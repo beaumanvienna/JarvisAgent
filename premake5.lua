@@ -29,7 +29,10 @@ project "jarvis"
 
     includedirs
     {
-        "engine/"
+        "engine/",
+        "application/",
+        "vendor/",
+        "vendor/spdlog/include"
     }
 
     filter "system:linux"

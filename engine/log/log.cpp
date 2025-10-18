@@ -19,59 +19,35 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#pragma once
+#include <vector>
 
-#include <iostream>
-#include <string>
+#include "log/log.h"
 
-typedef void CURL;
-struct curl_slist;
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 namespace AIAssistant
 {
-    class Curl
+    Log::Log()
     {
-    public:
-        struct QueryData
+        std::vector<spdlog::sink_ptr> logSink;
+        logSink.emplace_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+
+        spdlog::set_pattern("%^[%T] %n: %v%$");
+        m_Logger = std::make_shared<spdlog::logger>("Engine", begin(logSink), end(logSink));
+        if (m_Logger)
         {
-            std::string m_Url;
-            std::string m_Data;
-            bool IsValid() const;
-        };
+            spdlog::register_logger(m_Logger);
+            m_Logger->set_level(spdlog::level::trace);
+            m_Logger->flush_on(spdlog::level::trace);
+        }
 
-        // type alias for curl write callback
-        using CurlWriteCallback = size_t (*)(void*, size_t, size_t, void*);
-
-        // RAII for curl_slist
-        class CurlSlist
+        m_AppLogger = std::make_shared<spdlog::logger>("Application", begin(logSink), end(logSink));
+        if (m_AppLogger)
         {
-        public:
-            CurlSlist() = default;
-            ~CurlSlist();
-
-            void Append(std::string const& str);
-            struct curl_slist* Get();
-
-        private:
-            struct curl_slist* m_List{nullptr};
-        };
-
-    public:
-        Curl();
-        ~Curl();
-
-        bool IsInitialized() const;
-        bool Query(QueryData const& queryData);
-        std::string& GetBuffer();
-        void Clear();
-
-    private:
-        bool IsValidOpenAIKey(std::string const& key);
-
-    private:
-        bool m_Initialized{false};
-        CURL* m_Curl{nullptr};
-        std::string m_ApiKey;
-        std::string m_ReadBuffer;
-    };
+            spdlog::register_logger(m_AppLogger);
+            m_Logger->set_level(spdlog::level::trace);
+            m_Logger->flush_on(spdlog::level::trace);
+        }
+    }
 } // namespace AIAssistant

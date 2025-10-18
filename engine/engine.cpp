@@ -19,21 +19,14 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include <iostream>
-#include <string>
-#include "curl.h"
+#include "engine.h"
 
-int main()
+// global logger for the engine and application
+std::unique_ptr<AIAssistant::Log> g_Logger;
+
+int engine(int argc, char* argv[])
 {
-    AIAssistant::Curl curl;
-    AIAssistant::Curl::QueryData queryData = {
-        .m_Url = "https://api.openai.com/v1/chat/completions",
-        .m_Data = R"({
-            "model": "gpt-4.1",
-            "messages": [{"role": "user", "content": "Hello from C++!"}]
-        })" //
-    };
-    curl.Query(queryData);
+    g_Logger = std::make_unique<AIAssistant::Log>();
 
     return 0;
 }

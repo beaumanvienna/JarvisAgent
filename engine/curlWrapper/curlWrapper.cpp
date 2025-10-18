@@ -19,13 +19,15 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "curl.h"
 #include <curl/curl.h>
+
+#include "engine.h"
+#include "curlWrapper/curlWrapper.h"
 
 namespace AIAssistant
 {
 
-    Curl::Curl()
+    CurlWrapper::CurlWrapper()
     {
         char* apiKeyEnv = std::getenv("OPENAI_API_KEY");
         if (apiKeyEnv)
@@ -34,7 +36,7 @@ namespace AIAssistant
         }
         if (!IsValidOpenAIKey(m_ApiKey))
         {
-            std::cerr << "Missing OPENAI_API_KEY env variable\n";
+            LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
             return;
         }
 
@@ -43,14 +45,14 @@ namespace AIAssistant
 
         if (!m_Curl)
         {
-            std::cerr << "curl_easy_init()\n";
+            LOG_CORE_CRITICAL("curl_easy_init() failed");
             return;
         }
 
         m_Initialized = true;
     }
 
-    Curl::~Curl()
+    CurlWrapper::~CurlWrapper()
     {
         if (m_Curl)
         {
@@ -59,53 +61,54 @@ namespace AIAssistant
         curl_global_cleanup();
     }
 
-    Curl::CurlSlist::~CurlSlist()
+    CurlWrapper::CurlSlist::~CurlSlist()
     {
         if (m_List)
         {
             curl_slist_free_all(m_List);
         }
     }
-    void Curl::CurlSlist::Append(std::string const& str)
+    void CurlWrapper::CurlSlist::Append(std::string const& str)
     {
         m_List = curl_slist_append(m_List, str.c_str());
         if (!m_List)
         {
             // if curl_slist_append fails it returns nullptr
-            std::cerr << "curl_slist_append failed\n";
+            LOG_CORE_CRITICAL("curl_slist_append failed");
         }
     }
-    struct curl_slist* Curl::CurlSlist::Get() { return m_List; }
+    struct curl_slist* CurlWrapper::CurlSlist::Get() { return m_List; }
 
-    bool Curl::IsInitialized() const { return m_Initialized; }
+    bool CurlWrapper::IsInitialized() const { return m_Initialized; }
 
-    std::string& Curl::GetBuffer() { return m_ReadBuffer; }
+    std::string& CurlWrapper::GetBuffer() { return m_ReadBuffer; }
 
-    void Curl::Clear() { m_ReadBuffer.clear(); }
+    void CurlWrapper::Clear() { m_ReadBuffer.clear(); }
 
-    bool Curl::IsValidOpenAIKey(std::string const& key)
+    bool CurlWrapper::IsValidOpenAIKey(std::string const& key)
     {
         return key.size() >= 40 && key.size() <= 60 && key.rfind("sk-", 0) == 0; // starts with "sk-"
     }
 
-    bool Curl::QueryData::IsValid() const
+    bool CurlWrapper::QueryData::IsValid() const
     {
         bool urlEmpty = m_Url.empty();
         bool dataEmpty = m_Data.empty();
 
         if (urlEmpty)
         {
-            std::cerr << "Curl::QueryData::IsValid(): url empty \n";
+            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): url empty");
+            std::cerr << " \n";
         }
         if (dataEmpty)
         {
-            std::cerr << "Curl::QueryData::IsValid(): data empty \n";
+            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): data empty");
         }
 
         return !urlEmpty && !dataEmpty;
     }
 
-    bool Curl::Query(QueryData const& queryData)
+    bool CurlWrapper::Query(QueryData const& queryData)
     {
         if ((!m_Initialized) || (!queryData.IsValid()))
         {
@@ -135,6 +138,7 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
         curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
 
+        LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
         CURLcode res = curl_easy_perform(m_Curl);
 
         if (res == CURLE_OK)
@@ -143,7 +147,7 @@ namespace AIAssistant
         }
         else
         {
-            std::cerr << "curl error: " << curl_easy_strerror(res) << std::endl;
+            LOG_CORE_ERROR("curl error: {}", curl_easy_strerror(res));
         }
 
         return res == CURLE_OK;
