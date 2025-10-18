@@ -20,9 +20,29 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "engine.h"
+#include "core.h"
 
-int main(int argc, char* argv[])
+namespace AIAssistant
 {
-    // initialize engine
-    return engine(argc, argv);
-}
+    // global logger for the engine and application
+    std::unique_ptr<AIAssistant::Log> Core::g_Logger;
+
+    Core::Core()
+    {
+        // create the engine and application loggers
+        g_Logger = std::make_unique<AIAssistant::Log>();
+    }
+
+    void Core::Start() {}
+
+    void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
+    {
+        // run loop
+        do
+        {
+            app->OnUpdate();
+        } while (!app->IsFinished());
+    }
+
+    void Core::Shutdown() {}
+} // namespace AIAssistant

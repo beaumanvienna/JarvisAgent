@@ -19,10 +19,25 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "engine.h"
+#pragma once
+#include <memory>
 
-int main(int argc, char* argv[])
+#include "application.h"
+#include "log/log.h"
+
+namespace AIAssistant
 {
-    // initialize engine
-    return engine(argc, argv);
-}
+    class Core
+    {
+    public:
+        Core();
+        ~Core() = default;
+
+        void Start();
+        void Run(std::unique_ptr<AIAssistant::Application>&);
+        void Shutdown();
+
+    public:
+        static std::unique_ptr<AIAssistant::Log> g_Logger;
+    };
+} // namespace AIAssistant

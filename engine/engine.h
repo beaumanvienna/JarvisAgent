@@ -25,6 +25,7 @@
 #include <chrono>
 
 #include "log/log.h"
+#include "core.h"
 
 using namespace std::chrono_literals;
 using namespace AIAssistant;
@@ -36,18 +37,17 @@ int engine(int argc, char* argv[]);
 #endif
 #ifdef LOGGING_AND_ASSERTS
 
-extern std::unique_ptr<AIAssistant::Log> g_Logger;
-#define LOG_CORE_TRACE(...) g_Logger->GetLogger().trace(__VA_ARGS__)
-#define LOG_CORE_INFO(...) g_Logger->GetLogger().info(__VA_ARGS__)
-#define LOG_CORE_WARN(...) g_Logger->GetLogger().warn(__VA_ARGS__)
-#define LOG_CORE_ERROR(...) g_Logger->GetLogger().error(__VA_ARGS__)
-#define LOG_CORE_CRITICAL(...) g_Logger->GetLogger().critical(__VA_ARGS__)
+#define LOG_CORE_TRACE(...) Core::g_Logger->GetLogger().trace(__VA_ARGS__)
+#define LOG_CORE_INFO(...) Core::g_Logger->GetLogger().info(__VA_ARGS__)
+#define LOG_CORE_WARN(...) Core::g_Logger->GetLogger().warn(__VA_ARGS__)
+#define LOG_CORE_ERROR(...) Core::g_Logger->GetLogger().error(__VA_ARGS__)
+#define LOG_CORE_CRITICAL(...) Core::g_Logger->GetLogger().critical(__VA_ARGS__)
 
-#define LOG_APP_TRACE(...) g_Logger->GetAppLogger().trace(__VA_ARGS__)
-#define LOG_APP_INFO(...) g_Logger->GetAppLogger().info(__VA_ARGS__)
-#define LOG_APP_WARN(...) g_Logger->GetAppLogger().warn(__VA_ARGS__)
-#define LOG_APP_ERROR(...) g_Logger->GetAppLogger().error(__VA_ARGS__)
-#define LOG_APP_CRITICAL(...) g_Logger->GetAppLogger().critical(__VA_ARGS__)
+#define LOG_APP_TRACE(...) Core::g_Logger->GetAppLogger().trace(__VA_ARGS__)
+#define LOG_APP_INFO(...) Core::g_Logger->GetAppLogger().info(__VA_ARGS__)
+#define LOG_APP_WARN(...) Core::g_Logger->GetAppLogger().warn(__VA_ARGS__)
+#define LOG_APP_ERROR(...) Core::g_Logger->GetAppLogger().error(__VA_ARGS__)
+#define LOG_APP_CRITICAL(...) Core::g_Logger->GetAppLogger().critical(__VA_ARGS__)
 
 #define CORE_ASSERT(x, str) \
     if (!(x))               \

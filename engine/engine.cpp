@@ -20,13 +20,26 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "engine.h"
-
-// global logger for the engine and application
-std::unique_ptr<AIAssistant::Log> g_Logger;
+#include "core.h"
+#include "jarvis.h"
 
 int engine(int argc, char* argv[])
 {
-    g_Logger = std::make_unique<AIAssistant::Log>();
+    // create engine
+    auto engine = std::make_unique<Core>();
+    engine->Start();
+
+    // create application Jarvis
+    std::unique_ptr<AIAssistant::Application> app = Jarvis::Create();
+
+    // start Jarvis
+    app->OnStart();
+
+    engine->Run(app);
+
+    // shutdown
+    app->OnShutdown();
+    engine->Shutdown();
 
     return 0;
 }
