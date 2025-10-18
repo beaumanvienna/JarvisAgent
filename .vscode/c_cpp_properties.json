@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "conf1",
+            "includePath": [
+                "application",
+                "engine",
+                "vendor",
+                "/usr/include/x86_64-linux-gnu"
+            ],
+            "defines": [
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}
