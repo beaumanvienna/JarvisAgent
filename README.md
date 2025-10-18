@@ -2,7 +2,6 @@
 <br>
 Jarvis can perform AI tasks. It can be used to automate workflows.<br>
 <br>
-<br>
 
 # Contributions
 <br>
