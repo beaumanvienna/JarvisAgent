@@ -1,0 +1,29 @@
+# Introduction
+<br>
+Jarvis can perform AI tasks. It can be used to automate workflows.<br>
+<br>
+<br>
+
+# Development
+<br>
+To clone the project, use<br>
+
+`git clone --recurse-submodules https://github.com/beaumanvienna/jarvis`<br>
+<br>
+Jarvis is cross-platform. The project is defined in a Lua file for permake5.<br>
+<br>
+Run <br>
+`premake5 gmake` to get a Makefile<br>
+`premake5 vs2022` to get a VS solution<br>
+`premake5 xcode4` for Xcode on MacOS<br>
+<br>
+Use `premake5 clean` to clean the project from build artifacts.<br>
+<br>
+If you created a Makefile, build the project with<br>
+`make config=release verbose=1 && make config=debug verbose=1`<br>
+<br>
+Run the executable with<br>
+`./bin/Release/jarvis` or `./bin/Debug/jarvis`<br>
+<br>
+To update the source code, use<br>
+`git pull && git submodule update --init --recursive`
