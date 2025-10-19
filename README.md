@@ -13,7 +13,7 @@ Jarvis can perform AI tasks. It can be used to automate workflows.<br>
 
 # Contributions
 <br>
-In this project, you're welcome to contribute. Please be sure to enable clang formatting in your IDE. The coding style is Allmann. Member fields of structs and classes are written as `m_` + PascalCase.
+In this project, you're welcome to contribute. Please be sure to enable clang formatting in your IDE. The coding style is Allman. Member fields of structs and classes are written as `m_` + PascalCase.
 
 # Development
 <br>
