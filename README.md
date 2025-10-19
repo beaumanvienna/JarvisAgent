@@ -3,6 +3,14 @@
 Jarvis can perform AI tasks. It can be used to automate workflows.<br>
 <br>
 
+| Layer | Responsibility | Status |
+|--------|----------------|--------|
+| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading | 🚧 |
+| **Application** | Orchestrates queue handling and task flow | 🚧 |
+| **Config** | `config.json` with folder paths + thread count | ✅ |
+| **I/O** | Input queue, output folder | 🚧 |
+| **Networking** | ChatGPT requests/responses | 🚧 |
+
 # Contributions
 <br>
 In this project, you're welcome to contribute. Please be sure to enable clang formatting in your IDE. The coding style is Allmann. Member fields of structs and classes are written as `m_` + PascalCase.
