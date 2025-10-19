@@ -28,6 +28,9 @@ Run <br>
 `premake5 vs2022` to get a VS solution<br>
 `premake5 xcode4` for Xcode on MacOS<br>
 <br>
+On Ubuntu, install the required development libraries with<br>
+`sudo apt install libssl-dev zlib1g-dev`<br>
+<br>
 If you created a Makefile, build the project with<br>
 `make config=release verbose=1 && make config=debug verbose=1`<br>
 <br>
@@ -38,3 +41,6 @@ To update the source code, use<br>
 `git pull && git submodule update --init --recursive`<br>
 <br>
 Use `premake5 clean` to clean the project from build artifacts.<br>
+<br>
+<br>
+TODO: HTTP/2 is currently not enabled to keep the prototype simple. Enable it to improve performance.

@@ -34,7 +34,8 @@ project "jarvis"
         "engine/",
         "application/",
         "vendor/",
-        "vendor/spdlog/include"
+        "vendor/spdlog/include",
+        "vendor/curl/include"
     }
 
     filter "system:linux"
@@ -49,7 +50,12 @@ project "jarvis"
         }
         links
         {
-			"curl"
+			"curl",
+			"pthread",
+			"dl",
+			"ssl",
+			"crypto",
+			"z"
         }
         libdirs
         {
@@ -59,6 +65,16 @@ project "jarvis"
             "LINUX"
         }
 
+	filter "system:macosx"
+		links {
+			"curl",
+			"ssl",
+			"crypto",
+			"z",
+			"-framework CoreFoundation",
+			"-framework SystemConfiguration"
+		}
+
     filter { "action:gmake*", "configurations:Debug"}
         buildoptions { "-ggdb -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -Wno-reorder -Wno-expansion-to-defined" }
 
@@ -67,6 +83,7 @@ project "jarvis"
 
     filter "system:windows"
         systemversion "latest"
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz" }
 
     filter "configurations:Debug"
         defines { "DEBUG" }
@@ -84,5 +101,10 @@ project "jarvis"
         os.rmdir("./bin-int")
         os.remove("./**.make")
         os.remove("./Makefile")
+        os.remove("./vendor/Makefile")
+        os.rmdir("./vendor/curl/bin")
+        os.rmdir("./vendor/curl/bin-int")
         print("done.")
     end
+
+	include "vendor/curl.lua"

@@ -2,15 +2,15 @@
     "configurations": [
         {
             "name": "conf1",
-            "includePath": [
+            "includePath":
+            [
                 "application",
                 "engine",
                 "vendor",
                 "vendor/spdlog/include",
-                "/usr/include/x86_64-linux-gnu"
+                "vendor/curl/include"
             ],
-            "defines": [
-            ],
+            "defines": [],
             "cStandard": "c17",
             "cppStandard": "c++20",
             "intelliSenseMode": "linux-gcc-x64"

@@ -33,7 +33,8 @@ namespace AIAssistant
         if (apiKeyEnv)
         {
             m_ApiKey = std::string(apiKeyEnv);
-        }
+        } // if it is null, this will be caught in IsValidOpenAIKey()
+
         if (!IsValidOpenAIKey(m_ApiKey))
         {
             LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
