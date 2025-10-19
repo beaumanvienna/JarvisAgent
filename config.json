@@ -1,0 +1,7 @@
+{
+    "file format identifier": 1.2,
+    "description": "jarvis configuration file",
+    "author": "Copyright (c) 2025 JC Technolabs",
+    "queue folder": "../queue",
+    "max threads": 20
+}

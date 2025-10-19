@@ -24,6 +24,7 @@
 
 #include "application.h"
 #include "log/log.h"
+#include "json/configParser.h"
 
 namespace AIAssistant
 {
@@ -33,7 +34,7 @@ namespace AIAssistant
         Core();
         ~Core() = default;
 
-        void Start();
+        void Start(ConfigParser::EngineConfig const& engineConfig);
         void Run(std::unique_ptr<AIAssistant::Application>&);
         void Shutdown();
 

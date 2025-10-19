@@ -24,7 +24,9 @@ project "jarvis"
         "application/**.h", 
         "application/**.cpp",
         "engine/**.h",
-        "engine/**.cpp"
+        "engine/**.cpp",
+        "vendor/simdjson/simdjson.cpp",
+        "vendor/simdjson/simdjson.h",
     }
 
     includedirs

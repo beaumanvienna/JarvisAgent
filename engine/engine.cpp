@@ -22,12 +22,34 @@
 #include "engine.h"
 #include "core.h"
 #include "jarvis.h"
+#include "json/configParser.h"
+#include "json/configChecker.h"
 
 int engine(int argc, char* argv[])
 {
-    // create engine
+
+    // create engine (including the logger)
     auto engine = std::make_unique<Core>();
-    engine->Start();
+
+    // parse engine config
+    ConfigParser configParser("./config.json");
+    ConfigParser::EngineConfig engineConfig{};
+    configParser.Parse(engineConfig);
+    if (!configParser.ConfigParsed())
+    {
+        // exit app with error = true
+        return 1;
+    }
+
+    // check engine config
+    ConfigChecker().Check(engineConfig);
+    if (!engineConfig.IsValid())
+    {
+        // exit app with error = true
+        return 1;
+    }
+
+    engine->Start(engineConfig);
 
     // create application Jarvis
     std::unique_ptr<AIAssistant::Application> app = Jarvis::Create();

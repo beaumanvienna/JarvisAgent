@@ -33,7 +33,7 @@ namespace AIAssistant
         g_Logger = std::make_unique<AIAssistant::Log>();
     }
 
-    void Core::Start() {}
+    void Core::Start(ConfigParser::EngineConfig const& engineConfig) {}
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
     {
