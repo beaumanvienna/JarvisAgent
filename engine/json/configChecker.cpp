@@ -40,6 +40,8 @@ namespace AIAssistant
             // queue is a directory, but max threads not set: fix it
             if (engineConfig.m_MaxThreads < 1)
             {
+                LOG_APP_ERROR("Max threads not set. Fixing max threads. The config file should have a field "
+                              "similar to '\"max threads\": 20'");
                 engineConfig.m_MaxThreads = 16;
             }
         }
