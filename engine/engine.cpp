@@ -30,14 +30,14 @@ int engine(int argc, char* argv[])
     // create engine (including the logger)
     auto engine = std::make_unique<Core>();
 
-    // parse engine config
+    // parse JSON file to retrieve engine config
     ConfigParser configParser("./config.json");
     ConfigParser::EngineConfig engineConfig{};
     configParser.Parse(engineConfig);
     if (!configParser.ConfigParsed())
     {
         // exit with error = true
-        return 1;
+        return EXIT_FAILURE;
     }
 
     // check engine config
@@ -45,7 +45,7 @@ int engine(int argc, char* argv[])
     if (!engineConfig.IsValid())
     {
         // exit with error = true
-        return 1;
+        return EXIT_FAILURE;
     }
 
     engine->Start(engineConfig);
