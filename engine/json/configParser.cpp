@@ -102,8 +102,16 @@ namespace AIAssistant
                 CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::number), "type must be number");
                 auto maxThreads = static_cast<int64_t>(sceneObject.value().get_int64());
                 LOG_CORE_INFO("max threads: {}", maxThreads);
-                engineConfig.m_MaxThreads = maxThreads > 0 ? static_cast<uint32_t>(maxThreads) : 0;
+                engineConfig.m_MaxThreads = static_cast<uint32_t>(maxThreads);
                 ++fieldOccurances[ConfigFields::MaxThreads];
+            }
+            else if (sceneObjectKey == "engine sleep time in run loop in ms")
+            {
+                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto sleepTime = static_cast<int64_t>(sceneObject.value().get_int64());
+                LOG_CORE_INFO("engine sleep time in run loop in ms: {}", sleepTime);
+                engineConfig.m_SleepTime = static_cast<uint32_t>(sleepTime);
+                ++fieldOccurances[ConfigFields::SleepTime];
             }
         }
 

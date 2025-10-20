@@ -22,10 +22,13 @@
 #pragma once
 #include <memory>
 
+#include "engine.h"
 #include "application.h"
 #include "log/log.h"
 #include "json/configParser.h"
+#include "auxiliary/file.h"
 
+using namespace std::chrono_literals;
 namespace AIAssistant
 {
     class Core
@@ -40,5 +43,10 @@ namespace AIAssistant
 
     public:
         static std::unique_ptr<AIAssistant::Log> g_Logger;
+
+    private:
+        uint m_MaxThreads;
+        std::chrono::milliseconds m_SleepDuration;
+        std::filesystem::path m_QueueFolderFilepath;
     };
 } // namespace AIAssistant

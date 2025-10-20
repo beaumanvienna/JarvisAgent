@@ -37,7 +37,7 @@ int engine(int argc, char* argv[])
     configParser.Parse(engineConfig);
     if (!configParser.ConfigParsed())
     {
-        // exit app with error = true
+        // exit with error = true
         return 1;
     }
 
@@ -45,7 +45,7 @@ int engine(int argc, char* argv[])
     ConfigChecker().Check(engineConfig);
     if (!engineConfig.IsValid())
     {
-        // exit app with error = true
+        // exit with error = true
         return 1;
     }
 

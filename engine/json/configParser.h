@@ -29,6 +29,7 @@ namespace AIAssistant
         struct EngineConfig
         {
             uint m_MaxThreads{0};
+            uint m_SleepTime{0};
             std::string m_QueueFolderFilepath;
             bool m_ConfigValid{false};
 
@@ -52,6 +53,7 @@ namespace AIAssistant
             Author,
             QueueFolder,
             MaxThreads,
+            SleepTime,
             NumConfigFields
         };
 
@@ -60,7 +62,8 @@ namespace AIAssistant
             "Description", //
             "Author",      //
             "QueueFolder", //
-            "MaxThreads"   //
+            "MaxThreads",  //
+            "SleepTime"    //
         };
 
     public:

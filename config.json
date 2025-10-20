@@ -3,5 +3,6 @@
     "description": "jarvis configuration file",
     "author": "Copyright (c) 2025 JC Technolabs",
     "queue folder": "../queue",
-    "max threads": 20
+    "max threads": 20,
+    "engine sleep time in run loop in ms": 16
 }

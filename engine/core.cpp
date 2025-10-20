@@ -27,13 +27,18 @@ namespace AIAssistant
     // global logger for the engine and application
     std::unique_ptr<AIAssistant::Log> Core::g_Logger;
 
-    Core::Core()
+    Core::Core() : m_SleepDuration(10ms)
     {
         // create the engine and application loggers
         g_Logger = std::make_unique<AIAssistant::Log>();
     }
 
-    void Core::Start(ConfigParser::EngineConfig const& engineConfig) {}
+    void Core::Start(ConfigParser::EngineConfig const& engineConfig)
+    {
+        m_MaxThreads = engineConfig.m_MaxThreads;
+        m_QueueFolderFilepath = std::filesystem::path(engineConfig.m_QueueFolderFilepath);
+        m_SleepDuration = std::chrono::milliseconds(engineConfig.m_SleepTime);
+    }
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
     {
@@ -41,6 +46,10 @@ namespace AIAssistant
         do
         {
             app->OnUpdate();
+
+            // go easy on the CPU
+            CORE_ASSERT((m_SleepDuration > 0ms) && (m_SleepDuration <= 256ms), "sleep duration incorrect");
+            std::this_thread::sleep_for(std::chrono::milliseconds(m_SleepDuration));
         } while (!app->IsFinished());
     }
 
