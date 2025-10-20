@@ -43,7 +43,10 @@ namespace AIAssistant
         static std::unique_ptr<Application> Create();
 
     private:
-        bool m_IsFinished{false};
+        void CheckIfFinished();
+
+    private:
+        [[maybe_unused]] bool m_IsFinished{false};
         CurlWrapper m_Curl;
     };
 } // namespace AIAssistant

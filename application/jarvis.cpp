@@ -28,6 +28,8 @@ namespace AIAssistant
     void Jarvis::OnStart() { LOG_APP_INFO("starting Jarvis"); }
     void Jarvis::OnUpdate()
     {
+        m_Curl.Clear();
+        // retrieve prompt data from queue
         CurlWrapper::QueryData queryData = {
             .m_Url = "https://api.openai.com/v1/chat/completions",
             .m_Data = R"({
@@ -36,7 +38,9 @@ namespace AIAssistant
         })" //
         };
         m_Curl.Query(queryData);
-        m_IsFinished = true;
+
+        // check if app should terminate
+        CheckIfFinished();
     }
 
     void Jarvis::OnEvent() {}
@@ -44,4 +48,11 @@ namespace AIAssistant
     void Jarvis::OnShutdown() { LOG_APP_INFO("leaving Jarvis"); }
 
     bool Jarvis::IsFinished() { return m_IsFinished; }
+
+    void Jarvis::CheckIfFinished()
+    {
+        // not used
+        // m_IsFinished = false;
+        // Ctrl+C is caught by the engine and breaks the run loop
+    }
 } // namespace AIAssistant

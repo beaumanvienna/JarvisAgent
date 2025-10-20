@@ -19,6 +19,8 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <csignal>
+
 #include "engine.h"
 #include "core.h"
 
@@ -26,11 +28,34 @@ namespace AIAssistant
 {
     // global logger for the engine and application
     std::unique_ptr<AIAssistant::Log> Core::g_Logger;
+    bool Core::m_ShutdownRequest{false};
+    Core* Core::g_Core{nullptr};
 
-    Core::Core() : m_SleepDuration(10ms)
+    Core::Core() : m_SleepDuration(10ms), m_MaxThreads{16}
     {
+        g_Core = this;
+        // signal handling
+        signal(SIGINT, SignalHandler);
+
         // create the engine and application loggers
         g_Logger = std::make_unique<AIAssistant::Log>();
+    }
+
+    void Core::SignalHandler(int signal)
+    {
+        static bool sigIntReceived{false};
+        if ((signal == SIGINT) && sigIntReceived)
+        {
+            LOG_CORE_INFO("force shudown");
+            // force shudown
+            exit(EXIT_FAILURE);
+        }
+        if (signal == SIGINT)
+        {
+            sigIntReceived = true;
+            LOG_CORE_INFO("Received signal SIGINT, exiting");
+            m_ShutdownRequest = true;
+        }
     }
 
     void Core::Start(ConfigParser::EngineConfig const& engineConfig)
@@ -50,6 +75,11 @@ namespace AIAssistant
             // go easy on the CPU
             CORE_ASSERT((m_SleepDuration > 0ms) && (m_SleepDuration <= 256ms), "sleep duration incorrect");
             std::this_thread::sleep_for(std::chrono::milliseconds(m_SleepDuration));
+
+            if (m_ShutdownRequest)
+            {
+                break;
+            }
         } while (!app->IsFinished());
     }
 

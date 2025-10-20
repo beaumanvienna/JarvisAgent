@@ -45,6 +45,11 @@ namespace AIAssistant
         static std::unique_ptr<AIAssistant::Log> g_Logger;
 
     private:
+        static bool m_ShutdownRequest;
+        static void SignalHandler(int signal);
+
+    private:
+        static Core* g_Core;
         uint m_MaxThreads;
         std::chrono::milliseconds m_SleepDuration;
         std::filesystem::path m_QueueFolderFilepath;

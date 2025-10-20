@@ -56,7 +56,7 @@ int engine(int argc, char* argv[]);
 #define CORE_HARD_STOP(str)                                                                              \
     LOG_CORE_CRITICAL("hard stop on line number {0} in file {1}: {2} (error)", __LINE__, __FILE__, str); \
     std::cout << "terminating because of " << str << std::endl;                                          \
-    exit(1)
+    exit(EXIT_FAILURE)
 
 #define APP_ASSERT(x, str) \
     if (!(x))              \

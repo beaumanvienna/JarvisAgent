@@ -27,7 +27,6 @@
 
 int engine(int argc, char* argv[])
 {
-
     // create engine (including the logger)
     auto engine = std::make_unique<Core>();
 
@@ -63,5 +62,5 @@ int engine(int argc, char* argv[])
     app->OnShutdown();
     engine->Shutdown();
 
-    return 0;
+    return EXIT_SUCCESS;
 }
