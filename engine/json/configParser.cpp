@@ -56,7 +56,6 @@ namespace AIAssistant
 
         if (error)
         {
-            std::cerr << "Parse error: " << error_message(error) << std::endl;
             LOG_CORE_ERROR("An error occurred during parsing: {}", error_message(error));
             m_State = ConfigParser::State::ParseFailure;
             return m_State;
@@ -112,6 +111,13 @@ namespace AIAssistant
                 LOG_CORE_INFO("engine sleep time in run loop in ms: {}", sleepTime);
                 engineConfig.m_SleepTime = static_cast<uint32_t>(sleepTime);
                 ++fieldOccurances[ConfigFields::SleepTime];
+            }
+            else if (sceneObjectKey == "verbose")
+            {
+                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
+                engineConfig.m_Verbose = sceneObject.value().get_bool();
+                LOG_CORE_INFO("verbose: {}", engineConfig.m_Verbose);
+                ++fieldOccurances[ConfigFields::Verbose];
             }
         }
 

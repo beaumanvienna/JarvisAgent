@@ -20,7 +20,6 @@ project "jarvis"
 
     files
     {
-    
         "application/**.h", 
         "application/**.cpp",
         "engine/**.h",
@@ -35,7 +34,9 @@ project "jarvis"
         "application/",
         "vendor/",
         "vendor/spdlog/include",
-        "vendor/curl/include"
+        "vendor/curl/include",
+        "vendor/thread-pool/include",
+        "vendor/tracy/include"
     }
 
     filter "system:linux"
@@ -86,12 +87,20 @@ project "jarvis"
         links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz" }
 
     filter "configurations:Debug"
-        defines { "DEBUG" }
+        defines
+        { 
+			"DEBUG", 
+            "TRACY_ENABLE"
+        }
         runtime "Debug"
         symbols "on"
 
     filter "configurations:Release"
-        defines { "NDEBUG" }
+        defines
+        {
+			"NDEBUG",
+            "TRACY_ENABLE"
+		}
         runtime "Release"
         optimize "on"
 

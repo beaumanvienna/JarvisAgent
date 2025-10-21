@@ -20,7 +20,9 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <curl/curl.h>
+#include "tracy/Tracy.hpp"
 
+#include "core.h"
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
 
@@ -99,7 +101,6 @@ namespace AIAssistant
         if (urlEmpty)
         {
             LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): url empty");
-            std::cerr << " \n";
         }
         if (dataEmpty)
         {
@@ -137,14 +138,22 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_POSTFIELDS, data.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_WRITEFUNCTION, static_cast<CurlWriteCallback>(write_callback));
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
-        curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
+        if (Core::g_Core->Verbose())
+        {
+            curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
+        }
 
         LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
-        CURLcode res = curl_easy_perform(m_Curl);
+        CURLcode res;
+        {
+            const int blue = 0x0000ff;
+            ZoneScopedNC("curl_easy_perform(m_Curl)", blue);
+            res = curl_easy_perform(m_Curl);
+        }
 
         if (res == CURLE_OK)
         {
-            std::cout << "Response:\n" << m_ReadBuffer << std::endl;
+            LOG_CORE_INFO("Response:\n{}", m_ReadBuffer);
         }
         else
         {

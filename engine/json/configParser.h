@@ -31,6 +31,7 @@ namespace AIAssistant
             uint m_MaxThreads{0};
             uint m_SleepTime{0};
             std::string m_QueueFolderFilepath;
+            bool m_Verbose{false};
             bool m_ConfigValid{false};
 
             bool IsValid() const { return m_ConfigValid; }
@@ -54,6 +55,7 @@ namespace AIAssistant
             QueueFolder,
             MaxThreads,
             SleepTime,
+            Verbose,
             NumConfigFields
         };
 
@@ -63,7 +65,8 @@ namespace AIAssistant
             "Author",      //
             "QueueFolder", //
             "MaxThreads",  //
-            "SleepTime"    //
+            "SleepTime",   //
+            "Verbose"      //
         };
 
     public:

@@ -8,7 +8,9 @@
                 "engine",
                 "vendor",
                 "vendor/spdlog/include",
-                "vendor/curl/include"
+                "vendor/curl/include",
+				"vendor/thread-pool/include",
+				"vendor/tracy/include"
             ],
             "defines": [],
             "cStandard": "c17",

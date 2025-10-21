@@ -19,45 +19,16 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#pragma once
-#include <memory>
-
-#include "engine.h"
-#include "application.h"
-#include "log/log.h"
-#include "json/configParser.h"
-#include "auxiliary/file.h"
 #include "auxiliary/threadPool.h"
 
-using namespace std::chrono_literals;
 namespace AIAssistant
 {
-    class Core
-    {
-    public:
-        Core();
-        ~Core() = default;
+    ThreadPool::ThreadPool() {}
 
-        void Start(ConfigParser::EngineConfig const& engineConfig);
-        void Run(std::unique_ptr<AIAssistant::Application>&);
-        void Shutdown();
-        bool Verbose() const { return m_Verbose; }
+    void ThreadPool::Wait() { m_Pool.wait(); }
 
-    public:
-        static std::unique_ptr<AIAssistant::Log> g_Logger;
-        static Core* g_Core;
+    void ThreadPool::Reset(size_t const numThreads) { m_Pool.reset(numThreads); }
 
-    private:
-        static bool m_ShutdownRequest;
-        static void SignalHandler(int signal);
+    [[nodiscard]] size_t ThreadPool::Size() const { return m_Pool.get_thread_count(); }
 
-    private:
-        ThreadPool m_ThreadPool;
-
-        // core config
-        uint m_MaxThreads;
-        std::chrono::milliseconds m_SleepDuration;
-        std::filesystem::path m_QueueFolderFilepath;
-        bool m_Verbose;
-    };
 } // namespace AIAssistant

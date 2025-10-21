@@ -20,44 +20,32 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
+#include <iostream>
+#include <mutex>
+#include "BS_thread_pool/BS_thread_pool.hpp"
 
-#include "engine.h"
-#include "application.h"
-#include "log/log.h"
-#include "json/configParser.h"
-#include "auxiliary/file.h"
-#include "auxiliary/threadPool.h"
-
-using namespace std::chrono_literals;
 namespace AIAssistant
 {
-    class Core
+    class ThreadPool
     {
-    public:
-        Core();
-        ~Core() = default;
-
-        void Start(ConfigParser::EngineConfig const& engineConfig);
-        void Run(std::unique_ptr<AIAssistant::Application>&);
-        void Shutdown();
-        bool Verbose() const { return m_Verbose; }
 
     public:
-        static std::unique_ptr<AIAssistant::Log> g_Logger;
-        static Core* g_Core;
+        ThreadPool();
+
+        void Wait();
+        void Reset(size_t const numThreads);
+        [[nodiscard]] size_t Size() const;
+
+        template <typename FunctionType, typename ReturnType = std::invoke_result_t<std::decay_t<FunctionType>>>
+        [[nodiscard]] std::future<ReturnType> SubmitTask(FunctionType&& task)
+        {
+            std::lock_guard<std::mutex> guard(m_Mutex);
+            return m_Pool.submit_task(task);
+        }
+        [[nodiscard]] std::vector<std::thread::id> GetThreadIDs() const { return m_Pool.get_thread_ids(); }
 
     private:
-        static bool m_ShutdownRequest;
-        static void SignalHandler(int signal);
-
-    private:
-        ThreadPool m_ThreadPool;
-
-        // core config
-        uint m_MaxThreads;
-        std::chrono::milliseconds m_SleepDuration;
-        std::filesystem::path m_QueueFolderFilepath;
-        bool m_Verbose;
+        BS::thread_pool<> m_Pool;
+        std::mutex m_Mutex;
     };
 } // namespace AIAssistant
