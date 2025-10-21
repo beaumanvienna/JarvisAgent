@@ -1,6 +1,8 @@
 # Introduction
 <br>
-Jarvis can perform AI tasks. It can be used to automate workflows.<br>
+Jarvis can perform AI tasks. It can be used to automate workflows. <br>
+<br>
+Jarvis is a console application that operates as a background service. It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory. <br>
 <br>
 
 | Layer | Responsibility | Status |
