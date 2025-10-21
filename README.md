@@ -1,15 +1,15 @@
 # Introduction
 <br>
-Jarvis can perform AI tasks. It can be used to automate workflows. <br>
-<br>
 Jarvis is a console application that operates as a background service. It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory. <br>
+<br>
+It can perform AI-driven tasks and serve as a component for workflow automation.<br>
 <br>
 
 | Layer | Responsibility | Status |
 |--------|----------------|--------|
-| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading | 🚧 |
+| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
 | **Application** | Orchestrates queue handling and task flow | 🚧 |
-| **Config** | `config.json` with folder paths + thread count | ✅ |
+| **Config** | `config.json` with folder paths + thread count, and other settings | ✅ |
 | **I/O** | Input queue, output folder | 🚧 |
 | **Networking** | ChatGPT requests/responses | 🚧 |
 
