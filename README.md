@@ -21,7 +21,7 @@ In this project, you're welcome to contribute. Please be sure to enable clang fo
 <br>
 To clone the project, use<br>
 
-`git clone --recurse-submodules https://github.com/beaumanvienna/jarvis`<br>
+`git clone --recurse-submodules https://github.com/beaumanvienna/JarvisAgent`<br>
 <br>
 Jarvis is cross-platform. The project is defined in a Lua file for permake5.<br>
 <br>
