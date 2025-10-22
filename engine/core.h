@@ -41,7 +41,8 @@ namespace AIAssistant
         void Start(ConfigParser::EngineConfig const& engineConfig);
         void Run(std::unique_ptr<AIAssistant::Application>&);
         void Shutdown();
-        bool Verbose() const { return m_Verbose; }
+        bool Verbose() const { return m_EngineConfig.m_Verbose; }
+        ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
 
     public:
         static std::unique_ptr<AIAssistant::Log> g_Logger;
@@ -50,14 +51,12 @@ namespace AIAssistant
     private:
         static bool m_ShutdownRequest;
         static void SignalHandler(int signal);
+        void DisableCtrlCOutput();
 
     private:
         ThreadPool m_ThreadPool;
 
         // core config
-        uint m_MaxThreads;
-        std::chrono::milliseconds m_SleepDuration;
-        std::filesystem::path m_QueueFolderFilepath;
-        bool m_Verbose;
+        ConfigParser::EngineConfig m_EngineConfig;
     };
 } // namespace AIAssistant

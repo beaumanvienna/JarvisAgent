@@ -20,22 +20,36 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "engine.h"
-#include "jarvis.h"
+#include "jarvisAgent.h"
 namespace AIAssistant
 {
-    std::unique_ptr<Application> Jarvis::Create() { return std::make_unique<Jarvis>(); }
+    std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
 
-    void Jarvis::OnStart() { LOG_APP_INFO("starting Jarvis"); }
-    void Jarvis::OnUpdate()
+    void JarvisAgent::OnStart()
+    {
+        LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
+        m_Url = Core::g_Core->GetConfig().m_Url;
+        m_Model = Core::g_Core->GetConfig().m_Model;
+    }
+
+    void JarvisAgent::OnUpdate()
     {
         m_Curl.Clear();
+
+        // R"(...)" introduces a raw string literal in C++
+        // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
+        // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
+        //
+        // example request data:
+        // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
+        auto makeRequestData = [](std::string const& model, std::string const& message) -> std::string
+        { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
+
         // retrieve prompt data from queue
+        std::string message = "Hello from C++!";
         CurlWrapper::QueryData queryData = {
-            .m_Url = "https://api.openai.com/v1/chat/completions",
-            .m_Data = R"({
-            "model": "gpt-4.1",
-            "messages": [{"role": "user", "content": "Hello from C++!"}]
-        })" //
+            .m_Url = m_Url,                             //
+            .m_Data = makeRequestData(m_Model, message) //
         };
         m_Curl.Query(queryData);
 
@@ -43,13 +57,13 @@ namespace AIAssistant
         CheckIfFinished();
     }
 
-    void Jarvis::OnEvent() {}
+    void JarvisAgent::OnEvent() {}
 
-    void Jarvis::OnShutdown() { LOG_APP_INFO("leaving Jarvis"); }
+    void JarvisAgent::OnShutdown() { LOG_APP_INFO("leaving JarvisAgent"); }
 
-    bool Jarvis::IsFinished() { return m_IsFinished; }
+    bool JarvisAgent::IsFinished() { return m_IsFinished; }
 
-    void Jarvis::CheckIfFinished()
+    void JarvisAgent::CheckIfFinished()
     {
         // not used
         // m_IsFinished = false;

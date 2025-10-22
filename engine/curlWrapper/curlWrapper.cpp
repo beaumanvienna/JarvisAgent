@@ -141,6 +141,7 @@ namespace AIAssistant
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
+            LOG_CORE_INFO("data: {}", data);
         }
 
         LOG_CORE_INFO("sending query {}", ++m_QueryCounter);

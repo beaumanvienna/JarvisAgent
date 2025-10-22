@@ -28,11 +28,11 @@
 
 namespace AIAssistant
 {
-    class Jarvis : public Application
+    class JarvisAgent : public Application
     {
     public:
-        Jarvis() = default;
-        ~Jarvis() = default;
+        JarvisAgent() = default;
+        ~JarvisAgent() = default;
 
         virtual void OnStart() override;
         virtual void OnUpdate() override;
@@ -48,5 +48,7 @@ namespace AIAssistant
     private:
         [[maybe_unused]] bool m_IsFinished{false};
         CurlWrapper m_Curl;
+        std::string m_Url;
+        std::string m_Model;
     };
 } // namespace AIAssistant

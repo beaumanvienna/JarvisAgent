@@ -29,9 +29,11 @@ namespace AIAssistant
         struct EngineConfig
         {
             uint m_MaxThreads{0};
-            uint m_SleepTime{0};
+            std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
             bool m_Verbose{false};
+            std::string m_Url;
+            std::string m_Model;
             bool m_ConfigValid{false};
 
             bool IsValid() const { return m_ConfigValid; }
@@ -56,18 +58,21 @@ namespace AIAssistant
             MaxThreads,
             SleepTime,
             Verbose,
+            Url,
+            Model,
             NumConfigFields
         };
 
-        static constexpr std::array<std::string_view, ConfigFields::NumConfigFields> ConfigFieldNames = {
-            "Format",      //
-            "Description", //
-            "Author",      //
-            "QueueFolder", //
-            "MaxThreads",  //
-            "SleepTime",   //
-            "Verbose"      //
-        };
+        static constexpr std::array<std::string_view, ConfigFields::NumConfigFields> ConfigFieldNames = //
+            {"Format",                                                                                  //
+             "Description",                                                                             //
+             "Author",                                                                                  //
+             "QueueFolder",                                                                             //
+             "MaxThreads",                                                                              //
+             "SleepTime",                                                                               //
+             "Verbose",                                                                                 //
+             "Url",                                                                                     //
+             "Model"};                                                                                  //
 
     public:
         ConfigParser(std::string const&);

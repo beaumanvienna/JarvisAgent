@@ -1,9 +1,11 @@
 {
     "file format identifier": 1.2,
-    "description": "jarvis configuration file",
+    "description": "jarvisAgent configuration file",
     "author": "Copyright (c) 2025 JC Technolabs",
     "queue folder": "../queue",
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
-    "verbose": false
+    "verbose": true,
+    "url": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4.1"
 }

@@ -62,67 +62,83 @@ namespace AIAssistant
         }
 
         ondemand::document sceneDocument = parser.iterate(json);
-        ondemand::object sceneObjects = sceneDocument.get_object();
+        ondemand::object jsonObjects = sceneDocument.get_object();
 
         std::array<uint32_t, ConfigFields::NumConfigFields> fieldOccurances{};
-        for (auto sceneObject : sceneObjects)
+        for (auto jsonObject : jsonObjects)
         {
-            std::string_view sceneObjectKey = sceneObject.unescaped_key();
+            std::string_view jsonObjectKey = jsonObject.unescaped_key();
 
-            if (sceneObjectKey == "file format identifier")
+            if (jsonObjectKey == "file format identifier")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::number), "type must be number");
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
                 ++fieldOccurances[ConfigFields::Format];
             }
-            else if (sceneObjectKey == "description")
+            else if (jsonObjectKey == "description")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view description = sceneObject.value().get_string();
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view description = jsonObject.value().get_string();
                 LOG_CORE_INFO("description: {}", description);
                 ++fieldOccurances[ConfigFields::Description];
             }
-            else if (sceneObjectKey == "author")
+            else if (jsonObjectKey == "author")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view author = sceneObject.value().get_string();
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view author = jsonObject.value().get_string();
                 LOG_CORE_INFO("author: {}", author);
                 ++fieldOccurances[ConfigFields::Author];
             }
-            else if (sceneObjectKey == "queue folder")
+            else if (jsonObjectKey == "queue folder")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view queueFolderFilepath = sceneObject.value().get_string();
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view queueFolderFilepath = jsonObject.value().get_string();
                 LOG_CORE_INFO("queue folder: {}", queueFolderFilepath);
                 engineConfig.m_QueueFolderFilepath = queueFolderFilepath;
                 ++fieldOccurances[ConfigFields::QueueFolder];
             }
-            else if (sceneObjectKey == "max threads")
+            else if (jsonObjectKey == "max threads")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto maxThreads = static_cast<int64_t>(sceneObject.value().get_int64());
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto maxThreads = static_cast<int64_t>(jsonObject.value().get_int64());
                 LOG_CORE_INFO("max threads: {}", maxThreads);
                 engineConfig.m_MaxThreads = static_cast<uint32_t>(maxThreads);
                 ++fieldOccurances[ConfigFields::MaxThreads];
             }
-            else if (sceneObjectKey == "engine sleep time in run loop in ms")
+            else if (jsonObjectKey == "engine sleep time in run loop in ms")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto sleepTime = static_cast<int64_t>(sceneObject.value().get_int64());
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto sleepTime = static_cast<int64_t>(jsonObject.value().get_int64());
                 LOG_CORE_INFO("engine sleep time in run loop in ms: {}", sleepTime);
-                engineConfig.m_SleepTime = static_cast<uint32_t>(sleepTime);
+                engineConfig.m_SleepDuration = std::chrono::milliseconds(sleepTime);
                 ++fieldOccurances[ConfigFields::SleepTime];
             }
-            else if (sceneObjectKey == "verbose")
+            else if (jsonObjectKey == "verbose")
             {
-                CORE_ASSERT((sceneObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
-                engineConfig.m_Verbose = sceneObject.value().get_bool();
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
+                engineConfig.m_Verbose = jsonObject.value().get_bool();
                 LOG_CORE_INFO("verbose: {}", engineConfig.m_Verbose);
                 ++fieldOccurances[ConfigFields::Verbose];
             }
+            else if (jsonObjectKey == "url")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view url = jsonObject.value().get_string();
+                LOG_CORE_INFO("url: {}", url);
+                engineConfig.m_Url = url;
+                ++fieldOccurances[ConfigFields::Url];
+            }
+            else if (jsonObjectKey == "model")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view model = jsonObject.value().get_string();
+                LOG_CORE_INFO("model: {}", model);
+                engineConfig.m_Model = model;
+                ++fieldOccurances[ConfigFields::Model];
+            }
         }
 
-        // declare it ok if queue folder filepath was found
-        if (fieldOccurances[ConfigFields::QueueFolder] > 0)
+        // declare it ok if queue folder filepath and url were found
+        if ((fieldOccurances[ConfigFields::QueueFolder] > 0) && (fieldOccurances[ConfigFields::Url] > 0))
         {
             m_State = ConfigParser::State::ConfigOk;
         }

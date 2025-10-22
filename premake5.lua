@@ -2,9 +2,9 @@
 workspace "Chat"
     architecture "x86_64"
     configurations { "Debug", "Release" }
-    startproject "jarvis"
+    startproject "jarvisAgent"
 
-project "jarvis"
+project "jarvisAgent"
     kind "ConsoleApp"
     language "C++"
     cppdialect "C++20"
@@ -15,7 +15,7 @@ project "jarvis"
     
     defines
     {
-        "JARVIS_VERSION=\"0.1\""
+        "JARVIS_AGENT_VERSION=\"0.1\""
     }
 
     files

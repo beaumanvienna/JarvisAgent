@@ -1,6 +1,6 @@
 # Introduction
 <br>
-Jarvis is a console application that operates as a background service. It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory. <br>
+JarvisAgent is a console application that operates as a background service (agent). It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory. <br>
 <br>
 It can perform AI-driven tasks and serve as a component for workflow automation.<br>
 <br>
@@ -23,7 +23,7 @@ To clone the project, use<br>
 
 `git clone --recurse-submodules https://github.com/beaumanvienna/JarvisAgent`<br>
 <br>
-Jarvis is cross-platform. The project is defined in a Lua file for permake5.<br>
+JarvisAgent is cross-platform. The project is defined in a Lua file for permake5.<br>
 <br>
 Run <br>
 `premake5 gmake` to get a Makefile<br>
@@ -37,7 +37,7 @@ If you created a Makefile, build the project with<br>
 `make config=release verbose=1 && make config=debug verbose=1`<br>
 <br>
 Run the executable with<br>
-`./bin/Release/jarvis` or `./bin/Debug/jarvis`<br>
+`./bin/Release/jarvisAgent` or `./bin/Debug/jarvisAgent`<br>
 <br>
 To update the source code, use<br>
 `git pull && git submodule update --init --recursive`<br>

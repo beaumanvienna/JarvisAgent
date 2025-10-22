@@ -29,11 +29,44 @@ namespace AIAssistant
     {
         m_ConfigIsOk = true;
 
+        // check functions
+        auto checkQueueFolderFilepath = [](std::string const& queueFolderFilepath) -> bool
+        {
+            bool isDir = EngineCore::IsDirectory(queueFolderFilepath);
+            CORE_ASSERT(isDir, "queueFolderFilepath is not a directory");
+            return isDir;
+        };
+
+        auto checkUrl = [](std::string const& url) -> bool
+        {
+            std::string https("https://");
+            bool notEmpty = url.size() > https.size();
+            bool hasHttps = url.find(https) != std::string::npos;
+            CORE_ASSERT(notEmpty && hasHttps, "provided url invalid");
+            return notEmpty && hasHttps;
+        };
+
+        auto checkModel = [](std::string const& model) -> bool
+        {
+            bool notEmpty = !model.empty();
+            CORE_ASSERT(notEmpty, "no model provided");
+            return notEmpty;
+        };
+
+        // references for convenience
         auto& queueFolderFilepath = engineConfig.m_QueueFolderFilepath;
-        if (!EngineCore::IsDirectory(queueFolderFilepath))
+        auto& url = engineConfig.m_Url;
+        auto& model = engineConfig.m_Model;
+
+        // conclusion
+        m_ConfigIsOk = checkQueueFolderFilepath(queueFolderFilepath) && //
+                       checkUrl(url) &&                                 //
+                       checkModel(model);
+
+        // handling
+        if (!m_ConfigIsOk)
         {
             LOG_CORE_ERROR("config error: queue folder filepath is not a directory '{}'", queueFolderFilepath);
-            m_ConfigIsOk = false;
         }
         else
         {
@@ -46,11 +79,11 @@ namespace AIAssistant
             }
 
             // queue is a directory, but sleep time not set: fix it
-            if ((engineConfig.m_SleepTime <= 0) || (engineConfig.m_SleepTime > 256))
+            if ((engineConfig.m_SleepDuration <= 0ms) || (engineConfig.m_SleepDuration > 256ms))
             {
                 LOG_APP_ERROR("Sleep time not set. Fixing sleep time. The config file should have a field "
                               "similar to '\"engine sleep time in run loop in ms\": 10'");
-                engineConfig.m_SleepTime = 10;
+                engineConfig.m_SleepDuration = 10ms;
             }
         }
 

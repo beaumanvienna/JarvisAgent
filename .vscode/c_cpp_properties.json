@@ -12,7 +12,13 @@
 				"vendor/thread-pool/include",
 				"vendor/tracy/include"
             ],
-            "defines": [],
+            "defines": 
+            [
+                "ZoneScopedNC(x,y)",
+                "ZoneScopedN(x)",
+                "ZoneTransientN(x, y, z)",
+				"JARVIS_AGENT_VERSION"
+			],
             "cStandard": "c17",
             "cppStandard": "c++20",
             "intelliSenseMode": "linux-gcc-x64"

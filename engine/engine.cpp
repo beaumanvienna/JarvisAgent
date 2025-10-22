@@ -21,7 +21,7 @@
 
 #include "engine.h"
 #include "core.h"
-#include "jarvis.h"
+#include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
 
@@ -51,7 +51,7 @@ int engine(int argc, char* argv[])
     engine->Start(engineConfig);
 
     // create application Jarvis
-    std::unique_ptr<AIAssistant::Application> app = Jarvis::Create();
+    std::unique_ptr<AIAssistant::Application> app = JarvisAgent::Create();
 
     // start Jarvis
     app->OnStart();

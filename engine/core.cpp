@@ -20,6 +20,12 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <csignal>
+#ifndef _WIN32
+#include <termios.h>
+#include <unistd.h>
+#else
+#include <windows.h>
+#endif
 #include "tracy/Tracy.hpp"
 
 #include "engine.h"
@@ -32,11 +38,12 @@ namespace AIAssistant
     bool Core::m_ShutdownRequest{false};
     Core* Core::g_Core{nullptr};
 
-    Core::Core() : m_SleepDuration(10ms), m_MaxThreads{16}, m_Verbose{false}
+    Core::Core()
     {
         g_Core = this;
         // signal handling
         signal(SIGINT, SignalHandler);
+        DisableCtrlCOutput();
 
         // create the engine and application loggers
         g_Logger = std::make_unique<AIAssistant::Log>();
@@ -59,14 +66,29 @@ namespace AIAssistant
         }
     }
 
+    void Core::DisableCtrlCOutput()
+    {
+#ifndef _WIN32
+        termios term;
+        if (tcgetattr(STDIN_FILENO, &term) == 0)
+        {
+            term.c_lflag &= ~ECHOCTL; // disable echoing of ^C etc.
+            tcsetattr(STDIN_FILENO, TCSANOW, &term);
+        }
+#else
+        HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD mode;
+        GetConsoleMode(hIn, &mode);
+        mode &= ~ENABLE_ECHO_INPUT; // disable echoing
+        SetConsoleMode(hIn, mode);
+#endif
+    }
+
     void Core::Start(ConfigParser::EngineConfig const& engineConfig)
     {
-        m_MaxThreads = engineConfig.m_MaxThreads;
-        m_QueueFolderFilepath = std::filesystem::path(engineConfig.m_QueueFolderFilepath);
-        m_SleepDuration = std::chrono::milliseconds(engineConfig.m_SleepTime);
-        m_Verbose = engineConfig.m_Verbose;
+        m_EngineConfig = engineConfig;
 
-        m_ThreadPool.Reset(m_MaxThreads);
+        m_ThreadPool.Reset(m_EngineConfig.m_MaxThreads);
         LOG_CORE_INFO("thread count: {}", m_ThreadPool.Size());
     }
 
@@ -85,8 +107,9 @@ namespace AIAssistant
             { // go easy on the CPU
                 const int cyan = 0x00ffff;
                 ZoneScopedNC("sleep time (accuracy check for tracy)", cyan);
-                CORE_ASSERT((m_SleepDuration > 0ms) && (m_SleepDuration <= 256ms), "sleep duration incorrect");
-                std::this_thread::sleep_for(std::chrono::milliseconds(m_SleepDuration));
+                CORE_ASSERT((m_EngineConfig.m_SleepDuration > 0ms) && (m_EngineConfig.m_SleepDuration <= 256ms),
+                            "sleep duration incorrect");
+                std::this_thread::sleep_for(std::chrono::milliseconds(m_EngineConfig.m_SleepDuration));
             }
 
             if (m_ShutdownRequest)
