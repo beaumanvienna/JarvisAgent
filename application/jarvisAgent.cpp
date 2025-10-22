@@ -40,8 +40,9 @@ namespace AIAssistant
         // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
         // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
         //
-        // example request data:
+        // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
         // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
+        // -----------+++++++--------------------------------------------+++++++++++++++----
         auto makeRequestData = [](std::string const& model, std::string const& message) -> std::string
         { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
 
