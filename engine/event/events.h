@@ -20,47 +20,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
 
-#include "engine.h"
-#include "log/log.h"
-#include "application.h"
-#include "event/eventQueue.h"
-#include "json/configParser.h"
-#include "auxiliary/threadPool.h"
-#include "auxiliary/file.h"
-
-using namespace std::chrono_literals;
-namespace AIAssistant
-{
-    class Core
-    {
-    public:
-        Core();
-        ~Core() = default;
-
-        void Start(ConfigParser::EngineConfig const& engineConfig);
-        void Run(std::unique_ptr<AIAssistant::Application>&);
-        void Shutdown();
-        bool Verbose() const { return m_EngineConfig.m_Verbose; }
-        ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
-
-        // event API
-        void PushEvent(EventQueue::EventPtr eventPtr);
-
-    public:
-        static std::unique_ptr<AIAssistant::Log> g_Logger;
-        static Core* g_Core;
-
-    private:
-        static void SignalHandler(int signal);
-        void DisableCtrlCOutput();
-
-    private:
-        ThreadPool m_ThreadPool;
-        EventQueue m_EventQueue;
-
-        // core config
-        ConfigParser::EngineConfig m_EngineConfig;
-    };
-} // namespace AIAssistant
+#include "event/applicationEvent.h"
+#include "event/filesystemEvent.h"
+#include "event/engineEvent.h"
+#include "event/timerEvent.h"

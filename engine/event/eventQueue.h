@@ -21,46 +21,28 @@
 
 #pragma once
 #include <memory>
+#include <queue>
 
-#include "engine.h"
-#include "log/log.h"
-#include "application.h"
-#include "event/eventQueue.h"
-#include "json/configParser.h"
-#include "auxiliary/threadPool.h"
-#include "auxiliary/file.h"
+#include "event/event.h"
 
-using namespace std::chrono_literals;
 namespace AIAssistant
 {
-    class Core
+
+    // Thread-safe queue of events for main-thread consumption
+    class EventQueue
     {
     public:
-        Core();
-        ~Core() = default;
+        using EventPtr = std::shared_ptr<AIAssistant::Event>;
 
-        void Start(ConfigParser::EngineConfig const& engineConfig);
-        void Run(std::unique_ptr<AIAssistant::Application>&);
-        void Shutdown();
-        bool Verbose() const { return m_EngineConfig.m_Verbose; }
-        ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
+        void Push(EventPtr event);
+        EventPtr Pop();
 
-        // event API
-        void PushEvent(EventQueue::EventPtr eventPtr);
-
-    public:
-        static std::unique_ptr<AIAssistant::Log> g_Logger;
-        static Core* g_Core;
+        // Pop all events (main thread should call this periodically)
+        std::vector<EventPtr> PopAll();
 
     private:
-        static void SignalHandler(int signal);
-        void DisableCtrlCOutput();
-
-    private:
-        ThreadPool m_ThreadPool;
-        EventQueue m_EventQueue;
-
-        // core config
-        ConfigParser::EngineConfig m_EngineConfig;
+        std::mutex m_QueueAccessMutex;
+        std::queue<EventPtr> m_Queue;
     };
+
 } // namespace AIAssistant

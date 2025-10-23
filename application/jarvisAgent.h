@@ -36,7 +36,7 @@ namespace AIAssistant
 
         virtual void OnStart() override;
         virtual void OnUpdate() override;
-        virtual void OnEvent() override;
+        virtual void OnEvent(Event&) override;
         virtual void OnShutdown() override;
 
         virtual bool IsFinished() override;

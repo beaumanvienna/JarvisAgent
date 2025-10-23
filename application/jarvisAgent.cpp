@@ -21,6 +21,8 @@
 
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "event/events.h"
+
 namespace AIAssistant
 {
     std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
@@ -52,13 +54,39 @@ namespace AIAssistant
             .m_Url = m_Url,                             //
             .m_Data = makeRequestData(m_Model, message) //
         };
-        m_Curl.Query(queryData);
+
+        bool curleOk = m_Curl.Query(queryData);
+
+        if (!curleOk)
+        {
+            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+            Core::g_Core->PushEvent(appErrorEvent);
+        }
 
         // check if app should terminate
         CheckIfFinished();
     }
 
-    void JarvisAgent::OnEvent() {}
+    void JarvisAgent::OnEvent(Event& event)
+    {
+        EventDispatcher dispatcher(event);
+
+        // app-level event handling
+        dispatcher.Dispatch<EngineEvent>(
+            [&](EngineEvent& engineEvent)
+            {
+                if (engineEvent.GetEngineCode() == EngineEvent::EngineEventShutdown)
+                {
+                    LOG_CORE_INFO("App received shutdown request");
+                    m_IsFinished = true;
+                }
+                else
+                {
+                    LOG_CORE_ERROR("unhandled engine event");
+                }
+                return true;
+            });
+    }
 
     void JarvisAgent::OnShutdown() { LOG_APP_INFO("leaving JarvisAgent"); }
 

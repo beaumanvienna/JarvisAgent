@@ -20,47 +20,41 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
+#include "event/event.h"
 
-#include "engine.h"
-#include "log/log.h"
-#include "application.h"
-#include "event/eventQueue.h"
-#include "json/configParser.h"
-#include "auxiliary/threadPool.h"
-#include "auxiliary/file.h"
-
-using namespace std::chrono_literals;
 namespace AIAssistant
 {
-    class Core
+    class FileSystemEvent : public AIAssistant::Event
     {
     public:
-        Core();
-        ~Core() = default;
+        FileSystemEvent(std::string path) : m_Path(std::move(path)) {}
+        const std::string& GetPath() const { return m_Path; }
 
-        void Start(ConfigParser::EngineConfig const& engineConfig);
-        void Run(std::unique_ptr<AIAssistant::Application>&);
-        void Shutdown();
-        bool Verbose() const { return m_EngineConfig.m_Verbose; }
-        ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
+    protected:
+        std::string m_Path;
+    };
 
-        // event API
-        void PushEvent(EventQueue::EventPtr eventPtr);
-
+    class FileAddedEvent : public FileSystemEvent
+    {
     public:
-        static std::unique_ptr<AIAssistant::Log> g_Logger;
-        static Core* g_Core;
+        using FileSystemEvent::FileSystemEvent;
+        EVENT_CLASS_TYPE(FileAdded)
+        EVENT_CLASS_CATEGORY(EventCategoryFileSys)
+    };
 
-    private:
-        static void SignalHandler(int signal);
-        void DisableCtrlCOutput();
+    class FileRemovedEvent : public FileSystemEvent
+    {
+    public:
+        using FileSystemEvent::FileSystemEvent;
+        EVENT_CLASS_TYPE(FileRemoved)
+        EVENT_CLASS_CATEGORY(EventCategoryFileSys)
+    };
 
-    private:
-        ThreadPool m_ThreadPool;
-        EventQueue m_EventQueue;
-
-        // core config
-        ConfigParser::EngineConfig m_EngineConfig;
+    class FileModifiedEvent : public FileSystemEvent
+    {
+    public:
+        using FileSystemEvent::FileSystemEvent;
+        EVENT_CLASS_TYPE(FileModified)
+        EVENT_CLASS_CATEGORY(EventCategoryFileSys)
     };
 } // namespace AIAssistant

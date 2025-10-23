@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include "event/event.h"
 
 namespace AIAssistant
 {
@@ -28,7 +29,7 @@ namespace AIAssistant
     public:
         virtual void OnStart() = 0;
         virtual void OnUpdate() = 0;
-        virtual void OnEvent() = 0;
+        virtual void OnEvent(Event&) = 0;
         virtual void OnShutdown() = 0;
 
         virtual bool IsFinished() = 0;

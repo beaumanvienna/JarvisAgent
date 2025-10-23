@@ -28,14 +28,14 @@
 #endif
 #include "tracy/Tracy.hpp"
 
-#include "engine.h"
 #include "core.h"
+#include "engine.h"
+#include "event/events.h"
 
 namespace AIAssistant
 {
     // global logger for the engine and application
     std::unique_ptr<AIAssistant::Log> Core::g_Logger;
-    bool Core::m_ShutdownRequest{false};
     Core* Core::g_Core{nullptr};
 
     Core::Core()
@@ -62,7 +62,8 @@ namespace AIAssistant
         {
             sigIntReceived = true;
             LOG_CORE_INFO("Received signal SIGINT, exiting");
-            m_ShutdownRequest = true;
+            auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
+            g_Core->PushEvent(event);
         }
     }
 
@@ -84,6 +85,8 @@ namespace AIAssistant
 #endif
     }
 
+    void Core::PushEvent(EventQueue::EventPtr eventPtr) { m_EventQueue.Push(std::move(eventPtr)); }
+
     void Core::Start(ConfigParser::EngineConfig const& engineConfig)
     {
         m_EngineConfig = engineConfig;
@@ -104,17 +107,40 @@ namespace AIAssistant
                 app->OnUpdate();
             }
 
+            { // event handling
+                const auto green = 0x00ff00;
+                ZoneScopedNC("event handling", green);
+
+                // pop all pending events from queue
+                auto events = m_EventQueue.PopAll();
+
+                for (auto& eventPtr : events)
+                {
+                    Event& event = *eventPtr;
+                    EventDispatcher dispatcher(event);
+
+                    // engine-level event handling
+                    dispatcher.Dispatch<AppErrorEvent>(
+                        [](AppErrorEvent& appErrorEvent)
+                        {
+                            LOG_CORE_CRITICAL("Engine handled AppErrorEvent, ID: {}", appErrorEvent.GetErrorCode());
+                            return true;
+                        });
+
+                    // pass to app if not handled
+                    if (!event.IsHandled())
+                    {
+                        app->OnEvent(event);
+                    }
+                }
+            }
+
             { // go easy on the CPU
                 const int cyan = 0x00ffff;
                 ZoneScopedNC("sleep time (accuracy check for tracy)", cyan);
                 CORE_ASSERT((m_EngineConfig.m_SleepDuration > 0ms) && (m_EngineConfig.m_SleepDuration <= 256ms),
                             "sleep duration incorrect");
                 std::this_thread::sleep_for(std::chrono::milliseconds(m_EngineConfig.m_SleepDuration));
-            }
-
-            if (m_ShutdownRequest)
-            {
-                break;
             }
         } while (!app->IsFinished());
     }
