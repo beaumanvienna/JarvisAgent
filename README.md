@@ -5,13 +5,27 @@ JarvisAgent is a console application that operates as a background service (agen
 It can perform AI-driven tasks and serve as a component for workflow automation.<br>
 <br>
 
-| Layer | Responsibility | Status |
-|--------|----------------|--------|
-| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
-| **Application** | Orchestrates queue handling and task flow | 🚧 |
-| **Config** | `config.json` with folder paths + thread count, and other settings | ✅ |
-| **I/O** | Input queue, output folder | 🚧 |
-| **Networking** | ChatGPT requests/responses | 🚧 |
+| Layer            | Responsibility                                                                                                           | Status |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ------ |
+| **Engine**       | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅     |
+| **Event System** | Thread-safe atomic event queue and dispatcher system for cross-thread communication                                      | ✅     |
+| **Application**  | Orchestrates queue handling, event dispatching, and task flow                                                            | 🚧     |
+| **Config**       | `config.json` with folder paths, thread count, AI backend model, and other settings                                      | ✅     |
+| **I/O**          | Input queue folder watcher, output folder, file categorization                                                           | 🚧     |
+| **Networking**   | ChatGPT REST API requests and response handling                                                                          | 🚧     |
+
+
+<br> JarvisAgent processes different types of prompt files located in the queue folder defined in the configuration file `config.json`. Each file category serves a specific purpose, and files are identified using 4-letter, all-caps prefixes.<br>
+
+| Category                  | Description                                                                    | Prefix                 | Example Filename                                          |
+| ------------------------- | ------------------------------------------------------------------------------ | ---------------------- | --------------------------------------------------------- |
+| **Settings**              | Style, behavior, or tone modifiers (e.g., “write succinct”, “use formal tone”) | `STNG`                 | `STNG_write_succinct.txt`                                 |
+| **Context / Description** | Provides contextual or background information for AI prompts                   | `CNXT`                 | `CNXT_project_overview.txt`                               |
+| **Task**                  | Defines the main task or instruction for the AI                                | `TASK`                 | `TASK_compare_requirements.txt`                           |
+| **Subfolders**            | Contain additional prompt or requirement files, processed recursively          | *(folder name itself)* | `../queue/subproject/`                                    |
+| **Requirements**          | Requirement files such as customer or system requirements                      | *(no prefix)*          | `REQ_vehicle_speed.txt` or `customer_requirement_001.txt` |
+
+🧠 Categories STNG, CNXT, and TASK are combined into an environment used alongside each individual requirement file during processing.<br>
 
 # Contributions
 <br>
