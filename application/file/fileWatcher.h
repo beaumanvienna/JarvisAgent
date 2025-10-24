@@ -21,40 +21,34 @@
 
 #pragma once
 
-#include <memory>
+#include <filesystem>
+#include <chrono>
+#include <thread>
+#include <atomic>
+#include <unordered_map>
+#include "event/eventQueue.h"
+#include "event/filesystemEvent.h"
+#include "core.h"
 
-#include "application.h"
-#include "curlWrapper/curlWrapper.h"
-#include "file/fileWatcher.h"
-#include "file/fileCategory.h"
+namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
-    class JarvisAgent : public Application
+    class FileWatcher
     {
     public:
-        JarvisAgent() = default;
-        ~JarvisAgent() = default;
+        explicit FileWatcher(const fs::path& pathToWatch, std::chrono::milliseconds interval = 1000ms);
+        ~FileWatcher();
 
-        virtual void OnStart() override;
-        virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
-        virtual void OnShutdown() override;
-
-        virtual bool IsFinished() override;
-        static std::unique_ptr<Application> Create();
+        void Start();
+        void Stop();
 
     private:
-        void CheckIfFinished();
+        void Watch();
 
-    private:
-        bool m_IsFinished{false};
-        CurlWrapper m_Curl;
-        std::string m_Url;
-        std::string m_Model;
-
-    private:
-        std::unique_ptr<FileWatcher> m_FileWatcher;
-        FileCategorizer m_FileCategorizer;
+        fs::path m_PathToWatch;
+        std::chrono::milliseconds m_Interval;
+        std::atomic<bool> m_Running{false};
+        std::thread m_WatcherThread;
     };
 } // namespace AIAssistant

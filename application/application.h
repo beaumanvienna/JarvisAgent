@@ -27,6 +27,8 @@ namespace AIAssistant
     class Application
     {
     public:
+        virtual ~Application() = default;
+
         virtual void OnStart() = 0;
         virtual void OnUpdate() = 0;
         virtual void OnEvent(Event&) = 0;

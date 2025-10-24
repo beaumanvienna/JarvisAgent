@@ -32,6 +32,10 @@ namespace AIAssistant
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
         m_Url = Core::g_Core->GetConfig().m_Url;
         m_Model = Core::g_Core->GetConfig().m_Model;
+        const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
+
+        m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
+        m_FileWatcher->Start();
     }
 
     void JarvisAgent::OnUpdate()
@@ -55,7 +59,7 @@ namespace AIAssistant
             .m_Data = makeRequestData(m_Model, message) //
         };
 
-        bool curleOk = m_Curl.Query(queryData);
+        bool curleOk = true; // m_Curl.Query(queryData);
 
         if (!curleOk)
         {
@@ -86,9 +90,40 @@ namespace AIAssistant
                 }
                 return true;
             });
+
+        dispatcher.Dispatch<FileAddedEvent>(
+            [&](FileAddedEvent& fileEvent)
+            {
+                LOG_APP_INFO("New file detected: {}", fileEvent.GetPath());
+                m_FileCategorizer.AddFile(fileEvent.GetPath());
+                return true;
+            });
+
+        dispatcher.Dispatch<FileModifiedEvent>(
+            [&](FileModifiedEvent& fileEvent)
+            {
+                LOG_APP_INFO("File modified: {}", fileEvent.GetPath());
+                m_FileCategorizer.ModifyFile(fileEvent.GetPath());
+                return true;
+            });
+
+        dispatcher.Dispatch<FileRemovedEvent>(
+            [&](FileRemovedEvent& fileEvent)
+            {
+                LOG_APP_INFO("File removed: {}", fileEvent.GetPath());
+                m_FileCategorizer.RemoveFile(fileEvent.GetPath());
+                return true;
+            });
     }
 
-    void JarvisAgent::OnShutdown() { LOG_APP_INFO("leaving JarvisAgent"); }
+    void JarvisAgent::OnShutdown()
+    {
+        if (m_FileWatcher)
+        {
+            m_FileWatcher->Stop();
+        }
+        LOG_APP_INFO("leaving JarvisAgent");
+    }
 
     bool JarvisAgent::IsFinished() { return m_IsFinished; }
 

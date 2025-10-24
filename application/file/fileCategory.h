@@ -20,41 +20,50 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <filesystem>
+#include <vector>
+#include <string>
 
-#include <memory>
-
-#include "application.h"
-#include "curlWrapper/curlWrapper.h"
-#include "file/fileWatcher.h"
-#include "file/fileCategory.h"
+namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
-    class JarvisAgent : public Application
+    enum class FileCategory
+    {
+        Settings,
+        Context,
+        Task,
+        Requirement,
+        SubFolder,
+        Unknown
+    };
+
+    struct CategorizedFiles
+    {
+        std::vector<fs::path> m_Settings;
+        std::vector<fs::path> m_Context;
+        std::vector<fs::path> m_Tasks;
+        std::vector<fs::path> m_Requirements;
+        std::vector<fs::path> m_Subfolders;
+    };
+
+    class FileCategorizer
     {
     public:
-        JarvisAgent() = default;
-        ~JarvisAgent() = default;
+        FileCategorizer() = default;
+        ~FileCategorizer();
 
-        virtual void OnStart() override;
-        virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
-        virtual void OnShutdown() override;
+        void AddFile(fs::path const& filePath);
+        void RemoveFile(fs::path const& filePath);
+        void ModifyFile(fs::path const& filePath);
 
-        virtual bool IsFinished() override;
-        static std::unique_ptr<Application> Create();
-
-    private:
-        void CheckIfFinished();
+        const CategorizedFiles& GetCategorizedFiles() const { return m_CategorizedFiles; }
+        void PrintCategorizedFiles() const;
 
     private:
-        bool m_IsFinished{false};
-        CurlWrapper m_Curl;
-        std::string m_Url;
-        std::string m_Model;
+        FileCategory Categorize(fs::path const& filePath) const;
+        void RemoveFromVector(std::vector<fs::path>& vec, fs::path const& path);
 
-    private:
-        std::unique_ptr<FileWatcher> m_FileWatcher;
-        FileCategorizer m_FileCategorizer;
+        CategorizedFiles m_CategorizedFiles;
     };
 } // namespace AIAssistant
