@@ -27,6 +27,17 @@ It can perform AI-driven tasks and serve as a component for workflow automation.
 
 🧠 Categories STNG, CNXT, and TASK are combined into an environment used alongside each individual requirement file during processing.<br>
 
+# Architecture & Design Overview
+
+* **Environment Files** — Files in categories STNG (Settings), CNXT (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.
+* **Query Files (Requirement Files)** — Each represents a smaller task/requirement that we want the AI to process using the environment.
+* **File Watcher** — Monitors additions/changes/removals in the queue folder (including environment files and query files).
+* **File Categorizer & Tracker** — Tracks which files are environment vs query, tracks modification status, provides content retrieval.
+* **CurlWrapper / REST Interface** — Handles communication with the AI provider’s API (e.g., GPT-4/5) via HTTP.
+* **Thread Pool / Parallel Processing** — Configured by max threads in config.json; handles multiple query tasks in parallel.
+* **JarvisAgent Application** — Orchestrates startup, event handling, file watcher, file categorization, query dispatching.
+* **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).
+
 # Contributions
 <br>
 In this project, you're welcome to contribute. Please be sure to enable clang formatting in your IDE. The coding style is Allman. Member fields of structs and classes are written as `m_` + PascalCase.
