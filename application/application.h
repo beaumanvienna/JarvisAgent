@@ -34,7 +34,7 @@ namespace AIAssistant
         virtual void OnEvent(Event&) = 0;
         virtual void OnShutdown() = 0;
 
-        virtual bool IsFinished() = 0;
+        virtual bool IsFinished() const = 0;
 
     private:
     };

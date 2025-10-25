@@ -20,55 +20,44 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <filesystem>
-#include <unordered_map>
-#include <string>
 
-#include "engine.h"
-#include "file/trackedFile.h"
+#include <filesystem>
+#include <string>
+#include <atomic>
+#include <mutex>
+#include <fstream>
+#include <sstream>
+#include <optional>
 
 namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
-    enum class FileCategory
-    {
-        Settings,
-        Context,
-        Task,
-        Requirement,
-        SubFolder,
-        Unknown
-    };
-
-    using TrackedFiles = std::unordered_map<std::string, std::unique_ptr<TrackedFile>>;
-
-    struct CategorizedFiles
-    {
-        TrackedFiles m_Settings;
-        TrackedFiles m_Context;
-        TrackedFiles m_Tasks;
-        TrackedFiles m_Requirements;
-        TrackedFiles m_Subfolders;
-    };
-
-    class FileCategorizer
+    class TrackedFile
     {
     public:
-        FileCategorizer() = default;
-        ~FileCategorizer();
+        TrackedFile(fs::path const& path);
 
-        void AddFile(fs::path const& filePath);
-        void RemoveFile(fs::path const& filePath);
-        void ModifyFile(fs::path const& filePath);
+        bool IsModified() const { return m_Modified.load(); }
+        fs::path const& GetPath() const { return m_Path; }
 
-        const CategorizedFiles& GetCategorizedFiles() const { return m_CategorizedFiles; }
-        void PrintCategorizedFiles() const;
+        // marks it as modified
+        void MarkModified() { m_Modified.store(true); }
+
+        // retrieves content (and resets modified flag)
+        std::optional<std::string> GetContent();
+
+        // called when file changes on disk
+        // to make sure it really changed
+        bool CheckIfContentChanged();
 
     private:
-        FileCategory Categorize(fs::path const& filePath) const;
-        void RemoveFromFiles(TrackedFiles& files, fs::path const& path);
+        std::string ComputeFileHash() const;
 
-        CategorizedFiles m_CategorizedFiles;
+    private:
+        fs::path m_Path;
+        std::atomic<bool> m_Modified{true}; // all new files start "modified"
+        std::string m_LastHash;
+        mutable std::mutex m_Mutex;
     };
 } // namespace AIAssistant

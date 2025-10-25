@@ -41,7 +41,7 @@ namespace AIAssistant
         virtual void OnEvent(Event&) override;
         virtual void OnShutdown() override;
 
-        virtual bool IsFinished() override;
+        virtual bool IsFinished() const override;
         static std::unique_ptr<Application> Create();
 
     private:

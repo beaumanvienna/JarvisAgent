@@ -44,6 +44,7 @@ namespace AIAssistant
         void Shutdown();
         bool Verbose() const { return m_EngineConfig.m_Verbose; }
         ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
+        ThreadPool& GetThreadPool() { return m_ThreadPool; }
 
         // event API
         void PushEvent(EventQueue::EventPtr eventPtr);

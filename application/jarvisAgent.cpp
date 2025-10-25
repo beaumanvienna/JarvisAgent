@@ -81,12 +81,12 @@ namespace AIAssistant
             {
                 if (engineEvent.GetEngineCode() == EngineEvent::EngineEventShutdown)
                 {
-                    LOG_CORE_INFO("App received shutdown request");
+                    LOG_APP_INFO("App received shutdown request");
                     m_IsFinished = true;
                 }
                 else
                 {
-                    LOG_CORE_ERROR("unhandled engine event");
+                    LOG_APP_ERROR("unhandled engine event");
                 }
                 return true;
             });
@@ -118,14 +118,16 @@ namespace AIAssistant
 
     void JarvisAgent::OnShutdown()
     {
+        LOG_APP_INFO("leaving JarvisAgent");
         if (m_FileWatcher)
         {
             m_FileWatcher->Stop();
         }
-        LOG_APP_INFO("leaving JarvisAgent");
+        Core::g_Core->GetThreadPool().Wait();
+        m_FileCategorizer.PrintCategorizedFiles();
     }
 
-    bool JarvisAgent::IsFinished() { return m_IsFinished; }
+    bool JarvisAgent::IsFinished() const { return m_IsFinished; }
 
     void JarvisAgent::CheckIfFinished()
     {

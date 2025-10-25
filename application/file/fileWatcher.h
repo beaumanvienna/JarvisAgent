@@ -23,7 +23,6 @@
 
 #include <filesystem>
 #include <chrono>
-#include <thread>
 #include <atomic>
 #include <unordered_map>
 #include "event/eventQueue.h"
@@ -37,7 +36,7 @@ namespace AIAssistant
     class FileWatcher
     {
     public:
-        explicit FileWatcher(const fs::path& pathToWatch, std::chrono::milliseconds interval = 1000ms);
+        explicit FileWatcher(const fs::path& pathToWatch, std::chrono::milliseconds interval = 100ms);
         ~FileWatcher();
 
         void Start();
@@ -45,10 +44,11 @@ namespace AIAssistant
 
     private:
         void Watch();
+        bool IsValidFile(fs::directory_entry const& entry);
 
         fs::path m_PathToWatch;
         std::chrono::milliseconds m_Interval;
         std::atomic<bool> m_Running{false};
-        std::thread m_WatcherThread;
+        std::future<void> m_WatchTask;
     };
 } // namespace AIAssistant

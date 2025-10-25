@@ -34,43 +34,70 @@ namespace AIAssistant
     void FileWatcher::Start()
     {
         if (m_Running)
+        {
             return;
+        }
 
         m_Running = true;
-        m_WatcherThread = std::thread([this]() { Watch(); });
+        // Submit watcher to the thread pool
+        m_WatchTask = Core::g_Core->GetThreadPool().SubmitTask([this]() { Watch(); });
+    }
+
+    bool FileWatcher::IsValidFile(fs::directory_entry const& entry)
+    {
+        if (!fs::is_regular_file(entry))
+        {
+            return false;
+        }
+
+        // exclude files that start with a dot
+        // geany does that for temp files in the current folder
+        auto filename = entry.path().filename().string();
+        return !(!filename.empty() && filename[0] == '.');
     }
 
     void FileWatcher::Stop()
     {
         m_Running = false;
-        if (m_WatcherThread.joinable())
-            m_WatcherThread.join();
+        if (m_WatchTask.valid())
+        {
+            m_WatchTask.wait(); // wait for graceful exit
+        }
     }
 
     void FileWatcher::Watch()
     {
         std::unordered_map<std::string, fs::file_time_type> files;
 
-        // Initial snapshot
+        // --- Initial scan ---
         for (auto& file : fs::recursive_directory_iterator(m_PathToWatch))
         {
-            if (!fs::is_regular_file(file))
+            if (!IsValidFile(file))
+            {
                 continue;
-            files[file.path().string()] = fs::last_write_time(file);
+            }
+
+            std::string const pathStr = file.path().string();
+            files[pathStr] = fs::last_write_time(file);
+
+            // fire event for existing files at startup
+            Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr));
         }
 
         while (m_Running)
         {
             std::this_thread::sleep_for(m_Interval);
 
-            // Detect added or modified
+            // Detect added or modified files
             for (auto& file : fs::recursive_directory_iterator(m_PathToWatch))
             {
-                if (!fs::is_regular_file(file))
+                if (!IsValidFile(file))
+                {
                     continue;
+                }
 
-                const auto currentTime = fs::last_write_time(file);
-                const auto pathStr = file.path().string();
+                fs::file_time_type const currentTime = fs::last_write_time(file);
+                std::string const pathStr = file.path().string();
 
                 if (!files.contains(pathStr))
                 {
@@ -84,7 +111,7 @@ namespace AIAssistant
                 }
             }
 
-            // Detect removed
+            // Detect removed files
             for (auto it = files.begin(); it != files.end();)
             {
                 if (!fs::exists(it->first))

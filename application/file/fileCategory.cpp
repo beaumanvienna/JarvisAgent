@@ -31,59 +31,83 @@ namespace AIAssistant
     void FileCategorizer::AddFile(fs::path const& filePath)
     {
         FileCategory category = Categorize(filePath);
-        switch (category)
+        auto& categoryMap = [&]() -> TrackedFiles&
         {
-            case FileCategory::Settings:
+            switch (category)
             {
-                m_CategorizedFiles.m_Settings.push_back(filePath);
-                break;
+                case FileCategory::Settings:
+                    return m_CategorizedFiles.m_Settings;
+                case FileCategory::Context:
+                    return m_CategorizedFiles.m_Context;
+                case FileCategory::Task:
+                    return m_CategorizedFiles.m_Tasks;
+                case FileCategory::Requirement:
+                    return m_CategorizedFiles.m_Requirements;
+                case FileCategory::SubFolder:
+                    return m_CategorizedFiles.m_Subfolders;
+                default:
+                    return m_CategorizedFiles.m_Requirements; // fallback
             }
-            case FileCategory::Context:
-            {
-                m_CategorizedFiles.m_Context.push_back(filePath);
-                break;
-            }
-            case FileCategory::Task:
-            {
-                m_CategorizedFiles.m_Tasks.push_back(filePath);
-                break;
-            }
-            case FileCategory::Requirement:
-            {
-                m_CategorizedFiles.m_Requirements.push_back(filePath);
-                break;
-            }
-            case FileCategory::SubFolder:
-            {
-                m_CategorizedFiles.m_Subfolders.push_back(filePath);
-                break;
-            }
-            default:
-            {
-                break;
-            }
-        }
+        }();
+
+        std::string key = filePath.string();
+        categoryMap[key] = std::make_unique<TrackedFile>(filePath); // constructs and marks modified = true
     }
 
     void FileCategorizer::RemoveFile(fs::path const& filePath)
     {
-        RemoveFromVector(m_CategorizedFiles.m_Settings, filePath);
-        RemoveFromVector(m_CategorizedFiles.m_Context, filePath);
-        RemoveFromVector(m_CategorizedFiles.m_Tasks, filePath);
-        RemoveFromVector(m_CategorizedFiles.m_Requirements, filePath);
-        RemoveFromVector(m_CategorizedFiles.m_Subfolders, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Settings, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Context, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Tasks, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Requirements, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Subfolders, filePath);
     }
 
     void FileCategorizer::ModifyFile(fs::path const& filePath)
     {
-        // For now, we just remove and re-add to update its category if the filename changed
-        RemoveFile(filePath);
-        AddFile(filePath);
+        FileCategory category = Categorize(filePath);
+        auto& categoryMap = [&]() -> TrackedFiles&
+        {
+            switch (category)
+            {
+                case FileCategory::Settings:
+                    return m_CategorizedFiles.m_Settings;
+                case FileCategory::Context:
+                    return m_CategorizedFiles.m_Context;
+                case FileCategory::Task:
+                    return m_CategorizedFiles.m_Tasks;
+                case FileCategory::Requirement:
+                    return m_CategorizedFiles.m_Requirements;
+                case FileCategory::SubFolder:
+                    return m_CategorizedFiles.m_Subfolders;
+                default:
+                    return m_CategorizedFiles.m_Context; // fallback
+            }
+        }();
+
+        auto it = categoryMap.find(filePath.string());
+        if (it != categoryMap.end())
+        {
+            if (it->second->CheckIfContentChanged())
+            {
+                it->second->MarkModified();
+                LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
+            }
+        }
+        else
+        {
+            LOG_APP_CRITICAL("File not tracked yet (could be newly added)");
+        }
     }
 
-    void FileCategorizer::RemoveFromVector(std::vector<fs::path>& vec, fs::path const& path)
+    void FileCategorizer::RemoveFromFiles(TrackedFiles& files, fs::path const& path)
     {
-        vec.erase(std::remove(vec.begin(), vec.end(), path), vec.end());
+        auto it = files.find(path.string());
+        if (it != files.end())
+        {
+            files.erase(it);
+            LOG_APP_INFO("Removed file: {}", path.string());
+        }
     }
 
     FileCategory FileCategorizer::Categorize(fs::path const& filePath) const
@@ -116,14 +140,14 @@ namespace AIAssistant
 
     void FileCategorizer::PrintCategorizedFiles() const
     {
-        auto printCategory = [](std::string const& category, std::vector<fs::path> const& files)
+        auto printCategory = [](std::string const& category, TrackedFiles const& files)
         {
             if (!files.empty())
             {
                 std::cout << category << ":\n";
                 for (auto const& file : files)
                 {
-                    std::cout << "  " << file.string() << "\n";
+                    std::cout << "  " << file.second->GetPath().string() << "\n";
                 }
             }
         };
