@@ -95,11 +95,12 @@ Any detected file modification automatically triggers selective reprocessing:
 
 ```text
 queue/
-├── STNG_write_succinct.txt
+├── STNG_be_succinct.txt
 ├── CNXT_project_overview.txt
 ├── TASK_compare_requirements.txt
 ├── REQ_vehicle_speed.txt
 └── subproject/
+    ├── STNG_be_formal.txt
     ├── CNXT_subtask.txt
     ├── TASK_subtask.txt
     └── REQ_subsystem_behavior.txt
