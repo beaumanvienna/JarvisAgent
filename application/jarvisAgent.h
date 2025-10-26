@@ -20,13 +20,13 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-
 #include <memory>
+#include <unordered_map>
 
 #include "application.h"
-#include "curlWrapper/curlWrapper.h"
 #include "file/fileWatcher.h"
 #include "file/fileCategory.h"
+#include "session/sessionManager.h"
 
 namespace AIAssistant
 {
@@ -34,7 +34,7 @@ namespace AIAssistant
     {
     public:
         JarvisAgent() = default;
-        ~JarvisAgent() = default;
+        virtual ~JarvisAgent() = default;
 
         virtual void OnStart() override;
         virtual void OnUpdate() override;
@@ -49,12 +49,9 @@ namespace AIAssistant
 
     private:
         bool m_IsFinished{false};
-        CurlWrapper m_Curl;
-        std::string m_Url;
-        std::string m_Model;
 
     private:
+        std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
         std::unique_ptr<FileWatcher> m_FileWatcher;
-        FileCategorizer m_FileCategorizer;
     };
 } // namespace AIAssistant

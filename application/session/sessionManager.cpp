@@ -1,0 +1,246 @@
+/* Copyright (c) 2025 JC Technolabs
+
+   Permission is hereby granted, free of charge, to any person
+   obtaining a copy of this software and associated documentation files
+   (the "Software"), to deal in the Software without restriction,
+   including without limitation the rights to use, copy, modify, merge,
+   publish, distribute, sublicense, and/or sell copies of the Software,
+   and to permit persons to whom the Software is furnished to do so,
+   subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be
+   included in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+   CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
+
+#include "session/sessionManager.h"
+#include "event/events.h"
+
+namespace AIAssistant
+{
+    SessionManager::SessionManager(std::string const& filePath) : m_Name{filePath} {}
+
+    void SessionManager::OnStart()
+    {
+        m_Url = Core::g_Core->GetConfig().m_Url;
+        m_Model = Core::g_Core->GetConfig().m_Model;
+    }
+    void SessionManager::OnUpdate()
+    {
+        LOG_APP_INFO("Session manager {}, state: {}", m_Name, StateNames[m_State]);
+        CheckForUpdates();
+
+        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Requirements.Get();
+        for (auto& element : map)
+        {
+            auto& trackedFile = *element.second;
+            if (trackedFile.IsModified())
+            {
+                DispatchQuery(trackedFile);
+            }
+        }
+    }
+
+    void SessionManager::OnEvent(Event& event)
+    {
+        EventDispatcher dispatcher(event);
+        fs::path filePath;
+
+        dispatcher.Dispatch<FileAddedEvent>(
+            [&](FileAddedEvent& fileEvent)
+            {
+                LOG_APP_INFO("New file detected: {}", fileEvent.GetPath());
+                filePath = m_FileCategorizer.AddFile(fileEvent.GetPath());
+                return true;
+            });
+
+        dispatcher.Dispatch<FileModifiedEvent>(
+            [&](FileModifiedEvent& fileEvent)
+            {
+                LOG_APP_INFO("File modified: {}", fileEvent.GetPath());
+                filePath = m_FileCategorizer.ModifyFile(fileEvent.GetPath());
+                return true;
+            });
+
+        dispatcher.Dispatch<FileRemovedEvent>(
+            [&](FileRemovedEvent& fileEvent)
+            {
+                LOG_APP_INFO("File removed: {}", fileEvent.GetPath());
+                filePath = m_FileCategorizer.RemoveFile(fileEvent.GetPath());
+                return true;
+            });
+    }
+
+    void SessionManager::OnShutdown() { m_FileCategorizer.PrintCategorizedFiles(); }
+
+    bool SessionManager::IsFinished() const { return m_State == State::AllResponsesReceived; }
+
+    void SessionManager::DispatchQuery(TrackedFile& requirementFile)
+    {
+        m_Curl.Clear();
+
+        // R"(...)" introduces a raw string literal in C++
+        // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
+        // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
+        //
+        // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
+        // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
+        // -----------+++++++--------------------------------------------+++++++++++++++----
+        auto makeRequestData = [](std::string const& model, std::string const& message) -> std::string
+        { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
+
+        // retrieve prompt data from queue
+        std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
+
+        auto fileContent = requirementFile.GetContent();
+        if (fileContent.has_value())
+        {
+            message += fileContent.value();
+        }
+
+        CurlWrapper::QueryData queryData = {
+            .m_Url = m_Url,                             //
+            .m_Data = makeRequestData(m_Model, message) //
+        };
+
+        auto& threadpool = Core::g_Core->GetThreadPool();
+        auto query = [&]() { return m_Curl.Query(queryData); };
+        m_QueryFutures.push_back(threadpool.SubmitTask(query));
+
+        // --- track in-flight queries ---
+        m_QueryFutures.erase(           //
+            std::remove_if(             //
+                m_QueryFutures.begin(), //
+                m_QueryFutures.end(),   //
+                [&](auto& future)
+                {
+                    if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
+                    {
+                        bool curleOk = future.get();
+                        // report bad curl to engine
+                        if (!curleOk)
+                        {
+                            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+                            Core::g_Core->PushEvent(appErrorEvent);
+                        }
+                        return true; // remove from list
+                    }
+                    return false; // keep in list, we'll check next frame again
+                }),
+            m_QueryFutures.end());
+    }
+
+    void SessionManager::CheckForUpdates()
+    {
+        bool environmentUpdate{false};
+
+        if (m_FileCategorizer.GetCategorizedFiles().m_Settings.GetDirty())
+        {
+            AssembleSettings();
+            m_FileCategorizer.GetCategorizedFiles().m_Settings.SetDirty(false);
+            environmentUpdate = true;
+        }
+
+        if (m_FileCategorizer.GetCategorizedFiles().m_Context.GetDirty())
+        {
+            AssembleContext();
+            m_FileCategorizer.GetCategorizedFiles().m_Context.SetDirty(false);
+            environmentUpdate = true;
+        }
+
+        if (m_FileCategorizer.GetCategorizedFiles().m_Tasks.GetDirty())
+        {
+            AssembleTask();
+            m_FileCategorizer.GetCategorizedFiles().m_Tasks.SetDirty(false);
+            environmentUpdate = true;
+        }
+
+        if (environmentUpdate)
+        {
+            m_Environment.Assemble(m_Settings, m_Context, m_Tasks);
+        }
+    }
+
+    void SessionManager::AssembleSettings()
+    {
+        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Settings.m_Map;
+        for (auto& element : map)
+        {
+            auto content = element.second->GetContent();
+            if (content.has_value())
+            {
+                m_Settings += content.value();
+            }
+        }
+    }
+
+    void SessionManager::AssembleContext()
+    {
+        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Context.m_Map;
+        for (auto& element : map)
+        {
+            auto content = element.second->GetContent();
+            if (content.has_value())
+            {
+                m_Context += content.value();
+            }
+        }
+    }
+
+    void SessionManager::AssembleTask()
+    {
+        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Tasks.m_Map;
+        for (auto& element : map)
+        {
+            auto content = element.second->GetContent();
+            if (content.has_value())
+            {
+                m_Tasks += content.value();
+            }
+        }
+    }
+
+    void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks)
+    {
+        m_EnvironmentCombined = settings + context + tasks;
+        m_Dirty = true;
+
+        if (settings.empty())
+        {
+            return;
+        }
+
+        if (context.empty())
+        {
+            return;
+        }
+
+        if (tasks.empty())
+        {
+            return;
+        }
+
+        // minimum requirement met:
+        // at least one settings, context, tasks found
+        m_EnvironmentComplete = true;
+    }
+
+    std::string& SessionManager::Environment::GetEnvironmentAndResetDirtyFlag()
+    {
+        m_Dirty = false;
+        return m_EnvironmentCombined;
+    }
+
+    void SessionManager::Environment::Reset()
+    {
+        m_Dirty = false;
+        m_EnvironmentComplete = false;
+    }
+
+} // namespace AIAssistant

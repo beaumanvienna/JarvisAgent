@@ -30,7 +30,7 @@
 
 namespace AIAssistant
 {
-    TrackedFile::TrackedFile(fs::path const& path) : m_Path(path)
+    TrackedFile::TrackedFile(fs::path const& path, FileCategory fileCategory) : m_Path(path), m_FileCategory{fileCategory}
     {
         m_LastHash = ComputeFileHash();
         m_Modified.store(true);
@@ -65,6 +65,8 @@ namespace AIAssistant
         }
         return false;
     }
+
+    FileCategory TrackedFile::GetCategory() const { return m_FileCategory; }
 
     std::string TrackedFile::ComputeFileHash() const
     {

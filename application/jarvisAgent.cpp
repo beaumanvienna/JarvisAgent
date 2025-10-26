@@ -30,8 +30,7 @@ namespace AIAssistant
     void JarvisAgent::OnStart()
     {
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
-        m_Url = Core::g_Core->GetConfig().m_Url;
-        m_Model = Core::g_Core->GetConfig().m_Model;
+
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
 
         m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
@@ -40,31 +39,10 @@ namespace AIAssistant
 
     void JarvisAgent::OnUpdate()
     {
-        m_Curl.Clear();
 
-        // R"(...)" introduces a raw string literal in C++
-        // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
-        // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
-        //
-        // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
-        // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
-        // -----------+++++++--------------------------------------------+++++++++++++++----
-        auto makeRequestData = [](std::string const& model, std::string const& message) -> std::string
-        { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
-
-        // retrieve prompt data from queue
-        std::string message = "Hello from C++!";
-        CurlWrapper::QueryData queryData = {
-            .m_Url = m_Url,                             //
-            .m_Data = makeRequestData(m_Model, message) //
-        };
-
-        bool curleOk = true; // m_Curl.Query(queryData);
-
-        if (!curleOk)
+        for (auto& sessionManager : m_SessionManagers)
         {
-            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
-            Core::g_Core->PushEvent(appErrorEvent);
+            sessionManager.second->OnUpdate();
         }
 
         // check if app should terminate
@@ -91,29 +69,39 @@ namespace AIAssistant
                 return true;
             });
 
+        fs::path filePath;
+
         dispatcher.Dispatch<FileAddedEvent>(
             [&](FileAddedEvent& fileEvent)
             {
-                LOG_APP_INFO("New file detected: {}", fileEvent.GetPath());
-                m_FileCategorizer.AddFile(fileEvent.GetPath());
-                return true;
+                filePath = fileEvent.GetPath();
+                return false;
             });
 
         dispatcher.Dispatch<FileModifiedEvent>(
             [&](FileModifiedEvent& fileEvent)
             {
-                LOG_APP_INFO("File modified: {}", fileEvent.GetPath());
-                m_FileCategorizer.ModifyFile(fileEvent.GetPath());
-                return true;
+                filePath = fileEvent.GetPath();
+                return false;
             });
 
         dispatcher.Dispatch<FileRemovedEvent>(
             [&](FileRemovedEvent& fileEvent)
             {
-                LOG_APP_INFO("File removed: {}", fileEvent.GetPath());
-                m_FileCategorizer.RemoveFile(fileEvent.GetPath());
-                return true;
+                filePath = fileEvent.GetPath();
+                return false;
             });
+
+        // event was handled by the file categorizer
+        if (!filePath.empty())
+        {
+            auto sessionManagerName = filePath.parent_path().string();
+            if (!m_SessionManagers.contains(sessionManagerName))
+            {
+                m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(filePath);
+            }
+            m_SessionManagers[sessionManagerName]->OnEvent(event);
+        }
     }
 
     void JarvisAgent::OnShutdown()
@@ -124,7 +112,6 @@ namespace AIAssistant
             m_FileWatcher->Stop();
         }
         Core::g_Core->GetThreadPool().Wait();
-        m_FileCategorizer.PrintCategorizedFiles();
     }
 
     bool JarvisAgent::IsFinished() const { return m_IsFinished; }

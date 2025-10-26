@@ -20,14 +20,6 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <filesystem>
-#include <unordered_map>
-#include <string>
-
-#include "engine.h"
-#include "file/trackedFile.h"
-
-namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
@@ -39,36 +31,5 @@ namespace AIAssistant
         Requirement,
         SubFolder,
         Unknown
-    };
-
-    using TrackedFiles = std::unordered_map<std::string, std::unique_ptr<TrackedFile>>;
-
-    struct CategorizedFiles
-    {
-        TrackedFiles m_Settings;
-        TrackedFiles m_Context;
-        TrackedFiles m_Tasks;
-        TrackedFiles m_Requirements;
-        TrackedFiles m_Subfolders;
-    };
-
-    class FileCategorizer
-    {
-    public:
-        FileCategorizer() = default;
-        ~FileCategorizer();
-
-        void AddFile(fs::path const& filePath);
-        void RemoveFile(fs::path const& filePath);
-        void ModifyFile(fs::path const& filePath);
-
-        const CategorizedFiles& GetCategorizedFiles() const { return m_CategorizedFiles; }
-        void PrintCategorizedFiles() const;
-
-    private:
-        FileCategory Categorize(fs::path const& filePath) const;
-        void RemoveFromFiles(TrackedFiles& files, fs::path const& path);
-
-        CategorizedFiles m_CategorizedFiles;
     };
 } // namespace AIAssistant

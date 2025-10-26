@@ -20,48 +20,61 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-
 #include <filesystem>
+#include <unordered_map>
 #include <string>
-#include <atomic>
-#include <mutex>
-#include <fstream>
-#include <sstream>
-#include <optional>
 
+#include "engine.h"
+#include "file/trackedFile.h"
 #include "file/fileCategory.h"
 
 namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
-    class TrackedFile
+    using TrackedFileMap = std::unordered_map<std::string, std::unique_ptr<TrackedFile>>;
+
+    struct TrackedFiles
+    {
+        TrackedFileMap m_Map;
+        bool m_Dirty{true};
+        TrackedFileMap& Write()
+        {
+            m_Dirty = true;
+            return m_Map;
+        }
+
+        TrackedFileMap& Get() { return m_Map; }
+        void SetDirty(bool dirty = true) { m_Dirty = dirty; }
+        bool GetDirty() const { return m_Dirty; }
+    };
+
+    struct CategorizedFiles
+    {
+        TrackedFiles m_Settings;
+        TrackedFiles m_Context;
+        TrackedFiles m_Tasks;
+        TrackedFiles m_Requirements;
+        TrackedFiles m_Subfolders;
+    };
+
+    class FileCategorizer
     {
     public:
-        TrackedFile(fs::path const& path, FileCategory fileCategory);
+        FileCategorizer() = default;
+        ~FileCategorizer();
 
-        bool IsModified() const { return m_Modified.load(); }
-        fs::path const& GetPath() const { return m_Path; }
+        fs::path const AddFile(fs::path const& filePath);
+        fs::path const RemoveFile(fs::path const& filePath);
+        fs::path const ModifyFile(fs::path const& filePath);
 
-        // marks it as modified
-        void MarkModified() { m_Modified.store(true); }
-
-        // retrieves content (and resets modified flag)
-        std::optional<std::string> GetContent();
-        FileCategory GetCategory() const;
-
-        // called when file changes on disk
-        // to make sure it really changed
-        bool CheckIfContentChanged();
+        CategorizedFiles& GetCategorizedFiles() { return m_CategorizedFiles; }
+        void PrintCategorizedFiles() const;
 
     private:
-        std::string ComputeFileHash() const;
+        FileCategory Categorize(fs::path const& filePath) const;
+        void RemoveFromFiles(TrackedFiles& files, fs::path const& path);
 
-    private:
-        fs::path m_Path;
-        FileCategory m_FileCategory;
-        std::atomic<bool> m_Modified{true}; // all new files start "modified"
-        std::string m_LastHash;
-        mutable std::mutex m_Mutex;
+        CategorizedFiles m_CategorizedFiles;
     };
 } // namespace AIAssistant

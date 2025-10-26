@@ -19,7 +19,7 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "file/fileCategory.h"
+#include "file/fileCategorizer.h"
 #include "auxiliary/file.h"
 #include <algorithm>
 #include <iostream>
@@ -28,7 +28,7 @@ namespace AIAssistant
 {
     FileCategorizer::~FileCategorizer() {}
 
-    void FileCategorizer::AddFile(fs::path const& filePath)
+    fs::path const FileCategorizer::AddFile(fs::path const& filePath)
     {
         FileCategory category = Categorize(filePath);
         auto& categoryMap = [&]() -> TrackedFiles&
@@ -51,19 +51,21 @@ namespace AIAssistant
         }();
 
         std::string key = filePath.string();
-        categoryMap[key] = std::make_unique<TrackedFile>(filePath); // constructs and marks modified = true
+        categoryMap.Write()[key] = std::make_unique<TrackedFile>(filePath, category); // constructs and marks modified = true
+        return filePath;
     }
 
-    void FileCategorizer::RemoveFile(fs::path const& filePath)
+    fs::path const FileCategorizer::RemoveFile(fs::path const& filePath)
     {
         RemoveFromFiles(m_CategorizedFiles.m_Settings, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Context, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Tasks, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Requirements, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Subfolders, filePath);
+        return filePath;
     }
 
-    void FileCategorizer::ModifyFile(fs::path const& filePath)
+    fs::path const FileCategorizer::ModifyFile(fs::path const& filePath)
     {
         FileCategory category = Categorize(filePath);
         auto& categoryMap = [&]() -> TrackedFiles&
@@ -85,12 +87,14 @@ namespace AIAssistant
             }
         }();
 
-        auto it = categoryMap.find(filePath.string());
-        if (it != categoryMap.end())
+        auto& map = categoryMap.Get();
+        auto it = map.find(filePath.string());
+        if (it != map.end())
         {
             if (it->second->CheckIfContentChanged())
             {
                 it->second->MarkModified();
+                categoryMap.SetDirty();
                 LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
             }
         }
@@ -98,14 +102,17 @@ namespace AIAssistant
         {
             LOG_APP_CRITICAL("File not tracked yet (could be newly added)");
         }
+        return filePath;
     }
 
     void FileCategorizer::RemoveFromFiles(TrackedFiles& files, fs::path const& path)
     {
-        auto it = files.find(path.string());
-        if (it != files.end())
+        auto& map = files.Get();
+        auto it = map.find(path.string());
+        if (it != map.end())
         {
-            files.erase(it);
+            map.erase(it);
+            files.SetDirty();
             LOG_APP_INFO("Removed file: {}", path.string());
         }
     }
@@ -142,10 +149,11 @@ namespace AIAssistant
     {
         auto printCategory = [](std::string const& category, TrackedFiles const& files)
         {
-            if (!files.empty())
+            auto const& map = files.m_Map;
+            if (!map.empty())
             {
                 std::cout << category << ":\n";
-                for (auto const& file : files)
+                for (auto const& file : map)
                 {
                     std::cout << "  " << file.second->GetPath().string() << "\n";
                 }
