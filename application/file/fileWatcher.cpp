@@ -20,7 +20,9 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include "core.h"
 #include "file/fileWatcher.h"
+#include "event/events.h"
 
 namespace AIAssistant
 {
@@ -87,6 +89,13 @@ namespace AIAssistant
         while (m_Running)
         {
             std::this_thread::sleep_for(m_Interval);
+
+            if (!EngineCore::FileExists(m_PathToWatch))
+            {
+                LOG_APP_INFO("folder '{}' no longer exists, requesting shutdown", m_PathToWatch.string());
+                auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
+                Core::g_Core->PushEvent(event);
+            }
 
             // Detect added or modified files
             for (auto& file : fs::recursive_directory_iterator(m_PathToWatch))

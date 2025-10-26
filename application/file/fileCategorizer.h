@@ -43,10 +43,14 @@ namespace AIAssistant
             m_Dirty = true;
             return m_Map;
         }
+        uint m_ModifiedFiles{0};
 
         TrackedFileMap& Get() { return m_Map; }
         void SetDirty(bool dirty = true) { m_Dirty = dirty; }
         bool GetDirty() const { return m_Dirty; }
+        void IncrementModifiedFiles();
+        void DecrementModifiedFiles();
+        uint GetModifiedFiles() const { return m_ModifiedFiles; }
     };
 
     struct CategorizedFiles

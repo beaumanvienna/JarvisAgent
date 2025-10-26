@@ -36,7 +36,7 @@ namespace AIAssistant
         m_Modified.store(true);
     }
 
-    std::optional<std::string> TrackedFile::GetContent()
+    std::optional<std::string> TrackedFile::GetContentAndResetModified()
     {
         std::lock_guard lock(m_Mutex);
         std::ifstream file(m_Path);

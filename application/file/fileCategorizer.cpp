@@ -52,6 +52,7 @@ namespace AIAssistant
 
         std::string key = filePath.string();
         categoryMap.Write()[key] = std::make_unique<TrackedFile>(filePath, category); // constructs and marks modified = true
+        categoryMap.IncrementModifiedFiles();
         return filePath;
     }
 
@@ -93,8 +94,12 @@ namespace AIAssistant
         {
             if (it->second->CheckIfContentChanged())
             {
-                it->second->MarkModified();
-                categoryMap.SetDirty();
+                if (!it->second->IsModified())
+                {
+                    it->second->MarkModified();
+                    categoryMap.IncrementModifiedFiles();
+                    categoryMap.SetDirty();
+                }
                 LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
             }
         }
@@ -111,6 +116,10 @@ namespace AIAssistant
         auto it = map.find(path.string());
         if (it != map.end())
         {
+            if (it->second->IsModified())
+            {
+                files.DecrementModifiedFiles();
+            }
             map.erase(it);
             files.SetDirty();
             LOG_APP_INFO("Removed file: {}", path.string());
@@ -168,4 +177,13 @@ namespace AIAssistant
         printCategory("Subfolders", m_CategorizedFiles.m_Subfolders);
         std::cout << "=== End of Tracked Files ===\n";
     }
+
+    void TrackedFiles::IncrementModifiedFiles() { ++m_ModifiedFiles; }
+
+    void TrackedFiles::DecrementModifiedFiles()
+    {
+        CORE_ASSERT(m_ModifiedFiles, "m_ModifiedFiles overflow");
+        --m_ModifiedFiles;
+    }
+
 } // namespace AIAssistant

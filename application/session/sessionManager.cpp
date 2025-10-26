@@ -33,16 +33,39 @@ namespace AIAssistant
     }
     void SessionManager::OnUpdate()
     {
-        LOG_APP_INFO("Session manager {}, state: {}", m_Name, StateNames[m_State]);
         CheckForUpdates();
+        TrackInFlightQueries();
 
-        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Requirements.Get();
-        for (auto& element : map)
+        { // update statemachine
+            auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
+            bool queriesChanged = (requirements.GetModifiedFiles() != 0);
+            bool allQueriesSent = (requirements.GetModifiedFiles() == 0);
+
+            StateMachine::StateInfo stateInfo = {
+                .m_EnvironmentChanged = m_Environment.GetDirty(),                //
+                .m_EnvironmentComplete = m_Environment.GetEnvironmentComplete(), //
+                .m_QueriesChanged = queriesChanged,                              //
+                .m_AllQueriesSent = allQueriesSent,                              //
+                .m_AllResponsesReceived = (m_QueryFutures.size() == 0)           // idle when no futures are outstanding
+            };
+            m_StateMachine.OnUpdate(stateInfo);
+        }
+
+        // limit queued queries to 1½ the number of configured threads
+        // thread pool has queue but we can limit it here to safe queue memory
+        if (m_QueryFutures.size() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f)
         {
-            auto& trackedFile = *element.second;
-            if (trackedFile.IsModified())
+            auto& map = m_FileCategorizer.GetCategorizedFiles().m_Requirements.Get();
+            for (auto& element : map)
             {
-                DispatchQuery(trackedFile);
+                auto& trackedFile = *element.second;
+                if (trackedFile.IsModified())
+                {
+                    DispatchQuery(trackedFile);
+                    trackedFile.MarkModified(false);
+                    auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
+                    requirements.DecrementModifiedFiles();
+                }
             }
         }
     }
@@ -79,7 +102,7 @@ namespace AIAssistant
 
     void SessionManager::OnShutdown() { m_FileCategorizer.PrintCategorizedFiles(); }
 
-    bool SessionManager::IsFinished() const { return m_State == State::AllResponsesReceived; }
+    bool SessionManager::IsIdle() const { return m_StateMachine.GetState() == StateMachine::State::AllResponsesReceived; }
 
     void SessionManager::DispatchQuery(TrackedFile& requirementFile)
     {
@@ -98,7 +121,7 @@ namespace AIAssistant
         // retrieve prompt data from queue
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
 
-        auto fileContent = requirementFile.GetContent();
+        auto fileContent = requirementFile.GetContentAndResetModified();
         if (fileContent.has_value())
         {
             message += fileContent.value();
@@ -110,30 +133,13 @@ namespace AIAssistant
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();
-        auto query = [&]() { return m_Curl.Query(queryData); };
+        auto query = [&]()
+        {
+            LOG_CORE_CRITICAL("query data:\n{}", queryData.m_Data);
+#warning "query disabled"
+            return true; // m_Curl.Query(queryData);
+        };
         m_QueryFutures.push_back(threadpool.SubmitTask(query));
-
-        // --- track in-flight queries ---
-        m_QueryFutures.erase(           //
-            std::remove_if(             //
-                m_QueryFutures.begin(), //
-                m_QueryFutures.end(),   //
-                [&](auto& future)
-                {
-                    if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
-                    {
-                        bool curleOk = future.get();
-                        // report bad curl to engine
-                        if (!curleOk)
-                        {
-                            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
-                            Core::g_Core->PushEvent(appErrorEvent);
-                        }
-                        return true; // remove from list
-                    }
-                    return false; // keep in list, we'll check next frame again
-                }),
-            m_QueryFutures.end());
     }
 
     void SessionManager::CheckForUpdates()
@@ -166,43 +172,73 @@ namespace AIAssistant
             m_Environment.Assemble(m_Settings, m_Context, m_Tasks);
         }
     }
+    void SessionManager::TrackInFlightQueries()
+    {
+        // --- clean up futures and report result ---
+        m_QueryFutures.erase(           //
+            std::remove_if(             //
+                m_QueryFutures.begin(), //
+                m_QueryFutures.end(),   //
+                [&](auto& future)
+                {
+                    if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
+                    {
+                        bool curleOk = future.get();
+                        // report bad curl to engine
+                        if (!curleOk)
+                        {
+                            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+                            Core::g_Core->PushEvent(appErrorEvent);
+                        }
+                        return true; // remove from list
+                    }
+                    return false; // keep in list, we'll check next frame again
+                }),
+            m_QueryFutures.end());
+    }
 
     void SessionManager::AssembleSettings()
     {
-        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Settings.m_Map;
+        auto& settings = m_FileCategorizer.GetCategorizedFiles().m_Settings;
+        auto& map = settings.m_Map;
         for (auto& element : map)
         {
-            auto content = element.second->GetContent();
+            auto content = element.second->GetContentAndResetModified();
             if (content.has_value())
             {
                 m_Settings += content.value();
             }
+            settings.DecrementModifiedFiles();
         }
     }
 
     void SessionManager::AssembleContext()
     {
-        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Context.m_Map;
+        auto& context = m_FileCategorizer.GetCategorizedFiles().m_Context;
+        auto& map = context.m_Map;
         for (auto& element : map)
         {
-            auto content = element.second->GetContent();
+            auto content = element.second->GetContentAndResetModified();
             if (content.has_value())
             {
                 m_Context += content.value();
             }
+            context.DecrementModifiedFiles();
         }
     }
 
     void SessionManager::AssembleTask()
     {
-        auto& map = m_FileCategorizer.GetCategorizedFiles().m_Tasks.m_Map;
+        auto& tasks = m_FileCategorizer.GetCategorizedFiles().m_Tasks;
+        auto& map = tasks.m_Map;
         for (auto& element : map)
         {
-            auto content = element.second->GetContent();
+            auto content = element.second->GetContentAndResetModified();
             if (content.has_value())
             {
                 m_Tasks += content.value();
             }
+            tasks.DecrementModifiedFiles();
         }
     }
 
@@ -210,6 +246,7 @@ namespace AIAssistant
     {
         m_EnvironmentCombined = settings + context + tasks;
         m_Dirty = true;
+        m_EnvironmentComplete = false;
 
         if (settings.empty())
         {
@@ -241,6 +278,59 @@ namespace AIAssistant
     {
         m_Dirty = false;
         m_EnvironmentComplete = false;
+    }
+
+    void SessionManager::StateMachine::OnUpdate(StateInfo& stateInfo)
+    {
+        State oldState = m_State;
+
+        switch (m_State)
+        {
+            case State::CompilingEnvironment:
+            {
+                if (stateInfo.m_EnvironmentComplete)
+                {
+                    m_State = State::SendingQueries;
+                }
+                break;
+            }
+            case State::SendingQueries:
+            {
+                if (stateInfo.m_AllQueriesSent)
+                {
+                    m_State = State::AllQueriesSent;
+                }
+                break;
+            }
+            case State::AllQueriesSent:
+            {
+                if (stateInfo.m_AllResponsesReceived)
+                {
+                    m_State = State::AllResponsesReceived;
+                }
+                break;
+            }
+            case State::AllResponsesReceived:
+            {
+                if (stateInfo.m_EnvironmentChanged)
+                {
+                    m_State = State::CompilingEnvironment;
+                }
+                else if (stateInfo.m_QueriesChanged)
+                {
+                    m_State = State::SendingQueries;
+                }
+                break;
+            }
+            default:
+            {
+                break;
+            }
+        }
+        if (oldState != m_State)
+        {
+            LOG_APP_INFO("State changed: {} → {}", StateNames[oldState], StateNames[m_State]);
+        }
     }
 
 } // namespace AIAssistant

@@ -39,7 +39,6 @@ namespace AIAssistant
 
     void JarvisAgent::OnUpdate()
     {
-
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnUpdate();
@@ -98,7 +97,7 @@ namespace AIAssistant
             auto sessionManagerName = filePath.parent_path().string();
             if (!m_SessionManagers.contains(sessionManagerName))
             {
-                m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(filePath);
+                m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(sessionManagerName);
             }
             m_SessionManagers[sessionManagerName]->OnEvent(event);
         }

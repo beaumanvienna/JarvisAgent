@@ -33,20 +33,39 @@ namespace AIAssistant
     class SessionManager
     {
     private:
-        enum State
+        class StateMachine
         {
-            CompilingEnvironment = 0,
-            SendingQueries,
-            AllQueriesSent,
-            AllResponsesReceived,
-            NumStates
-        };
+        public:
+            enum State
+            {
+                CompilingEnvironment = 0,
+                SendingQueries,
+                AllQueriesSent,
+                AllResponsesReceived,
+                NumStates
+            };
 
-        static constexpr std::array<std::string_view, State::NumStates> StateNames = {
-            "CompilingEnvironment", //
-            "SendingQueries",       //
-            "AllQueriesSent",       //
-            "AllResponsesReceived"  //
+            static constexpr std::array<std::string_view, State::NumStates> StateNames = {
+                "CompilingEnvironment", //
+                "SendingQueries",       //
+                "AllQueriesSent",       //
+                "AllResponsesReceived"  //
+            };
+
+            struct StateInfo
+            {
+                bool m_EnvironmentChanged{false};
+                bool m_EnvironmentComplete{false};
+                bool m_QueriesChanged{false};
+                bool m_AllQueriesSent{false};
+                bool m_AllResponsesReceived{false};
+            };
+
+            void OnUpdate(StateInfo& stateInfo);
+            State GetState() const { return m_State; }
+
+        private:
+            State m_State{State::CompilingEnvironment};
         };
 
     public:
@@ -58,7 +77,7 @@ namespace AIAssistant
         void OnEvent(Event&);
         void OnShutdown();
 
-        bool IsFinished() const;
+        bool IsIdle() const;
 
     public:
         std::string const& GetName() const { return m_Name; }
@@ -66,6 +85,7 @@ namespace AIAssistant
     private:
         void DispatchQuery(TrackedFile& requirementFile);
         void CheckForUpdates();
+        void TrackInFlightQueries();
         void AssembleSettings();
         void AssembleContext();
         void AssembleTask();
@@ -88,7 +108,7 @@ namespace AIAssistant
 
     private:
         std::string m_Name; // session name = folder name
-        State m_State{State::CompilingEnvironment};
+        StateMachine m_StateMachine;
 
         FileCategorizer m_FileCategorizer;
 
