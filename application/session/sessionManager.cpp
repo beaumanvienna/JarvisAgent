@@ -24,9 +24,7 @@
 
 namespace AIAssistant
 {
-    SessionManager::SessionManager(std::string const& filePath) : m_Name{filePath} {}
-
-    void SessionManager::OnStart()
+    SessionManager::SessionManager(std::string const& filePath) : m_Name{filePath}
     {
         m_Url = Core::g_Core->GetConfig().m_Url;
         m_Model = Core::g_Core->GetConfig().m_Model;
@@ -107,8 +105,6 @@ namespace AIAssistant
 
     void SessionManager::DispatchQuery(TrackedFile& requirementFile)
     {
-        m_Curl.Clear();
-
         // R"(...)" introduces a raw string literal in C++
         // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
         // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
@@ -133,11 +129,9 @@ namespace AIAssistant
         auto& threadpool = Core::g_Core->GetThreadPool();
         auto query = [this, queryData]()
         {
-            std::lock_guard<std::mutex> guard(m_LogMutex);
-            LOG_CORE_CRITICAL("query data inside lambda:");
-            std::cout << queryData.m_Data << std::endl;
-#warning "query disabled"
-            return true; // m_Curl.Query(queryData);
+            auto& curl = CurlManager::GetThreadCurl();
+            curl.Clear();
+            return curl.Query(queryData);
         };
         m_QueryFutures.push_back(threadpool.SubmitTask(query));
     }

@@ -24,7 +24,7 @@
 #include <array>
 
 #include "engine.h"
-#include "curlWrapper/curlWrapper.h"
+#include "curlWrapper/curlManager.h"
 #include "file/trackedFile.h"
 #include "file/fileCategorizer.h"
 
@@ -72,7 +72,6 @@ namespace AIAssistant
         SessionManager(std::string const& name);
         virtual ~SessionManager() = default;
 
-        void OnStart();
         void OnUpdate();
         void OnEvent(Event&);
         void OnShutdown();
@@ -121,9 +120,7 @@ namespace AIAssistant
         // handles to queries
         std::vector<std::future<bool>> m_QueryFutures;
 
-        CurlWrapper m_Curl;
         std::string m_Url;
         std::string m_Model;
-        std::mutex m_LogMutex;
     };
 } // namespace AIAssistant
