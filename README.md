@@ -17,7 +17,7 @@ It can perform AI-driven tasks and serve as a component for workflow automation.
 | **Event System** | Thread-safe atomic event queue and dispatcher for cross-thread communication | ✅ |
 | **Application** | Orchestrates queue handling, event dispatching, file tracking, and AI query flow | ✅ |
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
-| **I/O** | File watcher, categorizer, and environment assembly (STNG/CNXT/TASK) | ✅ |
+| **I/O** | File watcher, categorizer, and environment assembly (STNG/CNTX/TASK) | ✅ |
 | **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) | ✅ |
 
 ---
@@ -30,18 +30,18 @@ Each file category serves a specific purpose, and files are identified using 4-l
 | Category | Description | Prefix | Example Filename |
 |-----------|-------------|---------|------------------|
 | **Settings** | Style, behavior, or tone modifiers (e.g., “write succinct”, “use formal tone”) | `STNG` | `STNG_write_succinct.txt` |
-| **Context / Description** | Provides contextual or background information for AI prompts | `CNXT` | `CNXT_project_overview.txt` |
+| **Context / Description** | Provides contextual or background information for AI prompts | `CNTX` | `CNTX_project_overview.txt` |
 | **Task** | Defines the main task or instruction for the AI | `TASK` | `TASK_compare_requirements.txt` |
 | **Subfolders** | Contain additional prompt or requirement files, processed recursively | *(folder name itself)* | `../queue/subproject/` |
 | **Requirements** | Requirement files such as customer or system requirements | *(no prefix)* | `REQ_vehicle_speed.txt` or `customer_requirement_001.txt` |
 
-🧠 Categories **STNG**, **CNXT**, and **TASK** are combined into an **environment** used alongside each individual requirement file during processing.
+🧠 Categories **STNG**, **CNTX**, and **TASK** are combined into an **environment** used alongside each individual requirement file during processing.
 
 ---
 
 ## Architecture & Design Overview
 
-- **Environment Files** — Files in categories STNG (Settings), CNXT (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.  
+- **Environment Files** — Files in categories STNG (Settings), CNTX (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.  
 - **Query Files (Requirement Files)** — Each represents a smaller task or requirement that is processed using the shared environment.  
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
 - **File Categorizer & Tracker** — Tracks which files belong to which category, monitors modification status, and provides content retrieval.  
@@ -56,7 +56,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 
 JarvisAgent operates as a **reactive state machine** that responds to file changes:
 
-1. **CompilingEnvironment** — Waits until all STNG, CNXT, and TASK files are available and up to date.  
+1. **CompilingEnvironment** — Waits until all STNG, CNTX, and TASK files are available and up to date.  
 2. **SendingQueries** — Dispatches requirement (REQ) files in parallel using the assembled environment.  
 3. **AllQueriesSent** — Awaits completion of all query futures.  
 4. **AllResponsesReceived** — Returns to idle until environment or requirements change.
@@ -71,8 +71,8 @@ Any detected file modification automatically triggers selective reprocessing:
 
 1. **Startup** — Initializes the core systems and begins watching the configured queue directory.  
 2. **File Monitoring** — The FileWatcher detects file additions, modifications, and deletions in real time.  
-3. **Categorization** — Each file is categorized as STNG, CNXT, TASK, REQ, or Subfolder.  
-4. **Environment Assembly** — STNG, CNXT, and TASK files are merged into a single environment context.  
+3. **Categorization** — Each file is categorized as STNG, CNTX, TASK, REQ, or Subfolder.  
+4. **Environment Assembly** — STNG, CNTX, and TASK files are merged into a single environment context.  
 5. **Query Dispatch** — Each REQ file is processed by combining it with the current environment and sent asynchronously to the AI backend.  
 6. **Result Storage** — Responses are written to the output directory.  
 7. **Reactivity** — Any file change automatically restarts the relevant part of the pipeline.
@@ -96,12 +96,12 @@ Any detected file modification automatically triggers selective reprocessing:
 ```text
 queue/
 ├── STNG_be_succinct.txt
-├── CNXT_project_overview.txt
+├── CNTX_project_overview.txt
 ├── TASK_compare_requirements.txt
 ├── REQ_vehicle_speed.txt
 └── subproject/
     ├── STNG_be_formal.txt
-    ├── CNXT_subtask.txt
+    ├── CNTX_subtask.txt
     ├── TASK_subtask.txt
     └── REQ_subsystem_behavior.txt
 ```
