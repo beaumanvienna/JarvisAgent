@@ -47,7 +47,7 @@ namespace AIAssistant
         void MarkModified(bool modified = true) { m_Modified.store(modified); }
 
         // retrieves content (and resets modified flag)
-        std::optional<std::string> GetContentAndResetModified();
+        std::string GetContentAndResetModified();
         FileCategory GetCategory() const;
 
         // called when file changes on disk

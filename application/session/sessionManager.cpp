@@ -53,7 +53,8 @@ namespace AIAssistant
 
         // limit queued queries to 1½ the number of configured threads
         // thread pool has queue but we can limit it here to safe queue memory
-        if (m_QueryFutures.size() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f)
+        if ((m_QueryFutures.size() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f) &&
+            m_Environment.GetEnvironmentComplete())
         {
             auto& map = m_FileCategorizer.GetCategorizedFiles().m_Requirements.Get();
             for (auto& element : map)
@@ -122,10 +123,7 @@ namespace AIAssistant
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
 
         auto fileContent = requirementFile.GetContentAndResetModified();
-        if (fileContent.has_value())
-        {
-            message += fileContent.value();
-        }
+        message += fileContent;
 
         CurlWrapper::QueryData queryData = {
             .m_Url = m_Url,                             //
@@ -133,9 +131,11 @@ namespace AIAssistant
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();
-        auto query = [&]()
+        auto query = [this, queryData]()
         {
-            LOG_CORE_CRITICAL("query data:\n{}", queryData.m_Data);
+            std::lock_guard<std::mutex> guard(m_LogMutex);
+            LOG_CORE_CRITICAL("query data inside lambda:");
+            std::cout << queryData.m_Data << std::endl;
 #warning "query disabled"
             return true; // m_Curl.Query(queryData);
         };
@@ -200,51 +200,71 @@ namespace AIAssistant
     void SessionManager::AssembleSettings()
     {
         auto& settings = m_FileCategorizer.GetCategorizedFiles().m_Settings;
+        if (settings.GetModifiedFiles() == 0)
+        {
+            return;
+        }
+
         auto& map = settings.m_Map;
+        m_Settings.clear();
         for (auto& element : map)
         {
+            bool isModified = element.second->IsModified();
             auto content = element.second->GetContentAndResetModified();
-            if (content.has_value())
+            m_Settings += content;
+            if (isModified)
             {
-                m_Settings += content.value();
+                settings.DecrementModifiedFiles();
             }
-            settings.DecrementModifiedFiles();
         }
     }
 
     void SessionManager::AssembleContext()
     {
         auto& context = m_FileCategorizer.GetCategorizedFiles().m_Context;
+        if (context.GetModifiedFiles() == 0)
+        {
+            return;
+        }
+
         auto& map = context.m_Map;
+        m_Context.clear();
         for (auto& element : map)
         {
+            bool isModified = element.second->IsModified();
             auto content = element.second->GetContentAndResetModified();
-            if (content.has_value())
+            m_Context += content;
+            if (isModified)
             {
-                m_Context += content.value();
+                context.DecrementModifiedFiles();
             }
-            context.DecrementModifiedFiles();
         }
     }
 
     void SessionManager::AssembleTask()
     {
         auto& tasks = m_FileCategorizer.GetCategorizedFiles().m_Tasks;
+        if (tasks.GetModifiedFiles() == 0)
+        {
+            return;
+        }
+
         auto& map = tasks.m_Map;
+        m_Tasks.clear();
         for (auto& element : map)
         {
+            bool isModified = element.second->IsModified();
             auto content = element.second->GetContentAndResetModified();
-            if (content.has_value())
+            m_Tasks += content;
+            if (isModified)
             {
-                m_Tasks += content.value();
+                tasks.DecrementModifiedFiles();
             }
-            tasks.DecrementModifiedFiles();
         }
     }
 
     void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks)
     {
-        m_EnvironmentCombined = settings + context + tasks;
         m_Dirty = true;
         m_EnvironmentComplete = false;
 
@@ -265,6 +285,7 @@ namespace AIAssistant
 
         // minimum requirement met:
         // at least one settings, context, tasks found
+        m_EnvironmentCombined = settings + context + tasks;
         m_EnvironmentComplete = true;
     }
 

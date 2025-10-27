@@ -140,7 +140,7 @@ namespace AIAssistant
             return FileCategory::Settings;
         }
 
-        if (filename.starts_with("CNXT"))
+        if (filename.starts_with("CNTX"))
         {
             return FileCategory::Context;
         }

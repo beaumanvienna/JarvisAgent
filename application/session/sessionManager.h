@@ -124,5 +124,6 @@ namespace AIAssistant
         CurlWrapper m_Curl;
         std::string m_Url;
         std::string m_Model;
+        std::mutex m_LogMutex;
     };
 } // namespace AIAssistant

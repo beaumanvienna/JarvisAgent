@@ -36,14 +36,14 @@ namespace AIAssistant
         m_Modified.store(true);
     }
 
-    std::optional<std::string> TrackedFile::GetContentAndResetModified()
+    std::string TrackedFile::GetContentAndResetModified()
     {
         std::lock_guard lock(m_Mutex);
         std::ifstream file(m_Path);
         if (!file.is_open())
         {
             LOG_APP_WARN("Failed to open file for reading: {}", m_Path.string());
-            return std::nullopt;
+            return {};
         }
 
         std::stringstream buffer;
