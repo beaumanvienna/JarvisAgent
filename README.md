@@ -67,18 +67,6 @@ Any detected file modification automatically triggers selective reprocessing:
 
 ---
 
-## How It Works
-
-1. **Startup** — Initializes the core systems and begins watching the configured queue directory.  
-2. **File Monitoring** — The FileWatcher detects file additions, modifications, and deletions in real time.  
-3. **Categorization** — Each file is categorized as STNG, CNTX, TASK, REQ, or Subfolder.  
-4. **Environment Assembly** — STNG, CNTX, and TASK files are merged into a single environment context.  
-5. **Query Dispatch** — Each REQ file is processed by combining it with the current environment and sent asynchronously to the AI backend.  
-6. **Result Storage** — Responses are written to the output directory.  
-7. **Reactivity** — Any file change automatically restarts the relevant part of the pipeline.
-
----
-
 ## Design Highlights
 
 - **Event-driven architecture** — Loosely coupled, non-blocking design.  
