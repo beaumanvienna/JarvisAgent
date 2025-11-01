@@ -36,7 +36,8 @@ project "jarvisAgent"
         "vendor/spdlog/include",
         "vendor/curl/include",
         "vendor/thread-pool/include",
-        "vendor/tracy/include"
+        "vendor/tracy/include",
+        "vendor/openssl/include",
     }
 
     filter "system:linux"
@@ -113,7 +114,11 @@ project "jarvisAgent"
         os.remove("./vendor/Makefile")
         os.rmdir("./vendor/curl/bin")
         os.rmdir("./vendor/curl/bin-int")
+        os.rmdir("./vendor/openssl/bin")
+        os.rmdir("./vendor/openssl/bin-int")
         print("done.")
     end
 
 	include "vendor/curl.lua"
+	include "vendor/openssl/crypto.lua"
+	include "vendor/openssl/ssl.lua"

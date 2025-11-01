@@ -18,7 +18,8 @@ project "curl"
     includedirs
     {
         "curl/include",
-        "curl/lib"
+        "curl/lib",
+        "openssl/include"
     }
     
     defines
