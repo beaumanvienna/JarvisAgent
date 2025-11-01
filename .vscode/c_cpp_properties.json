@@ -11,7 +11,7 @@
                 "vendor/curl/include",
 				"vendor/thread-pool/include",
 				"vendor/tracy/include",
-				"vendor/openssl"
+				"vendor/openssl",
 				"vendor/openssl/include",
 				"vendor/openssl/providers/common/include",
 				"vendor/openssl/providers/implementations/include",
