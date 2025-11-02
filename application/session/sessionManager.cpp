@@ -21,6 +21,7 @@
 
 #include "session/sessionManager.h"
 #include "event/events.h"
+#include "json/jsonHelper.h"
 
 namespace AIAssistant
 {
@@ -121,9 +122,11 @@ namespace AIAssistant
         auto fileContent = requirementFile.GetContentAndResetModified();
         message += fileContent;
 
+        auto sanitizedMessage = JsonHelper().SanitizeForJson(message);
+
         CurlWrapper::QueryData queryData = {
-            .m_Url = m_Url,                             //
-            .m_Data = makeRequestData(m_Model, message) //
+            .m_Url = m_Url,                                      //
+            .m_Data = makeRequestData(m_Model, sanitizedMessage) //
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();

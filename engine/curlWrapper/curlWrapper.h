@@ -59,6 +59,14 @@ namespace AIAssistant
         CurlWrapper();
         ~CurlWrapper();
 
+        // avoid accidental copies (which would double free CURL*)
+        CurlWrapper(CurlWrapper const&) = delete;
+        CurlWrapper& operator=(CurlWrapper const&) = delete;
+
+        // move semantics: default
+        CurlWrapper(CurlWrapper&&) = default;
+        CurlWrapper& operator=(CurlWrapper&&) noexcept = default;
+
         bool IsInitialized() const;
         bool Query(QueryData const& queryData);
         std::string& GetBuffer();
@@ -68,10 +76,12 @@ namespace AIAssistant
         bool IsValidOpenAIKey(std::string const& key);
 
     private:
+        static std::string m_ApiKey;
+
+    private:
         bool m_Initialized{false};
         uint32_t m_QueryCounter{0};
         CURL* m_Curl{nullptr};
-        std::string m_ApiKey;
         std::string m_ReadBuffer;
     };
 } // namespace AIAssistant

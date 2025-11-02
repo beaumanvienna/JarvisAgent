@@ -25,31 +25,69 @@
 #include "core.h"
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/replyParser.h"
 
 namespace AIAssistant
 {
 
+    std::string CurlWrapper::m_ApiKey;
+
     CurlWrapper::CurlWrapper()
     {
-        char* apiKeyEnv = std::getenv("OPENAI_API_KEY");
-        if (apiKeyEnv)
+        // once globally
         {
-            m_ApiKey = std::string(apiKeyEnv);
-        } // if it is null, this will be caught in IsValidOpenAIKey()
+            static bool initialized{false};
+            static std::mutex initMutex;
 
-        if (!IsValidOpenAIKey(m_ApiKey))
-        {
-            LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
-            return;
+            std::lock_guard<std::mutex> lock(initMutex);
+            if (!initialized)
+            {
+                char* apiKeyEnv = std::getenv("OPENAI_API_KEY");
+                if (apiKeyEnv)
+                {
+                    m_ApiKey = std::string(apiKeyEnv);
+                } // if it is null, this will be caught in IsValidOpenAIKey()
+
+                if (!IsValidOpenAIKey(m_ApiKey))
+                {
+                    LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
+                    return;
+                }
+
+                CURLcode res = curl_global_init(CURL_GLOBAL_DEFAULT);
+                if (res != CURLE_OK)
+                {
+                    LOG_CORE_CRITICAL("curl_global_init() failed: {}", curl_easy_strerror(res));
+                    return;
+                }
+                else
+                {
+                    initialized = true;
+
+                    auto exitRoutine = []()
+                    {
+                        curl_global_cleanup();
+                        LOG_CORE_INFO("libcurl globally cleaned up");
+                    };
+                    std::atexit(exitRoutine);
+                    LOG_CORE_INFO("libcurl globally initialized");
+                }
+            }
         }
 
-        curl_global_init(CURL_GLOBAL_DEFAULT);
+        // per instance
         m_Curl = curl_easy_init();
 
         if (!m_Curl)
         {
             LOG_CORE_CRITICAL("curl_easy_init() failed");
             return;
+        }
+        else
+        {
+            std::ostringstream oss;
+            oss << std::this_thread::get_id();
+            LOG_CORE_INFO("thread {} got a good curl", oss.str());
         }
 
         m_Initialized = true;
@@ -61,7 +99,6 @@ namespace AIAssistant
         {
             curl_easy_cleanup(m_Curl);
         }
-        curl_global_cleanup();
     }
 
     CurlWrapper::CurlSlist::~CurlSlist()
@@ -90,7 +127,7 @@ namespace AIAssistant
 
     bool CurlWrapper::IsValidOpenAIKey(std::string const& key)
     {
-        return key.size() >= 40 && key.size() <= 60 && key.rfind("sk-", 0) == 0; // starts with "sk-"
+        return key.size() >= 40 && key.rfind("sk-", 0) == 0; // starts with "sk-"
     }
 
     bool CurlWrapper::QueryData::IsValid() const
@@ -155,6 +192,8 @@ namespace AIAssistant
         if (res == CURLE_OK)
         {
             LOG_CORE_INFO("Response:\n{}", m_ReadBuffer);
+
+            ReplyParser replyParser(m_ReadBuffer);
         }
         else
         {

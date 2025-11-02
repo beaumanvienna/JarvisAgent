@@ -135,6 +135,10 @@ namespace AIAssistant
                 engineConfig.m_Model = model;
                 ++fieldOccurances[ConfigFields::Model];
             }
+            else
+            {
+                LOG_CORE_CRITICAL("uncaught json field in config");
+            }
         }
 
         // declare it ok if queue folder filepath and url were found
