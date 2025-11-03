@@ -58,7 +58,7 @@ namespace AIAssistant
 
         if (error)
         {
-            LOG_CORE_ERROR("An error occurred during parsing: {}", error_message(error));
+            LOG_CORE_ERROR("ReplyParser::Parse: An error occurred during parsing: {}", error_message(error));
             m_State = ReplyParser::State::ParseFailure;
             return;
         }
@@ -114,15 +114,79 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "error")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
-                LOG_CORE_ERROR("error: ");
-                ParseError(jsonObject.value());
-                m_HasError = true;
-                m_State = ReplyParser::State::ReplyError;
+                if (jsonObject.value().type() != ondemand::json_type::null)
+                {
+                    CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
+                    LOG_CORE_ERROR("error: ");
+                    ParseError(jsonObject.value());
+                    m_HasError = true;
+                    m_State = ReplyParser::State::ReplyError;
+                }
+            }
+            else if (jsonObjectKey == "requestId")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "requestID must be string");
+                std::string_view str = jsonObject.value().get_string();
+                LOG_CORE_INFO("Request ID: {}", str);
+            }
+            else if (jsonObjectKey == "statusCode")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "status code must be a number");
+                int64_t num = jsonObject.value().get_int64();
+                LOG_CORE_INFO("Status code: {}", num);
+            }
+            else if (jsonObjectKey == "timestamp")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "timestamp must be string");
+                std::string_view str = jsonObject.value().get_string();
+                LOG_CORE_INFO("TimeStamp: {}", str);
+            }
+            //            else if (jsonObjectKey == "path")
+            //            {
+            //                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "path must be string");
+            //                std::string_view str = jsonObject.value().get_string();
+            //                LOG_CORE_INFO("Path: {}", str);
+            //            }
+            else if (jsonObjectKey == "message")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "message must be a string");
+                std::string_view message = jsonObject.value().get_string();
+                LOG_CORE_INFO("The server says: \"{}\"", message);
             }
             else
             {
-                LOG_CORE_CRITICAL("uncaught json field in main server reply");
+                // Try to get the value as a string for display
+                try
+                {
+                    simdjson::ondemand::value val = jsonObject.value();
+                    std::string valueString;
+
+                    switch (val.type())
+                    {
+                        case simdjson::ondemand::json_type::string:
+                            valueString = std::string(val.get_string().value());
+                            break;
+                        case simdjson::ondemand::json_type::number:
+                            valueString = std::to_string(val.get_double().value());
+                            break;
+                        case simdjson::ondemand::json_type::boolean:
+                            valueString = val.get_bool().value() ? "true" : "false";
+                            break;
+                        case simdjson::ondemand::json_type::null:
+                            valueString = "null";
+                            break;
+                        default:
+                            valueString = "[complex type]";
+                            break;
+                    }
+
+                    LOG_CORE_INFO("{}: {}", jsonObjectKey, valueString);
+                }
+                catch (const simdjson::simdjson_error& e)
+                {
+                    LOG_CORE_WARN("Uncaught JSON field in main reply: \"{}\" (failed to stringify, error: {})",
+                                  jsonObjectKey, e.what());
+                }
             }
         }
 

@@ -46,9 +46,9 @@ namespace AIAssistant
                 if (apiKeyEnv)
                 {
                     m_ApiKey = std::string(apiKeyEnv);
-                } // if it is null, this will be caught in IsValidOpenAIKey()
+                } // if it is null, this will be caught in IsValidKey()
 
-                if (!IsValidOpenAIKey(m_ApiKey))
+                if (!IsValidKey(m_ApiKey))
                 {
                     LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
                     return;
@@ -125,10 +125,7 @@ namespace AIAssistant
 
     void CurlWrapper::Clear() { m_ReadBuffer.clear(); }
 
-    bool CurlWrapper::IsValidOpenAIKey(std::string const& key)
-    {
-        return key.size() >= 40 && key.rfind("sk-", 0) == 0; // starts with "sk-"
-    }
+    bool CurlWrapper::IsValidKey(std::string const& key) { return key.size() >= 8; }
 
     bool CurlWrapper::QueryData::IsValid() const
     {
@@ -178,7 +175,7 @@ namespace AIAssistant
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
-            LOG_CORE_INFO("data: {}", data);
+            LOG_CORE_INFO("url: {}, data: {}", url, data);
         }
 
         LOG_CORE_INFO("sending query {}", ++m_QueryCounter);

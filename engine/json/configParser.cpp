@@ -56,7 +56,7 @@ namespace AIAssistant
 
         if (error)
         {
-            LOG_CORE_ERROR("An error occurred during parsing: {}", error_message(error));
+            LOG_CORE_ERROR("ConfigParser::Parse: An error occurred during parsing: {}", error_message(error));
             m_State = ConfigParser::State::ParseFailure;
             return m_State;
         }
@@ -64,7 +64,7 @@ namespace AIAssistant
         ondemand::document sceneDocument = parser.iterate(json);
         ondemand::object jsonObjects = sceneDocument.get_object();
 
-        std::array<uint32_t, ConfigFields::NumConfigFields> fieldOccurances{};
+        FieldOccurances fieldOccurances{};
         for (auto jsonObject : jsonObjects)
         {
             std::string_view jsonObjectKey = jsonObject.unescaped_key();
@@ -119,25 +119,52 @@ namespace AIAssistant
                 LOG_CORE_INFO("verbose: {}", engineConfig.m_Verbose);
                 ++fieldOccurances[ConfigFields::Verbose];
             }
-            else if (jsonObjectKey == "url")
+            else if (jsonObjectKey == "API interfaces")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view url = jsonObject.value().get_string();
-                LOG_CORE_INFO("url: {}", url);
-                engineConfig.m_Url = url;
-                ++fieldOccurances[ConfigFields::Url];
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::array), "type must be array");
+                ParseInterfaces(jsonObject.value(), engineConfig, fieldOccurances);
             }
-            else if (jsonObjectKey == "model")
+            else if (jsonObjectKey == "API index")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view model = jsonObject.value().get_string();
-                LOG_CORE_INFO("model: {}", model);
-                engineConfig.m_Model = model;
-                ++fieldOccurances[ConfigFields::Model];
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
+                engineConfig.m_ApiIndex = jsonObject.value().get_int64();
+                LOG_CORE_INFO("API index: {}", engineConfig.m_ApiIndex);
+                ++fieldOccurances[ConfigFields::ApiIndex];
             }
             else
             {
-                LOG_CORE_CRITICAL("uncaught json field in config");
+                // Try to get the value as a string for display
+                try
+                {
+                    simdjson::ondemand::value val = jsonObject.value();
+                    std::string valueString;
+
+                    switch (val.type())
+                    {
+                        case simdjson::ondemand::json_type::string:
+                            valueString = std::string(val.get_string().value());
+                            break;
+                        case simdjson::ondemand::json_type::number:
+                            valueString = std::to_string(val.get_double().value());
+                            break;
+                        case simdjson::ondemand::json_type::boolean:
+                            valueString = val.get_bool().value() ? "true" : "false";
+                            break;
+                        case simdjson::ondemand::json_type::null:
+                            valueString = "null";
+                            break;
+                        default:
+                            valueString = "[complex type]";
+                            break;
+                    }
+
+                    LOG_CORE_INFO("{}: {}", jsonObjectKey, valueString);
+                }
+                catch (const simdjson::simdjson_error& e)
+                {
+                    LOG_CORE_WARN("uncaught json field in config: \"{}\" (failed to stringify, error: {})", jsonObjectKey,
+                                  e.what());
+                }
             }
         }
 
@@ -163,4 +190,59 @@ namespace AIAssistant
     }
 
     bool ConfigParser::ConfigParsed() const { return m_State == State::ConfigOk; }
+
+    void ConfigParser::ParseInterfaces(simdjson::ondemand::array jsonArray, EngineConfig& engineConfig,
+                                       FieldOccurances& fieldOccurances)
+    {
+        using namespace simdjson;
+
+        for (auto element : jsonArray)
+        {
+            ondemand::object interface = element.get_object();
+
+            EngineConfig::ApiInterface apiInterface;
+
+            for (auto field : interface)
+            {
+                std::string_view jsonObjectKey = field.unescaped_key();
+
+                if (jsonObjectKey == "url")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view url = field.value().get_string();
+                    LOG_CORE_INFO("url: {}", url);
+                    apiInterface.m_Url = url;
+                    ++fieldOccurances[ConfigFields::Url];
+                }
+                else if (jsonObjectKey == "model")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view model = field.value().get_string();
+                    LOG_CORE_INFO("model: {}", model);
+                    apiInterface.m_Model = model;
+                    ++fieldOccurances[ConfigFields::Model];
+                }
+                else if (jsonObjectKey == "API")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view api = field.value().get_string();
+                    LOG_CORE_INFO("API: {}", api);
+                    if (api == "API1")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API1;
+                    }
+                    else if (api == "API2")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API2;
+                    }
+                    else
+                    {
+                        CORE_HARD_STOP("invalid API in config.json");
+                    }
+                    ++fieldOccurances[ConfigFields::InterfaceType];
+                }
+            }
+            engineConfig.m_ApiInterfaces.push_back(std::move(apiInterface));
+        }
+    }
 } // namespace AIAssistant

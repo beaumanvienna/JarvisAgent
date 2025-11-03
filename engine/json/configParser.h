@@ -20,25 +20,13 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include "simdjson/simdjson.h"
 
 namespace AIAssistant
 {
     class ConfigParser
     {
     public:
-        struct EngineConfig
-        {
-            uint m_MaxThreads{0};
-            std::chrono::milliseconds m_SleepDuration{0};
-            std::string m_QueueFolderFilepath;
-            bool m_Verbose{false};
-            std::string m_Url;
-            std::string m_Model;
-            bool m_ConfigValid{false};
-
-            bool IsValid() const { return m_ConfigValid; }
-        };
-
         enum State
         {
             Undefined = 0,
@@ -46,6 +34,34 @@ namespace AIAssistant
             ParseFailure,
             FileNotFound,
             FileFormatFailure
+        };
+
+        struct EngineConfig
+        {
+            enum InterfaceType
+            {
+                API1 = 0,
+                API2,
+                NumAPIs,
+                InvalidAPI
+            };
+
+            struct ApiInterface
+            {
+                std::string m_Url;
+                std::string m_Model;
+                InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
+            };
+
+            uint m_MaxThreads{0};
+            std::chrono::milliseconds m_SleepDuration{0};
+            std::string m_QueueFolderFilepath;
+            bool m_Verbose{false};
+            size_t m_ApiIndex{0};
+            std::vector<ApiInterface> m_ApiInterfaces;
+            bool m_ConfigValid{false};
+
+            bool IsValid() const { return m_ConfigValid; }
         };
 
     private:
@@ -60,19 +76,27 @@ namespace AIAssistant
             Verbose,
             Url,
             Model,
+            InterfaceType,
+            ApiIndex,
             NumConfigFields
         };
 
+        using FieldOccurances = std::array<uint32_t, ConfigFields::NumConfigFields>;
+
         static constexpr std::array<std::string_view, ConfigFields::NumConfigFields> ConfigFieldNames = //
-            {"Format",                                                                                  //
-             "Description",                                                                             //
-             "Author",                                                                                  //
-             "QueueFolder",                                                                             //
-             "MaxThreads",                                                                              //
-             "SleepTime",                                                                               //
-             "Verbose",                                                                                 //
-             "Url",                                                                                     //
-             "Model"};                                                                                  //
+            {
+                "Format",        //
+                "Description",   //
+                "Author",        //
+                "QueueFolder",   //
+                "MaxThreads",    //
+                "SleepTime",     //
+                "Verbose",       //
+                "Url",           //
+                "Model",         //
+                "InterfaceType", //
+                "IndexAPI"       //
+        };
 
     public:
         ConfigParser(std::string const&);
@@ -81,6 +105,9 @@ namespace AIAssistant
         ConfigParser::State GetState() const;
         ConfigParser::State Parse(EngineConfig&);
         bool ConfigParsed() const;
+
+    private:
+        void ParseInterfaces(simdjson::ondemand::array, EngineConfig&, FieldOccurances&);
 
     private:
         ConfigParser::State m_State;

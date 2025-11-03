@@ -37,31 +37,49 @@ namespace AIAssistant
             return isDir;
         };
 
-        auto checkUrl = [](std::string const& url) -> bool
+        auto checkApiInterface = [](std::vector<ConfigParser::EngineConfig::ApiInterface> const& apiInterfaces,
+                                    size_t apiIndex) -> bool
         {
-            std::string https("https://");
-            bool notEmpty = url.size() > https.size();
-            bool hasHttps = url.find(https) != std::string::npos;
-            CORE_ASSERT(notEmpty && hasHttps, "provided url invalid");
-            return notEmpty && hasHttps;
-        };
+            if (apiInterfaces.empty())
+            {
+                CORE_ASSERT(false, "no APIs provided");
+                return false;
+            }
 
-        auto checkModel = [](std::string const& model) -> bool
-        {
-            bool notEmpty = !model.empty();
-            CORE_ASSERT(notEmpty, "no model provided");
-            return notEmpty;
+            if (apiInterfaces.size() < apiIndex)
+            {
+                CORE_ASSERT(false, "invalid API index");
+                return false;
+            }
+
+            auto checkUrl = [](std::string const& url) -> bool
+            {
+                std::string https("https://");
+                bool notEmpty = url.size() > https.size();
+                bool hasHttps = url.find(https) != std::string::npos;
+                CORE_ASSERT(notEmpty && hasHttps, "provided url invalid");
+                return notEmpty && hasHttps;
+            };
+
+            auto checkModel = [](std::string const& model) -> bool
+            {
+                bool notEmpty = !model.empty();
+                CORE_ASSERT(notEmpty, "no model provided");
+                return notEmpty;
+            };
+
+            bool hasUrl = checkUrl(apiInterfaces[apiIndex].m_Url);
+            bool hasModel = checkModel(apiInterfaces[apiIndex].m_Model);
+            bool hasType = apiInterfaces[apiIndex].m_InterfaceType != ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
+            return hasUrl && hasModel && hasType;
         };
 
         // references for convenience
         auto& queueFolderFilepath = engineConfig.m_QueueFolderFilepath;
-        auto& url = engineConfig.m_Url;
-        auto& model = engineConfig.m_Model;
 
         // conclusion
-        m_ConfigIsOk = checkQueueFolderFilepath(queueFolderFilepath) && //
-                       checkUrl(url) &&                                 //
-                       checkModel(model);
+        m_ConfigIsOk = checkQueueFolderFilepath(queueFolderFilepath) &&                          //
+                       checkApiInterface(engineConfig.m_ApiInterfaces, engineConfig.m_ApiIndex); //
 
         // handling
         if (!m_ConfigIsOk)

@@ -73,7 +73,7 @@ namespace AIAssistant
         void Clear();
 
     private:
-        bool IsValidOpenAIKey(std::string const& key);
+        bool IsValidKey(std::string const& key);
 
     private:
         static std::string m_ApiKey;

@@ -8,3 +8,5 @@ build
 *.d
 *.a
 *.o
+/config.json
+

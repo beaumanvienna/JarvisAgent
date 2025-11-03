@@ -5,7 +5,19 @@
     "queue folder": "../queue",
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
-    "verbose": false,
-    "url": "https://api.openai.com/v1/chat/completions",
-    "model": "gpt-4.1"
+    "verbose": true,
+    "API interfaces":
+    [
+        {
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1"
+        },
+        {
+            "url": "https://api.openai.com/v1/responses",
+            "model": "gpt-5-nano",
+            "API": "API2"
+        }
+    ],
+    "API index": 1
 }

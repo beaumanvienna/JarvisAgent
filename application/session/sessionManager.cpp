@@ -27,8 +27,12 @@ namespace AIAssistant
 {
     SessionManager::SessionManager(std::string const& filePath) : m_Name{filePath}
     {
-        m_Url = Core::g_Core->GetConfig().m_Url;
-        m_Model = Core::g_Core->GetConfig().m_Model;
+
+        auto apiIndex = Core::g_Core->GetConfig().m_ApiIndex;
+        auto& api = Core::g_Core->GetConfig().m_ApiInterfaces[apiIndex];
+
+        m_Url = api.m_Url;
+        m_Model = api.m_Model;
     }
     void SessionManager::OnUpdate()
     {
@@ -113,8 +117,17 @@ namespace AIAssistant
         // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
         // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
         // -----------+++++++--------------------------------------------+++++++++++++++----
-        auto makeRequestData = [](std::string const& model, std::string const& message) -> std::string
+        auto makeRequestDataAPI1 = [](std::string const& model, std::string const& message) -> std::string
         { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
+
+        // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
+        // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
+        // -----------+++++++--------------------------------------------+++++++++++++++----
+        //{"model": "gpt-5-nano", "input": "write a haiku about ai", "store": true}
+        // ----------++++++++++-------------++++++++++++++++++++++------------++++-
+        auto makeRequestDataAPI2 = [](std::string const& model, std::string const& message,
+                                      std::string const& store) -> std::string
+        { return R"({"model": ")" + model + R"(", "input": ")" + message + R"(", "store": )" + store + "}"; };
 
         // retrieve prompt data from queue
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
@@ -124,9 +137,31 @@ namespace AIAssistant
 
         auto sanitizedMessage = JsonHelper().SanitizeForJson(message);
 
+        bool store{false};
+        std::string requestData;
+        {
+            auto apiIndex = Core::g_Core->GetConfig().m_ApiIndex;
+            auto& api = Core::g_Core->GetConfig().m_ApiInterfaces[apiIndex];
+            switch (api.m_InterfaceType)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API1:
+                {
+                    requestData = makeRequestDataAPI1(m_Model, sanitizedMessage);
+                    break;
+                }
+                case ConfigParser::EngineConfig::InterfaceType::API2:
+                {
+                    requestData = makeRequestDataAPI2(m_Model, sanitizedMessage, store ? "true" : "false");
+                    break;
+                }
+                default:
+                    break; // no more checking here in the run loop
+            };
+        }
+
         CurlWrapper::QueryData queryData = {
-            .m_Url = m_Url,                                      //
-            .m_Data = makeRequestData(m_Model, sanitizedMessage) //
+            .m_Url = m_Url,       //
+            .m_Data = requestData //
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();
