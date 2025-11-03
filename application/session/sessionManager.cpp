@@ -120,9 +120,7 @@ namespace AIAssistant
         auto makeRequestDataAPI1 = [](std::string const& model, std::string const& message) -> std::string
         { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
 
-        // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
-        // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
-        // -----------+++++++--------------------------------------------+++++++++++++++----
+        // example request data (model: gpt-5-nano, content: write a haiku about ai), all quotes are part of json format:
         //{"model": "gpt-5-nano", "input": "write a haiku about ai", "store": true}
         // ----------++++++++++-------------++++++++++++++++++++++------------++++-
         auto makeRequestDataAPI2 = [](std::string const& model, std::string const& message,
