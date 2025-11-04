@@ -44,6 +44,10 @@ namespace AIAssistant
         void Shutdown();
         bool Verbose() const { return m_EngineConfig.m_Verbose; }
         ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
+        ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const
+        {
+            return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
+        }
         ThreadPool& GetThreadPool() { return m_ThreadPool; }
 
         // event API

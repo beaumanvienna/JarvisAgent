@@ -27,6 +27,7 @@
 #include "curlWrapper/curlManager.h"
 #include "file/trackedFile.h"
 #include "file/fileCategorizer.h"
+#include "json/replyParser.h"
 
 namespace AIAssistant
 {
@@ -122,5 +123,7 @@ namespace AIAssistant
 
         std::string m_Url;
         std::string m_Model;
+
+        std::unique_ptr<ReplyParser> m_ReplyParser;
     };
 } // namespace AIAssistant

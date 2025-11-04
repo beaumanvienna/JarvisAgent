@@ -189,8 +189,6 @@ namespace AIAssistant
         if (res == CURLE_OK)
         {
             LOG_CORE_INFO("Response:\n{}", m_ReadBuffer);
-
-            ReplyParser replyParser(m_ReadBuffer);
         }
         else
         {

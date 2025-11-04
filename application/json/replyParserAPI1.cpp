@@ -19,34 +19,30 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "json/replyParser.h"
+#include "json/replyParserAPI1.h"
 #include "core.h"
 
 namespace AIAssistant
 {
-    ReplyParser::ReplyParser(std::string const& jsonString) : m_JsonString(jsonString) { Parse(); }
+    ReplyParserAPI1::ReplyParserAPI1(std::string const& jsonString) : ReplyParser(jsonString) { Parse(); }
 
-    ReplyParser::~ReplyParser() {}
+    ReplyParserAPI1::ErrorInfo const& ReplyParserAPI1::GetErrorInfo() const { return m_ErrorInfo; }
 
-    bool ReplyParser::HasError() const { return m_HasError; }
+    ReplyParserAPI1::ErrorType ReplyParserAPI1::GetErrorType() const { return m_ErrorType; }
 
-    ReplyParser::ErrorInfo const& ReplyParser::GetErrorInfo() const { return m_ErrorInfo; }
+    size_t ReplyParserAPI1::HasContent() const { return m_Reply.m_Choices.size(); }
 
-    ReplyParser::ErrorType ReplyParser::GetErrorType() const { return m_ErrorType; }
-
-    size_t ReplyParser::HasContent() const { return m_Reply.m_Choices.size(); }
-
-    std::string ReplyParser::GetContent(size_t index) const
+    std::string ReplyParserAPI1::GetContent(size_t index) const
     {
         if (index < m_Reply.m_Choices.size())
         {
             return m_Reply.m_Choices[index].m_Message.m_Content;
         }
-        LOG_CORE_ERROR("ReplyParser::GetContent: index out of range, index: {}", index);
+        LOG_APP_ERROR("ReplyParserAPI1::GetContent: index out of range, index: {}", index);
         return {};
     }
 
-    void ReplyParser::Parse()
+    void ReplyParserAPI1::Parse()
     {
         using namespace simdjson;
         ondemand::parser parser;
@@ -58,7 +54,7 @@ namespace AIAssistant
 
         if (error)
         {
-            LOG_CORE_ERROR("ReplyParser::Parse: An error occurred during parsing: {}", error_message(error));
+            LOG_APP_ERROR("ReplyParserAPI1::Parse: An error occurred during parsing: {}", error_message(error));
             m_State = ReplyParser::State::ParseFailure;
             return;
         }
@@ -76,35 +72,35 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "id must be string");
                 std::string_view id = jsonObject.value().get_string();
-                LOG_CORE_INFO("id: {}", id);
+                LOG_APP_INFO("id: {}", id);
                 m_Reply.m_Id = id;
             }
             else if (jsonObjectKey == "object")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "object must be string");
                 std::string_view object = jsonObject.value().get_string();
-                LOG_CORE_INFO("object: {}", object);
+                LOG_APP_INFO("object: {}", object);
                 m_Reply.m_Object = object;
             }
             else if (jsonObjectKey == "created")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "created must be integer");
                 uint64_t created = jsonObject.value().get_uint64();
-                LOG_CORE_INFO("created: {}", created);
+                LOG_APP_INFO("created: {}", created);
                 m_Reply.m_Created = created;
             }
             else if (jsonObjectKey == "model")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "model must be string");
                 std::string_view model = jsonObject.value().get_string();
-                LOG_CORE_INFO("model: {}", model);
+                LOG_APP_INFO("model: {}", model);
                 m_Reply.m_Model = model;
             }
             else if (jsonObjectKey == "choices")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::array), "type must be array");
-                LOG_CORE_INFO("parsing content: ");
-                ParseContent(jsonObject.value());
+                LOG_APP_INFO("parsing content: ");
+                ParseContent(jsonObject.value(), reply);
                 m_State = ReplyParser::State::ReplyOk;
             }
             else if (jsonObjectKey == "usage")
@@ -117,7 +113,7 @@ namespace AIAssistant
                 if (jsonObject.value().type() != ondemand::json_type::null)
                 {
                     CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
-                    LOG_CORE_ERROR("error: ");
+                    LOG_APP_ERROR("error: ");
                     ParseError(jsonObject.value());
                     m_HasError = true;
                     m_State = ReplyParser::State::ReplyError;
@@ -127,31 +123,31 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "requestID must be string");
                 std::string_view str = jsonObject.value().get_string();
-                LOG_CORE_INFO("Request ID: {}", str);
+                LOG_APP_INFO("Request ID: {}", str);
             }
             else if (jsonObjectKey == "statusCode")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "status code must be a number");
                 int64_t num = jsonObject.value().get_int64();
-                LOG_CORE_INFO("Status code: {}", num);
+                LOG_APP_INFO("Status code: {}", num);
             }
             else if (jsonObjectKey == "timestamp")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "timestamp must be string");
                 std::string_view str = jsonObject.value().get_string();
-                LOG_CORE_INFO("TimeStamp: {}", str);
+                LOG_APP_INFO("TimeStamp: {}", str);
             }
             //            else if (jsonObjectKey == "path")
             //            {
             //                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "path must be string");
             //                std::string_view str = jsonObject.value().get_string();
-            //                LOG_CORE_INFO("Path: {}", str);
+            //                LOG_APP_INFO("Path: {}", str);
             //            }
             else if (jsonObjectKey == "message")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "message must be a string");
                 std::string_view message = jsonObject.value().get_string();
-                LOG_CORE_INFO("The server says: \"{}\"", message);
+                LOG_APP_INFO("The server says: \"{}\"", message);
             }
             else
             {
@@ -180,23 +176,27 @@ namespace AIAssistant
                             break;
                     }
 
-                    LOG_CORE_INFO("{}: {}", jsonObjectKey, valueString);
+                    LOG_APP_INFO("{}: {}", jsonObjectKey, valueString);
                 }
                 catch (const simdjson::simdjson_error& e)
                 {
-                    LOG_CORE_WARN("Uncaught JSON field in main reply: \"{}\" (failed to stringify, error: {})",
-                                  jsonObjectKey, e.what());
+                    LOG_APP_WARN("Uncaught JSON field in main reply: \"{}\" (failed to stringify, error: {})", jsonObjectKey,
+                                 e.what());
                 }
             }
         }
 
         if (!m_HasError)
         {
-            m_Reply = reply;
+            m_Reply = std::move(reply);
+        }
+        else
+        {
+            LOG_APP_CRITICAL("void ReplyParserAPI1::Parse(): reply discarded");
         }
     }
 
-    void ReplyParser::ParseContent(simdjson::ondemand::array jsonArray)
+    void ReplyParserAPI1::ParseContent(simdjson::ondemand::array jsonArray, Reply& reply)
     {
         using namespace simdjson;
 
@@ -213,7 +213,7 @@ namespace AIAssistant
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::number), "index must be integer");
                     uint64_t index = field.value().get_uint64();
-                    LOG_CORE_INFO("index: {}", index);
+                    LOG_APP_INFO("index: {}", index);
                     choice.m_Index = index;
                 }
                 else if (key == "message")
@@ -229,7 +229,7 @@ namespace AIAssistant
                         {
                             CORE_ASSERT((messageField.value().type() == ondemand::json_type::string), "role must be string");
                             std::string_view role = messageField.value().get_string();
-                            LOG_CORE_INFO("role: {}", role);
+                            LOG_APP_INFO("role: {}", role);
                             choice.m_Message.m_Role = role;
                         }
                         else if (msgKey == "content")
@@ -237,12 +237,12 @@ namespace AIAssistant
                             CORE_ASSERT((messageField.value().type() == ondemand::json_type::string),
                                         "content must be string");
                             std::string_view content = messageField.value().get_string();
-                            LOG_CORE_INFO("content: {}", content);
+                            LOG_APP_INFO("content: {}", content);
                             choice.m_Message.m_Content = content;
                         }
                         else
                         {
-                            LOG_CORE_CRITICAL("uncaught json field in message object: {}", msgKey);
+                            LOG_APP_CRITICAL("uncaught json field in message object: {}", msgKey);
                         }
                     }
                 }
@@ -250,20 +250,20 @@ namespace AIAssistant
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::string), "finish_reason must be string");
                     std::string_view reason = field.value().get_string();
-                    LOG_CORE_INFO("finish_reason: {}", reason);
+                    LOG_APP_INFO("finish_reason: {}", reason);
                     choice.m_FinishReason = reason;
                 }
                 else
                 {
-                    LOG_CORE_CRITICAL("uncaught json field in choice object: {}", key);
+                    LOG_APP_CRITICAL("uncaught json field in choice object: {}", key);
                 }
             }
 
-            m_Reply.m_Choices.push_back(std::move(choice));
+            reply.m_Choices.push_back(std::move(choice));
         }
     }
 
-    void ReplyParser::ParseUsage(simdjson::ondemand::object jsonObjects)
+    void ReplyParserAPI1::ParseUsage(simdjson::ondemand::object jsonObjects)
     {
         using namespace simdjson;
 
@@ -274,34 +274,34 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_CORE_INFO("prompt_tokens: {}", tokens);
+                LOG_APP_INFO("prompt_tokens: {}", tokens);
                 m_Reply.m_Usage.m_PromptTokens = tokens;
             }
             else if (jsonObjectKey == "completion_tokens")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_CORE_INFO("completion_tokens: {}", tokens);
+                LOG_APP_INFO("completion_tokens: {}", tokens);
                 m_Reply.m_Usage.m_CompletionTokens = tokens;
             }
             else if (jsonObjectKey == "total_tokens")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_CORE_INFO("total_tokens: {}", tokens);
+                LOG_APP_INFO("total_tokens: {}", tokens);
                 m_Reply.m_Usage.m_TotalTokens = tokens;
             }
             else
             {
-                LOG_CORE_CRITICAL("uncaught json field in server error reply (usage field)");
+                LOG_APP_CRITICAL("uncaught json field in server error reply (usage field)");
             }
         }
     }
 
-    void ReplyParser::ParseError(simdjson::ondemand::object jsonObjects)
+    void ReplyParserAPI1::ParseError(simdjson::ondemand::object jsonObjects)
     {
         using namespace simdjson;
-        ReplyParser::ErrorInfo errorInfo;
+        ReplyParserAPI1::ErrorInfo errorInfo;
 
         for (auto jsonObject : jsonObjects)
         {
@@ -310,21 +310,21 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view message = jsonObject.value().get_string();
-                LOG_CORE_INFO("message: {}", message);
+                LOG_APP_INFO("message: {}", message);
                 errorInfo.m_Message = message;
             }
             else if (jsonObjectKey == "type")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view type = jsonObject.value().get_string();
-                LOG_CORE_INFO("type: {}", type);
+                LOG_APP_INFO("type: {}", type);
                 errorInfo.m_Type = type;
             }
             else if (jsonObjectKey == "code")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view code = jsonObject.value().get_string();
-                LOG_CORE_INFO("code: {}", code);
+                LOG_APP_INFO("code: {}", code);
                 errorInfo.m_Code = code;
             }
             else if (jsonObjectKey == "param")
@@ -333,49 +333,49 @@ namespace AIAssistant
                 {
                     CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                     std::string_view param = jsonObject.value().get_string();
-                    LOG_CORE_INFO("parameter: {}", param);
+                    LOG_APP_INFO("parameter: {}", param);
                     errorInfo.m_Param = param;
                 }
             }
             else
             {
-                LOG_CORE_CRITICAL("uncaught json field in server error reply");
+                LOG_APP_CRITICAL("uncaught json field in server error reply");
             }
         }
         m_ErrorInfo = errorInfo;
         m_ErrorType = ParseErrorType(m_ErrorInfo.m_Type);
     }
 
-    ReplyParser::ErrorType ReplyParser::ParseErrorType(std::string_view type)
+    ReplyParserAPI1::ErrorType ReplyParserAPI1::ParseErrorType(std::string_view type)
     {
         if (type == "invalid_request_error")
         {
-            LOG_CORE_CRITICAL("There was a invalid request error.");
+            LOG_APP_CRITICAL("There was a invalid request error.");
             return ErrorType::InvalidRequestError;
         }
         if (type == "authentication_error")
         {
-            LOG_CORE_CRITICAL("There was an authentication error.");
+            LOG_APP_CRITICAL("There was an authentication error.");
             return ErrorType::AuthenticationError;
         }
         if (type == "permission_error")
         {
-            LOG_CORE_CRITICAL("There was a permission error.");
+            LOG_APP_CRITICAL("There was a permission error.");
             return ErrorType::PermissionError;
         }
         if (type == "rate_limit_error")
         {
-            LOG_CORE_CRITICAL("There was a rate limit error");
+            LOG_APP_CRITICAL("There was a rate limit error");
             return ErrorType::RateLimitError;
         }
         if (type == "server_error")
         {
-            LOG_CORE_CRITICAL("There was a server error");
+            LOG_APP_CRITICAL("There was a server error");
             return ErrorType::ServerError;
         }
         if (type == "insufficient_quota")
         {
-            LOG_CORE_CRITICAL("You have insufficient quota. Try again later.");
+            LOG_APP_CRITICAL("You have insufficient quota. Try again later.");
             return ErrorType::InsufficientQuota;
         }
         return ErrorType::Unknown;

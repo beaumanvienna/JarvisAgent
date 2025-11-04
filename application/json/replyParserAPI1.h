@@ -20,25 +20,38 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <string>
+#include "json/replyParser.h"
 #include "simdjson/simdjson.h"
 
 namespace AIAssistant
 {
-    class ReplyParser
+    class ReplyParserAPI1 : public ReplyParser
     {
     public:
-        // parser state
-        enum class State
-        {
-            Undefined = 0,
-            ParseOk,
-            ParseFailure,
-            ReplyOk,
-            ReplyError
-        };
-
         // reply handling
+        // ------------------------------------------------------------------
+        // Example response (GPT-4 format):
+        //
+        // {
+        //  "id": "chatcmpl-abc123",
+        //  "object": "chat.completion",
+        //  "created": 1677858242,
+        //  "model": "gpt-4.1",
+        //  "choices": [
+        //    {
+        //      "index": 0,
+        //      "message": {
+        //        "role": "assistant",
+        //        "content": "The engine meets the specified power output requirements."
+        //      },
+        //      "finish_reason": "stop"
+        //    }
+        //  ],
+        //  "usage": {
+        //    "prompt_tokens": 55,
+        //    "completion_tokens": 17,
+        //    "total_tokens": 72
+        //  }
         struct Reply
         {
             struct Choice
@@ -66,26 +79,6 @@ namespace AIAssistant
             Usage m_Usage;
         };
 
-        //  "id": "chatcmpl-abc123",
-        //  "object": "chat.completion",
-        //  "created": 1677858242,
-        //  "model": "gpt-4.1",
-        //  "choices": [
-        //    {
-        //      "index": 0,
-        //      "message": {
-        //        "role": "assistant",
-        //        "content": "The engine meets the specified power output requirements."
-        //      },
-        //      "finish_reason": "stop"
-        //    }
-        //  ],
-        //  "usage": {
-        //    "prompt_tokens": 55,
-        //    "completion_tokens": 17,
-        //    "total_tokens": 72
-        //  }
-
         // error handling
         struct ErrorInfo
         {
@@ -107,32 +100,27 @@ namespace AIAssistant
         };
 
     public:
-        ReplyParser(std::string const& jsonString);
-        ~ReplyParser();
+        ReplyParserAPI1(std::string const& jsonString);
+        virtual ~ReplyParserAPI1() = default;
 
-        bool HasError() const;
         ErrorInfo const& GetErrorInfo() const;
         ErrorType GetErrorType() const;
 
-        size_t HasContent() const;
-        std::string GetContent(size_t index = 0) const;
+        virtual size_t HasContent() const override;
+        virtual std::string GetContent(size_t index = 0) const override;
 
     private:
         void Parse();
-        void ParseContent(simdjson::ondemand::array);
+        void ParseContent(simdjson::ondemand::array, Reply&);
         void ParseUsage(simdjson::ondemand::object);
         void ParseError(simdjson::ondemand::object);
-        ReplyParser::ErrorType ParseErrorType(std::string_view type);
+        ReplyParserAPI1::ErrorType ParseErrorType(std::string_view type);
 
     private:
-        ReplyParser::State m_State;
-        std::string m_JsonString;
-
         // good reply
         Reply m_Reply;
 
         // bad reply
-        bool m_HasError{false};
         ErrorInfo m_ErrorInfo;
         ErrorType m_ErrorType{ErrorType::Unknown};
     };

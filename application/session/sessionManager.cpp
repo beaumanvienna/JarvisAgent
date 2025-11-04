@@ -34,6 +34,7 @@ namespace AIAssistant
         m_Url = api.m_Url;
         m_Model = api.m_Model;
     }
+
     void SessionManager::OnUpdate()
     {
         CheckForUpdates();
@@ -167,7 +168,24 @@ namespace AIAssistant
         {
             auto& curl = CurlManager::GetThreadCurl();
             curl.Clear();
-            return curl.Query(queryData);
+            bool ok = curl.Query(queryData);
+            if (ok)
+            {
+                auto interfaceType = Core::g_Core->GetInterfaceType();
+                m_ReplyParser = ReplyParser::Create(interfaceType, curl.GetBuffer());
+            }
+            bool curleOk = !m_ReplyParser->HasError();
+            size_t hasContent = m_ReplyParser->HasContent();
+            if (curleOk && (hasContent > 0))
+            {
+                for (size_t index{0}; index < hasContent; ++index)
+                {
+                    std::string contentText = m_ReplyParser->GetContent(index);
+                    LOG_APP_INFO("message:");
+                    std::cout << contentText << "\n";
+                }
+            }
+            return curleOk;
         };
         m_QueryFutures.push_back(threadpool.SubmitTask(query));
     }
@@ -202,6 +220,7 @@ namespace AIAssistant
             m_Environment.Assemble(m_Settings, m_Context, m_Tasks);
         }
     }
+
     void SessionManager::TrackInFlightQueries()
     {
         // --- clean up futures and report result ---
