@@ -19,8 +19,9 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "json/replyParserAPI1.h"
 #include "core.h"
+#include "json/replyParserAPI1.h"
+#include "json/jsonObjectParser.h"
 
 namespace AIAssistant
 {
@@ -66,49 +67,49 @@ namespace AIAssistant
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view jsonObjectKey = jsonObject.unescaped_key();
+            std::string_view key = jsonObject.unescaped_key();
 
-            if (jsonObjectKey == "id")
+            if (key == "id")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "id must be string");
                 std::string_view id = jsonObject.value().get_string();
                 LOG_APP_INFO("id: {}", id);
                 m_Reply.m_Id = id;
             }
-            else if (jsonObjectKey == "object")
+            else if (key == "object")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "object must be string");
                 std::string_view object = jsonObject.value().get_string();
                 LOG_APP_INFO("object: {}", object);
                 m_Reply.m_Object = object;
             }
-            else if (jsonObjectKey == "created")
+            else if (key == "created")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "created must be integer");
                 uint64_t created = jsonObject.value().get_uint64();
                 LOG_APP_INFO("created: {}", created);
                 m_Reply.m_Created = created;
             }
-            else if (jsonObjectKey == "model")
+            else if (key == "model")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "model must be string");
                 std::string_view model = jsonObject.value().get_string();
                 LOG_APP_INFO("model: {}", model);
                 m_Reply.m_Model = model;
             }
-            else if (jsonObjectKey == "choices")
+            else if (key == "choices")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::array), "type must be array");
                 LOG_APP_INFO("parsing content: ");
                 ParseContent(jsonObject.value(), reply);
                 m_State = ReplyParser::State::ReplyOk;
             }
-            else if (jsonObjectKey == "usage")
+            else if (key == "usage")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
                 ParseUsage(jsonObject.value());
             }
-            else if (jsonObjectKey == "error")
+            else if (key == "error")
             {
                 if (jsonObject.value().type() != ondemand::json_type::null)
                 {
@@ -119,31 +120,25 @@ namespace AIAssistant
                     m_State = ReplyParser::State::ReplyError;
                 }
             }
-            else if (jsonObjectKey == "requestId")
+            else if (key == "requestId")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "requestID must be string");
                 std::string_view str = jsonObject.value().get_string();
                 LOG_APP_INFO("Request ID: {}", str);
             }
-            else if (jsonObjectKey == "statusCode")
+            else if (key == "statusCode")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "status code must be a number");
                 int64_t num = jsonObject.value().get_int64();
                 LOG_APP_INFO("Status code: {}", num);
             }
-            else if (jsonObjectKey == "timestamp")
+            else if (key == "timestamp")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "timestamp must be string");
                 std::string_view str = jsonObject.value().get_string();
                 LOG_APP_INFO("TimeStamp: {}", str);
             }
-            //            else if (jsonObjectKey == "path")
-            //            {
-            //                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "path must be string");
-            //                std::string_view str = jsonObject.value().get_string();
-            //                LOG_APP_INFO("Path: {}", str);
-            //            }
-            else if (jsonObjectKey == "message")
+            else if (key == "message")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "message must be a string");
                 std::string_view message = jsonObject.value().get_string();
@@ -151,38 +146,8 @@ namespace AIAssistant
             }
             else
             {
-                // Try to get the value as a string for display
-                try
-                {
-                    simdjson::ondemand::value val = jsonObject.value();
-                    std::string valueString;
-
-                    switch (val.type())
-                    {
-                        case simdjson::ondemand::json_type::string:
-                            valueString = std::string(val.get_string().value());
-                            break;
-                        case simdjson::ondemand::json_type::number:
-                            valueString = std::to_string(val.get_double().value());
-                            break;
-                        case simdjson::ondemand::json_type::boolean:
-                            valueString = val.get_bool().value() ? "true" : "false";
-                            break;
-                        case simdjson::ondemand::json_type::null:
-                            valueString = "null";
-                            break;
-                        default:
-                            valueString = "[complex type]";
-                            break;
-                    }
-
-                    LOG_APP_INFO("{}: {}", jsonObjectKey, valueString);
-                }
-                catch (const simdjson::simdjson_error& e)
-                {
-                    LOG_APP_WARN("Uncaught JSON field in main reply: \"{}\" (failed to stringify, error: {})", jsonObjectKey,
-                                 e.what());
-                }
+                simdjson::ondemand::value val = jsonObject.value();
+                JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in main reply");
             }
         }
 
@@ -237,12 +202,14 @@ namespace AIAssistant
                             CORE_ASSERT((messageField.value().type() == ondemand::json_type::string),
                                         "content must be string");
                             std::string_view content = messageField.value().get_string();
-                            LOG_APP_INFO("content: {}", content);
+                            LOG_APP_INFO("content:");
+                            std::cout << content << "\n";
                             choice.m_Message.m_Content = content;
                         }
                         else
                         {
-                            LOG_APP_CRITICAL("uncaught json field in message object: {}", msgKey);
+                            simdjson::ondemand::value val = messageField.value();
+                            JsonObjectParser jsonObjectParser(msgKey, val, "Uncaught json field in message object");
                         }
                     }
                 }
@@ -255,7 +222,8 @@ namespace AIAssistant
                 }
                 else
                 {
-                    LOG_APP_CRITICAL("uncaught json field in choice object: {}", key);
+                    simdjson::ondemand::value val = field.value();
+                    JsonObjectParser jsonObjectParser(key, val, "uncaught json field in choice object");
                 }
             }
 
@@ -269,22 +237,22 @@ namespace AIAssistant
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view jsonObjectKey = jsonObject.unescaped_key();
-            if (jsonObjectKey == "prompt_tokens")
+            std::string_view key = jsonObject.unescaped_key();
+            if (key == "prompt_tokens")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
                 LOG_APP_INFO("prompt_tokens: {}", tokens);
                 m_Reply.m_Usage.m_PromptTokens = tokens;
             }
-            else if (jsonObjectKey == "completion_tokens")
+            else if (key == "completion_tokens")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
                 LOG_APP_INFO("completion_tokens: {}", tokens);
                 m_Reply.m_Usage.m_CompletionTokens = tokens;
             }
-            else if (jsonObjectKey == "total_tokens")
+            else if (key == "total_tokens")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
                 uint64_t tokens = jsonObject.value().get_uint64();
@@ -293,7 +261,8 @@ namespace AIAssistant
             }
             else
             {
-                LOG_APP_CRITICAL("uncaught json field in server error reply (usage field)");
+                simdjson::ondemand::value val = jsonObject.value();
+                JsonObjectParser jsonObjectParser(key, val, "uncaught json field in server error reply (usage field)");
             }
         }
     }
@@ -305,29 +274,30 @@ namespace AIAssistant
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view jsonObjectKey = jsonObject.unescaped_key();
-            if (jsonObjectKey == "message")
+            std::string_view key = jsonObject.unescaped_key();
+            if (key == "message")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view message = jsonObject.value().get_string();
-                LOG_APP_INFO("message: {}", message);
+                LOG_APP_INFO("message:");
+                std::cout << message << "\n";
                 errorInfo.m_Message = message;
             }
-            else if (jsonObjectKey == "type")
+            else if (key == "type")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view type = jsonObject.value().get_string();
                 LOG_APP_INFO("type: {}", type);
                 errorInfo.m_Type = type;
             }
-            else if (jsonObjectKey == "code")
+            else if (key == "code")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view code = jsonObject.value().get_string();
                 LOG_APP_INFO("code: {}", code);
                 errorInfo.m_Code = code;
             }
-            else if (jsonObjectKey == "param")
+            else if (key == "param")
             {
                 if (!jsonObject.value().is_null())
                 {
@@ -339,7 +309,8 @@ namespace AIAssistant
             }
             else
             {
-                LOG_APP_CRITICAL("uncaught json field in server error reply");
+                simdjson::ondemand::value val = jsonObject.value();
+                JsonObjectParser jsonObjectParser(key, val, "uncaught json field in server error reply");
             }
         }
         m_ErrorInfo = errorInfo;

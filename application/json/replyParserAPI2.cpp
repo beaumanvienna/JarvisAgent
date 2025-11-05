@@ -19,8 +19,9 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "json/replyParserAPI2.h"
 #include "core.h"
+#include "json/replyParserAPI2.h"
+#include "json/jsonObjectParser.h"
 
 namespace AIAssistant
 {
@@ -129,37 +130,8 @@ namespace AIAssistant
             }
             else
             {
-                // catch-all logging for unknown keys
-                try
-                {
-                    simdjson::ondemand::value value = jsonObject.value();
-                    std::string valueString;
-
-                    switch (value.type())
-                    {
-                        case simdjson::ondemand::json_type::string:
-                            valueString = std::string(value.get_string().value());
-                            break;
-                        case simdjson::ondemand::json_type::number:
-                            valueString = std::to_string(value.get_double().value());
-                            break;
-                        case simdjson::ondemand::json_type::boolean:
-                            valueString = value.get_bool().value() ? "true" : "false";
-                            break;
-                        case simdjson::ondemand::json_type::null:
-                            valueString = "null";
-                            break;
-                        default:
-                            valueString = "[complex type]";
-                            break;
-                    }
-
-                    LOG_APP_INFO("{}: {}", key, valueString);
-                }
-                catch (const simdjson::simdjson_error& e)
-                {
-                    LOG_APP_WARN("Uncaught JSON field \"{}\" (failed to stringify, error: {})", key, e.what());
-                }
+                simdjson::ondemand::value val = jsonObject.value();
+                JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in main reply");
             }
         }
 
@@ -238,6 +210,11 @@ namespace AIAssistant
                         }
                     }
                 }
+                else
+                {
+                    simdjson::ondemand::value val = field.value();
+                    JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in main reply");
+                }
             }
 
             if (output.m_Content.size())
@@ -273,6 +250,11 @@ namespace AIAssistant
                 m_Reply.m_Usage.m_TotalTokens = field.value().get_uint64();
                 LOG_APP_INFO("total_tokens: {}", m_Reply.m_Usage.m_TotalTokens);
             }
+            else
+            {
+                simdjson::ondemand::value val = field.value();
+                JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in usage parser");
+            }
         }
     }
 
@@ -307,6 +289,11 @@ namespace AIAssistant
                     std::string_view param = field.value().get_string();
                     errorInfo.m_Param = std::string(param);
                 }
+            }
+            else
+            {
+                simdjson::ondemand::value val = field.value();
+                JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in error parser");
             }
         }
 
