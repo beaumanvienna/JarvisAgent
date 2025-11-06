@@ -20,6 +20,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "session/sessionManager.h"
+#include "session/fileWriter.h"
+
 #include "event/events.h"
 #include "json/jsonHelper.h"
 
@@ -27,7 +29,6 @@ namespace AIAssistant
 {
     SessionManager::SessionManager(std::string const& filePath) : m_Name{filePath}
     {
-
         auto apiIndex = Core::g_Core->GetConfig().m_ApiIndex;
         auto& api = Core::g_Core->GetConfig().m_ApiInterfaces[apiIndex];
 
@@ -164,7 +165,8 @@ namespace AIAssistant
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();
-        auto query = [this, queryData]()
+        std::string inputFilename = requirementFile.GetPath().string();
+        auto query = [this, queryData, inputFilename]()
         {
             auto& curl = CurlManager::GetThreadCurl();
             curl.Clear();
@@ -178,11 +180,16 @@ namespace AIAssistant
             size_t hasContent = m_ReplyParser->HasContent();
             if (curleOk && (hasContent > 0))
             {
-                for (size_t index{0}; index < hasContent; ++index)
+                for (size_t index = 0; index < hasContent; ++index)
                 {
                     std::string contentText = m_ReplyParser->GetContent(index);
                     LOG_APP_INFO("message:");
                     std::cout << contentText << "\n";
+
+                    fs::path outputPath(inputFilename);
+                    outputPath.replace_filename(outputPath.stem().string() + ".output" + outputPath.extension().string());
+
+                    FileWriter::Get().WriteWithHeader(outputPath, contentText, m_Model);
                 }
             }
             return curleOk;

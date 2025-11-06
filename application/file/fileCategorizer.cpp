@@ -45,6 +45,8 @@ namespace AIAssistant
                     return m_CategorizedFiles.m_Requirements;
                 case FileCategory::SubFolder:
                     return m_CategorizedFiles.m_Subfolders;
+                case FileCategory::Ignored:
+                    return m_CategorizedFiles.m_Ignored;
                 default:
                     return m_CategorizedFiles.m_Requirements; // fallback
             }
@@ -63,12 +65,17 @@ namespace AIAssistant
         RemoveFromFiles(m_CategorizedFiles.m_Tasks, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Requirements, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Subfolders, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Ignored, filePath);
         return filePath;
     }
 
     fs::path const FileCategorizer::ModifyFile(fs::path const& filePath)
     {
         FileCategory category = Categorize(filePath);
+        if (category == FileCategory::Ignored)
+        {
+            return {};
+        }
         auto& categoryMap = [&]() -> TrackedFiles&
         {
             switch (category)
@@ -83,6 +90,8 @@ namespace AIAssistant
                     return m_CategorizedFiles.m_Requirements;
                 case FileCategory::SubFolder:
                     return m_CategorizedFiles.m_Subfolders;
+                case FileCategory::Ignored:
+                    return m_CategorizedFiles.m_Ignored;
                 default:
                     return m_CategorizedFiles.m_Context; // fallback
             }
@@ -150,6 +159,85 @@ namespace AIAssistant
             return FileCategory::Task;
         }
 
+        if (filePath.stem().string().ends_with(".output"))
+        {
+            LOG_APP_INFO("Ignoring output file: {}", filePath.string());
+            return FileCategory::Ignored;
+        }
+
+        // --- Quick magic-number check for common binary formats ---
+        {
+            std::ifstream f(filePath, std::ios::binary);
+            if (!f)
+            {
+                LOG_APP_WARN("Could not open file for content check: {}", filePath.string());
+                return FileCategory::Ignored;
+            }
+
+            std::array<unsigned char, 8> header{};
+            f.read(reinterpret_cast<char*>(header.data()), header.size());
+            size_t n = static_cast<size_t>(f.gcount());
+
+            // Define a small lambda for header comparison
+            auto match = [&](std::initializer_list<unsigned char> sig)
+            { return n >= sig.size() && std::equal(sig.begin(), sig.end(), header.begin()); };
+
+            if (match({0x50, 0x4B, 0x03, 0x04}) || // ZIP / DOCX / XLSX / ODT
+                match({0x89, 0x50, 0x4E, 0x47}) || // PNG
+                match({0x25, 0x50, 0x44, 0x46}) || // PDF
+                match({0xFF, 0xD8, 0xFF}) ||       // JPEG
+                match({0x47, 0x49, 0x46, 0x38}) || // GIF
+                match({0x42, 0x4D}) ||             // BMP
+                match({0x7F, 0x45, 0x4C, 0x46}) || // ELF binary
+                match({0x4D, 0x5A})                // Windows PE (EXE/DLL)
+            )
+            {
+                LOG_APP_INFO("Ignoring known binary type (magic number match): {}", filePath.string());
+                return FileCategory::Ignored;
+            }
+        }
+
+        // --- Check file readability (is it likely text?) ---
+        {
+            std::ifstream file(filePath, std::ios::binary);
+            if (!file)
+            {
+                LOG_APP_WARN("Could not open file for content check: {}", filePath.string());
+                return FileCategory::Ignored;
+            }
+
+            constexpr size_t kSampleSize = 256;
+            char buffer[kSampleSize]{};
+            file.read(buffer, kSampleSize);
+            std::streamsize bytesRead = file.gcount();
+
+            // If the file is empty, ignore it
+            if (bytesRead == 0)
+            {
+                LOG_APP_INFO("Ignoring empty file: {}", filePath.string());
+                return FileCategory::Ignored;
+            }
+
+            size_t nonTextCount = 0;
+            for (std::streamsize i = 0; i < bytesRead; ++i)
+            {
+                unsigned char c = static_cast<unsigned char>(buffer[i]);
+                // Allow printable ASCII + common whitespace (tab/newline/carriage return)
+                if ((c < 0x09) || (c > 0x0D && c < 0x20) || // other control chars
+                    (c == 0x7F))
+                {
+                    ++nonTextCount;
+                }
+            }
+
+            double nonTextRatio = static_cast<double>(nonTextCount) / static_cast<double>(bytesRead);
+            if (nonTextRatio > 0.1) // >10% non-printable = treat as binary
+            {
+                LOG_APP_INFO("Ignoring binary file (non-text ratio {:.1f}%): {}", nonTextRatio * 100.0, filePath.string());
+                return FileCategory::Ignored;
+            }
+        }
+
         // anything else is considered a requirement
         return FileCategory::Requirement;
     }
@@ -175,6 +263,7 @@ namespace AIAssistant
         printCategory("Tasks", m_CategorizedFiles.m_Tasks);
         printCategory("Requirements", m_CategorizedFiles.m_Requirements);
         printCategory("Subfolders", m_CategorizedFiles.m_Subfolders);
+        printCategory("Ignored", m_CategorizedFiles.m_Ignored);
         std::cout << "=== End of Tracked Files ===\n";
     }
 

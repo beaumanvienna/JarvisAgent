@@ -80,7 +80,7 @@ namespace AIAssistant
 
     private:
         bool m_Initialized{false};
-        uint32_t m_QueryCounter{0};
+        static std::atomic<uint32_t> m_QueryCounter;
         CURL* m_Curl{nullptr};
         std::string m_ReadBuffer;
     };

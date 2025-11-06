@@ -60,6 +60,7 @@ namespace AIAssistant
         TrackedFiles m_Tasks;
         TrackedFiles m_Requirements;
         TrackedFiles m_Subfolders;
+        TrackedFiles m_Ignored;
     };
 
     class FileCategorizer

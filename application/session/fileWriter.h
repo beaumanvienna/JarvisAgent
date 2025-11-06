@@ -20,17 +20,29 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <string>
+#include <mutex>
+#include <filesystem>
 
 namespace AIAssistant
 {
-    enum class FileCategory
+    class FileWriter
     {
-        Settings,
-        Context,
-        Task,
-        Requirement,
-        SubFolder,
-        Ignored,
-        Unknown
+    public:
+        static FileWriter& Get();
+
+        void Write(const std::filesystem::path& filePath, const std::string& content);
+        void WriteWithHeader(std::filesystem::path const& filePath, std::string const& content, std::string const& model,
+                             bool appendTimestamp = true);
+
+    private:
+        FileWriter() = default;
+        ~FileWriter() = default;
+
+        FileWriter(const FileWriter&) = delete;
+        FileWriter& operator=(const FileWriter&) = delete;
+
+    private:
+        std::mutex m_Mutex;
     };
 } // namespace AIAssistant

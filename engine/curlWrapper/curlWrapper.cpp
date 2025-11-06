@@ -31,6 +31,7 @@ namespace AIAssistant
 {
 
     std::string CurlWrapper::m_ApiKey;
+    std::atomic<uint32_t> CurlWrapper::m_QueryCounter{0};
 
     CurlWrapper::CurlWrapper()
     {
