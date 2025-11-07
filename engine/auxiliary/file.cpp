@@ -168,5 +168,29 @@ namespace AIAssistant
 
             return filename;
         }
+
+        fs::file_time_type GetNewestTimestamp(std::vector<fs::path> const& files)
+        {
+            fs::file_time_type newest{};
+            for (auto const& p : files)
+            {
+                try
+                {
+                    if (fs::exists(p))
+                    {
+                        auto t = fs::last_write_time(p);
+                        if (t > newest)
+                        {
+                            newest = t;
+                        }
+                    }
+                }
+                catch (...)
+                { /* ignore inaccessible paths */
+                }
+            }
+            return newest;
+        }
+
     } // namespace EngineCore
 } // namespace AIAssistant

@@ -24,6 +24,9 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <vector>
+
+namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
@@ -48,5 +51,6 @@ namespace AIAssistant
         bool CopyFile(const std::string& src, const std::string& dest);
         std::ifstream::pos_type FileSize(const std::string& filename);
         std::string& AddSlash(std::string& filename);
+        fs::file_time_type GetNewestTimestamp(std::vector<fs::path> const& files);
     } // namespace EngineCore
 } // namespace AIAssistant

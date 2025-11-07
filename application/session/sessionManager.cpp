@@ -67,12 +67,63 @@ namespace AIAssistant
                 auto& trackedFile = *element.second;
                 if (trackedFile.IsModified())
                 {
-                    DispatchQuery(trackedFile);
+                    if (IsQueryRequired(trackedFile))
+                    {
+                        DispatchQuery(trackedFile);
+                    }
                     trackedFile.MarkModified(false);
                     auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
                     requirements.DecrementModifiedFiles();
                 }
             }
+        }
+    }
+
+    bool SessionManager::IsQueryRequired(TrackedFile& requirementFile) const
+    {
+
+        fs::path requirementPath = requirementFile.GetPath();
+        fs::path outputPath = requirementPath;
+        outputPath.replace_filename(requirementPath.stem().string() + ".output" + requirementPath.extension().string());
+
+        try
+        {
+            // Requirement timestamp
+            if (!fs::exists(requirementPath))
+            {
+                LOG_APP_WARN("Requirement file missing: {}", requirementPath.string());
+                return false;
+            }
+
+            // If no output yet, definitely re-send
+            if (!fs::exists(outputPath))
+            {
+                LOG_APP_INFO("No output found for '{}', scheduling query", requirementPath.string());
+                return true;
+            }
+
+            auto requirementTime = fs::last_write_time(requirementPath);
+            auto environmentTime = m_Environment.GetTimestamp();
+
+            // Determine the newest relevant input time
+            auto newestInputTime = (requirementTime > environmentTime) ? requirementTime : environmentTime;
+            auto outputTime = fs::last_write_time(outputPath);
+
+            // Re-send if input newer than output
+            if (newestInputTime > outputTime)
+            {
+                LOG_APP_INFO("Re-scheduling '{}': input/environment newer than output", requirementPath.string());
+                return true;
+            }
+
+            // Otherwise, up to date
+            LOG_APP_INFO("Skipping '{}': output is up-to-date", requirementPath.string());
+            return false;
+        }
+        catch (const std::exception& e)
+        {
+            LOG_APP_WARN("Failed to check timestamps for '{}': {}", requirementPath.string(), e.what());
+            return false; // file not sendable
         }
     }
 
@@ -201,21 +252,23 @@ namespace AIAssistant
     {
         bool environmentUpdate{false};
 
-        if (m_FileCategorizer.GetCategorizedFiles().m_Settings.GetDirty())
+        auto& categorized = m_FileCategorizer.GetCategorizedFiles();
+
+        if (categorized.m_Settings.GetDirty())
         {
             AssembleSettings();
             m_FileCategorizer.GetCategorizedFiles().m_Settings.SetDirty(false);
             environmentUpdate = true;
         }
 
-        if (m_FileCategorizer.GetCategorizedFiles().m_Context.GetDirty())
+        if (categorized.m_Context.GetDirty())
         {
             AssembleContext();
             m_FileCategorizer.GetCategorizedFiles().m_Context.SetDirty(false);
             environmentUpdate = true;
         }
 
-        if (m_FileCategorizer.GetCategorizedFiles().m_Tasks.GetDirty())
+        if (categorized.m_Tasks.GetDirty())
         {
             AssembleTask();
             m_FileCategorizer.GetCategorizedFiles().m_Tasks.SetDirty(false);
@@ -224,7 +277,16 @@ namespace AIAssistant
 
         if (environmentUpdate)
         {
-            m_Environment.Assemble(m_Settings, m_Context, m_Tasks);
+            m_Environment.Assemble(m_Settings, m_Context, m_Tasks, categorized);
+
+            // Mark all requirements as modified since their environment changed
+            auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
+            for (auto& element : requirements.m_Map)
+            {
+                element.second->MarkModified();
+            }
+
+            LOG_APP_INFO("Environment updated → all requirements marked for dependency recheck");
         }
     }
 
@@ -319,30 +381,48 @@ namespace AIAssistant
         }
     }
 
-    void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks)
+    void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks,
+                                               CategorizedFiles& categorized)
     {
         m_Dirty = true;
         m_EnvironmentComplete = false;
 
-        if (settings.empty())
+        if (settings.empty() || context.empty() || tasks.empty())
         {
-            return;
-        }
-
-        if (context.empty())
-        {
-            return;
-        }
-
-        if (tasks.empty())
-        {
+            m_Timestamp = {};
             return;
         }
 
         // minimum requirement met:
         // at least one settings, context, tasks found
         m_EnvironmentCombined = settings + context + tasks;
+        m_Timestamp = ComputeTimestamp(categorized);
         m_EnvironmentComplete = true;
+    }
+
+    fs::file_time_type SessionManager::Environment::ComputeTimestamp(CategorizedFiles& categorized) const
+    {
+        std::vector<fs::path> envFiles;
+
+        envFiles.reserve(categorized.m_Settings.m_Map.size() + categorized.m_Context.m_Map.size() +
+                         categorized.m_Tasks.m_Map.size());
+
+        for (auto const& kv : categorized.m_Settings.m_Map)
+        {
+            envFiles.push_back(kv.second->GetPath());
+        }
+
+        for (auto const& kv : categorized.m_Context.m_Map)
+        {
+            envFiles.push_back(kv.second->GetPath());
+        }
+
+        for (auto const& kv : categorized.m_Tasks.m_Map)
+        {
+            envFiles.push_back(kv.second->GetPath());
+        }
+
+        return EngineCore::GetNewestTimestamp(envFiles);
     }
 
     std::string& SessionManager::Environment::GetEnvironmentAndResetDirtyFlag()

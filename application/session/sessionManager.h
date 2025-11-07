@@ -89,6 +89,7 @@ namespace AIAssistant
         void AssembleSettings();
         void AssembleContext();
         void AssembleTask();
+        bool IsQueryRequired(TrackedFile& requirementFile) const;
 
     private:
         class Environment
@@ -96,9 +97,16 @@ namespace AIAssistant
         public:
             bool GetDirty() const { return m_Dirty; };
             bool GetEnvironmentComplete() const { return m_EnvironmentComplete; };
-            void Assemble(std::string& settings, std::string& context, std::string& tasks);
+            void Assemble(std::string& settings, std::string& context, std::string& tasks, CategorizedFiles&);
             std::string& GetEnvironmentAndResetDirtyFlag();
             void Reset();
+
+        public:
+            fs::file_time_type GetTimestamp() const { return m_Timestamp; }
+
+        private:
+            fs::file_time_type ComputeTimestamp(CategorizedFiles& categorized) const;
+            fs::file_time_type m_Timestamp{};
 
         private:
             std::string m_EnvironmentCombined;
