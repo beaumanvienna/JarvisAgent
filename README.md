@@ -45,7 +45,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **Query Files (Requirement Files)** — Each represents a smaller task or requirement that is processed using the shared environment.  
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
 - **File Categorizer & Tracker** — Tracks which files belong to which category, monitors modification status, and provides content retrieval.  
-- **CurlWrapper / REST Interface** — Handles communication with the AI provider’s API (e.g., GPT-4/5) via HTTP.  
+- **CurlWrapper / REST Interface** — Handles communication with the AI provider’s API (e.g., GPT-4 and GPT-5 models) via HTTP.  
 - **Thread Pool / Parallel Processing** — Configured by `maxThreads` in `config.json`; handles multiple query tasks in parallel.  
 - **JarvisAgent Application** — Orchestrates startup, event handling, file watching, categorization, and query dispatching.  
 - **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).
@@ -63,17 +63,20 @@ JarvisAgent operates as a **reactive state machine** that responds to file chang
 
 Any detected file modification automatically triggers selective reprocessing:
 - Environment changes ⇒ full environment rebuild.  
-- Requirement changes ⇒ re-query for that specific file only.
+- Requirement changes ⇒ re-query for that specific file only.  
+- Outputs are **regenerated only when inputs or the environment have changed**, preventing unnecessary re-queries.
 
 ---
 
 ## Design Highlights
 
+- **Multi-model support** — Compatible with **GPT-4** and **GPT-5** through configurable API endpoints.  
+- **Output file I/O** — Responses are written to `.output.txt` files and reused when up to date.  
+- **Smart dependency tracking** — Automatically re-evaluates files only when their inputs or environment are newer than the output.  
+- **Binary-safe file handling** — Automatically skips known binary formats (ZIP, PDF, PNG, etc.) to avoid invalid input.  
 - **Event-driven architecture** — Loosely coupled, non-blocking design.  
 - **Atomic dirty tracking** — Modified files are tracked precisely without redundant work.  
 - **Parallel querying** — Uses thread pool for concurrent AI requests.  
-- **Automatic dependency tracking** — Rebuilds only what changed.  
-- **Hot reload** — Any file change triggers instant reprocessing.  
 - **Cross-platform** — Works on Linux, macOS, and Windows.
 
 ---
