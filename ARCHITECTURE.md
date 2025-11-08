@@ -56,13 +56,13 @@ def OnEvent(event):
     if event.type == "FileAdded" and event.path.endswith(".pdf"):
         # Convert the PDF into Markdown using MarkItDown
         os.system(f"markitdown \"{event.path}\" --output \"{event.path}.md\"")
+```
 
-
-# ARCHITECTURE_DETAILS
+# ARCHITECTURE DETAILS
 
 <br>
 
-This document expands the operational details for JarvisAgent’s web interface and runtime communication.
+This section expands on the operational details for JarvisAgent’s web interface and runtime communication.
 
 ---
 
@@ -121,6 +121,8 @@ Queues a user message for a **specific subsystem** by creating a file in the `qu
   "message": "Engine knocks at idle after warmup; MIL is off."
 }
 
+```
+
 **Behavior**
 - Ensures `queue/<subsystem>/` exists.
 - Writes a problem report file:  
@@ -133,9 +135,7 @@ Queues a user message for a **specific subsystem** by creating a file in the `qu
   "status": "queued",
   "file": "engine/PROB_20251107_193045.txt"
 }
-
-
-# ARCHITECTURE_DETAILS
+```
 
 ## GET /api/status
 **Description**  
