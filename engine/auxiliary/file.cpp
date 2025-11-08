@@ -171,7 +171,7 @@ namespace AIAssistant
 
         fs::file_time_type GetNewestTimestamp(std::vector<fs::path> const& files)
         {
-            fs::file_time_type newest{};
+            fs::file_time_type newest = fs::file_time_type::min();
             for (auto const& p : files)
             {
                 try

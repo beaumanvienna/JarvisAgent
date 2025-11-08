@@ -61,6 +61,7 @@ namespace AIAssistant
         if ((m_QueryFutures.size() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f) &&
             m_Environment.GetEnvironmentComplete())
         {
+            bool anyQueryDispatched = false;
             auto& map = m_FileCategorizer.GetCategorizedFiles().m_Requirements.Get();
             for (auto& element : map)
             {
@@ -70,11 +71,19 @@ namespace AIAssistant
                     if (IsQueryRequired(trackedFile))
                     {
                         DispatchQuery(trackedFile);
+                        anyQueryDispatched = true;
                     }
                     trackedFile.MarkModified(false);
                     auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
                     requirements.DecrementModifiedFiles();
                 }
+            }
+
+            // If environment was dirty but no queries needed to run, reset it
+            if (!anyQueryDispatched && m_Environment.GetDirty())
+            {
+                LOG_APP_INFO("All outputs up-to-date → resetting environment dirty flag");
+                m_Environment.Reset();
             }
         }
     }
@@ -183,7 +192,7 @@ namespace AIAssistant
         // retrieve prompt data from queue
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
 
-        auto fileContent = requirementFile.GetContentAndResetModified();
+        auto fileContent = requirementFile.GetContent();
         message += fileContent;
 
         auto sanitizedMessage = JsonHelper().SanitizeForJson(message);
@@ -283,7 +292,11 @@ namespace AIAssistant
             auto& requirements = m_FileCategorizer.GetCategorizedFiles().m_Requirements;
             for (auto& element : requirements.m_Map)
             {
-                element.second->MarkModified();
+                if (!element.second->IsModified())
+                {
+                    element.second->MarkModified();
+                    requirements.IncrementModifiedFiles();
+                }
             }
 
             LOG_APP_INFO("Environment updated → all requirements marked for dependency recheck");
@@ -328,7 +341,8 @@ namespace AIAssistant
         for (auto& element : map)
         {
             bool isModified = element.second->IsModified();
-            auto content = element.second->GetContentAndResetModified();
+            element.second->MarkModified(false);
+            auto content = element.second->GetContent();
             m_Settings += content;
             if (isModified)
             {
@@ -350,7 +364,8 @@ namespace AIAssistant
         for (auto& element : map)
         {
             bool isModified = element.second->IsModified();
-            auto content = element.second->GetContentAndResetModified();
+            element.second->MarkModified(false);
+            auto content = element.second->GetContent();
             m_Context += content;
             if (isModified)
             {
@@ -372,7 +387,8 @@ namespace AIAssistant
         for (auto& element : map)
         {
             bool isModified = element.second->IsModified();
-            auto content = element.second->GetContentAndResetModified();
+            element.second->MarkModified(false);
+            auto content = element.second->GetContent();
             m_Tasks += content;
             if (isModified)
             {
@@ -384,19 +400,30 @@ namespace AIAssistant
     void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks,
                                                CategorizedFiles& categorized)
     {
-        m_Dirty = true;
         m_EnvironmentComplete = false;
 
         if (settings.empty() || context.empty() || tasks.empty())
         {
-            m_Timestamp = {};
+            m_Timestamp = fs::file_time_type::min();
+            m_Dirty = false;
             return;
         }
 
-        // minimum requirement met:
-        // at least one settings, context, tasks found
-        m_EnvironmentCombined = settings + context + tasks;
-        m_Timestamp = ComputeTimestamp(categorized);
+        // Combine environment parts
+        std::string environmentCombined = settings + context + tasks;
+
+        // Compare with previous
+        if (environmentCombined != m_EnvironmentCombined)
+        {
+            m_EnvironmentCombined = std::move(environmentCombined);
+            m_Timestamp = ComputeTimestamp(categorized);
+            m_Dirty = true;
+        }
+        else
+        {
+            m_Dirty = false;
+        }
+
         m_EnvironmentComplete = true;
     }
 
@@ -407,19 +434,19 @@ namespace AIAssistant
         envFiles.reserve(categorized.m_Settings.m_Map.size() + categorized.m_Context.m_Map.size() +
                          categorized.m_Tasks.m_Map.size());
 
-        for (auto const& kv : categorized.m_Settings.m_Map)
+        for (auto const& keyValue : categorized.m_Settings.m_Map)
         {
-            envFiles.push_back(kv.second->GetPath());
+            envFiles.push_back(keyValue.second->GetPath());
         }
 
-        for (auto const& kv : categorized.m_Context.m_Map)
+        for (auto const& keyValue : categorized.m_Context.m_Map)
         {
-            envFiles.push_back(kv.second->GetPath());
+            envFiles.push_back(keyValue.second->GetPath());
         }
 
-        for (auto const& kv : categorized.m_Tasks.m_Map)
+        for (auto const& keyValue : categorized.m_Tasks.m_Map)
         {
-            envFiles.push_back(kv.second->GetPath());
+            envFiles.push_back(keyValue.second->GetPath());
         }
 
         return EngineCore::GetNewestTimestamp(envFiles);

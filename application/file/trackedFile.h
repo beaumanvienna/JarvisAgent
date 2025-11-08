@@ -44,10 +44,10 @@ namespace AIAssistant
         fs::path const& GetPath() const { return m_Path; }
 
         // marks it as modified
-        void MarkModified(bool modified = true) { m_Modified.store(modified); }
+        void MarkModified(bool modified = true);
 
         // retrieves content (and resets modified flag)
-        std::string GetContentAndResetModified();
+        std::string GetContent();
         FileCategory GetCategory() const;
 
         // called when file changes on disk

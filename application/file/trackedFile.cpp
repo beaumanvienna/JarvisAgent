@@ -33,10 +33,12 @@ namespace AIAssistant
     TrackedFile::TrackedFile(fs::path const& path, FileCategory fileCategory) : m_Path(path), m_FileCategory{fileCategory}
     {
         m_LastHash = ComputeFileHash();
-        m_Modified.store(true);
+        MarkModified(true);
     }
 
-    std::string TrackedFile::GetContentAndResetModified()
+    void TrackedFile::MarkModified(bool modified) { m_Modified.store(modified); }
+
+    std::string TrackedFile::GetContent()
     {
         std::lock_guard lock(m_Mutex);
         std::ifstream file(m_Path);
@@ -48,7 +50,6 @@ namespace AIAssistant
 
         std::stringstream buffer;
         buffer << file.rdbuf();
-        m_Modified.store(false);
         return buffer.str();
     }
 
@@ -60,7 +61,6 @@ namespace AIAssistant
         if (newHash != m_LastHash)
         {
             m_LastHash = newHash;
-            m_Modified.store(true);
             return true;
         }
         return false;

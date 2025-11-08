@@ -107,8 +107,8 @@ namespace AIAssistant
                 {
                     it->second->MarkModified();
                     categoryMap.IncrementModifiedFiles();
-                    categoryMap.SetDirty();
                 }
+                categoryMap.SetDirty();
                 LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
             }
         }
