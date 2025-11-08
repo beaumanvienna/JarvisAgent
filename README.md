@@ -14,7 +14,7 @@ It can perform AI-driven tasks and serve as a component for workflow automation.
 
 | Layer | Responsibility | Status |
 |-------|----------------|--------|
-| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
+| **Engine** | Networking (`libcurl` and `openssl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
 | **Event System** | Thread-safe atomic event queue and dispatcher for cross-thread communication | ✅ |
 | **Application** | Orchestrates queue handling, event dispatching, file tracking, and AI query flow | ✅ |
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
