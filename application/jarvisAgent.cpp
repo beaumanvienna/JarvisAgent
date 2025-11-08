@@ -35,6 +35,9 @@ namespace AIAssistant
 
         m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
         m_FileWatcher->Start();
+
+        m_WebServer = std::make_unique<WebServer>();
+        m_WebServer->Start();
     }
 
     void JarvisAgent::OnUpdate()
@@ -106,10 +109,17 @@ namespace AIAssistant
     void JarvisAgent::OnShutdown()
     {
         LOG_APP_INFO("leaving JarvisAgent");
+
         if (m_FileWatcher)
         {
             m_FileWatcher->Stop();
         }
+
+        if (m_WebServer)
+        {
+            m_WebServer->Stop();
+        }
+
         Core::g_Core->GetThreadPool().Wait();
     }
 

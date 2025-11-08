@@ -20,40 +20,32 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
-#include <unordered_map>
-
-#include "application.h"
-#include "file/fileWatcher.h"
-#include "file/fileCategory.h"
-#include "session/sessionManager.h"
-#include "web/webServer.h"
+#include "cpp-httplib/httplib.h"
+#include "auxiliary/threadPool.h"
+#include <atomic>
+#include <string>
+#include <mutex>
 
 namespace AIAssistant
 {
-    class JarvisAgent : public Application
+    class WebServer
     {
     public:
-        JarvisAgent() = default;
-        virtual ~JarvisAgent() = default;
+        WebServer();
+        ~WebServer();
 
-        virtual void OnStart() override;
-        virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
-        virtual void OnShutdown() override;
-
-        virtual bool IsFinished() const override;
-        static std::unique_ptr<Application> Create();
+        void Start();
+        void Stop();
 
     private:
-        void CheckIfFinished();
+        void RegisterRoutes();
+        void HandleChatPost(httplib::Request const& req, httplib::Response& res);
+        void HandleStatusGet(httplib::Request const& req, httplib::Response& res);
 
     private:
-        bool m_IsFinished{false};
-
-    private:
-        std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
-        std::unique_ptr<FileWatcher> m_FileWatcher;
-        std::unique_ptr<WebServer> m_WebServer;
+        httplib::Server m_Server;
+        std::atomic<bool> m_Running{false};
+        std::mutex m_Mutex;
+        std::future<void> m_ServerTask;
     };
 } // namespace AIAssistant
