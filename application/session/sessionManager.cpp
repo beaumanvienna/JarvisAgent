@@ -86,6 +86,10 @@ namespace AIAssistant
                 m_Environment.Reset();
             }
         }
+
+        m_StatusLineRenderer.Update(SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
+                                    m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
+                                    m_QueryFutures.size(), m_CompletedQueriesThisRun);
     }
 
     bool SessionManager::IsQueryRequired(TrackedFile& requirementFile) const
@@ -315,6 +319,7 @@ namespace AIAssistant
                     if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
                     {
                         bool curleOk = future.get();
+                        ++m_CompletedQueriesThisRun;
                         // report bad curl to engine
                         if (!curleOk)
                         {
