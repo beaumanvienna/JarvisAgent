@@ -105,10 +105,8 @@ queue/
 ## Planned Features
 
 - [ ] Enable HTTP/2 for improved network performance  
-- [ ] Add streaming response handling  
 - [ ] Support for multiple AI backends (OpenAI, Anthropic, Local LLM)  
 - [ ] Interactive CLI for monitoring active queries  
-- [ ] Persistent cache for previously processed requirement files  
 
 ---
 
