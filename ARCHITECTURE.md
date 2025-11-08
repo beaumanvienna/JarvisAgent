@@ -139,7 +139,7 @@ Queues a user message for a **specific subsystem** by creating a file in the `qu
 
 ## GET /api/status
 **Description**  
-Provides a **snapshot** of Jarvis runtime state for dashboards or health checks.
+Provides a **snapshot** of JarvisAgent runtime state for dashboards or health checks.
 
 **Behavior**
 - Reads counters and state from in-process metrics (state machine, futures, counters).
@@ -242,14 +242,14 @@ Browser (Bot UI)
 Web Server (cpp-httplib)
    │   write queue/<subsystem>/PROB_*.txt
    ▼
-Jarvis Core (Watcher + Dispatcher)
+JarvisAgent Core (Watcher + Dispatcher)
    │   build prompt (STNG+CNTX+TASK + PROB)
    │   async HTTP → GPT-4/5
    ▼
 AI Backend
    │   JSON reply
    ▼
-Jarvis Core
+JarvisAgent Core
    │   write *.output.txt
    ▼
 Web Server
