@@ -2,10 +2,11 @@
 
 <br>
 
-JarvisAgent is a **C++ console application** that operates as a background service (“agent”) for automated AI-assisted file processing.  
-It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory.
-
-It can perform AI-driven tasks and serve as a component for workflow automation.
+JarvisAgent is a **C++ console application** that operates as a background service (“agent”) for automated AI-assisted file processing.  <br>
+<br>
+It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory.<br>
+<br>
+It can perform AI-driven tasks and serve as a component for workflow automation.<br>
 
 ---
 
@@ -13,7 +14,7 @@ It can perform AI-driven tasks and serve as a component for workflow automation.
 
 | Layer | Responsibility | Status |
 |-------|----------------|--------|
-| **Engine** | Networking (`libcurl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
+| **Engine** | Networking (`libcurl` and `openssl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
 | **Event System** | Thread-safe atomic event queue and dispatcher for cross-thread communication | ✅ |
 | **Application** | Orchestrates queue handling, event dispatching, file tracking, and AI query flow | ✅ |
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
@@ -105,10 +106,8 @@ queue/
 ## Planned Features
 
 - [ ] Enable HTTP/2 for improved network performance  
-- [ ] Add streaming response handling  
 - [ ] Support for multiple AI backends (OpenAI, Anthropic, Local LLM)  
 - [ ] Interactive CLI for monitoring active queries  
-- [ ] Persistent cache for previously processed requirement files  
 
 ---
 
