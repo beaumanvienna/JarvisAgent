@@ -20,29 +20,24 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <iostream>
-#include <mutex>
-#include <string>
-#include <string_view>
 #include <atomic>
 #include <future>
-#include <chrono>
+#include "event/keyboardEvent.h"
 
 namespace AIAssistant
 {
-    class StatusLineRenderer
+    class KeyboardInput
     {
     public:
-        StatusLineRenderer() { Start(); };
-        void Update(std::string_view state, size_t outputs, size_t inflight, size_t completed);
+        KeyboardInput() = default;
+        ~KeyboardInput() = default;
 
         void Start();
         void Stop();
 
     private:
-        std::mutex m_Mutex;
-        size_t m_SpinnerIndex{0};
-        std::chrono::steady_clock::time_point m_LastSpinnerUpdate{std::chrono::steady_clock::now()};
+        void Listen();
         std::atomic<bool> m_Running{false};
+        std::future<void> m_ListenerTask;
     };
 } // namespace AIAssistant

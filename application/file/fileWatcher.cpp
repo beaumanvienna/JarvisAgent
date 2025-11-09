@@ -60,10 +60,16 @@ namespace AIAssistant
 
     void FileWatcher::Stop()
     {
+        if (!m_Running)
+        {
+            return;
+        }
+
         m_Running = false;
         if (m_WatchTask.valid())
         {
             m_WatchTask.wait(); // wait for graceful exit
+            LOG_APP_INFO("File watcher stopped");
         }
     }
 

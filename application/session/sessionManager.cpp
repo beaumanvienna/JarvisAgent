@@ -170,7 +170,11 @@ namespace AIAssistant
             });
     }
 
-    void SessionManager::OnShutdown() { m_FileCategorizer.PrintCategorizedFiles(); }
+    void SessionManager::OnShutdown()
+    {
+        // stop the status line renderer
+        m_StatusLineRenderer.Stop();
+    }
 
     bool SessionManager::IsIdle() const { return m_StateMachine.GetState() == StateMachine::State::AllResponsesReceived; }
 

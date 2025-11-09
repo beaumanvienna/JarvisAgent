@@ -110,6 +110,11 @@ namespace AIAssistant
     {
         LOG_APP_INFO("leaving JarvisAgent");
 
+        for (auto& sessionManager : m_SessionManagers)
+        {
+            sessionManager.second->OnShutdown();
+        }
+
         if (m_FileWatcher)
         {
             m_FileWatcher->Stop();
@@ -119,8 +124,6 @@ namespace AIAssistant
         {
             m_WebServer->Stop();
         }
-
-        Core::g_Core->GetThreadPool().Wait();
     }
 
     bool JarvisAgent::IsFinished() const { return m_IsFinished; }
@@ -130,5 +133,6 @@ namespace AIAssistant
         // not used
         // m_IsFinished = false;
         // Ctrl+C is caught by the engine and breaks the run loop
+        // Also, `q` can be used to quit
     }
 } // namespace AIAssistant

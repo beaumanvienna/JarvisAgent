@@ -29,6 +29,7 @@
 #include "json/configParser.h"
 #include "auxiliary/threadPool.h"
 #include "auxiliary/file.h"
+#include "input/keyboardInput.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -62,10 +63,16 @@ namespace AIAssistant
         void DisableCtrlCOutput();
 
     private:
+        // THREADS_REQUIRED_BY_APP:
+        // file watcher, keyboard input, and web server need threads
+        static constexpr uint THREADS_REQUIRED_BY_APP = 3;
         ThreadPool m_ThreadPool;
         EventQueue m_EventQueue;
 
         // core config
         ConfigParser::EngineConfig m_EngineConfig;
+
+        // input
+        std::unique_ptr<KeyboardInput> m_KeyboardInput;
     };
 } // namespace AIAssistant

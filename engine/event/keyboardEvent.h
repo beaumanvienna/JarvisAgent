@@ -20,29 +20,28 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <iostream>
-#include <mutex>
-#include <string>
-#include <string_view>
-#include <atomic>
-#include <future>
-#include <chrono>
+#include "event/event.h"
 
 namespace AIAssistant
 {
-    class StatusLineRenderer
+    class KeyPressedEvent : public Event
     {
     public:
-        StatusLineRenderer() { Start(); };
-        void Update(std::string_view state, size_t outputs, size_t inflight, size_t completed);
+        explicit KeyPressedEvent(char key) : m_Key(key) {}
 
-        void Start();
-        void Stop();
+        EVENT_CLASS_TYPE(KeyPressed)
+        EVENT_CLASS_CATEGORY(EventCategoryKeyboard)
+
+        char GetKey() const { return m_Key; }
+
+        std::string ToString() const override
+        {
+            std::stringstream ss;
+            ss << "KeyPressedEvent: " << m_Key;
+            return ss.str();
+        }
 
     private:
-        std::mutex m_Mutex;
-        size_t m_SpinnerIndex{0};
-        std::chrono::steady_clock::time_point m_LastSpinnerUpdate{std::chrono::steady_clock::now()};
-        std::atomic<bool> m_Running{false};
+        char m_Key;
     };
-} // namespace AIAssistant
+}

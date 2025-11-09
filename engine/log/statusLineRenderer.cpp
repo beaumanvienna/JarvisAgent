@@ -19,13 +19,37 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <unistd.h> // for isatty(STDOUT_FILENO)
+
+#include "engine.h"
 #include "log/statusLineRenderer.h"
 
 namespace AIAssistant
 {
+
+    void StatusLineRenderer::Start()
+    {
+        if (m_Running)
+        {
+            return;
+        }
+
+        m_Running = true;
+    }
+
+    void StatusLineRenderer::Stop()
+    {
+        if (!m_Running)
+        {
+            return;
+        }
+
+        m_Running = false;
+    }
+
     void StatusLineRenderer::Update(std::string_view state, size_t outputs, size_t inflight, size_t completed)
     {
-        if (!isatty(STDOUT_FILENO))
+        if (!isatty(STDOUT_FILENO) || !m_Running)
         {
             return; // disable dynamic terminal rendering when output is redirected
         }

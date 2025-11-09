@@ -91,8 +91,11 @@ namespace AIAssistant
     {
         m_EngineConfig = engineConfig;
 
-        m_ThreadPool.Reset(m_EngineConfig.m_MaxThreads);
+        m_ThreadPool.Reset(m_EngineConfig.m_MaxThreads + THREADS_REQUIRED_BY_APP);
         LOG_CORE_INFO("thread count: {}", m_ThreadPool.Size());
+
+        m_KeyboardInput = std::make_unique<KeyboardInput>();
+        m_KeyboardInput->Start();
     }
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
@@ -145,5 +148,12 @@ namespace AIAssistant
         } while (!app->IsFinished());
     }
 
-    void Core::Shutdown() {}
+    void Core::Shutdown()
+    {
+        if (m_KeyboardInput)
+        {
+            m_KeyboardInput->Stop();
+        }
+        Core::g_Core->GetThreadPool().Wait();
+    }
 } // namespace AIAssistant
