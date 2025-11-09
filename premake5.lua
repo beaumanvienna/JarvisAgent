@@ -38,6 +38,8 @@ project "jarvisAgent"
         "vendor/thread-pool/include",
         "vendor/tracy/include",
         "vendor/openssl/include",
+        "vendor/crow/include/crow",
+        "vendor/asio/asio/include"
     }
 
     filter "system:linux"

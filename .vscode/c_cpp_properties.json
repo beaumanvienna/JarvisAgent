@@ -16,7 +16,9 @@
 				"vendor/openssl/providers/common/include",
 				"vendor/openssl/providers/implementations/include",
 				"vendor/openssl/providers/fips/include",
-				"vendor/openssl/engines"
+				"vendor/openssl/engines",
+				"vendor/crow/include/crow",
+				"vendor/asio/asio/include"
             ],
             "defines": 
             [

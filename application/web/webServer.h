@@ -20,11 +20,13 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include "cpp-httplib/httplib.h"
+#include "crow.h"
 #include "auxiliary/threadPool.h"
 #include <atomic>
-#include <string>
+#include <future>
 #include <mutex>
+#include <string>
+#include <unordered_set>
 
 namespace AIAssistant
 {
@@ -37,15 +39,22 @@ namespace AIAssistant
         void Start();
         void Stop();
 
-    private:
-        void RegisterRoutes();
-        void HandleChatPost(httplib::Request const& req, httplib::Response& res);
-        void HandleStatusGet(httplib::Request const& req, httplib::Response& res);
+        void Broadcast(std::string const& jsonMessage);
 
     private:
-        httplib::Server m_Server;
+        void RegisterRoutes();
+        void RegisterWebSocket();
+
+        // Handlers
+        crow::response HandleChatPost(crow::request const& req);
+        crow::response HandleStatusGet();
+
+    private:
+        crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};
-        std::mutex m_Mutex;
         std::future<void> m_ServerTask;
+        std::mutex m_Mutex;
+
+        std::unordered_set<crow::websocket::connection*> m_Clients;
     };
 } // namespace AIAssistant

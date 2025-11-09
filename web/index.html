@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JarvisAgent WebSocket Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background-color: #1e1e1e;
+      color: #44a01c;
+      padding: 1rem;
+    }
+    #log {
+      white-space: pre-wrap;
+      border: 1px solid #44a01c;
+      border-radius: 6px;
+      padding: 0.5rem;
+      height: 60vh;
+      overflow-y: auto;
+      background: #111;
+    }
+    #input {
+      width: 80%;
+      background: #222;
+      color: #44a01c;
+      border: 1px solid #44a01c;
+      padding: 0.5rem;
+      border-radius: 4px;
+    }
+    #sendBtn {
+      background: #44a01c;
+      color: #111;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h2>🧠 JarvisAgent WebSocket Test</h2>
+  <div id="log">Connecting to ws://localhost:8080/ws ...</div>
+  <div style="margin-top: 1rem;">
+    <input id="input" type="text" value="Engine temperature warning light stays on" />
+    <button id="sendBtn">Send</button>
+  </div>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const ws = new WebSocket("ws://localhost:8080/ws");
+
+    ws.onopen = () => {
+      log("✅ Connected to JarvisAgent WebSocket\n");
+    };
+
+    ws.onmessage = (event) => {
+      log("📥 Message from server:\n" + event.data + "\n");
+    };
+
+    ws.onclose = () => log("❌ Connection closed\n");
+    ws.onerror = (err) => log("⚠️ Error: " + err.message + "\n");
+
+    document.getElementById("sendBtn").onclick = () => {
+      const msg = {
+        type: "chat",
+        subsystem: "engine",
+        message: document.getElementById("input").value
+      };
+      ws.send(JSON.stringify(msg));
+      log("📤 Sent: " + JSON.stringify(msg) + "\n");
+    };
+
+    function log(text) {
+      logEl.textContent += text;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  </script>
+</body>
+</html>
