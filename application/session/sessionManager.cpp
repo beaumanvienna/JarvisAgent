@@ -83,7 +83,7 @@ namespace AIAssistant
             if (!anyQueryDispatched && m_Environment.GetDirty())
             {
                 LOG_APP_INFO("All outputs up-to-date → resetting environment dirty flag");
-                m_Environment.Reset();
+                m_Environment.SetDirty(false);
             }
         }
 
@@ -405,7 +405,7 @@ namespace AIAssistant
     void SessionManager::Environment::Assemble(std::string& settings, std::string& context, std::string& tasks,
                                                CategorizedFiles& categorized)
     {
-        m_EnvironmentComplete = false;
+        SetEnvironmentComplete(false);
 
         if (settings.empty() || context.empty() || tasks.empty())
         {
@@ -429,7 +429,7 @@ namespace AIAssistant
             m_Dirty = false;
         }
 
-        m_EnvironmentComplete = true;
+        SetEnvironmentComplete(true);
     }
 
     fs::file_time_type SessionManager::Environment::ComputeTimestamp(CategorizedFiles& categorized) const
@@ -463,11 +463,9 @@ namespace AIAssistant
         return m_EnvironmentCombined;
     }
 
-    void SessionManager::Environment::Reset()
-    {
-        m_Dirty = false;
-        m_EnvironmentComplete = false;
-    }
+    void SessionManager::Environment::SetDirty(bool dirty) { m_Dirty = dirty; }
+
+    void SessionManager::Environment::SetEnvironmentComplete(bool complete) { m_EnvironmentComplete = complete; }
 
     void SessionManager::StateMachine::OnUpdate(StateInfo& stateInfo)
     {

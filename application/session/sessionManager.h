@@ -100,10 +100,11 @@ namespace AIAssistant
             bool GetEnvironmentComplete() const { return m_EnvironmentComplete; };
             void Assemble(std::string& settings, std::string& context, std::string& tasks, CategorizedFiles&);
             std::string& GetEnvironmentAndResetDirtyFlag();
-            void Reset();
 
         public:
             fs::file_time_type GetTimestamp() const { return m_Timestamp; }
+            void SetDirty(bool dirty = true);
+            void SetEnvironmentComplete(bool complete = true);
 
         private:
             fs::file_time_type ComputeTimestamp(CategorizedFiles& categorized) const;
