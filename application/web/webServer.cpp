@@ -74,12 +74,12 @@ namespace AIAssistant
             std::string subsystem = std::string(doc["subsystem"].get_string().value());
             std::string message = std::string(doc["message"].get_string().value());
 
-            fs::path queuePath(Core::g_Core->GetConfig().m_QueueFolderFilepath);
+            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
 
             fs::create_directories(queuePath);
 
             auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-            fs::path filename = queuePath / ("PROB_" + std::to_string(timestamp) + ".txt");
+            fs::path filename = queuePath / ("ISSUE_" + std::to_string(timestamp) + ".txt");
 
             std::ofstream out(filename);
             out << message;
@@ -101,11 +101,13 @@ namespace AIAssistant
     crow::response WebServer::HandleStatusGet()
     {
         crow::json::wvalue status;
-        status["state"] = "AllResponsesReceived";
+
+        status["type"] = "status";
+        status["name"] = "../queue/ICE";
+        status["state"] = "SendingQueries";
         status["outputs"] = 4;
-        status["inflight"] = 0;
-        status["completed"] = 18;
-        status["uptime"] = "00:00:42";
+        status["inflight"] = 1;
+        status["completed"] = 7;
         return crow::response(200, status.dump());
     }
 
@@ -142,7 +144,7 @@ namespace AIAssistant
                             std::string subsystem = std::string(doc["subsystem"].get_string().value());
                             std::string text = std::string(doc["message"].get_string().value());
 
-                            fs::path queuePath(Core::g_Core->GetConfig().m_QueueFolderFilepath);
+                            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
                             fs::create_directories(queuePath);
 
                             auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
@@ -211,4 +213,14 @@ namespace AIAssistant
             client->send_text(jsonMessage);
         }
     }
+
+    void WebServer::BroadcastJSON(std::string const& jsonString)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        for (auto* client : m_Clients)
+        {
+            client->send_text(jsonString);
+        }
+    }
+
 } // namespace AIAssistant

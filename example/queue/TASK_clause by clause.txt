@@ -1,0 +1,2 @@
+For each requirements, list if it is compliant, non-compliant, or if it could be made compliant with some additional cost.
+Provide a brief argumentation for your answer.

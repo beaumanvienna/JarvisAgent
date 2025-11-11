@@ -22,14 +22,19 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "event/events.h"
+#include "session/sessionManager.h"
+#include "file/fileWatcher.h"
+#include "web/webServer.h"
 
 namespace AIAssistant
 {
+    JarvisAgent* App::g_App = nullptr;
     std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
 
     void JarvisAgent::OnStart()
     {
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
+        App::g_App = this;
 
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
 
@@ -109,6 +114,7 @@ namespace AIAssistant
     void JarvisAgent::OnShutdown()
     {
         LOG_APP_INFO("leaving JarvisAgent");
+        App::g_App = nullptr;
 
         for (auto& sessionManager : m_SessionManagers)
         {

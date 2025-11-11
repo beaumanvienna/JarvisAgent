@@ -3,31 +3,39 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>JarvisAgent WebSocket Test</title>
+  <title>🧠 JarvisAgent Dashboard</title>
   <style>
     body {
       font-family: monospace;
       background-color: #1e1e1e;
       color: #44a01c;
       padding: 1rem;
+      overflow: hidden;
     }
+
+    h2 {
+      margin-top: 0;
+    }
+
     #log {
       white-space: pre-wrap;
       border: 1px solid #44a01c;
       border-radius: 6px;
       padding: 0.5rem;
-      height: 60vh;
+      height: 25vh;
       overflow-y: auto;
       background: #111;
     }
+
     #input {
-      width: 80%;
+      width: 70%;
       background: #222;
       color: #44a01c;
       border: 1px solid #44a01c;
       padding: 0.5rem;
       border-radius: 4px;
     }
+
     #sendBtn {
       background: #44a01c;
       color: #111;
@@ -36,35 +44,73 @@
       border-radius: 4px;
       cursor: pointer;
     }
+
+    .session-box {
+      position: absolute;
+      min-width: 240px;
+      background: rgba(30, 30, 30, 0.9);
+      border: 1px solid white;
+      border-radius: 10px;
+      padding: 10px;
+      cursor: move;
+      box-shadow: 0 0 10px rgba(255,255,255,0.2);
+      user-select: none;
+      transition: box-shadow 0.2s ease;
+    }
+
+    .session-box:hover {
+      box-shadow: 0 0 12px rgba(255,255,255,0.4);
+    }
+
+    .session-header {
+      font-weight: bold;
+      margin-bottom: 6px;
+      color: #fff;
+    }
+
+    .session-state {
+      color: #44a01c;
+      line-height: 1.4em;
+    }
+
+    .spinner {
+      color: #e0c341;
+      display: inline-block;
+      margin-left: 6px;
+    }
   </style>
 </head>
 <body>
-  <h2>🧠 JarvisAgent WebSocket Test</h2>
+  <h2>🧠 JarvisAgent Dashboard</h2>
+
   <div id="log">Connecting to ws://localhost:8080/ws ...</div>
   <div style="margin-top: 1rem;">
-    <input id="input" type="text" value="Engine temperature warning light stays on" />
+    <input id="input" type="text" value="motor temperature warning light stays on" />
     <button id="sendBtn">Send</button>
   </div>
 
   <script>
     const logEl = document.getElementById("log");
     const ws = new WebSocket("ws://localhost:8080/ws");
+    const sessions = {}; // sessionName -> DOM element
 
-    ws.onopen = () => {
-      log("✅ Connected to JarvisAgent WebSocket\n");
-    };
-
+    ws.onopen = () => log("✅ Connected to JarvisAgent WebSocket\n");
     ws.onmessage = (event) => {
-      log("📥 Message from server:\n" + event.data + "\n");
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "status") updateSessionBox(msg);
+        else log("📥 Message from server:\n" + event.data + "\n");
+      } catch (e) {
+        log("📥 " + event.data + "\n");
+      }
     };
-
     ws.onclose = () => log("❌ Connection closed\n");
     ws.onerror = (err) => log("⚠️ Error: " + err.message + "\n");
 
     document.getElementById("sendBtn").onclick = () => {
       const msg = {
         type: "chat",
-        subsystem: "engine",
+        subsystem: "ICE",
         message: document.getElementById("input").value
       };
       ws.send(JSON.stringify(msg));
@@ -75,6 +121,78 @@
       logEl.textContent += text;
       logEl.scrollTop = logEl.scrollHeight;
     }
+
+    // ---- Session boxes ----
+    function updateSessionBox(msg) {
+      const { name, state, outputs, inflight, completed } = msg;
+      let box = sessions[name];
+      if (!box) {
+        box = createSessionBox(name);
+        sessions[name] = box;
+      }
+      const stateEl = box.querySelector(".session-state");
+      stateEl.dataset.inflight = inflight;
+      stateEl.querySelector(".state-text").textContent = state;
+      stateEl.querySelector(".outputs").textContent = outputs;
+      stateEl.querySelector(".inflight").textContent = inflight;
+      stateEl.querySelector(".completed").textContent = completed;
+    }
+
+    function createSessionBox(name) {
+      const div = document.createElement("div");
+      div.className = "session-box";
+      div.style.top = `${200 + Object.keys(sessions).length * 140}px`;
+      div.style.left = "40px";
+      div.innerHTML = `
+        <div class="session-header">${name}</div>
+        <div class="session-state" data-inflight="0">
+          STATE: <span class="state-text">Waiting...</span>
+          <span class="spinner"></span><br>
+          Outputs: <span class="outputs">0</span><br>
+          In flight: <span class="inflight">0</span><br>
+          Completed: <span class="completed">0</span>
+        </div>
+      `;
+      document.body.appendChild(div);
+      makeDraggable(div);
+      return div;
+    }
+
+    function makeDraggable(el) {
+      let offsetX = 0, offsetY = 0, dragging = false;
+      el.addEventListener("mousedown", (e) => {
+        dragging = true;
+        offsetX = e.clientX - el.offsetLeft;
+        offsetY = e.clientY - el.offsetTop;
+        el.style.zIndex = 1000;
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        el.style.left = e.clientX - offsetX + "px";
+        el.style.top = e.clientY - offsetY + "px";
+      });
+      document.addEventListener("mouseup", () => {
+        dragging = false;
+        el.style.zIndex = "";
+      });
+    }
+
+    // ---- Spinner animation ----
+    const spinnerFrames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷", "⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+    let spinIndex = 0;
+
+    setInterval(() => {
+      document.querySelectorAll(".session-state").forEach(el => {
+        const inflight = parseInt(el.dataset.inflight || "0", 10);
+        const spinnerEl = el.querySelector(".spinner");
+        if (inflight > 0) {
+          spinnerEl.textContent = spinnerFrames[spinIndex % spinnerFrames.length];
+        } else {
+          spinnerEl.textContent = "";
+        }
+      });
+      spinIndex++;
+    }, 100);
   </script>
 </body>
 </html>

@@ -15,7 +15,8 @@ project "jarvisAgent"
     
     defines
     {
-        "JARVIS_AGENT_VERSION=\"0.1\""
+        "JARVIS_AGENT_VERSION=\"0.1\"",
+        "CROW_ENFORCE_WS_SPEC"
     }
 
     files

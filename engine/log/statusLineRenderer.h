@@ -33,16 +33,32 @@ namespace AIAssistant
     class StatusLineRenderer
     {
     public:
+        struct SessionStatus
+        {
+            std::string name;
+            std::string state;
+            size_t outputs{0};
+            size_t inflight{0};
+            size_t completed{0};
+
+            // spinner per session
+            size_t spinnerIndex{0};
+            std::chrono::steady_clock::time_point lastSpinnerUpdate{std::chrono::steady_clock::now()};
+        };
+
+    public:
         StatusLineRenderer() { Start(); };
-        void Update(std::string_view state, size_t outputs, size_t inflight, size_t completed);
+        void UpdateSession(const std::string& name, std::string_view state, size_t outputs, size_t inflight,
+                           size_t completed);
 
         void Start();
         void Stop();
+        void Render();
 
     private:
         std::mutex m_Mutex;
-        size_t m_SpinnerIndex{0};
-        std::chrono::steady_clock::time_point m_LastSpinnerUpdate{std::chrono::steady_clock::now()};
+        std::unordered_map<std::string, SessionStatus> m_Sessions;
         std::atomic<bool> m_Running{false};
+        size_t m_LastHeight{0};
     };
 } // namespace AIAssistant

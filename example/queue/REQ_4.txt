@@ -1,0 +1,5 @@
+requirement #4: ```
+
+The motor shall be capable of converting the  kinetic energy of the vehicle into combustion fuel.
+
+```

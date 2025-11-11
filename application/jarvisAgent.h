@@ -24,13 +24,14 @@
 #include <unordered_map>
 
 #include "application.h"
-#include "file/fileWatcher.h"
 #include "file/fileCategory.h"
-#include "session/sessionManager.h"
-#include "web/webServer.h"
 
 namespace AIAssistant
 {
+    class SessionManager;
+    class FileWatcher;
+    class WebServer;
+
     class JarvisAgent : public Application
     {
     public:
@@ -45,6 +46,8 @@ namespace AIAssistant
         virtual bool IsFinished() const override;
         static std::unique_ptr<Application> Create();
 
+        WebServer* GetWebServer() const { return m_WebServer.get(); }
+
     private:
         void CheckIfFinished();
 
@@ -55,5 +58,11 @@ namespace AIAssistant
         std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
         std::unique_ptr<FileWatcher> m_FileWatcher;
         std::unique_ptr<WebServer> m_WebServer;
+    };
+
+    class App
+    {
+    public:
+        static JarvisAgent* g_App;
     };
 } // namespace AIAssistant

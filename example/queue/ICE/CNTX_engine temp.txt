@@ -1,0 +1,13 @@
+The engine manual says:
+```Engine coolant over temperature refers to a condition where the engine coolant temperature exceeds the safe operating range specified by the manufacturer, indicating that the engine is overheating and it is not safe to continue driving.
+ This warning typically activates when the engine temperature exceeds 105°C (221°F), which is above the normal operating range of 195°F to 220°F (90°C to 105°C).
+ If left unchecked, an over-temperature condition can lead to serious engine damage, including warped cylinder heads, blown head gaskets, or complete engine failure.
+
+Common causes of engine overheating include coolant leaks, low coolant levels, a faulty thermostat that fails to open properly, a malfunctioning radiator fan, radiator clogging or damage, clogged coolant hoses, water pump failure, and a faulty radiator cap that reduces system pressure and cooling efficiency.
+ Aggressive driving styles can also contribute to overheating, but technical faults are a frequent cause, especially at idle or low speeds where airflow through the radiator is reduced.
+
+When the engine coolant over temperature warning light comes on, drivers should ease off the gas pedal, turn off the air conditioning, and look for a safe place to pull over. The engine should be turned off immediately, and the hood should not be opened while the engine is still hot to avoid injury from steam or hot fluids.
+ Once the engine has cooled, the coolant level should be checked and topped up if necessary, or roadside assistance should be called for inspection and repair.
+
+The cooling system must maintain a balance between preventing overheating and avoiding excessive cooling, as different engine components require different temperature ranges—for example, intake components and turbocharger inlets benefit from being as cold as possible, while cylinder walls need a compromise temperature around 90°C to optimize oil viscosity and prevent pre-ignition.
+ Liquid-cooled engines are generally more effective at managing temperature uniformity across the engine block compared to air-cooled engines, which can suffer from uneven cooling and hot spots due to air warming as it passes over successive components.```

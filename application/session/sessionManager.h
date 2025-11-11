@@ -28,7 +28,7 @@
 #include "file/trackedFile.h"
 #include "file/fileCategorizer.h"
 #include "json/replyParser.h"
-#include "log/statusLineRenderer.h"
+#include "jarvisAgent.h"
 
 namespace AIAssistant
 {
@@ -135,7 +135,6 @@ namespace AIAssistant
         std::string m_Model;
 
         std::unique_ptr<ReplyParser> m_ReplyParser;
-        StatusLineRenderer m_StatusLineRenderer;
         size_t m_CompletedQueriesThisRun{0};
     };
 } // namespace AIAssistant

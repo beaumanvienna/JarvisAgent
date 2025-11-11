@@ -21,9 +21,11 @@
 
 #include "session/sessionManager.h"
 #include "session/fileWriter.h"
+#include "web/webServer.h"
 
 #include "event/events.h"
 #include "json/jsonHelper.h"
+#include "core.h"
 
 namespace AIAssistant
 {
@@ -87,9 +89,24 @@ namespace AIAssistant
             }
         }
 
-        m_StatusLineRenderer.Update(SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
-                                    m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
-                                    m_QueryFutures.size(), m_CompletedQueriesThisRun);
+        { // status display in terminal
+            auto& statusLineRenderer = Core::g_Core->GetStatusLineRenderer();
+            statusLineRenderer.UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
+                                             m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
+                                             m_QueryFutures.size(), m_CompletedQueriesThisRun);
+        }
+
+        { // remote status display via web server
+            auto& webServer = *App::g_App->GetWebServer();
+            crow::json::wvalue msg;
+            msg["type"] = "status";
+            msg["name"] = m_Name;
+            msg["state"] = std::string(SessionManager::StateMachine::StateNames[m_StateMachine.GetState()]);
+            msg["outputs"] = m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size();
+            msg["inflight"] = m_QueryFutures.size();
+            msg["completed"] = m_CompletedQueriesThisRun;
+            webServer.BroadcastJSON(msg.dump());
+        }
     }
 
     bool SessionManager::IsQueryRequired(TrackedFile& requirementFile) const
@@ -170,11 +187,7 @@ namespace AIAssistant
             });
     }
 
-    void SessionManager::OnShutdown()
-    {
-        // stop the status line renderer
-        m_StatusLineRenderer.Stop();
-    }
+    void SessionManager::OnShutdown() {}
 
     bool SessionManager::IsIdle() const { return m_StateMachine.GetState() == StateMachine::State::AllResponsesReceived; }
 

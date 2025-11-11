@@ -96,6 +96,8 @@ namespace AIAssistant
 
         m_KeyboardInput = std::make_unique<KeyboardInput>();
         m_KeyboardInput->Start();
+
+        m_StatusLineRenderer.Start();
     }
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
@@ -109,6 +111,8 @@ namespace AIAssistant
                 ZoneScopedN("application->OnUpdate");
                 app->OnUpdate();
             }
+
+            m_StatusLineRenderer.Render();
 
             { // event handling
                 const auto green = 0x00ff00;
@@ -154,6 +158,8 @@ namespace AIAssistant
         {
             m_KeyboardInput->Stop();
         }
-        Core::g_Core->GetThreadPool().Wait();
+
+        m_StatusLineRenderer.Stop();
+        m_ThreadPool.Wait();
     }
 } // namespace AIAssistant

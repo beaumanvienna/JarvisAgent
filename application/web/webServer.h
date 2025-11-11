@@ -40,6 +40,7 @@ namespace AIAssistant
         void Stop();
 
         void Broadcast(std::string const& jsonMessage);
+        void BroadcastJSON(const std::string& jsonString);
 
     private:
         void RegisterRoutes();
