@@ -20,52 +20,48 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
-#include <unordered_map>
-
-#include "application.h"
-#include "file/fileCategory.h"
+#include <string>
+#include <cstdint>
+#include <chrono>
+#include <queue>
+#include <mutex>
+#include <atomic>
 
 namespace AIAssistant
 {
-    class SessionManager;
-    class FileWatcher;
-    class WebServer;
-    class ChatMessagePool;
-
-    class JarvisAgent : public Application
+    struct ChatMessageEntry
     {
-    public:
-        JarvisAgent() = default;
-        virtual ~JarvisAgent() = default;
-
-        virtual void OnStart() override;
-        virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
-        virtual void OnShutdown() override;
-
-        virtual bool IsFinished() const override;
-        static std::unique_ptr<Application> Create();
-
-        WebServer* GetWebServer() const { return m_WebServer.get(); }
-        ChatMessagePool* GetChatMessagePool() const { return m_ChatMessagePool.get(); }
-
-    private:
-        void CheckIfFinished();
-
-    private:
-        bool m_IsFinished{false};
-
-    private:
-        std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
-        std::unique_ptr<FileWatcher> m_FileWatcher;
-        std::unique_ptr<WebServer> m_WebServer;
-        std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
+        uint64_t id;
+        std::string subsystem;
+        std::string message;
+        std::chrono::steady_clock::time_point timestamp;
+        bool answered = false;
+        bool expired = false;
     };
 
-    class App
+    class ChatMessagePool
     {
     public:
-        static JarvisAgent* g_App;
+        ChatMessagePool(size_t initialSize = 100, double growThreshold = 0.7);
+
+        uint64_t AddMessage(std::string const& subsystem, std::string const& message);
+        void MarkAnswered(uint64_t id, std::string const& answerText);
+        void RemoveExpired();
+        void Update(); // called periodically to remove expired entries
+
+        size_t Size() const { return m_Entries.size(); }
+        size_t ActiveCount() const { return m_ActiveCount; }
+
+    private:
+        void GrowPool();
+
+    private:
+        std::vector<ChatMessageEntry> m_Entries;
+        std::queue<size_t> m_FreeIndices;
+        std::atomic<uint64_t> m_NextId{1};
+        std::mutex m_Mutex;
+        size_t m_ActiveCount{0};
+        double m_GrowThreshold{0.7};
     };
+
 } // namespace AIAssistant

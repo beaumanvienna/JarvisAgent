@@ -25,6 +25,7 @@
 #include "session/sessionManager.h"
 #include "file/fileWatcher.h"
 #include "web/webServer.h"
+#include "web/chatMessages.h"
 
 namespace AIAssistant
 {
@@ -43,6 +44,8 @@ namespace AIAssistant
 
         m_WebServer = std::make_unique<WebServer>();
         m_WebServer->Start();
+
+        m_ChatMessagePool = std::make_unique<ChatMessagePool>();
     }
 
     void JarvisAgent::OnUpdate()
@@ -51,6 +54,8 @@ namespace AIAssistant
         {
             sessionManager.second->OnUpdate();
         }
+
+        m_ChatMessagePool->RemoveExpired();
 
         // check if app should terminate
         CheckIfFinished();
@@ -99,7 +104,48 @@ namespace AIAssistant
                 return false;
             });
 
-        // event was handled by the file categorizer
+        // -----------------------------------------------------------------------------------
+        // Handle ChatMessagePool answer files: PROB_<id>_<timestamp>.output.txt
+        // -----------------------------------------------------------------------------------
+
+        if (!filePath.empty())
+        {
+            std::string filename = filePath.filename().string();
+
+            if (filename.starts_with("PROB_") && filename.ends_with(".output.txt"))
+            {
+                try
+                {
+                    // Extract the ID
+                    size_t pos1 = filename.find('_');           // after PROB
+                    size_t pos2 = filename.find('_', pos1 + 1); // after <id>
+                    std::string idStr = filename.substr(pos1 + 1, pos2 - (pos1 + 1));
+                    uint64_t id = std::stoull(idStr);
+
+                    // Read response text
+                    std::ifstream in(filePath);
+                    std::stringstream buffer;
+                    buffer << in.rdbuf();
+                    std::string answer = buffer.str();
+
+                    // Pass to chat pool
+                    m_ChatMessagePool->MarkAnswered(id, answer);
+
+                    LOG_APP_INFO("ChatMessagePool: answered id {} via {}", id, filename);
+                }
+                catch (const std::exception& e)
+                {
+                    LOG_APP_ERROR("Failed processing PROB_.output: {} ({})", filePath.string(), e.what());
+                }
+
+                // we do NOT forward this to SessionManager
+                return;
+            }
+        }
+
+        // -----------------------------------------------------------------------------------
+        // Forward all other file events to the SessionManager system
+        // -----------------------------------------------------------------------------------
         if (!filePath.empty())
         {
             auto sessionManagerName = filePath.parent_path().string();

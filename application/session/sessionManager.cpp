@@ -247,20 +247,40 @@ namespace AIAssistant
 
         auto& threadpool = Core::g_Core->GetThreadPool();
         std::string inputFilename = requirementFile.GetPath().string();
-        auto query = [this, queryData, inputFilename]()
+        auto query = [this, queryData, inputFilename]() -> bool
         {
-            auto& curl = CurlManager::GetThreadCurl();
-            curl.Clear();
-            bool ok = curl.Query(queryData);
-            if (ok)
+            try
             {
+                auto& curl = CurlManager::GetThreadCurl();
+                curl.Clear();
+
+                bool ok = curl.Query(queryData);
+
+                // Always create a parser, even if curl failed (empty buffer)
                 auto interfaceType = Core::g_Core->GetInterfaceType();
-                m_ReplyParser = ReplyParser::Create(interfaceType, curl.GetBuffer());
-            }
-            bool curleOk = !m_ReplyParser->HasError();
-            size_t hasContent = m_ReplyParser->HasContent();
-            if (curleOk && (hasContent > 0))
-            {
+                m_ReplyParser = ReplyParser::Create(interfaceType, ok ? curl.GetBuffer() : "");
+
+                // If curl itself failed → safe exit
+                if (!ok)
+                {
+                    LOG_APP_ERROR("Curl network error while processing: {}", inputFilename);
+                    return false;
+                }
+
+                // Parser error?
+                if (m_ReplyParser->HasError())
+                {
+                    return false;
+                }
+
+                size_t hasContent = m_ReplyParser->HasContent();
+                if (hasContent == 0)
+                {
+                    LOG_APP_WARN("No content returned for '{}'", inputFilename);
+                    return false;
+                }
+
+                // Write all returned content blocks
                 for (size_t index = 0; index < hasContent; ++index)
                 {
                     std::string contentText = m_ReplyParser->GetContent(index);
@@ -272,9 +292,16 @@ namespace AIAssistant
 
                     FileWriter::Get().WriteWithHeader(outputPath, contentText, m_Model);
                 }
+
+                return true;
             }
-            return curleOk;
+            catch (const std::exception& e)
+            {
+                LOG_APP_ERROR("Exception in query thread for '{}': {}", inputFilename, e.what());
+                return false;
+            }
         };
+
         m_QueryFutures.push_back(threadpool.SubmitTask(query));
     }
 

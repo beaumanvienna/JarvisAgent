@@ -19,11 +19,14 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "core.h"
-#include "web/webServer.h"
-#include "simdjson/simdjson.h"
 #include <fstream>
 #include <filesystem>
+#include "simdjson/simdjson.h"
+
+#include "core.h"
+#include "jarvisAgent.h"
+#include "web/webServer.h"
+#include "web/chatMessages.h"
 
 namespace fs = std::filesystem;
 namespace AIAssistant
@@ -78,8 +81,8 @@ namespace AIAssistant
 
             fs::create_directories(queuePath);
 
-            auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-            fs::path filename = queuePath / ("ISSUE_" + std::to_string(timestamp) + ".txt");
+            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, message);
+            fs::path filename = queuePath / ("ISSUE_" + std::to_string(id) + ".txt");
 
             std::ofstream out(filename);
             out << message;
@@ -87,6 +90,7 @@ namespace AIAssistant
 
             crow::json::wvalue response;
             response["status"] = "queued";
+            response["id"] = id;
             response["file"] = filename.string();
             return crow::response(200, response.dump());
         }
@@ -144,18 +148,25 @@ namespace AIAssistant
                             std::string subsystem = std::string(doc["subsystem"].get_string().value());
                             std::string text = std::string(doc["message"].get_string().value());
 
+                            // add to chat message pool
+                            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, text);
+                            auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
+
+                            // determine queue directory
                             fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
                             fs::create_directories(queuePath);
 
-                            auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-                            fs::path filename = queuePath / ("PROB_" + std::to_string(timestamp) + ".txt");
+                            // write the PROB_<id>_<timestamp>.txt file
+                            fs::path filename =
+                                queuePath / ("PROB_" + std::to_string(id) + "_" + std::to_string(timestamp) + ".txt");
 
                             std::ofstream out(filename);
                             out << text;
-                            out.close();
 
+                            // respond to browser
                             crow::json::wvalue response;
                             response["type"] = "queued";
+                            response["id"] = id; // <-- RETURN UNIQUE ID
                             response["file"] = filename.string();
                             conn.send_text(response.dump());
                         }

@@ -716,14 +716,14 @@ public:
     promise.state().on_suspend_->fn_ =
       [](void* p)
       {
-        auto& promise = *static_cast<derived_type*>(p);
+        auto& promise_ = *static_cast<derived_type*>(p);
 
         co_composed_handler_base<Executors, Handler,
-          Return> composed_handler(promise);
+          Return> composed_handler(promise_);
 
-        Handler handler(std::move(promise.state().handler_));
+        Handler handler(std::move(promise_.state().handler_));
         return_type result(
-            std::move(std::get<return_type>(promise.state().return_value_)));
+            std::move(std::get<return_type>(promise_.state().return_value_)));
 
         co_composed_handler_base<Executors, Handler,
           Return>(std::move(composed_handler));

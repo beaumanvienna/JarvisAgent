@@ -22,9 +22,10 @@
       border: 1px solid #44a01c;
       border-radius: 6px;
       padding: 0.5rem;
-      height: 25vh;
+      height: 20vh;
       overflow-y: auto;
       background: #111;
+      margin-bottom: 1rem;
     }
 
     #input {
@@ -45,6 +46,37 @@
       cursor: pointer;
     }
 
+    /* ---- Answers panel ---- */
+    #answers {
+      margin-top: 1rem;
+      border: 1px solid #44a01c;
+      border-radius: 6px;
+      padding: 0.5rem;
+      height: 35vh;
+      overflow-y: auto;
+      background: #111;
+    }
+
+    .answer-card {
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 0.5rem;
+      margin-bottom: 0.5rem;
+      background: #1a1a1a;
+    }
+
+    .answer-header {
+      font-weight: bold;
+      color: #fff;
+      margin-bottom: 0.25rem;
+    }
+
+    .answer-body {
+      white-space: pre-wrap;
+      color: #d6f5c6;
+    }
+
+    /* ---- Session boxes ---- */
     .session-box {
       position: absolute;
       min-width: 240px;
@@ -83,27 +115,51 @@
 <body>
   <h2>🧠 JarvisAgent Dashboard</h2>
 
+  <!-- Debug Log -->
   <div id="log">Connecting to ws://localhost:8080/ws ...</div>
-  <div style="margin-top: 1rem;">
+
+  <!-- Input Area -->
+  <div>
     <input id="input" type="text" value="motor temperature warning light stays on" />
     <button id="sendBtn">Send</button>
   </div>
 
+  <!-- Answers panel -->
+  <div id="answers"></div>
+
   <script>
     const logEl = document.getElementById("log");
+    const answersEl = document.getElementById("answers");
     const ws = new WebSocket("ws://localhost:8080/ws");
     const sessions = {}; // sessionName -> DOM element
 
     ws.onopen = () => log("✅ Connected to JarvisAgent WebSocket\n");
+
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === "status") updateSessionBox(msg);
-        else log("📥 Message from server:\n" + event.data + "\n");
+
+        if (msg.type === "status") {
+          updateSessionBox(msg);
+
+        } else if (msg.type === "output") {
+          showAnswer(msg);
+
+        } else if (msg.type === "timeout") {
+          showTimeout(msg);
+
+        } else if (msg.type === "late-answer") {
+          showLateAnswer(msg);
+
+        } else {
+          log("📥 Message from server:\n" + event.data + "\n");
+        }
+
       } catch (e) {
         log("📥 " + event.data + "\n");
       }
     };
+
     ws.onclose = () => log("❌ Connection closed\n");
     ws.onerror = (err) => log("⚠️ Error: " + err.message + "\n");
 
@@ -122,14 +178,76 @@
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // ---- Session boxes ----
+    /* ---- Output Answer ---- */
+    function showAnswer(msg) {
+      const { id, text } = msg;
+
+      const card = document.createElement("div");
+      card.className = "answer-card";
+
+      const header = document.createElement("div");
+      header.className = "answer-header";
+      header.textContent = `Answer for message #${id}`;
+
+      const body = document.createElement("div");
+      body.className = "answer-body";
+      body.textContent = text;
+
+      card.appendChild(header);
+      card.appendChild(body);
+      answersEl.prepend(card);
+    }
+
+    /* ---- Timeout ---- */
+    function showTimeout(msg) {
+      const { id, text } = msg;
+
+      const card = document.createElement("div");
+      card.className = "answer-card";
+      card.style.border = "1px solid #c33"; // red
+
+      card.innerHTML = `
+        <div class="answer-header" style="color:#ff7777;">
+          ❌ Timeout for message #${id}
+        </div>
+        <div class="answer-body" style="color:#ffb3b3;">
+          ${text}
+        </div>
+      `;
+
+      answersEl.prepend(card);
+    }
+
+    /* ---- Late Answer ---- */
+    function showLateAnswer(msg) {
+      const { id, text } = msg;
+
+      const card = document.createElement("div");
+      card.className = "answer-card";
+      card.style.border = "1px solid #e0a800"; // amber
+
+      card.innerHTML = `
+        <div class="answer-header" style="color:#ffe28a;">
+          ⚠️ Late answer for expired message #${id}
+        </div>
+        <div class="answer-body" style="color:#fff3cd;">
+          ${text}
+        </div>
+      `;
+
+      answersEl.prepend(card);
+    }
+
+    /* ---- Session Boxes ---- */
     function updateSessionBox(msg) {
       const { name, state, outputs, inflight, completed } = msg;
       let box = sessions[name];
+
       if (!box) {
         box = createSessionBox(name);
         sessions[name] = box;
       }
+
       const stateEl = box.querySelector(".session-state");
       stateEl.dataset.inflight = inflight;
       stateEl.querySelector(".state-text").textContent = state;
@@ -177,8 +295,8 @@
       });
     }
 
-    // ---- Spinner animation ----
-    const spinnerFrames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷", "⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+    /* ---- Spinner ---- */
+    const spinnerFrames = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷","⠁","⠂","⠄","⡀","⢀","⠠","⠐","⠈"];
     let spinIndex = 0;
 
     setInterval(() => {
@@ -193,6 +311,7 @@
       });
       spinIndex++;
     }, 100);
+
   </script>
 </body>
 </html>
