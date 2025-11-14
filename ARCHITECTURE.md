@@ -15,7 +15,7 @@ This document describes the **software architecture**, **communication layers**,
 |--------|----------------|----------|
 | **Core Engine** | C++ | File-based AI orchestration, dependency tracking, REST I/O |
 | **Scripting Layer** | Python | Extensibility, preprocessing, and automation via hooks |
-| **Web Server** | C++ (`cpp-httplib`) | Serves chatbot frontend and WebSocket API |
+| **Web Server** | C++ (`crow`) | Serves chatbot frontend and WebSocket API |
 | **Frontend (Bot UI)** | HTML5 + Tailwind CSS + Vanilla JS | Chat interface for end user |
 | **IPC (Internal)** | Shared filesystem (`queue/`) | Communication between web server and JarvisAgent core |
 | **Client–Server Protocol** | JSON over WebSocket | Bidirectional chat and status updates |
@@ -70,7 +70,7 @@ This section expands on the operational details for JarvisAgent’s web interfac
 
 - **Transparent pipeline** — Every step materialized as a file for traceability and offline auditing.
 - **Event-driven** — File watcher + selective rebuilds; no redundant work.
-- **Embeddable** — Lightweight, single-binary server using `cpp-httplib`.
+- **Embeddable** — Lightweight, single-binary server using the `crow` micro web framework.
 - **Extensible** — Python scripting hooks enable custom preprocessing (e.g., MarkItDown).
 - **Operator-friendly** — Terminal status line + browser chat UI with live updates.
 - **Binary-safe** — Non-text files are detected and ignored or preprocessed by the scripting layer.
@@ -91,7 +91,7 @@ This section expands on the operational details for JarvisAgent’s web interfac
 
 ## 🌐 Embedded Web Server
 
-**Library:** [`cpp-httplib`](https://github.com/yhirose/cpp-httplib) (header-only, HTTPS-capable)
+**Library:** [`Crow micro web framework`](https://github.com/CrowCpp/Crow) (header-only, HTTPS-capable)
 
 **Responsibilities:**
 - Serve static assets (HTML, JS, CSS) for the chat UI.
@@ -239,7 +239,7 @@ Real-time channel for **status**, **progress**, and **answers**. The server **pu
 Browser (Bot UI)
    │   POST /api/chat { subsystem, message }
    ▼
-Web Server (cpp-httplib)
+Web Server (crow)
    │   write queue/<subsystem>/PROB_*.txt
    ▼
 JarvisAgent Core (Watcher + Dispatcher)
