@@ -20,54 +20,57 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <memory>
-#include <unordered_map>
 
-#include "application.h"
-#include "file/fileCategory.h"
+#include <string>
+
+// Forward declaration to avoid including Python headers here
+struct _object;
+typedef _object PyObject;
 
 namespace AIAssistant
 {
-    class SessionManager;
-    class FileWatcher;
-    class WebServer;
-    class ChatMessagePool;
-    class PythonEngine;
+    class Event;
 
-    class JarvisAgent : public Application
+    class PythonEngine
     {
     public:
-        JarvisAgent() = default;
-        virtual ~JarvisAgent() = default;
+        PythonEngine();
+        ~PythonEngine();
 
-        virtual void OnStart() override;
-        virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
-        virtual void OnShutdown() override;
+        bool Initialize(std::string const& scriptPath);
+        void Shutdown();
 
-        virtual bool IsFinished() const override;
-        static std::unique_ptr<Application> Create();
+        void OnStart();
+        void OnUpdate();
+        void OnEvent(Event const& event);
+        void OnShutdown();
 
-        WebServer* GetWebServer() const { return m_WebServer.get(); }
-        ChatMessagePool* GetChatMessagePool() const { return m_ChatMessagePool.get(); }
-
-    private:
-        void CheckIfFinished();
+        bool IsRunning() const { return m_Running; }
 
     private:
-        bool m_IsFinished{false};
+        void Reset();
+        bool LoadModule();
+        void LoadHooks();
+
+        void CallHook(PyObject* function, char const* hookName);
+        void CallHookWithEvent(PyObject* function, char const* hookName, Event const& event);
+
+        PyObject* BuildEventDict(Event const& event);
 
     private:
-        std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
-        std::unique_ptr<FileWatcher> m_FileWatcher;
-        std::unique_ptr<WebServer> m_WebServer;
-        std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
-        std::unique_ptr<PythonEngine> m_PythonEngine;
+        bool m_Running{false};
+
+        std::string m_ScriptPath;
+        std::string m_ScriptDir;
+        std::string m_ModuleName;
+
+        PyObject* m_MainModule{nullptr};
+        PyObject* m_MainDict{nullptr};
+
+        PyObject* m_OnStartFunc{nullptr};
+        PyObject* m_OnUpdateFunc{nullptr};
+        PyObject* m_OnEventFunc{nullptr};
+        PyObject* m_OnShutdownFunc{nullptr};
     };
 
-    class App
-    {
-    public:
-        static JarvisAgent* g_App;
-    };
 } // namespace AIAssistant

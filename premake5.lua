@@ -52,6 +52,7 @@ project "jarvisAgent"
         }
         includedirs 
         {
+            "/usr/include/python3.12"
         }
         links
         {
@@ -60,7 +61,9 @@ project "jarvisAgent"
 			"dl",
 			"ssl",
 			"crypto",
-			"z"
+			"z",
+			"m",
+            "python3.12"
         }
         libdirs
         {
@@ -71,13 +74,18 @@ project "jarvisAgent"
         }
 
 	filter "system:macosx"
+
+        includedirs {
+            "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/include/python3.12"
+        }
 		links {
 			"curl",
 			"ssl",
 			"crypto",
 			"z",
 			"-framework CoreFoundation",
-			"-framework SystemConfiguration"
+			"-framework SystemConfiguration",
+            "python3.12"
 		}
 
     filter { "action:gmake*", "configurations:Debug"}
@@ -88,7 +96,14 @@ project "jarvisAgent"
 
     filter "system:windows"
         systemversion "latest"
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz" }
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "python312" }
+        
+        includedirs {
+            "C:/Users/%{os.getenv('USERNAME')}/AppData/Local/Programs/Python/Python312/include"
+        }
+        libdirs {
+            "C:/Users/%{os.getenv('USERNAME')}/AppData/Local/Programs/Python/Python312/libs"
+        }
 
     filter "configurations:Debug"
         defines
@@ -108,6 +123,8 @@ project "jarvisAgent"
         runtime "Release"
         optimize "on"
 
+    filter {}
+
     if _ACTION == 'clean' then
         print("clean the build...")
         os.rmdir("./bin")
@@ -125,3 +142,4 @@ project "jarvisAgent"
 	include "vendor/curl.lua"
 	include "vendor/openssl/crypto.lua"
 	include "vendor/openssl/ssl.lua"
+

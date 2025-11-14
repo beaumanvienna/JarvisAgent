@@ -18,7 +18,8 @@
 				"vendor/openssl/providers/fips/include",
 				"vendor/openssl/engines",
 				"vendor/crow/include/crow",
-				"vendor/asio/asio/include"
+				"vendor/asio/asio/include",
+                "/usr/include/python3.12/"
             ],
             "defines": 
             [

@@ -26,6 +26,7 @@
 #include "file/fileWatcher.h"
 #include "web/webServer.h"
 #include "web/chatMessages.h"
+#include "python/pythonEngine.h"
 
 namespace AIAssistant
 {
@@ -46,6 +47,21 @@ namespace AIAssistant
         m_WebServer->Start();
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
+
+        // initialize Python
+        m_PythonEngine = std::make_unique<PythonEngine>();
+
+        std::string const scriptPath = "scripts/main.py";
+        bool pythonOk = m_PythonEngine->Initialize(scriptPath);
+
+        if (!pythonOk)
+        {
+            LOG_APP_WARN("PythonEngine failed to initialize. Continuing without Python scripting.");
+        }
+        else
+        {
+            m_PythonEngine->OnStart();
+        }
     }
 
     void JarvisAgent::OnUpdate()
@@ -56,6 +72,11 @@ namespace AIAssistant
         }
 
         m_ChatMessagePool->RemoveExpired();
+
+        if (m_PythonEngine)
+        {
+            m_PythonEngine->OnUpdate();
+        }
 
         // check if app should terminate
         CheckIfFinished();
@@ -155,6 +176,14 @@ namespace AIAssistant
             }
             m_SessionManagers[sessionManagerName]->OnEvent(event);
         }
+
+        // ---------------------------------------------------------
+        // Forward event to Python
+        // ---------------------------------------------------------
+        if (m_PythonEngine)
+        {
+            m_PythonEngine->OnEvent(event);
+        }
     }
 
     void JarvisAgent::OnShutdown()
@@ -165,6 +194,11 @@ namespace AIAssistant
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnShutdown();
+        }
+
+        if (m_PythonEngine)
+        {
+            m_PythonEngine->OnShutdown();
         }
 
         if (m_FileWatcher)

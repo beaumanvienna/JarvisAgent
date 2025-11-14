@@ -10,3 +10,14 @@ build
 *.o
 /config.json
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Python build artifacts
+*.pyd
+*.so
+*.dll
+*.dylib
+
