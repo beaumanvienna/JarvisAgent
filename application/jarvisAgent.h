@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <chrono>
 #include <memory>
 #include <unordered_map>
 
@@ -50,6 +51,8 @@ namespace AIAssistant
 
         WebServer* GetWebServer() const { return m_WebServer.get(); }
         ChatMessagePool* GetChatMessagePool() const { return m_ChatMessagePool.get(); }
+        std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
+        int64_t GetStartupTimestamp() const;
 
     private:
         void CheckIfFinished();
@@ -58,6 +61,9 @@ namespace AIAssistant
         bool m_IsFinished{false};
 
     private:
+        std::chrono::system_clock::time_point m_StartupTime;
+
+        // submodules
         std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
         std::unique_ptr<FileWatcher> m_FileWatcher;
         std::unique_ptr<WebServer> m_WebServer;

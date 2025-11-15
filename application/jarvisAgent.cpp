@@ -27,6 +27,7 @@
 #include "web/webServer.h"
 #include "web/chatMessages.h"
 #include "python/pythonEngine.h"
+#include "file/probUtils.h"
 
 namespace AIAssistant
 {
@@ -35,6 +36,9 @@ namespace AIAssistant
 
     void JarvisAgent::OnStart()
     {
+        // capture application startup time
+        m_StartupTime = std::chrono::system_clock::now();
+
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
         App::g_App = this;
 
@@ -56,7 +60,7 @@ namespace AIAssistant
 
         if (!pythonOk)
         {
-            LOG_APP_WARN("PythonEngine failed to initialize. Continuing without Python scripting.");
+            LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
         }
         else
         {
@@ -127,40 +131,55 @@ namespace AIAssistant
 
         // -----------------------------------------------------------------------------------
         // Handle ChatMessagePool answer files: PROB_<id>_<timestamp>.output.txt
+        // Also suppress stale input files PROB_<id>_<timestamp>.txt created before startup.
         // -----------------------------------------------------------------------------------
 
         if (!filePath.empty())
         {
             std::string filename = filePath.filename().string();
 
-            if (filename.starts_with("PROB_") && filename.ends_with(".output.txt"))
+            std::optional<ProbUtils::ProbFileInfo> parsedProbFileInfo = ProbUtils::ParseProbFilename(filename);
+
+            if (parsedProbFileInfo.has_value())
             {
-                try
+                const ProbUtils::ProbFileInfo& probFileInfo = parsedProbFileInfo.value();
+
+                int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
+                int64_t fileTimestamp = probFileInfo.timestamp;
+
+                std::cout << filePath << " startupTimestamp: " << startupTimestamp << ", fileTimestamp: " << fileTimestamp
+                          << std::endl;
+
+                // -----------------------------------------------------------------------
+                // Suppress stale PROB files (input or output)
+                // -----------------------------------------------------------------------
+                if (fileTimestamp < startupTimestamp)
                 {
-                    // Extract the ID
-                    size_t pos1 = filename.find('_');           // after PROB
-                    size_t pos2 = filename.find('_', pos1 + 1); // after <id>
-                    std::string idStr = filename.substr(pos1 + 1, pos2 - (pos1 + 1));
-                    uint64_t id = std::stoull(idStr);
-
-                    // Read response text
-                    std::ifstream in(filePath);
-                    std::stringstream buffer;
-                    buffer << in.rdbuf();
-                    std::string answer = buffer.str();
-
-                    // Pass to chat pool
-                    m_ChatMessagePool->MarkAnswered(id, answer);
-
-                    LOG_APP_INFO("ChatMessagePool: answered id {} via {}", id, filename);
-                }
-                catch (const std::exception& e)
-                {
-                    LOG_APP_ERROR("Failed processing PROB_.output: {} ({})", filePath.string(), e.what());
+                    return; // silent ignore
                 }
 
-                // we do NOT forward this to SessionManager
-                return;
+                // -----------------------------------------------------------------------
+                // PROB OUTPUT → forward directly to ChatMessagePool
+                // -----------------------------------------------------------------------
+                if (probFileInfo.isOutput)
+                {
+                    std::ifstream inputStream(filePath);
+                    std::stringstream outputBuffer;
+                    outputBuffer << inputStream.rdbuf();
+
+                    std::string responseText = outputBuffer.str();
+
+                    m_ChatMessagePool->MarkAnswered(probFileInfo.id, responseText);
+
+                    LOG_APP_INFO("ChatMessagePool: answered id {} via {}", probFileInfo.id, filename);
+
+                    return; // stop here → do NOT send to SessionManager
+                }
+
+                // -----------------------------------------------------------------------
+                // PROB INPUT (non-stale) → allow SessionManager to handle it below
+                // -----------------------------------------------------------------------
+                // fall through to SessionManager handling
             }
         }
 
@@ -221,4 +240,10 @@ namespace AIAssistant
         // Ctrl+C is caught by the engine and breaks the run loop
         // Also, `q` can be used to quit
     }
+
+    int64_t JarvisAgent::GetStartupTimestamp() const
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(m_StartupTime.time_since_epoch()).count();
+    }
+
 } // namespace AIAssistant

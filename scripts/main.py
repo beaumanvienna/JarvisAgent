@@ -57,9 +57,9 @@ def OnEvent(event):
     if event_type == "FileAdded" and is_pdf(file_path):
         log_info(f"PDF detected: {file_path}")
         try:
-            output_md = file_path + ".md"
-            convert_pdf_to_markdown(file_path, output_md)
-            log_info(f"Converted PDF → Markdown: {output_md}")
+            md_path = convert_pdf_to_markdown(file_path)
+            log_info(f"PDF → Markdown ready: {md_path}")
+
         except Exception as e:
             log_error(f"PDF conversion failed for {file_path}: {e}")
 

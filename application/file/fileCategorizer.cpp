@@ -19,6 +19,8 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include "jarvisAgent.h"
+#include "file/probUtils.h"
 #include "file/fileCategorizer.h"
 #include "auxiliary/file.h"
 #include <algorithm>
@@ -163,6 +165,28 @@ namespace AIAssistant
         {
             LOG_APP_INFO("Ignoring output file: {}", filePath.string());
             return FileCategory::Ignored;
+        }
+
+        // --- Detect stale PROB files (input or output) ---
+        {
+            std::optional<ProbUtils::ProbFileInfo> probFileInfoOpt = ProbUtils::ParseProbFilename(filename);
+
+            if (probFileInfoOpt.has_value())
+            {
+                // Stale PROB files should be ignored
+                const ProbUtils::ProbFileInfo& probInfo = probFileInfoOpt.value();
+                int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
+
+                if (probInfo.timestamp < startupTimestamp)
+                {
+                    // Silent ignore — PROB file created before app started
+                    return FileCategory::Ignored;
+                }
+
+                // Non-stale PROB files should always be processed
+                // They are treated as requirements (SessionManager gets them)
+                return FileCategory::Requirement;
+            }
         }
 
         // --- Quick magic-number check for common binary formats ---

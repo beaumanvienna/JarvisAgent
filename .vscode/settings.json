@@ -83,7 +83,9 @@
         "format": "cpp",
         "future": "cpp",
         "numbers": "cpp",
-        "semaphore": "cpp"
+        "semaphore": "cpp",
+        "any": "cpp",
+        "coroutine": "cpp"
     },
     "editor.formatOnSave": true,
     "zenMode.hideLineNumbers": false
