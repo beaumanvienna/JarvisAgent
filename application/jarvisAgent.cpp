@@ -147,9 +147,6 @@ namespace AIAssistant
                 int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
                 int64_t fileTimestamp = probFileInfo.timestamp;
 
-                std::cout << filePath << " startupTimestamp: " << startupTimestamp << ", fileTimestamp: " << fileTimestamp
-                          << std::endl;
-
                 // -----------------------------------------------------------------------
                 // Suppress stale PROB files (input or output)
                 // -----------------------------------------------------------------------
