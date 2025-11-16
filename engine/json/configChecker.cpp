@@ -88,7 +88,7 @@ namespace AIAssistant
         }
         else
         {
-            // queue is a directory, but max threads not set: fix it
+            // max threads not set: fix it
             if ((engineConfig.m_MaxThreads <= 0) || (engineConfig.m_MaxThreads > 256))
             {
                 LOG_APP_ERROR("Max threads not set. Fixing max threads. The config file should have a field "
@@ -96,12 +96,20 @@ namespace AIAssistant
                 engineConfig.m_MaxThreads = 16;
             }
 
-            // queue is a directory, but sleep time not set: fix it
+            // sleep time not set: fix it
             if ((engineConfig.m_SleepDuration <= 0ms) || (engineConfig.m_SleepDuration > 256ms))
             {
                 LOG_APP_ERROR("Sleep time not set. Fixing sleep time. The config file should have a field "
                               "similar to '\"engine sleep time in run loop in ms\": 10'");
                 engineConfig.m_SleepDuration = 10ms;
+            }
+
+            // max file size not set: fix it
+            if ((engineConfig.m_MaxFileSizekB <= 0) || (engineConfig.m_MaxFileSizekB > 256))
+            {
+                LOG_APP_ERROR("Max file size not set. Fixing max file size. The config file should have a field "
+                              "similar to '\"max file size in kB\": 20'");
+                engineConfig.m_MaxFileSizekB = 20;
             }
         }
 

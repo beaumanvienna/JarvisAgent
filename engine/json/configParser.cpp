@@ -112,6 +112,14 @@ namespace AIAssistant
                 engineConfig.m_SleepDuration = std::chrono::milliseconds(sleepTime);
                 ++fieldOccurances[ConfigFields::SleepTime];
             }
+            else if (jsonObjectKey == "max file size in kB")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto maxFileSizekB = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("max file size in kB: {}", maxFileSizekB);
+                engineConfig.m_MaxFileSizekB = maxFileSizekB;
+                ++fieldOccurances[ConfigFields::MaxFileSizekB];
+            }
             else if (jsonObjectKey == "verbose")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::boolean), "type must be boolean");

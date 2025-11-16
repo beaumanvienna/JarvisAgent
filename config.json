@@ -19,5 +19,6 @@
             "API": "API2"
         }
     ],
-    "API index": 1
+    "API index": 1,
+    "max file size in kB": 24
 }

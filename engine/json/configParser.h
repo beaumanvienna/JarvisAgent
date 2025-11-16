@@ -59,6 +59,7 @@ namespace AIAssistant
             bool m_Verbose{false};
             size_t m_ApiIndex{0};
             std::vector<ApiInterface> m_ApiInterfaces;
+            size_t m_MaxFileSizekB{20};
             bool m_ConfigValid{false};
 
             bool IsValid() const { return m_ConfigValid; }
@@ -78,6 +79,7 @@ namespace AIAssistant
             Model,
             InterfaceType,
             ApiIndex,
+            MaxFileSizekB,
             NumConfigFields
         };
 

@@ -146,6 +146,12 @@ namespace AIAssistant
             return FileCategory::SubFolder;
         }
 
+        if (filePath.stem().string().ends_with(".output"))
+        {
+            LOG_APP_INFO("Ignoring output file: {}", filePath.string());
+            return FileCategory::Ignored;
+        }
+
         if (filename.starts_with("STNG"))
         {
             return FileCategory::Settings;
@@ -159,12 +165,6 @@ namespace AIAssistant
         if (filename.starts_with("TASK"))
         {
             return FileCategory::Task;
-        }
-
-        if (filePath.stem().string().ends_with(".output"))
-        {
-            LOG_APP_INFO("Ignoring output file: {}", filePath.string());
-            return FileCategory::Ignored;
         }
 
         // --- Detect stale PROB files (input or output) ---
@@ -258,6 +258,36 @@ namespace AIAssistant
             if (nonTextRatio > 0.1) // >10% non-printable = treat as binary
             {
                 LOG_APP_INFO("Ignoring binary file (non-text ratio {:.1f}%): {}", nonTextRatio * 100.0, filePath.string());
+                return FileCategory::Ignored;
+            }
+        }
+
+        // --- Hard limit for oversized files ---
+        {
+            std::error_code errorCode;
+            auto fileSize = fs::file_size(filePath, errorCode);
+
+            size_t fileSizeLimit = Core::g_Core->GetConfig().m_MaxFileSizekB;
+
+            if (!errorCode && fileSize > fileSizeLimit * 1024)
+            {
+                // Create .output.txt message
+                fs::path outputPath = filePath;
+                outputPath += ".output.txt";
+
+                std::ofstream out(outputPath);
+                if (out)
+                {
+                    out << "File '" << filePath.filename().string() << "' is too large (" << fileSize
+                        << " bytes). Maximum allowed size is " << fileSizeLimit << " kB.\n"
+                        << "Processing was skipped.\n";
+                }
+                else
+                {
+                    LOG_APP_ERROR("Failed to write oversized-file output: {}", outputPath.string());
+                }
+
+                LOG_APP_WARN("Ignoring oversized file: {} ({} bytes)", filePath.string(), fileSize);
                 return FileCategory::Ignored;
             }
         }
