@@ -208,9 +208,11 @@ namespace AIAssistant
 
             // ZIP files and ZIP-based formats (DOCX, XLSX, PPTX, ODT)
             bool isZipFormat = match({0x50, 0x4B, 0x03, 0x04});
+
+            // extension
             std::string ext = filePath.extension().string();
-            // Convert the extension to lowercase using std::transform and std::tolower
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            // Convert the extension to lowercase
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
 
             bool isOffice = isZipFormat && (ext == ".docx" || ext == ".xlsx" || ext == ".pptx" || ext == ".odt");
             bool isZip = isZipFormat && !isOffice;
@@ -237,7 +239,7 @@ namespace AIAssistant
             // ------------------------------
             if (isPng || isJpeg || isGif || isBmp || isElf || isPe || isZip)
             {
-                LOG_APP_INFO("File won't be sent directly to AI (binary type): {}", filePath.string());
+                LOG_APP_INFO("File won't be sent to AI (binary type): {}", filePath.string());
                 return FileCategory::Ignored;
             }
         }

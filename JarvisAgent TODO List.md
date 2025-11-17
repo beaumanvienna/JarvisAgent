@@ -1,30 +1,55 @@
-# JarvisAgent — TODO List
+# JarvisAgent TODO List (Core Items Only)
 
-## 1. Status Line Renderer overwrites log messages
-**Severity: Critical**
-
-The animated status/progress line overwrites `spdlog` output.
-
-Fix options:
-- Disable status line entirely  
-- Or: log to stderr and render status line on stdout  
-- Or: only draw the status line when stdout is a TTY  
+This list tracks the remaining essential work for JarvisAgent.
 
 ---
 
-## 2. GPT response parser: “no content” warning is too noisy
-When the model returns only reasoning tokens, no visible answer text is produced.
-
-Fix:  
-If content is empty, write this instead (no warning):
-
-```
-The model returned no answer (empty response).
-```
+## 1. Status Line Renderer Cleanup  
+**Problem:** Status line overwrites other log messages.  
+**Goal:** Ensure logs remain readable.  
+**Current plan:** Disable or restrict status line output until ANSI-based version is implemented.
 
 ---
 
-## 3. Minor cleanup (low priority)
-- naming consistency  
-- remove leftover logs  
-- small categorizer polish  
+## 2. File Categorizer Polish (Log Cleanliness)  
+**Goal:**  
+Reduce noise by removing unnecessary logs, especially for document formats handled by Python (PDF, DOCX, XLSX, PPTX).
+
+---
+
+## 3. Add GitHub Ubuntu CI Pipeline  
+**Goal:**  
+Automatic build + run tests on push/PR.  
+- Build on Ubuntu  
+- Run unit tests  
+- Run formatting checks  
+- Cache dependencies  
+- Fails early if compilation breaks
+
+---
+
+## 4. Compile on Windows  
+**Goal:**  
+Enable full Windows compatibility.  
+- Configure MSVC build  
+- Resolve filesystem path differences  
+- Add GitHub Windows CI
+
+---
+
+## 5. Dockerize JarvisAgent  
+**Goal:**  
+Provide a reproducible container environment.  
+- Ubuntu base image  
+- All required dependencies preinstalled  
+
+---
+
+## 6. Remove OnUpdate Python calls 
+**Goal:**  
+- OnUpdate() not used
+- Events jam event queuw during long file conversion
+
+
+---
+
