@@ -63,13 +63,6 @@ def OnEvent(event):
         except Exception as e:
             log_error(f"PDF conversion failed for {file_path}: {e}")
 
-    # ------------------------
-    # IGNORE binary input files
-    # ------------------------
-    if event_type == "FileAdded" and is_binary_file(file_path):
-        log_warn(f"Ignoring binary file: {file_path}")
-        return
-
     return
 
 

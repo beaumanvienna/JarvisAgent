@@ -86,8 +86,9 @@ namespace AIAssistant
         CheckIfFinished();
     }
 
-    void JarvisAgent::OnEvent(Event& event)
+    void JarvisAgent::OnEvent(std::shared_ptr<Event>& eventPtr)
     {
+        auto& event = *eventPtr.get();
         EventDispatcher dispatcher(event);
 
         // app-level event handling
@@ -198,7 +199,7 @@ namespace AIAssistant
         // ---------------------------------------------------------
         if (m_PythonEngine)
         {
-            m_PythonEngine->OnEvent(event);
+            m_PythonEngine->OnEvent(eventPtr);
         }
     }
 

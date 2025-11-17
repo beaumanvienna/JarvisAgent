@@ -43,7 +43,7 @@ namespace AIAssistant
 
         virtual void OnStart() override;
         virtual void OnUpdate() override;
-        virtual void OnEvent(Event&) override;
+        virtual void OnEvent(std::shared_ptr<Event>&) override;
         virtual void OnShutdown() override;
 
         virtual bool IsFinished() const override;

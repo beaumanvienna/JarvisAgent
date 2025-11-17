@@ -31,7 +31,7 @@ namespace AIAssistant
 
         virtual void OnStart() = 0;
         virtual void OnUpdate() = 0;
-        virtual void OnEvent(Event&) = 0;
+        virtual void OnEvent(std::shared_ptr<Event>&) = 0;
         virtual void OnShutdown() = 0;
 
         virtual bool IsFinished() const = 0;

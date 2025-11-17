@@ -137,7 +137,7 @@ namespace AIAssistant
                     // pass to app if not handled
                     if (!event.IsHandled())
                     {
-                        app->OnEvent(event);
+                        app->OnEvent(eventPtr);
                     }
                 }
             }

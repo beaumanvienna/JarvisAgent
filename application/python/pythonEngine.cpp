@@ -23,8 +23,6 @@
 #include "pythonEngine.h"
 
 #include <filesystem>
-#include <iostream>
-
 #include <Python.h>
 
 #include "log/log.h"
@@ -43,6 +41,7 @@ namespace AIAssistant
     void PythonEngine::Reset()
     {
         m_Running = false;
+
         m_ScriptPath.clear();
         m_ScriptDir.clear();
         m_ModuleName.clear();
@@ -85,9 +84,13 @@ namespace AIAssistant
         }
 
         Reset();
+        m_StopRequested = false;
 
         m_ScriptPath = scriptPath;
 
+        // ---------------------------------------------------------
+        // Resolve script directory + module name
+        // ---------------------------------------------------------
         try
         {
             fs::path pythonScriptPath(scriptPath);
@@ -102,6 +105,9 @@ namespace AIAssistant
 
         LOG_APP_INFO("Initializing PythonEngine with script '{}'", m_ScriptPath);
 
+        // ---------------------------------------------------------
+        // Initialize Python interpreter (GIL is held after this)
+        // ---------------------------------------------------------
         Py_Initialize();
 
         if (!Py_IsInitialized())
@@ -110,153 +116,204 @@ namespace AIAssistant
             return false;
         }
 
-        // Acquire GIL before modifying sys.path
-        PyGILState_STATE gilState = PyGILState_Ensure();
-
-        // -----------------------------------------
-        // Add script directory to sys.path
-        // -----------------------------------------
-        PyObject* sysModule = PyImport_ImportModule("sys");
-        if (!sysModule)
+        // ---------------------------------------------------------
+        // All interpreter setup MUST occur before releasing GIL
+        // ---------------------------------------------------------
         {
-            PyGILState_Release(gilState);
-            PyErr_Print();
-            LOG_APP_ERROR("PythonEngine: failed to import 'sys'");
-            return false;
-        }
+            PyGILState_STATE gilState = PyGILState_Ensure();
 
-        PyObject* sysPathList = PyObject_GetAttrString(sysModule, "path");
-        if (!sysPathList || !PyList_Check(sysPathList))
-        {
-            Py_XDECREF(sysPathList);
-            Py_DECREF(sysModule);
-            PyGILState_Release(gilState);
-            LOG_APP_ERROR("PythonEngine: sys.path is not a list");
-            return false;
-        }
+            // -----------------------------------------------------
+            // Add script directory to sys.path
+            // -----------------------------------------------------
+            PyObject* sysModule = PyImport_ImportModule("sys");
+            if (!sysModule)
+            {
+                PyErr_Print();
+                LOG_APP_ERROR("PythonEngine: failed to import 'sys'");
+                PyGILState_Release(gilState);
+                return false;
+            }
 
-        PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
-        if (!directoryString)
-        {
-            Py_DECREF(sysPathList);
-            Py_DECREF(sysModule);
-            PyGILState_Release(gilState);
-            LOG_APP_ERROR("PythonEngine: failed to build directory string");
-            return false;
-        }
+            PyObject* sysPathList = PyObject_GetAttrString(sysModule, "path");
+            if (!sysPathList || !PyList_Check(sysPathList))
+            {
+                Py_XDECREF(sysPathList);
+                Py_DECREF(sysModule);
+                LOG_APP_ERROR("PythonEngine: sys.path is not a list");
+                PyGILState_Release(gilState);
+                return false;
+            }
 
-        if (PyList_Append(sysPathList, directoryString) != 0)
-        {
-            PyErr_Print();
-            LOG_APP_ERROR("PythonEngine: failed to append '{}' to sys.path", m_ScriptDir);
+            PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
+            if (!directoryString)
+            {
+                Py_DECREF(sysPathList);
+                Py_DECREF(sysModule);
+                LOG_APP_ERROR("PythonEngine: failed to create directory string");
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            PyList_Append(sysPathList, directoryString);
+
             Py_DECREF(directoryString);
             Py_DECREF(sysPathList);
             Py_DECREF(sysModule);
+
+            // -----------------------------------------------------
+            // Import the script module
+            // -----------------------------------------------------
+            PyObject* moduleNameStr = PyUnicode_FromString(m_ModuleName.c_str());
+            if (!moduleNameStr)
+            {
+                LOG_APP_ERROR("PythonEngine: failed to create module name '{}'", m_ModuleName);
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            m_MainModule = PyImport_Import(moduleNameStr);
+            Py_DECREF(moduleNameStr);
+
+            if (!m_MainModule)
+            {
+                PyErr_Print();
+                LOG_APP_ERROR("PythonEngine: failed to import module '{}'", m_ModuleName);
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            m_MainDict = PyModule_GetDict(m_MainModule);
+            if (!m_MainDict)
+            {
+                LOG_APP_ERROR("PythonEngine: failed to retrieve module dict");
+                Py_DECREF(m_MainModule);
+                m_MainModule = nullptr;
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            // -----------------------------------------------------
+            // Load hook functions
+            // -----------------------------------------------------
+            auto loadHook = [&](char const* hookName, PyObject*& outFunc)
+            {
+                outFunc = nullptr;
+
+                PyObject* functionObject = PyDict_GetItemString(m_MainDict, hookName);
+                if (functionObject && PyCallable_Check(functionObject))
+                {
+                    Py_INCREF(functionObject);
+                    outFunc = functionObject;
+                    LOG_APP_INFO("PythonEngine: found hook '{}()'", hookName);
+                }
+                else
+                {
+                    LOG_APP_INFO("PythonEngine: hook '{}()' not defined", hookName);
+                }
+            };
+
+            loadHook("OnStart", m_OnStartFunc);
+            loadHook("OnUpdate", m_OnUpdateFunc);
+            loadHook("OnEvent", m_OnEventFunc);
+            loadHook("OnShutdown", m_OnShutdownFunc);
+
             PyGILState_Release(gilState);
-            return false;
         }
 
-        Py_DECREF(directoryString);
-        Py_DECREF(sysPathList);
-        Py_DECREF(sysModule);
-
-        // -----------------------------------------
-        // Load module
-        // -----------------------------------------
-        bool moduleLoaded = LoadModule();
-        if (!moduleLoaded)
-        {
-            PyGILState_Release(gilState);
-            LOG_APP_ERROR("PythonEngine: failed to load module '{}'", m_ModuleName);
-            return false;
-        }
-
-        // -----------------------------------------
-        // Load hooks
-        // -----------------------------------------
-        LoadHooks();
+        // release the GIL, this allows the worker thread to reacquire it safely
+        PyEval_SaveThread();
 
         m_Running = true;
 
-        PyGILState_Release(gilState);
+        // ---------------------------------------------------------
+        // Launch the worker thread
+        // ---------------------------------------------------------
+        StartWorkerThread();
 
         LOG_APP_INFO("PythonEngine initialized successfully");
         return true;
     }
 
-    bool PythonEngine::LoadModule()
+    void PythonEngine::StartWorkerThread() { m_WorkerThread = std::thread(&PythonEngine::WorkerLoop, this); }
+
+    void PythonEngine::WorkerLoop()
     {
-        PyObject* moduleNameString = PyUnicode_FromString(m_ModuleName.c_str());
-        if (!moduleNameString)
+        while (true)
         {
-            LOG_APP_ERROR("PythonEngine: failed to create module name '{}'", m_ModuleName);
-            return false;
+            PythonTask task;
+
+            {
+                std::unique_lock<std::mutex> lock(m_QueueMutex);
+                m_QueueCondition.wait(lock, [&]() { return m_StopRequested || !m_TaskQueue.empty(); });
+
+                if (m_StopRequested) // cancel all jobs
+                {
+                    break;
+                }
+                task = m_TaskQueue.front();
+                m_TaskQueue.pop();
+            }
+            PyGILState_STATE gilState = PyGILState_Ensure();
+            switch (task.m_Type)
+            {
+                case PythonTask::Type::OnStart:
+                {
+                    if (m_OnStartFunc)
+                    {
+                        CallHook(m_OnStartFunc, "OnStart");
+                    }
+                    break;
+                }
+
+                case PythonTask::Type::OnUpdate:
+                {
+                    if (m_OnUpdateFunc)
+                    {
+                        CallHook(m_OnUpdateFunc, "OnUpdate");
+                    }
+                    break;
+                }
+
+                case PythonTask::Type::OnEvent:
+                {
+                    if (m_OnEventFunc && task.m_EventPtr)
+                    {
+                        CallHookWithEvent(m_OnEventFunc, "OnEvent", *task.m_EventPtr);
+                    }
+                    break;
+                }
+
+                case PythonTask::Type::Shutdown:
+                {
+                    if (m_OnShutdownFunc)
+                    {
+                        CallHook(m_OnShutdownFunc, "OnShutdown");
+                    }
+                    break;
+                }
+            }
+
+            PyGILState_Release(gilState);
         }
-
-        PyObject* importedModule = PyImport_Import(moduleNameString);
-        Py_DECREF(moduleNameString);
-
-        if (!importedModule)
-        {
-            LOG_APP_ERROR("PythonEngine: PyImport_Import failed for '{}'", m_ModuleName);
-            PyErr_Print();
-            return false;
-        }
-
-        m_MainModule = importedModule;
-
-        m_MainDict = PyModule_GetDict(m_MainModule);
-        if (!m_MainDict)
-        {
-            LOG_APP_ERROR("PythonEngine: failed to get module dict");
-            Py_DECREF(m_MainModule);
-            m_MainModule = nullptr;
-            return false;
-        }
-
-        return true;
     }
 
-    void PythonEngine::LoadHooks()
+    void PythonEngine::EnqueueTask(PythonTask const& task)
     {
-        auto loadHook = [this](char const* hookName, PyObject*& outFunction)
         {
-            outFunction = nullptr;
-
-            if (m_MainDict == nullptr)
-            {
-                return;
-            }
-
-            PyObject* object = PyDict_GetItemString(m_MainDict, hookName);
-            if (object != nullptr && PyCallable_Check(object))
-            {
-                Py_INCREF(object);
-                outFunction = object;
-                LOG_APP_INFO("PythonEngine: found hook '{}()'", hookName);
-            }
-            else
-            {
-                LOG_APP_INFO("PythonEngine: hook '{}()' not defined", hookName);
-            }
-        };
-
-        loadHook("OnStart", m_OnStartFunc);
-        loadHook("OnUpdate", m_OnUpdateFunc);
-        loadHook("OnEvent", m_OnEventFunc);
-        loadHook("OnShutdown", m_OnShutdownFunc);
+            std::lock_guard<std::mutex> lock(m_QueueMutex);
+            m_TaskQueue.push(task);
+        }
+        m_QueueCondition.notify_one();
     }
+
+    // ---------------------------------------------------------
+    // Call hooks
+    // ---------------------------------------------------------
 
     void PythonEngine::CallHook(PyObject* function, char const* hookName)
     {
-        if (!m_Running || function == nullptr)
-        {
-            return;
-        }
-
-        PyGILState_STATE gilState = PyGILState_Ensure();
-
         PyObject* result = PyObject_CallObject(function, nullptr);
+
         if (!result)
         {
             LOG_APP_ERROR("PythonEngine: exception in hook '{}()'", hookName);
@@ -266,40 +323,23 @@ namespace AIAssistant
         {
             Py_DECREF(result);
         }
-
-        PyGILState_Release(gilState);
     }
 
     void PythonEngine::CallHookWithEvent(PyObject* function, char const* hookName, Event const& event)
     {
-        if (!m_Running || function == nullptr)
-        {
-            return;
-        }
-
-        PyGILState_STATE gilState = PyGILState_Ensure();
-
-        PyObject* eventDictionary = BuildEventDict(event);
-        if (!eventDictionary)
+        PyObject* eventDict = BuildEventDict(event);
+        if (!eventDict)
         {
             LOG_APP_ERROR("PythonEngine: failed to build event dictionary for '{}'", hookName);
-            PyGILState_Release(gilState);
             return;
         }
 
-        PyObject* argumentsTuple = PyTuple_New(1);
-        if (!argumentsTuple)
-        {
-            Py_DECREF(eventDictionary);
-            LOG_APP_ERROR("PythonEngine: failed to allocate tuple for '{}'", hookName);
-            PyGILState_Release(gilState);
-            return;
-        }
+        PyObject* args = PyTuple_New(1);
+        PyTuple_SetItem(args, 0, eventDict); // steals reference to eventDict
 
-        PyTuple_SetItem(argumentsTuple, 0, eventDictionary);
+        PyObject* result = PyObject_CallObject(function, args);
 
-        PyObject* result = PyObject_CallObject(function, argumentsTuple);
-        Py_DECREF(argumentsTuple);
+        Py_DECREF(args);
 
         if (!result)
         {
@@ -310,8 +350,6 @@ namespace AIAssistant
         {
             Py_DECREF(result);
         }
-
-        PyGILState_Release(gilState);
     }
 
     PyObject* PythonEngine::BuildEventDict(Event const& event)
@@ -323,29 +361,22 @@ namespace AIAssistant
         }
 
         PyObject* typeString = PyUnicode_FromString(event.GetName());
-        if (!typeString || PyDict_SetItemString(dictionary, "type", typeString) != 0)
-        {
-            Py_XDECREF(typeString);
-            Py_DECREF(dictionary);
-            return nullptr;
-        }
+        PyDict_SetItemString(dictionary, "type", typeString);
         Py_DECREF(typeString);
 
-        auto fileSystemEvent = dynamic_cast<AIAssistant::FileSystemEvent const*>(&event);
-        if (fileSystemEvent != nullptr)
+        if (auto fileSystemEvent = dynamic_cast<FileSystemEvent const*>(&event))
         {
             PyObject* pathString = PyUnicode_FromString(fileSystemEvent->GetPath().c_str());
-            if (!pathString || PyDict_SetItemString(dictionary, "path", pathString) != 0)
-            {
-                Py_XDECREF(pathString);
-                Py_DECREF(dictionary);
-                return nullptr;
-            }
+            PyDict_SetItemString(dictionary, "path", pathString);
             Py_DECREF(pathString);
         }
 
         return dictionary;
     }
+
+    // ---------------------------------------------------------
+    // Public API event entry points
+    // ---------------------------------------------------------
 
     void PythonEngine::OnStart()
     {
@@ -354,10 +385,9 @@ namespace AIAssistant
             return;
         }
 
-        if (m_OnStartFunc)
-        {
-            CallHook(m_OnStartFunc, "OnStart");
-        }
+        PythonTask task;
+        task.m_Type = PythonTask::Type::OnStart;
+        EnqueueTask(task);
     }
 
     void PythonEngine::OnUpdate()
@@ -367,23 +397,22 @@ namespace AIAssistant
             return;
         }
 
-        if (m_OnUpdateFunc)
-        {
-            CallHook(m_OnUpdateFunc, "OnUpdate");
-        }
+        PythonTask task;
+        task.m_Type = PythonTask::Type::OnUpdate;
+        EnqueueTask(task);
     }
 
-    void PythonEngine::OnEvent(Event const& event)
+    void PythonEngine::OnEvent(std::shared_ptr<Event> eventPtr)
     {
         if (!m_Running)
         {
             return;
         }
 
-        if (m_OnEventFunc)
-        {
-            CallHookWithEvent(m_OnEventFunc, "OnEvent", event);
-        }
+        PythonTask task;
+        task.m_Type = PythonTask::Type::OnEvent;
+        task.m_EventPtr = std::move(eventPtr);
+        EnqueueTask(task);
     }
 
     void PythonEngine::OnShutdown()
@@ -393,10 +422,9 @@ namespace AIAssistant
             return;
         }
 
-        if (m_OnShutdownFunc)
-        {
-            CallHook(m_OnShutdownFunc, "OnShutdown");
-        }
+        PythonTask task;
+        task.m_Type = PythonTask::Type::Shutdown;
+        EnqueueTask(task);
     }
 
     void PythonEngine::Shutdown()
@@ -406,15 +434,31 @@ namespace AIAssistant
             return;
         }
 
-        m_Running = false;
+        m_StopRequested = true;
+        m_QueueCondition.notify_all();
 
-        Reset();
-
-        if (Py_IsInitialized())
+        // wait for worker thread to stop
+        if (m_WorkerThread.joinable())
         {
-            Py_Finalize();
+            m_WorkerThread.join();
         }
 
+        // reacquire GIL BEFORE finalizing
+        PyGILState_Ensure();
+
+        // Decrease references safely
+        Py_XDECREF(m_OnStartFunc);
+        Py_XDECREF(m_OnUpdateFunc);
+        Py_XDECREF(m_OnEventFunc);
+        Py_XDECREF(m_OnShutdownFunc);
+
+        Py_XDECREF(m_MainModule);
+        // m_MainDict is borrowed from module, do NOT DECREF it
+
+        // finalize Python
+        Py_Finalize();
+
+        m_Running = false;
         LOG_APP_INFO("Python engine stopped");
     }
 

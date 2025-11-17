@@ -206,17 +206,38 @@ namespace AIAssistant
             auto match = [&](std::initializer_list<unsigned char> sig)
             { return n >= sig.size() && std::equal(sig.begin(), sig.end(), header.begin()); };
 
-            if (match({0x50, 0x4B, 0x03, 0x04}) || // ZIP / DOCX / XLSX / ODT
-                match({0x89, 0x50, 0x4E, 0x47}) || // PNG
-                match({0x25, 0x50, 0x44, 0x46}) || // PDF
-                match({0xFF, 0xD8, 0xFF}) ||       // JPEG
-                match({0x47, 0x49, 0x46, 0x38}) || // GIF
-                match({0x42, 0x4D}) ||             // BMP
-                match({0x7F, 0x45, 0x4C, 0x46}) || // ELF binary
-                match({0x4D, 0x5A})                // Windows PE (EXE/DLL)
-            )
+            // ZIP files and ZIP-based formats (DOCX, XLSX, PPTX, ODT)
+            bool isZipFormat = match({0x50, 0x4B, 0x03, 0x04});
+            std::string ext = filePath.extension().string();
+            // Convert the extension to lowercase using std::transform and std::tolower
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+            bool isOffice = isZipFormat && (ext == ".docx" || ext == ".xlsx" || ext == ".pptx" || ext == ".odt");
+            bool isZip = isZipFormat && !isOffice;
+            bool isPdf = match({0x25, 0x50, 0x44, 0x46}); // %PDF
+
+            bool isPng = match({0x89, 0x50, 0x4E, 0x47});
+            bool isJpeg = match({0xFF, 0xD8, 0xFF});
+            bool isGif = match({0x47, 0x49, 0x46, 0x38});
+            bool isBmp = match({0x42, 0x4D});
+            bool isElf = match({0x7F, 0x45, 0x4C, 0x46});
+            bool isPe = match({0x4D, 0x5A});
+
+            // ------------------------------
+            // Document formats → silent skip
+            // Python handles conversion.
+            // ------------------------------
+            if (isPdf || isOffice)
             {
-                LOG_APP_INFO("Ignoring known binary type (magic number match): {}", filePath.string());
+                return FileCategory::Ignored;
+            }
+
+            // ------------------------------
+            // Other binaries → log + ignore
+            // ------------------------------
+            if (isPng || isJpeg || isGif || isBmp || isElf || isPe || isZip)
+            {
+                LOG_APP_INFO("File won't be sent directly to AI (binary type): {}", filePath.string());
                 return FileCategory::Ignored;
             }
         }

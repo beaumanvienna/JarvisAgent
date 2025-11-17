@@ -22,6 +22,11 @@
 #pragma once
 
 #include <string>
+#include <queue>
+#include <thread>
+#include <mutex>
+#include <memory>
+#include <condition_variable>
 
 // Forward declaration to avoid including Python headers here
 struct _object;
@@ -30,6 +35,20 @@ typedef _object PyObject;
 namespace AIAssistant
 {
     class Event;
+
+    struct PythonTask
+    {
+        enum class Type
+        {
+            OnStart,
+            OnUpdate,
+            OnEvent,
+            Shutdown
+        };
+
+        Type m_Type{};
+        std::shared_ptr<Event> m_EventPtr;
+    };
 
     class PythonEngine
     {
@@ -42,23 +61,26 @@ namespace AIAssistant
 
         void OnStart();
         void OnUpdate();
-        void OnEvent(Event const& event);
+        void OnEvent(std::shared_ptr<Event> eventPtr);
         void OnShutdown();
 
         bool IsRunning() const { return m_Running; }
 
     private:
         void Reset();
-        bool LoadModule();
-        void LoadHooks();
 
         void CallHook(PyObject* function, char const* hookName);
         void CallHookWithEvent(PyObject* function, char const* hookName, Event const& event);
-
         PyObject* BuildEventDict(Event const& event);
+
+        // Worker
+        void StartWorkerThread();
+        void WorkerLoop();
+        void EnqueueTask(PythonTask const& task);
 
     private:
         bool m_Running{false};
+        bool m_StopRequested{false};
 
         std::string m_ScriptPath;
         std::string m_ScriptDir;
@@ -71,6 +93,11 @@ namespace AIAssistant
         PyObject* m_OnUpdateFunc{nullptr};
         PyObject* m_OnEventFunc{nullptr};
         PyObject* m_OnShutdownFunc{nullptr};
+
+        std::thread m_WorkerThread;
+        std::mutex m_QueueMutex;
+        std::condition_variable m_QueueCondition;
+        std::queue<PythonTask> m_TaskQueue;
     };
 
 } // namespace AIAssistant
