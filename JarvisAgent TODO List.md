@@ -11,13 +11,7 @@ This list tracks the remaining essential work for JarvisAgent.
 
 ---
 
-## 2. File Categorizer Polish (Log Cleanliness)  
-**Goal:**  
-Reduce noise by removing unnecessary logs, especially for document formats handled by Python (PDF, DOCX, XLSX, PPTX).
-
----
-
-## 3. Add GitHub Ubuntu CI Pipeline  
+## 2. Add GitHub Ubuntu CI Pipeline  
 **Goal:**  
 Automatic build + run tests on push/PR.  
 - Build on Ubuntu  
@@ -28,7 +22,7 @@ Automatic build + run tests on push/PR.
 
 ---
 
-## 4. Compile on Windows  
+## 3. Compile on Windows  
 **Goal:**  
 Enable full Windows compatibility.  
 - Configure MSVC build  
@@ -37,7 +31,7 @@ Enable full Windows compatibility.
 
 ---
 
-## 5. Dockerize JarvisAgent  
+## 4. Dockerize JarvisAgent  
 **Goal:**  
 Provide a reproducible container environment.  
 - Ubuntu base image  
@@ -45,7 +39,7 @@ Provide a reproducible container environment.
 
 ---
 
-## 6. Remove OnUpdate Python calls 
+## 5. Remove OnUpdate Python calls 
 **Goal:**  
 - OnUpdate() not used
 - Events jam event queuw during long file conversion
