@@ -27,6 +27,7 @@ Copyright (c) 2025 JC Technolabs
 from helpers.log import log_info, log_warn, log_error
 from helpers.fileutils import is_pdf, is_binary_file, read_text_file, write_text_file
 from helpers.markitdown_tools import convert_pdf_to_markdown
+from helpers.md_chunker import chunk_markdown_if_needed
 
 # This is called once when JarvisAgent starts
 def OnStart():
@@ -50,6 +51,7 @@ def OnEvent(event):
 
     event_type = event.get("type")
     file_path = event.get("path", "")
+    log_info(f"Python OnEvent() called with event type {event_type} and file path {file_path}")
 
     # ----------------------
     # AUTO-CONVERT PDF FILES
@@ -57,13 +59,29 @@ def OnEvent(event):
     if event_type == "FileAdded" and is_pdf(file_path):
         log_info(f"PDF detected: {file_path}")
         try:
-            md_path = convert_pdf_to_markdown(file_path)
-            log_info(f"PDF → Markdown ready: {md_path}")
+            markdown_path = convert_pdf_to_markdown(file_path)
+            log_info(f"PDF → Markdown ready: {markdown_path}")
+        except Exception as exception:
+            log_error(f"PDF conversion failed for {file_path}: {exception}")
+        return
 
-        except Exception as e:
-            log_error(f"PDF conversion failed for {file_path}: {e}")
+    # ----------------------
+    # CHUNK LARGE MARKDOWN FILES
+    # ----------------------
+    # We only care about newly added .md files that are not obvious
+    # output files (e.g., "*.output.txt").
+    if event_type == "FileAdded" and file_path.endswith(".md"):
+        # C++ core already ignores oversized .md files in the queue,
+        # but we also want Python to chunk them into smaller parts.
+        log_info(f"Markdown file detected for potential chunking: {file_path}")
+        try:
+            chunk_markdown_if_needed(file_path)
+        except Exception as exception:
+            log_error(f"Markdown chunking failed for {file_path}: {exception}")
+        return
 
     return
+
 
 
 # Called once when the C++ application is shutting down
