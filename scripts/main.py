@@ -51,7 +51,6 @@ def OnEvent(event):
 
     event_type = event.get("type")
     file_path = event.get("path", "")
-    log_info(f"Python OnEvent() called with event type {event_type} and file path {file_path}")
 
     # ----------------------
     # AUTO-CONVERT PDF FILES

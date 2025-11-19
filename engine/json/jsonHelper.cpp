@@ -32,6 +32,10 @@ namespace AIAssistant
         {
             switch (c)
             {
+                case '':
+                {
+                    break;
+                }
                 case '\"':
                 {
                     output += "\\\"";

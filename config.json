@@ -2,23 +2,39 @@
     "file format identifier": 1.2,
     "description": "jarvisAgent configuration file",
     "author": "Copyright (c) 2025 JC Technolabs",
+
     "queue folder": "../queue",
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
     "verbose": false,
-    "API interfaces":
-    [
+
+    "API interfaces": [
         {
             "url": "https://api.openai.com/v1/chat/completions",
             "model": "gpt-4.1",
-            "API": "API1"
+            "API": "API1",
+            "description": "High-accuracy model with strong reasoning. Use for precise technical tasks, debugging, and complex questions. Use API index 0."
         },
         {
             "url": "https://api.openai.com/v1/responses",
             "model": "gpt-5-nano",
-            "API": "API2"
+            "API": "API2",
+            "description": "Ultra-fast and extremely low-cost model. Ideal for large document batches, chunked PDF processing, and high-volume workloads.  Use API index 1."
+        },
+        {
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1-mini",
+            "API": "API1",
+            "description": "Lightweight, inexpensive model. Suitable for quick rewrites, smaller tasks, and general utility work.  Use API index 2."
+        },
+        {
+            "url": "https://api.openai.com/v1/responses",
+            "model": "gpt-4.1-mini",
+            "API": "API2",
+            "description": "Same model as gpt-4.1-mini, but via the Responses API for faster throughput when processing sequential chunks.  Use API index 3."
         }
     ],
-    "API index": 1,
+
+    "API index": 3,
     "max file size in kB": 24
 }
