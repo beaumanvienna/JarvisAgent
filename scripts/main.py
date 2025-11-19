@@ -34,6 +34,26 @@ from helpers.md_chunker import chunk_markdown_if_needed
 from helpers.chunk_combiner import handle_chunk_output_added
 
 
+def is_md_up_to_date(markdown_path: Path) -> bool:
+    """
+    Returns True if <markdown>.output.md exists and is newer.
+    """
+    if not markdown_path.name.endswith(".md"):
+        return False
+
+    # Derive foo.md → foo.output.md
+    output_path = markdown_path.with_suffix(".output.md")
+
+    if not output_path.exists():
+        return False
+
+    try:
+        return output_path.stat().st_mtime >= markdown_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+
 # regex to detect chunk output files
 CHUNK_OUTPUT_REGEX = re.compile(r"^chunk_(\d+)\.output\.md$")
 
@@ -98,6 +118,12 @@ def OnEvent(event):
         if CHUNK_OUTPUT_REGEX.match(file_name):
             return
 
+        # Skip chunking if foo.output.md is newer than foo.md
+        md_path = Path(file_path)
+        if is_md_up_to_date(md_path):
+            log_info(f"Markdown already processed — skipping: {file_path}")
+            return
+        
         # Original logic
         log_info(f"Markdown file detected for potential chunking: {file_path}")
         try:
@@ -105,6 +131,7 @@ def OnEvent(event):
         except Exception as exception:
             log_error(f"Markdown chunking failed for {file_path}: {exception}")
         return
+
 
     return
 
