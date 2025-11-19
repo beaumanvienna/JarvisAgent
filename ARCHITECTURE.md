@@ -1,7 +1,5 @@
 # JarvisAgent Architecture
 
-<br>
-
 JarvisAgent is an autonomous C++ background service for AI-assisted document and workflow processing.  
 It integrates a **Python scripting engine**, a **file-driven orchestration core**, and an **embedded web server** that exposes a **browser-based chatbot interface** for interactive use.
 
@@ -28,37 +26,41 @@ This document describes the **software architecture**, **communication layers**,
 
 **Responsibilities:**
 - Monitors the `queue/` directory for file additions, modifications, or deletions.
-- Categorizes files by prefix (`STNG`, `CNTX`, `TASK`) or no prefix for requirements, questions, problem reports, queries, in general: line items that need to be processesd against a common environment.
+- Categorizes files by prefix (`STNG`, `CNTX`, `TASK`) or no prefix for requirements, questions, problem reports, and queries.
 - Assembles AI queries by combining subsystem context and new inputs.
 - Dispatches asynchronous REST requests to AI backends (GPT-4 / GPT-5).
-- Writes resulting outputs to `.output.txt` files.
+- Writes resulting outputs to `.output.txt` (for text jobs) and `.output.md` (for multi-chunk Markdown) files.
 - Provides live runtime feedback via the terminal `StatusLineRenderer`.
+- Detects and skips files whose output is already up-to-date.
+- Reacts to chunk lifecycle: `.md` → chunked `.md` → AI summaries → combined `.output.md`.
 
 ---
 
 ### 2. Python Scripting Engine
 
-**Purpose:** Extend JarvisAgent through dynamic, user-defined automation scripts.  
-External tools such as **MarkItDown** are made available through this scripting layer.
+**Purpose:** Extend JarvisAgent through dynamic, user-defined automation scripts, including PDF conversion, Markdown chunking, and chunk-output recombination.
 
 **Integration:** The scripting engine is embedded via the CPython C API and exposes four hooks:
 
 | Hook | Description |
 |-------|-------------|
 | `OnStart()` | Invoked during application startup. |
-| `OnUpdate()` | Called every engine tick (approx. once per main loop iteration). |
-| `OnEvent(event)` | Triggered when a file or system event occurs (e.g., file added). |
+| `OnUpdate()` | Present for API completeness but currently unused. |
+| `OnEvent(event)` | Main handler for file-driven workflow: PDF conversion, MD chunking, chunk-output combining. |
 | `OnShutdown()` | Executed before application exit. |
 
-**Event Example:**
-```python
-def OnEvent(event):
-    if event.type == "FileAdded" and event.path.endswith(".pdf"):
-        # Convert the PDF into Markdown using MarkItDown
-        os.system(f"markitdown \"{event.path}\" --output \"{event.path}.md\"")
-```
+**FileEvent Highlights handled in Python:**
 
-# ARCHITECTURE DETAILS
+- **PDF Added:**  
+  Converts PDF to Markdown unless an up-to-date `.md` exists.
+- **Markdown Added:**  
+  If large, chunked into `chunk_XXX.md` files. If an existing combined output is newer, chunking is skipped.
+- **Chunk Output Added (`chunk_XXX.output.md`):**  
+  When all outputs for a document are present, merges them into a final `<file>.output.md` file.
+
+---
+
+## ARCHITECTURE DETAILS
 
 <br>
 
@@ -71,9 +73,10 @@ This section expands on the operational details for JarvisAgent’s web interfac
 - **Transparent pipeline** — Every step materialized as a file for traceability and offline auditing.
 - **Event-driven** — File watcher + selective rebuilds; no redundant work.
 - **Embeddable** — Lightweight, single-binary server using the `crow` micro web framework.
-- **Extensible** — Python scripting hooks enable custom preprocessing (e.g., MarkItDown).
+- **Extensible** — Python scripting hooks enable custom preprocessing (MarkItDown, chunking logic, recombination logic).
 - **Operator-friendly** — Terminal status line + browser chat UI with live updates.
 - **Binary-safe** — Non-text files are detected and ignored or preprocessed by the scripting layer.
+- **Idempotent processing** — Files are skipped efficiently when outputs are newer.
 
 ---
 
@@ -82,7 +85,7 @@ This section expands on the operational details for JarvisAgent’s web interfac
 | Channel | Direction | Technology | Payload |
 |--------|-----------|------------|--------|
 | Browser ↔ WebServer | Bidirectional | **WebSocket** | JSON events (chat, status, responses, errors) |
-| WebServer → JarvisCore | One-way | **Shared filesystem (queue/)** | Text files (`STNG/ CNTX/ TASK/ PROB/ REQ/`) |
+| WebServer → JarvisCore | One-way | **Shared filesystem (queue/)** | Text files (`STNG/ CNTX/ TASK/ PROB/ REQ/`, Markdown chunks) |
 | JarvisCore ↔ AI Backend | Request/Response | **HTTP REST (libcurl)** | OpenAI-style JSON |
 | JarvisCore → WebServer | Event-driven | **Filesystem change detection** | Output files trigger WS pushes |
 | WebServer → Browser | Push | **WebSocket** | Responses, status, errors |
@@ -100,19 +103,19 @@ This section expands on the operational details for JarvisAgent’s web interfac
 - Bridge the browser to the file-based IPC with JarvisCore.
 
 **Mounts (suggested):**
-- `GET /` → index.html
-- `GET /assets/*` → static assets
-- `POST /api/chat` → submit problem reports
-- `GET /api/status` → system snapshot
-- `GET /ws` → WebSocket endpoint
+- `GET /` → index.html  
+- `GET /assets/*` → static assets  
+- `POST /api/chat` → submit problem reports  
+- `GET /api/status` → system snapshot  
+- `GET /ws` → WebSocket endpoint  
 
 ---
 
 ## 📡 API Endpoints
 
 ### `POST /api/chat`
-**Description**  
-Queues a user message for a **specific subsystem** by creating a file in the `queue/<subsystem>` folder.
+
+Queues a user message for a **specific subsystem** by creating a file in the `queue/<subsystem>` directory.
 
 **Request**
 ```json
@@ -120,14 +123,13 @@ Queues a user message for a **specific subsystem** by creating a file in the `qu
   "subsystem": "engine",
   "message": "Engine knocks at idle after warmup; MIL is off."
 }
-
 ```
 
 **Behavior**
 - Ensures `queue/<subsystem>/` exists.
 - Writes a problem report file:  
   `queue/engine/PROB_YYYYMMDD_HHMMSS.txt`
-- Returns the logical file path for client-side correlation.
+- Returns the file path for UI correlation.
 
 **Response**
 ```json
@@ -137,15 +139,12 @@ Queues a user message for a **specific subsystem** by creating a file in the `qu
 }
 ```
 
-## GET /api/status
-**Description**  
-Provides a **snapshot** of JarvisAgent runtime state for dashboards or health checks.
+---
 
-**Behavior**
-- Reads counters and state from in-process metrics (state machine, futures, counters).
-- Returns totals since process start.
+### `GET /api/status`
 
-**Response**
+Returns a **snapshot** of JarvisAgent runtime state.
+
 ```json
 {
   "state": "SendingQueries",
@@ -156,80 +155,43 @@ Provides a **snapshot** of JarvisAgent runtime state for dashboards or health ch
 }
 ```
 
-**Field Notes**
-- `state`: One of `CompilingEnvironment | SendingQueries | AllQueriesSent | AllResponsesReceived`.
-- `outputs`: Count of output files present/known.
-- `inflight`: Futures currently running.
-- `completed`: Queries completed in this process lifetime.
-- `uptime`: HH:MM:SS (human-friendly string).
-
 ---
 
 ## 🔌 WebSocket API (`/ws`)
 
-**Description**  
-Real-time channel for **status**, **progress**, and **answers**. The server **pushes** updates when files complete or state changes.
+Real-time channel for status, progress, and answers.
 
-### Event Types
+**Event Types:**
 
 | Type | When | Payload |
 |------|------|---------|
 | `status` | State change or periodic pulse | `{ state, inflight, completed }` |
-| `update` | A specific file job transitions state | `{ file, status }` |
-| `response` | A job produced user-facing text | `{ subsystem, file, text }` |
-| `error` | Recoverable issue or failure | `{ message, detail? }` |
-
-### JSON Schemas (minimal)
-
-```json
-// status
-{ "type": "status", "state": "SendingQueries", "inflight": 3, "completed": 5 }
-
-// update
-{ "type": "update", "file": "engine/PROB_20251107_193045.txt", "status": "completed" }
-
-// response
-{
-  "type": "response",
-  "subsystem": "engine",
-  "file": "engine/PROB_20251107_193045.txt",
-  "text": "Likely detonation from advanced timing. Check knock sensor and base timing."
-}
-
-// error
-{ "type": "error", "message": "Failed to parse AI response.", "detail": "No 'content' array." }
-```
-
-**Notes**
-- `status.status` is not used; `status` events convey state via `state` + counters.
-- `update.status` values: `queued | running | completed | failed`.
-- `response.text` is Markdown-capable; render as rich text in UI if desired.
+| `update` | A file job changes state | `{ file, status }` |
+| `response` | Job produced user-facing text | `{ subsystem, file, text }` |
+| `error` | Recoverable issue | `{ message, detail? }` |
 
 ---
 
 ## 💬 Bot Frontend (Web UI)
 
-**Software Stack**
-- **UI:** HTML5 + Tailwind CSS  
-- **Logic:** Vanilla JavaScript  
-- **Transport:** WebSocket (JSON)  
-- **State:** In-memory (per tab); no backend persistence required
+**Stack**
+- HTML5 + Tailwind CSS  
+- Vanilla JS  
+- WebSocket transport  
 
 **Responsibilities**
-- Collect subsystem + problem report from user.
-- Submit via `POST /api/chat`.
-- Maintain a WebSocket connection for live updates.
-- Render chat history, show pending indicators/spinner.
-- Display errors unobtrusively with retry affordances.
+- Submit subsystem + message via `POST /api/chat`.
+- Maintain WebSocket session.
+- Render chat transcript and progress indicators.
+- Display Markdown-capable responses.
 
 **Message Flow**
-1. **User submits** subsystem + message.
-2. **Browser → WebServer**: `POST /api/chat`.
-3. **WebServer → Filesystem**: writes `PROB_*.txt` in `queue/<subsystem>/`.
-4. **JarvisCore** detects new file, **dispatches AI query**.
-5. **JarvisCore → Filesystem**: writes `*.output.txt`.
-6. **WebServer** detects changed files and **pushes** `response` via WebSocket.
-7. **Browser** appends AI answer in the transcript.
+1. Browser submits `POST /api/chat`.
+2. Web server writes `PROB_*.txt` to queue.
+3. Core detects file, builds prompt, dispatches AI call.
+4. AI reply written to `.output.txt` or `.output.md`.
+5. Web server pushes results via WebSocket.
+6. UI displays answer.
 
 ---
 
@@ -237,23 +199,24 @@ Real-time channel for **status**, **progress**, and **answers**. The server **pu
 
 ```
 Browser (Bot UI)
-   │   POST /api/chat { subsystem, message }
+   │ POST /api/chat { subsystem, message }
    ▼
 Web Server (crow)
-   │   write queue/<subsystem>/PROB_*.txt
-   ▼
-JarvisAgent Core (Watcher + Dispatcher)
-   │   build prompt (STNG+CNTX+TASK + PROB)
-   │   async HTTP → GPT-4/5
-   ▼
-AI Backend
-   │   JSON reply
+   │ writes PROB_*.txt
    ▼
 JarvisAgent Core
-   │   write *.output.txt
+   │ builds prompt (STNG + CNTX + TASK + PROB)
+   │ async HTTP to GPT-4/5
+   ▼
+AI Backend
+   │ JSON response
+   ▼
+JarvisAgent Core
+   │ writes *.output.txt / *.output.md
    ▼
 Web Server
-   │   WS push {type:"response", ...}
+   │ WebSocket push {response}
    ▼
-Browser (UI updates)
+Browser
+   │ render answer
 ```
