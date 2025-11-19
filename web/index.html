@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -85,13 +86,13 @@
       border-radius: 10px;
       padding: 10px;
       cursor: move;
-      box-shadow: 0 0 10px rgba(255,255,255,0.2);
+      box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
       user-select: none;
       transition: box-shadow 0.2s ease;
     }
 
     .session-box:hover {
-      box-shadow: 0 0 12px rgba(255,255,255,0.4);
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
     }
 
     .session-header {
@@ -112,8 +113,19 @@
     }
   </style>
 </head>
+
 <body>
-  <h2>🧠 JarvisAgent Dashboard</h2>
+
+
+  <h2 style="display:flex; justify-content:space-between; align-items:center;">
+    <span>🧠 JarvisAgent Dashboard</span>
+    <button id="quitBtn" style="background:#c33; color:white; border:none; padding:4px 10px; 
+                 border-radius:4px; cursor:pointer; font-weight:bold;">
+      Quit
+    </button>
+  </h2>
+
+
 
   <!-- Debug Log -->
   <div id="log">Connecting to ws://localhost:8080/ws ...</div>
@@ -172,6 +184,14 @@
       ws.send(JSON.stringify(msg));
       log("📤 Sent: " + JSON.stringify(msg) + "\n");
     };
+
+    // ---- Quit Button ----
+    document.getElementById("quitBtn").onclick = () => {
+      const msg = { type: "quit" };
+      ws.send(JSON.stringify(msg));
+      log("⛔ Quit requested from UI\n");
+    };
+
 
     function log(text) {
       logEl.textContent += text;
@@ -296,7 +316,7 @@
     }
 
     /* ---- Spinner ---- */
-    const spinnerFrames = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷","⠁","⠂","⠄","⡀","⢀","⠠","⠐","⠈"];
+    const spinnerFrames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷", "⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
     let spinIndex = 0;
 
     setInterval(() => {
@@ -314,4 +334,5 @@
 
   </script>
 </body>
+
 </html>

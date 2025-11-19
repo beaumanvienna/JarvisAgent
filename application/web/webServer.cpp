@@ -28,6 +28,8 @@
 #include "web/webServer.h"
 #include "web/chatMessages.h"
 
+#include "event/events.h"
+
 namespace fs = std::filesystem;
 namespace AIAssistant
 
@@ -170,6 +172,19 @@ namespace AIAssistant
                             response["file"] = filename.string();
                             conn.send_text(response.dump());
                         }
+                        else if (type == "quit")
+                        {
+                            auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
+                            Core::g_Core->PushEvent(event);
+
+                            crow::json::wvalue response;
+                            response["type"] = "quit-ack";
+                            response["message"] = "Shutdown initiated.";
+                            conn.send_text(response.dump());
+
+                            return;
+                        }
+
                         else
                         {
                             conn.send_text(R"({"error":"unknown type"})");
