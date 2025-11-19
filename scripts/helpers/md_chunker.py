@@ -24,6 +24,7 @@ Algorithm overview:
      UTF-8-aware slicing.
 
 Copyright (c) 2025 JC Technolabs
+License: GPL-3.0
 
 """
 

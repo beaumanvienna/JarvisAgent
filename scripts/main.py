@@ -18,16 +18,25 @@ Use these hooks to implement:
 - File transformers (PDF → Markdown)
 - Preprocessors (rewrite STNG/CNTX/TASK)
 - Specialized handlers (e.g., images / XML → text)
-- Auto-tagging or classification logic
+- Markdown chunking
+- Chunk output combining
 
 Copyright (c) 2025 JC Technolabs
-
 """
+
+from pathlib import Path
+import re
 
 from helpers.log import log_info, log_warn, log_error
 from helpers.fileutils import is_pdf, is_binary_file, read_text_file, write_text_file
 from helpers.markitdown_tools import convert_pdf_to_markdown
 from helpers.md_chunker import chunk_markdown_if_needed
+from helpers.chunk_combiner import handle_chunk_output_added
+
+
+# regex to detect chunk output files
+CHUNK_OUTPUT_REGEX = re.compile(r"^chunk_(\d+)\.output\.md$")
+
 
 # This is called once when JarvisAgent starts
 def OnStart():
@@ -51,6 +60,7 @@ def OnEvent(event):
 
     event_type = event.get("type")
     file_path = event.get("path", "")
+    file_name = Path(file_path).name
 
     # ----------------------
     # AUTO-CONVERT PDF FILES
@@ -65,13 +75,30 @@ def OnEvent(event):
         return
 
     # ----------------------
+    # HANDLE CHUNK OUTPUT FILES
+    # ----------------------
+    if event_type == "FileAdded" and CHUNK_OUTPUT_REGEX.match(file_name):
+        try:
+            handle_chunk_output_added(file_path)
+        except Exception as exception:
+            log_error(f"Chunk output combining failed for {file_path}: {exception}")
+        return
+
+    # ----------------------
     # CHUNK LARGE MARKDOWN FILES
     # ----------------------
-    # We only care about newly added .md files that are not obvious
-    # output files (e.g., "*.output.txt").
     if event_type == "FileAdded" and file_path.endswith(".md"):
-        # C++ core already ignores oversized .md files in the queue,
-        # but we also want Python to chunk them into smaller parts.
+
+        # Skip combined final output files
+        if file_name.endswith(".output.md"):
+            log_info(f"Final output file detected — skipping chunking: {file_path}")
+            return
+
+        # Skip chunk outputs (already handled above)
+        if CHUNK_OUTPUT_REGEX.match(file_name):
+            return
+
+        # Original logic
         log_info(f"Markdown file detected for potential chunking: {file_path}")
         try:
             chunk_markdown_if_needed(file_path)
@@ -80,7 +107,6 @@ def OnEvent(event):
         return
 
     return
-
 
 
 # Called once when the C++ application is shutting down

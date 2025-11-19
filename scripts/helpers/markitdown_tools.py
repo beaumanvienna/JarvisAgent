@@ -8,6 +8,10 @@ MarkItDown PDF Conversion Tools
 Provides PDF → Markdown conversion 
 
 This module is used by scripts/main.py through OnEvent().
+
+Copyright (c) 2025 JC Technolabs
+License: GPL-3.0
+
 """
 
 import os
