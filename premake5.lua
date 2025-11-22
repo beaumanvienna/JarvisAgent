@@ -63,7 +63,8 @@ project "jarvisAgent"
 			"crypto",
 			"z",
 			"m",
-            "python3.12"
+            "python3.12",
+            "ncursesw"
         }
         libdirs
         {

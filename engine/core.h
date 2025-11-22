@@ -30,7 +30,6 @@
 #include "auxiliary/threadPool.h"
 #include "auxiliary/file.h"
 #include "input/keyboardInput.h"
-#include "log/statusLineRenderer.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -51,7 +50,6 @@ namespace AIAssistant
             return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
         }
         ThreadPool& GetThreadPool() { return m_ThreadPool; }
-        StatusLineRenderer& GetStatusLineRenderer() { return m_StatusLineRenderer; }
 
         // event API
         void PushEvent(EventQueue::EventPtr eventPtr);
@@ -76,7 +74,5 @@ namespace AIAssistant
 
         // input
         std::unique_ptr<KeyboardInput> m_KeyboardInput;
-        // output
-        StatusLineRenderer m_StatusLineRenderer;
     };
 } // namespace AIAssistant

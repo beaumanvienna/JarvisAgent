@@ -26,6 +26,7 @@
 #include "event/events.h"
 #include "json/jsonHelper.h"
 #include "core.h"
+#include "log/ITerminal.h"
 
 namespace AIAssistant
 {
@@ -90,10 +91,10 @@ namespace AIAssistant
         }
 
         { // status display in terminal
-            auto& statusLineRenderer = Core::g_Core->GetStatusLineRenderer();
-            statusLineRenderer.UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
-                                             m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
-                                             m_QueryFutures.size(), m_CompletedQueriesThisRun);
+            auto terminal = App::g_App->GetTerminal();
+            terminal->UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
+                                    m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
+                                    m_QueryFutures.size(), m_CompletedQueriesThisRun);
         }
 
         { // remote status display via web server

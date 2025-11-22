@@ -22,20 +22,58 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "event/events.h"
-#include "session/sessionManager.h"
-#include "file/fileWatcher.h"
 #include "web/webServer.h"
+#include "session/sessionManager.h"
+#include "log/terminalLogStreamBuf.h"
+#include "log/ITerminal.h"
+#include "file/fileWatcher.h"
+#include "file/probUtils.h"
 #include "web/chatMessages.h"
 #include "python/pythonEngine.h"
-#include "file/probUtils.h"
 
 namespace AIAssistant
 {
     JarvisAgent* App::g_App = nullptr;
     std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
 
+    namespace
+    {
+        std::streambuf* g_OriginalCoutBuffer = nullptr;
+    } // namespace
+
     void JarvisAgent::OnStart()
     {
+        // --------------------------------------------------------------------
+        // create log file /tmp/log.txt
+        // --------------------------------------------------------------------
+        m_LogFile = std::make_shared<std::ofstream>();
+        std::string filename = "/tmp/log.txt";
+        m_LogFile->open(filename, std::ios::out | std::ios::trunc);
+
+        if (!m_LogFile->is_open())
+        {
+            LOG_APP_WARN("Failed to open log file {}", filename);
+        }
+        else
+        {
+            LOG_APP_INFO("Logging to {}", filename);
+        }
+
+        // --------------------------------------------------------------------
+        // Create terminal backend (ncurses hidden behind ITerminal)
+        // --------------------------------------------------------------------
+        m_Terminal = ITerminal::Create();
+        m_Terminal->Initialize();
+
+        // --------------------------------------------------------------------
+        // Redirect std::cout and std::cerr to terminal + file buffer
+        // --------------------------------------------------------------------
+        g_OriginalCoutBuffer = std::cout.rdbuf();
+
+        m_TerminalBuf = std::make_unique<TerminalLogStreamBuf>(m_Terminal.get(), m_LogFile);
+        std::cout.rdbuf(m_TerminalBuf.get());
+        std::cerr.rdbuf(m_TerminalBuf.get());
+
         // capture application startup time
         m_StartupTime = std::chrono::system_clock::now();
 
@@ -80,6 +118,12 @@ namespace AIAssistant
         if (m_PythonEngine)
         {
             m_PythonEngine->OnUpdate();
+        }
+
+        // Render ncurses terminal UI
+        if (m_Terminal)
+        {
+            m_Terminal->Render();
         }
 
         // check if app should terminate
@@ -226,6 +270,21 @@ namespace AIAssistant
         if (m_WebServer)
         {
             m_WebServer->Stop();
+        }
+
+        // restore std::cout
+        if (g_OriginalCoutBuffer != nullptr)
+        {
+            std::cout.rdbuf(g_OriginalCoutBuffer);
+            std::cerr.rdbuf(g_OriginalCoutBuffer);
+            g_OriginalCoutBuffer = nullptr;
+        }
+
+        // destroy terminal
+        if (m_Terminal)
+        {
+            m_Terminal->Shutdown();
+            m_Terminal.reset();
         }
     }
 
