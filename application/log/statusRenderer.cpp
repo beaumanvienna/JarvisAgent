@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <array>
 #include <sstream>
-#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -49,16 +48,14 @@ namespace AIAssistant
         {
             unsigned char c = static_cast<unsigned char>(text[byteIndex]);
 
-            // Determine UTF-8 character length
             int charLength = (c & 0x80) == 0      ? 1
                              : (c & 0xE0) == 0xC0 ? 2
                              : (c & 0xF0) == 0xE0 ? 3
                              : (c & 0xF8) == 0xF0 ? 4
-                                                  : 1; // fallback
+                                                  : 1;
 
             if (columnCount + 1 > maxColumns)
             {
-                // Cut cleanly *before* this character
                 text.resize(byteIndex);
                 return;
             }
@@ -66,18 +63,16 @@ namespace AIAssistant
             byteIndex += static_cast<size_t>(charLength);
             columnCount += 1;
         }
-
-        // Fits entirely — nothing to do
     }
 
     void StatusRenderer::Start()
     {
-        // No-op for ncurses version (kept for compatibility if needed later)
+        // No-op (kept for compatibility)
     }
 
     void StatusRenderer::Stop()
     {
-        // No-op for ncurses version (kept for compatibility if needed later)
+        // No-op (kept for compatibility)
     }
 
     void StatusRenderer::UpdateSession(std::string const& name, std::string_view state, size_t outputs, size_t inflight,
@@ -99,22 +94,8 @@ namespace AIAssistant
         return m_Sessions.size();
     }
 
-    void StatusRenderer::Render(WINDOW* statusWindow)
+    void StatusRenderer::BuildStatusLines(std::vector<std::string>& outLines, int maxColumns)
     {
-        if (statusWindow == nullptr)
-        {
-            return;
-        }
-
-        int windowRows = 0;
-        int windowCols = 0;
-        getmaxyx(statusWindow, windowRows, windowCols);
-
-        if (windowRows <= 0 || windowCols <= 0)
-        {
-            return;
-        }
-
         static std::array<char const*, 16> const spinnerChars{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷",
                                                               "⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"};
 
@@ -125,7 +106,6 @@ namespace AIAssistant
         {
             std::lock_guard<std::mutex> guard(m_Mutex);
 
-            // Update spinner animation timers
             for (auto& entry : m_Sessions)
             {
                 SessionStatus& sessionStatus = entry.second;
@@ -137,7 +117,6 @@ namespace AIAssistant
                 }
             }
 
-            // Copy into sortable vector
             rows.reserve(m_Sessions.size());
             for (auto const& entry : m_Sessions)
             {
@@ -145,20 +124,14 @@ namespace AIAssistant
             }
         }
 
-        // Sort alphabetically by session name
-        std::sort(rows.begin(), rows.end(), [](auto const& left, auto const& right) { return left.first < right.first; });
+        std::sort(rows.begin(), rows.end(),
+                  [](std::pair<std::string, SessionStatus> const& left, std::pair<std::string, SessionStatus> const& right)
+                  { return left.first < right.first; });
 
-        werase(statusWindow);
-
-        int lineIndex = 0;
+        outLines.clear();
 
         for (auto const& row : rows)
         {
-            if (lineIndex >= windowRows)
-            {
-                break;
-            }
-
             std::string const& name = row.first;
             SessionStatus const& sessionStatus = row.second;
 
@@ -168,7 +141,6 @@ namespace AIAssistant
                 spinnerGlyph = spinnerChars[sessionStatus.spinnerIndex % spinnerChars.size()];
             }
 
-            // Build the line
             std::ostringstream textStream;
             textStream << "[" << name << "] "
                        << "STATE: " << sessionStatus.state << " | Outputs: " << sessionStatus.outputs
@@ -176,22 +148,9 @@ namespace AIAssistant
                        << spinnerGlyph;
 
             std::string lineText = textStream.str();
+            SafeTruncateUtf8(lineText, maxColumns);
 
-            // UTF-8 safe truncation for ncurses width
-            SafeTruncateUtf8(lineText, windowCols);
-
-            mvwprintw(statusWindow, lineIndex, 0, "%s", lineText.c_str());
-            ++lineIndex;
+            outLines.push_back(std::move(lineText));
         }
-
-        // Clear any remaining lines
-        while (lineIndex < windowRows)
-        {
-            wmove(statusWindow, lineIndex, 0);
-            wclrtoeol(statusWindow);
-            ++lineIndex;
-        }
-
-        wrefresh(statusWindow);
     }
 } // namespace AIAssistant

@@ -21,35 +21,33 @@
 
 #pragma once
 
-#include <streambuf>
-#include <string>
 #include <fstream>
 #include <mutex>
+#include <streambuf>
+#include <string>
 
-#include "log/ITerminal.h"
+#include "log/terminalManager.h"
 
 namespace AIAssistant
 {
     class TerminalLogStreamBuf : public std::streambuf
     {
     public:
-        TerminalLogStreamBuf(ITerminal* terminal, std::shared_ptr<std::ofstream> fileLogger)
-            : m_Terminal(terminal), m_FileLogger(std::move(fileLogger))
+        TerminalLogStreamBuf(TerminalManager* terminalManager, std::shared_ptr<std::ofstream> fileLogger)
+            : m_TerminalManager(terminalManager), m_FileLogger(std::move(fileLogger))
         {
         }
 
     protected:
-        // ---------------------------------------------------------
-        // Flush the current line (called by std::endl and flush())
-        // ---------------------------------------------------------
-        virtual int sync() override
+        int sync() override
         {
             if (!m_Buffer.empty())
             {
-                // Send whole line to terminal
-                m_Terminal->EnqueueLogLine(m_Buffer);
+                if (m_TerminalManager != nullptr)
+                {
+                    m_TerminalManager->EnqueueLogLine(m_Buffer);
+                }
 
-                // Also write whole line into logfile
                 if (m_FileLogger && m_FileLogger->is_open())
                 {
                     std::lock_guard<std::mutex> lock(m_FileMutex);
@@ -60,13 +58,10 @@ namespace AIAssistant
                 m_Buffer.clear();
             }
 
-            return 0; // success
+            return 0;
         }
 
-        // ---------------------------------------------------------
-        // Called for every inserted character
-        // ---------------------------------------------------------
-        virtual int overflow(int character) override
+        int overflow(int character) override
         {
             if (character == traits_type::eof())
             {
@@ -77,22 +72,17 @@ namespace AIAssistant
 
             if (characterValue == '\n')
             {
-                // End-of-line → flush accumulated buffer
                 sync();
             }
             else
             {
-                // Accumulate characters into one logical line
                 m_Buffer.push_back(characterValue);
             }
 
             return character;
         }
 
-        // ---------------------------------------------------------
-        // Called for chunks of text (speeds things up)
-        // ---------------------------------------------------------
-        virtual std::streamsize xsputn(char const* data, std::streamsize count) override
+        std::streamsize xsputn(char const* data, std::streamsize count) override
         {
             for (std::streamsize index = 0; index < count; ++index)
             {
@@ -102,7 +92,7 @@ namespace AIAssistant
         }
 
     private:
-        ITerminal* m_Terminal;
+        TerminalManager* m_TerminalManager;
         std::string m_Buffer;
 
         std::shared_ptr<std::ofstream> m_FileLogger;

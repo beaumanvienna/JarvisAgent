@@ -21,13 +21,12 @@
 
 #pragma once
 
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <chrono>
-
-#include <ncursesw/ncurses.h>
+#include <vector>
 
 namespace AIAssistant
 {
@@ -55,7 +54,9 @@ namespace AIAssistant
         void Start();
         void Stop();
 
-        void Render(WINDOW* statusWindow);
+        // Build human-readable status lines for the terminal status window.
+        // maxColumns is the available width; implementation must be UTF-8 safe.
+        void BuildStatusLines(std::vector<std::string>& outLines, int maxColumns);
 
         size_t GetSessionCount();
 

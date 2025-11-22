@@ -57,12 +57,11 @@ namespace AIAssistant
         ~PythonEngine();
 
         bool Initialize(std::string const& scriptPath);
-        void Shutdown();
+        void Stop();
 
         void OnStart();
         void OnUpdate();
         void OnEvent(std::shared_ptr<Event> eventPtr);
-        void OnShutdown();
 
         bool IsRunning() const { return m_Running; }
 

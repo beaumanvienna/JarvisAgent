@@ -26,6 +26,7 @@
 
 #include "application.h"
 #include "file/fileCategory.h"
+#include "log/statusRenderer.h"
 
 namespace AIAssistant
 {
@@ -34,8 +35,6 @@ namespace AIAssistant
     class WebServer;
     class ChatMessagePool;
     class PythonEngine;
-    class ITerminal;
-    class TerminalLogStreamBuf;
 
     class JarvisAgent : public Application
     {
@@ -55,7 +54,7 @@ namespace AIAssistant
         ChatMessagePool* GetChatMessagePool() const { return m_ChatMessagePool.get(); }
         std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
         int64_t GetStartupTimestamp() const;
-        ITerminal* GetTerminal() { return m_Terminal.get(); }
+        StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
 
     private:
         void CheckIfFinished();
@@ -64,9 +63,7 @@ namespace AIAssistant
         bool m_IsFinished{false};
 
     private:
-        std::shared_ptr<std::ofstream> m_LogFile;
-        std::unique_ptr<TerminalLogStreamBuf> m_TerminalBuf;
-
+        StatusRenderer m_StatusRenderer;
         std::chrono::system_clock::time_point m_StartupTime;
 
         // submodules
@@ -75,7 +72,6 @@ namespace AIAssistant
         std::unique_ptr<WebServer> m_WebServer;
         std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
         std::unique_ptr<PythonEngine> m_PythonEngine;
-        std::unique_ptr<ITerminal> m_Terminal;
     };
 
     class App

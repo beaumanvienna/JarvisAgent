@@ -24,8 +24,7 @@
 #include "event/events.h"
 #include "web/webServer.h"
 #include "session/sessionManager.h"
-#include "log/terminalLogStreamBuf.h"
-#include "log/ITerminal.h"
+#include "log/terminalManager.h"
 #include "file/fileWatcher.h"
 #include "file/probUtils.h"
 #include "web/chatMessages.h"
@@ -36,50 +35,52 @@ namespace AIAssistant
     JarvisAgent* App::g_App = nullptr;
     std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
 
-    namespace
-    {
-        std::streambuf* g_OriginalCoutBuffer = nullptr;
-    } // namespace
-
     void JarvisAgent::OnStart()
     {
-        // --------------------------------------------------------------------
-        // create log file /tmp/log.txt
-        // --------------------------------------------------------------------
-        m_LogFile = std::make_shared<std::ofstream>();
-        std::string filename = "/tmp/log.txt";
-        m_LogFile->open(filename, std::ios::out | std::ios::trunc);
-
-        if (!m_LogFile->is_open())
-        {
-            LOG_APP_WARN("Failed to open log file {}", filename);
-        }
-        else
-        {
-            LOG_APP_INFO("Logging to {}", filename);
-        }
-
-        // --------------------------------------------------------------------
-        // Create terminal backend (ncurses hidden behind ITerminal)
-        // --------------------------------------------------------------------
-        m_Terminal = ITerminal::Create();
-        m_Terminal->Initialize();
-
-        // --------------------------------------------------------------------
-        // Redirect std::cout and std::cerr to terminal + file buffer
-        // --------------------------------------------------------------------
-        g_OriginalCoutBuffer = std::cout.rdbuf();
-
-        m_TerminalBuf = std::make_unique<TerminalLogStreamBuf>(m_Terminal.get(), m_LogFile);
-        std::cout.rdbuf(m_TerminalBuf.get());
-        std::cerr.rdbuf(m_TerminalBuf.get());
-
         // capture application startup time
         m_StartupTime = std::chrono::system_clock::now();
 
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
         App::g_App = this;
 
+        // ---------------------------------------------------------
+        // Hook StatusRenderer → TerminalManager (engine-owned)
+        // ---------------------------------------------------------
+        if (Core::g_Core != nullptr)
+        {
+            TerminalManager* terminal = Core::g_Core->GetTerminalManager();
+            if (terminal != nullptr)
+            {
+                terminal->SetStatusCallbacks(
+                    // Build status lines dynamically
+                    [this](std::vector<std::string>& lines, int maxWidth)
+                    { m_StatusRenderer.BuildStatusLines(lines, maxWidth); },
+
+                    // Compute status window height dynamically
+                    [this](int totalRows) -> int
+                    {
+                        size_t sessionCount = m_StatusRenderer.GetSessionCount();
+                        if (sessionCount == 0)
+                        {
+                            sessionCount = 1;
+                        }
+
+                        int statusHeight = static_cast<int>(sessionCount);
+
+                        // ensure at least 1 line, and leave at least 1 for log
+                        if (statusHeight >= totalRows)
+                        {
+                            statusHeight = std::max(1, totalRows - 1);
+                        }
+
+                        return statusHeight;
+                    });
+            }
+        }
+
+        // ---------------------------------------------------------
+        // Start all other subsystems
+        // ---------------------------------------------------------
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
 
         m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
@@ -106,6 +107,8 @@ namespace AIAssistant
         }
     }
 
+    //--------------------------------------------------------------------
+
     void JarvisAgent::OnUpdate()
     {
         for (auto& sessionManager : m_SessionManagers)
@@ -120,22 +123,22 @@ namespace AIAssistant
             m_PythonEngine->OnUpdate();
         }
 
-        // Render ncurses terminal UI
-        if (m_Terminal)
-        {
-            m_Terminal->Render();
-        }
+        // NO terminal rendering here — engine renders terminal globally
 
         // check if app should terminate
         CheckIfFinished();
     }
+
+    //--------------------------------------------------------------------
 
     void JarvisAgent::OnEvent(std::shared_ptr<Event>& eventPtr)
     {
         auto& event = *eventPtr.get();
         EventDispatcher dispatcher(event);
 
-        // app-level event handling
+        // ---------------------------------------------------------
+        // App-level event handling
+        // ---------------------------------------------------------
         dispatcher.Dispatch<EngineEvent>(
             [&](EngineEvent& engineEvent)
             {
@@ -175,8 +178,7 @@ namespace AIAssistant
             });
 
         // -----------------------------------------------------------------------------------
-        // Handle ChatMessagePool answer files: PROB_<id>_<timestamp>.output.txt
-        // Also suppress stale input files PROB_<id>_<timestamp>.txt created before startup.
+        // ChatMessagePool handling (PROB_xxx files)
         // -----------------------------------------------------------------------------------
 
         if (!filePath.empty())
@@ -192,17 +194,13 @@ namespace AIAssistant
                 int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
                 int64_t fileTimestamp = probFileInfo.timestamp;
 
-                // -----------------------------------------------------------------------
-                // Suppress stale PROB files (input or output)
-                // -----------------------------------------------------------------------
+                // Suppress stale files
                 if (fileTimestamp < startupTimestamp)
                 {
-                    return; // silent ignore
+                    return;
                 }
 
-                // -----------------------------------------------------------------------
-                // PROB OUTPUT → forward directly to ChatMessagePool
-                // -----------------------------------------------------------------------
+                // PROB OUTPUT
                 if (probFileInfo.isOutput)
                 {
                     std::ifstream inputStream(filePath);
@@ -215,37 +213,35 @@ namespace AIAssistant
 
                     LOG_APP_INFO("ChatMessagePool: answered id {} via {}", probFileInfo.id, filename);
 
-                    return; // stop here → do NOT send to SessionManager
+                    return;
                 }
-
-                // -----------------------------------------------------------------------
-                // PROB INPUT (non-stale) → allow SessionManager to handle it below
-                // -----------------------------------------------------------------------
-                // fall through to SessionManager handling
             }
         }
 
         // -----------------------------------------------------------------------------------
-        // Forward all other file events to the SessionManager system
+        // Forward remaining file events to correct SessionManager
         // -----------------------------------------------------------------------------------
+
         if (!filePath.empty())
         {
             auto sessionManagerName = filePath.parent_path().string();
+
             if (!m_SessionManagers.contains(sessionManagerName))
             {
                 m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(sessionManagerName);
             }
+
             m_SessionManagers[sessionManagerName]->OnEvent(event);
         }
 
-        // ---------------------------------------------------------
         // Forward event to Python
-        // ---------------------------------------------------------
         if (m_PythonEngine)
         {
             m_PythonEngine->OnEvent(eventPtr);
         }
     }
+
+    //--------------------------------------------------------------------
 
     void JarvisAgent::OnShutdown()
     {
@@ -259,7 +255,8 @@ namespace AIAssistant
 
         if (m_PythonEngine)
         {
-            m_PythonEngine->OnShutdown();
+            m_PythonEngine->Stop();
+            m_PythonEngine.reset();
         }
 
         if (m_FileWatcher)
@@ -272,30 +269,16 @@ namespace AIAssistant
             m_WebServer->Stop();
         }
 
-        // restore std::cout
-        if (g_OriginalCoutBuffer != nullptr)
-        {
-            std::cout.rdbuf(g_OriginalCoutBuffer);
-            std::cerr.rdbuf(g_OriginalCoutBuffer);
-            g_OriginalCoutBuffer = nullptr;
-        }
-
-        // destroy terminal
-        if (m_Terminal)
-        {
-            m_Terminal->Shutdown();
-            m_Terminal.reset();
-        }
+        // No terminal shutdown here — engine handles it
     }
+
+    //--------------------------------------------------------------------
 
     bool JarvisAgent::IsFinished() const { return m_IsFinished; }
 
     void JarvisAgent::CheckIfFinished()
     {
-        // not used
-        // m_IsFinished = false;
-        // Ctrl+C is caught by the engine and breaks the run loop
-        // Also, `q` can be used to quit
+        // Ctrl+C is caught by engine and breaks run loop
     }
 
     int64_t JarvisAgent::GetStartupTimestamp() const

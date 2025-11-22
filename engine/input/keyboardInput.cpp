@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "core.h"
+#include "engine.h"
 #include "input/keyboardInput.h"
 #include "event/events.h"
 #include <iostream>

@@ -23,10 +23,10 @@
 #include "session/fileWriter.h"
 #include "web/webServer.h"
 
+#include "core.h"
 #include "event/events.h"
 #include "json/jsonHelper.h"
-#include "core.h"
-#include "log/ITerminal.h"
+#include "log/statusRenderer.h"
 
 namespace AIAssistant
 {
@@ -90,11 +90,15 @@ namespace AIAssistant
             }
         }
 
-        { // status display in terminal
-            auto terminal = App::g_App->GetTerminal();
-            terminal->UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
-                                    m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
-                                    m_QueryFutures.size(), m_CompletedQueriesThisRun);
+        { // status display in terminal (ncurses status panel)
+            JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+            if (jarvisAgent != nullptr)
+            {
+                StatusRenderer& statusRenderer = jarvisAgent->GetStatusRenderer();
+                statusRenderer.UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
+                                             m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
+                                             m_QueryFutures.size(), m_CompletedQueriesThisRun);
+            }
         }
 
         { // remote status display via web server

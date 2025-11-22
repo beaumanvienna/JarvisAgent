@@ -31,6 +31,7 @@
 #include "core.h"
 #include "engine.h"
 #include "event/events.h"
+#include "curlWrapper/curlWrapper.h"
 
 namespace AIAssistant
 {
@@ -45,8 +46,31 @@ namespace AIAssistant
         signal(SIGINT, SignalHandler);
         DisableCtrlCOutput();
 
-        // create the engine and application loggers
+        // -----------------------------------------------------------------
+        // Create terminal manager and redirect std::cout / std::cerr
+        // -----------------------------------------------------------------
+        m_TerminalManager = std::make_unique<TerminalManager>();
+
+        m_LogFile = std::make_shared<std::ofstream>();
+        std::string filename = "/tmp/log.txt";
+        m_LogFile->open(filename, std::ios::out | std::ios::trunc);
+
+        m_OriginalCoutBuffer = std::cout.rdbuf();
+        m_TerminalBuf = std::make_unique<TerminalLogStreamBuf>(m_TerminalManager.get(), m_LogFile);
+        std::cout.rdbuf(m_TerminalBuf.get());
+        std::cerr.rdbuf(m_TerminalBuf.get());
+
+        // create the engine and application loggers (logs go through terminal)
         g_Logger = std::make_unique<AIAssistant::Log>();
+
+        if (m_LogFile->is_open())
+        {
+            LOG_CORE_INFO("Logging to {}", filename);
+        }
+        else
+        {
+            LOG_CORE_WARN("Failed to open log file {}", filename);
+        }
     }
 
     void Core::SignalHandler(int signal)
@@ -96,6 +120,11 @@ namespace AIAssistant
 
         m_KeyboardInput = std::make_unique<KeyboardInput>();
         m_KeyboardInput->Start();
+
+        if (m_TerminalManager)
+        {
+            m_TerminalManager->Initialize();
+        }
     }
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
@@ -138,6 +167,11 @@ namespace AIAssistant
                 }
             }
 
+            if (m_TerminalManager)
+            {
+                m_TerminalManager->Render();
+            }
+
             { // go easy on the CPU
                 const int cyan = 0x00ffff;
                 ZoneScopedNC("sleep time (accuracy check for tracy)", cyan);
@@ -155,6 +189,40 @@ namespace AIAssistant
             m_KeyboardInput->Stop();
         }
 
+        CurlWrapper::GlobalCleanup();
+
+        if (m_TerminalManager)
+        {
+            m_TerminalManager->Shutdown();
+        }
+
         m_ThreadPool.Wait();
+
+        if (m_OriginalCoutBuffer != nullptr)
+        {
+            std::cout.rdbuf(m_OriginalCoutBuffer);
+            std::cerr.rdbuf(m_OriginalCoutBuffer);
+            m_OriginalCoutBuffer = nullptr;
+        }
+
+        m_TerminalBuf.reset();
+
+        if (m_LogFile && m_LogFile->is_open())
+        {
+            m_LogFile->close();
+        }
     }
+
+    bool Core::Verbose() const { return m_EngineConfig.m_Verbose; }
+
+    ConfigParser::EngineConfig const& Core::GetConfig() const { return m_EngineConfig; }
+
+    ConfigParser::EngineConfig::InterfaceType const& Core::GetInterfaceType() const
+    {
+        return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
+    }
+
+    ThreadPool& Core::GetThreadPool() { return m_ThreadPool; }
+
+    TerminalManager* Core::GetTerminalManager() { return m_TerminalManager.get(); }
 } // namespace AIAssistant

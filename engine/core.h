@@ -22,7 +22,6 @@
 #pragma once
 #include <memory>
 
-#include "engine.h"
 #include "log/log.h"
 #include "application.h"
 #include "event/eventQueue.h"
@@ -30,6 +29,9 @@
 #include "auxiliary/threadPool.h"
 #include "auxiliary/file.h"
 #include "input/keyboardInput.h"
+
+#include "log/terminalManager.h"
+#include "log/terminalLogStreamBuf.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -43,13 +45,11 @@ namespace AIAssistant
         void Start(ConfigParser::EngineConfig const& engineConfig);
         void Run(std::unique_ptr<AIAssistant::Application>&);
         void Shutdown();
-        bool Verbose() const { return m_EngineConfig.m_Verbose; }
-        ConfigParser::EngineConfig const& GetConfig() const { return m_EngineConfig; }
-        ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const
-        {
-            return m_EngineConfig.m_ApiInterfaces[m_EngineConfig.m_ApiIndex].m_InterfaceType;
-        }
-        ThreadPool& GetThreadPool() { return m_ThreadPool; }
+        bool Verbose() const;
+        ConfigParser::EngineConfig const& GetConfig() const;
+        ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const;
+        ThreadPool& GetThreadPool();
+        TerminalManager* GetTerminalManager();
 
         // event API
         void PushEvent(EventQueue::EventPtr eventPtr);
@@ -74,5 +74,11 @@ namespace AIAssistant
 
         // input
         std::unique_ptr<KeyboardInput> m_KeyboardInput;
+
+        // terminal output and logging
+        std::unique_ptr<TerminalManager> m_TerminalManager;
+        std::unique_ptr<TerminalLogStreamBuf> m_TerminalBuf;
+        std::shared_ptr<std::ofstream> m_LogFile;
+        std::streambuf* m_OriginalCoutBuffer{nullptr};
     };
 } // namespace AIAssistant

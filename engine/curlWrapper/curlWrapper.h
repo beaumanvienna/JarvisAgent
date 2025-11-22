@@ -72,6 +72,8 @@ namespace AIAssistant
         std::string& GetBuffer();
         void Clear();
 
+        static void GlobalCleanup();
+
     private:
         bool IsValidKey(std::string const& key);
 

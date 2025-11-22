@@ -19,10 +19,37 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "log/ITerminal.h"
-#include "log/terminalRenderer.h"
+#pragma once
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace AIAssistant
 {
-    std::unique_ptr<ITerminal> ITerminal::Create() { return std::make_unique<TerminalRenderer>(); }
+    class TerminalManager
+    {
+    public:
+        using StatusLinesCallback = std::function<void(std::vector<std::string>& lines, int maxWidth)>;
+        using StatusHeightCallback = std::function<int(int totalRows)>;
+
+    public:
+        TerminalManager();
+        ~TerminalManager();
+
+        void Initialize();
+        void Shutdown();
+
+        void Render();
+        void RenderPaused(int counter);
+
+        void EnqueueLogLine(std::string const& line);
+
+        void SetStatusCallbacks(StatusLinesCallback statusLinesCallback, StatusHeightCallback statusHeightCallback);
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> m_Impl;
+    };
 } // namespace AIAssistant

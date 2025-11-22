@@ -36,7 +36,7 @@ namespace AIAssistant
 
     PythonEngine::PythonEngine() = default;
 
-    PythonEngine::~PythonEngine() { Shutdown(); }
+    PythonEngine::~PythonEngine() {}
 
     void PythonEngine::Reset()
     {
@@ -415,51 +415,44 @@ namespace AIAssistant
         EnqueueTask(task);
     }
 
-    void PythonEngine::OnShutdown()
+    void PythonEngine::Stop()
     {
         if (!m_Running)
         {
             return;
         }
 
-        PythonTask task;
-        task.m_Type = PythonTask::Type::Shutdown;
-        EnqueueTask(task);
-    }
-
-    void PythonEngine::Shutdown()
-    {
-        if (!m_Running)
+        // enqueue the Python OnShutdown() hook
+        if (m_OnShutdownFunc)
         {
-            return;
+            PythonTask task;
+            task.m_Type = PythonTask::Type::Shutdown;
+            EnqueueTask(task);
         }
 
+        // stop worker thread
         m_StopRequested = true;
         m_QueueCondition.notify_all();
 
-        // wait for worker thread to stop
         if (m_WorkerThread.joinable())
         {
             m_WorkerThread.join();
         }
 
-        // reacquire GIL BEFORE finalizing
+        // finalize Python interpreter
         PyGILState_Ensure();
 
-        // Decrease references safely
         Py_XDECREF(m_OnStartFunc);
         Py_XDECREF(m_OnUpdateFunc);
         Py_XDECREF(m_OnEventFunc);
         Py_XDECREF(m_OnShutdownFunc);
 
         Py_XDECREF(m_MainModule);
-        // m_MainDict is borrowed from module, do NOT DECREF it
 
-        // finalize Python
         Py_Finalize();
 
         m_Running = false;
+
         LOG_APP_INFO("Python engine stopped");
     }
-
 } // namespace AIAssistant

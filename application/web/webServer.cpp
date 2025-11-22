@@ -24,6 +24,7 @@
 #include "simdjson/simdjson.h"
 
 #include "core.h"
+#include "engine.h"
 #include "jarvisAgent.h"
 #include "web/webServer.h"
 #include "web/chatMessages.h"

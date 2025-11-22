@@ -64,13 +64,6 @@ namespace AIAssistant
                 else
                 {
                     initialized = true;
-
-                    auto exitRoutine = []()
-                    {
-                        curl_global_cleanup();
-                        LOG_CORE_INFO("libcurl globally cleaned up");
-                    };
-                    std::atexit(exitRoutine);
                     LOG_CORE_INFO("libcurl globally initialized");
                 }
             }
@@ -109,6 +102,13 @@ namespace AIAssistant
             curl_slist_free_all(m_List);
         }
     }
+
+    void CurlWrapper::GlobalCleanup()
+    {
+        curl_global_cleanup();
+        LOG_CORE_INFO("libcurl globally cleaned up");
+    }
+
     void CurlWrapper::CurlSlist::Append(std::string const& str)
     {
         m_List = curl_slist_append(m_List, str.c_str());
