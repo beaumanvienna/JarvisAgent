@@ -100,10 +100,12 @@ namespace AIAssistant
         if (!pythonOk)
         {
             LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
+            m_WebServer->BroadcastPythonStatus(false);
         }
         else
         {
             m_PythonEngine->OnStart();
+            m_WebServer->BroadcastPythonStatus(true);
         }
     }
 
@@ -258,6 +260,7 @@ namespace AIAssistant
         {
             m_PythonEngine->Stop();
             m_PythonEngine.reset();
+            m_WebServer->BroadcastPythonStatus(false);
         }
 
         if (m_FileWatcher)

@@ -250,4 +250,13 @@ namespace AIAssistant
         }
     }
 
+    void WebServer::BroadcastPythonStatus(bool pythonRunning)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "python-status";
+        msg["running"] = pythonRunning;
+
+        BroadcastJSON(msg.dump());
+    }
+
 } // namespace AIAssistant

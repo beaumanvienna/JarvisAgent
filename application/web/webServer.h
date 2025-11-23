@@ -41,6 +41,7 @@ namespace AIAssistant
 
         void Broadcast(std::string const& jsonMessage);
         void BroadcastJSON(const std::string& jsonString);
+        void BroadcastPythonStatus(bool pythonRunning);
 
     private:
         void RegisterRoutes();

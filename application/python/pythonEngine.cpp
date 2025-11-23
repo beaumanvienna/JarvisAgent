@@ -31,7 +31,7 @@
 
 namespace fs = std::filesystem;
 
-extern "C" void JarvisRedirectPython(const char* message)
+extern "C" void JarvisRedirectPython(char const* message)
 {
     if (message == nullptr)
     {
@@ -112,7 +112,7 @@ namespace AIAssistant
             // -------------------------------------------------------------
             // Install stdout/stderr redirection *before* importing module
             // -------------------------------------------------------------
-            const char* redirectCode = "import sys\n"
+            char const* redirectCode = "import sys\n"
                                        "import ctypes\n"
                                        "class _JarvisRedirect:\n"
                                        "    def write(self, msg):\n"

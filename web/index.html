@@ -116,16 +116,19 @@
 
 <body>
 
-
   <h2 style="display:flex; justify-content:space-between; align-items:center;">
     <span>🧠 JarvisAgent Dashboard</span>
+
+    <!-- 🔥 Added Python Offline Warning (minimal change) -->
+    <span id="pythonStatus" style="color:#c33; font-weight:bold; margin-right:10px; display:none;">
+      ⚠️ Python Offline
+    </span>
+
     <button id="quitBtn" style="background:#c33; color:white; border:none; padding:4px 10px; 
                  border-radius:4px; cursor:pointer; font-weight:bold;">
       Quit
     </button>
   </h2>
-
-
 
   <!-- Debug Log -->
   <div id="log">Connecting to ws://localhost:8080/ws ...</div>
@@ -163,6 +166,10 @@
         } else if (msg.type === "late-answer") {
           showLateAnswer(msg);
 
+        /* 🔥 Added Python status handler */
+        } else if (msg.type === "python-status") {
+          updatePythonStatus(msg.running);
+
         } else {
           log("📥 Message from server:\n" + event.data + "\n");
         }
@@ -192,10 +199,15 @@
       log("⛔ Quit requested from UI\n");
     };
 
-
     function log(text) {
       logEl.textContent += text;
       logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    /* ---- 🔥 Python Status Indicator ---- */
+    function updatePythonStatus(running) {
+      const el = document.getElementById("pythonStatus");
+      el.style.display = running ? "none" : "inline";
     }
 
     /* ---- Output Answer ---- */
@@ -224,7 +236,7 @@
 
       const card = document.createElement("div");
       card.className = "answer-card";
-      card.style.border = "1px solid #c33"; // red
+      card.style.border = "1px solid #c33";
 
       card.innerHTML = `
         <div class="answer-header" style="color:#ff7777;">
@@ -244,7 +256,7 @@
 
       const card = document.createElement("div");
       card.className = "answer-card";
-      card.style.border = "1px solid #e0a800"; // amber
+      card.style.border = "1px solid #e0a800";
 
       card.innerHTML = `
         <div class="answer-header" style="color:#ffe28a;">
