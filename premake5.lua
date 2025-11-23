@@ -45,7 +45,11 @@ project "jarvisAgent"
 
     filter "system:linux"
 
-        linkoptions { "-fno-pie -no-pie" }
+        linkoptions {
+            "-fno-pie -no-pie",
+            "-rdynamic"
+        }
+
 
         files 
         { 

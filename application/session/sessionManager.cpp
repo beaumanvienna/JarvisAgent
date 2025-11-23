@@ -27,6 +27,7 @@
 #include "event/events.h"
 #include "json/jsonHelper.h"
 #include "log/statusRenderer.h"
+#include "auxiliary/file.h"
 
 namespace AIAssistant
 {

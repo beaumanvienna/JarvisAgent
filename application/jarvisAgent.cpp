@@ -111,21 +111,22 @@ namespace AIAssistant
 
     void JarvisAgent::OnUpdate()
     {
+        // Update all session managers (state machines for REQ/STNG/TASK)
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnUpdate();
         }
 
+        // Clean old chat messages
         m_ChatMessagePool->RemoveExpired();
 
-        if (m_PythonEngine)
-        {
-            m_PythonEngine->OnUpdate();
-        }
+        // --- Python OnUpdate disabled ---
+        // if (m_PythonEngine)
+        // {
+        //     m_PythonEngine->OnUpdate();
+        // }
 
-        // NO terminal rendering here — engine renders terminal globally
-
-        // check if app should terminate
+        // Termination logic
         CheckIfFinished();
     }
 

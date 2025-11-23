@@ -33,6 +33,19 @@
 #include "event/events.h"
 #include "curlWrapper/curlWrapper.h"
 
+extern "C" void JarvisRedirect(const char* message)
+{
+    if (!message)
+    {
+        return;
+    }
+
+    // Forward into the C++ logging system, which handles:
+    //  - ncurses terminal log window via TerminalLogStreamBuf
+    //  - /tmp/log.txt
+    std::cout << message << std::endl;
+}
+
 namespace AIAssistant
 {
     // global logger for the engine and application

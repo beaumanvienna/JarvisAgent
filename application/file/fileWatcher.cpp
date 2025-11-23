@@ -22,6 +22,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "auxiliary/file.h"
 #include "file/fileWatcher.h"
 #include "event/events.h"
 

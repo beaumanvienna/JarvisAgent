@@ -27,7 +27,6 @@
 #include "event/eventQueue.h"
 #include "json/configParser.h"
 #include "auxiliary/threadPool.h"
-#include "auxiliary/file.h"
 #include "input/keyboardInput.h"
 
 #include "log/terminalManager.h"

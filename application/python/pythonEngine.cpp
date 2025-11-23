@@ -31,11 +31,21 @@
 
 namespace fs = std::filesystem;
 
+extern "C" void JarvisRedirectPython(const char* message)
+{
+    if (message == nullptr)
+    {
+        return;
+    }
+
+    // Send into std::cout so it flows through TerminalLogStreamBuf
+    std::cout << message << std::endl;
+}
+
 namespace AIAssistant
 {
 
     PythonEngine::PythonEngine() = default;
-
     PythonEngine::~PythonEngine() {}
 
     void PythonEngine::Reset()
@@ -46,36 +56,20 @@ namespace AIAssistant
         m_ScriptDir.clear();
         m_ModuleName.clear();
 
-        if (m_OnStartFunc)
-        {
-            Py_DECREF(m_OnStartFunc);
-            m_OnStartFunc = nullptr;
-        }
-        if (m_OnUpdateFunc)
-        {
-            Py_DECREF(m_OnUpdateFunc);
-            m_OnUpdateFunc = nullptr;
-        }
-        if (m_OnEventFunc)
-        {
-            Py_DECREF(m_OnEventFunc);
-            m_OnEventFunc = nullptr;
-        }
-        if (m_OnShutdownFunc)
-        {
-            Py_DECREF(m_OnShutdownFunc);
-            m_OnShutdownFunc = nullptr;
-        }
+        Py_XDECREF(m_OnStartFunc);
+        Py_XDECREF(m_OnUpdateFunc);
+        Py_XDECREF(m_OnEventFunc);
+        Py_XDECREF(m_OnShutdownFunc);
 
-        if (m_MainModule)
-        {
-            Py_DECREF(m_MainModule);
-            m_MainModule = nullptr;
-        }
+        Py_XDECREF(m_MainModule);
+        m_MainModule = nullptr;
 
         m_MainDict = nullptr;
     }
 
+    // ============================================================================
+    //   Initialize()
+    // ============================================================================
     bool PythonEngine::Initialize(std::string const& scriptPath)
     {
         if (m_Running)
@@ -85,12 +79,9 @@ namespace AIAssistant
 
         Reset();
         m_StopRequested = false;
-
         m_ScriptPath = scriptPath;
 
-        // ---------------------------------------------------------
         // Resolve script directory + module name
-        // ---------------------------------------------------------
         try
         {
             fs::path pythonScriptPath(scriptPath);
@@ -105,9 +96,6 @@ namespace AIAssistant
 
         LOG_APP_INFO("Initializing PythonEngine with script '{}'", m_ScriptPath);
 
-        // ---------------------------------------------------------
-        // Initialize Python interpreter (GIL is held after this)
-        // ---------------------------------------------------------
         Py_Initialize();
 
         if (!Py_IsInitialized())
@@ -116,15 +104,37 @@ namespace AIAssistant
             return false;
         }
 
-        // ---------------------------------------------------------
-        // All interpreter setup MUST occur before releasing GIL
-        // ---------------------------------------------------------
+        // IMPORTANT:
+        // All interpreter setup must happen BEFORE releasing GIL.
         {
             PyGILState_STATE gilState = PyGILState_Ensure();
 
-            // -----------------------------------------------------
+            // -------------------------------------------------------------
+            // Install stdout/stderr redirection *before* importing module
+            // -------------------------------------------------------------
+            const char* redirectCode = "import sys\n"
+                                       "import ctypes\n"
+                                       "class _JarvisRedirect:\n"
+                                       "    def write(self, msg):\n"
+                                       "        try:\n"
+                                       "            _C = ctypes.CDLL(None)\n"
+                                       "            _C.JarvisRedirectPython(msg.encode('utf-8'))\n"
+                                       "        except Exception:\n"
+                                       "            pass\n"
+                                       "    def flush(self):\n"
+                                       "        pass\n"
+                                       "r = _JarvisRedirect()\n"
+                                       "sys.stdout = r\n"
+                                       "sys.stderr = r\n";
+
+            if (PyRun_SimpleString(redirectCode) != 0)
+            {
+                LOG_APP_ERROR("PythonEngine: failed to install stdout/stderr redirect");
+            }
+
+            // -------------------------------------------------------------
             // Add script directory to sys.path
-            // -----------------------------------------------------
+            // -------------------------------------------------------------
             PyObject* sysModule = PyImport_ImportModule("sys");
             if (!sysModule)
             {
@@ -145,34 +155,25 @@ namespace AIAssistant
             }
 
             PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
-            if (!directoryString)
-            {
-                Py_DECREF(sysPathList);
-                Py_DECREF(sysModule);
-                LOG_APP_ERROR("PythonEngine: failed to create directory string");
-                PyGILState_Release(gilState);
-                return false;
-            }
-
             PyList_Append(sysPathList, directoryString);
 
             Py_DECREF(directoryString);
             Py_DECREF(sysPathList);
             Py_DECREF(sysModule);
 
-            // -----------------------------------------------------
-            // Import the script module
-            // -----------------------------------------------------
-            PyObject* moduleNameStr = PyUnicode_FromString(m_ModuleName.c_str());
-            if (!moduleNameStr)
+            // -------------------------------------------------------------
+            // Import main Python module
+            // -------------------------------------------------------------
+            PyObject* moduleNameObj = PyUnicode_FromString(m_ModuleName.c_str());
+            if (!moduleNameObj)
             {
-                LOG_APP_ERROR("PythonEngine: failed to create module name '{}'", m_ModuleName);
+                LOG_APP_ERROR("PythonEngine: failed to allocate module name '{}'", m_ModuleName);
                 PyGILState_Release(gilState);
                 return false;
             }
 
-            m_MainModule = PyImport_Import(moduleNameStr);
-            Py_DECREF(moduleNameStr);
+            m_MainModule = PyImport_Import(moduleNameObj);
+            Py_DECREF(moduleNameObj);
 
             if (!m_MainModule)
             {
@@ -192,9 +193,9 @@ namespace AIAssistant
                 return false;
             }
 
-            // -----------------------------------------------------
+            // -------------------------------------------------------------
             // Load hook functions
-            // -----------------------------------------------------
+            // -------------------------------------------------------------
             auto loadHook = [&](char const* hookName, PyObject*& outFunc)
             {
                 outFunc = nullptr;
@@ -220,20 +221,18 @@ namespace AIAssistant
             PyGILState_Release(gilState);
         }
 
-        // release the GIL, this allows the worker thread to reacquire it safely
+        // Release GIL so worker thread can reacquire it
         PyEval_SaveThread();
 
         m_Running = true;
-
-        // ---------------------------------------------------------
-        // Launch the worker thread
-        // ---------------------------------------------------------
         StartWorkerThread();
 
         LOG_APP_INFO("PythonEngine initialized successfully");
         return true;
     }
-
+    // ============================================================================
+    //   Worker thread
+    // ============================================================================
     void PythonEngine::StartWorkerThread() { m_WorkerThread = std::thread(&PythonEngine::WorkerLoop, this); }
 
     void PythonEngine::WorkerLoop()
@@ -246,14 +245,17 @@ namespace AIAssistant
                 std::unique_lock<std::mutex> lock(m_QueueMutex);
                 m_QueueCondition.wait(lock, [&]() { return m_StopRequested || !m_TaskQueue.empty(); });
 
-                if (m_StopRequested) // cancel all jobs
+                if (m_StopRequested)
                 {
                     break;
                 }
+
                 task = m_TaskQueue.front();
                 m_TaskQueue.pop();
             }
+
             PyGILState_STATE gilState = PyGILState_Ensure();
+
             switch (task.m_Type)
             {
                 case PythonTask::Type::OnStart:
@@ -297,22 +299,22 @@ namespace AIAssistant
         }
     }
 
+    // ============================================================================
+    //   Enqueue + hook callers
+    // ============================================================================
     void PythonEngine::EnqueueTask(PythonTask const& task)
     {
         {
             std::lock_guard<std::mutex> lock(m_QueueMutex);
             m_TaskQueue.push(task);
         }
+
         m_QueueCondition.notify_one();
     }
 
-    // ---------------------------------------------------------
-    // Call hooks
-    // ---------------------------------------------------------
-
-    void PythonEngine::CallHook(PyObject* function, char const* hookName)
+    void PythonEngine::CallHook(PyObject* functionObject, char const* hookName)
     {
-        PyObject* result = PyObject_CallObject(function, nullptr);
+        PyObject* result = PyObject_CallObject(functionObject, nullptr);
 
         if (!result)
         {
@@ -325,9 +327,10 @@ namespace AIAssistant
         }
     }
 
-    void PythonEngine::CallHookWithEvent(PyObject* function, char const* hookName, Event const& event)
+    void PythonEngine::CallHookWithEvent(PyObject* functionObject, char const* hookName, Event const& event)
     {
         PyObject* eventDict = BuildEventDict(event);
+
         if (!eventDict)
         {
             LOG_APP_ERROR("PythonEngine: failed to build event dictionary for '{}'", hookName);
@@ -335,9 +338,9 @@ namespace AIAssistant
         }
 
         PyObject* args = PyTuple_New(1);
-        PyTuple_SetItem(args, 0, eventDict); // steals reference to eventDict
+        PyTuple_SetItem(args, 0, eventDict); // steals reference
 
-        PyObject* result = PyObject_CallObject(function, args);
+        PyObject* result = PyObject_CallObject(functionObject, args);
 
         Py_DECREF(args);
 
@@ -352,6 +355,9 @@ namespace AIAssistant
         }
     }
 
+    // ============================================================================
+    //   Build Python event dict
+    // ============================================================================
     PyObject* PythonEngine::BuildEventDict(Event const& event)
     {
         PyObject* dictionary = PyDict_New();
@@ -373,11 +379,9 @@ namespace AIAssistant
 
         return dictionary;
     }
-
-    // ---------------------------------------------------------
-    // Public API event entry points
-    // ---------------------------------------------------------
-
+    // ============================================================================
+    //   Public API entry points
+    // ============================================================================
     void PythonEngine::OnStart()
     {
         if (!m_Running)
@@ -415,6 +419,9 @@ namespace AIAssistant
         EnqueueTask(task);
     }
 
+    // ============================================================================
+    //   Shutdown
+    // ============================================================================
     void PythonEngine::Stop()
     {
         if (!m_Running)
@@ -422,7 +429,7 @@ namespace AIAssistant
             return;
         }
 
-        // enqueue the Python OnShutdown() hook
+        // enqueue the Shutdown hook so Python gets a clean callback
         if (m_OnShutdownFunc)
         {
             PythonTask task;
@@ -430,7 +437,7 @@ namespace AIAssistant
             EnqueueTask(task);
         }
 
-        // stop worker thread
+        // tell the worker thread to stop
         m_StopRequested = true;
         m_QueueCondition.notify_all();
 
@@ -439,8 +446,8 @@ namespace AIAssistant
             m_WorkerThread.join();
         }
 
-        // finalize Python interpreter
-        PyGILState_Ensure();
+        // clean up Python references safely under the GIL
+        PyGILState_STATE gilState = PyGILState_Ensure();
 
         Py_XDECREF(m_OnStartFunc);
         Py_XDECREF(m_OnUpdateFunc);
@@ -449,7 +456,13 @@ namespace AIAssistant
 
         Py_XDECREF(m_MainModule);
 
-        Py_Finalize();
+        m_OnStartFunc = nullptr;
+        m_OnUpdateFunc = nullptr;
+        m_OnEventFunc = nullptr;
+        m_OnShutdownFunc = nullptr;
+        m_MainModule = nullptr;
+
+        PyGILState_Release(gilState);
 
         m_Running = false;
 
