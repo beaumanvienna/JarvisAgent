@@ -5,20 +5,15 @@
 JarvisAgent Python Scripting Layer
 ----------------------------------
 
-Automation hooks called directly from the C++ PythonEngine:
-
-    OnStart()
-    OnUpdate()
-    OnEvent(event)
-    OnShutdown()
-
-Implements:
-- PDF → Markdown conversion
+Supports:
+- Document conversion using MarkItDown CLI (PDF/DOCX/XLSX/PPTX/etc.)
 - Markdown chunking
 - Chunk-output combining
-- STNG/CNTX/TASK preprocessing (future expansion)
+- Future STNG/CNTX/TASK preprocessing
 
 Copyright (c) 2025 JC Technolabs
+License: GPL-3.0
+
 """
 
 from pathlib import Path
@@ -27,8 +22,13 @@ import sys
 import ctypes
 
 from helpers.log import log_info, log_warn, log_error
-from helpers.fileutils import is_pdf
-from helpers.markitdown_tools import convert_pdf_to_markdown
+from helpers.fileutils import (
+    is_pdf,
+    is_docx,
+    is_xlsx,
+    is_pptx,
+)
+from helpers.markitdown_tools import convert_with_markitdown
 from helpers.md_chunker import chunk_markdown_if_needed
 from helpers.chunk_combiner import handle_chunk_output_added
 
@@ -52,7 +52,7 @@ class _JarvisRedirect:
         try:
             self._redirect(msg.encode("utf-8"))
         except Exception:
-            pass  # Silent fail — avoid recursion or loops
+            pass
 
     def flush(self):
         pass
@@ -61,26 +61,25 @@ class _JarvisRedirect:
 redir = _JarvisRedirect()
 sys.stdout = redir
 sys.stderr = redir
+
+
 # --------------------------------------------------------------------
-
-
-# Detect chunk output files
+# Regex for chunk output files
+# --------------------------------------------------------------------
 CHUNK_OUTPUT_REGEX = re.compile(r"^chunk_(\d+)\.output\.md$")
 
 
 def is_md_up_to_date(markdown_path: Path) -> bool:
-    """
-    Returns True if <markdown>.output.md exists and is newer.
-    """
+    """Return True if foo.output.md exists and is newer."""
     if not markdown_path.name.endswith(".md"):
         return False
 
-    output_path = markdown_path.with_suffix(".output.md")
-    if not output_path.exists():
+    out_path = markdown_path.with_suffix(".output.md")
+    if not out_path.exists():
         return False
 
     try:
-        return output_path.stat().st_mtime >= markdown_path.stat().st_mtime
+        return out_path.stat().st_mtime >= markdown_path.stat().st_mtime
     except OSError:
         return False
 
@@ -88,39 +87,36 @@ def is_md_up_to_date(markdown_path: Path) -> bool:
 # --------------------------------------------------------------------
 # Hook implementations
 # --------------------------------------------------------------------
-
 def OnStart():
     log_info("Python OnStart() called.")
 
 
 def OnUpdate():
-    # light-weight; runs ~60 times per second
+    # Disabled — not used anymore
     return
 
 
 def OnEvent(event):
-    """
-    event is a dict passed from C++:
-        {
-            "type": "FileAdded",
-            "path": "../queue/STNG_xxx.txt"
-        }
-    """
 
     event_type = event.get("type")
     file_path = event.get("path", "")
     file_name = Path(file_path).name
 
     # ------------------------------------------------------------
-    # AUTO-CONVERT PDF → MARKDOWN
+    # DOCUMENT CONVERSION (PDF, DOCX, XLSX, PPTX)
     # ------------------------------------------------------------
-    if event_type == "FileAdded" and is_pdf(file_path):
-        log_info(f"PDF detected: {file_path}")
+    if event_type == "FileAdded" and (
+        is_pdf(file_path)
+        or is_docx(file_path)
+        or is_xlsx(file_path)
+        or is_pptx(file_path)
+    ):
+        log_info(f"Document detected: {file_path}")
         try:
-            markdown_path = convert_pdf_to_markdown(file_path)
-            log_info(f"PDF → Markdown ready: {markdown_path}")
+            md_path = convert_with_markitdown(file_path)
+            log_info(f"Converted → Markdown: {md_path}")
         except Exception as exception:
-            log_error(f"PDF conversion failed for {file_path}: {exception}")
+            log_error(f"Conversion failed for {file_path}: {exception}")
         return
 
     # ------------------------------------------------------------
@@ -130,7 +126,7 @@ def OnEvent(event):
         try:
             handle_chunk_output_added(file_path)
         except Exception as exception:
-            log_error(f"Chunk output combining failed for {file_path}: {exception}")
+            log_error(f"Chunk combining failed for {file_path}: {exception}")
         return
 
     # ------------------------------------------------------------
@@ -138,27 +134,26 @@ def OnEvent(event):
     # ------------------------------------------------------------
     if event_type == "FileAdded" and file_path.endswith(".md"):
 
-        # skip final combined results
+        # skip combined results
         if file_name.endswith(".output.md"):
             return
 
-        # skip chunk outputs (already handled)
+        # skip chunk outputs
         if CHUNK_OUTPUT_REGEX.match(file_name):
             return
 
-        # skip if processed and up to date
         md_path = Path(file_path)
+
+        # skip if already processed
         if is_md_up_to_date(md_path):
             log_info(f"Markdown already processed — skipping: {file_path}")
             return
 
-        # perform chunking
-        log_info(f"Markdown file detected for potential chunking: {file_path}")
+        log_info(f"Markdown file detected for chunking: {file_path}")
         try:
             chunk_markdown_if_needed(file_path)
         except Exception as exception:
             log_error(f"Markdown chunking failed for {file_path}: {exception}")
-
         return
 
 

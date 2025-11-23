@@ -1,49 +1,31 @@
-# JarvisAgent TODO List (Core Items Only)
+# JarvisAgent TODO List
 
-This list tracks the remaining essential work for JarvisAgent.
-
----
-
-## 1. Status Line Renderer Cleanup  
-**Problem:** Status line overwrites other log messages.  
-**Goal:** Ensure logs remain readable.  
-**Current plan:** Disable or restrict status line output until ANSI-based version is implemented.
+This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 2. Add GitHub Ubuntu CI Pipeline  
+## 1. Add GitHub Ubuntu CI Pipeline
 **Goal:**  
-Automatic build + run tests on push/PR.  
+Automatic build + run tests on push/PR.
 - Build on Ubuntu  
+- Fail early if compilation breaks
 - Run unit tests  
-- Run formatting checks  
-- Cache dependencies  
-- Fails early if compilation breaks
 
 ---
 
-## 3. Compile on Windows  
+## 2. Compile on Windows
 **Goal:**  
-Enable full Windows compatibility.  
+Enable full Windows compatibility.
 - Configure MSVC build  
 - Resolve filesystem path differences  
 - Add GitHub Windows CI
 
 ---
 
-## 4. Dockerize JarvisAgent  
+## 3. Dockerize JarvisAgent
 **Goal:**  
-Provide a reproducible container environment.  
+Provide a reproducible container environment.
 - Ubuntu base image  
-- All required dependencies preinstalled  
+- All required dependencies preinstalled  (markitdown and python 3.12)
 
 ---
-
-## 5. Remove OnUpdate Python calls 
-**Goal:**  
-- OnUpdate() not used
-- Events jam event queuw during long file conversion
-
-
----
-

@@ -2,83 +2,92 @@
 # -*- coding: utf-8 -*-
 
 """
-MarkItDown PDF Conversion Tools
+MarkItDown CLI Conversion Tools
 -------------------------------
 
-Provides PDF → Markdown conversion 
+Uses the MarkItDown CLI tool (NOT the Python module).
 
-This module is used by scripts/main.py through OnEvent().
+Supports any file type that MarkItDown can handle:
+- PDF
+- DOCX/DOC
+- XLS/XLSX/CSV
+- PPT/PPTX
+- Images (OCR/EXIF)
+- HTML
+- ZIP
+- Audio
+- EPUB
 
 Copyright (c) 2025 JC Technolabs
 License: GPL-3.0
-
 """
 
 import os
 import subprocess
+from pathlib import Path
 
 from helpers.log import log_info, log_warn, log_error
 
 
-def convert_pdf_to_markdown(pdf_path: str, md_path: str = None) -> str:
+def convert_with_markitdown(input_path: str) -> Path:
     """
-    Convert a PDF file to Markdown using Microsoft's MarkItDown tool.
-
-    - Skips conversion when the .md file already exists AND is newer than the PDF
-    - Returns the output .md path (created or reused)
+    Convert any supported file into Markdown via MarkItDown CLI.
+    Always uses:
+        markitdown <input>
     """
 
-    if md_path is None:
-        md_path = pdf_path + ".md"
+    input_path = str(input_path)
+    md_path = Path(input_path).with_suffix(".md")
 
-    # ----------------------------
-    # Skip conversion if up-to-date
-    # ----------------------------
-    if os.path.exists(md_path):
+    # ------------------------------------------------------
+    # Skip when output exists and is newer
+    # ------------------------------------------------------
+    if md_path.exists():
         try:
-            pdf_mtime = os.path.getmtime(pdf_path)
-            md_mtime = os.path.getmtime(md_path)
-
-            if md_mtime >= pdf_mtime:
-                log_info(f"Skipping PDF conversion (already up-to-date): {md_path}")
+            if md_path.stat().st_mtime >= Path(input_path).stat().st_mtime:
+                log_info(f"Skipping conversion (up-to-date): {md_path}")
                 return md_path
         except Exception as e:
-            log_warn(f"Timestamp check failed for {pdf_path}: {e}")
-            # if timestamps fail, we fall through and re-convert
+            log_warn(f"Timestamp check failed for {input_path}: {e}")
 
-    # ----------------------------
-    # Perform conversion
-    # ----------------------------
-    log_info(f"Running MarkItDown on: {pdf_path}")
+    log_info(f"Running MarkItDown CLI for: {input_path}")
 
     try:
         result = subprocess.run(
-            ["markitdown", pdf_path],
+            ["markitdown", input_path],
             capture_output=True,
-            text=True
+            text=True,
         )
 
         if result.returncode != 0:
-            log_error(f"MarkItDown failed: {result.stderr.strip()}")
-            raise RuntimeError(f"MarkItDown error: {result.stderr}")
+            raise RuntimeError(result.stderr.strip())
 
-        # Write the markdown output manually
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(result.stdout)
+        if not result.stdout.strip():
+            log_warn(f"MarkItDown returned empty output for {input_path}")
+            md_text = f"# WARNING\nMarkItDown produced empty output for:\n{input_path}"
+        else:
+            md_text = result.stdout
 
-        log_info(f"PDF converted successfully: {md_path}")
+        md_path.write_text(md_text, encoding="utf-8")
+
+        log_info(f"Converted successfully → {md_path}")
         return md_path
 
     except FileNotFoundError:
         log_error(
-            "markitdown not found. Install it using: "
-            "pipx install markitdown[pdf]"
+            "markitdown CLI not found. Install it using:\n"
+            "    pipx install markitdown[pdf]"
         )
-        # Write a placeholder md file so JarvisAgent continues normally
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(f"# ERROR: markitdown missing\nCould not convert {pdf_path}.")
+        md_path.write_text(
+            f"# ERROR: markitdown missing\nCould not convert: {input_path}",
+            encoding="utf-8",
+        )
         return md_path
 
-    except Exception as e:
-        log_error(f"Unexpected PDF conversion error: {e}")
-        raise
+    except Exception as exception:
+        log_error(f"Conversion FAILED for {input_path}: {exception}")
+        md_path.write_text(
+            f"# ERROR converting file\n\n{input_path}\n\nError:\n```\n{exception}\n```",
+            encoding="utf-8",
+        )
+        return md_path
