@@ -120,6 +120,21 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 
 ## Development
 
+JarvisAgent depends on
+* ncurses/ncursesw
+* python3-12
+* libssl
+* libz
+* markitdown
+* premake5
+
+On Ubuntu, use these commands to install the dependencies:
+```
+sudo apt install -y python3 python3-pip libncurses5 libncurses5-dev libncursesw5 libncursesw5-dev libssl-dev zlib1g-dev
+pipx install "markitdown[all]"
+```
+Premake5: `git clone https://github.com/premake/premake-core`, build it with `./Bootstrap.sh`, copy executable to /use/bin<br>
+<br>
 To clone the project, use:
 
 ```bash
@@ -148,10 +163,8 @@ premake5 xcode4
 for Xcode on MacOS.<br>
 <br>
 <br>
-On Ubuntu, install the required development libraries with<br>
-`sudo apt install libssl-dev zlib1g-dev`<br>
-<br>
 If you created a Makefile, build the project with<br>
+`export MAKEFLAGS=-j8` or however many CPU cores you want to use<br>
 `make config=release verbose=1 && make config=debug verbose=1`<br>
 <br>
 Run the executable with<br>
