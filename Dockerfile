@@ -1,17 +1,18 @@
 
 FROM ubuntu:22.04 AS builder
 
-
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y \
     build-essential \
     git \
     wget \
     ca-certificates \
-    python3 \
+    python3.12 \
+    python3.12-dev \
     python3-pip \
-    python3-dev \
     libncurses5 \
     libncurses5-dev \
     libncursesw5 \
@@ -46,11 +47,13 @@ RUN make config=release verbose=1 -j4 2>&1 || make config=release verbose=1 -j1
 
 FROM ubuntu:22.04
 
-
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y \
-    python3 \
+# Install Python 3.12 for runtime
+RUN apt-get update && apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y \
+    python3.12 \
     python3-pip \
     libncurses5 \
     libncursesw5 \
