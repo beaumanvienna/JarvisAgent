@@ -2,9 +2,11 @@
 
   jarvis_agent:
     image: ghcr.io/ahmeterenlacinbala/jarvisagent:main
+    environment:
+      - TRACY_NO_INVARIANT_CHECK=1
     labels:
       traefik.enable: "true"
-      traefik.http.routers.jarvis_agent.rule: Host(`DomainNameHere.com`)
+      traefik.http.routers.jarvis_agent.rule: Host(`jarvis-backend.lacinbala.com`)
       traefik.http.routers.jarvis_agent.entrypoints: websecure
       traefik.http.routers.jarvis_agent.tls.certresolver: le
       traefik.http.services.jarvis_agent.loadbalancer.server.port: "8080"
