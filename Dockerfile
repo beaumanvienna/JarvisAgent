@@ -11,12 +11,14 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-pip \
+    python3-dev \
     libncurses5 \
     libncurses5-dev \
     libncursesw5 \
     libncursesw5-dev \
     libssl-dev \
     zlib1g-dev \
+    perl \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -34,9 +36,11 @@ RUN cd /tmp && \
 WORKDIR /app
 
 COPY . .
+
+
 RUN premake5 gmake
-RUN export MAKEFLAGS=-j$(nproc) && \
-    make config=release verbose=1
+
+RUN make config=release verbose=1 -j4 2>&1 || make config=release verbose=1 -j1
 
 FROM ubuntu:22.04
 
@@ -77,10 +81,5 @@ USER appuser
 
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')" || exit 1
-
-# Run the application
 CMD ["./jarvisAgent"]
 
