@@ -13,13 +13,13 @@ Supports:
 
 Copyright (c) 2025 JC Technolabs
 License: GPL-3.0
-
 """
 
 from pathlib import Path
 import re
 import sys
 import ctypes
+import traceback
 
 from helpers.log import log_info, log_warn, log_error
 from helpers.fileutils import (
@@ -34,6 +34,41 @@ from helpers.chunk_combiner import handle_chunk_output_added
 
 
 # --------------------------------------------------------------------
+# Notify C++ about Python error states → triggers "Python Offline" UI
+# --------------------------------------------------------------------
+class _JarvisPyStatus:
+    def __init__(self):
+        try:
+            C = ctypes.CDLL(None)
+            C.JarvisPyStatus.argtypes = [ctypes.c_char_p]
+            C.JarvisPyStatus.restype = None
+            self._send = C.JarvisPyStatus
+        except Exception as exception:
+            # Hard-stop: cannot report errors → engine must shut down
+            log_error(f"Failed to initialize JarvisPyStatus: {exception}")
+            self._send = None
+
+    def send(self, msg: str):
+        if self._send is None:
+            # Hard-stop: error reporting path broken
+            log_error("JarvisPyStatus.send() called but C callback is missing")
+            return
+        try:
+            self._send(msg.encode("utf-8"))
+        except Exception as exception:
+            log_error(f"JarvisPyStatus.send() failed: {exception}")
+
+
+pystatus = _JarvisPyStatus()
+
+
+def notify_python_error(message: str):
+    """Send error state to C++ and log it."""
+    log_error(message)
+    pystatus.send(message)
+
+
+# --------------------------------------------------------------------
 # Redirect Python stdout/stderr → C++ log (JarvisRedirect)
 # --------------------------------------------------------------------
 class _JarvisRedirect:
@@ -43,16 +78,22 @@ class _JarvisRedirect:
             C.JarvisRedirect.argtypes = [ctypes.c_char_p]
             C.JarvisRedirect.restype = None
             self._redirect = C.JarvisRedirect
-        except Exception:
+        except Exception as exception:
+            notify_python_error(f"Failed to initialize JarvisRedirect: {exception}")
             self._redirect = None
 
     def write(self, msg):
-        if not msg or self._redirect is None:
+        if not msg:
             return
+
+        if self._redirect is None:
+            notify_python_error("JarvisRedirect.write() called but redirect function is missing")
+            return
+
         try:
             self._redirect(msg.encode("utf-8"))
-        except Exception:
-            pass
+        except Exception as exception:
+            notify_python_error(f"JarvisRedirect.write() failed: {exception}")
 
     def flush(self):
         pass
@@ -61,6 +102,17 @@ class _JarvisRedirect:
 redir = _JarvisRedirect()
 sys.stdout = redir
 sys.stderr = redir
+
+
+# --------------------------------------------------------------------
+# Global exception hook — catches ANY unhandled Python exception
+# --------------------------------------------------------------------
+def _global_exception_hook(exc_type, exc, tb):
+    details = "".join(traceback.format_exception(exc_type, exc, tb))
+    notify_python_error("Unhandled Python exception:\n" + details)
+
+
+sys.excepthook = _global_exception_hook
 
 
 # --------------------------------------------------------------------
@@ -116,7 +168,7 @@ def OnEvent(event):
             md_path = convert_with_markitdown(file_path)
             log_info(f"Converted → Markdown: {md_path}")
         except Exception as exception:
-            log_error(f"Conversion failed for {file_path}: {exception}")
+            notify_python_error(f"Conversion failed for {file_path}: {exception}")
         return
 
     # ------------------------------------------------------------
@@ -126,7 +178,7 @@ def OnEvent(event):
         try:
             handle_chunk_output_added(file_path)
         except Exception as exception:
-            log_error(f"Chunk combining failed for {file_path}: {exception}")
+            notify_python_error(f"Chunk combining failed for {file_path}: {exception}")
         return
 
     # ------------------------------------------------------------
@@ -153,7 +205,7 @@ def OnEvent(event):
         try:
             chunk_markdown_if_needed(file_path)
         except Exception as exception:
-            log_error(f"Markdown chunking failed for {file_path}: {exception}")
+            notify_python_error(f"Markdown chunking failed for {file_path}: {exception}")
         return
 
 

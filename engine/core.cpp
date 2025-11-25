@@ -211,6 +211,10 @@ namespace AIAssistant
 
         m_ThreadPool.Wait();
 
+        // Ensure all pending log output is flushed ---
+        std::cout << std::flush;
+        std::cerr << std::flush;
+
         if (m_OriginalCoutBuffer != nullptr)
         {
             std::cout.rdbuf(m_OriginalCoutBuffer);

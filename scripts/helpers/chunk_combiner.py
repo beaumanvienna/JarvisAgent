@@ -5,39 +5,71 @@
 # Combines chunk_###.output.md files into a single final .output.md
 # once *all* chunk outputs are present and newer than their inputs.
 #
-# Usage (from main.py):
-#     from helpers.chunk_combiner import handle_chunk_output_added
-#     handle_chunk_output_added(file_path)
-#
 # Copyright (c) 2025 JC Technolabs
 # License: GPL-3.0
 
-
 import re
+import ctypes
 from pathlib import Path
-
 
 # Regex for chunk numbering
 CHUNK_INPUT_REGEX = re.compile(r"^chunk_(\d+)\.md$")
 CHUNK_OUTPUT_REGEX = re.compile(r"^chunk_(\d+)\.output\.md$")
 
 
-def log(msg: str):
-    """Local logging helper — override if needed."""
+def log(msg: str) -> None:
     print(f"[PY][ChunkCombiner] {msg}")
 
 
-def handle_chunk_output_added(trigger_file: str):
+# --------------------------------------------------------------------
+# Local Python → C++ error forwarder
+# --------------------------------------------------------------------
+class _JarvisPyStatusHelper:
+    def __init__(self):
+        try:
+            C = ctypes.CDLL(None)
+            C.JarvisPyStatus.argtypes = [ctypes.c_char_p]
+            C.JarvisPyStatus.restype = None
+            self._send = C.JarvisPyStatus
+        except Exception:
+            self._send = None
+
+    def send(self, msg: str):
+        if self._send is None:
+            return
+        try:
+            self._send(msg.encode("utf-8"))
+        except Exception:
+            pass
+
+
+_pystatus = _JarvisPyStatusHelper()
+
+
+def _notify_chunker_error(message: str):
+    log(message)
+    try:
+        _pystatus.send(message)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------
+# Chunk combination
+# --------------------------------------------------------------------
+def handle_chunk_output_added(trigger_file: str) -> None:
     """
     Called by main.py when a new chunk_###.output.md file appears.
 
-    Steps:
-      1. Identify folder containing chunks.
-      2. Ensure all chunk_###.md files have matching chunk_###.output.md files.
-      3. Ensure output is newer than input.
-      4. Combine all outputs, sorted numerically.
-      5. Write combined file into parent folder:
-         <OriginalFileName>.output.md
+    Soft failures (normal workflow-waiting):
+      - Missing matching chunk outputs
+      - Output older than input
+
+    Hard failures (dev mode):
+      - Unexpected folder structure
+      - Read/write failures
+
+    Hard failures report to C++ → Stop Python Engine.
     """
 
     trigger_path = Path(trigger_file)
@@ -46,59 +78,85 @@ def handle_chunk_output_added(trigger_file: str):
     # ------------------------------------------------------------------
     # 1) Gather all chunk input files
     # ------------------------------------------------------------------
-    chunk_inputs = {}
-    for f in folder.iterdir():
-        match = CHUNK_INPUT_REGEX.match(f.name)
-        if match:
-            idx = int(match.group(1))
-            chunk_inputs[idx] = f
+    chunk_inputs: dict[int, Path] = {}
+    try:
+        for file_path in folder.iterdir():
+            match = CHUNK_INPUT_REGEX.match(file_path.name)
+            if match:
+                index = int(match.group(1))
+                chunk_inputs[index] = file_path
+    except Exception as exception:
+        _notify_chunker_error(f"ChunkCombiner: failed to iterate folder {folder}: {exception}")
+        return
 
+    # No chunks -> ignore
     if not chunk_inputs:
-        return  # No chunks in this folder — just ignore
+        return
 
     # ------------------------------------------------------------------
-    # 2) Check for all output chunks + timestamps
+    # 2) Check output chunks (soft waiting)
     # ------------------------------------------------------------------
-    chunk_outputs = {}
-    for idx, input_file in chunk_inputs.items():
-        output = folder / f"chunk_{idx:03d}.output.md"
+    chunk_outputs: dict[int, Path] = {}
+    for index, input_file in chunk_inputs.items():
+        output = folder / f"chunk_{index:03d}.output.md"
+
+        # Soft conditions
         if not output.exists():
-            log(f"Chunk {idx:03d} output missing — cannot combine yet.")
             return
 
-        if output.stat().st_mtime <= input_file.stat().st_mtime:
-            log(f"Chunk {idx:03d} output older than input — waiting.")
+        try:
+            if output.stat().st_mtime <= input_file.stat().st_mtime:
+                return
+        except Exception as exception:
+            _notify_chunker_error(f"ChunkCombiner: failed timestamp check: {exception}")
             return
 
-        chunk_outputs[idx] = output
+        chunk_outputs[index] = output
 
     # ------------------------------------------------------------------
-    # 3) Determine output filename
-    # Folder: "Vulkan Cookbook.pdf.md_chunks"
-    # Original: "Vulkan Cookbook.pdf.md"
-    # Combined: "Vulkan Cookbook.pdf.output.md"
+    # 3) Determine combined output file location
     # ------------------------------------------------------------------
     folder_name = folder.name
     if not folder_name.endswith("_chunks"):
-        log(f"Folder name does not end with '_chunks': {folder_name}")
+        _notify_chunker_error(
+            f"ChunkCombiner: folder name does not end with '_chunks': {folder_name}"
+        )
         return
 
-    original_md = folder_name.replace("_chunks", "")  # "Vulkan Cookbook.pdf.md"
-    combined_output = folder.parent / original_md.replace(".md", ".output.md")
+    original_md_name = folder_name.replace("_chunks", "")
+    combined_output = folder.parent / original_md_name.replace(".md", ".output.md")
 
     # ------------------------------------------------------------------
-    # 4) Combine sorted chunk outputs
+    # 4) Combine sorted outputs
     # ------------------------------------------------------------------
     sorted_indices = sorted(chunk_outputs.keys())
     log(f"Combining {len(sorted_indices)} chunks into: {combined_output}")
 
-    combined_parts = []
-    for idx in sorted_indices:
-        text = chunk_outputs[idx].read_text(encoding="utf-8").rstrip()
+    combined_parts: list[str] = []
+
+    for index in sorted_indices:
+        output_file = chunk_outputs[index]
+        try:
+            text = output_file.read_text(encoding="utf-8").rstrip()
+        except Exception as exception:
+            _notify_chunker_error(
+                f"ChunkCombiner: failed to read chunk output {output_file}: {exception}"
+            )
+            return
+
         combined_parts.append(text + "\n\n")
 
     combined_text = "".join(combined_parts)
 
-    combined_output.write_text(combined_text, encoding="utf-8")
+    # ------------------------------------------------------------------
+    # 5) Write final combined output
+    # ------------------------------------------------------------------
+    try:
+        combined_output.write_text(combined_text, encoding="utf-8")
+    except Exception as exception:
+        _notify_chunker_error(
+            f"ChunkCombiner: failed to write combined output {combined_output}: {exception}"
+        )
+        return
 
     log(f"Combined file written: {combined_output}")

@@ -55,6 +55,7 @@ namespace AIAssistant
         std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
         int64_t GetStartupTimestamp() const;
         StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
+        PythonEngine* GetPythonEngine() { return m_PythonEngine.get(); }
 
     private:
         void CheckIfFinished();

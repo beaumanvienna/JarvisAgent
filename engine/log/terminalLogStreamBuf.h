@@ -43,15 +43,17 @@ namespace AIAssistant
         {
             if (!m_Buffer.empty())
             {
+                std::string clean = StripAnsi(m_Buffer);
+
                 if (m_TerminalManager != nullptr)
                 {
-                    m_TerminalManager->EnqueueLogLine(m_Buffer);
+                    m_TerminalManager->EnqueueLogLine(clean);
                 }
 
                 if (m_FileLogger && m_FileLogger->is_open())
                 {
                     std::lock_guard<std::mutex> lock(m_FileMutex);
-                    (*m_FileLogger) << m_Buffer << "\n";
+                    (*m_FileLogger) << clean << "\n";
                     m_FileLogger->flush();
                 }
 
@@ -64,19 +66,17 @@ namespace AIAssistant
         int overflow(int character) override
         {
             if (character == traits_type::eof())
-            {
                 return traits_type::not_eof(character);
-            }
 
-            char characterValue = static_cast<char>(character);
+            char c = static_cast<char>(character);
 
-            if (characterValue == '\n')
+            if (c == '\n')
             {
                 sync();
             }
             else
             {
-                m_Buffer.push_back(characterValue);
+                m_Buffer.push_back(c);
             }
 
             return character;
@@ -84,11 +84,46 @@ namespace AIAssistant
 
         std::streamsize xsputn(char const* data, std::streamsize count) override
         {
-            for (std::streamsize index = 0; index < count; ++index)
+            m_Buffer.append(data, data + count);
+
+            // Flush only if newline present
+            if (!m_Buffer.empty() && m_Buffer.back() == '\n')
             {
-                overflow(static_cast<unsigned char>(data[index]));
+                m_Buffer.pop_back();
+                sync();
             }
+
             return count;
+        }
+
+    private:
+        // Removes full ANSI escape sequences safely
+        static std::string StripAnsi(std::string const& input)
+        {
+            std::string output;
+            output.reserve(input.size());
+
+            bool inEscape = false;
+            for (unsigned char c : input)
+            {
+                if (!inEscape)
+                {
+                    if (c == 0x1B) // ESC
+                    {
+                        inEscape = true;
+                        continue;
+                    }
+                    output.push_back(c);
+                }
+                else
+                {
+                    // end ESC if 'm' or reset
+                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                        inEscape = false;
+                }
+            }
+
+            return output;
         }
 
     private:

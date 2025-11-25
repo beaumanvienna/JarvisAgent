@@ -20,9 +20,23 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include "event/event.h"
+#include <string>
 
-#include "event/applicationEvent.h"
-#include "event/filesystemEvent.h"
-#include "event/engineEvent.h"
-#include "event/timerEvent.h"
-#include "event/pythonErrorEvent.h"
+namespace AIAssistant
+{
+    class PythonCrashedEvent : public Event
+    {
+    public:
+        PythonCrashedEvent(std::string message)
+            : m_Message(std::move(message)) {}
+
+        const std::string& GetMessage() const { return m_Message; }
+
+        EVENT_CLASS_TYPE(PythonCrashed)
+        EVENT_CLASS_CATEGORY(EventCategoryEngine)
+
+    private:
+        std::string m_Message;
+    };
+}

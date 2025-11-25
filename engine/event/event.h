@@ -42,7 +42,8 @@ namespace AIAssistant
         FileRemoved,         //
         FileModified,        //
         AppError,            //
-        EngineEvent          //
+        EngineEvent,         //
+        PythonCrashed        //
     };
 
     enum EventCategory

@@ -37,6 +37,8 @@ namespace AIAssistant
 
     void JarvisAgent::OnStart()
     {
+        CORE_ASSERT(Core::g_Core != nullptr, "Core must exist before JarvisAgent start!");
+
         // capture application startup time
         m_StartupTime = std::chrono::system_clock::now();
 
@@ -46,10 +48,8 @@ namespace AIAssistant
         // ---------------------------------------------------------
         // Hook StatusRenderer → TerminalManager (engine-owned)
         // ---------------------------------------------------------
-        if (Core::g_Core != nullptr)
         {
             TerminalManager* terminal = Core::g_Core->GetTerminalManager();
-            if (terminal != nullptr)
             {
                 terminal->SetStatusCallbacks(
                     // Build status lines dynamically
@@ -91,21 +91,20 @@ namespace AIAssistant
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
-        // initialize Python
-        m_PythonEngine = std::make_unique<PythonEngine>();
+        { // initialize Python
+            m_PythonEngine = std::make_unique<PythonEngine>();
 
-        std::string const scriptPath = "scripts/main.py";
-        bool pythonOk = m_PythonEngine->Initialize(scriptPath);
+            std::string const scriptPath = "scripts/main.py";
+            bool pythonOk = m_PythonEngine->Initialize(scriptPath);
 
-        if (!pythonOk)
-        {
-            LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
-            m_WebServer->BroadcastPythonStatus(false);
-        }
-        else
-        {
-            m_PythonEngine->OnStart();
-            m_WebServer->BroadcastPythonStatus(true);
+            if (!pythonOk)
+            {
+                LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
+            }
+            else
+            {
+                m_PythonEngine->OnStart();
+            }
         }
     }
 
@@ -123,10 +122,23 @@ namespace AIAssistant
         m_ChatMessagePool->RemoveExpired();
 
         // --- Python OnUpdate disabled ---
-        // if (m_PythonEngine)
-        // {
-        //     m_PythonEngine->OnUpdate();
-        // }
+        // m_PythonEngine->OnUpdate();
+
+        {
+            static std::chrono::steady_clock::time_point lastBroadcastTime = std::chrono::steady_clock::now();
+
+            std::chrono::steady_clock::time_point const currentTime = std::chrono::steady_clock::now();
+
+            std::chrono::steady_clock::duration const timeSinceLastBroadcast = currentTime - lastBroadcastTime;
+
+            if (timeSinceLastBroadcast >= 1s)
+            {
+                bool const pythonRunning = m_PythonEngine->IsRunning();
+                m_WebServer->BroadcastPythonStatus(pythonRunning);
+
+                lastBroadcastTime = currentTime;
+            }
+        }
 
         // Termination logic
         CheckIfFinished();
@@ -178,6 +190,14 @@ namespace AIAssistant
             {
                 filePath = fileEvent.GetPath();
                 return false;
+            });
+
+        dispatcher.Dispatch<PythonCrashedEvent>(
+            [&](PythonCrashedEvent& evt)
+            {
+                LOG_APP_CRITICAL("Python crashed: {}", evt.GetMessage());
+                m_PythonEngine->Stop();
+                return true;
             });
 
         // -----------------------------------------------------------------------------------
@@ -238,10 +258,7 @@ namespace AIAssistant
         }
 
         // Forward event to Python
-        if (m_PythonEngine)
-        {
-            m_PythonEngine->OnEvent(eventPtr);
-        }
+        m_PythonEngine->OnEvent(eventPtr);
     }
 
     //--------------------------------------------------------------------
@@ -256,24 +273,19 @@ namespace AIAssistant
             sessionManager.second->OnShutdown();
         }
 
-        if (m_PythonEngine)
         {
             m_PythonEngine->Stop();
             m_PythonEngine.reset();
             m_WebServer->BroadcastPythonStatus(false);
         }
 
-        if (m_FileWatcher)
         {
             m_FileWatcher->Stop();
         }
 
-        if (m_WebServer)
         {
             m_WebServer->Stop();
         }
-
-        // No terminal shutdown here — engine handles it
     }
 
     //--------------------------------------------------------------------

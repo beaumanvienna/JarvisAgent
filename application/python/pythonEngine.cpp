@@ -28,6 +28,9 @@
 #include "log/log.h"
 #include "event/event.h"
 #include "event/filesystemEvent.h"
+#include "event/pythonErrorEvent.h"
+
+#include "jarvisAgent.h"
 
 namespace fs = std::filesystem;
 
@@ -40,6 +43,24 @@ extern "C" void JarvisRedirectPython(char const* message)
 
     // Send into std::cout so it flows through TerminalLogStreamBuf
     std::cout << message << std::endl;
+}
+
+extern "C" void JarvisPyStatus(char const* message)
+{
+    if (message == nullptr)
+    {
+        return;
+    }
+
+    // Log Python-side error for visibility
+    std::cout << "[PYTHON-ERROR] " << message << std::endl;
+
+    // stop python
+    {
+        auto event = std::make_shared<AIAssistant::PythonCrashedEvent>(message);
+
+        AIAssistant::Core::g_Core->PushEvent(event);
+    }
 }
 
 namespace AIAssistant
@@ -379,6 +400,7 @@ namespace AIAssistant
 
         return dictionary;
     }
+
     // ============================================================================
     //   Public API entry points
     // ============================================================================
