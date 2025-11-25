@@ -49,11 +49,12 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.12 for runtime
+
 RUN apt-get update && apt-get install -y software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update && apt-get install -y \
     python3.12 \
+    libpython3.12 \
     python3-pip \
     libncurses5 \
     libncursesw5 \
