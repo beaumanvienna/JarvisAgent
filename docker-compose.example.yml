@@ -1,0 +1,48 @@
+# Example docker-compose.yml entry for JarvisAgent
+# Add this service to your main docker-compose.yml file
+
+version: "3.8"
+
+services:
+  jarvis_agent:
+    image: ghcr.io/yourusername/jarvisagent:main
+    container_name: jarvis_agent
+    restart: unless-stopped
+    
+    # Optional: Use environment file for configuration
+    # env_file:
+    #   - ./jarvis_agent.env
+    
+    # Optional: Mount queue directory if you want persistence
+    volumes:
+      - jarvis-queue:/app/queue
+      # Optional: Mount custom config.json
+      # - ./jarvis_config.json:/app/config.json:ro
+    
+    # Traefik labels for HTTPS and subdomain routing
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.jarvis_agent.rule: Host(`jarvis-agent.lacinbala.com`)
+      traefik.http.routers.jarvis_agent.entrypoints: websecure
+      traefik.http.routers.jarvis_agent.tls.certresolver: le
+      traefik.http.services.jarvis_agent.loadbalancer.server.port: "8080"
+    
+    networks:
+      - web
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  web:
+    external: true
+
+volumes:
+  jarvis-queue:
+    driver: local
+

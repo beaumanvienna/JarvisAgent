@@ -1,0 +1,47 @@
+# Build artifacts
+bin/
+bin-int/
+*.make
+Makefile
+
+# Git
+.git/
+.gitignore
+.gitmodules
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (not needed in container)
+*.md
+!README.md
+LICENSE
+
+# Example files
+example/
+
+# Premake generated files
+*.make
+Makefile
+
+# Compiled object files
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+tmp/
+temp/
+
