@@ -1,7 +1,7 @@
 # Add this to your docker-compose.yml services section:
 
   jarvis_agent:
-    image: ghcr.io/ahmeterenlacinbala/jarvisagent:main
+    image: ghcr.io/beaumanvienna/jarvisagent:main # change here with your image path
     env_file:
       - ./jarvis_agent.env
     labels:
