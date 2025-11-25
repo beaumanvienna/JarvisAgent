@@ -18,19 +18,21 @@ RUN apt-get update && apt-get install -y \
     libncursesw5-dev \
     libssl-dev \
     zlib1g-dev \
+    uuid-dev \
     perl \
     && rm -rf /var/lib/apt/lists/*
 
 
 RUN pip3 install "markitdown[all]"
 
-# premake5
+# Build premake5 from source (works for both ARM64 and x86_64)
 RUN cd /tmp && \
-    wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz && \
-    tar -xzf premake-5.0.0-beta2-linux.tar.gz && \
-    mv premake5 /usr/local/bin/ && \
+    git clone --depth 1 https://github.com/premake/premake-core.git && \
+    cd premake-core && \
+    make -f Bootstrap.mak linux && \
+    cp bin/release/premake5 /usr/local/bin/ && \
     chmod +x /usr/local/bin/premake5 && \
-    rm premake-5.0.0-beta2-linux.tar.gz
+    cd /tmp && rm -rf premake-core
 
 
 WORKDIR /app
