@@ -61,6 +61,13 @@ void KeyboardInput::Stop()
 void KeyboardInput::Listen()
 {
 #ifndef _WIN32
+    // Check if stdin is a TTY (fails in Docker containers without -it)
+    if (!isatty(STDIN_FILENO))
+    {
+        LOG_CORE_INFO("No TTY detected, keyboard input disabled (headless mode)");
+        return;
+    }
+
     // set terminal to raw mode (non-canonical, no echo)
     termios oldt{}, newt{};
     tcgetattr(STDIN_FILENO, &oldt);
