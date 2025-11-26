@@ -38,6 +38,8 @@ jobs:
 
       - name: Install Premake5
         uses: abel0b/setup-premake@v2
+        with:
+          version: "5.0.0-beta2"
 
       - name: Generate Makefiles
         run: premake5 gmake
