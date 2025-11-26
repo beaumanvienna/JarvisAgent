@@ -1,0 +1,104 @@
+name: 🐧Linux
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------
+      # Checkout
+      # -----------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # -----------------------------------------------------------
+      # Install system-level dependencies
+      # -----------------------------------------------------------
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            python3 python3-pip python3-venv \
+            pipx \
+            libncurses5 libncurses5-dev \
+            libncursesw5 libncursesw5-dev \
+            libssl-dev \
+            zlib1g-dev \
+            pkg-config
+
+      # -----------------------------------------------------------
+      # Install markitdown via pipx
+      # -----------------------------------------------------------
+      - name: Install markitdown
+        run: |
+          pipx ensurepath
+          pipx install "markitdown[all]"
+
+      # -----------------------------------------------------------
+      # Install premake5 (GitHub Action)
+      # -----------------------------------------------------------
+      - name: Install premake5
+        uses: abel0b/setup-premake@v3
+        with:
+          version: "5.0.0-beta2"
+
+      # -----------------------------------------------------------
+      # Generate Makefile via premake5
+      # -----------------------------------------------------------
+      - name: Generate Makefiles
+        run: premake5 gmake
+
+      # -----------------------------------------------------------
+      # Enable parallel build everywhere
+      # -----------------------------------------------------------
+      - name: Set parallel build flags
+        run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+
+      # -----------------------------------------------------------
+      # Build Release
+      # -----------------------------------------------------------
+      - name: Build Release (parallel)
+        run: |
+          echo "Using $(nproc) cores"
+          make -j$(nproc) config=release verbose=1
+
+      # -----------------------------------------------------------
+      # Build Debug
+      # -----------------------------------------------------------
+      - name: Build Debug (parallel)
+        run: |
+          echo "Using $(nproc) cores"
+          make -j$(nproc) config=debug verbose=1
+
+      # -----------------------------------------------------------
+      # Optional: Smoke test (if executable exists)
+      # -----------------------------------------------------------
+      - name: Run Release smoke test
+        run: |
+          if [ -f ./bin/Release/jarvisAgent ]; then
+            echo "Running smoke test…"
+            timeout 3 ./bin/Release/jarvisAgent || true
+          else
+            echo "No Release executable found, skipping."
+          fi
+
+      - name: Run Debug smoke test
+        run: |
+          if [ -f ./bin/Debug/jarvisAgent ]; then
+            echo "Running smoke test…"
+            timeout 3 ./bin/Debug/jarvisAgent || true
+          else
+            echo "No Debug executable found, skipping."
+          fi
