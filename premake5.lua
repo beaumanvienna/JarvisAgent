@@ -43,40 +43,56 @@ project "jarvisAgent"
         "vendor/asio/asio/include"
     }
 
-    filter "system:linux"
+        filter "system:linux"
 
         linkoptions {
             "-fno-pie -no-pie",
             "-rdynamic"
         }
 
+        --
+        -- Use python3-config --includes to discover Python include path.
+        --
+        local py_includes = os.outputof("python3-config --includes")
 
-        files 
-        { 
+        -- Example output:
+        --   "-I/usr/include/python3.12 -I/usr/include/python3.12"
+        --
+        -- Extract the first include path:
+        local py_incdir = py_includes:match("-I([^%s]+)")
+        if not py_incdir then
+            error("Failed to extract Python include directory from python3-config --includes")
+        end
+
+        -- Extract the final folder name (e.g. "python3.12")
+        local py_libname = py_incdir:match("([^/]+)$")
+        if not py_libname then
+            error("Failed to determine Python library name from include path: " .. py_incdir)
+        end
+
+        -- Create linker library name, e.g. "-lpython3.12"
+        local py_link = py_libname
+
+        includedirs {
+            py_incdir
         }
-        includedirs 
-        {
-            "/usr/include/python3.12"
-        }
-        links
-        {
-			"curl",
-			"pthread",
-			"dl",
-			"ssl",
-			"crypto",
-			"z",
-			"m",
-            "python3.12",
+
+        links {
+            "curl",
+            "pthread",
+            "dl",
+            "ssl",
+            "crypto",
+            "z",
+            "m",
+            py_link,      -- e.g. python3.12
             "ncursesw"
         }
-        libdirs
-        {
-        }
-        defines
-        {
+
+        defines {
             "LINUX"
         }
+
 
 	filter "system:macosx"
 
