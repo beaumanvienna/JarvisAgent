@@ -25,6 +25,10 @@
 #include <clocale>
 #include <mutex>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <ncursesw/ncurses.h>
 
 namespace AIAssistant
@@ -270,6 +274,14 @@ namespace AIAssistant
         {
             return;
         }
+
+#ifndef _WIN32
+        // check if a TTY is available before initializing ncurses
+        if (!isatty(STDOUT_FILENO))
+        {
+            return;
+        }
+#endif
 
         std::setlocale(LC_ALL, "");
 

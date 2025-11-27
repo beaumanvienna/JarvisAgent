@@ -2,12 +2,10 @@
     "file format identifier": 1.2,
     "description": "jarvisAgent configuration file",
     "author": "Copyright (c) 2025 JC Technolabs",
-
-    "queue folder": "../queue",
+    "queue folder": "queue",
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
     "verbose": false,
-
     "API interfaces": [
         {
             "url": "https://api.openai.com/v1/chat/completions",
@@ -34,7 +32,6 @@
             "description": "Same model as gpt-4.1-mini, but via the Responses API for faster throughput when processing sequential chunks.  Use API index 3."
         }
     ],
-
     "API index": 3,
     "max file size in kB": 24
 }

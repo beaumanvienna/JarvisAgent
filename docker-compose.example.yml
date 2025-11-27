@@ -1,0 +1,15 @@
+# Add this to your docker-compose.yml services section:
+
+  jarvis_agent:
+    image: ghcr.io/beaumanvienna/jarvisagent:main # change here with your image path
+    env_file:
+      - ./jarvis_agent.env
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.jarvis_agent.rule: Host(`YourDomain`)
+      traefik.http.routers.jarvis_agent.entrypoints: websecure
+      traefik.http.routers.jarvis_agent.tls.certresolver: le
+      traefik.http.services.jarvis_agent.loadbalancer.server.port: "8080"
+    networks:
+      - web
+    restart: unless-stopped
