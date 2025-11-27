@@ -39,6 +39,7 @@ namespace AIAssistant
 
         // Pop all events (main thread should call this periodically)
         std::vector<EventPtr> PopAll();
+        size_t Size();
 
     private:
         std::mutex m_QueueAccessMutex;

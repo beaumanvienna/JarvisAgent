@@ -1,8 +1,22 @@
+-- Copyright (c) 2025 JC Technolabs
+-- License: GPL-3.0
+
 -- premake5.lua
-workspace "Chat"
+workspace "AIAssistant"
     architecture "x86_64"
     configurations { "Debug", "Release" }
     startproject "jarvisAgent"
+
+-- ================================================================
+-- TRACY TOGGLE (OFF by default)
+-- Usage:
+--   premake5 gmake2 --tracy
+--   make config=release
+-- ================================================================
+newoption {
+    trigger = "tracy",
+    description = "Enable Tracy profiler instrumentation"
+}
 
 project "jarvisAgent"
     kind "ConsoleApp"
@@ -15,9 +29,20 @@ project "jarvisAgent"
     
     defines
     {
+        --"TRACY_ENABLE",
         "JARVIS_AGENT_VERSION=\"0.1\"",
         "CROW_ENFORCE_WS_SPEC"
     }
+
+    ------------------------------------
+    -- Tracy toggle logic (added)
+    ------------------------------------
+    if _OPTIONS["tracy"] then
+        defines { "TRACY_ENABLE" }
+        print(">>> Tracy profiling: ENABLED")
+    else
+        print(">>> Tracy profiling: DISABLED")
+    end
 
     files
     {
@@ -129,8 +154,7 @@ project "jarvisAgent"
     filter "configurations:Debug"
         defines
         { 
-			"DEBUG", 
-            "TRACY_ENABLE"
+			"DEBUG"
         }
         runtime "Debug"
         symbols "on"
@@ -138,8 +162,7 @@ project "jarvisAgent"
     filter "configurations:Release"
         defines
         {
-			"NDEBUG",
-            "TRACY_ENABLE"
+			"NDEBUG"
 		}
         runtime "Release"
         optimize "on"
@@ -163,4 +186,3 @@ project "jarvisAgent"
 	include "vendor/curl.lua"
 	include "vendor/openssl/crypto.lua"
 	include "vendor/openssl/ssl.lua"
-
