@@ -4,28 +4,32 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 1. Add GitHub Ubuntu CI Pipeline
-**Goal:**  
-Automatic build + run tests on push/PR.
-- Build on Ubuntu  
-- Fail early if compilation breaks
-- Run unit tests  
+## 1. GitHub CI — Ubuntu (in progress)
+- Fix smoke test failing (TTY / ncurses / config path)
 
 ---
 
-## 2. Compile on Windows
-**Goal:**  
-Enable full Windows compatibility.
-- Configure MSVC build  
-- Resolve filesystem path differences  
-- Add GitHub Windows CI
+## 2. Windows Build (not started)
+- Generate MSVC project via premake5
+- Compile using MSVC
+- Use PDCurses for ncurses UI on Windows
+- Add Windows CI runner
 
 ---
 
-## 3. Dockerize JarvisAgent
-**Goal:**  
-Provide a reproducible container environment.
-- Ubuntu base image  
-- All required dependencies preinstalled  (markitdown and python 3.12)
+## 3. Dockerization (in progress)
+- Convert Dockerfile to Ubuntu 24.04
+- Remove deadsnakes PPA
+- Use python3/python3-dev from system
+- Replace ncurses5 with ncurses6
+- Remove TRACY_NO_INVARIANT_CHECK
+- Verify working headless mode
+
+---
+
+## 4. Terminal UI (new)
+- Vendor PDCurses-wide source code for Linux, macOS, Windows
+- Prefer PDCurses over system ncursesw6
+- Use system ncursesw6 on only as fallback
 
 ---
