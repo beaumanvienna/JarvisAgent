@@ -33,6 +33,8 @@ namespace AIAssistant
     {
         WINDOW* m_LogWindow{nullptr};
         WINDOW* m_StatusWindow{nullptr};
+        WINDOW* m_LogHeaderWindow{nullptr};
+        WINDOW* m_StatusHeaderWindow{nullptr};
 
         int m_LastRows{0};
         int m_LastCols{0};
@@ -69,34 +71,48 @@ namespace AIAssistant
                 return;
             }
 
-            int statusHeight = 1;
+            // We have:
+            //   - 1 row for LOG header
+            //   - logContentHeight rows for log content
+            //   - 1 row for STATUS header
+            //   - statusContentHeight rows for status content
+            //
+            // rows = 1 + logContentHeight + 1 + statusContentHeight
+
+            int statusContentHeight = 1;
 
             if (m_StatusHeightCallback)
             {
-                statusHeight = m_StatusHeightCallback(rows);
-                if (statusHeight < 1)
+                statusContentHeight = m_StatusHeightCallback(rows);
+                if (statusContentHeight < 1)
                 {
-                    statusHeight = 1;
+                    statusContentHeight = 1;
                 }
-                if (statusHeight >= rows)
+
+                // Leave at least 1 row for log content and 2 rows for headers
+                int maxStatusContentHeight = std::max(1, rows - 3);
+                if (statusContentHeight > maxStatusContentHeight)
                 {
-                    statusHeight = std::max(1, rows - 1);
+                    statusContentHeight = maxStatusContentHeight;
                 }
-            }
-            else
-            {
-                statusHeight = 1;
             }
 
-            int logHeight = rows - statusHeight;
-            if (logHeight < 1)
+            int logContentHeight = rows - statusContentHeight - 2;
+            if (logContentHeight < 1)
             {
-                logHeight = 1;
+                logContentHeight = 1;
             }
+
+            int logHeaderY = 0;
+            int logContentY = logHeaderY + 1;
+
+            int statusHeaderY = logContentY + logContentHeight;
+            int statusContentY = statusHeaderY + 1;
 
             bool recreate = false;
 
-            if (m_LogWindow == nullptr || m_StatusWindow == nullptr)
+            if (m_LogWindow == nullptr || m_StatusWindow == nullptr || m_LogHeaderWindow == nullptr ||
+                m_StatusHeaderWindow == nullptr)
             {
                 recreate = true;
             }
@@ -110,8 +126,8 @@ namespace AIAssistant
                 int currentStatusCols = 0;
                 getmaxyx(m_StatusWindow, currentStatusRows, currentStatusCols);
 
-                if (currentLogRows != logHeight || currentLogCols != cols || currentStatusRows != statusHeight ||
-                    currentStatusCols != cols)
+                if (currentLogRows != logContentHeight || currentLogCols != cols ||
+                    currentStatusRows != statusContentHeight || currentStatusCols != cols)
                 {
                     recreate = true;
                 }
@@ -127,23 +143,57 @@ namespace AIAssistant
                 delwin(m_LogWindow);
                 m_LogWindow = nullptr;
             }
-
             if (m_StatusWindow != nullptr)
             {
                 delwin(m_StatusWindow);
                 m_StatusWindow = nullptr;
             }
+            if (m_LogHeaderWindow != nullptr)
+            {
+                delwin(m_LogHeaderWindow);
+                m_LogHeaderWindow = nullptr;
+            }
+            if (m_StatusHeaderWindow != nullptr)
+            {
+                delwin(m_StatusHeaderWindow);
+                m_StatusHeaderWindow = nullptr;
+            }
 
-            m_LogWindow = newwin(logHeight, cols, 0, 0);
-            m_StatusWindow = newwin(statusHeight, cols, logHeight, 0);
+            m_LogHeaderWindow = newwin(1, cols, logHeaderY, 0);
+            m_LogWindow = newwin(logContentHeight, cols, logContentY, 0);
+
+            m_StatusHeaderWindow = newwin(1, cols, statusHeaderY, 0);
+            m_StatusWindow = newwin(statusContentHeight, cols, statusContentY, 0);
 
             scrollok(m_LogWindow, TRUE);
             idlok(m_LogWindow, TRUE);
 
+            werase(m_LogHeaderWindow);
             werase(m_LogWindow);
+            werase(m_StatusHeaderWindow);
             werase(m_StatusWindow);
 
+            wattron(m_LogHeaderWindow, A_BOLD);
+            mvwprintw(m_LogHeaderWindow, 0, 0, "[ LOG ]");
+            wattroff(m_LogHeaderWindow, A_BOLD);
+
+            for (int i = 6; i < getmaxx(m_LogHeaderWindow); ++i) // 6 = strlen("[ LOG ]")
+            {
+                mvwaddch(m_LogHeaderWindow, 0, i, '-');
+            }
+
+            wattron(m_StatusHeaderWindow, A_BOLD);
+            mvwprintw(m_StatusHeaderWindow, 0, 0, "[ STATUS ]");
+            wattroff(m_StatusHeaderWindow, A_BOLD);
+
+            for (int i = 10; i < getmaxx(m_StatusHeaderWindow); ++i) // 10 = strlen("[ STATUS ]")
+            {
+                mvwaddch(m_StatusHeaderWindow, 0, i, '-');
+            }
+
+            wrefresh(m_LogHeaderWindow);
             wrefresh(m_LogWindow);
+            wrefresh(m_StatusHeaderWindow);
             wrefresh(m_StatusWindow);
 
             m_LogPrintLine = 0;
@@ -228,6 +278,14 @@ namespace AIAssistant
             if (!m_StatusLinesCallback)
             {
                 wrefresh(m_StatusWindow);
+                if (m_LogHeaderWindow)
+                {
+                    wrefresh(m_LogHeaderWindow);
+                }
+                if (m_StatusHeaderWindow)
+                {
+                    wrefresh(m_StatusHeaderWindow);
+                }
                 return;
             }
 
@@ -257,6 +315,15 @@ namespace AIAssistant
             }
 
             wrefresh(m_StatusWindow);
+
+            if (m_LogHeaderWindow)
+            {
+                wrefresh(m_LogHeaderWindow);
+            }
+            if (m_StatusHeaderWindow)
+            {
+                wrefresh(m_StatusHeaderWindow);
+            }
         }
     };
 
@@ -274,6 +341,7 @@ namespace AIAssistant
         std::setlocale(LC_ALL, "");
 
         initscr();
+        curs_set(0); // disable cursor
         cbreak();
         noecho();
         keypad(stdscr, TRUE);
@@ -304,11 +372,20 @@ namespace AIAssistant
             delwin(m_Impl->m_LogWindow);
             m_Impl->m_LogWindow = nullptr;
         }
-
         if (m_Impl->m_StatusWindow != nullptr)
         {
             delwin(m_Impl->m_StatusWindow);
             m_Impl->m_StatusWindow = nullptr;
+        }
+        if (m_Impl->m_LogHeaderWindow != nullptr)
+        {
+            delwin(m_Impl->m_LogHeaderWindow);
+            m_Impl->m_LogHeaderWindow = nullptr;
+        }
+        if (m_Impl->m_StatusHeaderWindow != nullptr)
+        {
+            delwin(m_Impl->m_StatusHeaderWindow);
+            m_Impl->m_StatusHeaderWindow = nullptr;
         }
 
         endwin();
