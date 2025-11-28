@@ -33,7 +33,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 | **Settings** | Style, behavior, or tone modifiers (e.g., “write succinct”, “use formal tone”) | `STNG` | `STNG_write_succinct.txt` |
 | **Context / Description** | Provides contextual or background information for AI prompts | `CNTX` | `CNTX_project_overview.txt` |
 | **Task** | Defines the main task or instruction for the AI | `TASK` | `TASK_compare_requirements.txt` |
-| **Subfolders** | Contain additional prompt or requirement files, processed recursively | *(folder name itself)* | `../queue/subproject/` |
+| **Subfolders** | Contain additional prompt or requirement files, processed recursively | *(folder name itself)* | `queue/subproject/` |
 | **Requirements** | Requirement files such as customer or system requirements | *(no prefix)* | `REQ_vehicle_speed.txt` or `customer_requirement_001.txt` |
 
 🧠 Categories **STNG**, **CNTX**, and **TASK** are combined into an **environment** used alongside each individual requirement file during processing.
