@@ -7,6 +7,9 @@ JarvisAgent is a **C++ console application** that operates as a background servi
 It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory.<br>
 <br>
 It can perform AI-driven tasks and serve as a component for workflow automation.<br>
+<br>
+![JarvisAgent Screenshot](example/screenshot.png)<br>
+<br>
 
 ---
 
