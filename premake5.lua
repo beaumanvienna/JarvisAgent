@@ -31,7 +31,8 @@ project "jarvisAgent"
     {
         --"TRACY_ENABLE",
         "JARVIS_AGENT_VERSION=\"0.1\"",
-        "CROW_ENFORCE_WS_SPEC"
+        "CROW_ENFORCE_WS_SPEC",
+        "PDC_WIDE"
     }
 
     ------------------------------------
@@ -65,10 +66,11 @@ project "jarvisAgent"
         "vendor/tracy/include",
         "vendor/openssl/include",
         "vendor/crow/include/crow",
-        "vendor/asio/asio/include"
+        "vendor/asio/asio/include",
+        "vendor/pdcursesmod"
     }
 
-        filter "system:linux"
+    filter "system:linux"
 
         linkoptions {
             "-fno-pie -no-pie",
@@ -111,7 +113,7 @@ project "jarvisAgent"
             "z",
             "m",
             py_link,      -- e.g. python3.12
-            "ncursesw"
+            "pdcursesmod"
         }
 
         defines {
@@ -131,7 +133,8 @@ project "jarvisAgent"
 			"z",
 			"-framework CoreFoundation",
 			"-framework SystemConfiguration",
-            "python3.12"
+            "python3.12",
+            "pdcursesmod"
 		}
 
     filter { "action:gmake*", "configurations:Debug"}
@@ -142,7 +145,7 @@ project "jarvisAgent"
 
     filter "system:windows"
         systemversion "latest"
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "python312" }
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "python312", "pdcursesmod" }
         
         includedirs {
             "C:/Users/%{os.getenv('USERNAME')}/AppData/Local/Programs/Python/Python312/include"
@@ -169,20 +172,49 @@ project "jarvisAgent"
 
     filter {}
 
-    if _ACTION == 'clean' then
+    if _ACTION == "clean" then
         print("clean the build...")
-        os.rmdir("./bin")
-        os.rmdir("./bin-int")
-        os.remove("./**.make")
-        os.remove("./Makefile")
-        os.remove("./vendor/Makefile")
-        os.rmdir("./vendor/curl/bin")
-        os.rmdir("./vendor/curl/bin-int")
-        os.rmdir("./vendor/openssl/bin")
-        os.rmdir("./vendor/openssl/bin-int")
+
+        ----------------------------------------------------
+        -- Top-level build folders
+        ----------------------------------------------------
+        os.rmdir("bin")
+        os.rmdir("bin-int")
+
+        ----------------------------------------------------
+        -- Remove all generated Makefiles (.make)
+        ----------------------------------------------------
+        os.remove("*.make")
+        os.remove("**/*.make")
+        os.remove("Makefile")
+        os.remove("vendor/Makefile")
+
+        ----------------------------------------------------
+        -- Curl build folders
+        ----------------------------------------------------
+        os.rmdir("vendor/curl/bin")
+        os.rmdir("vendor/curl/bin-int")
+
+        ----------------------------------------------------
+        -- OpenSSL build folders
+        ----------------------------------------------------
+        os.rmdir("vendor/openssl/bin")
+        os.rmdir("vendor/openssl/bin-int")
+
+        ----------------------------------------------------
+        -- PDCursesMod build folders
+        ----------------------------------------------------
+        os.rmdir("vendor/pdcursesmod/bin")
+        os.rmdir("vendor/pdcursesmod/bin-int")
+        os.remove("vendor/pdcursesmod/Makefile")
+
         print("done.")
     end
+
 
 	include "vendor/curl.lua"
 	include "vendor/openssl/crypto.lua"
 	include "vendor/openssl/ssl.lua"
+	include "vendor/pdcursesmod/pdcursesmod.lua"
+
+

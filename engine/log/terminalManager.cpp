@@ -20,12 +20,13 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "log/terminalManager.h"
+#include "engine.h"
 
 #include <algorithm>
 #include <clocale>
 #include <mutex>
 
-#include <ncursesw/ncurses.h>
+#include "pdcursesmod/curses.h"
 
 namespace AIAssistant
 {
@@ -55,7 +56,16 @@ namespace AIAssistant
                 start_color();
                 use_default_colors();
 
-                // Log window: green text on default background (JarvisAgent style)
+                // Log window: JarvisAgent dashboard green (#02a414) if possible,
+                // otherwise fall back to the default COLOR_GREEN.
+                if (can_change_color())
+                {
+                    short const greenR = 149;
+                    short const greenG = 635;
+                    short const greenB = 412;
+                    init_color(COLOR_GREEN, greenR, greenG, greenB);
+                }
+
                 init_pair(1, COLOR_GREEN, -1);
             }
         }
