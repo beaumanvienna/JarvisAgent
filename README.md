@@ -54,7 +54,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **Thread Pool / Parallel Processing** — Configured by `maxThreads` in `config.json`; handles multiple query tasks in parallel.  
 - **JarvisAgent Application** — Orchestrates startup, event handling, file watching, categorization, and query dispatching.  
 - **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).  
-- **Terminal Renderer (optional)** — Uses ncurses for advanced log and status display in the console.  
+- **Terminal Renderer ** — Uses PDcurses for advanced log and status display in the console.  
 
 ---
 
@@ -125,7 +125,6 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 ## Development
 
 JarvisAgent depends on
-* ncurses/ncursesw
 * python3 and python3 development headers
 * libssl
 * libz
@@ -134,7 +133,7 @@ JarvisAgent depends on
 
 On Ubuntu, use these commands to install the dependencies:
 ```
-sudo apt install -y python3 python3-pip libncurses5 libncurses5-dev libncursesw5 libncursesw5-dev libssl-dev zlib1g-dev
+sudo apt install -y python3 python3-pip libssl-dev zlib1g-dev
 pipx install "markitdown[all]"
 ```
 Premake5: `git clone https://github.com/premake/premake-core`, build it with `./Bootstrap.sh`, copy executable to /use/bin<br>
