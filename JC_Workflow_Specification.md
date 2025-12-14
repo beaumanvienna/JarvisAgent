@@ -71,7 +71,8 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
 - **Run**: A single execution instance of a workflow with its own state and logs.  
 - **JCWF Runtime**: The JarvisAgent orchestration layer that loads, validates, and runs JCWF workflows.  
 - **Environment**: Optional metadata and variables attached to a task (for example, environment variables for shell tasks, or an assistant environment for AI tasks).  
-- **Queue Files**: Optional STNG_, TASK_, CNXT artifacts used by JarvisAgent’s queue-based execution; JCWF can reference these explicitly per task.
+- **Queue Files**: Optional STNG_, TASK_, CNXT_, PROB_ artifacts used by JarvisAgent’s queue-based execution; JCWF can reference these explicitly per task.
+  - In addition to file paths, a JCWF MAY embed queue file content inline (see 3.3.6) to make the workflow self-contained.
 
 ---
 
@@ -434,7 +435,7 @@ A workflow MAY define a dedicated `clean` task that removes generated artifacts.
 
 The orchestrator or UI MAY expose a “clean” action that simply runs this task (ignoring usual dependency checks).
 
-#### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNXT)
+#### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNXT_, PROB_)
 
 Tasks MAY describe additional environment and queue-related details:
 
@@ -450,7 +451,8 @@ Tasks MAY describe additional environment and queue-related details:
 "queue_binding": {
   "stng_files": ["STNG_daily.txt"],
   "task_files": ["TASK_summarize.txt"],
-  "cnxt_files": ["CNXT_daily.txt"]
+  "cnxt_files": ["CNXT_daily.txt"],
+  "prob_files": ["PROB_daily.txt"]
 }
 ```
 
@@ -461,11 +463,24 @@ Tasks MAY describe additional environment and queue-related details:
     - For `ai_call` tasks with `mode: "assistant"`, this MAY reference a preconfigured assistant that keeps its own long-lived context. In that case, JCWF does not need to send full context on every call; the backend can rely on the assistant’s stored state.
 
 - `queue_binding` (OPTIONAL, object)  
-  - `stng_files` (OPTIONAL, array of strings): STNG_ settings files associated with this task, for example, the tone of the AI.  
-  - `task_files` (OPTIONAL, array of strings): TASK_ files representing work instructions.  
-  - `cnxt_files` (OPTIONAL, array of strings): CNXT_ context files (background information).  
+  - `stng_files` (OPTIONAL, array): STNG_ settings files associated with this task, for example, the tone of the AI.  
+  - `task_files` (OPTIONAL, array): TASK_ files representing work instructions.  
+  - `cnxt_files` (OPTIONAL, array): CNXT_ context files (background information).  
+- `prob_files` (OPTIONAL, array): PROB_ files representing problems/requests (the concrete work item) that the task should address.  
 
-JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNXT files when it is an AI or queue-integrated task.
+Each entry in `stng_files` / `task_files` / `cnxt_files` / `prob_files` MAY be either:
+
+- A string (path to an existing file), or
+- An inline object with file content:
+
+```jsonc
+{ "path": "TASK_summarize.txt", "content": "Summarize the report in 5 bullets." }
+```
+
+If `content` is present, the runtime MUST write (or overwrite) the file at `path` before the task executes.
+This inline form is RECOMMENDED when a workflow is generated automatically and should be runnable without additional files.
+
+JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNXT_/PROB_ files when it is an AI or queue-integrated task.
 
 ---
 
@@ -656,7 +671,7 @@ Recommended data structures (conceptual):
 
 The core orchestrator SHOULD be deterministic and thread-safe. It MAY use a task queue and worker threads, but heavy work (document conversion, AI calls) is delegated to Python or external processes.
 
-For tasks that integrate with the existing queue system, the orchestrator MAY map task execution to creation or consumption of STNG_, TASK_, and CNXT files in the queue directories according to `queue_binding`.
+For tasks that integrate with the existing queue system, the orchestrator MAY map task execution to creation or consumption of STNG_, TASK_, CNXT_, and PROB_ files in the queue directories according to `queue_binding`.
 
 ---
 
@@ -918,15 +933,19 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
           "properties": {
             "stng_files": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": { "$ref": "#/$defs/queue_file_ref" }
             },
             "task_files": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": { "$ref": "#/$defs/queue_file_ref" }
             },
             "cnxt_files": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "prob_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
             }
           }
         },
@@ -959,6 +978,20 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
           }
         }
       }
+    },
+
+    "queue_file_ref": {
+      "anyOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["path", "content"],
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          }
+        }
+      ]
     },
 
     "dataflow": {

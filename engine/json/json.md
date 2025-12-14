@@ -1,6 +1,6 @@
 # JarvisAgent Engine JSON Utilities
 
-This document describes the JSON-related engine components:
+This document describes the JSON-related engine components used to load and validate `config.json`:
 
 - `ConfigParser`
 - `ConfigChecker`
@@ -10,15 +10,63 @@ All code lives under `engine/json`.
 
 ---
 
-## 1. ConfigParser
+## 1. config.json
+
+JarvisAgent reads configuration from `config.json` at startup (example below). Fields not recognized by the parser are *best-effort stringified and logged* (top-level only), then ignored.
+
+```jsonc
+{
+    "file format identifier": 1.2,
+    "description": "jarvisAgent configuration file",
+    "author": "Copyright (c) 2025 JC Technolabs",
+
+    "queue folder": "../queue",
+    "workflows folder": "../workflows",
+    "max threads": 20,
+    "engine sleep time in run loop in ms": 16,
+    "verbose": false,
+
+    "API interfaces": [
+        {
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1",
+            "description": "Human-readable hint (currently ignored by parser)"
+        }
+    ],
+
+    "API index": 0,
+    "max file size in kB": 24
+}
+```
+
+### 1.1 Top-level keys and meaning
+
+| JSON key | Type | Meaning | Notes |
+|---|---:|---|---|
+| `file format identifier` | number | Format marker/version for the config file. | Parsed only for type checking; **not stored** in `EngineConfig`. |
+| `description` | string | Human-readable description. | Logged; not stored. |
+| `author` | string | Human-readable author/copyright string. | Logged; not stored. |
+| `queue folder` | string | Path to the queue folder directory. | Stored as `EngineConfig::m_QueueFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
+| `workflows folder` | string | Path to the workflows folder directory. | Stored as `EngineConfig::m_WorkflowsFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
+| `max threads` | number | Worker-thread pool size. | Stored as `EngineConfig::m_MaxThreads`. `ConfigChecker` clamps via defaults if out of range. |
+| `engine sleep time in run loop in ms` | number | Sleep interval in the main run loop. | Stored as `EngineConfig::m_SleepDuration` (ms). Defaults applied if out of range. |
+| `verbose` | boolean | Enables verbose logging. | Stored as `EngineConfig::m_Verbose`. |
+| `API interfaces` | array | List of API endpoints/models. | Parsed by `ConfigParser::ParseInterfaces()`. |
+| `API index` | number | Selects active interface in `API interfaces`. | Stored as `EngineConfig::m_ApiIndex`. Must point to an existing entry (see `ConfigChecker`). |
+| `max file size in kB` | number | Maximum allowed file size for queue items. | Stored as `EngineConfig::m_MaxFileSizekB`. Defaults applied if out of range. |
+
+---
+
+## 2. ConfigParser
 
 **Header:** `json/configParser.h`  
 **Source:** `json/configParser.cpp`  
 **Namespace:** `AIAssistant`
 
-`ConfigParser` loads and validates the raw JSON configuration file (e.g. `config.json`) and fills an `EngineConfig` struct.
+`ConfigParser` loads and validates the raw JSON configuration file (e.g. `config.json`) and fills a `ConfigParser::EngineConfig` struct.
 
-### 1.1 EngineConfig
+### 2.1 EngineConfig
 
 ```cpp
 struct EngineConfig
@@ -41,6 +89,7 @@ struct EngineConfig
     uint m_MaxThreads{0};
     std::chrono::milliseconds m_SleepDuration{0};
     std::string m_QueueFolderFilepath;
+    std::string m_WorkflowsFolderFilepath;
     bool m_Verbose{false};
     size_t m_ApiIndex{0};
     std::vector<ApiInterface> m_ApiInterfaces;
@@ -51,36 +100,27 @@ struct EngineConfig
 };
 ```
 
-**Fields:**
+**Stored fields populated from JSON:**
 
-- `m_MaxThreads`  
-  Maximum number of worker threads used by the engine thread pool.
+- `m_QueueFolderFilepath` from `"queue folder"`
+- `m_WorkflowsFolderFilepath` from `"workflows folder"`
+- `m_MaxThreads` from `"max threads"`
+- `m_SleepDuration` from `"engine sleep time in run loop in ms"`
+- `m_Verbose` from `"verbose"`
+- `m_ApiInterfaces` from `"API interfaces"` (via `ParseInterfaces`)
+- `m_ApiIndex` from `"API index"`
+- `m_MaxFileSizekB` from `"max file size in kB"`
 
-- `m_SleepDuration`  
-  Sleep interval of the main run loop (`Core::Run`).
+**Logged-only (not stored):**
 
-- `m_QueueFolderFilepath`  
-  Path to the queue directory that JarvisAgent monitors for work items.
+- `"description"`
+- `"author"`
 
-- `m_Verbose`  
-  Enables verbose logging in the engine.
+**Type-checked but not stored:**
 
-- `m_ApiIndex`  
-  Index into `m_ApiInterfaces` selecting the active API configuration.
+- `"file format identifier"` (must be a JSON number)
 
-- `m_ApiInterfaces`  
-  List of configured API endpoints:
-  - `m_Url` – Full HTTPS URL of the API endpoint.
-  - `m_Model` – Model name (e.g. an LLM identifier).
-  - `m_InterfaceType` – One of `API1`, `API2`, or `InvalidAPI`.
-
-- `m_MaxFileSizekB`  
-  Maximum allowed file size (kB) for items processed from the queue.
-
-- `m_ConfigValid` / `IsValid()`  
-  Set by `ConfigChecker` to indicate whether the configuration is valid.
-
-### 1.2 Parser State
+### 2.2 Parser State
 
 ```cpp
 enum State
@@ -93,65 +133,43 @@ enum State
 };
 ```
 
-Used internally for reporting parser status.
-
-### 1.3 Construction and State
+### 2.3 Public API
 
 ```cpp
 ConfigParser(std::string const& filepathAndFilename);
 ~ConfigParser();
 
 State GetState() const;
-bool ConfigParsed() const;
 State Parse(EngineConfig& engineConfig);
+bool ConfigParsed() const;
 ```
 
-- **Constructor**  
-  Stores the config file path and initializes state to `Undefined`.
+### 2.4 Parse() behavior (current implementation)
 
-- **GetState()**  
-  Returns last parser state.
+`Parse(EngineConfig&)` does:
 
-- **ConfigParsed()**  
-  Convenience: returns `true` if `GetState() == ConfigOk`.
+1. Resets `m_State` and resets `engineConfig = {}`.
+2. Checks that the config path exists and is not a directory.
+   - On failure: `FileNotFound`.
+3. Parses JSON via `simdjson::ondemand`.
+   - On parse error: `ParseFailure`.
+4. Iterates over top-level fields:
+   - Validates expected types with `CORE_ASSERT`.
+   - Populates `EngineConfig` where applicable.
+   - Logs `description`, `author`, and other informational fields.
+   - Unknown top-level fields:
+     - Attempts best-effort stringification and logs `"key: value"` for simple types.
+     - Logs `"[complex type]"` for arrays/objects.
+5. Sets state:
+   - `ConfigOk` if **both**:
+     - `"queue folder"` appeared at least once, **and**
+     - at least one `"url"` field appeared within `"API interfaces"`.
+   - Otherwise: `FileFormatFailure`.
+6. Logs a “format info” summary of field occurrences.
 
-- **Parse(EngineConfig& engineConfig)**  
-  Main entry point. Responsibilities:
-  1. Reset `engineConfig` to default-initialized state.
-  2. Verify the file exists and is not a directory:
-     - On failure → logs error, sets `FileNotFound`, returns.
-  3. Use `simdjson::ondemand` to parse the JSON.
-     - On parse error → logs error, sets `ParseFailure`, returns.
-  4. Iterate top-level fields and fill:
-     - `"description"` → logs only.
-     - `"author"` → logs only.
-     - `"queue folder"` → sets `m_QueueFolderFilepath`.
-     - `"max threads"` → sets `m_MaxThreads`.
-     - `"engine sleep time in run loop in ms"` → sets `m_SleepDuration`.
-     - `"max file size in kB"` → sets `m_MaxFileSizekB`.
-     - `"verbose"` → sets `m_Verbose`.
-     - `"API interfaces"` → handled by `ParseInterfaces`.
-     - `"API index"` → sets `m_ApiIndex`.
-     - Unknown fields → best-effort stringification and logging.
-  5. Maintain `fieldOccurances[]` to track which expected fields appeared.
-  6. Final state:
-     - If `"queue folder"` and at least one `"url"` were found → `ConfigOk`.
-     - Otherwise → `FileFormatFailure`.
-  7. Logs a small “format info” summary of field occurrences.
+**Important:** `ConfigOk` indicates successful parsing and minimal required presence checks. It does **not** guarantee semantic correctness (directory existence, valid API selection, etc.). Semantic validation is done by `ConfigChecker` (Section 3).
 
-The engine (`engine.cpp`) uses:
-
-```cpp
-ConfigParser configParser("./config.json");
-ConfigParser::EngineConfig engineConfig{};
-configParser.Parse(engineConfig);
-if (!configParser.ConfigParsed())
-{
-    return EXIT_FAILURE;
-}
-```
-
-### 1.4 ParseInterfaces()
+### 2.5 ParseInterfaces()
 
 ```cpp
 void ParseInterfaces(simdjson::ondemand::array jsonArray,
@@ -161,14 +179,16 @@ void ParseInterfaces(simdjson::ondemand::array jsonArray,
 
 - Iterates the `"API interfaces"` array.
 - For each element:
-  - `"url"` → `ApiInterface::m_Url`
-  - `"model"` → `ApiInterface::m_Model`
-  - `"API"` → maps `"API1"` / `"API2"` to `InterfaceType::API1` / `API2`, otherwise calls `CORE_HARD_STOP`.
+  - `"url"` (string) → `ApiInterface::m_Url`
+  - `"model"` (string) → `ApiInterface::m_Model`
+  - `"API"` (string) → maps `"API1"` / `"API2"` to `InterfaceType::API1` / `API2`, otherwise `CORE_HARD_STOP`.
 - Appends each `ApiInterface` to `engineConfig.m_ApiInterfaces`.
+
+**Note:** Any additional fields inside each API interface object (for example `"description"`) are currently **silently ignored** (not stored and not logged) by `ParseInterfaces()`.
 
 ---
 
-## 2. ConfigChecker
+## 3. ConfigChecker
 
 **Header:** `json/configChecker.h`  
 **Source:** `json/configChecker.cpp`  
@@ -176,7 +196,7 @@ void ParseInterfaces(simdjson::ondemand::array jsonArray,
 
 `ConfigChecker` performs semantic validation and applies defaults on a previously parsed `EngineConfig`.
 
-### 2.1 Public API
+### 3.1 Public API
 
 ```cpp
 class ConfigChecker
@@ -193,68 +213,45 @@ private:
 };
 ```
 
-### 2.2 Check()
+### 3.2 Check() behavior (current implementation)
 
-```cpp
-bool Check(ConfigParser::EngineConfig& engineConfig);
-```
+`Check(EngineConfig&)`:
 
-Responsibilities:
+1. Validates directories:
+   - `EngineCore::IsDirectory(engineConfig.m_QueueFolderFilepath)` must be `true`.
+   - `EngineCore::IsDirectory(engineConfig.m_WorkflowsFolderFilepath)` must be `true`.
 
-1. **Queue folder validity**
-   - Uses `EngineCore::IsDirectory()` to verify that
-     `engineConfig.m_QueueFolderFilepath` is an existing directory.
-   - Logs a `CORE_ASSERT` if it is not a directory.
-
-2. **API selection validity**
-   - Ensures at least one `ApiInterface` exists.
-   - Ensures `m_ApiIndex` is in range for `m_ApiInterfaces`.
+2. Validates API selection:
+   - `m_ApiInterfaces` must not be empty.
+   - The selected index must be valid.
+     - **Practical requirement:** `engineConfig.m_ApiIndex < engineConfig.m_ApiInterfaces.size()`.
    - For the selected interface:
-     - URL is non-empty and contains `"https://"`.
-     - Model string is non-empty.
-     - `m_InterfaceType` is not `InvalidAPI`.
+     - URL must be non-empty and contain `"https://"`
+     - Model must be non-empty
+     - Interface type must not be `InvalidAPI`
 
-3. **Global result**
-   - `m_ConfigIsOk` is set to the combined result of the checks above.
-   - On failure, logs an error indicating the queue folder issue.
+3. If validation fails:
+   - Logs error(s) for the failing component(s).
+   - Sets `engineConfig.m_ConfigValid = false`.
 
-4. **Fixing defaults (only if base checks passed)**
-   - `m_MaxThreads`  
-     If `<= 0` or `> 256` → logs an app error and sets to `16`.
-   - `m_SleepDuration`  
-     If `<= 0ms` or `> 256ms` → logs an app error and sets to `10ms`.
-   - `m_MaxFileSizekB`  
-     If `<= 0` or `> 256` → logs an app error and sets to `20`.
-
-5. **Finalizing EngineConfig**
-   - Writes `engineConfig.m_ConfigValid = m_ConfigIsOk`.
-
-The engine then checks:
-
-```cpp
-ConfigChecker().Check(engineConfig);
-if (!engineConfig.IsValid())
-{
-    return EXIT_FAILURE;
-}
-```
-
-### 2.3 ConfigIsOk()
-
-Returns the last result of `Check()`.
+4. If validation succeeds:
+   - Applies defaults for out-of-range values:
+     - `m_MaxThreads`: if `<= 0` or `> 256` → set to `16`.
+     - `m_SleepDuration`: if `<= 0ms` or `> 256ms` → set to `10ms`.
+     - `m_MaxFileSizekB`: if `<= 0` or `> 256` → set to `20`.
+   - Sets `engineConfig.m_ConfigValid = true`.
 
 ---
 
-## 3. JsonHelper
+## 4. JsonHelper
 
 **Header:** `json/jsonHelper.h`  
 **Source:** `json/jsonHelper.cpp`  
 **Namespace:** `AIAssistant`
 
-`JsonHelper` provides small JSON utility helpers.  
-Currently only one function is implemented.
+`JsonHelper` provides small JSON utility helpers.
 
-### 3.1 SanitizeForJson()
+### 4.1 SanitizeForJson()
 
 ```cpp
 class JsonHelper
@@ -264,25 +261,20 @@ public:
 };
 ```
 
-**Behavior:**
+**Behavior (as implemented):**
 
-- Produces a copy of the input where:
-  - Double quotes (`"`) → `\"`
-  - Backslashes (`\`) → `\\`
-  - Newline (`\n`) → `\n`
-  - Carriage return (`\r`) → `\r`
-  - Tab (`\t`) → `\t`
-  - Single quotes and other characters are left as-is, except for the specific handling in the `switch` statement.
-- Pre-allocates output capacity to `input.size()` for efficiency.
-
-This is used wherever text needs to be safely embedded inside JSON string values (e.g. when constructing request payloads for APIs).
+- Returns a copy of `input` where:
+  - `"` becomes `\"`
+  - `\` becomes `\\`
+  - newline becomes `\n`
+  - carriage return becomes `\r`
+  - tab becomes `\t`
+- One additional `switch` case in the current source appears as a non-printable / mangled character in some outputs; it is handled with a `break` (skipped). If you want, we can inspect the source file directly in a clean rendering and document that case precisely.
 
 ---
 
-## 4. Summary
+## 5. Summary
 
-- **ConfigParser**: parses `config.json` using `simdjson`, fills `EngineConfig`, and tracks basic field presence.
-- **ConfigChecker**: verifies directories, API configuration, and sensible ranges; sets defaults where needed and marks the config as valid.
-- **JsonHelper**: sanitizes arbitrary strings so they are safe to embed in JSON.
-
-Together these components provide JarvisAgent’s engine-level JSON parsing, validation, and string-sanitization infrastructure.
+- **ConfigParser**: parses `config.json` using `simdjson::ondemand`, populates `EngineConfig`, logs some fields, and logs unknown top-level fields.
+- **ConfigChecker**: validates directories and API selection and applies sensible defaults for thread count, sleep time, and max file size.
+- **JsonHelper**: provides string sanitization for embedding arbitrary text safely in JSON strings.
