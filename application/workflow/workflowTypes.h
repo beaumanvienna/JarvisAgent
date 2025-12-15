@@ -23,10 +23,10 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-#include <unordered_map>
 #include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace AIAssistant
 {
@@ -70,7 +70,10 @@ namespace AIAssistant
         Running,
         Skipped,
         Succeeded,
-        Failed
+        Failed,
+
+        // New: non-terminal "waiting for filesystem-driven completion" (ai_call)
+        WaitingExternal
     };
 
     // Overall workflow-run state (separate from per-task states)
@@ -124,16 +127,37 @@ namespace AIAssistant
         std::unordered_map<std::string, std::string> m_Variables;
     };
 
+    // Queue file reference (supports either "path only" or "inline content")
+    struct QueueFileRef
+    {
+        std::string m_Path;
+        std::string m_Content;
+        bool m_HasInlineContent{false};
+
+        QueueFileRef() = default;
+        QueueFileRef(std::string const& path) : m_Path(path) {}
+
+        QueueFileRef(char const* path) : m_Path(path) {}
+
+        std::string const& Path() const { return m_Path; }
+
+        // Compatibility: lets code treat QueueFileRef like a "path string" in many contexts
+        operator std::string const&() const { return m_Path; }
+    };
+
     struct QueueBinding
     {
         // STNG_* files (settings / tone).
-        std::vector<std::string> m_StngFiles;
+        std::vector<QueueFileRef> m_StngFiles;
 
         // TASK_* files (instructions).
-        std::vector<std::string> m_TaskFiles;
+        std::vector<QueueFileRef> m_TaskFiles;
 
         // CNXT_* files (context).
-        std::vector<std::string> m_CnxtFiles;
+        std::vector<QueueFileRef> m_CnxtFiles;
+
+        // PROB_* files (problem / request payload).
+        std::vector<QueueFileRef> m_ProbFiles;
     };
 
     // ---------------------------------------------------------------------
@@ -216,6 +240,9 @@ namespace AIAssistant
         std::string m_ParamsJson;
     };
 
+    // Compatibility alias for code that used TaskDefinition naming today
+    using TaskDefinition = TaskDef;
+
     // ---------------------------------------------------------------------
     // Workflow definition (static configuration)
     // ---------------------------------------------------------------------
@@ -273,6 +300,10 @@ namespace AIAssistant
 
         // Produced output values by logical slot name (e.g. "markdown_path").
         std::unordered_map<std::string, std::string> m_OutputValues;
+
+        // ai_call correlation (required for event-driven async completion)
+        int64_t m_ExternalRequestId{0};
+        int64_t m_ExternalRequestTimestampNs{0};
     };
 
     // ---------------------------------------------------------------------

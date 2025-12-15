@@ -12,54 +12,48 @@
    The above copyright notice and this permission notice shall be
    included in all copies or substantial portions of the Software.
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
+   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
 
 #pragma once
 
+#include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <filesystem>
-#include <optional>
 
-#include "workflowTypes.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
-
     class WorkflowRegistry
     {
     public:
-        WorkflowRegistry() = default;
-        ~WorkflowRegistry() = default;
-
-        bool LoadDirectory(std::filesystem::path const& dirPath);
-        bool LoadFile(std::filesystem::path const& filePath);
-
-        bool HasWorkflow(std::string const& workflowId) const;
-
-        std::optional<WorkflowDefinition> GetWorkflow(std::string const& workflowId) const;
-
-        std::vector<std::string> GetWorkflowIds() const;
-
+        bool LoadDirectory(std::filesystem::path const& workflowsDirectoryPath);
         bool ValidateAll() const;
 
-    private:
-        bool ValidateWorkflow(WorkflowDefinition const& wf) const;
-        bool ValidateTasks(WorkflowDefinition const& wf) const;
-        bool ValidateTaskIO(TaskDef const& task, WorkflowDefinition const& wf) const;
-        bool ValidateDataflow(WorkflowDefinition const& wf) const;
-        bool ValidateTriggers(WorkflowDefinition const& wf) const;
-        bool ValidateNoCycles(WorkflowDefinition const& wf) const;
+        std::vector<std::string> GetWorkflowIds() const;
+        std::optional<WorkflowDefinition> GetWorkflow(std::string const& workflowId) const;
+
+        void Clear();
 
     private:
+        bool LoadWorkflowFile(std::filesystem::path const& workflowFilePath);
+
+        // IMPORTANT:
+        // This must only rewrite *workflow file* paths (file_inputs/file_outputs).
+        // QueueBinding paths are intended to be written relative to the queue folder,
+        // so we do NOT rewrite those here.
+        static void RewriteWorkflowPaths(std::filesystem::path const& workflowDirectoryPath,
+                                         WorkflowDefinition& workflowDefinition);
+
         std::unordered_map<std::string, WorkflowDefinition> m_Workflows;
     };
-
 } // namespace AIAssistant

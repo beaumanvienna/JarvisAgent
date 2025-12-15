@@ -25,7 +25,8 @@
 #include <vector>
 
 #include "simdjson/simdjson.h"
-#include "workflowTypes.h"
+#include "workflow/workflowRegistry.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {

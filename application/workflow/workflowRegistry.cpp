@@ -12,437 +12,294 @@
    The above copyright notice and this permission notice shall be
    included in all copies or substantial portions of the Software.
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
+   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+#include "workflow/workflowRegistry.h"
 
 #include "engine.h"
+#include "workflow/workflowJsonParser.h"
 
-#include "workflowRegistry.h"
-#include "workflowJsonParser.h"
-
-#include <filesystem>
+#include <algorithm>
 #include <fstream>
-#include <functional>
-#include <optional>
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace AIAssistant
 {
-
-    // ------------------------------------------------------------
-    // Load all workflow files (.jcwf) from directory
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::LoadDirectory(std::filesystem::path const& dirPath)
+    namespace
     {
-        LOG_APP_INFO("WorkflowRegistry::LoadDirectory scanning {}", dirPath.string());
-
-        if (!std::filesystem::exists(dirPath))
+        bool ReadFileToString(std::filesystem::path const& filePath, std::string& outText)
         {
-            LOG_APP_WARN("Directory does not exist: {}", dirPath.string());
+            std::ifstream fileStream(filePath, std::ios::binary);
+            if (!fileStream.is_open())
+            {
+                return false;
+            }
+
+            fileStream.seekg(0, std::ios::end);
+            std::streamoff const size = fileStream.tellg();
+            if (size < 0)
+            {
+                return false;
+            }
+
+            outText.clear();
+            outText.resize(static_cast<size_t>(size));
+
+            fileStream.seekg(0, std::ios::beg);
+            fileStream.read(outText.data(), static_cast<std::streamsize>(outText.size()));
+
+            return fileStream.good() || fileStream.eof();
+        }
+
+        bool LooksLikeTemplatePath(std::string const& pathText)
+        {
+            // JCWF allows templates like "${inputs.foo}" etc.
+            // Those are not filesystem paths and must not be rewritten.
+            return (pathText.find("${") != std::string::npos);
+        }
+
+        bool HasSupportedWorkflowExtension(std::filesystem::path const& filePath)
+        {
+            std::string const extension = filePath.extension().string();
+            if (extension == ".jcwf")
+            {
+                return true;
+            }
+
+            // Many projects still store workflows as .json during transition.
+            if (extension == ".json")
+            {
+                return true;
+            }
+
+            return false;
+        }
+    } // namespace
+
+    void WorkflowRegistry::Clear() { m_Workflows.clear(); }
+
+    bool WorkflowRegistry::LoadDirectory(std::filesystem::path const& workflowsDirectoryPath)
+    {
+        Clear();
+
+        if (workflowsDirectoryPath.empty())
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadDirectory: empty workflows directory path");
             return false;
         }
 
-        for (auto const& entry : std::filesystem::directory_iterator(dirPath))
+        std::error_code errorCode;
+        if (!std::filesystem::exists(workflowsDirectoryPath, errorCode))
         {
+            LOG_APP_WARN("WorkflowRegistry::LoadDirectory: directory does not exist: '{}'", workflowsDirectoryPath.string());
+            return false;
+        }
+
+        if (!std::filesystem::is_directory(workflowsDirectoryPath, errorCode))
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadDirectory: path is not a directory: '{}'", workflowsDirectoryPath.string());
+            return false;
+        }
+
+        size_t loadedCount = 0;
+
+        for (std::filesystem::directory_entry const& entry :
+             std::filesystem::directory_iterator(workflowsDirectoryPath, errorCode))
+        {
+            if (errorCode)
+            {
+                LOG_APP_WARN("WorkflowRegistry::LoadDirectory: directory iteration error: '{}' ({})",
+                             workflowsDirectoryPath.string(), errorCode.message());
+                break;
+            }
+
             if (!entry.is_regular_file())
             {
                 continue;
             }
 
-            std::filesystem::path const& path = entry.path();
-            if (path.extension() == ".jcwf")
+            std::filesystem::path const filePath = entry.path();
+            if (!HasSupportedWorkflowExtension(filePath))
             {
-                LOG_APP_INFO("Loading workflow file {}", path.string());
+                continue;
+            }
 
-                if (!LoadFile(path))
-                {
-                    LOG_APP_ERROR("Failed to load workflow {}", path.string());
-                    return false;
-                }
+            if (LoadWorkflowFile(filePath))
+            {
+                loadedCount++;
             }
         }
 
-        return true;
-    }
-
-    // ------------------------------------------------------------
-    // Load or reload a single JCWF file
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::LoadFile(std::filesystem::path const& filePath)
-    {
-        std::filesystem::path const absoluteFilePath = std::filesystem::absolute(filePath);
-        std::filesystem::path const workflowDirectory = absoluteFilePath.parent_path();
-
-        LOG_APP_INFO("WorkflowRegistry::LoadFile {}", absoluteFilePath.string());
-
-        std::ifstream file(absoluteFilePath);
-        if (!file.is_open())
+        if (loadedCount == 0)
         {
-            LOG_APP_ERROR("Failed to open {}", absoluteFilePath.string());
             return false;
         }
-
-        std::string const jsonContent((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-
-        WorkflowDefinition definition;
-        std::string errorMessage;
-
-        WorkflowJsonParser parser;
-        if (!parser.ParseWorkflowJson(jsonContent, definition, errorMessage))
-        {
-            LOG_APP_ERROR("WorkflowJsonParser failed for {}: {}", absoluteFilePath.string(), errorMessage);
-            return false;
-        }
-
-        // enforce version
-        if (definition.m_Version != "1.0")
-        {
-            LOG_APP_ERROR("Workflow {} has unsupported version '{}'. Only version 1.0 is allowed.", definition.m_Id,
-                          definition.m_Version);
-            return false;
-        }
-
-        // ------------------------------------------------------------
-        // Root path-like fields at the JCWF directory.
-        //
-        // Important: Only root *literal* relative paths.
-        // If the string contains a template (${...}), do not rewrite it here,
-        // because it may resolve to an absolute path at runtime.
-        // ------------------------------------------------------------
-        auto rewriteLiteralPathsInPlace = [&](std::vector<std::string>& paths)
-        {
-            for (std::string& raw : paths)
-            {
-                if (raw.empty())
-                {
-                    continue;
-                }
-
-                if (raw.find("${") != std::string::npos)
-                {
-                    continue;
-                }
-
-                std::filesystem::path const pathCandidate(raw);
-
-                // Leave absolute paths untouched.
-                if (pathCandidate.is_absolute())
-                {
-                    continue;
-                }
-
-                std::filesystem::path const rooted = (workflowDirectory / pathCandidate).lexically_normal();
-                raw = rooted.string();
-            }
-        };
-
-        for (auto& taskPair : definition.m_Tasks)
-        {
-            TaskDef& taskDefinition = taskPair.second;
-
-            rewriteLiteralPathsInPlace(taskDefinition.m_FileInputs);
-            rewriteLiteralPathsInPlace(taskDefinition.m_FileOutputs);
-
-            rewriteLiteralPathsInPlace(taskDefinition.m_QueueBinding.m_StngFiles);
-            rewriteLiteralPathsInPlace(taskDefinition.m_QueueBinding.m_TaskFiles);
-            rewriteLiteralPathsInPlace(taskDefinition.m_QueueBinding.m_CnxtFiles);
-        }
-
-        // reload warning or normal load
-        if (m_Workflows.contains(definition.m_Id))
-        {
-            LOG_APP_WARN("Workflow {} already exists; reloading.", definition.m_Id);
-        }
-
-        std::string const id = definition.m_Id;
-
-        // Use the workflow id as the map key; do not look up by filename stem.
-        LOG_APP_INFO("Registered workflow {}", id);
-
-        m_Workflows[id] = std::move(definition);
 
         return true;
-    }
-
-    // ------------------------------------------------------------
-    // Lookup functions
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::HasWorkflow(std::string const& workflowId) const { return m_Workflows.contains(workflowId); }
-
-    std::optional<WorkflowDefinition> WorkflowRegistry::GetWorkflow(std::string const& workflowId) const
-    {
-        auto iterator = m_Workflows.find(workflowId);
-        if (iterator == m_Workflows.end())
-        {
-            return std::nullopt;
-        }
-        return iterator->second;
     }
 
     std::vector<std::string> WorkflowRegistry::GetWorkflowIds() const
     {
-        std::vector<std::string> ids;
-        ids.reserve(m_Workflows.size());
+        std::vector<std::string> workflowIds;
+        workflowIds.reserve(m_Workflows.size());
 
-        for (auto const& [key, _] : m_Workflows)
+        for (auto const& workflowPair : m_Workflows)
         {
-            ids.push_back(key);
+            workflowIds.push_back(workflowPair.first);
         }
 
-        return ids;
+        std::sort(workflowIds.begin(), workflowIds.end());
+        return workflowIds;
     }
 
-    // ------------------------------------------------------------
-    // Validate all workflows
-    // ------------------------------------------------------------
+    std::optional<WorkflowDefinition> WorkflowRegistry::GetWorkflow(std::string const& workflowId) const
+    {
+        auto const iterator = m_Workflows.find(workflowId);
+        if (iterator == m_Workflows.end())
+        {
+            return std::nullopt;
+        }
+
+        return iterator->second; // copy (keeps call sites simple)
+    }
+
+    bool WorkflowRegistry::LoadWorkflowFile(std::filesystem::path const& workflowFilePath)
+    {
+        std::string fileText;
+        if (!ReadFileToString(workflowFilePath, fileText))
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: failed to read '{}'", workflowFilePath.string());
+            return false;
+        }
+
+        WorkflowJsonParser parser;
+        WorkflowDefinition workflowDefinition;
+        std::string errorMessage;
+
+        if (!parser.ParseWorkflowJson(fileText, workflowDefinition, errorMessage))
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: parse failed for '{}': {}", workflowFilePath.string(),
+                         errorMessage);
+            return false;
+        }
+
+        if (workflowDefinition.m_Id.empty())
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id", workflowFilePath.string());
+            return false;
+        }
+
+        RewriteWorkflowPaths(workflowFilePath.parent_path(), workflowDefinition);
+
+        auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
+        if (!inserted)
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: duplicate workflow id '{}' (file '{}')",
+                         workflowDefinition.m_Id, workflowFilePath.string());
+            return false;
+        }
+
+        return true;
+    }
+
+    void WorkflowRegistry::RewriteWorkflowPaths(std::filesystem::path const& workflowDirectoryPath,
+                                                WorkflowDefinition& workflowDefinition)
+    {
+        for (auto& taskPair : workflowDefinition.m_Tasks)
+        {
+            TaskDef& taskDefinition = taskPair.second;
+
+            for (std::string& inputPathText : taskDefinition.m_FileInputs)
+            {
+                if (inputPathText.empty() || LooksLikeTemplatePath(inputPathText))
+                {
+                    continue;
+                }
+
+                std::filesystem::path const inputPath(inputPathText);
+                if (!inputPath.is_absolute())
+                {
+                    std::filesystem::path const rewritten = (workflowDirectoryPath / inputPath).lexically_normal();
+                    inputPathText = rewritten.string();
+                }
+            }
+
+            for (std::string& outputPathText : taskDefinition.m_FileOutputs)
+            {
+                if (outputPathText.empty() || LooksLikeTemplatePath(outputPathText))
+                {
+                    continue;
+                }
+
+                std::filesystem::path const outputPath(outputPathText);
+                if (!outputPath.is_absolute())
+                {
+                    std::filesystem::path const rewritten = (workflowDirectoryPath / outputPath).lexically_normal();
+                    outputPathText = rewritten.string();
+                }
+            }
+        }
+    }
+
     bool WorkflowRegistry::ValidateAll() const
     {
-        bool allOk = true;
+        bool allValid = true;
 
-        for (auto const& [id, wf] : m_Workflows)
+        for (auto const& workflowPair : m_Workflows)
         {
-            LOG_APP_INFO("Validating workflow {}", id);
+            std::string const& workflowId = workflowPair.first;
+            WorkflowDefinition const& workflowDefinition = workflowPair.second;
 
-            if (!ValidateWorkflow(wf))
+            if (workflowDefinition.m_Id != workflowId)
             {
-                allOk = false;
-            }
-        }
-
-        return allOk;
-    }
-
-    // ------------------------------------------------------------
-    // Validate a single workflow
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateWorkflow(WorkflowDefinition const& wf) const
-    {
-        bool ok = true;
-
-        if (!ValidateTriggers(wf))
-        {
-            ok = false;
-        }
-
-        if (!ValidateTasks(wf))
-        {
-            ok = false;
-        }
-
-        if (!ValidateDataflow(wf))
-        {
-            ok = false;
-        }
-
-        if (!ValidateNoCycles(wf))
-        {
-            ok = false;
-        }
-
-        return ok;
-    }
-
-    // ------------------------------------------------------------
-    // Validate triggers
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateTriggers(WorkflowDefinition const& wf) const
-    {
-        std::unordered_set<std::string> seenIds;
-
-        for (auto const& trig : wf.m_Triggers)
-        {
-            if (seenIds.contains(trig.m_Id))
-            {
-                LOG_APP_ERROR("Workflow {} trigger '{}' is duplicated", wf.m_Id, trig.m_Id);
-                return false;
-            }
-            seenIds.insert(trig.m_Id);
-
-            if (trig.m_Type == WorkflowTriggerType::Unknown)
-            {
-                LOG_APP_ERROR("Workflow {} trigger '{}' has unknown type", wf.m_Id, trig.m_Id);
-                return false;
+                LOG_APP_WARN("WorkflowRegistry::ValidateAll: workflow map key '{}' != definition id '{}'", workflowId,
+                             workflowDefinition.m_Id);
+                allValid = false;
             }
 
-            // Validate minimal required fields for each type
-            // (real logic is performed later by TriggerEngine)
-            if (trig.m_Type == WorkflowTriggerType::Cron)
+            // Validate tasks
+            for (auto const& taskPair : workflowDefinition.m_Tasks)
             {
-                if (trig.m_ParamsJson.empty())
+                std::string const& taskKey = taskPair.first;
+                TaskDef const& taskDefinition = taskPair.second;
+
+                if (taskDefinition.m_Id.empty())
                 {
-                    LOG_APP_ERROR("Workflow {} trigger '{}' missing cron parameters", wf.m_Id, trig.m_Id);
-                    return false;
+                    LOG_APP_WARN("WorkflowRegistry::ValidateAll: workflow '{}' task '{}' has empty id", workflowId, taskKey);
+                    allValid = false;
+                }
+
+                if (!taskDefinition.m_Id.empty() && taskDefinition.m_Id != taskKey)
+                {
+                    LOG_APP_WARN("WorkflowRegistry::ValidateAll: workflow '{}' task key '{}' != task id '{}'", workflowId,
+                                 taskKey, taskDefinition.m_Id);
+                    allValid = false;
+                }
+
+                // Validate depends_on references exist
+                for (std::string const& dependencyTaskId : taskDefinition.m_DependsOn)
+                {
+                    if (workflowDefinition.m_Tasks.find(dependencyTaskId) == workflowDefinition.m_Tasks.end())
+                    {
+                        LOG_APP_WARN(
+                            "WorkflowRegistry::ValidateAll: workflow '{}' task '{}' depends_on '{}' which does not exist",
+                            workflowId, taskKey, dependencyTaskId);
+                        allValid = false;
+                    }
                 }
             }
         }
 
-        return true;
-    }
-
-    // ------------------------------------------------------------
-    // Validate tasks
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateTasks(WorkflowDefinition const& wf) const
-    {
-        for (auto const& [taskId, task] : wf.m_Tasks)
-        {
-            // Validate depends_on references
-            for (std::string const& dep : task.m_DependsOn)
-            {
-                if (!wf.m_Tasks.contains(dep))
-                {
-                    LOG_APP_ERROR("Workflow {}: task '{}' depends on unknown task '{}'", wf.m_Id, taskId, dep);
-                    return false;
-                }
-            }
-
-            // Validate I/O slots
-            if (!ValidateTaskIO(task, wf))
-            {
-                return false;
-            }
-
-            // Validate environment
-            if (task.m_Type == TaskType::AiCall)
-            {
-                // assistant mode requires environment or provider inside params
-                // (we cannot inspect params JSON here)
-            }
-        }
-
-        return true;
-    }
-
-    // ------------------------------------------------------------
-    // Validate task I/O slots
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateTaskIO(TaskDef const& task, WorkflowDefinition const& wf) const
-    {
-        // Required inputs must have a type string
-        for (auto const& [inputName, field] : task.m_Inputs)
-        {
-            if (field.m_IsRequired && field.m_Type.empty())
-            {
-                LOG_APP_ERROR("Workflow {} task '{}' input '{}' is required but has no type", wf.m_Id, task.m_Id, inputName);
-                return false;
-            }
-        }
-
-        // Outputs must have type to help the orchestrator
-        for (auto const& [outputName, field] : task.m_Outputs)
-        {
-            if (field.m_Type.empty())
-            {
-                LOG_APP_ERROR("Workflow {} task '{}' output '{}' missing type", wf.m_Id, task.m_Id, outputName);
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    // ------------------------------------------------------------
-    // Validate dataflow edges
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateDataflow(WorkflowDefinition const& wf) const
-    {
-        for (auto const& df : wf.m_Dataflows)
-        {
-            if (!wf.m_Tasks.contains(df.m_FromTask))
-            {
-                LOG_APP_ERROR("Workflow {} dataflow references unknown from_task '{}'", wf.m_Id, df.m_FromTask);
-                return false;
-            }
-
-            if (!wf.m_Tasks.contains(df.m_ToTask))
-            {
-                LOG_APP_ERROR("Workflow {} dataflow references unknown to_task '{}'", wf.m_Id, df.m_ToTask);
-                return false;
-            }
-
-            // Validate output slot existence
-            if (!df.m_FromOutput.empty())
-            {
-                TaskDef const& taskFrom = wf.m_Tasks.at(df.m_FromTask);
-                if (!taskFrom.m_Outputs.contains(df.m_FromOutput))
-                {
-                    LOG_APP_ERROR("Workflow {} dataflow: from_task '{}' has no output slot '{}'", wf.m_Id, df.m_FromTask,
-                                  df.m_FromOutput);
-                    return false;
-                }
-            }
-
-            // Validate input slot existence
-            if (!df.m_ToInput.empty())
-            {
-                TaskDef const& taskTo = wf.m_Tasks.at(df.m_ToTask);
-                if (!taskTo.m_Inputs.contains(df.m_ToInput))
-                {
-                    LOG_APP_ERROR("Workflow {} dataflow: to_task '{}' has no input slot '{}'", wf.m_Id, df.m_ToTask,
-                                  df.m_ToInput);
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    // ------------------------------------------------------------
-    // Validate no circular dependencies in task DAG
-    // ------------------------------------------------------------
-    bool WorkflowRegistry::ValidateNoCycles(WorkflowDefinition const& wf) const
-    {
-        std::unordered_set<std::string> visiting;
-        std::unordered_set<std::string> visited;
-
-        std::function<bool(std::string const&)> dfs = [&](std::string const& taskId) -> bool
-        {
-            if (visiting.contains(taskId))
-            {
-                LOG_APP_ERROR("Workflow {} cycle detected at task '{}'", wf.m_Id, taskId);
-                return true;
-            }
-
-            if (visited.contains(taskId))
-            {
-                return false;
-            }
-
-            visiting.insert(taskId);
-
-            TaskDef const& task = wf.m_Tasks.at(taskId);
-            for (std::string const& dep : task.m_DependsOn)
-            {
-                if (dfs(dep))
-                {
-                    return true;
-                }
-            }
-
-            visiting.erase(taskId);
-            visited.insert(taskId);
-            return false;
-        };
-
-        bool ok = true;
-
-        for (auto const& [taskId, _] : wf.m_Tasks)
-        {
-            if (dfs(taskId))
-            {
-                ok = false;
-            }
-        }
-
-        return ok;
+        return allValid;
     }
 
 } // namespace AIAssistant

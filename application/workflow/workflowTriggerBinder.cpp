@@ -12,8 +12,8 @@
    The above copyright notice and this permission notice shall be
    included in all copies or substantial portions of the Software.
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
@@ -38,7 +38,6 @@ namespace
 {
     using namespace simdjson;
 
-    // Lowercase helper (ASCII-oriented is fine for our trigger keywords)
     std::string ToLowerAscii(std::string_view input)
     {
         std::string result;
@@ -53,14 +52,8 @@ namespace
         return result;
     }
 
-    // ---------------------------------------------------------------------
-    // Helpers to parse small JSON objects with ondemand
-    // ---------------------------------------------------------------------
-
     bool ParseCronParams(std::string const& paramsJson, std::string& outExpression)
     {
-        using namespace simdjson;
-
         outExpression.clear();
 
         if (paramsJson.empty())
@@ -134,7 +127,6 @@ namespace
                               std::vector<AIAssistant::TriggerEngine::FileEventType>& outEvents,
                               uint32_t& outDebounceMilliseconds)
     {
-        using namespace simdjson;
         using FileEventType = AIAssistant::TriggerEngine::FileEventType;
 
         outPath.clear();
@@ -269,11 +261,6 @@ namespace
                     outDebounceMilliseconds = static_cast<uint32_t>(rawValue);
                 }
             }
-            else
-            {
-                // Unknown fields are ignored but noted for debugging if needed
-                // (no log to avoid spam; add LOG_APP_WARN here if you want visibility)
-            }
         }
 
         if (!hasPath)
@@ -295,7 +282,6 @@ namespace
 
 namespace AIAssistant
 {
-
     void WorkflowTriggerBinder::RegisterAll(WorkflowRegistry const& workflowRegistry, TriggerEngine& triggerEngine) const
     {
         std::vector<std::string> workflowIds = workflowRegistry.GetWorkflowIds();
@@ -312,13 +298,18 @@ namespace AIAssistant
 
             WorkflowDefinition const& workflowDefinition = optionalWorkflowDefinition.value();
 
+            if (workflowDefinition.m_Triggers.empty())
+            {
+                triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, "auto", true);
+                continue;
+            }
+
             for (WorkflowTrigger const& workflowTrigger : workflowDefinition.m_Triggers)
             {
                 switch (workflowTrigger.m_Type)
                 {
                     case WorkflowTriggerType::Auto:
                     {
-                        // Auto triggers fire once immediately upon registration (if enabled).
                         triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
                                                      workflowTrigger.m_IsEnabled);
                         break;
@@ -364,7 +355,6 @@ namespace AIAssistant
 
                     case WorkflowTriggerType::Manual:
                     {
-                        // Manual triggers do not require params here; UI/CLI will call FireManualTrigger.
                         triggerEngine.AddManualTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
                                                        workflowTrigger.m_IsEnabled);
                         break;
@@ -372,7 +362,6 @@ namespace AIAssistant
 
                     case WorkflowTriggerType::Structure:
                     {
-                        // Structure triggers control per-item expansion. They do not schedule time or events themselves.
                         LOG_APP_INFO(
                             "WorkflowTriggerBinder::RegisterAll: structure trigger '{}' in workflow '{}' is used for "
                             "per-item expansion and does not register a runtime trigger",

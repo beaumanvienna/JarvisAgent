@@ -87,7 +87,7 @@ namespace AIAssistant
                             bool isEnabled);
 
         // Register a file-watch trigger.
-        // path: file path the trigger is interested in.
+        // path: file or directory path the trigger is interested in.
         // events: vector of FileEventType (created/modified/deleted).
         // debounceMilliseconds: minimum time between firings.
         void AddFileWatchTrigger(std::string const& workflowId, std::string const& triggerId, std::string const& path,
@@ -192,6 +192,9 @@ namespace AIAssistant
         // Helper: erase-remove for workflowId from a vector.
         template <typename TriggerVector>
         void EraseWorkflowFromVector(TriggerVector& triggerVector, std::string const& workflowId);
+
+        static std::string NormalizePath(std::string const& path);
+        static bool IsPathMatch(std::string const& watchedPath, std::string const& eventPath);
 
     private:
         TriggerCallback m_TriggerCallback;

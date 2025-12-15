@@ -101,9 +101,10 @@ Expected JCWF JSON structure:
 }
 */
 
-#include "workflowJsonParser.h"
-#include "workflowTypes.h"
+#include "workflow/workflowJsonParser.h"
+
 #include "engine.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -139,7 +140,7 @@ namespace AIAssistant
         bool hasVersion = false;
         bool hasId = false;
         bool hasTasks = false;
-        bool hasTriggers = false;
+        bool hasTriggersField = false;
 
         for (auto field : root)
         {
@@ -204,7 +205,7 @@ namespace AIAssistant
                     return false;
                 }
 
-                hasTriggers = true;
+                hasTriggersField = true;
             }
             else if (key == "tasks")
             {
@@ -254,8 +255,8 @@ namespace AIAssistant
             return false;
         }
 
-        // If no trigger is provided in the JCWF file, 'auto' is assumed as the default trigger.
-        if (!hasTriggers)
+        // If no trigger is provided (missing field or empty array), 'auto' is assumed as the default trigger.
+        if (!hasTriggersField || outputDefinition.m_Triggers.empty())
         {
             WorkflowTrigger const autoTrigger{
                 .m_Type = WorkflowTriggerType::Auto, //

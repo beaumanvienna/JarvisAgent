@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <filesystem>
+#include <system_error>
 
 #include "engine.h"
 #include "jarvisAgent.h"
@@ -36,7 +37,24 @@
 #include "workflow/workflowOrchestrator.h"
 #include "workflow/taskExecutorRegistry.h"
 #include "workflow/shellTaskExecutor.h"
+#include "workflow/aiCallTaskExecutor.h"
 #include "workflow/triggerEngine.h"
+#include "workflow/aiRequestPool.h"
+#include "workflow/workflowRuntimeManager.h"
+
+namespace
+{
+    std::chrono::system_clock::time_point ToSystemClock(std::filesystem::file_time_type const& fileTime)
+    {
+        using FileClock = std::filesystem::file_time_type::clock;
+
+        auto const fileNow = FileClock::now();
+        auto const systemNow = std::chrono::system_clock::now();
+
+        auto const adjustedTime = fileTime - fileNow + systemNow;
+        return std::chrono::time_point_cast<std::chrono::system_clock::duration>(adjustedTime);
+    }
+} // namespace
 
 namespace AIAssistant
 {
@@ -115,6 +133,8 @@ namespace AIAssistant
             }
         }
 
+        m_AiRequestPool = std::make_unique<AiRequestPool>();
+
         // ---------------------------------------------------------
         // Initialize workflow system (registry + orchestrator + triggers)
         // ---------------------------------------------------------
@@ -153,19 +173,34 @@ namespace AIAssistant
                 executorRegistry.RegisterExecutor(TaskType::Shell, shellExecutor);
             }
 
+            // AiCall executor (TaskType::AiCall)
+            {
+                std::shared_ptr<ITaskExecutor> aiCallExecutor = std::make_shared<AiCallTaskExecutor>();
+                executorRegistry.RegisterExecutor(TaskType::AiCall, aiCallExecutor);
+            }
+
             // Later we can add:
             //  - PythonTaskExecutor for TaskType::Python
-            //  - AiCallTaskExecutor for TaskType::AiCall
             //  - InternalTaskExecutor for TaskType::Internal
         }
 
         WorkflowOrchestrator::Get().SetRegistry(m_WorkflowRegistry.get());
+
+        m_WorkflowRuntimeManager = std::make_unique<WorkflowRuntimeManager>();
+        m_WorkflowRuntimeManager->SetRegistry(m_WorkflowRegistry.get());
+        m_WorkflowRuntimeManager->Start();
 
         m_TriggerEngine = std::make_unique<TriggerEngine>(
             [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)
             {
                 LOG_APP_INFO("JarvisAgent: Trigger fired for workflow '{}' (trigger id '{}')", triggerEvent.m_WorkflowId,
                              triggerEvent.m_TriggerId);
+
+                if (m_WorkflowRuntimeManager != nullptr)
+                {
+                    m_WorkflowRuntimeManager->EnqueueWorkflowRun(triggerEvent.m_WorkflowId);
+                    return;
+                }
 
                 bool const runOk = WorkflowOrchestrator::Get().RunWorkflowOnce(triggerEvent.m_WorkflowId);
 
@@ -222,11 +257,21 @@ namespace AIAssistant
             }
         }
 
+        if (m_AiRequestPool != nullptr)
+        {
+            m_AiRequestPool->Update();
+        }
+
         // Tick trigger engine (cron-based triggers)
         if (m_TriggerEngine)
         {
             auto const now = std::chrono::system_clock::now();
             m_TriggerEngine->Tick(now);
+        }
+
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->Update();
         }
 
         // Termination logic
@@ -303,11 +348,40 @@ namespace AIAssistant
         if (hasFileEvent && m_TriggerEngine)
         {
             auto const now = std::chrono::system_clock::now();
-            m_TriggerEngine->NotifyFileEvent(filePath.string(), fileEventType, now);
+
+            bool suppressTriggerEvent = false;
+            if (fileEventType != TriggerEngine::FileEventType::Deleted)
+            {
+                auto const timeSinceStartup = now - m_StartupTime;
+                if (timeSinceStartup <= std::chrono::seconds(10))
+                {
+                    std::error_code errorCode;
+                    std::filesystem::file_time_type const lastWriteTime =
+                        std::filesystem::last_write_time(filePath, errorCode);
+                    if (!errorCode)
+                    {
+                        auto const lastWriteSystemTime = ToSystemClock(lastWriteTime);
+                        if (lastWriteSystemTime < m_StartupTime)
+                        {
+                            suppressTriggerEvent = true;
+                        }
+                    }
+                }
+            }
+
+            if (suppressTriggerEvent)
+            {
+                LOG_APP_INFO("JarvisAgent: ignoring file event for '{}' during startup (pre-existing file)",
+                             filePath.string());
+            }
+            else
+            {
+                m_TriggerEngine->NotifyFileEvent(filePath.string(), fileEventType, now);
+            }
         }
 
         // -----------------------------------------------------------------------------------
-        // ChatMessagePool handling (PROB_xxx files)
+        // PROB handling (ai_call completion consumes output files first, then chat)
         // -----------------------------------------------------------------------------------
 
         if (!filePath.empty())
@@ -332,6 +406,14 @@ namespace AIAssistant
                 // PROB OUTPUT
                 if (probFileInfo.isOutput)
                 {
+                    if (m_AiRequestPool != nullptr)
+                    {
+                        if (m_AiRequestPool->OnProbFileEvent(probFileInfo, filePath.string()))
+                        {
+                            return;
+                        }
+                    }
+
                     std::ifstream inputStream(filePath);
                     std::stringstream outputBuffer;
                     outputBuffer << inputStream.rdbuf();
@@ -372,6 +454,15 @@ namespace AIAssistant
     void JarvisAgent::OnShutdown()
     {
         LOG_APP_INFO("leaving JarvisAgent");
+
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->Stop();
+            m_WorkflowRuntimeManager.reset();
+        }
+
+        m_AiRequestPool.reset();
+
         App::g_App = nullptr;
 
         for (auto& sessionManager : m_SessionManagers)

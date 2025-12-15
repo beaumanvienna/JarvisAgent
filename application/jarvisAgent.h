@@ -38,6 +38,9 @@ namespace AIAssistant
     class WorkflowRegistry;
     class TriggerEngine;
 
+    class AiRequestPool;
+    class WorkflowRuntimeManager;
+
     class JarvisAgent : public Application
     {
     public:
@@ -60,6 +63,9 @@ namespace AIAssistant
         PythonEngine* GetPythonEngine() { return m_PythonEngine.get(); }
         WorkflowRegistry* GetWorkflowRegistry() { return m_WorkflowRegistry.get(); }
 
+        AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
+        WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
+
     private:
         void CheckIfFinished();
         void InitializeWorkflows();
@@ -80,6 +86,9 @@ namespace AIAssistant
 
         std::unique_ptr<WorkflowRegistry> m_WorkflowRegistry;
         std::unique_ptr<TriggerEngine> m_TriggerEngine;
+
+        std::unique_ptr<AiRequestPool> m_AiRequestPool;
+        std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;
     };
 
     class App

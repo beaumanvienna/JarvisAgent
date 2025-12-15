@@ -25,6 +25,7 @@
 
 #include <memory>
 #include "workflowTypes.h"
+#include "workflowRegistry.h"
 
 namespace AIAssistant
 {

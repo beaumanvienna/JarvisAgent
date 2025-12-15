@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <unordered_set>
 
 // Bring in logging and core types.
 #include "core.h"
@@ -256,10 +257,12 @@ namespace AIAssistant
                                             std::string const& path, std::vector<FileEventType> const& events,
                                             uint32_t debounceMilliseconds, bool isEnabled)
     {
+        std::string const normalizedPath = NormalizePath(path);
+
         FileWatchTriggerInstance fileTriggerInstance{};
         fileTriggerInstance.m_WorkflowId = workflowId;
         fileTriggerInstance.m_TriggerId = triggerId;
-        fileTriggerInstance.m_WatchedPath = path;
+        fileTriggerInstance.m_WatchedPath = normalizedPath;
         fileTriggerInstance.m_Events = events;
         fileTriggerInstance.m_DebounceInterval = std::chrono::milliseconds(debounceMilliseconds);
         fileTriggerInstance.m_IsEnabled = isEnabled;
@@ -268,11 +271,11 @@ namespace AIAssistant
         m_FileWatchTriggers.push_back(std::move(fileTriggerInstance));
 
         // Update index map.
-        auto& indexVector = m_FileWatchIndex[path];
+        auto& indexVector = m_FileWatchIndex[normalizedPath];
         indexVector.push_back(triggerIndex);
 
         LOG_APP_INFO("TriggerEngine::AddFileWatchTrigger: registered file trigger '{}' for workflow '{}' on path '{}'",
-                     triggerId, workflowId, path);
+                     triggerId, workflowId, normalizedPath);
     }
 
     void TriggerEngine::AddManualTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled)
@@ -332,30 +335,29 @@ namespace AIAssistant
     void TriggerEngine::NotifyFileEvent(std::string const& path, FileEventType fileEventType,
                                         std::chrono::system_clock::time_point const& now)
     {
-        auto iterator = m_FileWatchIndex.find(path);
-        if (iterator == m_FileWatchIndex.end())
-        {
-            return;
-        }
+        std::string const normalizedEventPath = NormalizePath(path);
 
-        std::vector<size_t> const& indices = iterator->second;
-        for (size_t triggerIndex : indices)
+        std::unordered_set<size_t> processedIndices;
+
+        auto processIndex = [&](size_t triggerIndex)
         {
             if (triggerIndex >= m_FileWatchTriggers.size())
             {
-                continue;
+                return;
             }
+
+            processedIndices.insert(triggerIndex);
 
             FileWatchTriggerInstance& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
 
             if (!fileTriggerInstance.m_IsEnabled)
             {
-                continue;
+                return;
             }
 
             if (!ContainsEvent(fileTriggerInstance.m_Events, fileEventType))
             {
-                continue;
+                return;
             }
 
             bool canFire = false;
@@ -380,6 +382,36 @@ namespace AIAssistant
 
                 FireTrigger(fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId);
             }
+        };
+
+        // Fast path: exact match using index.
+        {
+            auto iterator = m_FileWatchIndex.find(normalizedEventPath);
+            if (iterator != m_FileWatchIndex.end())
+            {
+                std::vector<size_t> const& indices = iterator->second;
+                for (size_t triggerIndex : indices)
+                {
+                    processIndex(triggerIndex);
+                }
+            }
+        }
+
+        // Slow path: prefix (directory) matches.
+        for (size_t triggerIndex = 0; triggerIndex < m_FileWatchTriggers.size(); ++triggerIndex)
+        {
+            if (processedIndices.contains(triggerIndex))
+            {
+                continue;
+            }
+
+            FileWatchTriggerInstance const& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
+            if (!IsPathMatch(fileTriggerInstance.m_WatchedPath, normalizedEventPath))
+            {
+                continue;
+            }
+
+            processIndex(triggerIndex);
         }
     }
 
@@ -433,6 +465,73 @@ namespace AIAssistant
                                              { return instance.m_WorkflowId == workflowId; });
 
         triggerVector.erase(newEndIterator, triggerVector.end());
+    }
+
+    std::string TriggerEngine::NormalizePath(std::string const& path)
+    {
+        std::string normalizedPath;
+        normalizedPath.reserve(path.size());
+
+        bool previousWasSlash = false;
+        for (char character : path)
+        {
+            char const normalizedCharacter = (character == '\\') ? '/' : character;
+
+            if (normalizedCharacter == '/')
+            {
+                if (previousWasSlash)
+                {
+                    continue;
+                }
+                previousWasSlash = true;
+            }
+            else
+            {
+                previousWasSlash = false;
+            }
+
+            normalizedPath.push_back(normalizedCharacter);
+        }
+
+        return normalizedPath;
+    }
+
+    bool TriggerEngine::IsPathMatch(std::string const& watchedPath, std::string const& eventPath)
+    {
+        if (watchedPath.empty())
+        {
+            return false;
+        }
+
+        if (eventPath == watchedPath)
+        {
+            return true;
+        }
+
+        if (eventPath.size() < watchedPath.size())
+        {
+            return false;
+        }
+
+        if (eventPath.compare(0, watchedPath.size(), watchedPath) != 0)
+        {
+            return false;
+        }
+
+        // watchedPath is a prefix. It's a match if watchedPath ends with '/'
+        // or the next char in eventPath is '/'.
+        if (watchedPath.back() == '/')
+        {
+            return true;
+        }
+
+        if (eventPath.size() == watchedPath.size())
+        {
+            return true;
+        }
+
+        char const boundaryCharacter = eventPath[watchedPath.size()];
+        return boundaryCharacter == '/';
     }
 
 } // namespace AIAssistant

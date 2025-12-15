@@ -19,11 +19,138 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#include "workflowJsonParser.h"
+#include "workflow/workflowJsonParserDetails.h"
+#include "workflow/workflowJsonParser.h"
+
+#include <optional>
+#include <string_view>
+
 #include "engine.h"
 
 namespace AIAssistant
 {
+    static bool ReadQueueFileRefArray(simdjson::ondemand::value& value, std::vector<QueueFileRef>& outFileRefs,
+                                      std::string const& context, std::string& outErrorMessage)
+    {
+        outFileRefs.clear();
+
+        simdjson::ondemand::array array;
+        auto const arrayError = value.get_array().get(array);
+        if (arrayError)
+        {
+            outErrorMessage = context + " must be an array";
+            return false;
+        }
+
+        for (simdjson::ondemand::value item : array)
+        {
+            // Either "path string" OR {"path":"...", "content":"..."}.
+            if (item.type() == simdjson::ondemand::json_type::string)
+            {
+                std::string_view pathText;
+                auto const stringError = item.get_string().get(pathText);
+                if (stringError)
+                {
+                    outErrorMessage = context + " contains an invalid string";
+                    return false;
+                }
+
+                QueueFileRef fileRef{};
+                fileRef.m_Path = std::string(pathText);
+                fileRef.m_HasInlineContent = false;
+                outFileRefs.push_back(std::move(fileRef));
+                continue;
+            }
+
+            if (item.type() == simdjson::ondemand::json_type::object)
+            {
+                simdjson::ondemand::object object;
+                auto const objectError = item.get_object().get(object);
+                if (objectError)
+                {
+                    outErrorMessage = context + " contains an invalid object";
+                    return false;
+                }
+
+                std::string_view pathText;
+                std::string_view contentText;
+
+                auto const pathError = object["path"].get_string().get(pathText);
+                if (pathError)
+                {
+                    outErrorMessage = context + " object is missing 'path' (string)";
+                    return false;
+                }
+
+                auto const contentError = object["content"].get_string().get(contentText);
+                if (contentError)
+                {
+                    outErrorMessage = context + " object is missing 'content' (string)";
+                    return false;
+                }
+
+                QueueFileRef fileRef{};
+                fileRef.m_Path = std::string(pathText);
+                fileRef.m_Content = std::string(contentText);
+                fileRef.m_HasInlineContent = true;
+                outFileRefs.push_back(std::move(fileRef));
+                continue;
+            }
+
+            outErrorMessage = context + " contains an unsupported item type (expected string or object)";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ParseTaskQueueBinding(simdjson::ondemand::value& value, QueueBinding& binding, std::string& errorMessage)
+    {
+        binding = {};
+
+        simdjson::ondemand::object obj;
+        auto const objError = value.get_object().get(obj);
+        if (objError)
+        {
+            errorMessage = "queue_binding must be an object";
+            return false;
+        }
+
+        auto readArray = [&](char const* fieldName, std::vector<QueueFileRef>& destination) -> bool
+        {
+            simdjson::ondemand::value fieldValue;
+            auto const fieldError = obj[fieldName].get(fieldValue);
+            if (fieldError)
+            {
+                return true; // optional
+            }
+
+            return ReadQueueFileRefArray(fieldValue, destination, std::string("queue_binding.") + fieldName, errorMessage);
+        };
+
+        if (!readArray("stng_files", binding.m_StngFiles))
+        {
+            return false;
+        }
+
+        if (!readArray("task_files", binding.m_TaskFiles))
+        {
+            return false;
+        }
+
+        if (!readArray("cnxt_files", binding.m_CnxtFiles))
+        {
+            return false;
+        }
+
+        if (!readArray("prob_files", binding.m_ProbFiles))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     namespace
     {
         bool RequireObject(simdjson::ondemand::value& value, std::string const& context, std::string& errorMessage)
@@ -887,113 +1014,7 @@ namespace AIAssistant
     bool WorkflowJsonParser::ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut,
                                                    std::string& errorMessage) const
     {
-        if (!RequireObject(jsonValue, "task.queue_binding", errorMessage))
-        {
-            return false;
-        }
-
-        auto objectResult = jsonValue.get_object();
-        if (objectResult.error() != simdjson::SUCCESS)
-        {
-            errorMessage = "failed to read 'queue_binding' object: ";
-            errorMessage += simdjson::error_message(objectResult.error());
-            return false;
-        }
-
-        simdjson::ondemand::object bindingObject = objectResult.value();
-
-        auto readStringArray = [&errorMessage](simdjson::ondemand::value& arrayValue, std::vector<std::string>& output,
-                                               std::string const& context) -> bool
-        {
-            auto typeResult = arrayValue.type();
-            if (typeResult.error() != simdjson::SUCCESS)
-            {
-                errorMessage = "failed to get type for ";
-                errorMessage += context;
-                errorMessage += ": ";
-                errorMessage += simdjson::error_message(typeResult.error());
-                return false;
-            }
-
-            if (typeResult.value() != simdjson::ondemand::json_type::array)
-            {
-                errorMessage = context;
-                errorMessage += " must be array of strings";
-                return false;
-            }
-
-            auto arrayResult = arrayValue.get_array();
-            if (arrayResult.error() != simdjson::SUCCESS)
-            {
-                errorMessage = "failed to read ";
-                errorMessage += context;
-                errorMessage += " array: ";
-                errorMessage += simdjson::error_message(arrayResult.error());
-                return false;
-            }
-
-            simdjson::ondemand::array jsonArray = arrayResult.value();
-
-            for (simdjson::ondemand::value itemValue : jsonArray)
-            {
-                auto stringResult = itemValue.get_string(false);
-                if (stringResult.error() != simdjson::SUCCESS)
-                {
-                    errorMessage = context;
-                    errorMessage += " must be array of strings";
-                    return false;
-                }
-
-                std::string_view stringView = stringResult.value();
-                output.emplace_back(stringView.begin(), stringView.end());
-            }
-
-            return true;
-        };
-
-        for (auto field : bindingObject)
-        {
-            auto keyResult = field.unescaped_key();
-            if (keyResult.error() != simdjson::SUCCESS)
-            {
-                errorMessage = "failed to read queue_binding key: ";
-                errorMessage += simdjson::error_message(keyResult.error());
-                return false;
-            }
-
-            std::string_view keyView = keyResult.value();
-            std::string key(keyView.begin(), keyView.end());
-
-            simdjson::ondemand::value value = field.value();
-
-            if (key == "stng_files")
-            {
-                if (!readStringArray(value, bindingOut.m_StngFiles, "queue_binding.stng_files"))
-                {
-                    return false;
-                }
-            }
-            else if (key == "task_files")
-            {
-                if (!readStringArray(value, bindingOut.m_TaskFiles, "queue_binding.task_files"))
-                {
-                    return false;
-                }
-            }
-            else if (key == "cnxt_files")
-            {
-                if (!readStringArray(value, bindingOut.m_CnxtFiles, "queue_binding.cnxt_files"))
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                LOG_CORE_WARN("Unknown field in queue_binding: {}", key);
-            }
-        }
-
-        return true;
+        return ::AIAssistant::ParseTaskQueueBinding(jsonValue, bindingOut, errorMessage);
     }
 
     // ---------------------------------------------------------------------
