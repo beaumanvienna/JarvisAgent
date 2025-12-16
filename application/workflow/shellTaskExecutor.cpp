@@ -26,11 +26,18 @@
 #include "engine.h"
 #include "shellTaskExecutor.h"
 
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <unordered_map>
 #include <vector>
-#include <string>
-#include <cctype>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <sys/wait.h>
+#endif
 
 #include "simdjson/simdjson.h"
 
@@ -38,6 +45,35 @@ namespace AIAssistant
 {
     namespace
     {
+#if defined(_WIN32)
+        FILE* OpenPipe(char const* command, char const* mode) { return _popen(command, mode); }
+
+        int ClosePipe(FILE* pipe) { return _pclose(pipe); }
+#else
+        FILE* OpenPipe(char const* command, char const* mode) { return popen(command, mode); }
+
+        int ClosePipe(FILE* pipe)
+        {
+            int const status = pclose(pipe);
+            if (status == -1)
+            {
+                return -1;
+            }
+
+            if (WIFEXITED(status))
+            {
+                return WEXITSTATUS(status);
+            }
+
+            if (WIFSIGNALED(status))
+            {
+                return 128 + WTERMSIG(status);
+            }
+
+            return status;
+        }
+#endif
+
         // ------------------------------------------------------------
         // Build a derived output-slot → value map for this task.
         //
@@ -260,7 +296,7 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Build a command string for std::system() from argv-style vector.
+        // Build a command string from argv-style vector.
         //
         // For now we assume arguments are already validated as "safe".
         // We simply join them with spaces.
@@ -316,6 +352,75 @@ namespace AIAssistant
             {
                 rawArgs.push_back(std::string("${outputs}"));
             }
+        }
+
+        // ------------------------------------------------------------
+        // Execute a command while capturing stdout/stderr, and forward it
+        // through the normal JarvisAgent logging path.
+        //
+        // This avoids external processes writing directly to the terminal
+        // (which bypasses TerminalLogStreamBuf / ncurses and can corrupt the UI).
+        // ------------------------------------------------------------
+        bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId, int& exitCodeOut)
+        {
+            exitCodeOut = -1;
+
+            // Redirect stderr into stdout so we capture both streams.
+            std::string const commandWithRedirect = command + " 2>&1";
+
+            FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
+            if (pipe == nullptr)
+            {
+                LOG_APP_ERROR("ShellTaskExecutor: Failed to open pipe for command '{}' (task='{}')", command, taskId);
+                return false;
+            }
+
+            std::string pending;
+            pending.reserve(4096);
+
+            char buffer[4096];
+            while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr)
+            {
+                pending.append(buffer);
+
+                for (;;)
+                {
+                    size_t const newlineIndex = pending.find('\n');
+                    if (newlineIndex == std::string::npos)
+                    {
+                        break;
+                    }
+
+                    std::string line = pending.substr(0, newlineIndex);
+                    pending.erase(0, newlineIndex + 1);
+
+                    if (!line.empty() && line.back() == '\r')
+                    {
+                        line.pop_back();
+                    }
+
+                    if (!line.empty())
+                    {
+                        LOG_APP_INFO("[shell:{}] {}", taskId, line);
+                    }
+                }
+            }
+
+            if (!pending.empty())
+            {
+                if (!pending.empty() && pending.back() == '\r')
+                {
+                    pending.pop_back();
+                }
+
+                if (!pending.empty())
+                {
+                    LOG_APP_INFO("[shell:{}] {}", taskId, pending);
+                }
+            }
+
+            exitCodeOut = ClosePipe(pipe);
+            return exitCodeOut >= 0;
         }
     } // anonymous namespace
 
@@ -551,18 +656,32 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // 6) Join into a single command string for std::system()
+        // 6) Execute while capturing stdout/stderr.
+        //
+        // We must not allow external commands to write directly to the terminal,
+        // because that bypasses the std::cout → TerminalLogStreamBuf pipeline and
+        // can corrupt the ncurses dashboard.
         // ------------------------------------------------------------
         std::string const fullCommand = JoinArgumentsForSystem(argumentList);
 
         LOG_APP_INFO("[shell] Command: {}", fullCommand);
 
-        int const result = std::system(fullCommand.c_str());
+        int exitCode = -1;
+        bool const executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, exitCode);
 
-        if (result != 0)
+        if (!executed)
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: Failed to execute shell command '{}' for task '{}'", fullCommand,
+                          taskDefinition.m_Id);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ShellTaskExecutor: Failed to execute shell command";
+            return false;
+        }
+
+        if (exitCode != 0)
         {
             LOG_APP_ERROR("ShellTaskExecutor: Shell command '{}' for task '{}' returned non-zero exit status {}",
-                          fullCommand, taskDefinition.m_Id, result);
+                          fullCommand, taskDefinition.m_Id, exitCode);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Shell command returned non-zero exit status";
             return false;

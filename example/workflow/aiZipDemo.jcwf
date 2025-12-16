@@ -187,13 +187,13 @@
         "stl.output.md",
         "pythonTrivia.output.md",
         "vulkanRendering.output.md",
-        "scripts/zipResponses.sh"
+        "scripts/zipTool.sh"
       ],
       "file_outputs": [
         "aiResponses.zip"
       ],
       "params": {
-        "command": "scripts/zipResponses.sh",
+        "command": "scripts/zipTool.sh",
         "args": [
           "${input[0]}",
           "${input[1]}",
