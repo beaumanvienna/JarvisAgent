@@ -329,7 +329,7 @@ namespace AIAssistant
 
     bool AiCallTaskExecutor::WriteInlineQueueBindingFiles(QueueBinding const& queueBinding, std::string& outErrorMessage)
     {
-        // ai_call: write environment artifacts (STNG/TASK/CNXT). PROB submission is created by this executor.
+        // ai_call: write environment artifacts (STNG/TASK/CNTX). PROB submission is created by this executor.
         if (!WriteInlineQueueFileRefs(queueBinding.m_StngFiles, outErrorMessage))
         {
             return false;
@@ -340,7 +340,7 @@ namespace AIAssistant
             return false;
         }
 
-        if (!WriteInlineQueueFileRefs(queueBinding.m_CnxtFiles, outErrorMessage))
+        if (!WriteInlineQueueFileRefs(queueBinding.m_CntxFiles, outErrorMessage))
         {
             return false;
         }
@@ -351,25 +351,26 @@ namespace AIAssistant
     bool AiCallTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                      TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        (void)workflowDefinition;
-
         std::string errorMessage;
 
         // ------------------------------------------------------------
-        // Resolve queue folder
+        // Resolve workflow base directory (directory containing the loaded .jcwf file)
         // ------------------------------------------------------------
-        if (Core::g_Core == nullptr)
+        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+
+        if (workflowBaseDirectoryPath.empty())
         {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "Core::g_Core is null";
-            return false;
+            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
+            if (!workflowFilePath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFilePath.parent_path();
+            }
         }
 
-        std::string const queueFolder = Core::g_Core->GetConfig().m_QueueFolderFilepath;
-        if (queueFolder.empty())
+        if (workflowBaseDirectoryPath.empty())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "queue folder is empty";
+            taskState.m_LastErrorMessage = "workflow base directory is empty (WorkflowDefinition not populated by loader)";
             return false;
         }
 
@@ -398,9 +399,39 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Write inline queue binding files (STNG/TASK/CNXT static artifacts)
+        // Write inline queue binding files (STNG/TASK/CNTX static artifacts)
         // ------------------------------------------------------------
-        if (!WriteInlineQueueBindingFiles(taskDefinition.m_QueueBinding, errorMessage))
+        QueueBinding localizedQueueBinding = taskDefinition.m_QueueBinding;
+
+        auto const localizeInlineFileRefs = [&](std::vector<QueueFileRef>& fileRefs)
+        {
+            for (QueueFileRef& fileRef : fileRefs)
+            {
+                if (!fileRef.m_HasInlineContent)
+                {
+                    continue;
+                }
+
+                if (fileRef.m_Path.empty())
+                {
+                    continue;
+                }
+
+                std::filesystem::path const filePath(fileRef.m_Path);
+                if (!filePath.is_absolute())
+                {
+                    std::filesystem::path const rewritten = (workflowBaseDirectoryPath / filePath).lexically_normal();
+                    fileRef.m_Path = rewritten.string();
+                }
+            }
+        };
+
+        localizeInlineFileRefs(localizedQueueBinding.m_StngFiles);
+        localizeInlineFileRefs(localizedQueueBinding.m_TaskFiles);
+        localizeInlineFileRefs(localizedQueueBinding.m_CntxFiles);
+        localizeInlineFileRefs(localizedQueueBinding.m_ProbFiles);
+
+        if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
@@ -451,7 +482,7 @@ namespace AIAssistant
         }
 
         std::filesystem::path const requestPath =
-            std::filesystem::path(queueFolder) / BuildProbFilename(requestId, timestampNs, false);
+            workflowBaseDirectoryPath / BuildProbFilename(requestId, timestampNs, false);
 
         std::string const promptText = TryBuildPromptFromParams(taskDefinition, taskState);
 

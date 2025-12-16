@@ -138,7 +138,7 @@ namespace AIAssistant
             return false;
         }
 
-        if (!readArray("cnxt_files", binding.m_CnxtFiles))
+        if (!readArray("cntx_files", binding.m_CntxFiles))
         {
             return false;
         }

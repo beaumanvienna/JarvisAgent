@@ -55,7 +55,7 @@ Expected JCWF JSON structure:
       "queue_binding": {
         "stng_files": ["STNG_daily.txt"],
         "task_files": ["TASK_summarize.txt"],
-        "cnxt_files": ["CNXT_daily.txt"]
+        "cntx_files": ["CNTX_daily.txt"]
       },
       "inputs": {
         "source_path": { "type": "string", "required": true }

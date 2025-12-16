@@ -192,6 +192,9 @@ namespace AIAssistant
             return false;
         }
 
+        workflowDefinition.m_WorkflowFilePath = workflowFilePath.lexically_normal().string();
+        workflowDefinition.m_WorkflowBaseDirectory = workflowFilePath.parent_path().lexically_normal().string();
+
         if (workflowDefinition.m_Id.empty())
         {
             LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id", workflowFilePath.string());
@@ -247,6 +250,29 @@ namespace AIAssistant
                     outputPathText = rewritten.string();
                 }
             }
+
+            auto const rewriteQueueFileRefs = [&](std::vector<QueueFileRef>& fileRefs)
+            {
+                for (QueueFileRef& fileRef : fileRefs)
+                {
+                    if (fileRef.m_Path.empty() || LooksLikeTemplatePath(fileRef.m_Path))
+                    {
+                        continue;
+                    }
+
+                    std::filesystem::path const filePath(fileRef.m_Path);
+                    if (!filePath.is_absolute())
+                    {
+                        std::filesystem::path const rewritten = (workflowDirectoryPath / filePath).lexically_normal();
+                        fileRef.m_Path = rewritten.string();
+                    }
+                }
+            };
+
+            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_StngFiles);
+            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_TaskFiles);
+            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_CntxFiles);
+            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_ProbFiles);
         }
     }
 

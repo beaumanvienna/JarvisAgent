@@ -8,7 +8,7 @@ Source: the open points you provided (focused on `jarvisAgent.cpp/.h` and the `w
 
 ### ai_call architecture compliance
 - [ ] Implement **per-request overrides** for `ai_call` (model / API index / request params) instead of only `prompt_template`.
-- [ ] Fix **queue-binding path anchoring** so `STNG_` / `TASK_` / `CNXT_` files land under the **queue folder / subsystem directory**, not written “as-is” via `QueueFileRef.path`.
+- [ ] Fix **queue-binding path anchoring** so `STNG_` / `TASK_` / `CNTX_` files land under the **queue folder / subsystem directory**, not written “as-is” via `QueueFileRef.path`.
 - [ ] Implement `queue_binding.prob_files` behavior:
   - [ ] If JCWF provides `prob_files` (inline content or string ref), **consume/write** them.
   - [ ] Decide how this interacts with the executor’s `PROB_<id>_<ts>.txt` generation (avoid conflicting sources of truth).

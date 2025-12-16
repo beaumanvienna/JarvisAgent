@@ -153,8 +153,8 @@ namespace AIAssistant
         // TASK_* files (instructions).
         std::vector<QueueFileRef> m_TaskFiles;
 
-        // CNXT_* files (context).
-        std::vector<QueueFileRef> m_CnxtFiles;
+        // CNTX_* files (context).
+        std::vector<QueueFileRef> m_CntxFiles;
 
         // PROB_* files (problem / request payload).
         std::vector<QueueFileRef> m_ProbFiles;
@@ -256,6 +256,12 @@ namespace AIAssistant
         std::string m_Id;
         std::string m_Label;
         std::string m_Doc;
+
+        // Workflow File Path: filesystem path of the loaded .jcwf file (set by the loader).
+        std::string m_WorkflowFilePath;
+
+        // Workflow Base Directory: directory that contains the loaded .jcwf file (set by the loader).
+        std::string m_WorkflowBaseDirectory;
 
         // JCWF: "triggers"
         std::vector<WorkflowTrigger> m_Triggers;

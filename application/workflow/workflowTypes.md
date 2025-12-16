@@ -63,7 +63,7 @@ Describes the environment for tasks:
 Specifies files related to task execution:
 - **m_StngFiles**: STNG settings files.
 - **m_TaskFiles**: TASK instruction files.
-- **m_CnxtFiles**: CNXT context files.
+- **m_CntxFiles**: CNTX context files.
 
 ### WorkflowTrigger
 Represents a trigger with its type and parameters:
@@ -104,6 +104,8 @@ Describes the overall workflow:
 - **m_Id**: Unique identifier for the workflow.
 - **m_Label**: Human-readable label for the workflow.
 - **m_Doc**: Documentation string for the workflow.
+- **m_WorkflowFilePath**: Workflow File Path: filesystem path of the loaded .jcwf file (set by the loader).
+- **m_WorkflowBaseDirectory**: Workflow Base Directory: directory that contains the loaded .jcwf file (set by the loader).
 - **m_Triggers**: List of triggers for the workflow.
 - **m_Tasks**: Map of task definitions.
 - **m_Dataflows**: List of data flows.

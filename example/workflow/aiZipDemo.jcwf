@@ -27,7 +27,7 @@
       "mode": "single",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
-        "CNXT_webLookup_cpp_python_vulkan.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
         "TASK_createMarkdown.txt"
       ],
       "file_outputs": [
@@ -47,9 +47,9 @@
             "content": "friendly, educational, computer science tone"
           }
         ],
-        "cnxt_files": [
+        "cntx_files": [
           {
-            "path": "CNXT_webLookup_cpp_python_vulkan.txt",
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
             "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
           }
         ],
@@ -78,7 +78,7 @@
       "mode": "single",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
-        "CNXT_webLookup_cpp_python_vulkan.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
         "TASK_createMarkdown.txt"
       ],
       "file_outputs": [
@@ -98,9 +98,9 @@
             "content": "friendly, educational, computer science tone"
           }
         ],
-        "cnxt_files": [
+        "cntx_files": [
           {
-            "path": "CNXT_webLookup_cpp_python_vulkan.txt",
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
             "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
           }
         ],
@@ -129,7 +129,7 @@
       "mode": "single",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
-        "CNXT_webLookup_cpp_python_vulkan.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
         "TASK_createMarkdown.txt"
       ],
       "file_outputs": [
@@ -149,9 +149,9 @@
             "content": "friendly, educational, computer science tone"
           }
         ],
-        "cnxt_files": [
+        "cntx_files": [
           {
-            "path": "CNXT_webLookup_cpp_python_vulkan.txt",
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
             "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
           }
         ],
