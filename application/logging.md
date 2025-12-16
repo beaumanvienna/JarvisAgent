@@ -106,6 +106,25 @@ Python-side mirror of C++ logging formatting.
 
 ---
 
+# ShellTaskExecutor (Shell task logging)
+
+Shell tasks must not write directly to the terminal (stdout/stderr), because that bypasses the `spdlog → std::cout → TerminalLogStreamBuf` pipeline and can corrupt the ncurses UI.
+
+### Responsibilities
+- Execute the configured shell command/script for a `shell` task.
+- Capture **stdout and stderr** from the invoked process.
+- Forward captured output back into the normal logging pipeline via `LOG_APP_INFO(...)`.
+
+### Important Behaviors
+- Shell execution captures output via a pipe (`popen` / `_popen`) instead of using `std::system`.
+- `stderr` is redirected into `stdout` (`2>&1`) so both streams are captured.
+- Output is forwarded **line-by-line** as log messages so `TerminalLogStreamBuf` can enforce the “one log message = one line” rule.
+- The executor logs:
+  - the command being executed (e.g. `[shell] Command: ...`)
+  - each output line (e.g. `[shell:<taskId>] <line>`)
+
+---
+
 # End-to-End Logging Flow
 
 ```
@@ -126,12 +145,20 @@ Python logs follow the same path:
 log.py print() → Python redirect → C++ JarvisRedirectPython → std::cout → TerminalLogStreamBuf
 ```
 
+Shell task output is normalized into the same path:
+```
+ShellTaskExecutor (popen / _popen capture stdout+stderr)
+         ↓
+LOG_APP_INFO(...) → std::cout → TerminalLogStreamBuf → TerminalManager
+```
+
 ---
 
 # Summary
 
 The logging system ensures:
 - All logs (C++ & Python) flow through a single unified pipeline
+- Shell task output is captured and forwarded into the same pipeline (no direct stdout/stderr to terminal)
 - Every message is line-based, newline-terminated, and ANSI-clean
 - Terminal UI stays responsive and UTF-8 safe
 - Status information is updated per session through StatusRenderer
