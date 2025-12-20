@@ -190,8 +190,7 @@
       "file_inputs": [
         "stl.output.md",
         "pythonTrivia.output.md",
-        "vulkanRendering.output.md",
-        "scripts/zipTool.sh"
+        "vulkanRendering.output.md"
       ],
       "file_outputs": [
         "aiResponses.zip"

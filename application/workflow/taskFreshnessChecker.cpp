@@ -87,12 +87,11 @@ namespace
 
         return true;
     }
-}
+} // namespace
 
 namespace AIAssistant
 {
-    bool TaskFreshnessChecker::IsTaskUpToDate(WorkflowDefinition const& workflowDefinition,
-                                              std::string const& taskId,
+    bool TaskFreshnessChecker::IsTaskUpToDate(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
                                               ResolvedPaths const& resolvedPaths,
                                               ResolveOutputPathsFn const& resolveOutputPaths) const
     {
@@ -101,7 +100,6 @@ namespace AIAssistant
         {
             return false;
         }
-
 
         auto definitionIterator = workflowDefinition.m_Tasks.find(taskId);
         if (definitionIterator == workflowDefinition.m_Tasks.end())

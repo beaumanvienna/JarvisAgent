@@ -199,36 +199,6 @@ namespace AIAssistant
                 return false;
             }
 
-            fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
-            if (workingDirectory.empty())
-            {
-                workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
-            }
-            else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
-            {
-                workingDirectory =
-                    (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
-            }
-
-            if (!workingDirectory.empty())
-            {
-                for (fs::path& path : outInputPaths)
-                {
-                    if (path.is_relative())
-                    {
-                        path = (workingDirectory / path).lexically_normal();
-                    }
-                }
-
-                for (fs::path& path : outOutputPaths)
-                {
-                    if (path.is_relative())
-                    {
-                        path = (workingDirectory / path).lexically_normal();
-                    }
-                }
-            }
-
             return true;
         }
 
@@ -762,6 +732,8 @@ namespace AIAssistant
                         PopulateSkippedTaskOutputsIfPossible(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                              taskState);
                         taskState.m_State = TaskInstanceStateKind::Skipped;
+                        LOG_APP_INFO("[WorkflowRuntimeManager] task '{}' is up to date -> skipped", taskId);
+                        dispatchedAny = true;
                         continue;
                     }
                 }
@@ -881,33 +853,6 @@ namespace AIAssistant
                 summary += ";";
             }
             result.m_TaskState.m_InputsJson = summary;
-        }
-
-        fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
-        if (workingDirectory.empty())
-        {
-            workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
-        }
-        else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
-        {
-            workingDirectory =
-                (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
-        }
-
-        if (!workingDirectory.empty())
-        {
-            try
-            {
-                fs::create_directories(workingDirectory);
-            }
-            catch (fs::filesystem_error const& exception)
-            {
-                result.m_TaskState.m_State = TaskInstanceStateKind::Failed;
-                result.m_TaskState.m_LastErrorMessage =
-                    std::string("Failed to create task working directory: ") + exception.what();
-                result.m_ExecuteOk = false;
-                return result;
-            }
         }
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();

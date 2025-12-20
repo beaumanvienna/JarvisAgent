@@ -49,16 +49,14 @@ namespace AIAssistant
             std::vector<std::filesystem::path> m_OutputPaths;
         };
 
-        using ResolveOutputPathsFn = std::function<bool(std::string const& taskId, std::vector<std::filesystem::path>& outPaths)>;
+        using ResolveOutputPathsFn =
+            std::function<bool(std::string const& taskId, std::vector<std::filesystem::path>& outPaths)>;
 
-        bool IsTaskUpToDate(WorkflowDefinition const& workflowDefinition,
-                            std::string const& taskId,
-                            ResolvedPaths const& resolvedPaths,
-                            ResolveOutputPathsFn const& resolveOutputPaths) const;
+        bool IsTaskUpToDate(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
+                            ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths) const;
 
     private:
-        bool CollectUpstreamOutputTimes(WorkflowDefinition const& workflowDefinition,
-                                        std::string const& taskId,
+        bool CollectUpstreamOutputTimes(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
                                         std::unordered_set<std::string>& visitedTasks,
                                         std::vector<std::filesystem::file_time_type>& outTimes,
                                         ResolveOutputPathsFn const& resolveOutputPaths) const;

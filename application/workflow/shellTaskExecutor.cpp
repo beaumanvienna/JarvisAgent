@@ -50,9 +50,9 @@ namespace AIAssistant
 
         std::mutex g_ShellTaskExecutorCurrentPathMutex;
 
-        
-        std::filesystem::path const g_JarvisAgentLaunchWorkingDirectoryPath = std::filesystem::current_path().lexically_normal();
-class ScopedCurrentPath
+        std::filesystem::path const g_JarvisAgentLaunchWorkingDirectoryPath =
+            std::filesystem::current_path().lexically_normal();
+        class ScopedCurrentPath
         {
         public:
             explicit ScopedCurrentPath(std::filesystem::path const& newPath, std::error_code& errorCode)
@@ -398,7 +398,8 @@ class ScopedCurrentPath
         // This avoids external processes writing directly to the terminal
         // (which bypasses TerminalLogStreamBuf / ncurses and can corrupt the UI).
         // ------------------------------------------------------------
-        bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId, std::filesystem::path const& workingDirectoryPath, int& exitCodeOut)
+        bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId,
+                                              std::filesystem::path const& workingDirectoryPath, int& exitCodeOut)
         {
             std::scoped_lock<std::mutex> const lock(g_ShellTaskExecutorCurrentPathMutex);
 
@@ -406,11 +407,10 @@ class ScopedCurrentPath
             ScopedCurrentPath const scopedCurrentPath(workingDirectoryPath, errorCode);
             if (errorCode)
             {
-                LOG_APP_ERROR("[shell:{}] Failed to set current_path to '{}': {}", taskId,
-                              workingDirectoryPath.string(), errorCode.message());
+                LOG_APP_ERROR("[shell:{}] Failed to set current_path to '{}': {}", taskId, workingDirectoryPath.string(),
+                              errorCode.message());
                 return false;
             }
-
 
             exitCodeOut = -1;
 
@@ -519,7 +519,7 @@ class ScopedCurrentPath
                                     TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
         (void)workflowRun;
-        
+
         std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
         if (workflowBaseDirectoryPath.empty())
         {
@@ -557,8 +557,9 @@ class ScopedCurrentPath
 
         if (taskWorkingDirectoryPath.empty())
         {
-            LOG_APP_ERROR("ShellTaskExecutor: Task '{}' has empty working directory and workflow base directory could not be resolved",
-                          taskDefinition.m_Id);
+            LOG_APP_ERROR(
+                "ShellTaskExecutor: Task '{}' has empty working directory and workflow base directory could not be resolved",
+                taskDefinition.m_Id);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing working directory";
             return false;
@@ -566,6 +567,7 @@ class ScopedCurrentPath
 
         std::error_code createErrorCode;
         std::filesystem::create_directories(taskWorkingDirectoryPath, createErrorCode);
+
         if (createErrorCode)
         {
             LOG_APP_ERROR("ShellTaskExecutor: Failed to create working directory '{}' for task '{}': {}",
@@ -777,7 +779,8 @@ class ScopedCurrentPath
         LOG_APP_INFO("[shell] Command: {}", fullCommand);
 
         int exitCode = -1;
-        bool const executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
+        bool const executed =
+            ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
 
         if (!executed)
         {
@@ -801,8 +804,7 @@ class ScopedCurrentPath
         // 7) Populate taskState.m_OutputValues for downstream dataflow
         // ------------------------------------------------------------
         bool const outputsMapToFiles =
-            !taskDefinition.m_FileOutputs.empty() &&
-            taskDefinition.m_FileOutputs.size() == taskDefinition.m_Outputs.size();
+            !taskDefinition.m_FileOutputs.empty() && taskDefinition.m_FileOutputs.size() == taskDefinition.m_Outputs.size();
 
         for (auto const& outputPair : derivedOutputs)
         {
