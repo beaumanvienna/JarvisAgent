@@ -354,7 +354,7 @@ namespace AIAssistant
         std::string errorMessage;
 
         // ------------------------------------------------------------
-        // Resolve workflow base directory
+        // Resolve workflow base directory (directory containing the loaded .jcwf file)
         // ------------------------------------------------------------
         std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
 
@@ -383,18 +383,22 @@ namespace AIAssistant
             return false;
         }
 
-        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
-        if (taskWorkingDirectoryPath.empty())
+        std::filesystem::path taskWorkingDirectoryPath;
+        if (!taskDefinition.m_WorkingDirectory.empty())
         {
-            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-        }
-        else if (!taskWorkingDirectoryPath.is_absolute())
-        {
-            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+            taskWorkingDirectoryPath = std::filesystem::path(taskDefinition.m_WorkingDirectory);
+            if (!taskWorkingDirectoryPath.is_absolute())
+            {
+                taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+            }
+            else
+            {
+                taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+            }
         }
         else
         {
-            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
         }
 
         JarvisAgent* app = App::g_App;
@@ -430,6 +434,11 @@ namespace AIAssistant
         {
             for (QueueFileRef& fileRef : fileRefs)
             {
+                if (!fileRef.m_HasInlineContent)
+                {
+                    continue;
+                }
+
                 if (fileRef.m_Path.empty())
                 {
                     continue;
@@ -438,7 +447,7 @@ namespace AIAssistant
                 std::filesystem::path const filePath(fileRef.m_Path);
                 if (!filePath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = filePath.lexically_normal();
+                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / filePath).lexically_normal();
                     fileRef.m_Path = rewritten.string();
                 }
             }
@@ -477,19 +486,18 @@ namespace AIAssistant
             return false;
         }
 
-        for (std::string& fileOutput : resolvedFileOutputs)
+        for (std::string& outputPathText : resolvedFileOutputs)
         {
-            if (fileOutput.empty())
-            {
-                continue;
-            }
-
-            std::filesystem::path const outputPath(fileOutput);
+            std::filesystem::path outputPath(outputPathText);
             if (!outputPath.is_absolute())
             {
-                std::filesystem::path const rewritten = (outputPath).lexically_normal();
-                fileOutput = rewritten.string();
+                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
             }
+            else
+            {
+                outputPath = outputPath.lexically_normal();
+            }
+            outputPathText = outputPath.string();
         }
 
         // ------------------------------------------------------------

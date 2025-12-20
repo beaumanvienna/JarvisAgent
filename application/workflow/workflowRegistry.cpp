@@ -60,13 +60,6 @@ namespace AIAssistant
             return fileStream.good() || fileStream.eof();
         }
 
-        bool LooksLikeTemplatePath(std::string const& pathText)
-        {
-            // JCWF allows templates like "${inputs.foo}" etc.
-            // Those are not filesystem paths and must not be rewritten.
-            return (pathText.find("${") != std::string::npos);
-        }
-
         bool HasSupportedWorkflowExtension(std::filesystem::path const& filePath)
         {
             std::string const extension = filePath.extension().string();
@@ -216,9 +209,6 @@ namespace AIAssistant
             LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id", workflowFilePath.string());
             return false;
         }
-
-        RewriteWorkflowPaths(std::filesystem::path(workflowDefinition.m_WorkflowBaseDirectory), workflowDefinition);
-
         auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
         if (!inserted)
         {
@@ -228,89 +218,6 @@ namespace AIAssistant
         }
 
         return true;
-    }
-
-    void WorkflowRegistry::RewriteWorkflowPaths(std::filesystem::path const& workflowBaseDirectoryPath,
-                                                WorkflowDefinition& workflowDefinition)
-    {
-        for (auto& taskPair : workflowDefinition.m_Tasks)
-        {
-            TaskDef& taskDefinition = taskPair.second;
-
-            if (LooksLikeTemplatePath(taskDefinition.m_WorkingDirectory))
-            {
-                continue;
-            }
-
-            std::filesystem::path taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-            if (!taskDefinition.m_WorkingDirectory.empty())
-            {
-                std::filesystem::path const rawWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
-                if (rawWorkingDirectoryPath.is_absolute())
-                {
-                    taskWorkingDirectoryPath = rawWorkingDirectoryPath;
-                }
-                else
-                {
-                    taskWorkingDirectoryPath = workflowBaseDirectoryPath / rawWorkingDirectoryPath;
-                }
-            }
-
-            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-            taskDefinition.m_WorkingDirectory = taskWorkingDirectoryPath.string();
-            for (std::string& inputPathText : taskDefinition.m_FileInputs)
-            {
-                if (inputPathText.empty() || LooksLikeTemplatePath(inputPathText))
-                {
-                    continue;
-                }
-
-                std::filesystem::path const inputPath(inputPathText);
-                if (!inputPath.is_absolute())
-                {
-                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / inputPath).lexically_normal();
-                    inputPathText = rewritten.string();
-                }
-            }
-
-            for (std::string& outputPathText : taskDefinition.m_FileOutputs)
-            {
-                if (outputPathText.empty() || LooksLikeTemplatePath(outputPathText))
-                {
-                    continue;
-                }
-
-                std::filesystem::path const outputPath(outputPathText);
-                if (!outputPath.is_absolute())
-                {
-                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / outputPath).lexically_normal();
-                    outputPathText = rewritten.string();
-                }
-            }
-
-            auto const rewriteQueueFileRefs = [&](std::vector<QueueFileRef>& fileRefs)
-            {
-                for (QueueFileRef& fileRef : fileRefs)
-                {
-                    if (fileRef.m_Path.empty() || LooksLikeTemplatePath(fileRef.m_Path))
-                    {
-                        continue;
-                    }
-
-                    std::filesystem::path const filePath(fileRef.m_Path);
-                    if (!filePath.is_absolute())
-                    {
-                        std::filesystem::path const rewritten = (taskWorkingDirectoryPath / filePath).lexically_normal();
-                        fileRef.m_Path = rewritten.string();
-                    }
-                }
-            };
-
-            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_StngFiles);
-            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_TaskFiles);
-            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_CntxFiles);
-            rewriteQueueFileRefs(taskDefinition.m_QueueBinding.m_ProbFiles);
-        }
     }
 
     bool WorkflowRegistry::ValidateAll() const

@@ -47,14 +47,6 @@ namespace AIAssistant
     private:
         bool LoadWorkflowFile(std::filesystem::path const& workflowFilePath);
 
-        // IMPORTANT:
-        // This must resolve task working directories relative to the workflow base directory,
-        // and rewrite task-level file paths (file_inputs/file_outputs and queue_binding file references)
-        // relative to each task working directory.
-        static void RewriteWorkflowPaths(std::filesystem::path const& workflowBaseDirectoryPath,
-                                         WorkflowDefinition& workflowDefinition);
-
         std::unordered_map<std::string, WorkflowDefinition> m_Workflows;
     };
 } // namespace AIAssistant
-

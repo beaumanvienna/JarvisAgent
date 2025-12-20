@@ -78,6 +78,8 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
   - Relative paths MAY contain `..` segments; JarvisAgent MUST resolve them after lexical normalization.
 - **Path Syntax**: This specification uses Unix-style paths with forward slashes (`/`). An absolute path MUST begin with `/`.
 
+- **JarvisAgent Launch Working Directory**: The process current working directory at the time JarvisAgent starts (for example, the project root when launching `./bin/Release/jarvisAgent`). This directory is used to resolve `scripts/` paths for `shell` tasks.
+
 - **JCWF Runtime**: The JarvisAgent orchestration layer that loads, validates, and runs JCWF workflows.  
 - **Environment**: Optional metadata and variables attached to a task (for example, environment variables for shell tasks, or an assistant environment for AI tasks).  
 - **Queue Files**: Optional STNG_, TASK_, CNTX_, PROB_ artifacts used by JarvisAgent’s queue-based execution; JCWF can reference these explicitly per task.
@@ -166,7 +168,7 @@ JarvisAgent MUST resolve paths deterministically and independent of the process 
 
 **Exceptions**
 
-- For `shell` tasks, `params.command` MUST follow the existing security rule (“MUST start with `scripts/` relative to the JarvisAgent working directory”), and is not resolved relative to workflow/task directories.
+- For `shell` tasks, `params.command` MUST start with `scripts/` and MUST be resolved relative to the JarvisAgent Launch Working Directory (not the workflow/task directories).
 
 **Directory creation**
 
@@ -349,7 +351,7 @@ Each task has:
 
 - `shell`  
   Executes a command on the host (JarvisAgent SHOULD restrict/whitelist this).  
-  Security rule: shell commands MUST start with `scripts/` (relative to the JarvisAgent working directory).
+  Security rule: shell commands MUST start with `scripts/` (relative to the JarvisAgent Launch Working Directory).
 
   ```jsonc
   {

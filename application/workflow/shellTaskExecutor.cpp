@@ -29,10 +29,11 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <mutex>
+#include <filesystem>
 
 #if defined(_WIN32)
 #include <process.h>
@@ -46,6 +47,41 @@ namespace AIAssistant
 {
     namespace
     {
+
+        std::mutex g_ShellTaskExecutorCurrentPathMutex;
+
+        
+        std::filesystem::path const g_JarvisAgentLaunchWorkingDirectoryPath = std::filesystem::current_path().lexically_normal();
+class ScopedCurrentPath
+        {
+        public:
+            explicit ScopedCurrentPath(std::filesystem::path const& newPath, std::error_code& errorCode)
+            {
+                m_OldPath = std::filesystem::current_path(errorCode);
+                if (errorCode)
+                {
+                    return;
+                }
+
+                if (!newPath.empty())
+                {
+                    std::filesystem::current_path(newPath, errorCode);
+                }
+            }
+
+            ~ScopedCurrentPath()
+            {
+                std::error_code ignoredErrorCode;
+                if (!m_OldPath.empty())
+                {
+                    std::filesystem::current_path(m_OldPath, ignoredErrorCode);
+                }
+            }
+
+        private:
+            std::filesystem::path m_OldPath;
+        };
+
 #if defined(_WIN32)
         FILE* OpenPipe(char const* command, char const* mode) { return _popen(command, mode); }
 
@@ -296,27 +332,7 @@ namespace AIAssistant
             return true;
         }
 
-                std::string EscapeSpacesForShellToken(std::string const& raw)
-        {
-            std::string escaped;
-            escaped.reserve(raw.size());
-
-            for (char const c : raw)
-            {
-                if (c == ' ')
-                {
-                    escaped += "\\ ";
-                }
-                else
-                {
-                    escaped += c;
-                }
-            }
-
-            return escaped;
-        }
-
-// ------------------------------------------------------------
+        // ------------------------------------------------------------
         // Build a command string from argv-style vector.
         //
         // For now we assume arguments are already validated as "safe".
@@ -382,8 +398,20 @@ namespace AIAssistant
         // This avoids external processes writing directly to the terminal
         // (which bypasses TerminalLogStreamBuf / ncurses and can corrupt the UI).
         // ------------------------------------------------------------
-        bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId, int& exitCodeOut)
+        bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId, std::filesystem::path const& workingDirectoryPath, int& exitCodeOut)
         {
+            std::scoped_lock<std::mutex> const lock(g_ShellTaskExecutorCurrentPathMutex);
+
+            std::error_code errorCode;
+            ScopedCurrentPath const scopedCurrentPath(workingDirectoryPath, errorCode);
+            if (errorCode)
+            {
+                LOG_APP_ERROR("[shell:{}] Failed to set current_path to '{}': {}", taskId,
+                              workingDirectoryPath.string(), errorCode.message());
+                return false;
+            }
+
+
             exitCodeOut = -1;
 
             // Redirect stderr into stdout so we capture both streams.
@@ -491,6 +519,61 @@ namespace AIAssistant
                                     TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
         (void)workflowRun;
+        
+        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+        if (workflowBaseDirectoryPath.empty())
+        {
+            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
+            if (!workflowFileDirectoryPath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFileDirectoryPath;
+            }
+        }
+
+        if (workflowBaseDirectoryPath.empty())
+        {
+            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
+            if (!workflowFilePath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFilePath.parent_path();
+            }
+        }
+
+        workflowBaseDirectoryPath = workflowBaseDirectoryPath.lexically_normal();
+
+        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
+        if (taskWorkingDirectoryPath.empty())
+        {
+            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
+        }
+        else if (taskWorkingDirectoryPath.is_relative() && !workflowBaseDirectoryPath.empty())
+        {
+            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+        }
+        else
+        {
+            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+        }
+
+        if (taskWorkingDirectoryPath.empty())
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: Task '{}' has empty working directory and workflow base directory could not be resolved",
+                          taskDefinition.m_Id);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing working directory";
+            return false;
+        }
+
+        std::error_code createErrorCode;
+        std::filesystem::create_directories(taskWorkingDirectoryPath, createErrorCode);
+        if (createErrorCode)
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: Failed to create working directory '{}' for task '{}': {}",
+                          taskWorkingDirectoryPath.string(), taskDefinition.m_Id, createErrorCode.message());
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ShellTaskExecutor: Failed to create working directory";
+            return false;
+        }
 
         LOG_APP_INFO("[shell] Executing shell task '{}'", taskDefinition.m_Id);
 
@@ -564,6 +647,13 @@ namespace AIAssistant
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Script path rejected (must start with 'scripts/')";
             return false;
+        }
+
+        std::filesystem::path const commandPathFilesystemPath(commandPath);
+        if (commandPathFilesystemPath.is_relative())
+        {
+            std::filesystem::path const jarvisAgentWorkingDirectoryPath = g_JarvisAgentLaunchWorkingDirectoryPath;
+            commandPath = (jarvisAgentWorkingDirectoryPath / commandPathFilesystemPath).lexically_normal().string();
         }
 
         // ------------------------------------------------------------
@@ -644,14 +734,8 @@ namespace AIAssistant
         // ------------------------------------------------------------
         // 5) Build argv-style list: [commandPath, expanded args...]
         // ------------------------------------------------------------
-        std::filesystem::path const jarvisAgentWorkingDirectoryPath = std::filesystem::current_path();
-        std::filesystem::path const commandFilesystemPath(commandPath);
-        std::filesystem::path const commandAbsolutePath =
-            commandFilesystemPath.is_absolute() ? commandFilesystemPath
-                                               : (jarvisAgentWorkingDirectoryPath / commandFilesystemPath).lexically_normal();
-
         std::vector<std::string> argumentList;
-        argumentList.push_back(commandAbsolutePath.string());
+        argumentList.push_back(commandPath);
 
         for (std::string const& rawArgument : rawArgs)
         {
@@ -688,71 +772,12 @@ namespace AIAssistant
         // because that bypasses the std::cout → TerminalLogStreamBuf pipeline and
         // can corrupt the ncurses dashboard.
         // ------------------------------------------------------------
-        std::string const commandBody = JoinArgumentsForSystem(argumentList);
-
-        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
-            if (!workflowFileDirectoryPath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFileDirectoryPath;
-            }
-        }
-
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
-            if (!workflowFilePath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFilePath.parent_path();
-            }
-        }
-
-        if (workflowBaseDirectoryPath.empty())
-        {
-            LOG_APP_ERROR("ShellTaskExecutor: workflow base directory is empty for task '{}'", taskDefinition.m_Id);
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "ShellTaskExecutor: workflow base directory is empty";
-            return false;
-        }
-
-        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
-        if (taskWorkingDirectoryPath.empty())
-        {
-            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-        }
-        else if (!taskWorkingDirectoryPath.is_absolute())
-        {
-            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
-        }
-        else
-        {
-            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-        }
-
-        std::string fullCommand = commandBody;
-
-        std::string const taskWorkingDirectory = taskWorkingDirectoryPath.string();
-        if (!taskWorkingDirectory.empty())
-        {
-            if (!IsSafeArgument(taskWorkingDirectory))
-            {
-                LOG_APP_ERROR("ShellTaskExecutor: Working directory '{}' failed safety check for task '{}'",
-                              taskWorkingDirectory, taskDefinition.m_Id);
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                taskState.m_LastErrorMessage = "ShellTaskExecutor: Working directory contains unsupported characters";
-                return false;
-            }
-
-            std::string const escapedWorkingDirectory = EscapeSpacesForShellToken(taskWorkingDirectory);
-            fullCommand = "cd " + escapedWorkingDirectory + " && " + commandBody;
-        }
+        std::string const fullCommand = JoinArgumentsForSystem(argumentList);
 
         LOG_APP_INFO("[shell] Command: {}", fullCommand);
 
         int exitCode = -1;
-        bool const executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, exitCode);
+        bool const executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
 
         if (!executed)
         {
@@ -775,9 +800,24 @@ namespace AIAssistant
         // ------------------------------------------------------------
         // 7) Populate taskState.m_OutputValues for downstream dataflow
         // ------------------------------------------------------------
+        bool const outputsMapToFiles =
+            !taskDefinition.m_FileOutputs.empty() &&
+            taskDefinition.m_FileOutputs.size() == taskDefinition.m_Outputs.size();
+
         for (auto const& outputPair : derivedOutputs)
         {
-            taskState.m_OutputValues[outputPair.first] = outputPair.second;
+            if (!outputsMapToFiles)
+            {
+                taskState.m_OutputValues[outputPair.first] = outputPair.second;
+                continue;
+            }
+
+            std::filesystem::path outputPath(outputPair.second);
+            if (outputPath.is_relative())
+            {
+                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
+            }
+            taskState.m_OutputValues[outputPair.first] = outputPath.string();
         }
 
         taskState.m_State = TaskInstanceStateKind::Succeeded;
