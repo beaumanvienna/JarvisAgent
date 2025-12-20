@@ -199,6 +199,36 @@ namespace AIAssistant
                 return false;
             }
 
+            fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
+            if (workingDirectory.empty())
+            {
+                workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
+            }
+            else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
+            {
+                workingDirectory =
+                    (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
+            }
+
+            if (!workingDirectory.empty())
+            {
+                for (fs::path& path : outInputPaths)
+                {
+                    if (path.is_relative())
+                    {
+                        path = (workingDirectory / path).lexically_normal();
+                    }
+                }
+
+                for (fs::path& path : outOutputPaths)
+                {
+                    if (path.is_relative())
+                    {
+                        path = (workingDirectory / path).lexically_normal();
+                    }
+                }
+            }
+
             return true;
         }
 
@@ -728,6 +758,31 @@ namespace AIAssistant
                 summary += ";";
             }
             taskState.m_InputsJson = summary;
+        }
+
+        fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
+        if (workingDirectory.empty())
+        {
+            workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
+        }
+        else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
+        {
+            workingDirectory =
+                (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
+        }
+
+        if (!workingDirectory.empty())
+        {
+            try
+            {
+                fs::create_directories(workingDirectory);
+            }
+            catch (fs::filesystem_error const& exception)
+            {
+                taskState.m_LastErrorMessage = std::string("Failed to create task working directory: ") + exception.what();
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            }
         }
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();

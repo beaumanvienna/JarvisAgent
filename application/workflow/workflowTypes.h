@@ -28,6 +28,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "engine.h"
+
 namespace AIAssistant
 {
     // ---------------------------------------------------------------------
@@ -216,6 +218,9 @@ namespace AIAssistant
         // JCWF: "depends_on"
         std::vector<std::string> m_DependsOn; // task IDs
 
+        // JCWF: "working_directory"
+        std::string m_WorkingDirectory;
+
         // JCWF: "file_inputs", "file_outputs"
         std::vector<std::string> m_FileInputs;  // file paths or templates
         std::vector<std::string> m_FileOutputs; // file paths or templates
@@ -260,7 +265,10 @@ namespace AIAssistant
         // Workflow File Path: filesystem path of the loaded .jcwf file (set by the loader).
         std::string m_WorkflowFilePath;
 
-        // Workflow Base Directory: directory that contains the loaded .jcwf file (set by the loader).
+        // Workflow File Directory: directory that contains the loaded .jcwf file (set by the loader).
+        std::string m_WorkflowFileDirectory;
+
+        // Workflow Base Directory: base directory used for resolving workflow-level relative paths (set by the loader).
         std::string m_WorkflowBaseDirectory;
 
         // JCWF: "triggers"

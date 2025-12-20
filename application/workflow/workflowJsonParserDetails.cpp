@@ -567,6 +567,14 @@ namespace AIAssistant
             {
                 ElementToString(value, taskOut.m_Doc);
             }
+            else if (key == "working_directory")
+            {
+                if (!ElementToString(value, taskOut.m_WorkingDirectory))
+                {
+                    errorMessage = "task field 'working_directory' must be a string";
+                    return false;
+                }
+            }
             else if (key == "mode")
             {
                 std::string modeString;
@@ -1229,3 +1237,4 @@ namespace AIAssistant
     }
 
 } // namespace AIAssistant
+

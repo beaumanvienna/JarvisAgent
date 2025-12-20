@@ -70,7 +70,13 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
   - Example: `context["today"] = "2025-12-01"` or `context["report_url"] = "https://..."`.  
 - **Run**: A single execution instance of a workflow with its own state and logs.  
 - **Workflow File Path**: The filesystem path of the loaded `.jcwf` file.
-- **Workflow Base Directory**: The directory that contains the `.jcwf` file. All relative paths inside the workflow are resolved against this directory.
+- **Workflow File Directory**: The directory that contains the loaded `.jcwf` file.
+- **Workflow Base Directory**: The base directory used for resolving workflow-level relative paths.
+  - If the root field `base_directory` is present and starts with `/`, it is treated as an absolute path.
+  - If `base_directory` is present and is relative, it MUST be resolved relative to the Workflow File Directory.
+  - If `base_directory` is omitted, the Workflow Base Directory defaults to the Workflow File Directory.
+  - Relative paths MAY contain `..` segments; JarvisAgent MUST resolve them after lexical normalization.
+- **Path Syntax**: This specification uses Unix-style paths with forward slashes (`/`). An absolute path MUST begin with `/`.
 
 - **JCWF Runtime**: The JarvisAgent orchestration layer that loads, validates, and runs JCWF workflows.  
 - **Environment**: Optional metadata and variables attached to a task (for example, environment variables for shell tasks, or an assistant environment for AI tasks).  
@@ -94,6 +100,7 @@ The root object has the following top-level fields:
   "id": "daily-report",
   "label": "Daily Reporting Workflow",
   "doc": "Generates a daily report from XLS and sends it to an AI assistant for summarization.",
+  "base_directory": ".",
   "triggers": [ /* see 3.2 */ ],
   "tasks": { /* see 3.3 */ },
   "dataflow": [ /* see 3.5 */ ],
@@ -118,6 +125,9 @@ The root object has the following top-level fields:
 - `doc` (OPTIONAL, string or array of strings)  
   - Documentation or comments about the workflow.
 
+- `base_directory` (OPTIONAL, string)  
+  - Workflow base directory override used for resolving workflow-level relative paths (see 3.1.2).  
+  - If relative, it MUST be resolved relative to the Workflow File Directory. If omitted, it defaults to the Workflow File Directory.
 - `triggers` (OPTIONAL, array of trigger objects)  
   - Defines when and how the workflow starts. See 3.2.
 
@@ -132,13 +142,36 @@ The root object has the following top-level fields:
 
 #### 3.1.2 Path Resolution
 
-JarvisAgent MUST treat the directory containing the loaded `.jcwf` file as the **workflow base directory**.
+JarvisAgent MUST resolve paths deterministically and independent of the process current working directory.
 
-Unless explicitly stated otherwise, any relative path found in a JCWF file MUST be resolved relative to the workflow base directory, including (but not limited to):
+**Workflow-level paths**
 
-- Trigger paths (for example, `file_watch.params.path`)
-- `file_inputs` and `file_outputs`
-- `queue_binding` file references (`stng_files`, `task_files`, `cntx_files`, `prob_files`), including inline `{ "path": "...", "content": "..." }`
+1. Determine the **Workflow File Directory** as the directory containing the loaded `.jcwf` file.
+2. Determine the **Workflow Base Directory** as follows:
+   - If `base_directory` is present:
+     - If it starts with `/`, treat it as an absolute path.
+     - Otherwise, resolve it relative to the Workflow File Directory.
+   - If `base_directory` is omitted, the Workflow Base Directory MUST default to the Workflow File Directory.
+3. Unless explicitly stated otherwise, any **workflow-level** relative path (for example trigger paths) MUST be resolved relative to the Workflow Base Directory.
+
+**Task-level paths**
+
+1. Each task MAY define `working_directory`.
+   - If `working_directory` is omitted, it MUST default to the Workflow Base Directory.
+   - If `working_directory` is relative, it MUST be resolved relative to the Workflow Base Directory.
+   - Task working directories MAY contain `..` segments; JarvisAgent MUST resolve them after lexical normalization (escaping upward is allowed).
+2. Unless explicitly stated otherwise for a specific field, any **task-scoped** relative file path MUST be resolved relative to the task `working_directory`, including (but not limited to):
+   - `file_inputs` and `file_outputs`
+   - `queue_binding` file references (`stng_files`, `task_files`, `cntx_files`, `prob_files`), including inline `{ "path": "...", "content": "..." }`
+
+**Exceptions**
+
+- For `shell` tasks, `params.command` MUST follow the existing security rule (“MUST start with `scripts/` relative to the JarvisAgent working directory”), and is not resolved relative to workflow/task directories.
+
+**Directory creation**
+
+- Before executing a task, JarvisAgent MUST ensure the resolved task `working_directory` exists (create directories as needed).
+- If JarvisAgent writes a file on behalf of the workflow (for example inline queue files with `content`, or other runtime-generated artifacts), it MUST create the parent directory of the target path if it does not exist.
 
 This enables workflows to be run from any current working directory without writing artifacts into the launch directory by accident.
 
@@ -273,6 +306,7 @@ Each task has:
   "doc": "Sends the prepared text to an AI assistant and stores the answer.",
   "mode": "single | per_item",
   "depends_on": ["load_xls"],
+  "working_directory": "output",
   "file_inputs": ["data/report.xlsx"],
   "file_outputs": ["output/report.summary.txt"],
   "environment": { /* see 3.3.6 */ },
@@ -495,6 +529,13 @@ Each entry in `stng_files` / `task_files` / `cntx_files` / `prob_files` MAY be e
 If `content` is present, the runtime MUST write (or overwrite) the file at `path` before the task executes.
 This inline form is RECOMMENDED when a workflow is generated automatically and should be runnable without additional files.
 
+
+**Path resolution for `queue_binding`:**
+
+- If a `queue_binding` entry is a relative path string, it MUST be resolved relative to the task `working_directory`.
+- If a `queue_binding` entry is an inline object `{ "path": "...", "content": "..." }` and `path` is relative, it MUST be resolved relative to the task `working_directory`.
+- When writing inline `content`, the runtime MUST create the parent directory of the target `path` if it does not exist.
+
 JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNTX_/PROB_ files when it is an AI or queue-integrated task.
 
 ---
@@ -646,7 +687,7 @@ Responsibilities:
 
 - Parse and hold in-memory representation of workflows:  
   - `WorkflowDefinition` (id, label, triggers, tasks, dataflow).  
-- Store the workflow **file path** and **base directory** when loading a `.jcwf`, and resolve all relative paths against the base directory.
+- Store the workflow **file path**, **Workflow File Directory**, and **Workflow Base Directory** when loading a `.jcwf`, and resolve workflow/task relative paths as specified in 3.1.2.
 - Listen to cron and file events and map them to workflow triggers.  
 - Maintain a `WorkflowRun` object per workflow execution.  
 - Perform dependency resolution and ready-task scheduling using `depends_on` and file freshness.  
@@ -662,6 +703,7 @@ Recommended data structures (conceptual):
 - `WorkflowDefinition`  
   - `std::string id;`  
   - `std::string filePath;`  
+  - `std::string fileDirectory;`  
   - `std::string baseDirectory;`  
   - `std::unordered_map<std::string, TaskDef> tasks;`  
   - `std::vector<DataflowDef> dataflows;`  
@@ -868,6 +910,7 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
         { "type": "array", "items": { "type": "string" } }
       ]
     },
+    "base_directory": { "type": "string" },
     "triggers": {
       "type": "array",
       "items": { "$ref": "#/$defs/trigger" }
@@ -923,6 +966,7 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
           "enum": ["single", "per_item"],
           "default": "single"
         },
+        "working_directory": { "type": "string" },
         "depends_on": {
           "type": "array",
           "items": { "type": "string" }

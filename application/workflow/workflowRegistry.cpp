@@ -193,7 +193,23 @@ namespace AIAssistant
         }
 
         workflowDefinition.m_WorkflowFilePath = workflowFilePath.lexically_normal().string();
-        workflowDefinition.m_WorkflowBaseDirectory = workflowFilePath.parent_path().lexically_normal().string();
+        workflowDefinition.m_WorkflowFileDirectory = workflowFilePath.parent_path().lexically_normal().string();
+
+        std::filesystem::path const workflowFileDirectoryPath = workflowFilePath.parent_path();
+        if (workflowDefinition.m_WorkflowBaseDirectory.empty())
+        {
+            workflowDefinition.m_WorkflowBaseDirectory = workflowFileDirectoryPath.lexically_normal().string();
+        }
+        else
+        {
+            std::filesystem::path baseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+            if (!baseDirectoryPath.is_absolute())
+            {
+                baseDirectoryPath = workflowFileDirectoryPath / baseDirectoryPath;
+            }
+
+            workflowDefinition.m_WorkflowBaseDirectory = baseDirectoryPath.lexically_normal().string();
+        }
 
         if (workflowDefinition.m_Id.empty())
         {
@@ -201,7 +217,7 @@ namespace AIAssistant
             return false;
         }
 
-        RewriteWorkflowPaths(workflowFilePath.parent_path(), workflowDefinition);
+        RewriteWorkflowPaths(std::filesystem::path(workflowDefinition.m_WorkflowBaseDirectory), workflowDefinition);
 
         auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
         if (!inserted)
@@ -214,13 +230,34 @@ namespace AIAssistant
         return true;
     }
 
-    void WorkflowRegistry::RewriteWorkflowPaths(std::filesystem::path const& workflowDirectoryPath,
+    void WorkflowRegistry::RewriteWorkflowPaths(std::filesystem::path const& workflowBaseDirectoryPath,
                                                 WorkflowDefinition& workflowDefinition)
     {
         for (auto& taskPair : workflowDefinition.m_Tasks)
         {
             TaskDef& taskDefinition = taskPair.second;
 
+            if (LooksLikeTemplatePath(taskDefinition.m_WorkingDirectory))
+            {
+                continue;
+            }
+
+            std::filesystem::path taskWorkingDirectoryPath = workflowBaseDirectoryPath;
+            if (!taskDefinition.m_WorkingDirectory.empty())
+            {
+                std::filesystem::path const rawWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
+                if (rawWorkingDirectoryPath.is_absolute())
+                {
+                    taskWorkingDirectoryPath = rawWorkingDirectoryPath;
+                }
+                else
+                {
+                    taskWorkingDirectoryPath = workflowBaseDirectoryPath / rawWorkingDirectoryPath;
+                }
+            }
+
+            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+            taskDefinition.m_WorkingDirectory = taskWorkingDirectoryPath.string();
             for (std::string& inputPathText : taskDefinition.m_FileInputs)
             {
                 if (inputPathText.empty() || LooksLikeTemplatePath(inputPathText))
@@ -231,7 +268,7 @@ namespace AIAssistant
                 std::filesystem::path const inputPath(inputPathText);
                 if (!inputPath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = (workflowDirectoryPath / inputPath).lexically_normal();
+                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / inputPath).lexically_normal();
                     inputPathText = rewritten.string();
                 }
             }
@@ -246,7 +283,7 @@ namespace AIAssistant
                 std::filesystem::path const outputPath(outputPathText);
                 if (!outputPath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = (workflowDirectoryPath / outputPath).lexically_normal();
+                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / outputPath).lexically_normal();
                     outputPathText = rewritten.string();
                 }
             }
@@ -263,7 +300,7 @@ namespace AIAssistant
                     std::filesystem::path const filePath(fileRef.m_Path);
                     if (!filePath.is_absolute())
                     {
-                        std::filesystem::path const rewritten = (workflowDirectoryPath / filePath).lexically_normal();
+                        std::filesystem::path const rewritten = (taskWorkingDirectoryPath / filePath).lexically_normal();
                         fileRef.m_Path = rewritten.string();
                     }
                 }

@@ -28,6 +28,7 @@
 #include "triggerEngine.h"
 
 #include <cctype>
+#include <filesystem>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -348,7 +349,27 @@ namespace AIAssistant
                             break;
                         }
 
-                        triggerEngine.AddFileWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath,
+                        std::string resolvedWatchedPath = watchedPath;
+
+                        if (!watchedPath.empty())
+                        {
+                            std::filesystem::path baseDirectoryPath = workflowDefinition.m_WorkflowBaseDirectory;
+                            if (baseDirectoryPath.empty())
+                            {
+                                baseDirectoryPath = workflowDefinition.m_WorkflowFileDirectory;
+                            }
+
+                            if (watchedPath.front() != '/')
+                            {
+                                resolvedWatchedPath = (baseDirectoryPath / std::filesystem::path(watchedPath)).lexically_normal().generic_string();
+                            }
+                            else
+                            {
+                                resolvedWatchedPath = std::filesystem::path(watchedPath).lexically_normal().generic_string();
+                            }
+                        }
+
+                        triggerEngine.AddFileWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, resolvedWatchedPath,
                                                           fileEvents, debounceMilliseconds, workflowTrigger.m_IsEnabled);
                         break;
                     }

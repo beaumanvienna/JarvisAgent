@@ -354,9 +354,18 @@ namespace AIAssistant
         std::string errorMessage;
 
         // ------------------------------------------------------------
-        // Resolve workflow base directory (directory containing the loaded .jcwf file)
+        // Resolve workflow base directory
         // ------------------------------------------------------------
         std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+
+        if (workflowBaseDirectoryPath.empty())
+        {
+            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
+            if (!workflowFileDirectoryPath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFileDirectoryPath;
+            }
+        }
 
         if (workflowBaseDirectoryPath.empty())
         {
@@ -372,6 +381,20 @@ namespace AIAssistant
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "workflow base directory is empty (WorkflowDefinition not populated by loader)";
             return false;
+        }
+
+        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
+        if (taskWorkingDirectoryPath.empty())
+        {
+            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
+        }
+        else if (!taskWorkingDirectoryPath.is_absolute())
+        {
+            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+        }
+        else
+        {
+            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
         }
 
         JarvisAgent* app = App::g_App;
@@ -407,11 +430,6 @@ namespace AIAssistant
         {
             for (QueueFileRef& fileRef : fileRefs)
             {
-                if (!fileRef.m_HasInlineContent)
-                {
-                    continue;
-                }
-
                 if (fileRef.m_Path.empty())
                 {
                     continue;
@@ -420,7 +438,7 @@ namespace AIAssistant
                 std::filesystem::path const filePath(fileRef.m_Path);
                 if (!filePath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = (workflowBaseDirectoryPath / filePath).lexically_normal();
+                    std::filesystem::path const rewritten = filePath.lexically_normal();
                     fileRef.m_Path = rewritten.string();
                 }
             }
@@ -459,6 +477,21 @@ namespace AIAssistant
             return false;
         }
 
+        for (std::string& fileOutput : resolvedFileOutputs)
+        {
+            if (fileOutput.empty())
+            {
+                continue;
+            }
+
+            std::filesystem::path const outputPath(fileOutput);
+            if (!outputPath.is_absolute())
+            {
+                std::filesystem::path const rewritten = (outputPath).lexically_normal();
+                fileOutput = rewritten.string();
+            }
+        }
+
         // ------------------------------------------------------------
         // Build prompt + submit request (PROB_<id>_<ts>.txt)
         // ------------------------------------------------------------
@@ -482,7 +515,7 @@ namespace AIAssistant
         }
 
         std::filesystem::path const requestPath =
-            workflowBaseDirectoryPath / BuildProbFilename(requestId, timestampNs, false);
+            taskWorkingDirectoryPath / BuildProbFilename(requestId, timestampNs, false);
 
         std::string const promptText = TryBuildPromptFromParams(taskDefinition, taskState);
 

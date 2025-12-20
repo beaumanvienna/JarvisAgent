@@ -29,6 +29,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -295,7 +296,27 @@ namespace AIAssistant
             return true;
         }
 
-        // ------------------------------------------------------------
+                std::string EscapeSpacesForShellToken(std::string const& raw)
+        {
+            std::string escaped;
+            escaped.reserve(raw.size());
+
+            for (char const c : raw)
+            {
+                if (c == ' ')
+                {
+                    escaped += "\\ ";
+                }
+                else
+                {
+                    escaped += c;
+                }
+            }
+
+            return escaped;
+        }
+
+// ------------------------------------------------------------
         // Build a command string from argv-style vector.
         //
         // For now we assume arguments are already validated as "safe".
@@ -469,7 +490,6 @@ namespace AIAssistant
     bool ShellTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                     TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        (void)workflowDefinition;
         (void)workflowRun;
 
         LOG_APP_INFO("[shell] Executing shell task '{}'", taskDefinition.m_Id);
@@ -624,8 +644,14 @@ namespace AIAssistant
         // ------------------------------------------------------------
         // 5) Build argv-style list: [commandPath, expanded args...]
         // ------------------------------------------------------------
+        std::filesystem::path const jarvisAgentWorkingDirectoryPath = std::filesystem::current_path();
+        std::filesystem::path const commandFilesystemPath(commandPath);
+        std::filesystem::path const commandAbsolutePath =
+            commandFilesystemPath.is_absolute() ? commandFilesystemPath
+                                               : (jarvisAgentWorkingDirectoryPath / commandFilesystemPath).lexically_normal();
+
         std::vector<std::string> argumentList;
-        argumentList.push_back(commandPath);
+        argumentList.push_back(commandAbsolutePath.string());
 
         for (std::string const& rawArgument : rawArgs)
         {
@@ -662,7 +688,66 @@ namespace AIAssistant
         // because that bypasses the std::cout → TerminalLogStreamBuf pipeline and
         // can corrupt the ncurses dashboard.
         // ------------------------------------------------------------
-        std::string const fullCommand = JoinArgumentsForSystem(argumentList);
+        std::string const commandBody = JoinArgumentsForSystem(argumentList);
+
+        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+        if (workflowBaseDirectoryPath.empty())
+        {
+            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
+            if (!workflowFileDirectoryPath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFileDirectoryPath;
+            }
+        }
+
+        if (workflowBaseDirectoryPath.empty())
+        {
+            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
+            if (!workflowFilePath.empty())
+            {
+                workflowBaseDirectoryPath = workflowFilePath.parent_path();
+            }
+        }
+
+        if (workflowBaseDirectoryPath.empty())
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: workflow base directory is empty for task '{}'", taskDefinition.m_Id);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ShellTaskExecutor: workflow base directory is empty";
+            return false;
+        }
+
+        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
+        if (taskWorkingDirectoryPath.empty())
+        {
+            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
+        }
+        else if (!taskWorkingDirectoryPath.is_absolute())
+        {
+            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+        }
+        else
+        {
+            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+        }
+
+        std::string fullCommand = commandBody;
+
+        std::string const taskWorkingDirectory = taskWorkingDirectoryPath.string();
+        if (!taskWorkingDirectory.empty())
+        {
+            if (!IsSafeArgument(taskWorkingDirectory))
+            {
+                LOG_APP_ERROR("ShellTaskExecutor: Working directory '{}' failed safety check for task '{}'",
+                              taskWorkingDirectory, taskDefinition.m_Id);
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastErrorMessage = "ShellTaskExecutor: Working directory contains unsupported characters";
+                return false;
+            }
+
+            std::string const escapedWorkingDirectory = EscapeSpacesForShellToken(taskWorkingDirectory);
+            fullCommand = "cd " + escapedWorkingDirectory + " && " + commandBody;
+        }
 
         LOG_APP_INFO("[shell] Command: {}", fullCommand);
 

@@ -25,6 +25,7 @@
       "label": "Explain a random STL component",
       "doc": "Pick ONE random C++ Standard Library (STL) component (container/algorithm/iterator/utility). Explain what it is, when to use it, common pitfalls, and give a short C++20 code example. Use Allman braces in the example.",
       "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
         "CNTX_webLookup_cpp_python_vulkan.txt",
@@ -76,6 +77,7 @@
       "label": "Explain random Python trivia",
       "doc": "Pick ONE random Python trivia fact (a surprising behavior, corner case, or language feature). Explain it clearly and include a tiny code example that demonstrates it.",
       "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
         "CNTX_webLookup_cpp_python_vulkan.txt",
@@ -127,6 +129,7 @@
       "label": "Explain a random Vulkan rendering method",
       "doc": "Pick ONE random rendering method or shader algorithm (e.g., deferred rendering, clustered shading, SSAO, shadow mapping variant, TAA, etc.) and explain it with a Vulkan mindset. Mention typical passes, what resources are needed (images/buffers), how descriptors might be laid out, and any key synchronization points. Keep it practical.",
       "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
       "file_inputs": [
         "STNG_friendlyEducationalComputerScience.txt",
         "CNTX_webLookup_cpp_python_vulkan.txt",
@@ -178,6 +181,7 @@
       "label": "Zip the 3 AI responses",
       "doc": "Creates aiResponses.zip containing the 3 response text files.",
       "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
       "depends_on": [
         "ai_stl_random",
         "ai_python_trivia_random",

@@ -27,6 +27,68 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+    fs::path ResolveWorkingDirectory(AIAssistant::WorkflowDefinition const& workflowDefinition,
+                                     AIAssistant::TaskDef const& taskDefinition)
+    {
+        fs::path workflowBaseDirectory = workflowDefinition.m_WorkflowBaseDirectory;
+
+        if (workflowBaseDirectory.empty())
+        {
+            workflowBaseDirectory = workflowDefinition.m_WorkflowFileDirectory;
+        }
+
+        if (workflowBaseDirectory.empty())
+        {
+            fs::path const workflowFilePath = workflowDefinition.m_WorkflowFilePath;
+            if (!workflowFilePath.empty())
+            {
+                workflowBaseDirectory = workflowFilePath.parent_path();
+            }
+        }
+        fs::path taskWorkingDirectory = taskDefinition.m_WorkingDirectory;
+
+        bool const hasExplicitWorkingDirectory = !taskWorkingDirectory.empty();
+        if (!hasExplicitWorkingDirectory)
+        {
+            taskWorkingDirectory = workflowBaseDirectory;
+        }
+        else if (!workflowBaseDirectory.empty() && taskWorkingDirectory.is_relative())
+        {
+            taskWorkingDirectory = fs::path(workflowBaseDirectory) / taskWorkingDirectory;
+        }
+
+        if (!taskWorkingDirectory.empty())
+        {
+            taskWorkingDirectory = taskWorkingDirectory.lexically_normal();
+        }
+
+        return taskWorkingDirectory;
+    }
+
+    bool HasPathPrefix(fs::path const& fullPath, fs::path const& prefixPath)
+    {
+        if (prefixPath.empty())
+        {
+            return false;
+        }
+
+        auto fullIterator = fullPath.begin();
+        for (auto prefixIterator = prefixPath.begin(); prefixIterator != prefixPath.end(); ++prefixIterator)
+        {
+            if (fullIterator == fullPath.end() || *fullIterator != *prefixIterator)
+            {
+                return false;
+            }
+
+            ++fullIterator;
+        }
+
+        return true;
+    }
+}
+
 namespace AIAssistant
 {
     bool TaskFreshnessChecker::IsTaskUpToDate(WorkflowDefinition const& workflowDefinition,
@@ -40,6 +102,33 @@ namespace AIAssistant
             return false;
         }
 
+
+        auto definitionIterator = workflowDefinition.m_Tasks.find(taskId);
+        if (definitionIterator == workflowDefinition.m_Tasks.end())
+        {
+            return false;
+        }
+
+        TaskDef const& taskDefinition = definitionIterator->second;
+
+        fs::path const taskWorkingDirectory = ResolveWorkingDirectory(workflowDefinition, taskDefinition);
+
+        auto resolveTaskScopedPath = [&](fs::path const& candidatePath) -> fs::path
+        {
+            fs::path const normalizedCandidatePath = candidatePath.lexically_normal();
+            if (!normalizedCandidatePath.is_relative() || taskWorkingDirectory.empty())
+            {
+                return normalizedCandidatePath;
+            }
+
+            if (HasPathPrefix(normalizedCandidatePath, taskWorkingDirectory))
+            {
+                return normalizedCandidatePath;
+            }
+
+            return (taskWorkingDirectory / normalizedCandidatePath).lexically_normal();
+        };
+
         std::error_code errorCode;
 
         // ---------------------------------------------------------
@@ -49,13 +138,14 @@ namespace AIAssistant
 
         for (fs::path const& inputPath : resolvedPaths.m_InputPaths)
         {
-            if (!fs::exists(inputPath, errorCode))
+            fs::path const resolvedInputPath = resolveTaskScopedPath(inputPath);
+            if (!fs::exists(resolvedInputPath, errorCode))
             {
                 // Missing input ⇒ not up to date.
                 return false;
             }
 
-            auto writeTime = fs::last_write_time(inputPath, errorCode);
+            auto writeTime = fs::last_write_time(resolvedInputPath, errorCode);
             if (errorCode)
             {
                 return false;
@@ -98,13 +188,14 @@ namespace AIAssistant
 
         for (fs::path const& outputPath : resolvedPaths.m_OutputPaths)
         {
-            if (!fs::exists(outputPath, errorCode))
+            fs::path const resolvedOutputPath = resolveTaskScopedPath(outputPath);
+            if (!fs::exists(resolvedOutputPath, errorCode))
             {
                 // An output is missing ⇒ not up to date.
                 return false;
             }
 
-            auto writeTime = fs::last_write_time(outputPath, errorCode);
+            auto writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
                 return false;
@@ -148,6 +239,24 @@ namespace AIAssistant
 
         TaskDef const& taskDefinition = definitionIterator->second;
 
+        fs::path const taskWorkingDirectory = ResolveWorkingDirectory(workflowDefinition, taskDefinition);
+
+        auto resolveTaskScopedPath = [&](fs::path const& candidatePath) -> fs::path
+        {
+            fs::path const normalizedCandidatePath = candidatePath.lexically_normal();
+            if (!normalizedCandidatePath.is_relative() || taskWorkingDirectory.empty())
+            {
+                return normalizedCandidatePath;
+            }
+
+            if (HasPathPrefix(normalizedCandidatePath, taskWorkingDirectory))
+            {
+                return normalizedCandidatePath;
+            }
+
+            return (taskWorkingDirectory / normalizedCandidatePath).lexically_normal();
+        };
+
         // Recurse into dependencies first (transitive closure).
         for (std::string const& dependencyId : taskDefinition.m_DependsOn)
         {
@@ -168,12 +277,13 @@ namespace AIAssistant
 
         for (fs::path const& outputPath : outputPaths)
         {
-            if (!fs::exists(outputPath, errorCode))
+            fs::path const resolvedOutputPath = resolveTaskScopedPath(outputPath);
+            if (!fs::exists(resolvedOutputPath, errorCode))
             {
                 return false;
             }
 
-            auto writeTime = fs::last_write_time(outputPath, errorCode);
+            auto writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
                 return false;

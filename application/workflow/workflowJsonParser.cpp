@@ -198,6 +198,14 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "base_directory")
+            {
+                if (!ElementToString(value, outputDefinition.m_WorkflowBaseDirectory))
+                {
+                    errorMessage = "field 'base_directory' must be a string";
+                    return false;
+                }
+            }
             else if (key == "triggers")
             {
                 if (!ParseTriggers(value, outputDefinition.m_Triggers, errorMessage))
@@ -272,3 +280,4 @@ namespace AIAssistant
     }
 
 } // namespace AIAssistant
+
