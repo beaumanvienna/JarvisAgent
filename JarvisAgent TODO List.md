@@ -33,11 +33,11 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 5. Workflow files (new)
-- Add support for JSON task lists defined via JC workflow files
-    - Implement JSON loader for JC workflow files
-    - Implement task dependency resolver
-    - Implement triggers (cron, file-change)
+## 5. Workflow system (follow-ups)
+- Python task executor
+- Internal (C++) task executor
+- Manual trigger via browser-based terminal prompt (remote control from a web page)
+- Conditional tasks (spec + engine): execute tasks depending on boolean or enum return values written to a file (example: AI picks 1 out of N options → writes selection → task is selected)
 
 ---
 
@@ -52,3 +52,17 @@ This list tracks the remaining work for JarvisAgent.
 - Ensure isolated interpreter state per engine
 
 ---
+
+## 7. Browser-based terminal prompt (remote control from a web page) (new)
+- Use a web terminal emulator like xterm.js on the frontend, and drive it via your existing WebSocket server side (Crow is already in your stack).
+- In that setup, you don’t need a “C++ prompt library” at all — you need:
+  - a command parser/dispatcher in C++
+  - a completion provider in C++ (your own command registry is usually best)
+  - a tiny WS protocol: `{ "type":"line"|"complete"|"help", ... }`
+- Commands to support (initial):
+  - trigger workflows
+  - check state
+  - get help
+
+---
+
