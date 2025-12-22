@@ -131,6 +131,37 @@ namespace AIAssistant
             return true;
         }
 
+        static bool ReadTextFile(std::string const& filePath, std::string& outFileContent, std::string& outErrorMessage)
+        {
+            outErrorMessage.clear();
+            outFileContent.clear();
+
+            std::error_code errorCode;
+            bool const exists = std::filesystem::exists(filePath, errorCode);
+            if (errorCode)
+            {
+                outErrorMessage = fmt::format("exists() failed for '{}' (error: {})", filePath, errorCode.message());
+                return false;
+            }
+
+            if (!exists)
+            {
+                outErrorMessage = fmt::format("file does not exist: '{}'", filePath);
+                return false;
+            }
+
+            std::ifstream inputStream(filePath, std::ios::binary);
+            if (!inputStream.is_open())
+            {
+                outErrorMessage = fmt::format("failed to open file '{}' for reading", filePath);
+                return false;
+            }
+
+            std::string fileContent((std::istreambuf_iterator<char>(inputStream)), std::istreambuf_iterator<char>());
+            outFileContent = std::move(fileContent);
+            return true;
+        }
+
         static bool WriteInlineQueueFileRefs(std::vector<QueueFileRef> const& fileRefs, std::string& outErrorMessage)
         {
             for (QueueFileRef const& fileRef : fileRefs)
@@ -156,17 +187,11 @@ namespace AIAssistant
         }
     } // namespace
 
-    std::string AiCallTaskExecutor::BuildProbFilename(int64_t const requestId, int64_t const timestampNs,
-                                                      bool const isOutput)
+    std::string AiCallTaskExecutor::BuildProbFilename(int64_t const requestId, int64_t const timestampNs)
     {
         // Format: PROB_<id>_<timestampNs>.txt or PROB_<id>_<timestampNs>.output.txt
         std::ostringstream stringStream;
-        stringStream << "PROB_" << requestId << "_" << timestampNs;
-        if (isOutput)
-        {
-            stringStream << ".output";
-        }
-        stringStream << ".txt";
+        stringStream << "PROB_" << requestId << "_" << timestampNs << ".txt";
         return stringStream.str();
     }
 
@@ -401,6 +426,23 @@ namespace AIAssistant
             taskWorkingDirectoryPath = workflowBaseDirectoryPath;
         }
 
+        {
+            LOG_APP_INFO("debug: ai_call: workflowBaseDir='{}' taskWorkingDir='{}' taskId='{}'",
+                         workflowBaseDirectoryPath.string(), taskWorkingDirectoryPath.string(), taskDefinition.m_Id);
+
+            std::error_code createError;
+            std::filesystem::create_directories(taskWorkingDirectoryPath, createError);
+            if (createError)
+            {
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastErrorMessage =
+                    std::format("failed to create task working directory '{}' ({}): {}", taskWorkingDirectoryPath.string(),
+                                createError.value(), createError.message());
+                LOG_APP_ERROR("debug: ai_call: {}", taskState.m_LastErrorMessage);
+                return false;
+            }
+        }
+
         JarvisAgent* app = App::g_App;
         if (app == nullptr)
         {
@@ -430,33 +472,33 @@ namespace AIAssistant
         // ------------------------------------------------------------
         QueueBinding localizedQueueBinding = taskDefinition.m_QueueBinding;
 
-        auto const localizeInlineFileRefs = [&](std::vector<QueueFileRef>& fileRefs)
+        auto const localizeFileRefs = [&](std::vector<QueueFileRef>& fileRefs, std::string const& listName)
         {
             for (QueueFileRef& fileRef : fileRefs)
             {
-                if (!fileRef.m_HasInlineContent)
-                {
-                    continue;
-                }
-
                 if (fileRef.m_Path.empty())
                 {
                     continue;
                 }
 
-                std::filesystem::path const filePath(fileRef.m_Path);
+                std::string const originalPath = fileRef.m_Path;
+
+                std::filesystem::path filePath(originalPath);
                 if (!filePath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / filePath).lexically_normal();
-                    fileRef.m_Path = rewritten.string();
+                    filePath = (taskWorkingDirectoryPath / filePath).lexically_normal();
+                    fileRef.m_Path = filePath.string();
                 }
+
+                LOG_APP_INFO("debug: ai_call: localized {} path='{}' -> '{}' (inline={})", listName, originalPath,
+                             fileRef.m_Path, fileRef.m_HasInlineContent);
             }
         };
 
-        localizeInlineFileRefs(localizedQueueBinding.m_StngFiles);
-        localizeInlineFileRefs(localizedQueueBinding.m_TaskFiles);
-        localizeInlineFileRefs(localizedQueueBinding.m_CntxFiles);
-        localizeInlineFileRefs(localizedQueueBinding.m_ProbFiles);
+        localizeFileRefs(localizedQueueBinding.m_StngFiles, "stng_files");
+        localizeFileRefs(localizedQueueBinding.m_TaskFiles, "task_files");
+        localizeFileRefs(localizedQueueBinding.m_CntxFiles, "cntx_files");
+        localizeFileRefs(localizedQueueBinding.m_ProbFiles, "prob_files");
 
         if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
         {
@@ -522,10 +564,55 @@ namespace AIAssistant
             return false;
         }
 
-        std::filesystem::path const requestPath =
-            taskWorkingDirectoryPath / BuildProbFilename(requestId, timestampNs, false);
+        std::filesystem::path const requestPath = taskWorkingDirectoryPath / BuildProbFilename(requestId, timestampNs);
 
-        std::string const promptText = TryBuildPromptFromParams(taskDefinition, taskState);
+        LOG_APP_INFO("debug: ai_call: writing PROB file to '{}'", requestPath.string());
+
+        std::string promptText;
+        if (!localizedQueueBinding.m_ProbFiles.empty())
+        {
+            std::ostringstream probStream;
+            for (size_t probIndex = 0; probIndex < localizedQueueBinding.m_ProbFiles.size(); ++probIndex)
+            {
+                QueueFileRef const& fileRef = localizedQueueBinding.m_ProbFiles[probIndex];
+                if (fileRef.m_HasInlineContent)
+                {
+                    LOG_APP_INFO("debug: ai_call: PROB inline content (path='{}', bytes={})", fileRef.m_Path,
+                                 fileRef.m_Content.size());
+                    probStream << fileRef.m_Content;
+                }
+                else
+                {
+                    std::string fileContent;
+                    std::string readError;
+                    LOG_APP_INFO("debug: ai_call: PROB source path='{}'", fileRef.m_Path);
+                    if (!ReadTextFile(fileRef.m_Path, fileContent, readError))
+                    {
+                        requestPool->Forget(requestHandle);
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastErrorMessage = readError;
+                        LOG_APP_ERROR("debug: ai_call: {}", readError);
+                        return false;
+                    }
+
+                    probStream << fileContent;
+                }
+
+                if (probIndex + 1 < localizedQueueBinding.m_ProbFiles.size())
+                {
+                    probStream << "\n";
+                }
+            }
+
+            promptText = probStream.str();
+            LOG_APP_INFO("debug: ai_call: built PROB from queue_binding prob_files (count={}, bytes={})",
+                         localizedQueueBinding.m_ProbFiles.size(), promptText.size());
+        }
+        else
+        {
+            promptText = TryBuildPromptFromParams(taskDefinition, taskState);
+            LOG_APP_INFO("debug: ai_call: built PROB from task params (bytes={})", promptText.size());
+        }
 
         if (!WriteTextFile(requestPath.string(), promptText, errorMessage))
         {

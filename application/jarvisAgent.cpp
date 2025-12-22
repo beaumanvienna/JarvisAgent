@@ -32,12 +32,15 @@
 #include "file/probUtils.h"
 #include "web/chatMessages.h"
 #include "python/pythonEngine.h"
+#include "task/carMaintenanceTask.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowTriggerBinder.h"
 #include "workflow/workflowOrchestrator.h"
 #include "workflow/taskExecutorRegistry.h"
 #include "workflow/shellTaskExecutor.h"
 #include "workflow/aiCallTaskExecutor.h"
+#include "workflow/internalTaskExecutor.h"
+#include "workflow/pythonTaskExecutor.h"
 #include "workflow/triggerEngine.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowRuntimeManager.h"
@@ -70,6 +73,11 @@ namespace AIAssistant
 
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
         App::g_App = this;
+
+        // ---------------------------------------------------------
+        // Internal task registrations
+        // ---------------------------------------------------------
+        m_InternalTaskRegistry.RegisterFactory("carMaintenance", []() { return std::make_unique<CarMaintenanceTask>(); });
 
         // ---------------------------------------------------------
         // Hook StatusRenderer → TerminalManager (engine-owned)
@@ -178,10 +186,23 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> aiCallExecutor = std::make_shared<AiCallTaskExecutor>();
                 executorRegistry.RegisterExecutor(TaskType::AiCall, aiCallExecutor);
             }
+            // Python executor (TaskType::Python)
+            {
+                std::shared_ptr<ITaskExecutor> pythonExecutor = std::make_shared<PythonTaskExecutor>();
+                executorRegistry.RegisterExecutor(TaskType::Python, pythonExecutor);
+            }
 
-            // Later we can add:
-            //  - PythonTaskExecutor for TaskType::Python
-            //  - InternalTaskExecutor for TaskType::Internal
+            // Internal executor (TaskType::Internal)
+            // Note: m_InternalTaskRegistry is owned by JarvisAgent; wrap it with a no-op deleter.
+            {
+                std::shared_ptr<IInternalTaskRegistry> internalTaskRegistryPtr(
+                    static_cast<IInternalTaskRegistry*>(&m_InternalTaskRegistry), [](IInternalTaskRegistry* const) {});
+
+                std::shared_ptr<ITaskExecutor> internalExecutor =
+                    std::make_shared<InternalTaskExecutor>(internalTaskRegistryPtr);
+
+                executorRegistry.RegisterExecutor(TaskType::Internal, internalExecutor);
+            }
         }
 
         WorkflowOrchestrator::Get().SetRegistry(m_WorkflowRegistry.get());

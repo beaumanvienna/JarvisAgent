@@ -39,6 +39,119 @@ namespace AIAssistant
 {
     namespace
     {
+        bool ResolveFreshnessPathsForTask(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
+                                          TaskDef const& taskDefinition, std::string const& taskId,
+                                          std::vector<fs::path>& outInputPaths, std::vector<fs::path>& outOutputPaths);
+
+        fs::path GetQueueFolderPath()
+        {
+            if (Core::g_Core == nullptr)
+            {
+                return fs::path{};
+            }
+
+            return fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath).lexically_normal();
+        }
+
+        fs::path GetScriptsFolderPath()
+        {
+            std::error_code errorCode;
+            fs::path currentPath = fs::current_path(errorCode);
+            if (errorCode)
+            {
+                return fs::path{};
+            }
+
+            return (currentPath / "scripts").lexically_normal();
+        }
+
+        bool IsPathWithin(fs::path const& candidatePath, fs::path const& basePath)
+        {
+            if (candidatePath.empty() || basePath.empty())
+            {
+                return false;
+            }
+
+            std::error_code errorCode;
+
+            fs::path canonicalBasePath = fs::weakly_canonical(basePath, errorCode);
+            if (errorCode)
+            {
+                errorCode.clear();
+                canonicalBasePath = fs::absolute(basePath, errorCode).lexically_normal();
+                errorCode.clear();
+            }
+
+            fs::path canonicalCandidatePath = fs::weakly_canonical(candidatePath, errorCode);
+            if (errorCode)
+            {
+                errorCode.clear();
+                canonicalCandidatePath = fs::absolute(candidatePath, errorCode).lexically_normal();
+                errorCode.clear();
+            }
+
+            auto baseIterator = canonicalBasePath.begin();
+            auto candidateIterator = canonicalCandidatePath.begin();
+
+            for (; baseIterator != canonicalBasePath.end(); ++baseIterator, ++candidateIterator)
+            {
+                if (candidateIterator == canonicalCandidatePath.end() || *candidateIterator != *baseIterator)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        bool ValidateTaskPathPolicy(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
+                                    TaskDef const& taskDefinition, std::string const& taskId,
+                                    fs::path const& workingDirectory, TaskInstanceState& taskState)
+        {
+            fs::path const queueFolderPath = GetQueueFolderPath();
+            fs::path const scriptsFolderPath = GetScriptsFolderPath();
+
+            auto fail = [&](std::string const& message) -> bool
+            {
+                taskState.m_LastErrorMessage = message;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            };
+
+            if (IsPathWithin(workingDirectory, scriptsFolderPath))
+            {
+                return fail("Task working_directory resolves into ./scripts. The scripts folder is reserved for tools.");
+            }
+
+            if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(workingDirectory, queueFolderPath))
+            {
+                return fail("Non-AI task working_directory resolves into the queue folder. Only ai_call tasks may use the queue folder.");
+            }
+
+            std::vector<fs::path> resolvedInputPaths;
+            std::vector<fs::path> resolvedOutputPaths;
+            if (!ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId, resolvedInputPaths,
+                                              resolvedOutputPaths))
+            {
+                return fail("Failed to resolve file_outputs for reserved-folder validation.");
+            }
+
+            for (fs::path const& outputPath : resolvedOutputPaths)
+            {
+                if (IsPathWithin(outputPath, scriptsFolderPath))
+                {
+                    return fail(std::string("Task file_output resolves into ./scripts: ") + outputPath.string());
+                }
+
+                if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(outputPath, queueFolderPath))
+                {
+                    return fail(std::string("Non-AI task file_output resolves into queue folder: ") + outputPath.string());
+                }
+            }
+
+            return true;
+        }
+
         bool ResolveTemplateString(std::string const& value, std::unordered_map<std::string, std::string> const& inputValues,
                                    std::unordered_map<std::string, std::string> const& outputValues,
                                    std::string& outResolved)
@@ -769,6 +882,11 @@ namespace AIAssistant
         {
             workingDirectory =
                 (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
+        }
+
+        if (!ValidateTaskPathPolicy(workflowDefinition, workflowRun, taskDefinition, taskId, workingDirectory, taskState))
+        {
+            return false;
         }
 
         if (!workingDirectory.empty())

@@ -28,12 +28,86 @@
 #include "pythonTaskExecutor.h"
 #include "python/pythonEngine.h"
 
+#include <filesystem>
 #include <unordered_map>
 
 namespace AIAssistant
 {
     namespace
     {
+        namespace fs = std::filesystem;
+
+        fs::path ResolveWorkflowBaseDirectory(WorkflowDefinition const& workflowDefinition)
+        {
+            fs::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+
+            if (workflowBaseDirectoryPath.empty())
+            {
+                fs::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
+                if (!workflowFileDirectoryPath.empty())
+                {
+                    workflowBaseDirectoryPath = workflowFileDirectoryPath;
+                }
+            }
+
+            if (workflowBaseDirectoryPath.empty())
+            {
+                fs::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
+                if (!workflowFilePath.empty())
+                {
+                    workflowBaseDirectoryPath = workflowFilePath.parent_path();
+                }
+            }
+
+            return workflowBaseDirectoryPath.lexically_normal();
+        }
+
+        fs::path ResolveTaskWorkingDirectory(fs::path const& workflowBaseDirectoryPath, TaskDef const& taskDefinition)
+        {
+            fs::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
+
+            if (taskWorkingDirectoryPath.empty())
+            {
+                taskWorkingDirectoryPath = workflowBaseDirectoryPath;
+            }
+            else if (taskWorkingDirectoryPath.is_relative() && !workflowBaseDirectoryPath.empty())
+            {
+                taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
+            }
+            else
+            {
+                taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
+            }
+
+            return taskWorkingDirectoryPath;
+        }
+
+        bool ValidateFileInputsExist(TaskDef const& taskDefinition, fs::path const& taskWorkingDirectoryPath,
+                                     std::string& errorMessageOut)
+        {
+            std::error_code errorCode;
+
+            for (std::string const& fileInput : taskDefinition.m_FileInputs)
+            {
+                fs::path inputPath(fileInput);
+
+                if (inputPath.is_relative())
+                {
+                    inputPath = taskWorkingDirectoryPath / inputPath;
+                }
+
+                inputPath = inputPath.lexically_normal();
+
+                if (!fs::exists(inputPath, errorCode))
+                {
+                    errorMessageOut = "PythonTaskExecutor: Missing input file: " + inputPath.string();
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         // Shared helper: see ShellTaskExecutor explanation.
         void BuildOutputSlotMap(TaskDef const& taskDefinition, TaskInstanceState const& taskState,
                                 std::unordered_map<std::string, std::string>& outputSlotMapOut)
@@ -78,9 +152,6 @@ namespace AIAssistant
     bool PythonTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                      TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        (void)workflowDefinition;
-        (void)workflowRun;
-
         LOG_APP_INFO("[python] Executing Python task '{}'", taskDefinition.m_Id);
 
         PythonEngine* pythonEngine = App::g_App->GetPythonEngine();
@@ -92,8 +163,52 @@ namespace AIAssistant
             return false;
         }
 
+        fs::path const workflowBaseDirectoryPath = ResolveWorkflowBaseDirectory(workflowDefinition);
+        fs::path const taskWorkingDirectoryPath = ResolveTaskWorkingDirectory(workflowBaseDirectoryPath, taskDefinition);
+
+        if (taskWorkingDirectoryPath.empty())
+        {
+            taskState.m_LastErrorMessage = "PythonTaskExecutor: Missing working directory";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        std::error_code createErrorCode;
+        fs::create_directories(taskWorkingDirectoryPath, createErrorCode);
+
+        if (createErrorCode)
+        {
+            taskState.m_LastErrorMessage = "PythonTaskExecutor: Failed to create working directory";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
         std::string errorMessage;
-        bool const ok = pythonEngine->ExecuteWorkflowTask(taskDefinition, errorMessage);
+        if (!ValidateFileInputsExist(taskDefinition, taskWorkingDirectoryPath, errorMessage))
+        {
+            taskState.m_LastErrorMessage = errorMessage;
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        std::unordered_map<std::string, std::string> contextValues;
+        contextValues.reserve(workflowRun.m_Context.size() + 4);
+
+        for (auto const& contextPair : workflowRun.m_Context)
+        {
+            contextValues[contextPair.first] = contextPair.second.m_Value;
+        }
+
+        contextValues["_workflow_id"] = workflowRun.m_WorkflowId;
+        contextValues["_run_id"] = workflowRun.m_RunId;
+        contextValues["_workflow_base_directory"] = workflowBaseDirectoryPath.string();
+        contextValues["_task_working_directory"] = taskWorkingDirectoryPath.string();
+
+        std::unordered_map<std::string, std::string> pythonOutputs;
+
+        bool const ok =
+            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), taskState.m_InputValues,
+                                              contextValues, pythonOutputs, errorMessage);
 
         if (!ok)
         {
@@ -102,13 +217,21 @@ namespace AIAssistant
             return false;
         }
 
-        // Derive outputs from the task definition and resolved inputs.
+        for (auto const& outputPair : pythonOutputs)
+        {
+            taskState.m_OutputValues[outputPair.first] = outputPair.second;
+        }
+
+        // Fallback: derive outputs from the task definition and resolved inputs (only fills missing keys).
         std::unordered_map<std::string, std::string> derivedOutputs;
         BuildOutputSlotMap(taskDefinition, taskState, derivedOutputs);
 
         for (auto const& outputPair : derivedOutputs)
         {
-            taskState.m_OutputValues[outputPair.first] = outputPair.second;
+            if (!taskState.m_OutputValues.contains(outputPair.first))
+            {
+                taskState.m_OutputValues[outputPair.first] = outputPair.second;
+            }
         }
 
         taskState.m_State = TaskInstanceStateKind::Succeeded;

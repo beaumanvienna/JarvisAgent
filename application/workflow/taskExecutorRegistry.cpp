@@ -21,6 +21,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 #include "taskExecutorRegistry.h"
+
+
 #include "engine.h"
 
 namespace AIAssistant
@@ -31,7 +33,7 @@ namespace AIAssistant
         return instance;
     }
 
-    void TaskExecutorRegistry::RegisterExecutor(TaskType type, std::shared_ptr<ITaskExecutor> const& executorPtr)
+void TaskExecutorRegistry::RegisterExecutor(TaskType type, std::shared_ptr<ITaskExecutor> const& executorPtr)
     {
         m_Executors[type] = executorPtr;
     }

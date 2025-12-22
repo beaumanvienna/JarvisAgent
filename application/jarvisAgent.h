@@ -27,6 +27,7 @@
 #include "application.h"
 #include "file/fileCategory.h"
 #include "log/statusRenderer.h"
+#include "task/internalTaskRegistry.h"
 
 namespace AIAssistant
 {
@@ -66,6 +67,8 @@ namespace AIAssistant
         AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
         WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
 
+        IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
+
     private:
         void CheckIfFinished();
         void InitializeWorkflows();
@@ -86,6 +89,8 @@ namespace AIAssistant
 
         std::unique_ptr<WorkflowRegistry> m_WorkflowRegistry;
         std::unique_ptr<TriggerEngine> m_TriggerEngine;
+
+        InternalTaskRegistry m_InternalTaskRegistry;
 
         std::unique_ptr<AiRequestPool> m_AiRequestPool;
         std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;

@@ -1086,3 +1086,37 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
 ---
 
 *End of JC Workflow File (JCWF) Specification v1.0*
+---
+
+## Project conventions and runtime enforcement
+
+The JCWF **file format** is intentionally generic. Some path rules are **project/runtime policies enforced by JarvisAgent**, not JCWF schema requirements.
+
+### Task folders
+
+**Policy (JarvisAgent runtime enforcement):** each task MUST use its own unique `working_directory` so every task writes its artifacts into its own folder.
+
+JarvisAgent enforces these conventions:
+
+- **AI tasks (`type: "ai_call"`):** `working_directory` MUST be a per-task folder under the workflow queue root (e.g. `../queue/<workflowId>/<NN_taskName>/`).
+- **Non-AI tasks (`type: "internal" | "shell" | "python"`):** `working_directory` MUST be a per-task folder under the workflow base directory (e.g. `<workflowId>/<NN_taskName>/`).
+
+This keeps queue artifacts isolated from workflow-owned artifacts and makes debugging much easier.
+
+### Queue folder policy (JarvisAgent runtime)
+
+**Policy:** _Only AI tasks may write into the queue folder._
+
+This is a **JarvisAgent enforcement rule (engine/runtime)**, not a JCWF spec rule. JCWF merely provides file paths; JarvisAgent decides whether a task is allowed to create/write a given path.
+
+### Scripts folder policy (JarvisAgent runtime)
+
+**Policy:** _Workflow tasks must not create or overwrite files inside the scripts folder._
+
+Scripts may be referenced as **inputs** (e.g. a shell script path), but outputs must be written into the task working directory (or another workflow-owned location).
+
+### Missing source files
+
+**Policy:** missing input sources are a **hard error** for all executors (`ai_call`, `internal`, `shell`, `python`).
+
+If any required source file (e.g. `file_inputs` or non-inline `queue_binding` files) cannot be found/read, the task fails and subsequent tasks do not start.

@@ -146,7 +146,7 @@ Used by `SessionManager` when writing `.output.*` files.
 
 ---
 
-## WriteWithHeader(path, content, model, appendTimestamp)
+## WriteWithHeader(path, content, model)
 Writes a structured output:
 
 ```

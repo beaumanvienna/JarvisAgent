@@ -199,6 +199,46 @@ namespace AIAssistant
                 return false;
             }
 
+            // Resolve task-scoped relative paths against the task working directory.
+            // Spec rule: relative file_inputs / file_outputs paths are relative to task.working_directory.
+            {
+                fs::path const workflowBaseDirectory = fs::path(workflowDefinition.m_WorkflowBaseDirectory).lexically_normal();
+
+                fs::path taskWorkingDirectory = taskDefinition.m_WorkingDirectory.empty()
+                                                    ? workflowBaseDirectory
+                                                    : fs::path(taskDefinition.m_WorkingDirectory);
+
+                if (taskWorkingDirectory.is_relative())
+                {
+                    taskWorkingDirectory = (workflowBaseDirectory / taskWorkingDirectory);
+                }
+
+                taskWorkingDirectory = taskWorkingDirectory.lexically_normal();
+
+                auto resolveTaskScopedPaths = [&](std::vector<fs::path>& paths) -> void
+                {
+                    for (fs::path& path : paths)
+                    {
+                        if (path.empty())
+                        {
+                            continue;
+                        }
+
+                        if (path.is_relative())
+                        {
+                            path = (taskWorkingDirectory / path).lexically_normal();
+                        }
+                        else
+                        {
+                            path = path.lexically_normal();
+                        }
+                    }
+                };
+
+                resolveTaskScopedPaths(outInputPaths);
+                resolveTaskScopedPaths(outOutputPaths);
+            }
+
             return true;
         }
 

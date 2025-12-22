@@ -1,0 +1,175 @@
+{
+  "version": "1.0",
+  "id": "aiCarMaintenancePipeline",
+  "label": "AI \u2192 Classify \u2192 C++ Manual \u2192 AI Answer \u2192 Zip \u2192 Python FileInfo",
+  "doc": [
+    "Demo pipeline using ../workflows/message.txt (symlink) to switch test questions.",
+    "Task 1: AI classifies question into {'engine','tires','rephrase'} and writes to classification.txt.",
+    "Task 2: Internal C++ task reads classification.txt and writes manual.txt (engine manual / tire maintenance / rephrase request).",
+    "Task 3: AI answers using manual.txt as CNTX and message.txt as PROB, writes answer.txt.",
+    "Task 4: Shell zips answer.txt via scripts/zipTool.sh into answer.zip.",
+    "Task 5: Python prints file info for answer.zip via printFileInfo.get_file_info()."
+  ],
+  "base_directory": ".",
+  "triggers": [
+    {
+      "type": "auto",
+      "id": "auto-trigger",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "tasks": {
+    "classifyQuestion": {
+      "id": "classifyQuestion",
+      "type": "ai_call",
+      "label": "Classify question topic",
+      "doc": "AI MUST answer with exactly one word: engine | tires | rephrase",
+      "mode": "single",
+      "working_directory": "../queue/aiCarMaintenancePipeline/01_classifyQuestion",
+      "file_inputs": [
+        "../../../workflows/message.txt"
+      ],
+      "file_outputs": [
+        "classification.txt"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_classifyOneWord.txt",
+            "content": "You are a strict classifier. Output must be EXACTLY ONE WORD.\nNo punctuation, no quotes, no extra text.\nAllowed outputs: engine, tires, rephrase.\n"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_classifyRules.txt",
+            "content": "Classification rules:\n- If the user asks about engines, engine lights, oil, starting issues, overheating, etc. -> engine\n- If the user asks about tires, tire wear, pressure, alignment, rotation, punctures, etc. -> tires\n- Otherwise -> rephrase\n"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_classifyTopic.txt",
+            "content": "Classify the user's question into exactly one of: engine, tires, rephrase.\nReturn exactly one word from that enumeration."
+          }
+        ],
+        "prob_files": [
+          "../../../workflows/message.txt"
+        ]
+      }
+    },
+    "buildManual": {
+      "id": "buildManual",
+      "type": "internal",
+      "label": "Generate manual or rephrase request (C++)",
+      "doc": "Reads classification.txt and writes manual.txt (engine manual / tire maintenance / rephrase request).",
+      "mode": "single",
+      "depends_on": [
+        "classifyQuestion"
+      ],
+      "working_directory": "../workflows/aiCarMaintenancePipeline/02_buildManual",
+      "file_inputs": [
+        "../../../queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.txt"
+      ],
+      "file_outputs": [
+        "manual.txt"
+      ],
+      "params": {
+        "action": "carMaintenance"
+      }
+    },
+    "answerWithManual": {
+      "id": "answerWithManual",
+      "type": "ai_call",
+      "label": "Answer using manual + original question",
+      "doc": "Uses manual.txt as context and message.txt as problem statement.",
+      "mode": "single",
+      "depends_on": [
+        "buildManual"
+      ],
+      "working_directory": "../queue/aiCarMaintenancePipeline/03_answerWithManual",
+      "file_inputs": [
+        "../../../workflows/aiCarMaintenancePipeline/02_buildManual/manual.txt",
+        "../../../workflows/message.txt"
+      ],
+      "file_outputs": [
+        "answer.txt"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_answerStyle.txt",
+            "content": "Be practical and concise. Use bullet points where helpful. Do not invent facts.\n"
+          }
+        ],
+        "cntx_files": [
+          "../../../workflows/aiCarMaintenancePipeline/02_buildManual/manual.txt"
+        ],
+        "task_files": [
+          {
+            "path": "TASK_answerUserQuestion.txt",
+            "content": "Use the provided context/manual (CNTX) to answer the user's question (PROB).\nIf CNTX asks for rephrasing, ask 2-3 focused follow-up questions.\n"
+          }
+        ],
+        "prob_files": [
+          "../../../workflows/message.txt"
+        ]
+      }
+    },
+    "zipAnswer": {
+      "id": "zipAnswer",
+      "type": "shell",
+      "label": "Zip AI answer",
+      "doc": "Creates answer.zip from answer.txt via scripts/zipTool.sh",
+      "mode": "single",
+      "depends_on": [
+        "answerWithManual"
+      ],
+      "working_directory": "../workflows/aiCarMaintenancePipeline/04_zipAnswer",
+      "file_inputs": [
+        "../../../queue/aiCarMaintenancePipeline/03_answerWithManual/answer.txt"
+      ],
+      "file_outputs": [
+        "answer.zip"
+      ],
+      "params": {
+        "command": "scripts/zipTool.sh",
+        "args": [
+          "${output[0]}",
+          "${input[0]}"
+        ]
+      }
+    },
+    "printZipInfo": {
+      "id": "printZipInfo",
+      "type": "python",
+      "label": "Print zip file info",
+      "doc": "Calls printFileInfo.get_file_info() for answer.zip.",
+      "mode": "single",
+      "depends_on": [
+        "zipAnswer"
+      ],
+      "working_directory": "../workflows/aiCarMaintenancePipeline/05_printZipInfo",
+      "file_inputs": [
+        "../04_zipAnswer/answer.zip"
+      ],
+      "params": {
+        "module": "printFileInfo",
+        "function": "get_file_info"
+      },
+      "inputs": {
+        "filename": {
+          "type": "string",
+          "required": true
+        }
+      }
+    }
+  },
+  "dataflow": [
+    {
+      "from_task": "zipAnswer",
+      "from_output": "archive_path",
+      "to_task": "printZipInfo",
+      "to_input": "filename"
+    }
+  ]
+}

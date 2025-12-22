@@ -16,34 +16,29 @@
    KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
    WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
    PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-   OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-   THE SOFTWARE.
-*/
+   OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+   USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-
-#include "taskExecutor.h"
-
-#include "task/internalTaskRegistry.h"
+#include <filesystem>
+#include <string>
+#include <vector>
 
 namespace AIAssistant
 {
-    class IInternalTaskRegistry;
-
-    class InternalTaskExecutor : public ITaskExecutor
+    class ITask
     {
     public:
-        explicit InternalTaskExecutor(std::shared_ptr<IInternalTaskRegistry> const& internalTaskRegistryPtr);
-        virtual ~InternalTaskExecutor() = default;
+        virtual ~ITask() = default;
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
-                     TaskInstanceState& taskState) override;
-
-    private:
-        std::shared_ptr<IInternalTaskRegistry> m_InternalTaskRegistryPtr;
+        // Executes the task.
+        //
+        // Returns true on success. On failure, returns false and writes a human-readable
+        // message to errorMessageOut.
+        virtual bool Execute(std::vector<std::filesystem::path> const& inputFilePaths,
+                             std::vector<std::filesystem::path> const& outputFilePaths, std::string& errorMessageOut) = 0;
     };
 
 } // namespace AIAssistant

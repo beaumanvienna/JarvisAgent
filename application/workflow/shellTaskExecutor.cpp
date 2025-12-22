@@ -577,6 +577,50 @@ namespace AIAssistant
             return false;
         }
 
+
+        // Hard-error on missing sources (inputs).
+        for (std::string const& inputPathString : taskDefinition.m_FileInputs)
+        {
+            std::filesystem::path inputPath(inputPathString);
+            if (inputPath.is_relative())
+            {
+                inputPath = (taskWorkingDirectoryPath / inputPath).lexically_normal();
+            }
+            else
+            {
+                inputPath = inputPath.lexically_normal();
+            }
+
+            if (!std::filesystem::exists(inputPath))
+            {
+                LOG_APP_ERROR("ShellTaskExecutor: Missing required input file '{}' for task '{}'", inputPath.string(), taskDefinition.m_Id);
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing required input file";
+                return false;
+            }
+        }
+
+        // Ensure output parent directories exist.
+        for (std::string const& outputPathString : taskDefinition.m_FileOutputs)
+        {
+            std::filesystem::path outputPath(outputPathString);
+            if (outputPath.is_relative())
+            {
+                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
+            }
+            else
+            {
+                outputPath = outputPath.lexically_normal();
+            }
+
+            std::filesystem::path parentPath = outputPath.parent_path();
+            if (!parentPath.empty())
+            {
+                std::error_code outputError;
+                std::filesystem::create_directories(parentPath, outputError);
+            }
+        }
+
         LOG_APP_INFO("[shell] Executing shell task '{}'", taskDefinition.m_Id);
 
         // ------------------------------------------------------------
@@ -657,6 +701,15 @@ namespace AIAssistant
             std::filesystem::path const jarvisAgentWorkingDirectoryPath = g_JarvisAgentLaunchWorkingDirectoryPath;
             commandPath = (jarvisAgentWorkingDirectoryPath / commandPathFilesystemPath).lexically_normal().string();
         }
+
+        if (!std::filesystem::exists(std::filesystem::path(commandPath)))
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: Missing required script file '{}' for task '{}'", commandPath, taskDefinition.m_Id);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing required script file";
+            return false;
+        }
+
 
         // ------------------------------------------------------------
         // 3) Derive logical output values up front

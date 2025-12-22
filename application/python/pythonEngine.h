@@ -27,6 +27,7 @@
 #include <mutex>
 #include <memory>
 #include <condition_variable>
+#include <unordered_map>
 
 #include "workflow/workflowTypes.h"
 
@@ -67,7 +68,12 @@ namespace AIAssistant
 
         bool IsRunning() const { return m_Running; }
 
-        bool ExecuteWorkflowTask(TaskDef const& task, std::string& errorMessage);
+        bool ExecuteWorkflowTask(TaskDef const& taskDefinition,
+                              std::string const& taskWorkingDirectory,
+                              std::unordered_map<std::string, std::string> const& inputValues,
+                              std::unordered_map<std::string, std::string> const& contextValues,
+                              std::unordered_map<std::string, std::string>& outputValuesOut,
+                              std::string& errorMessage);
 
     private:
         void Reset();
@@ -99,6 +105,7 @@ namespace AIAssistant
 
         std::thread m_WorkerThread;
         std::mutex m_QueueMutex;
+        std::mutex m_InterpreterMutex;
         std::condition_variable m_QueueCondition;
         std::queue<PythonTask> m_TaskQueue;
     };

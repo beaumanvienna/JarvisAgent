@@ -11,8 +11,8 @@
    The above copyright notice and this permission notice shall be
    included in all copies or substantial portions of the Software.
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
@@ -20,28 +20,32 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+
 #include <string>
-#include <mutex>
 #include <filesystem>
+
+#include "task/taskBase.h"
 
 namespace AIAssistant
 {
-    class FileWriter
+    class CarMaintenanceTask final : public ITask
     {
     public:
-        static FileWriter& Get();
+        CarMaintenanceTask() = default;
+        virtual ~CarMaintenanceTask() = default;
 
-        void Write(const std::filesystem::path& filePath, const std::string& content);
-        void WriteWithHeader(std::filesystem::path const& filePath, std::string const& content, std::string const& model);
-
-    private:
-        FileWriter() = default;
-        ~FileWriter() = default;
-
-        FileWriter(const FileWriter&) = delete;
-        FileWriter& operator=(const FileWriter&) = delete;
+        bool Execute(std::vector<std::filesystem::path> const& inputFilePaths,
+                     std::vector<std::filesystem::path> const& outputFilePaths,
+                     std::string& errorMessageOut) override;
 
     private:
-        std::mutex m_Mutex;
+        static bool TryReadAllText(std::filesystem::path const& filePath, std::string& fileContentsOut, std::string& errorMessageOut);
+        static bool TryWriteAllText(std::filesystem::path const& filePath, std::string const& fileContents, std::string& errorMessageOut);
+
+        static bool ContainsCaseInsensitive(std::string const& haystack, std::string const& needle);
+        static std::string MakeEngineManualText();
+        static std::string MakeTireMaintenanceText();
+        static std::string MakeRephraseRequestText();
     };
+
 } // namespace AIAssistant

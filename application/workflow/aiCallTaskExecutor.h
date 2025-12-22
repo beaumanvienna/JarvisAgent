@@ -42,7 +42,7 @@ namespace AIAssistant
         static bool WriteTextFile(std::string const& filePath, std::string const& fileContent, std::string& outErrorMessage);
 
     private:
-        static std::string BuildProbFilename(int64_t const requestId, int64_t const timestampNs, bool const isOutput);
+        static std::string BuildProbFilename(int64_t const requestId, int64_t const timestampNs);
 
         static std::optional<std::string> TryExtractStringParam(std::string const& rawParamsJson,
                                                                 std::string const& fieldName, std::string& outErrorMessage);
