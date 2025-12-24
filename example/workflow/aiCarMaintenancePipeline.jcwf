@@ -31,7 +31,7 @@
         "../../../workflows/message.txt"
       ],
       "file_outputs": [
-        "classification.txt"
+        "classification.output.txt"
       ],
       "queue_binding": {
         "stng_files": [
@@ -68,7 +68,7 @@
       ],
       "working_directory": "../workflows/aiCarMaintenancePipeline/02_buildManual",
       "file_inputs": [
-        "../../../queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.txt"
+        "../../../queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.txt"
       ],
       "file_outputs": [
         "manual.txt"
@@ -92,7 +92,7 @@
         "../../../workflows/message.txt"
       ],
       "file_outputs": [
-        "answer.txt"
+        "answer.output.txt"
       ],
       "queue_binding": {
         "stng_files": [
@@ -126,7 +126,7 @@
       ],
       "working_directory": "../workflows/aiCarMaintenancePipeline/04_zipAnswer",
       "file_inputs": [
-        "../../../queue/aiCarMaintenancePipeline/03_answerWithManual/answer.txt"
+        "../../../queue/aiCarMaintenancePipeline/03_answerWithManual/answer.output.txt"
       ],
       "file_outputs": [
         "answer.zip"
