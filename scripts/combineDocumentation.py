@@ -101,7 +101,61 @@ def _anchor_id(text: str) -> str:
     return anchor.strip("-")
 
 
-def BuildCombinedDocumentation(docsDirectory: str, context: Optional[dict] = None) -> Dict[str, str]:
+
+def _auto_find_docs_root(start_dir: Path) -> Path:
+    """
+    Best-effort fallback when docsDirectory is not provided by JCWF.
+    We try to locate a queue root by walking up a few parents and looking for a
+    'queue' directory (either as a child or as a sibling via ../queue).
+    Then we choose the workflow subdirectory that contains the most per-task doc files.
+    """
+    search_roots = [start_dir] + list(start_dir.parents)[:8]
+
+    best_candidate: Optional[Path] = None
+    best_score = 0
+
+    for root in search_roots:
+        candidate_queue_dirs = [
+            root / "queue",
+            root / ".." / "queue",
+        ]
+        for queue_dir in candidate_queue_dirs:
+            try:
+                q = queue_dir.resolve()
+            except OSError:
+                q = queue_dir.absolute()
+            if not q.is_dir():
+                continue
+
+            # Choose the workflow folder under queue/ that contains the most task docs.
+            for workflow_dir in sorted(q.iterdir()):
+                if not workflow_dir.is_dir():
+                    continue
+
+                score = 0
+                try:
+                    for task_dir in workflow_dir.iterdir():
+                        if not task_dir.is_dir():
+                            continue
+                        if (task_dir / "docu.output.md").is_file() or (task_dir / "docu.md").is_file():
+                            score += 1
+                except OSError:
+                    continue
+
+                if score > best_score:
+                    best_score = score
+                    best_candidate = workflow_dir
+
+    if best_candidate is None or best_score == 0:
+        raise RuntimeError(
+            "combine docs: docsDirectory was not provided and no suitable ../queue/<workflowId> "
+            "folder containing docu.output.md/docu.md could be auto-detected."
+        )
+
+    return best_candidate
+
+
+def BuildCombinedDocumentation(docsDirectory: str = "", context: Optional[dict] = None, **kwargs) -> Dict[str, str]:
     """
     JCWF entry point.
 
@@ -114,27 +168,39 @@ def BuildCombinedDocumentation(docsDirectory: str, context: Optional[dict] = Non
     """
     context = context or {}
 
+
+    # Accept alternate input naming from JCWF/dataflow and tolerate missing docsDirectory.
+    if not docsDirectory:
+        docsDirectory = str(kwargs.get("docsDirectory", "") or kwargs.get("docs_directory", "") or kwargs.get("docsDir", ""))
+
+
     task_working_directory = Path(context.get("_task_working_directory", "."))
     workflow_base_directory = Path(context.get("_workflow_base_directory", "."))
 
     # Resolve docsDirectory robustly.
-    docs_root_candidates = [
-        Path(docsDirectory),
-        task_working_directory / docsDirectory,
-        workflow_base_directory / docsDirectory,
-        Path.cwd() / docsDirectory,
-    ]
-
+    # Preferred: docsDirectory passed from JCWF (e.g. ../queue/jarvisCppDocu).
+    # Fallback: auto-detect a suitable ../queue/<workflowId> folder based on the current working directory.
     docs_root: Optional[Path] = None
-    for candidate in docs_root_candidates:
-        candidate = candidate.expanduser()
-        try:
-            candidate = candidate.resolve()
-        except OSError:
-            candidate = candidate.absolute()
-        if candidate.exists():
-            docs_root = candidate
-            break
+
+    if docsDirectory:
+        docs_root_candidates = [
+            Path(docsDirectory),
+            task_working_directory / docsDirectory,
+            workflow_base_directory / docsDirectory,
+            Path.cwd() / docsDirectory,
+        ]
+
+        for candidate in docs_root_candidates:
+            candidate = candidate.expanduser()
+            try:
+                candidate = candidate.resolve()
+            except OSError:
+                candidate = candidate.absolute()
+            if candidate.exists():
+                docs_root = candidate
+                break
+    else:
+        docs_root = _auto_find_docs_root(Path.cwd())
 
     if docs_root is None:
         raise RuntimeError(f"combine docs: docsDirectory not found: {docsDirectory}")
