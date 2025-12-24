@@ -206,12 +206,18 @@ namespace AIAssistant
 
         std::unordered_map<std::string, std::string> pythonOutputs;
 
+        if (taskDefinition.m_ParamsJson.empty())
+        {
+            LOG_APP_ERROR("[python] Task '{}' is missing params JSON (module/function)", taskDefinition.m_Id);
+        }
+
         bool const ok =
             pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), taskState.m_InputValues,
                                               contextValues, pythonOutputs, errorMessage);
 
         if (!ok)
         {
+            LOG_APP_ERROR("[python] Task '{}' failed: {}", taskDefinition.m_Id, errorMessage);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
             return false;

@@ -349,6 +349,19 @@ Each task has:
   }
   ```
 
+**Python module/function resolution**
+
+- Python tasks **MUST** specify `params.module` and `params.function`.
+- `params.module` is a normal Python import name.
+  JarvisAgent adds the `scripts/` directory (relative to the Launch Working Directory)
+  to `sys.path`.
+- A script file like `scripts/combineJarvisDocumentation.py` is referenced as:
+  - `"module": "combineJarvisDocumentation"`
+  - `"function": "<callable name inside the file>"`
+- If the module cannot be imported, or the function is missing / not callable,
+  the task fails and the error message is recorded and logged.
+
+
 - `shell`  
   Executes a command on the host (JarvisAgent SHOULD restrict/whitelist this).  
   Security rule: shell commands MUST start with `scripts/` (relative to the JarvisAgent Launch Working Directory).

@@ -1,0 +1,2366 @@
+{
+  "version": "1.0",
+  "id": "jarvisCppDocu",
+  "label": "JarvisAgent C++ Docu Generator",
+  "doc": [
+    "Generates Markdown documentation for each C++ header (and matching .cpp when present) in application/ and engine/.",
+    "Each task is an ai_call and writes its artifacts into a per-task folder under ../queue/<workflowId>/."
+  ],
+  "base_directory": ".",
+  "triggers": [
+    {
+      "type": "auto",
+      "id": "auto-run",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {
+        "exposed_in_ui": true
+      }
+    }
+  ],
+  "tasks": {
+    "doc_application_application_h": {
+      "id": "doc_application_application_h",
+      "type": "ai_call",
+      "label": "Docu: application/application.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/01_doc_application_application_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/application.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/application.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_file_fileCategorizer_h": {
+      "id": "doc_application_file_fileCategorizer_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/fileCategorizer.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/02_doc_application_file_fileCategorizer_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/file/fileCategorizer.h",
+        "../../../jarvisAgent/application/file/fileCategorizer.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/file/fileCategorizer.h",
+          "../../../jarvisAgent/application/file/fileCategorizer.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_file_fileCategory_h": {
+      "id": "doc_application_file_fileCategory_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/fileCategory.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/03_doc_application_file_fileCategory_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/file/fileCategory.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/file/fileCategory.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_file_fileWatcher_h": {
+      "id": "doc_application_file_fileWatcher_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/fileWatcher.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/04_doc_application_file_fileWatcher_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/file/fileWatcher.h",
+        "../../../jarvisAgent/application/file/fileWatcher.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/file/fileWatcher.h",
+          "../../../jarvisAgent/application/file/fileWatcher.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_file_probUtils_h": {
+      "id": "doc_application_file_probUtils_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/probUtils.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/05_doc_application_file_probUtils_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/file/probUtils.h",
+        "../../../jarvisAgent/application/file/probUtils.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/file/probUtils.h",
+          "../../../jarvisAgent/application/file/probUtils.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_file_trackedFile_h": {
+      "id": "doc_application_file_trackedFile_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/trackedFile.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/06_doc_application_file_trackedFile_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/file/trackedFile.h",
+        "../../../jarvisAgent/application/file/trackedFile.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/file/trackedFile.h",
+          "../../../jarvisAgent/application/file/trackedFile.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_jarvisAgent_h": {
+      "id": "doc_application_jarvisAgent_h",
+      "type": "ai_call",
+      "label": "Docu: application/jarvisAgent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/07_doc_application_jarvisAgent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/jarvisAgent.h",
+        "../../../jarvisAgent/application/jarvisAgent.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/jarvisAgent.h",
+          "../../../jarvisAgent/application/jarvisAgent.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_json_jsonObjectParser_h": {
+      "id": "doc_application_json_jsonObjectParser_h",
+      "type": "ai_call",
+      "label": "Docu: application/json/jsonObjectParser.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/08_doc_application_json_jsonObjectParser_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/json/jsonObjectParser.h",
+        "../../../jarvisAgent/application/json/jsonObjectParser.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/json/jsonObjectParser.h",
+          "../../../jarvisAgent/application/json/jsonObjectParser.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_json_replyParserAPI1_h": {
+      "id": "doc_application_json_replyParserAPI1_h",
+      "type": "ai_call",
+      "label": "Docu: application/json/replyParserAPI1.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/09_doc_application_json_replyParserAPI1_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/json/replyParserAPI1.h",
+        "../../../jarvisAgent/application/json/replyParserAPI1.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/json/replyParserAPI1.h",
+          "../../../jarvisAgent/application/json/replyParserAPI1.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_json_replyParserAPI2_h": {
+      "id": "doc_application_json_replyParserAPI2_h",
+      "type": "ai_call",
+      "label": "Docu: application/json/replyParserAPI2.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/10_doc_application_json_replyParserAPI2_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/json/replyParserAPI2.h",
+        "../../../jarvisAgent/application/json/replyParserAPI2.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/json/replyParserAPI2.h",
+          "../../../jarvisAgent/application/json/replyParserAPI2.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_json_replyParser_h": {
+      "id": "doc_application_json_replyParser_h",
+      "type": "ai_call",
+      "label": "Docu: application/json/replyParser.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/11_doc_application_json_replyParser_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/json/replyParser.h",
+        "../../../jarvisAgent/application/json/replyParser.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/json/replyParser.h",
+          "../../../jarvisAgent/application/json/replyParser.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_log_statusRenderer_h": {
+      "id": "doc_application_log_statusRenderer_h",
+      "type": "ai_call",
+      "label": "Docu: application/log/statusRenderer.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/12_doc_application_log_statusRenderer_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/log/statusRenderer.h",
+        "../../../jarvisAgent/application/log/statusRenderer.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/log/statusRenderer.h",
+          "../../../jarvisAgent/application/log/statusRenderer.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_python_pythonEngine_h": {
+      "id": "doc_application_python_pythonEngine_h",
+      "type": "ai_call",
+      "label": "Docu: application/python/pythonEngine.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/13_doc_application_python_pythonEngine_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/python/pythonEngine.h",
+        "../../../jarvisAgent/application/python/pythonEngine.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/python/pythonEngine.h",
+          "../../../jarvisAgent/application/python/pythonEngine.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_session_fileWriter_h": {
+      "id": "doc_application_session_fileWriter_h",
+      "type": "ai_call",
+      "label": "Docu: application/session/fileWriter.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/14_doc_application_session_fileWriter_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/session/fileWriter.h",
+        "../../../jarvisAgent/application/session/fileWriter.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/session/fileWriter.h",
+          "../../../jarvisAgent/application/session/fileWriter.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_session_sessionManager_h": {
+      "id": "doc_application_session_sessionManager_h",
+      "type": "ai_call",
+      "label": "Docu: application/session/sessionManager.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/15_doc_application_session_sessionManager_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/session/sessionManager.h",
+        "../../../jarvisAgent/application/session/sessionManager.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/session/sessionManager.h",
+          "../../../jarvisAgent/application/session/sessionManager.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_task_carMaintenanceTask_h": {
+      "id": "doc_application_task_carMaintenanceTask_h",
+      "type": "ai_call",
+      "label": "Docu: application/task/carMaintenanceTask.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/16_doc_application_task_carMaintenanceTask_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/task/carMaintenanceTask.h",
+        "../../../jarvisAgent/application/task/carMaintenanceTask.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/task/carMaintenanceTask.h",
+          "../../../jarvisAgent/application/task/carMaintenanceTask.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_task_internalTaskRegistry_h": {
+      "id": "doc_application_task_internalTaskRegistry_h",
+      "type": "ai_call",
+      "label": "Docu: application/task/internalTaskRegistry.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/17_doc_application_task_internalTaskRegistry_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/task/internalTaskRegistry.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/task/internalTaskRegistry.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_task_taskBase_h": {
+      "id": "doc_application_task_taskBase_h",
+      "type": "ai_call",
+      "label": "Docu: application/task/taskBase.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/18_doc_application_task_taskBase_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/task/taskBase.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/task/taskBase.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_web_chatMessages_h": {
+      "id": "doc_application_web_chatMessages_h",
+      "type": "ai_call",
+      "label": "Docu: application/web/chatMessages.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/19_doc_application_web_chatMessages_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/web/chatMessages.h",
+        "../../../jarvisAgent/application/web/chatMessages.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/web/chatMessages.h",
+          "../../../jarvisAgent/application/web/chatMessages.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_web_webServer_h": {
+      "id": "doc_application_web_webServer_h",
+      "type": "ai_call",
+      "label": "Docu: application/web/webServer.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/20_doc_application_web_webServer_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/web/webServer.h",
+        "../../../jarvisAgent/application/web/webServer.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/web/webServer.h",
+          "../../../jarvisAgent/application/web/webServer.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_aiCallTaskExecutor_h": {
+      "id": "doc_application_workflow_aiCallTaskExecutor_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/aiCallTaskExecutor.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/21_doc_application_workflow_aiCallTaskExecutor_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/aiCallTaskExecutor.h",
+        "../../../jarvisAgent/application/workflow/aiCallTaskExecutor.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/aiCallTaskExecutor.h",
+          "../../../jarvisAgent/application/workflow/aiCallTaskExecutor.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_aiRequestPool_h": {
+      "id": "doc_application_workflow_aiRequestPool_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/aiRequestPool.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/22_doc_application_workflow_aiRequestPool_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/aiRequestPool.h",
+        "../../../jarvisAgent/application/workflow/aiRequestPool.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/aiRequestPool.h",
+          "../../../jarvisAgent/application/workflow/aiRequestPool.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_dataflowResolver_h": {
+      "id": "doc_application_workflow_dataflowResolver_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/dataflowResolver.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/23_doc_application_workflow_dataflowResolver_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/dataflowResolver.h",
+        "../../../jarvisAgent/application/workflow/dataflowResolver.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/dataflowResolver.h",
+          "../../../jarvisAgent/application/workflow/dataflowResolver.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_internalTaskExecutor_h": {
+      "id": "doc_application_workflow_internalTaskExecutor_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/internalTaskExecutor.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/24_doc_application_workflow_internalTaskExecutor_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/internalTaskExecutor.h",
+        "../../../jarvisAgent/application/workflow/internalTaskExecutor.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/internalTaskExecutor.h",
+          "../../../jarvisAgent/application/workflow/internalTaskExecutor.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_pythonTaskExecutor_h": {
+      "id": "doc_application_workflow_pythonTaskExecutor_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/pythonTaskExecutor.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/25_doc_application_workflow_pythonTaskExecutor_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/pythonTaskExecutor.h",
+        "../../../jarvisAgent/application/workflow/pythonTaskExecutor.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/pythonTaskExecutor.h",
+          "../../../jarvisAgent/application/workflow/pythonTaskExecutor.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_shellTaskExecutor_h": {
+      "id": "doc_application_workflow_shellTaskExecutor_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/shellTaskExecutor.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/26_doc_application_workflow_shellTaskExecutor_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/shellTaskExecutor.h",
+        "../../../jarvisAgent/application/workflow/shellTaskExecutor.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/shellTaskExecutor.h",
+          "../../../jarvisAgent/application/workflow/shellTaskExecutor.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_taskExecutor_h": {
+      "id": "doc_application_workflow_taskExecutor_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/taskExecutor.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/27_doc_application_workflow_taskExecutor_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/taskExecutor.h",
+        "../../../jarvisAgent/application/workflow/taskExecutor.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/taskExecutor.h",
+          "../../../jarvisAgent/application/workflow/taskExecutor.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_taskExecutorRegistry_h": {
+      "id": "doc_application_workflow_taskExecutorRegistry_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/taskExecutorRegistry.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/28_doc_application_workflow_taskExecutorRegistry_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/taskExecutorRegistry.h",
+        "../../../jarvisAgent/application/workflow/taskExecutorRegistry.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/taskExecutorRegistry.h",
+          "../../../jarvisAgent/application/workflow/taskExecutorRegistry.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_taskFreshnessChecker_h": {
+      "id": "doc_application_workflow_taskFreshnessChecker_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/taskFreshnessChecker.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/29_doc_application_workflow_taskFreshnessChecker_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/taskFreshnessChecker.h",
+        "../../../jarvisAgent/application/workflow/taskFreshnessChecker.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/taskFreshnessChecker.h",
+          "../../../jarvisAgent/application/workflow/taskFreshnessChecker.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_triggerEngine_h": {
+      "id": "doc_application_workflow_triggerEngine_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/triggerEngine.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/30_doc_application_workflow_triggerEngine_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/triggerEngine.h",
+        "../../../jarvisAgent/application/workflow/triggerEngine.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/triggerEngine.h",
+          "../../../jarvisAgent/application/workflow/triggerEngine.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowDataflow_h": {
+      "id": "doc_application_workflow_workflowDataflow_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowDataflow.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/31_doc_application_workflow_workflowDataflow_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowDataflow.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowDataflow.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowJsonParserDetails_h": {
+      "id": "doc_application_workflow_workflowJsonParserDetails_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowJsonParserDetails.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/32_doc_application_workflow_workflowJsonParserDetails_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowJsonParserDetails.h",
+        "../../../jarvisAgent/application/workflow/workflowJsonParserDetails.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowJsonParserDetails.h",
+          "../../../jarvisAgent/application/workflow/workflowJsonParserDetails.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowJsonParser_h": {
+      "id": "doc_application_workflow_workflowJsonParser_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowJsonParser.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/33_doc_application_workflow_workflowJsonParser_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowJsonParser.h",
+        "../../../jarvisAgent/application/workflow/workflowJsonParser.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowJsonParser.h",
+          "../../../jarvisAgent/application/workflow/workflowJsonParser.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowOrchestrator_h": {
+      "id": "doc_application_workflow_workflowOrchestrator_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowOrchestrator.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/34_doc_application_workflow_workflowOrchestrator_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowOrchestrator.h",
+        "../../../jarvisAgent/application/workflow/workflowOrchestrator.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowOrchestrator.h",
+          "../../../jarvisAgent/application/workflow/workflowOrchestrator.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowRegistry_h": {
+      "id": "doc_application_workflow_workflowRegistry_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowRegistry.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/35_doc_application_workflow_workflowRegistry_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowRegistry.h",
+        "../../../jarvisAgent/application/workflow/workflowRegistry.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowRegistry.h",
+          "../../../jarvisAgent/application/workflow/workflowRegistry.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowRuntimeManager_h": {
+      "id": "doc_application_workflow_workflowRuntimeManager_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowRuntimeManager.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/36_doc_application_workflow_workflowRuntimeManager_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowRuntimeManager.h",
+        "../../../jarvisAgent/application/workflow/workflowRuntimeManager.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowRuntimeManager.h",
+          "../../../jarvisAgent/application/workflow/workflowRuntimeManager.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowTriggerBinder_h": {
+      "id": "doc_application_workflow_workflowTriggerBinder_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowTriggerBinder.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/37_doc_application_workflow_workflowTriggerBinder_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowTriggerBinder.h",
+        "../../../jarvisAgent/application/workflow/workflowTriggerBinder.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowTriggerBinder.h",
+          "../../../jarvisAgent/application/workflow/workflowTriggerBinder.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowTypes_h": {
+      "id": "doc_application_workflow_workflowTypes_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowTypes.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/38_doc_application_workflow_workflowTypes_h",
+      "file_inputs": [
+        "../../../jarvisAgent/application/workflow/workflowTypes.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/application/workflow/workflowTypes.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_auxiliary_file_h": {
+      "id": "doc_engine_auxiliary_file_h",
+      "type": "ai_call",
+      "label": "Docu: engine/auxiliary/file.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/39_doc_engine_auxiliary_file_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/auxiliary/file.h",
+        "../../../jarvisAgent/engine/auxiliary/file.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/auxiliary/file.h",
+          "../../../jarvisAgent/engine/auxiliary/file.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_auxiliary_threadPool_h": {
+      "id": "doc_engine_auxiliary_threadPool_h",
+      "type": "ai_call",
+      "label": "Docu: engine/auxiliary/threadPool.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/40_doc_engine_auxiliary_threadPool_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/auxiliary/threadPool.h",
+        "../../../jarvisAgent/engine/auxiliary/threadPool.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/auxiliary/threadPool.h",
+          "../../../jarvisAgent/engine/auxiliary/threadPool.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_core_h": {
+      "id": "doc_engine_core_h",
+      "type": "ai_call",
+      "label": "Docu: engine/core.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/41_doc_engine_core_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/core.h",
+        "../../../jarvisAgent/engine/core.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/core.h",
+          "../../../jarvisAgent/engine/core.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_curlWrapper_curlManager_h": {
+      "id": "doc_engine_curlWrapper_curlManager_h",
+      "type": "ai_call",
+      "label": "Docu: engine/curlWrapper/curlManager.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/42_doc_engine_curlWrapper_curlManager_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/curlWrapper/curlManager.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/curlWrapper/curlManager.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_curlWrapper_curlWrapper_h": {
+      "id": "doc_engine_curlWrapper_curlWrapper_h",
+      "type": "ai_call",
+      "label": "Docu: engine/curlWrapper/curlWrapper.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/43_doc_engine_curlWrapper_curlWrapper_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/curlWrapper/curlWrapper.h",
+        "../../../jarvisAgent/engine/curlWrapper/curlWrapper.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/curlWrapper/curlWrapper.h",
+          "../../../jarvisAgent/engine/curlWrapper/curlWrapper.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_engine_h": {
+      "id": "doc_engine_engine_h",
+      "type": "ai_call",
+      "label": "Docu: engine/engine.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/44_doc_engine_engine_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/engine.h",
+        "../../../jarvisAgent/engine/engine.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/engine.h",
+          "../../../jarvisAgent/engine/engine.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_applicationEvent_h": {
+      "id": "doc_engine_event_applicationEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/applicationEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/45_doc_engine_event_applicationEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/applicationEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/applicationEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_engineEvent_h": {
+      "id": "doc_engine_event_engineEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/engineEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/46_doc_engine_event_engineEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/engineEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/engineEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_event_h": {
+      "id": "doc_engine_event_event_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/event.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/47_doc_engine_event_event_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/event.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/event.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_eventQueue_h": {
+      "id": "doc_engine_event_eventQueue_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/eventQueue.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/48_doc_engine_event_eventQueue_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/eventQueue.h",
+        "../../../jarvisAgent/engine/event/eventQueue.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/eventQueue.h",
+          "../../../jarvisAgent/engine/event/eventQueue.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_events_h": {
+      "id": "doc_engine_event_events_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/events.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/49_doc_engine_event_events_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/events.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/events.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_filesystemEvent_h": {
+      "id": "doc_engine_event_filesystemEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/filesystemEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/50_doc_engine_event_filesystemEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/filesystemEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/filesystemEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_keyboardEvent_h": {
+      "id": "doc_engine_event_keyboardEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/keyboardEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/51_doc_engine_event_keyboardEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/keyboardEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/keyboardEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_pythonErrorEvent_h": {
+      "id": "doc_engine_event_pythonErrorEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/pythonErrorEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/52_doc_engine_event_pythonErrorEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/pythonErrorEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/pythonErrorEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_event_timerEvent_h": {
+      "id": "doc_engine_event_timerEvent_h",
+      "type": "ai_call",
+      "label": "Docu: engine/event/timerEvent.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/53_doc_engine_event_timerEvent_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/event/timerEvent.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/event/timerEvent.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_input_keyboardInput_h": {
+      "id": "doc_engine_input_keyboardInput_h",
+      "type": "ai_call",
+      "label": "Docu: engine/input/keyboardInput.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/54_doc_engine_input_keyboardInput_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/input/keyboardInput.h",
+        "../../../jarvisAgent/engine/input/keyboardInput.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/input/keyboardInput.h",
+          "../../../jarvisAgent/engine/input/keyboardInput.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_json_configChecker_h": {
+      "id": "doc_engine_json_configChecker_h",
+      "type": "ai_call",
+      "label": "Docu: engine/json/configChecker.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/55_doc_engine_json_configChecker_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/json/configChecker.h",
+        "../../../jarvisAgent/engine/json/configChecker.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/json/configChecker.h",
+          "../../../jarvisAgent/engine/json/configChecker.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_json_configParser_h": {
+      "id": "doc_engine_json_configParser_h",
+      "type": "ai_call",
+      "label": "Docu: engine/json/configParser.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/56_doc_engine_json_configParser_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/json/configParser.h",
+        "../../../jarvisAgent/engine/json/configParser.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/json/configParser.h",
+          "../../../jarvisAgent/engine/json/configParser.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_json_jsonHelper_h": {
+      "id": "doc_engine_json_jsonHelper_h",
+      "type": "ai_call",
+      "label": "Docu: engine/json/jsonHelper.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/57_doc_engine_json_jsonHelper_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/json/jsonHelper.h",
+        "../../../jarvisAgent/engine/json/jsonHelper.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/json/jsonHelper.h",
+          "../../../jarvisAgent/engine/json/jsonHelper.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_log_log_h": {
+      "id": "doc_engine_log_log_h",
+      "type": "ai_call",
+      "label": "Docu: engine/log/log.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/58_doc_engine_log_log_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/log/log.h",
+        "../../../jarvisAgent/engine/log/log.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/log/log.h",
+          "../../../jarvisAgent/engine/log/log.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_log_terminalLogStreamBuf_h": {
+      "id": "doc_engine_log_terminalLogStreamBuf_h",
+      "type": "ai_call",
+      "label": "Docu: engine/log/terminalLogStreamBuf.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/59_doc_engine_log_terminalLogStreamBuf_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/log/terminalLogStreamBuf.h"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/log/terminalLogStreamBuf.h"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_engine_log_terminalManager_h": {
+      "id": "doc_engine_log_terminalManager_h",
+      "type": "ai_call",
+      "label": "Docu: engine/log/terminalManager.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/60_doc_engine_log_terminalManager_h",
+      "file_inputs": [
+        "../../../jarvisAgent/engine/log/terminalManager.h",
+        "../../../jarvisAgent/engine/log/terminalManager.cpp"
+      ],
+      "file_outputs": [
+        "docu.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../jarvisAgent/engine/log/terminalManager.h",
+          "../../../jarvisAgent/engine/log/terminalManager.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "combineDocumentation": {
+      "id": "combineDocumentation",
+      "type": "python",
+      "label": "Combine generated class docs",
+      "doc": "Generates a single combined Markdown document with hyperlinks and folder-structured TOC.",
+      "mode": "single",
+      "depends_on": [
+        "doc_application_application_h",
+        "doc_application_file_fileCategorizer_h",
+        "doc_application_file_fileCategory_h",
+        "doc_application_file_fileWatcher_h",
+        "doc_application_file_probUtils_h",
+        "doc_application_file_trackedFile_h",
+        "doc_application_jarvisAgent_h",
+        "doc_application_json_jsonObjectParser_h",
+        "doc_application_json_replyParserAPI1_h",
+        "doc_application_json_replyParserAPI2_h",
+        "doc_application_json_replyParser_h",
+        "doc_application_log_statusRenderer_h",
+        "doc_application_python_pythonEngine_h",
+        "doc_application_session_fileWriter_h",
+        "doc_application_session_sessionManager_h",
+        "doc_application_task_carMaintenanceTask_h",
+        "doc_application_task_internalTaskRegistry_h",
+        "doc_application_task_taskBase_h",
+        "doc_application_web_chatMessages_h",
+        "doc_application_web_webServer_h",
+        "doc_application_workflow_aiCallTaskExecutor_h",
+        "doc_application_workflow_aiRequestPool_h",
+        "doc_application_workflow_dataflowResolver_h",
+        "doc_application_workflow_internalTaskExecutor_h",
+        "doc_application_workflow_pythonTaskExecutor_h",
+        "doc_application_workflow_shellTaskExecutor_h",
+        "doc_application_workflow_taskExecutor_h",
+        "doc_application_workflow_taskExecutorRegistry_h",
+        "doc_application_workflow_taskFreshnessChecker_h",
+        "doc_application_workflow_triggerEngine_h",
+        "doc_application_workflow_workflowDataflow_h",
+        "doc_application_workflow_workflowJsonParserDetails_h",
+        "doc_application_workflow_workflowJsonParser_h",
+        "doc_application_workflow_workflowOrchestrator_h",
+        "doc_application_workflow_workflowRegistry_h",
+        "doc_application_workflow_workflowRuntimeManager_h",
+        "doc_application_workflow_workflowTriggerBinder_h",
+        "doc_application_workflow_workflowTypes_h",
+        "doc_engine_auxiliary_file_h",
+        "doc_engine_auxiliary_threadPool_h",
+        "doc_engine_core_h",
+        "doc_engine_curlWrapper_curlManager_h",
+        "doc_engine_curlWrapper_curlWrapper_h",
+        "doc_engine_engine_h",
+        "doc_engine_event_applicationEvent_h",
+        "doc_engine_event_engineEvent_h",
+        "doc_engine_event_event_h",
+        "doc_engine_event_eventQueue_h",
+        "doc_engine_event_events_h",
+        "doc_engine_event_filesystemEvent_h",
+        "doc_engine_event_keyboardEvent_h",
+        "doc_engine_event_pythonErrorEvent_h",
+        "doc_engine_event_timerEvent_h",
+        "doc_engine_input_keyboardInput_h",
+        "doc_engine_json_configChecker_h",
+        "doc_engine_json_configParser_h",
+        "doc_engine_json_jsonHelper_h",
+        "doc_engine_log_log_h",
+        "doc_engine_log_terminalLogStreamBuf_h",
+        "doc_engine_log_terminalManager_h"
+      ],
+      "working_directory": "../workflows/jarvisCppDocu/61_combineDocumentation",
+      "file_inputs": [
+        "../../../queue/jarvisCppDocu"
+      ],
+      "file_outputs": [
+        "combinedDocumentation.md"
+      ],
+      "params": {
+        "module": "combineDocumentation",
+        "function": "BuildCombinedDocumentation"
+      },
+      "inputs": {
+        "docsDirectory": {
+          "type": "string",
+          "required": false
+        },
+        "context": {
+          "type": "object",
+          "required": false
+        }
+      }
+    }
+  }
+}
