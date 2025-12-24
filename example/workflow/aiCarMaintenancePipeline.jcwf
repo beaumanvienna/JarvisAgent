@@ -131,6 +131,11 @@
       "file_outputs": [
         "answer.zip"
       ],
+      "outputs": {
+        "archive_path": {
+          "type": "string"
+        }
+      },
       "params": {
         "command": "scripts/zipTool.sh",
         "args": [

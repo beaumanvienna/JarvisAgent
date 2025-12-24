@@ -29,8 +29,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    fs::path ResolveWorkingDirectory(AIAssistant::WorkflowDefinition const& workflowDefinition,
-                                     AIAssistant::TaskDef const& taskDefinition)
+    [[maybe_unused]] fs::path ResolveWorkingDirectory(AIAssistant::WorkflowDefinition const& workflowDefinition,
+                                                      AIAssistant::TaskDef const& taskDefinition)
     {
         fs::path workflowBaseDirectory = workflowDefinition.m_WorkflowBaseDirectory;
 
@@ -67,7 +67,7 @@ namespace
         return taskWorkingDirectory;
     }
 
-    bool HasPathPrefix(fs::path const& fullPath, fs::path const& prefixPath)
+    [[maybe_unused]] bool HasPathPrefix(fs::path const& fullPath, fs::path const& prefixPath)
     {
         if (prefixPath.empty())
         {
@@ -109,24 +109,6 @@ namespace AIAssistant
 
         TaskDef const& taskDefinition = definitionIterator->second;
 
-        fs::path const taskWorkingDirectory = ResolveWorkingDirectory(workflowDefinition, taskDefinition);
-
-        auto resolveTaskScopedPath = [&](fs::path const& candidatePath) -> fs::path
-        {
-            fs::path const normalizedCandidatePath = candidatePath.lexically_normal();
-            if (!normalizedCandidatePath.is_relative() || taskWorkingDirectory.empty())
-            {
-                return normalizedCandidatePath;
-            }
-
-            if (HasPathPrefix(normalizedCandidatePath, taskWorkingDirectory))
-            {
-                return normalizedCandidatePath;
-            }
-
-            return (taskWorkingDirectory / normalizedCandidatePath).lexically_normal();
-        };
-
         std::error_code errorCode;
 
         // ---------------------------------------------------------
@@ -136,7 +118,7 @@ namespace AIAssistant
 
         for (fs::path const& inputPath : resolvedPaths.m_InputPaths)
         {
-            fs::path const resolvedInputPath = resolveTaskScopedPath(inputPath);
+            fs::path const resolvedInputPath = inputPath.lexically_normal();
             if (!fs::exists(resolvedInputPath, errorCode))
             {
                 // Missing input ⇒ not up to date.
@@ -158,13 +140,18 @@ namespace AIAssistant
         std::unordered_set<std::string> visitedTasks;
         std::vector<fs::file_time_type> upstreamTimes;
 
-        if (!CollectUpstreamOutputTimes(workflowDefinition, taskId, visitedTasks, upstreamTimes, resolveOutputPaths))
+        // Collect timestamps for all upstream outputs (transitively).
+        // Upstream means: dependencies of this task (not the task itself).
+        for (std::string const& dependencyId : taskDefinition.m_DependsOn)
         {
-            // If upstream outputs are missing or unreadable, we err on the
-            // side of *not* considering this task up to date.
-            return false;
+            if (!CollectUpstreamOutputTimes(workflowDefinition, dependencyId, visitedTasks, upstreamTimes,
+                                            resolveOutputPaths))
+            {
+                // If upstream outputs are missing or unreadable, we err on the
+                // side of *not* considering this task up to date.
+                return false;
+            }
         }
-
         if (!upstreamTimes.empty())
         {
             inputTimes.insert(inputTimes.end(), upstreamTimes.begin(), upstreamTimes.end());
@@ -186,7 +173,7 @@ namespace AIAssistant
 
         for (fs::path const& outputPath : resolvedPaths.m_OutputPaths)
         {
-            fs::path const resolvedOutputPath = resolveTaskScopedPath(outputPath);
+            fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
                 // An output is missing ⇒ not up to date.
@@ -237,24 +224,6 @@ namespace AIAssistant
 
         TaskDef const& taskDefinition = definitionIterator->second;
 
-        fs::path const taskWorkingDirectory = ResolveWorkingDirectory(workflowDefinition, taskDefinition);
-
-        auto resolveTaskScopedPath = [&](fs::path const& candidatePath) -> fs::path
-        {
-            fs::path const normalizedCandidatePath = candidatePath.lexically_normal();
-            if (!normalizedCandidatePath.is_relative() || taskWorkingDirectory.empty())
-            {
-                return normalizedCandidatePath;
-            }
-
-            if (HasPathPrefix(normalizedCandidatePath, taskWorkingDirectory))
-            {
-                return normalizedCandidatePath;
-            }
-
-            return (taskWorkingDirectory / normalizedCandidatePath).lexically_normal();
-        };
-
         // Recurse into dependencies first (transitive closure).
         for (std::string const& dependencyId : taskDefinition.m_DependsOn)
         {
@@ -275,7 +244,7 @@ namespace AIAssistant
 
         for (fs::path const& outputPath : outputPaths)
         {
-            fs::path const resolvedOutputPath = resolveTaskScopedPath(outputPath);
+            fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
                 return false;
