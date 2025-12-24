@@ -174,24 +174,24 @@ It also validates that required inputs exist and logs errors when resolution fai
 
 ```mermaid
 flowchart TD
-  D0[ResolveInputsForTask] --> D1[Start with empty resolvedInputs]
-  D1 --> D2[For each input slot declared in TaskDefinition]
-  D2 --> D3{Has dataflow edge feeding this input?}
-  D3 -- yes --> D4[Lookup upstream task state]
-  D4 --> D5{Upstream output exists?}
-  D5 -- yes --> D6[Copy value into resolvedInputs[inputName]]
-  D5 -- no --> D7[Log error: missing upstream output]
-  D3 -- no --> D8{Has explicit raw param/template?}
-  D8 -- yes --> D9[Expand templates -> resolvedInputs]
-  D8 -- no --> D10{Is input required?}
-  D10 -- yes --> D11[Log error: missing required input]
-  D10 -- no --> D12[Leave unset / optional]
+  D0["ResolveInputsForTask"] --> D1["Start with empty resolvedInputs"]
+  D1 --> D2["For each input slot declared in TaskDefinition"]
+  D2 --> D3{"Has dataflow edge feeding this input?"}
+  D3 -- yes --> D4["Lookup upstream task state"]
+  D4 --> D5{"Upstream output exists?"}
+  D5 -- yes --> D6["Copy value into resolvedInputs[inputName]"]
+  D5 -- no --> D7["Log error: missing upstream output"]
+  D3 -- no --> D8{"Has explicit raw param/template?"}
+  D8 -- yes --> D9["Expand templates -> resolvedInputs"]
+  D8 -- no --> D10{"Is input required?"}
+  D10 -- yes --> D11["Log error: missing required input"]
+  D10 -- no --> D12["Leave unset / optional"]
   D6 --> D2
   D7 --> D2
   D9 --> D2
   D11 --> D2
   D12 --> D2
-  D2 --> D13[Return resolvedInputs (or failure)]
+  D2 --> D13["Return resolvedInputs (or failure)"]
 ```
 
 ---
@@ -202,13 +202,34 @@ The AI car maintenance example is a straight pipeline (AI → internal → AI �
 
 ```mermaid
 flowchart TD
-  T1[classifyQuestion (ai_call)] --> T2[buildManual (internal)]
-  T2 --> T3[answerWithManual (ai_call)]
-  T3 --> T4[zipAnswer (shell)]
-  T4 --> T5[printZipInfo (python)]
+  %% Stage 1: classify
+  Q["message.txt (user question)"] --> T1["classifyQuestion (ai_call)"]
+  T1 --> C["classification.output.txt"]
+
+  %% Stage 2: build manual (internal branch on classification)
+  C --> D{"classification == 'engine'?"}
+  D -- yes --> M1["Select engine manual"]
+  D -- no --> E{"classification == 'tires'?"}
+  E -- yes --> M2["Select tires manual"]
+  E -- no --> M3["Select rephrase guidance"]
+
+  M1 --> T2["buildManual (internal)"]
+  M2 --> T2
+  M3 --> T2
+  T2 --> MAN["manual.txt"]
+
+  %% Stage 3: answer (uses selected manual)
+  MAN --> T3["answerWithManual (ai_call)"]
+  Q --> T3
+  T3 --> AOUT["answer.output.txt"]
+
+  %% Stage 4: zip + python info
+  AOUT --> T4["zipAnswer (shell)"]
+  T4 --> ZIP["answer.zip"]
+  ZIP --> T5["printZipInfo (python)"]
 
   %% dataflow edge (explicit)
-  T4 -- archive_path --> T5
+  T4 -->|archive_path| T5
 ```
 
 In this workflow:
@@ -230,15 +251,15 @@ AI-call tasks generate a set of files in the **queue** directory per task run. T
 
 ```mermaid
 flowchart LR
-  A[TaskDefinition (ai_call)] --> B[AiCallTaskExecutor]
-  B --> C[Write STNG_*.txt]
-  B --> D[Write TASK_*.txt]
-  B --> E[Write CNTX_*.txt]
-  B --> F[Write PROB_<idx>_<ts>.txt]
-  F --> G[Submit async request -> AiRequestPool]
-  G --> H[Completion arrives]
-  H --> I[Write PROB_<idx>_<ts>.output.txt]
-  I --> J[Write stable workflow output file]
+  A["TaskDefinition (ai_call)"] --> B["AiCallTaskExecutor"]
+  B --> C["Write STNG_*.txt"]
+  B --> D["Write TASK_*.txt"]
+  B --> E["Write CNTX_*.txt"]
+  B --> F["Write PROB_{idx}_{timestamp}.txt"]
+  F --> G["Submit async request -> AiRequestPool"]
+  G --> H["Completion arrives"]
+  H --> I["Write PROB_{idx}_{timestamp}.output.txt"]
+  I --> J["Write stable workflow output file"]
 ```
 
 ---
