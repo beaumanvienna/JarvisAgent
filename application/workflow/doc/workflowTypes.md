@@ -34,6 +34,7 @@ Represents the state of a task instance:
 - **Skipped**: Task was skipped due to conditions.
 - **Succeeded**: Task completed successfully.
 - **Failed**: Task encountered an error during execution.
+- **WaitingExternal**: Task is waiting for filesystem-driven external completion (e.g. ai_call).
 
 ### WorkflowRunState
 Represents the state of a workflow run:
@@ -59,11 +60,18 @@ Describes the environment for tasks:
 - **m_AssistantId**: ID for the AI assistant environment.
 - **m_Variables**: Environment variables for the task.
 
+### QueueFileRef
+Represents a queue file reference used by `queue_binding` entries.
+- **m_Path**: Path to the referenced file.
+- **m_Content**: Inline file content (when provided).
+- **m_HasInlineContent**: Indicates whether `m_Content` is populated.
+
 ### QueueBinding
 Specifies files related to task execution:
 - **m_StngFiles**: STNG settings files.
 - **m_TaskFiles**: TASK instruction files.
 - **m_CntxFiles**: CNTX context files.
+- **m_ProbFiles**: PROB problem/request files.
 
 ### WorkflowTrigger
 Represents a trigger with its type and parameters:
@@ -88,6 +96,7 @@ Represents the static configuration of a task:
 - **m_Label**: Human-readable label for the task.
 - **m_Doc**: Documentation string for the task.
 - **m_DependsOn**: List of task IDs that this task depends on.
+- **m_WorkingDirectory**: Task working directory (JCWF: `working_directory`).
 - **m_FileInputs**: List of input files.
 - **m_FileOutputs**: List of output files.
 - **m_Environment**: Environment configuration for the task.
@@ -105,7 +114,8 @@ Describes the overall workflow:
 - **m_Label**: Human-readable label for the workflow.
 - **m_Doc**: Documentation string for the workflow.
 - **m_WorkflowFilePath**: Workflow File Path: filesystem path of the loaded .jcwf file (set by the loader).
-- **m_WorkflowBaseDirectory**: Workflow Base Directory: directory that contains the loaded .jcwf file (set by the loader).
+- **m_WorkflowFileDirectory**: Workflow File Directory: directory that contains the loaded .jcwf file (set by the loader).
+- **m_WorkflowBaseDirectory**: Workflow Base Directory: base directory used for resolving workflow-level relative paths (set by the loader).
 - **m_Triggers**: List of triggers for the workflow.
 - **m_Tasks**: Map of task definitions.
 - **m_Dataflows**: List of data flows.
@@ -122,6 +132,8 @@ Represents the runtime state of a task instance:
 - **m_OutputsJson**: Outputs produced by the executor.
 - **m_InputValues**: Resolved input values by logical slot name.
 - **m_OutputValues**: Produced output values by logical slot name.
+- **m_ExternalRequestId**: AI-call correlation request id (for event-driven completion).
+- **m_ExternalRequestTimestampNs**: AI-call correlation timestamp (nanoseconds).
 
 ### WorkflowRun
 Represents a workflow run:

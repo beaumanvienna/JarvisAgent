@@ -87,7 +87,7 @@ namespace AIAssistant
                                                        std::string& resolvedValueOut) const
     {
         // Each DataflowEdge is an alias for DataflowDef.
-        for (DataflowEdge const& dataflowEdge : workflowDefinition.m_Dataflows)
+        for (auto const& dataflowEdge : workflowDefinition.m_Dataflows)
         {
             if (dataflowEdge.m_ToTask != targetTaskId || dataflowEdge.m_ToInput != targetInputName)
             {

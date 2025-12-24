@@ -1156,42 +1156,6 @@
         ]
       }
     },
-    "doc_application_workflow_workflowDataflow_h": {
-      "id": "doc_application_workflow_workflowDataflow_h",
-      "type": "ai_call",
-      "label": "Docu: application/workflow/workflowDataflow.h",
-      "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/31_doc_application_workflow_workflowDataflow_h",
-      "file_inputs": [
-        "../../../jarvisAgent/application/workflow/workflowDataflow.h"
-      ],
-      "file_outputs": [
-        "docu.md"
-      ],
-      "queue_binding": {
-        "stng_files": [
-          {
-            "path": "STNG_docu.txt",
-            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
-          }
-        ],
-        "task_files": [
-          {
-            "path": "TASK_docu.txt",
-            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
-          }
-        ],
-        "cntx_files": [
-          "../../../jarvisAgent/application/workflow/workflowDataflow.h"
-        ],
-        "prob_files": [
-          {
-            "path": "PROB_docu.txt",
-            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
-          }
-        ]
-      }
-    },
     "doc_application_workflow_workflowJsonParserDetails_h": {
       "id": "doc_application_workflow_workflowJsonParserDetails_h",
       "type": "ai_call",
@@ -2309,7 +2273,6 @@
         "doc_application_workflow_taskExecutorRegistry_h",
         "doc_application_workflow_taskFreshnessChecker_h",
         "doc_application_workflow_triggerEngine_h",
-        "doc_application_workflow_workflowDataflow_h",
         "doc_application_workflow_workflowJsonParserDetails_h",
         "doc_application_workflow_workflowJsonParser_h",
         "doc_application_workflow_workflowOrchestrator_h",
