@@ -22,11 +22,56 @@ from typing import Dict, List, Optional, Tuple
 
 def _safe_read_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return _strip_outer_markdown_code_fence(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return _strip_outer_markdown_code_fence(path.read_text(encoding="utf-8", errors="replace"))
 
 
+
+
+def _strip_outer_markdown_code_fence(text: str) -> str:
+    """
+    Some AI outputs wrap the entire document in a fenced code block like:
+        ```markdown
+        ...markdown...
+        ```
+    When this combined doc is rendered, the markdown stays literal.
+    This helper removes a single outer fence if present.
+    """
+    lines = text.splitlines()
+
+    # Find first non-empty line
+    start_index = 0
+    while start_index < len(lines) and not lines[start_index].strip():
+        start_index += 1
+
+    if start_index >= len(lines):
+        return text
+
+    first = lines[start_index].strip().lower()
+    if not first.startswith("```"):
+        return text
+
+    # Accept common fence starters
+    if first not in ("```", "```markdown", "```md"):
+        # Still treat any ```<lang> as a wrapper if the closing fence exists
+        pass
+
+    # Find last non-empty line
+    end_index = len(lines) - 1
+    while end_index >= 0 and not lines[end_index].strip():
+        end_index -= 1
+
+    if end_index <= start_index:
+        return text
+
+    last = lines[end_index].strip()
+    if last != "```":
+        return text
+
+    # Strip exactly one outer wrapper
+    stripped_lines = lines[:start_index] + lines[start_index + 1 : end_index] + lines[end_index + 1 :]
+    return "\n".join(stripped_lines)
 def _derive_source_header_path_from_task_folder(task_folder_name: str) -> str:
     """
     folder name: doc_application_file_fileWatcher_h
