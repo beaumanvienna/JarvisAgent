@@ -211,7 +211,35 @@ namespace AIAssistant
             LOG_APP_ERROR("[python] Task '{}' is missing params JSON (module/function)", taskDefinition.m_Id);
         }
 
-        bool const ok =
+        
+        // Provide derived output paths as kwargs to the Python function.
+        // Our Python task functions commonly expect both input and output paths as parameters, but the engine only
+        // forwards m_InputValues. We therefore derive output slot values from file_outputs and pass them as inputs.
+        {
+            std::unordered_map<std::string, std::string> derivedOutputSlotMap;
+            BuildOutputSlotMap(taskDefinition, taskState, derivedOutputSlotMap);
+
+            for (auto const& outputPair : derivedOutputSlotMap)
+            {
+                if (taskState.m_InputValues.contains(outputPair.first))
+                {
+                    continue;
+                }
+
+                fs::path outputPath = fs::path(outputPair.second);
+                if (outputPath.is_relative())
+                {
+                    outputPath = taskWorkingDirectoryPath / outputPath;
+                }
+
+                std::string const resolvedOutputPath = outputPath.lexically_normal().string();
+                taskState.m_InputValues[outputPair.first] = resolvedOutputPath;
+
+                LOG_APP_INFO("[python] Derived output path for '{}' -> '{}'", outputPair.first, resolvedOutputPath);
+            }
+        }
+
+bool const ok =
             pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), taskState.m_InputValues,
                                               contextValues, pythonOutputs, errorMessage);
 

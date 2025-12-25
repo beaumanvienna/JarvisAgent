@@ -59,6 +59,12 @@
             "content": "engine code 244 -> prompt \"if code 244 \\\"engine temperature\\\" is active check if there is code 245 \\\"low cooling liquid\\\" present. if so floow the instructions there. if not check if the radiator is clogged. if so clean it and were done. if not, check if the cooling pump runs. if not check if the circuit breaker is in. if not check and fix wiring. put back in circuit breaker. check if cooling pump works now. if yes we're done. if not replace cooling pump.\""
           }
         ]
+      },
+      "outputs": {
+        "outputMdPath": {
+          "type": "string",
+          "required": true
+        }
       }
     },
     "aiCode250": {
@@ -99,6 +105,12 @@
             "content": "e.g. \"engine code 250\" means uneven tire wire. if code 250 is present then adjust the alignment of the wheels as per proceedure 5 from the tire manual."
           }
         ]
+      },
+      "outputs": {
+        "outputMdPath": {
+          "type": "string",
+          "required": true
+        }
       }
     },
     "aiCode301": {
@@ -139,6 +151,12 @@
             "content": "e.g. code 301 is present \"headlights light circut breaker tripped.\" If code 301 is present check the wiring of the headlights. if there is a short or faulty wiring then fix the wiring. then put circuit breaker back in and switch on the headlights. if the breaker does not trip again, we are done. if it trips again then disconnect left light and put circuit breaker back in. switch on lights. if circuit breakers stays in, replace left light. if breaker trips replace right light."
           }
         ]
+      },
+      "outputs": {
+        "outputMdPath": {
+          "type": "string",
+          "required": true
+        }
       }
     },
     "combineGuideMd": {
@@ -167,10 +185,6 @@
         "code301MdPath": {
           "type": "string",
           "required": true
-        },
-        "outputMdPath": {
-          "type": "string",
-          "required": true
         }
       },
       "file_inputs": [
@@ -180,7 +194,13 @@
       ],
       "file_outputs": [
         "engineTroubleshootingGuide.md"
-      ]
+      ],
+      "outputs": {
+        "outputMdPath": {
+          "type": "string",
+          "required": true
+        }
+      }
     },
     "convertGuidePdf": {
       "id": "convertGuidePdf",
@@ -198,10 +218,6 @@
         "inputMdPath": {
           "type": "string",
           "required": true
-        },
-        "outputPdfPath": {
-          "type": "string",
-          "required": true
         }
       },
       "file_inputs": [
@@ -209,7 +225,39 @@
       ],
       "file_outputs": [
         "Vehicle Troubleshooting Guide.pdf"
-      ]
+      ],
+      "outputs": {
+        "outputPdfPath": {
+          "type": "string",
+          "required": true
+        }
+      }
     }
-  }
+  },
+  "dataflow": [
+    {
+      "from_task": "aiCode244",
+      "from_output": "outputMdPath",
+      "to_task": "combineGuideMd",
+      "to_input": "code244MdPath"
+    },
+    {
+      "from_task": "aiCode250",
+      "from_output": "outputMdPath",
+      "to_task": "combineGuideMd",
+      "to_input": "code250MdPath"
+    },
+    {
+      "from_task": "aiCode301",
+      "from_output": "outputMdPath",
+      "to_task": "combineGuideMd",
+      "to_input": "code301MdPath"
+    },
+    {
+      "from_task": "combineGuideMd",
+      "from_output": "outputMdPath",
+      "to_task": "convertGuidePdf",
+      "to_input": "inputMdPath"
+    }
+  ]
 }
