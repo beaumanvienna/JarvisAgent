@@ -56,7 +56,7 @@
         "prob_files": [
           {
             "path": "PROB_code244.txt",
-            "content": "engine code 244 -> prompt \"if code 244 \\\"engine temperature\\\" is active check if there is code 245 \\\"low cooling liquid\\\" present. if so floow the instructions there. if not check if the radiator is clogged. if so clean it and were done. if not, check if the cooling pump runs. if not check if the circuit breaker is in. if not check and fix wiring. put back in circuit breaker. check if cooling pump works now. if yes we're done. if not replace cooling pump.\""
+            "content": "engine code 244 -> prompt if code 244 'engine temperature' is active check if there is code 245 'low cooling liquid' present. if so floow the instructions there. if not check if the radiator is clogged. if so clean it and were done. if not, check if the cooling pump runs. if not check if the circuit breaker is in. if not check and fix wiring. put back in circuit breaker. check if cooling pump works now. if yes we're done. if not replace cooling pump."
           }
         ]
       },
@@ -102,7 +102,7 @@
         "prob_files": [
           {
             "path": "PROB_code250.txt",
-            "content": "e.g. \"engine code 250\" means uneven tire wire. if code 250 is present then adjust the alignment of the wheels as per proceedure 5 from the tire manual."
+            "content": "e.g. engine code 250 'tire alignment' means uneven tire wire. if code 250 is present then adjust the alignment of the wheels as per proceedure 5 from the tire manual."
           }
         ]
       },
@@ -148,7 +148,7 @@
         "prob_files": [
           {
             "path": "PROB_code301.txt",
-            "content": "e.g. code 301 is present \"headlights light circut breaker tripped.\" If code 301 is present check the wiring of the headlights. if there is a short or faulty wiring then fix the wiring. then put circuit breaker back in and switch on the headlights. if the breaker does not trip again, we are done. if it trips again then disconnect left light and put circuit breaker back in. switch on lights. if circuit breakers stays in, replace left light. if breaker trips replace right light."
+            "content": "code 301 is present 'headlights light circut breaker tripped'. If code 301 is present check the wiring of the headlights. if there is a short or faulty wiring then fix the wiring. then put circuit breaker back in and switch on the headlights. if the breaker does not trip again, we are done. if it trips again then disconnect left light and put circuit breaker back in. switch on lights. if circuit breakers stays in, replace left light. if breaker trips replace right light."
           }
         ]
       },
@@ -204,34 +204,25 @@
     },
     "convertGuidePdf": {
       "id": "convertGuidePdf",
-      "type": "python",
+      "type": "shell",
       "label": "Convert guide MD -> PDF (md2pdf-mermaid)",
       "depends_on": [
         "combineGuideMd"
       ],
       "working_directory": "../workflows/vehicleTroubleshootingGuide/05_convertGuidePdf",
       "params": {
-        "module": "convertMarkdownToPdf",
-        "function": "convertMarkdownToPdf"
-      },
-      "inputs": {
-        "inputMdPath": {
-          "type": "string",
-          "required": true
-        }
+        "command": "scripts/convertGuidePdf.sh",
+        "args": [
+          "${input[0]}",
+          "${output[0]}"
+        ]
       },
       "file_inputs": [
         "../04_combineGuideMd/engineTroubleshootingGuide.md"
       ],
       "file_outputs": [
         "Vehicle Troubleshooting Guide.pdf"
-      ],
-      "outputs": {
-        "outputPdfPath": {
-          "type": "string",
-          "required": true
-        }
-      }
+      ]
     }
   },
   "dataflow": [
@@ -252,12 +243,6 @@
       "from_output": "outputMdPath",
       "to_task": "combineGuideMd",
       "to_input": "code301MdPath"
-    },
-    {
-      "from_task": "combineGuideMd",
-      "from_output": "outputMdPath",
-      "to_task": "convertGuidePdf",
-      "to_input": "inputMdPath"
     }
   ]
 }

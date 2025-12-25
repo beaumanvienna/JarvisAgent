@@ -4,8 +4,7 @@ set -euo pipefail
 # Files that are essential for debugging executors + registry +
 # orchestrator without blowing up the output.
 INCLUDE_PATTERNS=(
-    "../workflows/*"
-    "scripts/*.sh"
+    "../queue/vehicleTroubleshootingGuide/01_aiCode244/*"
 )
 
 WORKFLOW_DIR="."

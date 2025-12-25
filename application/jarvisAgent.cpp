@@ -116,8 +116,9 @@ namespace AIAssistant
         // Start all other subsystems
         // ---------------------------------------------------------
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
+        std::filesystem::path const absoluteQueuePath = std::filesystem::absolute(queuePath);
 
-        m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
+        m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, 100ms);
         m_FileWatcher->Start();
 
         m_WebServer = std::make_unique<WebServer>();

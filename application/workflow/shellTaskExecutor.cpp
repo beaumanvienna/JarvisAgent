@@ -338,22 +338,56 @@ namespace AIAssistant
         // For now we assume arguments are already validated as "safe".
         // We simply join them with spaces.
         // ------------------------------------------------------------
-        std::string JoinArgumentsForSystem(std::vector<std::string> const& arguments)
+        std::string QuoteForPosixShell(std::string const& value)
         {
-            std::string command;
+            std::string quoted;
+            quoted.reserve(value.size() + 2);
 
-            for (size_t argumentIndex = 0; argumentIndex < arguments.size(); ++argumentIndex)
+            quoted.push_back('\'');
+            for (char const character : value)
             {
-                command += arguments[argumentIndex];
-
-                if (argumentIndex + 1 < arguments.size())
+                if (character == '\'')
                 {
-                    command += " ";
+                    quoted.append("'\\''");
+                }
+                else
+                {
+                    quoted.push_back(character);
                 }
             }
-
-            return command;
+            quoted.push_back('\'');
+            return quoted;
         }
+
+        std::string JoinArgumentsForSystem(std::vector<std::string> const& arguments)
+        {
+            // NOTE:
+            // This is used to build a command line for /bin/sh -c via popen().
+            // If an argument contains whitespace, it must be quoted so it survives the shell.
+            std::ostringstream stringStream;
+            bool isFirst = true;
+            for (std::string const& argument : arguments)
+            {
+                if (!isFirst)
+                {
+                    stringStream << " ";
+                }
+
+                bool const hasWhitespace = argument.find_first_of(" \t\r\n") != std::string::npos;
+                if (hasWhitespace)
+                {
+                    stringStream << QuoteForPosixShell(argument);
+                }
+                else
+                {
+                    stringStream << argument;
+                }
+
+                isFirst = false;
+            }
+            return stringStream.str();
+        }
+
 
         // ------------------------------------------------------------
         // Scan raw args for the presence of any input/output macros.
@@ -403,19 +437,16 @@ namespace AIAssistant
         {
             std::scoped_lock<std::mutex> const lock(g_ShellTaskExecutorCurrentPathMutex);
 
-            std::error_code errorCode;
-            ScopedCurrentPath const scopedCurrentPath(workingDirectoryPath, errorCode);
-            if (errorCode)
-            {
-                LOG_APP_ERROR("[shell:{}] Failed to set current_path to '{}': {}", taskId, workingDirectoryPath.string(),
-                              errorCode.message());
-                return false;
-            }
-
             exitCodeOut = -1;
 
             // Redirect stderr into stdout so we capture both streams.
-            std::string const commandWithRedirect = command + " 2>&1";
+            // IMPORTANT:
+            // Do NOT change the process-wide current_path; other threads (for example the file watcher)
+            // rely on it. Instead, run the command inside a subshell that changes directory only for
+            // the spawned shell process.
+            std::string const commandWithRedirect =
+                "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + " 2>&1";
+
 
             FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
             if (pipe == nullptr)

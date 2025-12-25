@@ -777,6 +777,39 @@ Python interface expectations:
 
 Python tasks SHOULD avoid blocking the GIL unnecessarily (for example, use I/O-bound calls, async HTTP). Long-running CPU tasks MAY be done via separate processes if needed.
 
+#### 4.3.1 Python logging and subprocess output
+
+JarvisAgent embeds Python via `PythonEngine` and installs an in-process redirection for Python’s `sys.stdout` and `sys.stderr` so that Python output is routed through `JarvisRedirectPython(...)` into the ncurses terminal UI.
+
+That means **regular Python output is safe** (for example `print(...)`, and the standard `logging` module when configured to write to `sys.stderr`).
+
+However, **child processes** (anything started via `subprocess`, `os.system`, etc.) write to the **OS-level** stdout/stderr file descriptors by default and can bypass Python’s `sys.stdout`/`sys.stderr` redirection. If that output reaches the terminal directly, it can corrupt the ncurses UI.
+
+**Rule for Python task scripts:** If you invoke external tools, you MUST capture their stdout/stderr and forward it explicitly via Python (which is redirected by `PythonEngine`) or write it to files in the task working directory.
+
+Minimal example (capture + forward):
+
+```python
+import subprocess
+import sys
+
+completed_process = subprocess.run(
+    ["some_tool", "--flag"],
+    text=True,
+    capture_output=True,
+)
+
+if completed_process.stdout:
+    print(completed_process.stdout, end="")
+
+if completed_process.stderr:
+    print(completed_process.stderr, end="", file=sys.stderr)
+
+completed_process.check_returncode()
+```
+
+If you need streaming output (long-running tools), use `subprocess.Popen(..., stdout=PIPE, stderr=PIPE, text=True)` and forward line-by-line.
+
 ---
 
 ### 4.4 Web UI: Monitoring and Control

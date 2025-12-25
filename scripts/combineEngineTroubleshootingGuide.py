@@ -36,8 +36,8 @@ def buildEngineTroubleshootingGuide(
     outputLines.append("")
     outputLines.append("## introduction")
     outputLines.append(
-        "This troubleshooting guide is used to reoair the vehicle. "
-        "Usage: read out the engine codes and follow the troubleshooitng steps."
+        "This troubleshooting guide is used to repair the vehicle."
+        "Usage: read out the engine codes and follow the troubleshooting steps."
     )
     outputLines.append("")
 
