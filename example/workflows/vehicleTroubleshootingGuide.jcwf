@@ -1,0 +1,215 @@
+{
+  "version": "1.0",
+  "id": "vehicleTroubleshootingGuide",
+  "label": "Vehicle Troubleshooting Guide (CFG + PDF)",
+  "doc": "Generate Mermaid control-flow graphs for engine codes 244/250/301, combine into an MD guide, then convert to PDF via md2pdf-mermaid.",
+  "base_directory": ".",
+  "triggers": [
+    {
+      "type": "auto",
+      "id": "auto-run",
+      "enabled": true,
+      "params": {}
+    },
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {
+        "exposed_in_ui": true
+      }
+    }
+  ],
+  "tasks": {
+    "aiCode244": {
+      "id": "aiCode244",
+      "type": "ai_call",
+      "label": "AI: CFG for code 244",
+      "working_directory": "../queue/vehicleTroubleshootingGuide/01_aiCode244",
+      "file_outputs": [
+        "code244.output.md"
+      ],
+      "params": {
+        "provider": "${defaults.ai.provider}",
+        "model": "${defaults.ai.model}",
+        "mode": "one_shot"
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "succinct"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_generateCfgMermaidMd.txt",
+            "content": "Generate a control flow graph using Mermaid. Output MUST be Markdown containing exactly one ```mermaid``` flowchart diagram (no extra prose)."
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_needMermaidCfg.txt",
+            "content": "for a troubleshooting guide, a mermaid control graph is needed to show the troubleshooting steps"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_code244.txt",
+            "content": "engine code 244 -> prompt \"if code 244 \\\"engine temperature\\\" is active check if there is code 245 \\\"low cooling liquid\\\" present. if so floow the instructions there. if not check if the radiator is clogged. if so clean it and were done. if not, check if the cooling pump runs. if not check if the circuit breaker is in. if not check and fix wiring. put back in circuit breaker. check if cooling pump works now. if yes we're done. if not replace cooling pump.\""
+          }
+        ]
+      }
+    },
+    "aiCode250": {
+      "id": "aiCode250",
+      "type": "ai_call",
+      "label": "AI: CFG for code 250",
+      "working_directory": "../queue/vehicleTroubleshootingGuide/02_aiCode250",
+      "file_outputs": [
+        "code250.output.md"
+      ],
+      "params": {
+        "provider": "${defaults.ai.provider}",
+        "model": "${defaults.ai.model}",
+        "mode": "one_shot"
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "succinct"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_generateCfgMermaidMd.txt",
+            "content": "Generate a control flow graph using Mermaid. Output MUST be Markdown containing exactly one ```mermaid``` flowchart diagram (no extra prose)."
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_needMermaidCfg.txt",
+            "content": "for a troubleshooting guide, a mermaid control graph is needed to show the troubleshooting steps"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_code250.txt",
+            "content": "e.g. \"engine code 250\" means uneven tire wire. if code 250 is present then adjust the alignment of the wheels as per proceedure 5 from the tire manual."
+          }
+        ]
+      }
+    },
+    "aiCode301": {
+      "id": "aiCode301",
+      "type": "ai_call",
+      "label": "AI: CFG for code 301",
+      "working_directory": "../queue/vehicleTroubleshootingGuide/03_aiCode301",
+      "file_outputs": [
+        "code301.output.md"
+      ],
+      "params": {
+        "provider": "${defaults.ai.provider}",
+        "model": "${defaults.ai.model}",
+        "mode": "one_shot"
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "succinct"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_generateCfgMermaidMd.txt",
+            "content": "Generate a control flow graph using Mermaid. Output MUST be Markdown containing exactly one ```mermaid``` flowchart diagram (no extra prose)."
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_needMermaidCfg.txt",
+            "content": "for a troubleshooting guide, a mermaid control graph is needed to show the troubleshooting steps"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_code301.txt",
+            "content": "e.g. code 301 is present \"headlights light circut breaker tripped.\" If code 301 is present check the wiring of the headlights. if there is a short or faulty wiring then fix the wiring. then put circuit breaker back in and switch on the headlights. if the breaker does not trip again, we are done. if it trips again then disconnect left light and put circuit breaker back in. switch on lights. if circuit breakers stays in, replace left light. if breaker trips replace right light."
+          }
+        ]
+      }
+    },
+    "combineGuideMd": {
+      "id": "combineGuideMd",
+      "type": "python",
+      "label": "Combine CFG markdown into one guide",
+      "depends_on": [
+        "aiCode244",
+        "aiCode250",
+        "aiCode301"
+      ],
+      "working_directory": "../workflows/vehicleTroubleshootingGuide/04_combineGuideMd",
+      "params": {
+        "module": "combineEngineTroubleshootingGuide",
+        "function": "buildEngineTroubleshootingGuide"
+      },
+      "inputs": {
+        "code244MdPath": {
+          "type": "string",
+          "required": true
+        },
+        "code250MdPath": {
+          "type": "string",
+          "required": true
+        },
+        "code301MdPath": {
+          "type": "string",
+          "required": true
+        },
+        "outputMdPath": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "file_inputs": [
+        "../../../queue/vehicleTroubleshootingGuide/01_aiCode244/code244.output.md",
+        "../../../queue/vehicleTroubleshootingGuide/02_aiCode250/code250.output.md",
+        "../../../queue/vehicleTroubleshootingGuide/03_aiCode301/code301.output.md"
+      ],
+      "file_outputs": [
+        "engineTroubleshootingGuide.md"
+      ]
+    },
+    "convertGuidePdf": {
+      "id": "convertGuidePdf",
+      "type": "python",
+      "label": "Convert guide MD -> PDF (md2pdf-mermaid)",
+      "depends_on": [
+        "combineGuideMd"
+      ],
+      "working_directory": "../workflows/vehicleTroubleshootingGuide/05_convertGuidePdf",
+      "params": {
+        "module": "convertMarkdownToPdf",
+        "function": "convertMarkdownToPdf"
+      },
+      "inputs": {
+        "inputMdPath": {
+          "type": "string",
+          "required": true
+        },
+        "outputPdfPath": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "file_inputs": [
+        "../04_combineGuideMd/engineTroubleshootingGuide.md"
+      ],
+      "file_outputs": [
+        "Vehicle Troubleshooting Guide.pdf"
+      ]
+    }
+  }
+}

@@ -19,7 +19,7 @@ It loads a Python automation script, discovers lifecycle hooks, redirects Python
 - Dispatch tasks asynchronously using a dedicated worker thread and task queue.
 - Convert C++ events into Python dictionaries.
 - Guarantee safe GIL (Global Interpreter Lock) handling.
-- Cleanly shut down the interpreter and release all Python references.
+- Release Python references safely under the GIL (note: the current implementation does **not** call `Py_Finalize()`; the interpreter remains initialized for the process lifetime).
 
 ### High‑Level Operation
 
@@ -39,8 +39,14 @@ It loads a Python automation script, discovers lifecycle hooks, redirects Python
      }
      ```
 
-4. **Shutdown**
-   - Enqueues Python `OnShutdown()`.
+4. **Workflow task execution (`ExecuteWorkflowTask`)**
+   - Runs **synchronously on the calling thread** (not on the worker thread).
+   - Parses task params JSON for `module` + `function`.
+   - Calls the Python function with `inputValues` as keyword arguments.
+   - Optionally provides a `context` dict (see below).
+
+5. **Shutdown**
+   - Enqueues Python `OnShutdown()` (best-effort; see `Stop()` notes below).
    - Stops worker thread.
    - Releases Python references under GIL.
 
@@ -81,10 +87,10 @@ Below are the key member functions and the software requirements each one fulfil
 
 ---
 
-### **Initialize(std::string const& scriptPath)**  
+### **bool Initialize(std::string const& scriptPath)**  
 **Implements:**
-- Start CPython (`Py_Initialize`).
-- Redirect Python stdout/stderr to the JarvisAgent logger.
+- Start CPython (`Py_Initialize`). Returns `true` on success (or if already running), `false` on failure.
+- Redirect Python stdout/stderr to the JarvisAgent logger (implemented via `ctypes.CDLL(None)` calling `JarvisRedirectPython`).
 - Extract script directory + module name.
 - Add script folder to `sys.path`.
 - Import module using CPython API.
@@ -96,11 +102,11 @@ Below are the key member functions and the software requirements each one fulfil
 
 ### **Stop()**  
 **Implements:**
-- Enqueue Python `OnShutdown`.
-- Signal worker to stop.
-- Join worker thread.
-- Acquire GIL and safely decref all Python objects.
-- Reset engine state.
+- Enqueue Python `OnShutdown` **(best-effort)**.
+- Signal worker to stop and join worker thread.
+- Acquire GIL and safely `DECREF` Python objects.
+- Mark engine as not running.
+- Note: does **not** call `Py_Finalize()`.
 
 ---
 
@@ -117,6 +123,21 @@ Below are the key member functions and the software requirements each one fulfil
 **Implements:**
 - Package any C++ event into Python dictionary.
 - Enqueue a Python `OnEvent` task.
+
+---
+
+### **ExecuteWorkflowTask(TaskDef const& taskDefinition, ...)**
+**Implements:**
+- Runs a workflow task **synchronously on the calling thread** under the GIL.
+- Parses `taskDefinition.m_ParamsJson` (JSON) for string fields `module` and `function`.
+- Imports the module, resolves the callable, and invokes it with `inputValues` as keyword arguments.
+- If the task declares an input named `context`, a `context` dict is provided as a keyword argument.
+- If `context` is not declared but the first call fails with an error that looks like a missing `context`, the call is retried once with `context` attached.
+- The `context` dict contains the provided `contextValues` plus reserved keys:
+  - `_task_id`
+  - `_task_working_directory`
+- Treats a return value of `None` as success with no outputs.
+- If a dict is returned, outputs are extracted as UTF-8 strings into `outputValuesOut`.
 
 ---
 
@@ -171,13 +192,15 @@ Below are the key member functions and the software requirements each one fulfil
 ## Additional Notes
 
 ### Threading + GIL Safety
-- Only the worker thread runs Python code.
+- The worker thread runs Python lifecycle hooks (`OnStart`, `OnUpdate`, `OnEvent`, `OnShutdown`).
+- Workflow tasks (`ExecuteWorkflowTask`) run Python code **on the calling thread** (synchronously) under the GIL.
 - C++ threads may enqueue tasks at any time.
 - GIL is handled automatically using `PyGILState_Ensure()` / `PyGILState_Release()`.
 
 ### Error Handling
 - Any Python exception prints to stdout, which is redirected to JarvisAgent logs.
 - Missing hooks are explicitly logged but not treated as errors.
+- The C entry point `JarvisPyStatus(...)` can be called from Python code to emit a `PythonCrashedEvent` into the engine event queue.
 
 ### Output Redirection
 All Python `print()` output is captured and routed to:
