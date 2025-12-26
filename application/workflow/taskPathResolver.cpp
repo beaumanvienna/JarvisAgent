@@ -132,6 +132,35 @@ namespace AIAssistant
             }
         }
 
+
+        auto const hasInlineQueueContent = [&]() -> bool
+        {
+            auto const anyInline = [](std::vector<QueueFileRef> const& refs) -> bool
+            {
+                for (QueueFileRef const& ref : refs)
+                {
+                    if (ref.m_HasInlineContent)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            return anyInline(taskDefinition.m_QueueBinding.m_StngFiles) || anyInline(taskDefinition.m_QueueBinding.m_TaskFiles) ||
+                   anyInline(taskDefinition.m_QueueBinding.m_CntxFiles) || anyInline(taskDefinition.m_QueueBinding.m_ProbFiles);
+        };
+
+        // If a task embeds inline queue content, freshness MUST depend on the JCWF file itself.
+        // Reason: the inline content is stored inside the workflow file; changes to that content update the JCWF mtime.
+        if (hasInlineQueueContent())
+        {
+            std::filesystem::path const workflowFilePath{workflowDefinition.m_WorkflowFilePath};
+            std::filesystem::path const workflowFileDirectoryPath{workflowDefinition.m_WorkflowFileDirectory};
+
+            inputPathsOut.push_back(ResolvePath(workflowFileDirectoryPath, workflowFilePath));
+        }
+
         // Expand and resolve file inputs.
         for (std::string const& rawInput : taskDefinition.m_FileInputs)
         {

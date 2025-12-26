@@ -605,6 +605,12 @@ Rules:
      - Each `file_output` has a modification time newer than or equal to every `file_input` and all upstream outputs from `depends_on` tasks.  
    - If any `file_output` is missing, or any `file_input` or upstream output is newer, the task is considered stale and MUST run.  
    - If `file_inputs` or `file_outputs` are omitted, the engine MUST assume the task is not up to date and SHOULD run it whenever its dependencies are satisfied.
+
+- **Inline queue content and freshness**
+  - If a task embeds queue files inline via `{ "path": "...", "content": "..." }` (see 3.3.6),
+    the runtime MUST treat the **workflow `.jcwf` file itself** as an implicit freshness input.
+  - Inline content MUST NOT be treated as a separate freshness input file; instead, edits are tracked via the `.jcwf` file modification time.
+
    - If a task is skipped as “up to date”, the runtime SHOULD treat it as successful and its `file_outputs` MUST be considered available to downstream tasks (for both readiness and freshness comparisons).
 
 3. Per-item mode  

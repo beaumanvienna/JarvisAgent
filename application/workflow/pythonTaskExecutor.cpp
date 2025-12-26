@@ -148,8 +148,34 @@ namespace AIAssistant
             LOG_APP_ERROR("[python] Task '{}' is missing params JSON (module/function)", taskDefinition.m_Id);
         }
 
+
+        std::unordered_map<std::string, std::string> callArguments = taskState.m_InputValues;
+
+        // Provide output file path arguments to Python functions when the workflow declares an output slot.
+        // This avoids requiring Python scripts to re-derive the output file location.
+        if ((taskDefinition.m_FileOutputs.size() == 1) && (!taskDefinition.m_Outputs.empty()))
+        {
+            fs::path const outputPath = TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, taskDefinition.m_FileOutputs[0]);
+
+            for (auto const& outputField : taskDefinition.m_Outputs)
+            {
+                std::string const& outputName = outputField.first;
+
+                if (callArguments.contains(outputName))
+                {
+                    continue;
+                }
+
+                if (outputName.find("Path") == std::string::npos)
+                {
+                    continue;
+                }
+
+                callArguments[outputName] = outputPath.string();
+            }
+        }
         bool const ok =
-            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), taskState.m_InputValues,
+            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
                                               contextValues, pythonOutputs, errorMessage);
 
         if (!ok)
