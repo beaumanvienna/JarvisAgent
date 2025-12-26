@@ -42,6 +42,7 @@
 #endif
 
 #include "simdjson/simdjson.h"
+#include "taskPathResolver.h"
 
 namespace AIAssistant
 {
@@ -388,7 +389,6 @@ namespace AIAssistant
             return stringStream.str();
         }
 
-
         // ------------------------------------------------------------
         // Scan raw args for the presence of any input/output macros.
         //
@@ -446,7 +446,6 @@ namespace AIAssistant
             // the spawned shell process.
             std::string const commandWithRedirect =
                 "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + " 2>&1";
-
 
             FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
             if (pipe == nullptr)
@@ -608,7 +607,6 @@ namespace AIAssistant
             return false;
         }
 
-
         // Hard-error on missing sources (inputs).
         for (std::string const& inputPathString : taskDefinition.m_FileInputs)
         {
@@ -624,7 +622,8 @@ namespace AIAssistant
 
             if (!std::filesystem::exists(inputPath))
             {
-                LOG_APP_ERROR("ShellTaskExecutor: Missing required input file '{}' for task '{}'", inputPath.string(), taskDefinition.m_Id);
+                LOG_APP_ERROR("ShellTaskExecutor: Missing required input file '{}' for task '{}'", inputPath.string(),
+                              taskDefinition.m_Id);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing required input file";
                 return false;
@@ -735,12 +734,12 @@ namespace AIAssistant
 
         if (!std::filesystem::exists(std::filesystem::path(commandPath)))
         {
-            LOG_APP_ERROR("ShellTaskExecutor: Missing required script file '{}' for task '{}'", commandPath, taskDefinition.m_Id);
+            LOG_APP_ERROR("ShellTaskExecutor: Missing required script file '{}' for task '{}'", commandPath,
+                          taskDefinition.m_Id);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Missing required script file";
             return false;
         }
-
 
         // ------------------------------------------------------------
         // 3) Derive logical output values up front

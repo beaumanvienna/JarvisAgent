@@ -32,6 +32,7 @@
 #include "dataflowResolver.h"
 #include "taskExecutorRegistry.h"
 #include "taskFreshnessChecker.h"
+#include "taskPathResolver.h"
 
 namespace fs = std::filesystem;
 
@@ -39,9 +40,6 @@ namespace AIAssistant
 {
     namespace
     {
-        bool ResolveFreshnessPathsForTask(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
-                                          TaskDef const& taskDefinition, std::string const& taskId,
-                                          std::vector<fs::path>& outInputPaths, std::vector<fs::path>& outOutputPaths);
 
         fs::path GetQueueFolderPath()
         {
@@ -125,13 +123,14 @@ namespace AIAssistant
 
             if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(workingDirectory, queueFolderPath))
             {
-                return fail("Non-AI task working_directory resolves into the queue folder. Only ai_call tasks may use the queue folder.");
+                return fail("Non-AI task working_directory resolves into the queue folder. Only ai_call tasks may use the "
+                            "queue folder.");
             }
 
             std::vector<fs::path> resolvedInputPaths;
             std::vector<fs::path> resolvedOutputPaths;
-            if (!ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId, resolvedInputPaths,
-                                              resolvedOutputPaths))
+            if (!TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId,
+                                                                resolvedInputPaths, resolvedOutputPaths))
             {
                 return fail("Failed to resolve file_outputs for reserved-folder validation.");
             }
@@ -152,199 +151,6 @@ namespace AIAssistant
             return true;
         }
 
-        bool ResolveTemplateString(std::string const& value, std::unordered_map<std::string, std::string> const& inputValues,
-                                   std::unordered_map<std::string, std::string> const& outputValues,
-                                   std::string& outResolved)
-        {
-            outResolved.clear();
-            outResolved.reserve(value.size());
-
-            size_t pos = 0;
-
-            while (pos < value.size())
-            {
-                size_t const dollar = value.find("${", pos);
-                if (dollar == std::string::npos)
-                {
-                    outResolved.append(value.substr(pos));
-                    break;
-                }
-
-                outResolved.append(value.substr(pos, dollar - pos));
-
-                size_t const close = value.find('}', dollar + 2);
-                if (close == std::string::npos)
-                {
-                    return false;
-                }
-
-                std::string const token = value.substr(dollar + 2, close - (dollar + 2));
-
-                if (token.rfind("inputs.", 0) == 0)
-                {
-                    std::string const key = token.substr(7);
-                    auto iterator = inputValues.find(key);
-                    if (iterator == inputValues.end())
-                    {
-                        return false;
-                    }
-                    outResolved.append(iterator->second);
-                }
-                else if (token.rfind("outputs.", 0) == 0)
-                {
-                    std::string const key = token.substr(8);
-                    auto iterator = outputValues.find(key);
-                    if (iterator == outputValues.end())
-                    {
-                        return false;
-                    }
-                    outResolved.append(iterator->second);
-                }
-                else
-                {
-                    return false;
-                }
-
-                pos = close + 1;
-            }
-
-            if (outResolved.find("${") != std::string::npos)
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        bool ResolveTemplatePathList(std::vector<std::string> const& templates,
-                                     std::unordered_map<std::string, std::string> const& inputValues,
-                                     std::unordered_map<std::string, std::string> const& outputValues,
-                                     std::vector<fs::path>& outPaths)
-        {
-            outPaths.clear();
-            outPaths.reserve(templates.size());
-
-            for (std::string const& templateValue : templates)
-            {
-                std::string resolved;
-                if (!ResolveTemplateString(templateValue, inputValues, outputValues, resolved))
-                {
-                    if (templateValue.find("${") == std::string::npos)
-                    {
-                        outPaths.emplace_back(templateValue);
-                        continue;
-                    }
-                    return false;
-                }
-
-                if (resolved.empty())
-                {
-                    return false;
-                }
-
-                outPaths.emplace_back(resolved);
-            }
-
-            return true;
-        }
-
-        bool TryResolveTaskInputsForFreshness(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
-                                              TaskDef const& taskDefinition, std::string const& taskId,
-                                              std::unordered_map<std::string, std::string>& outInputValues)
-        {
-            DataflowResolver dataflowResolver;
-
-            std::optional<TaskResolvedInputs> optionalResolvedInputs =
-                dataflowResolver.ResolveInputsForTask(workflowDefinition, workflowRun, taskDefinition, taskId);
-
-            if (!optionalResolvedInputs.has_value())
-            {
-                return false;
-            }
-
-            outInputValues = optionalResolvedInputs.value().m_StringValues;
-            return true;
-        }
-
-        bool ResolveFreshnessPathsForTask(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
-                                          TaskDef const& taskDefinition, std::string const& taskId,
-                                          std::vector<fs::path>& outInputPaths, std::vector<fs::path>& outOutputPaths)
-        {
-            auto hasTemplatePrefix = [](std::vector<std::string> const& values, std::string const& prefix) -> bool
-            {
-                for (std::string const& value : values)
-                {
-                    if (value.find(prefix) != std::string::npos)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            bool const needsInputResolution = hasTemplatePrefix(taskDefinition.m_FileInputs, "${inputs.") ||
-                                              hasTemplatePrefix(taskDefinition.m_FileOutputs, "${inputs.");
-
-            std::unordered_map<std::string, std::string> inputValues;
-            if (needsInputResolution)
-            {
-                if (!TryResolveTaskInputsForFreshness(workflowDefinition, workflowRun, taskDefinition, taskId, inputValues))
-                {
-                    return false;
-                }
-            }
-
-            std::unordered_map<std::string, std::string> outputValues;
-
-            auto stateIterator = workflowRun.m_TaskStates.find(taskId);
-            if (stateIterator != workflowRun.m_TaskStates.end())
-            {
-                outputValues = stateIterator->second.m_OutputValues;
-            }
-
-            if (!ResolveTemplatePathList(taskDefinition.m_FileInputs, inputValues, outputValues, outInputPaths))
-            {
-                return false;
-            }
-
-            if (!ResolveTemplatePathList(taskDefinition.m_FileOutputs, inputValues, outputValues, outOutputPaths))
-            {
-                return false;
-            }
-
-            fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
-            if (workingDirectory.empty())
-            {
-                workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
-            }
-            else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
-            {
-                workingDirectory =
-                    (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
-            }
-
-            if (!workingDirectory.empty())
-            {
-                for (fs::path& path : outInputPaths)
-                {
-                    if (path.is_relative())
-                    {
-                        path = (workingDirectory / path).lexically_normal();
-                    }
-                }
-
-                for (fs::path& path : outOutputPaths)
-                {
-                    if (path.is_relative())
-                    {
-                        path = (workingDirectory / path).lexically_normal();
-                    }
-                }
-            }
-
-            return true;
-        }
-
         void PopulateSkippedTaskOutputsIfPossible(WorkflowDefinition const& workflowDefinition,
                                                   WorkflowRun const& workflowRun, TaskDef const& taskDefinition,
                                                   std::string const& taskId, TaskInstanceState& taskState)
@@ -352,8 +158,8 @@ namespace AIAssistant
             std::vector<fs::path> unusedInputPaths;
             std::vector<fs::path> resolvedOutputPaths;
 
-            if (!ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId, unusedInputPaths,
-                                              resolvedOutputPaths))
+            if (!TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId,
+                                                                unusedInputPaths, resolvedOutputPaths))
             {
                 return;
             }
@@ -683,8 +489,9 @@ namespace AIAssistant
                     TaskFreshnessChecker freshnessChecker;
                     TaskFreshnessChecker::ResolvedPaths resolvedPaths;
 
-                    if (ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId,
-                                                     resolvedPaths.m_InputPaths, resolvedPaths.m_OutputPaths))
+                    if (TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition,
+                                                                       taskId, resolvedPaths.m_InputPaths,
+                                                                       resolvedPaths.m_OutputPaths))
                     {
                         auto resolveUpstreamOutputs = [&](std::string const& upstreamTaskId,
                                                           std::vector<fs::path>& outPaths) -> bool
@@ -698,8 +505,9 @@ namespace AIAssistant
                             std::vector<fs::path> unusedInputs;
                             std::vector<fs::path> outputPaths;
 
-                            if (!ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, upstreamIt->second,
-                                                              upstreamTaskId, unusedInputs, outputPaths))
+                            if (!TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun,
+                                                                                upstreamIt->second, upstreamTaskId,
+                                                                                unusedInputs, outputPaths))
                             {
                                 return false;
                             }
@@ -880,8 +688,7 @@ namespace AIAssistant
         }
         else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
         {
-            workingDirectory =
-                (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
+            workingDirectory = (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
         }
 
         if (!ValidateTaskPathPolicy(workflowDefinition, workflowRun, taskDefinition, taskId, workingDirectory, taskState))

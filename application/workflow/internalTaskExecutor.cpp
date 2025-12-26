@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "workflow/internalTaskExecutor.h"
+#include "workflow/taskPathResolver.h"
 
 #include "jarvisAgent.h"
 #include "task/internalTaskRegistry.h"
@@ -34,42 +35,6 @@ namespace AIAssistant
 {
     namespace
     {
-        std::filesystem::path ResolveTaskWorkingDirectoryPath(std::filesystem::path const& workflowBaseDirectoryPath,
-                                                              std::string const& taskWorkingDirectory)
-        {
-            if (taskWorkingDirectory.empty())
-            {
-                return workflowBaseDirectoryPath;
-            }
-
-            std::filesystem::path taskWorkingDirectoryPath(taskWorkingDirectory);
-            if (taskWorkingDirectoryPath.is_relative())
-            {
-                taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
-            }
-            else
-            {
-                taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-            }
-
-            return taskWorkingDirectoryPath;
-        }
-
-        std::filesystem::path ResolveTaskScopedPath(std::filesystem::path const& taskWorkingDirectoryPath,
-                                                    std::string const& taskScopedPathString)
-        {
-            std::filesystem::path taskScopedPath(taskScopedPathString);
-            if (taskScopedPath.is_relative())
-            {
-                taskScopedPath = (taskWorkingDirectoryPath / taskScopedPath).lexically_normal();
-            }
-            else
-            {
-                taskScopedPath = taskScopedPath.lexically_normal();
-            }
-
-            return taskScopedPath;
-        }
 
         bool TryGetActionFromParamsJson(std::string const& paramsJson, std::string& outAction, std::string& outError)
         {
@@ -166,8 +131,7 @@ namespace AIAssistant
 
         std::filesystem::path const workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
         std::filesystem::path const taskWorkingDirectoryPath =
-            ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
-
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
         {
             std::error_code error;
             std::filesystem::create_directories(taskWorkingDirectoryPath, error);
@@ -185,14 +149,15 @@ namespace AIAssistant
         resolvedInputPaths.reserve(taskDefinition.m_FileInputs.size());
         for (std::string const& inputPathString : taskDefinition.m_FileInputs)
         {
-            resolvedInputPaths.push_back(ResolveTaskScopedPath(taskWorkingDirectoryPath, inputPathString));
+            resolvedInputPaths.push_back(TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, inputPathString));
         }
 
         std::vector<std::filesystem::path> resolvedOutputPaths;
         resolvedOutputPaths.reserve(taskDefinition.m_FileOutputs.size());
         for (std::string const& outputPathString : taskDefinition.m_FileOutputs)
         {
-            resolvedOutputPaths.push_back(ResolveTaskScopedPath(taskWorkingDirectoryPath, outputPathString));
+            resolvedOutputPaths.push_back(
+                TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, outputPathString));
         }
 
         {

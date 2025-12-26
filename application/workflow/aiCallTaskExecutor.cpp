@@ -33,6 +33,7 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "workflow/aiRequestPool.h"
+#include "workflow/taskPathResolver.h"
 
 #include "simdjson/simdjson.h"
 
@@ -202,7 +203,8 @@ namespace AIAssistant
                     continue;
                 }
 
-                std::filesystem::path const sourcePath = (taskWorkingDirectoryPath / fileRef.m_Path).lexically_normal();
+                std::filesystem::path const sourcePath =
+                    TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fileRef.m_Path);
                 LOG_APP_INFO("debug ai_call: PROB source path='{}' resolved='{}'", fileRef.m_Path, sourcePath.string());
 
                 std::string sourceText;
@@ -248,7 +250,7 @@ namespace AIAssistant
                 std::filesystem::path sourcePath(fileRef.m_Path);
                 if (!sourcePath.is_absolute())
                 {
-                    sourcePath = (taskWorkingDirectoryPath / sourcePath).lexically_normal();
+                    sourcePath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, sourcePath);
                 }
                 else
                 {
@@ -278,7 +280,7 @@ namespace AIAssistant
                 }
                 usedFilenames.insert(baseName);
 
-                std::filesystem::path const destPath = (taskWorkingDirectoryPath / baseName).lexically_normal();
+                std::filesystem::path const destPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, baseName);
 
                 LOG_APP_INFO("debug ai_call: CNTX source path='{}' resolved='{}' -> writing '{}'", fileRef.m_Path,
                              sourcePath.string(), destPath.string());
@@ -515,23 +517,8 @@ namespace AIAssistant
             return false;
         }
 
-        std::filesystem::path taskWorkingDirectoryPath;
-        if (!taskDefinition.m_WorkingDirectory.empty())
-        {
-            taskWorkingDirectoryPath = std::filesystem::path(taskDefinition.m_WorkingDirectory);
-            if (!taskWorkingDirectoryPath.is_absolute())
-            {
-                taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
-            }
-            else
-            {
-                taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-            }
-        }
-        else
-        {
-            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-        }
+        std::filesystem::path const taskWorkingDirectoryPath =
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
 
         JarvisAgent* app = App::g_App;
         if (app == nullptr)
@@ -579,7 +566,8 @@ namespace AIAssistant
                 std::filesystem::path const filePath(fileRef.m_Path);
                 if (!filePath.is_absolute())
                 {
-                    std::filesystem::path const rewritten = (taskWorkingDirectoryPath / filePath).lexically_normal();
+                    std::filesystem::path const rewritten =
+                        TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, filePath);
                     fileRef.m_Path = rewritten.string();
                 }
             }
@@ -630,7 +618,7 @@ namespace AIAssistant
             std::filesystem::path outputPath(outputPathText);
             if (!outputPath.is_absolute())
             {
-                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
+                outputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, outputPath);
             }
             else
             {

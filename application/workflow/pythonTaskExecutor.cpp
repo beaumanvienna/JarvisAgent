@@ -27,6 +27,7 @@
 #include "jarvisAgent.h"
 #include "pythonTaskExecutor.h"
 #include "python/pythonEngine.h"
+#include "taskPathResolver.h"
 
 #include <filesystem>
 #include <unordered_map>
@@ -62,26 +63,6 @@ namespace AIAssistant
             return workflowBaseDirectoryPath.lexically_normal();
         }
 
-        fs::path ResolveTaskWorkingDirectory(fs::path const& workflowBaseDirectoryPath, TaskDef const& taskDefinition)
-        {
-            fs::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
-
-            if (taskWorkingDirectoryPath.empty())
-            {
-                taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-            }
-            else if (taskWorkingDirectoryPath.is_relative() && !workflowBaseDirectoryPath.empty())
-            {
-                taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
-            }
-            else
-            {
-                taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-            }
-
-            return taskWorkingDirectoryPath;
-        }
-
         bool ValidateFileInputsExist(TaskDef const& taskDefinition, fs::path const& taskWorkingDirectoryPath,
                                      std::string& errorMessageOut)
         {
@@ -91,12 +72,7 @@ namespace AIAssistant
             {
                 fs::path inputPath(fileInput);
 
-                if (inputPath.is_relative())
-                {
-                    inputPath = taskWorkingDirectoryPath / inputPath;
-                }
-
-                inputPath = inputPath.lexically_normal();
+                inputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, inputPath);
 
                 if (!fs::exists(inputPath, errorCode))
                 {
@@ -106,46 +82,6 @@ namespace AIAssistant
             }
 
             return true;
-        }
-
-        // Shared helper: see ShellTaskExecutor explanation.
-        void BuildOutputSlotMap(TaskDef const& taskDefinition, TaskInstanceState const& taskState,
-                                std::unordered_map<std::string, std::string>& outputSlotMapOut)
-        {
-            outputSlotMapOut.clear();
-
-            // 1) Zip outputs with file_outputs when sizes match
-            if (!taskDefinition.m_FileOutputs.empty() &&
-                taskDefinition.m_FileOutputs.size() == taskDefinition.m_Outputs.size())
-            {
-                size_t fileIndex = 0;
-                for (auto const& outputPair : taskDefinition.m_Outputs)
-                {
-                    if (fileIndex < taskDefinition.m_FileOutputs.size())
-                    {
-                        outputSlotMapOut[outputPair.first] = taskDefinition.m_FileOutputs[fileIndex];
-                    }
-
-                    ++fileIndex;
-                }
-            }
-
-            // 2) Fallback: use input with the same name
-            for (auto const& outputPair : taskDefinition.m_Outputs)
-            {
-                std::string const& outputName = outputPair.first;
-
-                if (outputSlotMapOut.contains(outputName))
-                {
-                    continue;
-                }
-
-                auto inputIterator = taskState.m_InputValues.find(outputName);
-                if (inputIterator != taskState.m_InputValues.end())
-                {
-                    outputSlotMapOut[outputName] = inputIterator->second;
-                }
-            }
         }
     } // anonymous namespace
 
@@ -164,7 +100,8 @@ namespace AIAssistant
         }
 
         fs::path const workflowBaseDirectoryPath = ResolveWorkflowBaseDirectory(workflowDefinition);
-        fs::path const taskWorkingDirectoryPath = ResolveTaskWorkingDirectory(workflowBaseDirectoryPath, taskDefinition);
+        fs::path const taskWorkingDirectoryPath =
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
 
         if (taskWorkingDirectoryPath.empty())
         {
@@ -211,35 +148,7 @@ namespace AIAssistant
             LOG_APP_ERROR("[python] Task '{}' is missing params JSON (module/function)", taskDefinition.m_Id);
         }
 
-        
-        // Provide derived output paths as kwargs to the Python function.
-        // Our Python task functions commonly expect both input and output paths as parameters, but the engine only
-        // forwards m_InputValues. We therefore derive output slot values from file_outputs and pass them as inputs.
-        {
-            std::unordered_map<std::string, std::string> derivedOutputSlotMap;
-            BuildOutputSlotMap(taskDefinition, taskState, derivedOutputSlotMap);
-
-            for (auto const& outputPair : derivedOutputSlotMap)
-            {
-                if (taskState.m_InputValues.contains(outputPair.first))
-                {
-                    continue;
-                }
-
-                fs::path outputPath = fs::path(outputPair.second);
-                if (outputPath.is_relative())
-                {
-                    outputPath = taskWorkingDirectoryPath / outputPath;
-                }
-
-                std::string const resolvedOutputPath = outputPath.lexically_normal().string();
-                taskState.m_InputValues[outputPair.first] = resolvedOutputPath;
-
-                LOG_APP_INFO("[python] Derived output path for '{}' -> '{}'", outputPair.first, resolvedOutputPath);
-            }
-        }
-
-bool const ok =
+        bool const ok =
             pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), taskState.m_InputValues,
                                               contextValues, pythonOutputs, errorMessage);
 
@@ -258,7 +167,7 @@ bool const ok =
 
         // Fallback: derive outputs from the task definition and resolved inputs (only fills missing keys).
         std::unordered_map<std::string, std::string> derivedOutputs;
-        BuildOutputSlotMap(taskDefinition, taskState, derivedOutputs);
+        TaskPathResolver::BuildOutputSlotMap(taskDefinition, taskState, derivedOutputs);
 
         for (auto const& outputPair : derivedOutputs)
         {

@@ -61,7 +61,6 @@ namespace AIAssistant
                                                                WorkflowRun const& workflowRun, TaskDef const& taskDefinition,
                                                                std::string const& taskId) const;
 
-    private:
         // Look up whether any dataflow edge maps to this input field.
         bool TryResolveFromDataflowEdges(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
                                          std::string const& targetTaskId, std::string const& targetInputName,
