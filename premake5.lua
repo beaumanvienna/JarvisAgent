@@ -165,10 +165,7 @@ project "jarvisAgent"
         -- So we must guard Windows-only host calls to avoid crashing when premake runs elsewhere.
         --
         if os.ishost("windows") then
-            local pythonInfo = os.outputof([[python -c "import sys, sysconfig; \
-print(sysconfig.get_path('include')); \
-print(sys.base_prefix); \
-print(f'python{sys.version_info[0]}{sys.version_info[1]}')"]])
+            local pythonInfo = os.outputof([[python -c "import sys, sysconfig; print(sysconfig.get_path('include')); print(sys.base_prefix); print('python{}{}'.format(sys.version_info[0], sys.version_info[1]))"]])
 
             if not pythonInfo then
                 error("Python not found on PATH. On CI, ensure actions/setup-python ran before premake5.")
@@ -187,15 +184,13 @@ print(f'python{sys.version_info[0]}{sys.version_info[1]}')"]])
             local pyBasePrefix = lines[2]
             local pyLibName = lines[3]
 
-            -- Typical Windows layout:
-            --   include: <base>\include
-            --   libs:    <base>\libs
             local pyLibDir = path.join(pyBasePrefix, "libs")
 
             includedirs { pyIncludeDir }
             libdirs { pyLibDir }
             links { pyLibName }
         end
+
 
     filter "configurations:Debug"
         defines
