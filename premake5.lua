@@ -26,7 +26,7 @@ project "jarvisAgent"
 
     targetdir "bin/%{cfg.buildcfg}"
     objdir ("bin-int/%{cfg.buildcfg}")
-    
+
     defines
     {
         "JARVIS_AGENT_VERSION=\"0.1\"",
@@ -46,7 +46,7 @@ project "jarvisAgent"
 
     files
     {
-        "application/**.h", 
+        "application/**.h",
         "application/**.cpp",
         "engine/**.h",
         "engine/**.cpp",
@@ -79,84 +79,128 @@ project "jarvisAgent"
         --
         -- Use python3-config --includes to discover Python include path.
         --
-        local py_includes = os.outputof("python3-config --includes")
-
-        -- Example output:
-        --   "-I/usr/include/python3.12 -I/usr/include/python3.12"
+        -- IMPORTANT:
+        -- Premake executes Lua at generation-time, even inside a filter.
+        -- So we must guard Linux-only host calls (like python3-config)
+        -- to avoid crashing when premake runs on Windows/macOS.
         --
-        -- Extract the first include path:
-        local py_incdir = py_includes:match("-I([^%s]+)")
-        if not py_incdir then
-            error("Failed to extract Python include directory from python3-config --includes")
+        if os.ishost("linux") then
+            local py_includes = os.outputof("python3-config --includes")
+            if not py_includes then
+                error("python3-config not found (needed to locate Python includes on Linux).")
+            end
+
+            -- Extract the first include path:
+            local py_incdir = py_includes:match("-I([^%s]+)")
+            if not py_incdir then
+                error("Failed to extract Python include directory from python3-config --includes")
+            end
+
+            -- Extract the final folder name (e.g. "python3.12")
+            local py_libname = py_incdir:match("([^/]+)$")
+            if not py_libname then
+                error("Failed to determine Python library name from include path: " .. py_incdir)
+            end
+
+            local py_link = py_libname
+
+            includedirs {
+                py_incdir
+            }
+
+            links {
+                "curl",
+                "pthread",
+                "dl",
+                "ssl",
+                "crypto",
+                "z",
+                "m",
+                py_link,
+                "pdcursesmod"
+            }
         end
-
-        -- Extract the final folder name (e.g. "python3.12")
-        local py_libname = py_incdir:match("([^/]+)$")
-        if not py_libname then
-            error("Failed to determine Python library name from include path: " .. py_incdir)
-        end
-
-        -- Create linker library name, e.g. "-lpython3.12"
-        local py_link = py_libname
-
-        includedirs {
-            py_incdir
-        }
-
-        links {
-            "curl",
-            "pthread",
-            "dl",
-            "ssl",
-            "crypto",
-            "z",
-            "m",
-            py_link,      -- e.g. python3.12
-            "pdcursesmod"
-        }
 
         defines {
             "LINUX"
         }
 
-
-	filter "system:macosx"
+    filter "system:macosx"
 
         includedirs {
             "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/include/python3.12"
         }
-		links {
-			"curl",
-			"ssl",
-			"crypto",
-			"z",
-			"-framework CoreFoundation",
-			"-framework SystemConfiguration",
+        links {
+            "curl",
+            "ssl",
+            "crypto",
+            "z",
+            "-framework CoreFoundation",
+            "-framework SystemConfiguration",
             "python3.12",
             "pdcursesmod"
-		}
+        }
 
-    filter { "action:gmake*", "configurations:Debug"}
+    filter { "action:gmake*", "configurations:Debug" }
         buildoptions { "-ggdb -Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -Wno-reorder -Wno-expansion-to-defined" }
 
-    filter { "action:gmake*", "configurations:Release"}
+    filter { "action:gmake*", "configurations:Release" }
         buildoptions { "-Wall -Wextra -Wpedantic -Wshadow -Wno-unused-parameter -Wno-reorder -Wno-expansion-to-defined" }
 
     filter "system:windows"
         systemversion "latest"
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "python312", "pdcursesmod" }
-        
-        includedirs {
-            "C:/Users/%{os.getenv('USERNAME')}/AppData/Local/Programs/Python/Python312/include"
-        }
-        libdirs {
-            "C:/Users/%{os.getenv('USERNAME')}/AppData/Local/Programs/Python/Python312/libs"
-        }
+
+        --
+        -- Windows system libs (always).
+        --
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod" }
+
+        --
+        -- Robust Python discovery on Windows:
+        -- Uses whatever "python" is on PATH (e.g. provided by actions/setup-python),
+        -- and queries sysconfig for include/lib locations and the import-lib name.
+        --
+        -- IMPORTANT:
+        -- Premake executes Lua at generation-time, even inside a filter.
+        -- So we must guard Windows-only host calls to avoid crashing when premake runs elsewhere.
+        --
+        if os.ishost("windows") then
+            local pythonInfo = os.outputof([[python -c "import sys, sysconfig; \
+print(sysconfig.get_path('include')); \
+print(sys.base_prefix); \
+print(f'python{sys.version_info[0]}{sys.version_info[1]}')"]])
+
+            if not pythonInfo then
+                error("Python not found on PATH. On CI, ensure actions/setup-python ran before premake5.")
+            end
+
+            local lines = {}
+            for line in pythonInfo:gmatch("([^\r\n]+)") do
+                lines[#lines + 1] = line
+            end
+
+            if #lines < 3 then
+                error("Failed to query Python sysconfig paths. Output was: " .. pythonInfo)
+            end
+
+            local pyIncludeDir = lines[1]
+            local pyBasePrefix = lines[2]
+            local pyLibName = lines[3]
+
+            -- Typical Windows layout:
+            --   include: <base>\include
+            --   libs:    <base>\libs
+            local pyLibDir = path.join(pyBasePrefix, "libs")
+
+            includedirs { pyIncludeDir }
+            libdirs { pyLibDir }
+            links { pyLibName }
+        end
 
     filter "configurations:Debug"
         defines
-        { 
-			"DEBUG"
+        {
+            "DEBUG"
         }
         runtime "Debug"
         symbols "on"
@@ -164,8 +208,8 @@ project "jarvisAgent"
     filter "configurations:Release"
         defines
         {
-			"NDEBUG"
-		}
+            "NDEBUG"
+        }
         runtime "Release"
         optimize "on"
 
@@ -210,10 +254,7 @@ project "jarvisAgent"
         print("done.")
     end
 
-
-	include "vendor/curl.lua"
-	include "vendor/openssl/crypto.lua"
-	include "vendor/openssl/ssl.lua"
-	include "vendor/pdcursesmod/pdcursesmod.lua"
-
-
+    include "vendor/curl.lua"
+    include "vendor/openssl/crypto.lua"
+    include "vendor/openssl/ssl.lua"
+    include "vendor/pdcursesmod/pdcursesmod.lua"
