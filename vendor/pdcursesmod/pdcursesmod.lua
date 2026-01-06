@@ -33,15 +33,21 @@ project "pdcursesmod"
     -- WINDOWS → WINCON BACKEND
     ----------------------------------------------------------------------
     filter "system:windows"
-        defines { "PDC_WIDE", "PDC_WINCON" }
+        defines { "PDC_WIDE" }
         files { "wincon/*.c" }
         includedirs { "wincon" }
+        removefiles {
+            "common/dosutil.c",
+            "common/mouse.c",
+            "common/winclip.c"
+        }
+
 
     ----------------------------------------------------------------------
     -- LINUX + MACOS → VT BACKEND
     ----------------------------------------------------------------------
     filter { "system:linux or system:macosx" }
-        defines { "PDC_WIDE", "PDC_VT" }
+        defines { "PDC_WIDE" }
         files { "vt/*.c" }
         includedirs { "vt" }
 
