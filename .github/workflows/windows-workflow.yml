@@ -18,6 +18,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
