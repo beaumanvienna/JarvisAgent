@@ -123,7 +123,6 @@ project "ssl"
     }
 
     filter "system:windows"
-
         defines
         {
             "_WINSOCKAPI_",

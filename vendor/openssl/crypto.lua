@@ -1056,6 +1056,14 @@ project "crypto"
 		"ssl/record/methods/tls_pad.c"
     }
 
+    filter "system:windows"
+        defines
+        {
+            "_WINSOCKAPI_",
+            "WIN32_LEAN_AND_MEAN",
+            "NOMINMAX"
+        }
+
     filter { "action:gmake*", "configurations:Debug"}
         buildoptions { "-ggdb -fPIC -pthread -m64 -Wall" }
 
