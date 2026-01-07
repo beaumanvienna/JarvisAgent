@@ -22,6 +22,8 @@
 #pragma once
 #include <memory>
 #include <queue>
+#include <mutex>
+#include <vector>
 
 #include "event/event.h"
 

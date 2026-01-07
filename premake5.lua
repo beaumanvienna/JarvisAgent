@@ -150,6 +150,7 @@ project "jarvisAgent"
     filter "system:windows"
         systemversion "latest"
         buildoptions { "/utf-8" }
+        defines { "NOMINMAX" }
 
         --
         -- Windows system libs (always).
