@@ -413,7 +413,7 @@ namespace AIAssistant
         // ---------------------------------------------------------
         for (auto iterator = activeRun.m_RunningTasks.begin(); iterator != activeRun.m_RunningTasks.end();)
         {
-            std::future<TaskExecutionResult>& future = iterator->second;
+            std::shared_future<TaskExecutionResult>& future = iterator->second;
 
             if (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
             {
@@ -596,7 +596,7 @@ namespace AIAssistant
                 {
                     return ExecuteTaskOnWorker(workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
                                                taskStateSnapshot);
-                });
+                }).share();
 
             dispatchedAny = true;
         }

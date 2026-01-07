@@ -1064,6 +1064,12 @@ project "crypto"
             "NOMINMAX"
         }
 
+        removefiles
+        {
+            "engines/e_afalg.c",
+            "engines/e_capi.c"
+        }
+
     filter { "action:gmake*", "configurations:Debug"}
         buildoptions { "-ggdb -fPIC -pthread -m64 -Wall" }
 
