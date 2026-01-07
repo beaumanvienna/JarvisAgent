@@ -149,6 +149,7 @@ project "jarvisAgent"
 
     filter "system:windows"
         systemversion "latest"
+        buildoptions { "/utf-8" }
 
         --
         -- Windows system libs (always).
