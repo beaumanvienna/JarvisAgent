@@ -150,12 +150,18 @@ project "jarvisAgent"
     filter "system:windows"
         systemversion "latest"
         buildoptions { "/utf-8" }
-        defines { "NOMINMAX" }
+
+        -- Use the shared MSVC runtime on Windows so we don't mix /MT (staticruntime on)
+        -- with third-party libs that are built with /MD by default.
+        staticruntime "off"
+
+        -- Tell libcurl headers that we're linking against the static library.
+        defines { "CURL_STATICLIB", "NOMINMAX" }
 
         --
         -- Windows system libs (always).
         --
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "crypto", "ssl", "curl" }
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "ssl", "crypto" }
 
         --
         -- Robust Python discovery on Windows:

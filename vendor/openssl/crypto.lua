@@ -1064,6 +1064,12 @@ project "crypto"
             "NOMINMAX"
         }
 
+        
+    -- OpenSSL engines that are not supported in our Windows build:
+    -- - afalg depends on unistd.h
+    -- - capi relies on generated headers (e_capi_err.h)
+        defines { "OPENSSL_NO_AFALGENG", "OPENSSL_NO_CAPIENG" }
+        
         removefiles
         {
             "engines/e_afalg.c",
