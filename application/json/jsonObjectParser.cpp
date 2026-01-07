@@ -34,7 +34,7 @@ namespace AIAssistant
     std::string JsonObjectParser::PrintIndented() const
     {
         std::string str;
-        for (uint i = 0; i < m_IndentLevel; ++i)
+        for (uint32_t i = 0; i < m_IndentLevel; ++i)
         {
             str += "  ";
         }

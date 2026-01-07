@@ -53,7 +53,7 @@ namespace AIAssistant
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
             };
 
-            uint m_MaxThreads{0};
+            size_t m_MaxThreads{0};
             std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
             std::string m_WorkflowsFolderFilepath;

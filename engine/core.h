@@ -64,7 +64,7 @@ namespace AIAssistant
     private:
         // THREADS_REQUIRED_BY_APP:
         // file watcher, keyboard input, and web server need threads
-        static constexpr uint THREADS_REQUIRED_BY_APP = 3;
+        static constexpr size_t THREADS_REQUIRED_BY_APP = 3;
         ThreadPool m_ThreadPool;
         EventQueue m_EventQueue;
 
