@@ -155,7 +155,7 @@ project "jarvisAgent"
         --
         -- Windows system libs (always).
         --
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod" }
+        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "crypto", "ssl", "curl" }
 
         --
         -- Robust Python discovery on Windows:
