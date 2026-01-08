@@ -6,7 +6,6 @@
 project "pdcursesmod"
     kind "StaticLib"
     language "C"
-    staticruntime "on"
 
     targetdir ("bin/%{cfg.buildcfg}")
     objdir    ("bin-int/%{cfg.buildcfg}")
