@@ -86,30 +86,7 @@ jobs:
             msbuild "$($solutionFile.FullName)" /m /p:Configuration=Debug /p:Platform=x64
           }
 
-      - name: Smoke test (Release)
-        shell: pwsh
-        run: |
-          $candidateExecutables = Get-ChildItem -Path . -Recurse -File -Filter jarvisAgent.exe
-          if ($candidateExecutables.Count -eq 0)
-          {
-            Write-Host "No jarvisAgent.exe found for smoke test."
-            exit 0
-          }
-
-          foreach ($executableFile in $candidateExecutables)
-          {
-            Write-Host "Running: $($executableFile.FullName) --help"
-            try
-            {
-              & "$($executableFile.FullName)" --help
-            }
-            catch
-            {
-              Write-Host "Smoke test failed for $($executableFile.FullName) but continuing."
-            }
-          }
-
-      - name: Smoke test (Debug)
+      - name: Smoke test
         shell: pwsh
         run: |
           $candidateExecutables = Get-ChildItem -Path . -Recurse -File -Filter jarvisAgent.exe

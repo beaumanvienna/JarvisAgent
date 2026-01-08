@@ -123,74 +123,75 @@ project "jarvisAgent"
         defines {
             "LINUX"
         }
-filter "system:macosx"
 
-    --
-    -- Robust Python discovery on macOS:
-    -- Uses whatever "python3" is on PATH (e.g. provided by actions/setup-python),
-    -- and queries sysconfig for include/lib locations and the link library name.
-    --
-    -- IMPORTANT:
-    -- Premake executes Lua at generation-time, even inside a filter.
-    -- So we must guard macOS-only host calls to avoid crashing when premake runs elsewhere.
-    --
-    if os.ishost("macosx") then
-        local pythonInfo = os.outputof([[python3 -c "import sys, sysconfig; print(sysconfig.get_path('include') or ''); print(sysconfig.get_config_var('LIBDIR') or ''); print(sys.base_prefix or ''); print(sysconfig.get_config_var('LDLIBRARY') or '')"]])
-
-        if not pythonInfo then
-            error("python3 not found on PATH. On CI, ensure actions/setup-python ran before premake5.")
+    filter "system:macosx"
+    
+        --
+        -- Robust Python discovery on macOS:
+        -- Uses whatever "python3" is on PATH (e.g. provided by actions/setup-python),
+        -- and queries sysconfig for include/lib locations and the link library name.
+        --
+        -- IMPORTANT:
+        -- Premake executes Lua at generation-time, even inside a filter.
+        -- So we must guard macOS-only host calls to avoid crashing when premake runs elsewhere.
+        --
+        if os.ishost("macosx") then
+            local pythonInfo = os.outputof([[python3 -c "import sys, sysconfig; print(sysconfig.get_path('include') or ''); print(sysconfig.get_config_var('LIBDIR') or ''); print(sys.base_prefix or ''); print(sysconfig.get_config_var('LDLIBRARY') or '')"]])
+    
+            if not pythonInfo then
+                error("python3 not found on PATH. On CI, ensure actions/setup-python ran before premake5.")
+            end
+    
+            local lines = {}
+            for line in pythonInfo:gmatch("([^\r\n]+)") do
+                lines[#lines + 1] = line
+            end
+    
+            if #lines < 4 then
+                error("Failed to query Python sysconfig paths on macOS. Output was: " .. pythonInfo)
+            end
+    
+            local pyIncludeDir = lines[1]
+            local pyLibDir = lines[2]
+            local pyBasePrefix = lines[3]
+            local pyLdLibrary = lines[4]
+    
+            if pyIncludeDir == "" then
+                error("Failed to determine Python include directory on macOS.")
+            end
+    
+            if pyLibDir == "" then
+                -- Fallback (common for framework builds): <base_prefix>/lib
+                pyLibDir = path.join(pyBasePrefix, "lib")
+            end
+    
+            local pyLibName = pyLdLibrary
+            -- Convert e.g. "libpython3.12.dylib" -> "python3.12"
+            pyLibName = pyLibName:gsub("^lib", "")
+            pyLibName = pyLibName:gsub("%.dylib$", "")
+            pyLibName = pyLibName:gsub("%.a$", "")
+    
+            if pyLibName == "" then
+                error("Failed to determine Python link library name on macOS (LDLIBRARY was: " .. pyLdLibrary .. ").")
+            end
+    
+            includedirs { pyIncludeDir }
+            libdirs { pyLibDir }
+    
+            -- Ensure the runtime can find libpython without extra env vars.
+            linkoptions { "-Wl,-rpath," .. pyLibDir }
+    
+            links {
+                "curl",
+                "ssl",
+                "crypto",
+                "z",
+                "-framework CoreFoundation",
+                "-framework SystemConfiguration",
+                pyLibName,
+                "pdcursesmod"
+            }
         end
-
-        local lines = {}
-        for line in pythonInfo:gmatch("([^\r\n]+)") do
-            lines[#lines + 1] = line
-        end
-
-        if #lines < 4 then
-            error("Failed to query Python sysconfig paths on macOS. Output was: " .. pythonInfo)
-        end
-
-        local pyIncludeDir = lines[1]
-        local pyLibDir = lines[2]
-        local pyBasePrefix = lines[3]
-        local pyLdLibrary = lines[4]
-
-        if pyIncludeDir == "" then
-            error("Failed to determine Python include directory on macOS.")
-        end
-
-        if pyLibDir == "" then
-            -- Fallback (common for framework builds): <base_prefix>/lib
-            pyLibDir = path.join(pyBasePrefix, "lib")
-        end
-
-        local pyLibName = pyLdLibrary
-        -- Convert e.g. "libpython3.12.dylib" -> "python3.12"
-        pyLibName = pyLibName:gsub("^lib", "")
-        pyLibName = pyLibName:gsub("%.dylib$", "")
-        pyLibName = pyLibName:gsub("%.a$", "")
-
-        if pyLibName == "" then
-            error("Failed to determine Python link library name on macOS (LDLIBRARY was: " .. pyLdLibrary .. ").")
-        end
-
-        includedirs { pyIncludeDir }
-        libdirs { pyLibDir }
-
-        -- Ensure the runtime can find libpython without extra env vars.
-        linkoptions { "-Wl,-rpath," .. pyLibDir }
-
-        links {
-            "curl",
-            "ssl",
-            "crypto",
-            "z",
-            "-framework CoreFoundation",
-            "-framework SystemConfiguration",
-            pyLibName,
-            "pdcursesmod"
-        }
-    end
 
 
     filter { "action:gmake*", "configurations:Debug" }
