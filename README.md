@@ -1,5 +1,6 @@
-![Windows Build (MSVC)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/windows-workflow.yml/badge.svg)
 ![Linux Build (GCC)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/linux-workflow.yml/badge.svg)
+![Windows Build (MSVC)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/windows-workflow.yml/badge.svg)
+![macOS Build (Clang)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/macos-workflow.yml/badge.svg)
 
 # JarvisAgent
 
