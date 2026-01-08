@@ -141,29 +141,17 @@
  */
 
 #ifdef HAVE_CONFIG_H
-
+#ifdef LINUX
 #include "curl_config.h"
+#endif
+#ifdef MACOS
+#include "curl_config_macOS.h"
+#endif
 
 #else /* HAVE_CONFIG_H */
 
 #ifdef _WIN32
 #  include "config-win32.h"
-#endif
-
-#ifdef macintosh
-#  include "config-mac.h"
-#endif
-
-#ifdef __riscos__
-#  include "config-riscos.h"
-#endif
-
-#ifdef __OS400__
-#  include "config-os400.h"
-#endif
-
-#ifdef __PLAN9__
-#  include "config-plan9.h"
 #endif
 
 #endif /* HAVE_CONFIG_H */

@@ -24,9 +24,9 @@ project "curl"
     
     defines
     {
-		"CURL_STATICLIB",
-		"USE_MANUAL",
-		"CURL_HIDDEN_SYMBOLS",
+        "CURL_STATICLIB",
+        "USE_MANUAL",
+        "CURL_HIDDEN_SYMBOLS",
         "BUILDING_LIBCURL"
     }
     
@@ -37,12 +37,18 @@ project "curl"
     filter "system:linux"
         defines
         {
-			"_GNU_SOURCE",
-			"HAVE_CONFIG_H"
-		}
+            "_GNU_SOURCE",
+            "LINUX",
+            "HAVE_CONFIG_H"
+        }
 
     filter "system:macosx"
-        defines { "_DARWIN_C_SOURCE" }
+        defines 
+        { 
+            "_DARWIN_C_SOURCE",
+            "MACOSX",
+            "HAVE_CONFIG_H"
+        }
 
     filter { "action:gmake*", "configurations:Debug"}
         buildoptions { "-ggdb" }
