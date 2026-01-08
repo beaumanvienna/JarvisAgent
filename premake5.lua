@@ -156,7 +156,7 @@ project "jarvisAgent"
         staticruntime "off"
 
         -- Tell libcurl headers that we're linking against the static library.
-        defines { "CURL_STATICLIB", "NOMINMAX", "Py_NO_ENABLE_SHARED" }
+        defines { "CURL_STATICLIB", "NOMINMAX" }
 
         --
         -- Windows system libs (always).
