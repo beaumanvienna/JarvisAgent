@@ -37,6 +37,13 @@ namespace AIAssistant
             return isDir;
         };
 
+        auto checkWorkflowsFolder = [](std::string const& workflowsFolder) -> bool
+        {
+            bool isDir = EngineCore::IsDirectory(workflowsFolder);
+            CORE_ASSERT(isDir, "workflowsFolder is not a directory");
+            return isDir;
+        };
+
         auto checkApiInterface = [](std::vector<ConfigParser::EngineConfig::ApiInterface> const& apiInterfaces,
                                     size_t apiIndex) -> bool
         {
@@ -76,15 +83,30 @@ namespace AIAssistant
 
         // references for convenience
         auto& queueFolderFilepath = engineConfig.m_QueueFolderFilepath;
+        auto& workflowsFolder = engineConfig.m_WorkflowsFolderFilepath;
+
+        bool ok1 = checkQueueFolderFilepath(queueFolderFilepath);                            //
+        bool ok2 = checkWorkflowsFolder(workflowsFolder);                                    //
+        bool ok3 = checkApiInterface(engineConfig.m_ApiInterfaces, engineConfig.m_ApiIndex); //
 
         // conclusion
-        m_ConfigIsOk = checkQueueFolderFilepath(queueFolderFilepath) &&                          //
-                       checkApiInterface(engineConfig.m_ApiInterfaces, engineConfig.m_ApiIndex); //
+        m_ConfigIsOk = ok1 && ok2 && ok3;
 
         // handling
         if (!m_ConfigIsOk)
         {
-            LOG_CORE_ERROR("config error: queue folder filepath is not a directory '{}'", queueFolderFilepath);
+            if (!ok1)
+            {
+                LOG_CORE_ERROR("config error: queue folder filepath is not a directory '{}'", queueFolderFilepath);
+            }
+            if (!ok2)
+            {
+                LOG_CORE_ERROR("config error: workflows folder filepath is not a directory '{}'", workflowsFolder);
+            }
+            if (!ok3)
+            {
+                LOG_CORE_ERROR("config error: API interface '{}'", engineConfig.m_ApiIndex);
+            }
         }
         else
         {

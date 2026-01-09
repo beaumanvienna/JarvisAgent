@@ -32,8 +32,7 @@ namespace AIAssistant
         static FileWriter& Get();
 
         void Write(const std::filesystem::path& filePath, const std::string& content);
-        void WriteWithHeader(std::filesystem::path const& filePath, std::string const& content, std::string const& model,
-                             bool appendTimestamp = true);
+        void WriteWithHeader(std::filesystem::path const& filePath, std::string const& content, std::string const& model);
 
     private:
         FileWriter() = default;

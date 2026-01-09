@@ -27,6 +27,7 @@
 #include "application.h"
 #include "file/fileCategory.h"
 #include "log/statusRenderer.h"
+#include "task/internalTaskRegistry.h"
 
 namespace AIAssistant
 {
@@ -35,6 +36,11 @@ namespace AIAssistant
     class WebServer;
     class ChatMessagePool;
     class PythonEngine;
+    class WorkflowRegistry;
+    class TriggerEngine;
+
+    class AiRequestPool;
+    class WorkflowRuntimeManager;
 
     class JarvisAgent : public Application
     {
@@ -55,9 +61,17 @@ namespace AIAssistant
         std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
         int64_t GetStartupTimestamp() const;
         StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
+        PythonEngine* GetPythonEngine() { return m_PythonEngine.get(); }
+        WorkflowRegistry* GetWorkflowRegistry() { return m_WorkflowRegistry.get(); }
+
+        AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
+        WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
+
+        IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
 
     private:
         void CheckIfFinished();
+        void InitializeWorkflows();
 
     private:
         bool m_IsFinished{false};
@@ -72,6 +86,14 @@ namespace AIAssistant
         std::unique_ptr<WebServer> m_WebServer;
         std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
         std::unique_ptr<PythonEngine> m_PythonEngine;
+
+        std::unique_ptr<WorkflowRegistry> m_WorkflowRegistry;
+        std::unique_ptr<TriggerEngine> m_TriggerEngine;
+
+        InternalTaskRegistry m_InternalTaskRegistry;
+
+        std::unique_ptr<AiRequestPool> m_AiRequestPool;
+        std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;
     };
 
     class App

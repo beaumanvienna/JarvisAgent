@@ -153,8 +153,10 @@ namespace AIAssistant
             }
 
             { // event handling
+#ifdef TRACY_ENABLE
                 const auto green = 0x00ff00;
                 ZoneScopedNC("event handling", green);
+#endif
 
                 // pop all pending events from queue
                 auto events = m_EventQueue.PopAll();
@@ -186,8 +188,10 @@ namespace AIAssistant
             }
 
             { // go easy on the CPU
+#ifdef TRACY_ENABLE
                 const int cyan = 0x00ffff;
                 ZoneScopedNC("sleep time (accuracy check for tracy)", cyan);
+#endif
                 CORE_ASSERT((m_EngineConfig.m_SleepDuration > 0ms) && (m_EngineConfig.m_SleepDuration <= 256ms),
                             "sleep duration incorrect");
                 std::this_thread::sleep_for(std::chrono::milliseconds(m_EngineConfig.m_SleepDuration));
@@ -210,6 +214,10 @@ namespace AIAssistant
         }
 
         m_ThreadPool.Wait();
+
+        // Ensure all pending log output is flushed ---
+        std::cout << std::flush;
+        std::cerr << std::flush;
 
         if (m_OriginalCoutBuffer != nullptr)
         {

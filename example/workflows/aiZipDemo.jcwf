@@ -1,0 +1,209 @@
+{
+  "version": "1.0",
+  "id": "ai-zip-demo",
+  "label": "AI Topic Trio + Zip",
+  "doc": "Runs 3 AI explanations (STL, Python trivia, Vulkan rendering method) and zips the 3 response files.",
+  "triggers": [
+    {
+      "type": "auto",
+      "id": "auto",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "defaults": {
+    "timeout_ms": 15000,
+    "ai": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini"
+    }
+  },
+  "tasks": {
+    "ai_stl_random": {
+      "id": "ai_stl_random",
+      "type": "ai_call",
+      "label": "Explain a random STL component",
+      "doc": "Pick ONE random C++ Standard Library (STL) component (container/algorithm/iterator/utility). Explain what it is, when to use it, common pitfalls, and give a short C++20 code example. Use Allman braces in the example.",
+      "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
+      "file_inputs": [
+        "STNG_friendlyEducationalComputerScience.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
+        "TASK_createMarkdown.txt"
+      ],
+      "file_outputs": [
+        "stl.output.md"
+      ],
+      "environment": {
+        "name": "assistant_env_topic_explainer",
+        "assistant_id": "topic-explainer",
+        "variables": {
+          "OUTPUT_FORMAT": "markdown"
+        }
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_friendlyEducationalComputerScience.txt",
+            "content": "friendly, educational, computer science tone"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
+            "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_createMarkdown.txt",
+            "content": "Create markdown output."
+          }
+        ]
+      },
+      "params": {
+        "mode": "one_shot",
+        "prompt_template": "Pick ONE random C++ Standard Library (STL) component (container/algorithm/iterator/utility). Explain what it is, when to use it, common pitfalls, and give a short C++20 code example. Use Allman braces in the example. Output in Markdown."
+      },
+      "outputs": {
+        "response_text": {
+          "type": "string"
+        }
+      }
+    },
+    "ai_python_trivia_random": {
+      "id": "ai_python_trivia_random",
+      "type": "ai_call",
+      "label": "Explain random Python trivia",
+      "doc": "Pick ONE random Python trivia fact (a surprising behavior, corner case, or language feature). Explain it clearly and include a tiny code example that demonstrates it.",
+      "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
+      "file_inputs": [
+        "STNG_friendlyEducationalComputerScience.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
+        "TASK_createMarkdown.txt"
+      ],
+      "file_outputs": [
+        "pythonTrivia.output.md"
+      ],
+      "environment": {
+        "name": "assistant_env_topic_explainer",
+        "assistant_id": "topic-explainer",
+        "variables": {
+          "OUTPUT_FORMAT": "markdown"
+        }
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_friendlyEducationalComputerScience.txt",
+            "content": "friendly, educational, computer science tone"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
+            "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_createMarkdown.txt",
+            "content": "Create markdown output."
+          }
+        ]
+      },
+      "params": {
+        "mode": "one_shot",
+        "prompt_template": "Pick ONE random Python trivia fact (a surprising behavior, corner case, or language feature). Explain it clearly and include a tiny code example that demonstrates it. Output in Markdown."
+      },
+      "outputs": {
+        "response_text": {
+          "type": "string"
+        }
+      }
+    },
+    "ai_vulkan_method_random": {
+      "id": "ai_vulkan_method_random",
+      "type": "ai_call",
+      "label": "Explain a random Vulkan rendering method",
+      "doc": "Pick ONE random rendering method or shader algorithm (e.g., deferred rendering, clustered shading, SSAO, shadow mapping variant, TAA, etc.) and explain it with a Vulkan mindset. Mention typical passes, what resources are needed (images/buffers), how descriptors might be laid out, and any key synchronization points. Keep it practical.",
+      "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
+      "file_inputs": [
+        "STNG_friendlyEducationalComputerScience.txt",
+        "CNTX_webLookup_cpp_python_vulkan.txt",
+        "TASK_createMarkdown.txt"
+      ],
+      "file_outputs": [
+        "vulkanRendering.output.md"
+      ],
+      "environment": {
+        "name": "assistant_env_topic_explainer",
+        "assistant_id": "topic-explainer",
+        "variables": {
+          "OUTPUT_FORMAT": "markdown"
+        }
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_friendlyEducationalComputerScience.txt",
+            "content": "friendly, educational, computer science tone"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_webLookup_cpp_python_vulkan.txt",
+            "content": "AI may pull C++, Python, and Vulkan/computer-graphics info from the net."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_createMarkdown.txt",
+            "content": "Create markdown output."
+          }
+        ]
+      },
+      "params": {
+        "mode": "one_shot",
+        "prompt_template": "Pick ONE random rendering method or shader algorithm (e.g., deferred rendering, clustered shading, SSAO, shadow mapping variant, TAA, etc.) and explain it with a Vulkan mindset. Mention typical passes, what resources are needed (images/buffers), how descriptors might be laid out, and any key synchronization points. Keep it practical. Output in Markdown."
+      },
+      "outputs": {
+        "response_text": {
+          "type": "string"
+        }
+      }
+    },
+    "zip_responses": {
+      "id": "zip_responses",
+      "type": "shell",
+      "label": "Zip the 3 AI responses",
+      "doc": "Creates aiResponses.zip containing the 3 response text files.",
+      "mode": "single",
+      "working_directory": "../queue/aiZipDemo",
+      "depends_on": [
+        "ai_stl_random",
+        "ai_python_trivia_random",
+        "ai_vulkan_method_random"
+      ],
+      "file_inputs": [
+        "stl.output.md",
+        "pythonTrivia.output.md",
+        "vulkanRendering.output.md"
+      ],
+      "file_outputs": [
+        "aiResponses.zip"
+      ],
+      "params": {
+        "command": "scripts/zipTool.sh",
+        "args": [
+          "${output[0]}",
+          "${input[0]}",
+          "${input[1]}",
+          "${input[2]}"
+        ]
+      }
+    }
+  }
+}

@@ -22,6 +22,8 @@
 #pragma once
 #include <memory>
 #include <queue>
+#include <mutex>
+#include <vector>
 
 #include "event/event.h"
 
@@ -39,6 +41,7 @@ namespace AIAssistant
 
         // Pop all events (main thread should call this periodically)
         std::vector<EventPtr> PopAll();
+        size_t Size();
 
     private:
         std::mutex m_QueueAccessMutex;

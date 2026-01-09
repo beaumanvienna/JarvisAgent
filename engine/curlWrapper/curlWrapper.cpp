@@ -182,8 +182,10 @@ namespace AIAssistant
         LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
         CURLcode res;
         {
+#ifdef TRACY_ENABLE
             const int blue = 0x0000ff;
             ZoneScopedNC("curl_easy_perform(m_Curl)", blue);
+#endif
             res = curl_easy_perform(m_Curl);
         }
 

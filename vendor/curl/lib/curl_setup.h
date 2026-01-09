@@ -150,22 +150,6 @@
 #  include "config-win32.h"
 #endif
 
-#ifdef macintosh
-#  include "config-mac.h"
-#endif
-
-#ifdef __riscos__
-#  include "config-riscos.h"
-#endif
-
-#ifdef __OS400__
-#  include "config-os400.h"
-#endif
-
-#ifdef __PLAN9__
-#  include "config-plan9.h"
-#endif
-
 #endif /* HAVE_CONFIG_H */
 
 /* ================================================================ */

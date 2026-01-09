@@ -1,12 +1,11 @@
 {
     "version": "0.2.0",
-    "configurations":
-    [
+    "configurations": [
         {
             "name": "C++ Launch",
             "type": "cppdbg",
             "request": "launch",
-            "program": "./bin/Release/jarvisAgent",
+            "program": "${workspaceFolder}/bin/Release/jarvisAgent",
             "args": [],
             "cwd": "${workspaceFolder}",
             "environment": [],
@@ -16,15 +15,14 @@
             "name": "(gdb) Launch",
             "type": "cppdbg",
             "request": "launch",
-            "program": "./bin/Debug/jarvisAgent",
+            "program": "${workspaceFolder}/bin/Debug/jarvisAgent",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "setupCommands":
-            [
+            "setupCommands": [
                 {
                     "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",
@@ -41,15 +39,14 @@
             "name": "(lldb) Launch",
             "type": "cppdbg",
             "request": "launch",
-            "program": "./bin/Debug/jarvisAgent",
+            "program": "${workspaceFolder}/bin/Debug/jarvisAgent",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "lldb",
-            "setupCommands":
-            [
+            "setupCommands": [
                 {
                     "description": "Enable pretty-printing for gdb",
                     "text": "-enable-pretty-printing",

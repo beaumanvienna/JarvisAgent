@@ -119,7 +119,7 @@
   <h2 style="display:flex; justify-content:space-between; align-items:center;">
     <span>🧠 JarvisAgent Dashboard</span>
 
-    <!-- 🔥 Added Python Offline Warning (minimal change) -->
+    <!-- 🔥 Added Python Offline Warning -->
     <span id="pythonStatus" style="color:#c33; font-weight:bold; margin-right:10px; display:none;">
       ⚠️ Python Offline
     </span>
@@ -166,7 +166,7 @@
         } else if (msg.type === "late-answer") {
           showLateAnswer(msg);
 
-        /* 🔥 Added Python status handler */
+          /* 🔥 Added Python status handler */
         } else if (msg.type === "python-status") {
           updatePythonStatus(msg.running);
 

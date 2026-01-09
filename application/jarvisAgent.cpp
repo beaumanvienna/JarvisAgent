@@ -19,6 +19,9 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <filesystem>
+#include <system_error>
+
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "event/events.h"
@@ -29,6 +32,32 @@
 #include "file/probUtils.h"
 #include "web/chatMessages.h"
 #include "python/pythonEngine.h"
+#include "task/carMaintenanceTask.h"
+#include "workflow/workflowRegistry.h"
+#include "workflow/workflowTriggerBinder.h"
+#include "workflow/workflowOrchestrator.h"
+#include "workflow/taskExecutorRegistry.h"
+#include "workflow/shellTaskExecutor.h"
+#include "workflow/aiCallTaskExecutor.h"
+#include "workflow/internalTaskExecutor.h"
+#include "workflow/pythonTaskExecutor.h"
+#include "workflow/triggerEngine.h"
+#include "workflow/aiRequestPool.h"
+#include "workflow/workflowRuntimeManager.h"
+
+namespace
+{
+    std::chrono::system_clock::time_point ToSystemClock(std::filesystem::file_time_type const& fileTime)
+    {
+        using FileClock = std::filesystem::file_time_type::clock;
+
+        auto const fileNow = FileClock::now();
+        auto const systemNow = std::chrono::system_clock::now();
+
+        auto const adjustedTime = fileTime - fileNow + systemNow;
+        return std::chrono::time_point_cast<std::chrono::system_clock::duration>(adjustedTime);
+    }
+} // namespace
 
 namespace AIAssistant
 {
@@ -37,6 +66,8 @@ namespace AIAssistant
 
     void JarvisAgent::OnStart()
     {
+        CORE_ASSERT(Core::g_Core != nullptr, "Core must exist before JarvisAgent start!");
+
         // capture application startup time
         m_StartupTime = std::chrono::system_clock::now();
 
@@ -44,12 +75,15 @@ namespace AIAssistant
         App::g_App = this;
 
         // ---------------------------------------------------------
+        // Internal task registrations
+        // ---------------------------------------------------------
+        m_InternalTaskRegistry.RegisterFactory("carMaintenance", []() { return std::make_unique<CarMaintenanceTask>(); });
+
+        // ---------------------------------------------------------
         // Hook StatusRenderer → TerminalManager (engine-owned)
         // ---------------------------------------------------------
-        if (Core::g_Core != nullptr)
         {
             TerminalManager* terminal = Core::g_Core->GetTerminalManager();
-            if (terminal != nullptr)
             {
                 terminal->SetStatusCallbacks(
                     // Build status lines dynamically
@@ -82,8 +116,9 @@ namespace AIAssistant
         // Start all other subsystems
         // ---------------------------------------------------------
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
+        std::filesystem::path const absoluteQueuePath = std::filesystem::absolute(queuePath);
 
-        m_FileWatcher = std::make_unique<FileWatcher>(queuePath, 100ms);
+        m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, 100ms);
         m_FileWatcher->Start();
 
         m_WebServer = std::make_unique<WebServer>();
@@ -91,21 +126,124 @@ namespace AIAssistant
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
-        // initialize Python
-        m_PythonEngine = std::make_unique<PythonEngine>();
+        { // initialize Python
+            m_PythonEngine = std::make_unique<PythonEngine>();
 
-        std::string const scriptPath = "scripts/main.py";
-        bool pythonOk = m_PythonEngine->Initialize(scriptPath);
+            std::string const scriptPath = "scripts/main.py";
+            bool pythonOk = m_PythonEngine->Initialize(scriptPath);
 
-        if (!pythonOk)
+            if (!pythonOk)
+            {
+                LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
+            }
+            else
+            {
+                m_PythonEngine->OnStart();
+            }
+        }
+
+        m_AiRequestPool = std::make_unique<AiRequestPool>();
+
+        // ---------------------------------------------------------
+        // Initialize workflow system (registry + orchestrator + triggers)
+        // ---------------------------------------------------------
+        InitializeWorkflows();
+    }
+
+    //--------------------------------------------------------------------
+
+    void JarvisAgent::InitializeWorkflows()
+    {
+        m_WorkflowRegistry = std::make_unique<WorkflowRegistry>();
+
+        std::filesystem::path workflowsDirectory = Core::g_Core->GetConfig().m_WorkflowsFolderFilepath;
+
+        if (!m_WorkflowRegistry->LoadDirectory(workflowsDirectory))
         {
-            LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
-            m_WebServer->BroadcastPythonStatus(false);
+            LOG_APP_WARN("JarvisAgent::InitializeWorkflows: no workflows loaded from '{}'", workflowsDirectory.string());
         }
         else
         {
-            m_PythonEngine->OnStart();
-            m_WebServer->BroadcastPythonStatus(true);
+            if (!m_WorkflowRegistry->ValidateAll())
+            {
+                LOG_APP_WARN("JarvisAgent::InitializeWorkflows: one or more workflows failed validation");
+            }
+        }
+
+        // ---------------------------------------------------------
+        // Register task executors
+        // ---------------------------------------------------------
+        {
+            TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();
+
+            // Shell executor (TaskType::Shell)
+            {
+                std::shared_ptr<ITaskExecutor> shellExecutor = std::make_shared<ShellTaskExecutor>();
+                executorRegistry.RegisterExecutor(TaskType::Shell, shellExecutor);
+            }
+
+            // AiCall executor (TaskType::AiCall)
+            {
+                std::shared_ptr<ITaskExecutor> aiCallExecutor = std::make_shared<AiCallTaskExecutor>();
+                executorRegistry.RegisterExecutor(TaskType::AiCall, aiCallExecutor);
+            }
+            // Python executor (TaskType::Python)
+            {
+                std::shared_ptr<ITaskExecutor> pythonExecutor = std::make_shared<PythonTaskExecutor>();
+                executorRegistry.RegisterExecutor(TaskType::Python, pythonExecutor);
+            }
+
+            // Internal executor (TaskType::Internal)
+            // Note: m_InternalTaskRegistry is owned by JarvisAgent; wrap it with a no-op deleter.
+            {
+                std::shared_ptr<IInternalTaskRegistry> internalTaskRegistryPtr(
+                    static_cast<IInternalTaskRegistry*>(&m_InternalTaskRegistry), [](IInternalTaskRegistry* const) {});
+
+                std::shared_ptr<ITaskExecutor> internalExecutor =
+                    std::make_shared<InternalTaskExecutor>(internalTaskRegistryPtr);
+
+                executorRegistry.RegisterExecutor(TaskType::Internal, internalExecutor);
+            }
+        }
+
+        WorkflowOrchestrator::Get().SetRegistry(m_WorkflowRegistry.get());
+
+        m_WorkflowRuntimeManager = std::make_unique<WorkflowRuntimeManager>();
+        m_WorkflowRuntimeManager->SetRegistry(m_WorkflowRegistry.get());
+        m_WorkflowRuntimeManager->Start();
+
+        m_TriggerEngine = std::make_unique<TriggerEngine>(
+            [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)
+            {
+                LOG_APP_INFO("JarvisAgent: Trigger fired for workflow '{}' (trigger id '{}')", triggerEvent.m_WorkflowId,
+                             triggerEvent.m_TriggerId);
+
+                if (m_WorkflowRuntimeManager != nullptr)
+                {
+                    m_WorkflowRuntimeManager->EnqueueWorkflowRun(triggerEvent.m_WorkflowId);
+                    return;
+                }
+
+                bool const runOk = WorkflowOrchestrator::Get().RunWorkflowOnce(triggerEvent.m_WorkflowId);
+
+                if (!runOk)
+                {
+                    LOG_APP_ERROR("JarvisAgent: Workflow '{}' run from trigger '{}' failed", triggerEvent.m_WorkflowId,
+                                  triggerEvent.m_TriggerId);
+                }
+            });
+
+        // -----------------------------------------------------------------
+        // Bind all JCWF triggers into TriggerEngine
+        // -----------------------------------------------------------------
+        if (m_WorkflowRegistry && m_TriggerEngine)
+        {
+            WorkflowTriggerBinder workflowTriggerBinder;
+            workflowTriggerBinder.RegisterAll(*m_WorkflowRegistry, *m_TriggerEngine);
+        }
+        else
+        {
+            LOG_APP_WARN("JarvisAgent::InitializeWorkflows: skipping trigger registration (registry or engine missing)");
         }
     }
 
@@ -123,10 +261,40 @@ namespace AIAssistant
         m_ChatMessagePool->RemoveExpired();
 
         // --- Python OnUpdate disabled ---
-        // if (m_PythonEngine)
-        // {
-        //     m_PythonEngine->OnUpdate();
-        // }
+        // m_PythonEngine->OnUpdate();
+
+        {
+            static std::chrono::steady_clock::time_point lastBroadcastTime = std::chrono::steady_clock::now();
+
+            std::chrono::steady_clock::time_point const currentTime = std::chrono::steady_clock::now();
+
+            std::chrono::steady_clock::duration const timeSinceLastBroadcast = currentTime - lastBroadcastTime;
+
+            if (timeSinceLastBroadcast >= 1s)
+            {
+                bool const pythonRunning = m_PythonEngine->IsRunning();
+                m_WebServer->BroadcastPythonStatus(pythonRunning);
+
+                lastBroadcastTime = currentTime;
+            }
+        }
+
+        if (m_AiRequestPool != nullptr)
+        {
+            m_AiRequestPool->Update();
+        }
+
+        // Tick trigger engine (cron-based triggers)
+        if (m_TriggerEngine)
+        {
+            auto const now = std::chrono::system_clock::now();
+            m_TriggerEngine->Tick(now);
+        }
+
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->Update();
+        }
 
         // Termination logic
         CheckIfFinished();
@@ -158,11 +326,15 @@ namespace AIAssistant
             });
 
         fs::path filePath;
+        bool hasFileEvent = false;
+        TriggerEngine::FileEventType fileEventType = TriggerEngine::FileEventType::Created;
 
         dispatcher.Dispatch<FileAddedEvent>(
             [&](FileAddedEvent& fileEvent)
             {
                 filePath = fileEvent.GetPath();
+                fileEventType = TriggerEngine::FileEventType::Created;
+                hasFileEvent = true;
                 return false;
             });
 
@@ -170,6 +342,8 @@ namespace AIAssistant
             [&](FileModifiedEvent& fileEvent)
             {
                 filePath = fileEvent.GetPath();
+                fileEventType = TriggerEngine::FileEventType::Modified;
+                hasFileEvent = true;
                 return false;
             });
 
@@ -177,11 +351,59 @@ namespace AIAssistant
             [&](FileRemovedEvent& fileEvent)
             {
                 filePath = fileEvent.GetPath();
+                fileEventType = TriggerEngine::FileEventType::Deleted;
+                hasFileEvent = true;
                 return false;
             });
 
+        dispatcher.Dispatch<PythonCrashedEvent>(
+            [&](PythonCrashedEvent& evt)
+            {
+                LOG_APP_CRITICAL("Python crashed: {}", evt.GetMessage());
+                m_PythonEngine->Stop();
+                return true;
+            });
+
+        // ---------------------------------------------------------
+        // Forward file events into TriggerEngine (file_watch triggers)
+        // ---------------------------------------------------------
+        if (hasFileEvent && m_TriggerEngine)
+        {
+            auto const now = std::chrono::system_clock::now();
+
+            bool suppressTriggerEvent = false;
+            if (fileEventType != TriggerEngine::FileEventType::Deleted)
+            {
+                auto const timeSinceStartup = now - m_StartupTime;
+                if (timeSinceStartup <= std::chrono::seconds(10))
+                {
+                    std::error_code errorCode;
+                    std::filesystem::file_time_type const lastWriteTime =
+                        std::filesystem::last_write_time(filePath, errorCode);
+                    if (!errorCode)
+                    {
+                        auto const lastWriteSystemTime = ToSystemClock(lastWriteTime);
+                        if (lastWriteSystemTime < m_StartupTime)
+                        {
+                            suppressTriggerEvent = true;
+                        }
+                    }
+                }
+            }
+
+            if (suppressTriggerEvent)
+            {
+                LOG_APP_INFO("JarvisAgent: ignoring file event for '{}' during startup (pre-existing file)",
+                             filePath.string());
+            }
+            else
+            {
+                m_TriggerEngine->NotifyFileEvent(filePath.string(), fileEventType, now);
+            }
+        }
+
         // -----------------------------------------------------------------------------------
-        // ChatMessagePool handling (PROB_xxx files)
+        // PROB handling (ai_call completion consumes output files first, then chat)
         // -----------------------------------------------------------------------------------
 
         if (!filePath.empty())
@@ -206,6 +428,14 @@ namespace AIAssistant
                 // PROB OUTPUT
                 if (probFileInfo.isOutput)
                 {
+                    if (m_AiRequestPool != nullptr)
+                    {
+                        if (m_AiRequestPool->OnProbFileEvent(probFileInfo, filePath.string()))
+                        {
+                            return;
+                        }
+                    }
+
                     std::ifstream inputStream(filePath);
                     std::stringstream outputBuffer;
                     outputBuffer << inputStream.rdbuf();
@@ -238,10 +468,7 @@ namespace AIAssistant
         }
 
         // Forward event to Python
-        if (m_PythonEngine)
-        {
-            m_PythonEngine->OnEvent(eventPtr);
-        }
+        m_PythonEngine->OnEvent(eventPtr);
     }
 
     //--------------------------------------------------------------------
@@ -249,6 +476,15 @@ namespace AIAssistant
     void JarvisAgent::OnShutdown()
     {
         LOG_APP_INFO("leaving JarvisAgent");
+
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->Stop();
+            m_WorkflowRuntimeManager.reset();
+        }
+
+        m_AiRequestPool.reset();
+
         App::g_App = nullptr;
 
         for (auto& sessionManager : m_SessionManagers)
@@ -256,24 +492,19 @@ namespace AIAssistant
             sessionManager.second->OnShutdown();
         }
 
-        if (m_PythonEngine)
         {
             m_PythonEngine->Stop();
             m_PythonEngine.reset();
             m_WebServer->BroadcastPythonStatus(false);
         }
 
-        if (m_FileWatcher)
         {
             m_FileWatcher->Stop();
         }
 
-        if (m_WebServer)
         {
             m_WebServer->Stop();
         }
-
-        // No terminal shutdown here — engine handles it
     }
 
     //--------------------------------------------------------------------

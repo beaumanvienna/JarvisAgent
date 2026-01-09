@@ -63,6 +63,9 @@ int engine(int argc, char* argv[]);
     LOG_APP_CRITICAL("ASSERT on line number {0} in file {1}: {2} (error)", __LINE__, __FILE__, str)
 
 #else
+#define CORE_HARD_STOP(str) \
+    {                       \
+    }
 #define CORE_ASSERT(x, str) \
     {                       \
     }

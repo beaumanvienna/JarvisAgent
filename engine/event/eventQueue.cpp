@@ -55,4 +55,10 @@ namespace AIAssistant
         return eventVector;
     }
 
+    size_t EventQueue::Size()
+    {
+        std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
+        return m_Queue.size();
+    }
+
 } // namespace AIAssistant

@@ -25,3 +25,4 @@
 #include "event/filesystemEvent.h"
 #include "event/engineEvent.h"
 #include "event/timerEvent.h"
+#include "event/pythonErrorEvent.h"

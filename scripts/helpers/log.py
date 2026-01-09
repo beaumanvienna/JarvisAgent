@@ -1,4 +1,3 @@
-
 """
 
 Copyright (c) 2025 JC Technolabs

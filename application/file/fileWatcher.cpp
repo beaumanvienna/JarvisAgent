@@ -98,7 +98,7 @@ namespace AIAssistant
         {
             std::this_thread::sleep_for(m_Interval);
 
-            if (!EngineCore::FileExists(m_PathToWatch))
+            if (!EngineCore::FileExists(m_PathToWatch.string()))
             {
                 LOG_APP_INFO("folder '{}' no longer exists, requesting shutdown", m_PathToWatch.string());
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);

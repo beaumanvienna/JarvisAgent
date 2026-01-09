@@ -21,3 +21,6 @@ __pycache__/
 *.dll
 *.dylib
 
+vendor/curl/lib/curl_config.h
+queue
+workflows

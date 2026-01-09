@@ -53,9 +53,10 @@ namespace AIAssistant
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
             };
 
-            uint m_MaxThreads{0};
+            size_t m_MaxThreads{0};
             std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
+            std::string m_WorkflowsFolderFilepath;
             bool m_Verbose{false};
             size_t m_ApiIndex{0};
             std::vector<ApiInterface> m_ApiInterfaces;
@@ -72,6 +73,7 @@ namespace AIAssistant
             Description,
             Author,
             QueueFolder,
+            WorkflowsFolder,
             MaxThreads,
             SleepTime,
             Verbose,
@@ -87,17 +89,19 @@ namespace AIAssistant
 
         static constexpr std::array<std::string_view, ConfigFields::NumConfigFields> ConfigFieldNames = //
             {
-                "Format",        //
-                "Description",   //
-                "Author",        //
-                "QueueFolder",   //
-                "MaxThreads",    //
-                "SleepTime",     //
-                "Verbose",       //
-                "Url",           //
-                "Model",         //
-                "InterfaceType", //
-                "IndexAPI"       //
+                "Format",          //
+                "Description",     //
+                "Author",          //
+                "QueueFolder",     //
+                "WorkflowsFolder", //
+                "MaxThreads",      //
+                "SleepTime",       //
+                "Verbose",         //
+                "Url",             //
+                "Model",           //
+                "InterfaceType",   //
+                "IndexAPI",        //
+                "MaxFileSizekB"    //
         };
 
     public:

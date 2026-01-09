@@ -2,7 +2,9 @@
     "file format identifier": 1.2,
     "description": "jarvisAgent configuration file",
     "author": "Copyright (c) 2025 JC Technolabs",
+
     "queue folder": "queue",
+    "workflows folder": "workflows",
     "max threads": 20,
     "engine sleep time in run loop in ms": 16,
     "verbose": false,

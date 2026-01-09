@@ -88,5 +88,6 @@
         "coroutine": "cpp"
     },
     "editor.formatOnSave": true,
-    "zenMode.hideLineNumbers": false
+    "zenMode.hideLineNumbers": false,
+    "CodeGPT.apiKey": "OpenAI"
 }

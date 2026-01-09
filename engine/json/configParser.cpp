@@ -96,6 +96,14 @@ namespace AIAssistant
                 engineConfig.m_QueueFolderFilepath = queueFolderFilepath;
                 ++fieldOccurances[ConfigFields::QueueFolder];
             }
+            else if (jsonObjectKey == "workflows folder")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view workflowsFolder = jsonObject.value().get_string();
+                LOG_CORE_INFO("workflows folder: {}", workflowsFolder);
+                engineConfig.m_WorkflowsFolderFilepath = workflowsFolder;
+                ++fieldOccurances[ConfigFields::WorkflowsFolder];
+            }
             else if (jsonObjectKey == "max threads")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");

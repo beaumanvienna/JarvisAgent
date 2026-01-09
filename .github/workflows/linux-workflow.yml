@@ -1,0 +1,66 @@
+name: "🐧Linux"
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential gcc g++ make \
+            python3 python3-pip python3-venv \
+            libncurses6 libncursesw6 libncurses-dev \
+            libssl-dev zlib1g-dev
+
+      - name: Install pipx
+        run: |
+          python3 -m pip install --user pipx
+          python3 -m pipx ensurepath
+          pipx --version
+
+      - name: Install MarkItDown
+        run: pipx install "markitdown[all]"
+
+      - name: Install Premake5
+        uses: abel0b/setup-premake@v2
+        with:
+          version: "5.0.0-beta2"
+
+      - name: Generate Makefiles
+        run: premake5 gmake
+
+      - name: Set parallel build flags
+        run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
+
+      - name: Build Release (parallel)
+        run: |
+          echo "Using $(nproc) cores"
+          make -j$(nproc) config=release verbose=1
+
+      - name: Build Debug (parallel)
+        run: |
+          echo "Using $(nproc) cores"
+          make -j$(nproc) config=debug verbose=1
+
+      - name: Smoke test (Release)
+        run: |
+          ./bin/Release/jarvisAgent --help || true
+
+      - name: Smoke test (Debug)
+        run: |
+          ./bin/Debug/jarvisAgent --help || true

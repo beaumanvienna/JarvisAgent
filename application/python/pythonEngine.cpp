@@ -23,11 +23,24 @@
 #include "pythonEngine.h"
 
 #include <filesystem>
-#include <Python.h>
+
+// Wrap Python.h to force linking against the Release library (python314.lib)
+// even in Debug builds, because python314_d.lib is rarely available.
+#if defined(_WIN32) && defined(_DEBUG)
+    #undef _DEBUG
+    #include <Python.h>
+    #define _DEBUG
+#else
+    #include <Python.h>
+#endif
+
 
 #include "log/log.h"
 #include "event/event.h"
 #include "event/filesystemEvent.h"
+#include "event/pythonErrorEvent.h"
+
+#include "jarvisAgent.h"
 
 namespace fs = std::filesystem;
 
@@ -40,6 +53,24 @@ extern "C" void JarvisRedirectPython(char const* message)
 
     // Send into std::cout so it flows through TerminalLogStreamBuf
     std::cout << message << std::endl;
+}
+
+extern "C" void JarvisPyStatus(char const* message)
+{
+    if (message == nullptr)
+    {
+        return;
+    }
+
+    // Log Python-side error for visibility
+    std::cout << "[PYTHON-ERROR] " << message << std::endl;
+
+    // stop python
+    {
+        auto event = std::make_shared<AIAssistant::PythonCrashedEvent>(message);
+
+        AIAssistant::Core::g_Core->PushEvent(event);
+    }
 }
 
 namespace AIAssistant
@@ -108,6 +139,7 @@ namespace AIAssistant
         // All interpreter setup must happen BEFORE releasing GIL.
         {
             PyGILState_STATE gilState = PyGILState_Ensure();
+            std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
 
             // -------------------------------------------------------------
             // Install stdout/stderr redirection *before* importing module
@@ -255,6 +287,7 @@ namespace AIAssistant
             }
 
             PyGILState_STATE gilState = PyGILState_Ensure();
+            std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
 
             switch (task.m_Type)
             {
@@ -379,6 +412,7 @@ namespace AIAssistant
 
         return dictionary;
     }
+
     // ============================================================================
     //   Public API entry points
     // ============================================================================
@@ -449,6 +483,8 @@ namespace AIAssistant
         // clean up Python references safely under the GIL
         PyGILState_STATE gilState = PyGILState_Ensure();
 
+        std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
+
         Py_XDECREF(m_OnStartFunc);
         Py_XDECREF(m_OnUpdateFunc);
         Py_XDECREF(m_OnEventFunc);
@@ -468,4 +504,369 @@ namespace AIAssistant
 
         LOG_APP_INFO("Python engine stopped");
     }
+
+    bool PythonEngine::ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
+                                           std::unordered_map<std::string, std::string> const& inputValues,
+                                           std::unordered_map<std::string, std::string> const& contextValues,
+                                           std::unordered_map<std::string, std::string>& outputValuesOut,
+                                           std::string& errorMessage)
+    {
+        outputValuesOut.clear();
+
+        if (!m_Running)
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: Python engine is not running";
+            return false;
+        }
+
+        if (taskDefinition.m_ParamsJson.empty())
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: task params are missing (expected JSON with module/function)";
+            return false;
+        }
+
+        // NOTE:
+        // - We do not change the process working directory here (std::filesystem::current_path / os.chdir),
+        //   because that is process-global and would break parallel task execution.
+        // - Task-scoped path resolution is handled by the workflow runtime and the task executor.
+
+        PyGILState_STATE gilState = PyGILState_Ensure();
+        std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
+
+        auto pyObjectToUtf8 = [](PyObject* object) -> std::string
+        {
+            if (object == nullptr)
+            {
+                return {};
+            }
+
+            PyObject* stringObject = PyObject_Str(object);
+            if (stringObject == nullptr)
+            {
+                return {};
+            }
+
+            char const* utf8 = PyUnicode_AsUTF8(stringObject);
+            std::string const result = (utf8 != nullptr) ? utf8 : "";
+
+            Py_DECREF(stringObject);
+            return result;
+        };
+
+        auto consumePythonException = [&]() -> std::string
+        {
+            PyObject* typeObject = nullptr;
+            PyObject* valueObject = nullptr;
+            PyObject* traceObject = nullptr;
+
+            PyErr_Fetch(&typeObject, &valueObject, &traceObject);
+            PyErr_NormalizeException(&typeObject, &valueObject, &traceObject);
+
+            std::string message;
+
+            if (valueObject != nullptr)
+            {
+                message = pyObjectToUtf8(valueObject);
+            }
+            else if (typeObject != nullptr)
+            {
+                message = pyObjectToUtf8(typeObject);
+            }
+            else
+            {
+                message = "unknown python error";
+            }
+
+            Py_XDECREF(typeObject);
+            Py_XDECREF(valueObject);
+            Py_XDECREF(traceObject);
+
+            return message;
+        };
+
+        // --------------------------------------------------------------------
+        // Parse params JSON to get module + function
+        // --------------------------------------------------------------------
+        std::string moduleName;
+        std::string functionName;
+
+        PyObject* jsonModule = PyImport_ImportModule("json");
+        if (jsonModule == nullptr)
+        {
+            errorMessage =
+                "PythonEngine::ExecuteWorkflowTask: failed to import python module 'json': " + consumePythonException();
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        PyObject* paramsDict = PyObject_CallMethod(jsonModule, "loads", "s", taskDefinition.m_ParamsJson.c_str());
+        Py_DECREF(jsonModule);
+
+        if (paramsDict == nullptr || !PyDict_Check(paramsDict))
+        {
+            errorMessage =
+                "PythonEngine::ExecuteWorkflowTask: failed to parse task params JSON: " + consumePythonException();
+            Py_XDECREF(paramsDict);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        PyObject* moduleObject = PyDict_GetItemString(paramsDict, "module");     // borrowed
+        PyObject* functionObject = PyDict_GetItemString(paramsDict, "function"); // borrowed
+
+        if (moduleObject == nullptr || functionObject == nullptr || !PyUnicode_Check(moduleObject) ||
+            !PyUnicode_Check(functionObject))
+        {
+            errorMessage =
+                "PythonEngine::ExecuteWorkflowTask: task params JSON must contain string fields 'module' and 'function'";
+            Py_DECREF(paramsDict);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        {
+            char const* moduleUtf8 = PyUnicode_AsUTF8(moduleObject);
+            char const* functionUtf8 = PyUnicode_AsUTF8(functionObject);
+
+            moduleName = (moduleUtf8 != nullptr) ? moduleUtf8 : "";
+            functionName = (functionUtf8 != nullptr) ? functionUtf8 : "";
+        }
+
+        Py_DECREF(paramsDict);
+
+        if (moduleName.empty() || functionName.empty())
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: empty module/function in task params";
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // Import module + look up callable
+        // --------------------------------------------------------------------
+        PyObject* taskModule = PyImport_ImportModule(moduleName.c_str());
+        if (taskModule == nullptr)
+        {
+            errorMessage =
+                "PythonEngine::ExecuteWorkflowTask: failed to import '" + moduleName + "': " + consumePythonException();
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        PyObject* taskFunction = PyObject_GetAttrString(taskModule, functionName.c_str());
+        Py_DECREF(taskModule);
+
+        if (taskFunction == nullptr || !PyCallable_Check(taskFunction))
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: '" + moduleName + "." + functionName + "' is not callable";
+            Py_XDECREF(taskFunction);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // Build kwargs (inputs...) + context dict
+        // --------------------------------------------------------------------
+        PyObject* kwargs = PyDict_New();
+        if (kwargs == nullptr)
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate kwargs dict";
+            Py_DECREF(taskFunction);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        for (auto const& inputPair : inputValues)
+        {
+            PyObject* valueString = PyUnicode_FromString(inputPair.second.c_str());
+            if (valueString == nullptr)
+            {
+                continue;
+            }
+
+            PyDict_SetItemString(kwargs, inputPair.first.c_str(), valueString);
+            Py_DECREF(valueString);
+        }
+
+        bool const taskWantsContextInput = (taskDefinition.m_Inputs.find("context") != taskDefinition.m_Inputs.end());
+
+        auto attachContextDictToKwargs = [&](PyObject* kwargsDict) -> bool
+        {
+            PyObject* contextDict = PyDict_New();
+            if (contextDict == nullptr)
+            {
+                return false;
+            }
+
+            for (auto const& contextPair : contextValues)
+            {
+                PyObject* valueString = PyUnicode_FromString(contextPair.second.c_str());
+                if (valueString == nullptr)
+                {
+                    continue;
+                }
+
+                PyDict_SetItemString(contextDict, contextPair.first.c_str(), valueString);
+                Py_DECREF(valueString);
+            }
+
+            // Add a few well-known runtime fields under reserved keys.
+            {
+                PyObject* taskIdString = PyUnicode_FromString(taskDefinition.m_Id.c_str());
+                PyObject* workingDirectoryString = PyUnicode_FromString(taskWorkingDirectory.c_str());
+
+                if (taskIdString != nullptr)
+                {
+                    PyDict_SetItemString(contextDict, "_task_id", taskIdString);
+                    Py_DECREF(taskIdString);
+                }
+
+                if (workingDirectoryString != nullptr)
+                {
+                    PyDict_SetItemString(contextDict, "_task_working_directory", workingDirectoryString);
+                    Py_DECREF(workingDirectoryString);
+                }
+            }
+
+            PyDict_SetItemString(kwargsDict, "context", contextDict);
+            Py_DECREF(contextDict);
+
+            return true;
+        };
+
+        if (taskWantsContextInput)
+        {
+            if (!attachContextDictToKwargs(kwargs))
+            {
+                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate context dict";
+                Py_DECREF(kwargs);
+                Py_DECREF(taskFunction);
+                PyGILState_Release(gilState);
+                return false;
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Execute
+        // --------------------------------------------------------------------
+        PyObject* argsTuple = PyTuple_New(0);
+        if (argsTuple == nullptr)
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple";
+            Py_DECREF(kwargs);
+            Py_DECREF(taskFunction);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        PyObject* resultObject = PyObject_Call(taskFunction, argsTuple, kwargs);
+        Py_DECREF(argsTuple);
+
+        if (resultObject == nullptr && !taskWantsContextInput)
+        {
+            std::string const firstException = consumePythonException();
+
+            bool const looksLikeMissingContext = (firstException.find("context") != std::string::npos) &&
+                                                 ((firstException.find("missing") != std::string::npos) ||
+                                                  (firstException.find("required") != std::string::npos));
+
+            if (!looksLikeMissingContext)
+            {
+                errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + firstException;
+                Py_DECREF(kwargs);
+                Py_DECREF(taskFunction);
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            if (!attachContextDictToKwargs(kwargs))
+            {
+                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate context dict";
+                Py_DECREF(kwargs);
+                Py_DECREF(taskFunction);
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            argsTuple = PyTuple_New(0);
+            if (argsTuple == nullptr)
+            {
+                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple";
+                Py_DECREF(kwargs);
+                Py_DECREF(taskFunction);
+                PyGILState_Release(gilState);
+                return false;
+            }
+
+            resultObject = PyObject_Call(taskFunction, argsTuple, kwargs);
+            Py_DECREF(argsTuple);
+
+            if (resultObject == nullptr)
+            {
+                errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException();
+                Py_DECREF(kwargs);
+                Py_DECREF(taskFunction);
+                PyGILState_Release(gilState);
+                return false;
+            }
+        }
+        else if (resultObject == nullptr)
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException();
+            Py_DECREF(kwargs);
+            Py_DECREF(taskFunction);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        Py_DECREF(kwargs);
+        Py_DECREF(taskFunction);
+
+        // A python task may return None; treat it as success with no outputs.
+        if (resultObject == Py_None)
+        {
+            Py_DECREF(resultObject);
+            PyGILState_Release(gilState);
+            return true;
+        }
+
+        if (!PyDict_Check(resultObject))
+        {
+            errorMessage = "PythonEngine::ExecuteWorkflowTask: expected dict return value (or None) from '" + moduleName +
+                           "." + functionName + "'";
+            Py_DECREF(resultObject);
+            PyGILState_Release(gilState);
+            return false;
+        }
+
+        // Extract output values as strings.
+        PyObject* keyObject = nullptr;
+        PyObject* valueObject = nullptr;
+        Py_ssize_t position = 0;
+
+        while (PyDict_Next(resultObject, &position, &keyObject, &valueObject))
+        {
+            if (keyObject == nullptr || !PyUnicode_Check(keyObject))
+            {
+                continue;
+            }
+
+            char const* keyUtf8 = PyUnicode_AsUTF8(keyObject);
+            if (keyUtf8 == nullptr)
+            {
+                continue;
+            }
+
+            std::string const key = keyUtf8;
+            std::string const value = pyObjectToUtf8(valueObject);
+
+            outputValuesOut[key] = value;
+        }
+
+        Py_DECREF(resultObject);
+
+        PyGILState_Release(gilState);
+        return true;
+    }
+
 } // namespace AIAssistant
