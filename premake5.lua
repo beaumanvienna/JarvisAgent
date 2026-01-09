@@ -149,7 +149,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
             end
 
             local lines = {}
-            for line in pythonInfo:gmatch("([^]+)") do
+            for line in pythonInfo:gmatch("([^\r\n]+)") do
                 lines[#lines + 1] = line
             end
 
