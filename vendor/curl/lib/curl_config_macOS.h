@@ -710,7 +710,7 @@
 /* #undef USE_LIBSSH */
 
 /* if libssh2 is in use */
-#define USE_LIBSSH2 1
+/* #undef USE_LIBSSH2 */
 
 /* if libpsl is in use */
 /* #undef USE_LIBPSL */
