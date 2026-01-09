@@ -17,7 +17,7 @@ This list tracks the remaining work for JarvisAgent.
   - Remove deadsnakes PPA / hardcoded Python version; use system Python (`python3`, `python3-dev`, `python3-pip`)
   - Remove any ncurses packages (PDCursesMod is vendored + statically linked)
   - Remove TRACY_NO_INVARIANT_CHECK changes (Tracy is off by default)
-  - Resolve merge conflicts (`config.json`, `engine/log/terminalManager.cpp`)
+  - Fix new workflow
 - Verify working headless mode in container
 - Verify working deployment (docker-compose example)
 
