@@ -150,6 +150,8 @@
 #  include "config-win32.h"
 #endif
 
+#endif /* HAVE_CONFIG_H */
+
 /* ================================================================ */
 /* Definition of preprocessor macros/symbols which modify compiler  */
 /* behavior or generated code characteristics must be done here,   */
