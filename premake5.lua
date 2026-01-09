@@ -181,13 +181,14 @@ project "jarvisAgent"
             -- Ensure the runtime can find libpython without extra env vars.
             linkoptions { "-Wl,-rpath," .. pyLibDir }
     
+
+            -- macOS frameworks needed by libcurl (SystemConfiguration/CoreFoundation)
+            linkoptions { "-framework CoreFoundation", "-framework SystemConfiguration" }
             links {
                 "curl",
                 "ssl",
                 "crypto",
                 "z",
-                "-framework CoreFoundation",
-                "-framework SystemConfiguration",
                 pyLibName,
                 "pdcursesmod"
             }
