@@ -18,6 +18,7 @@ This list tracks the remaining work for JarvisAgent.
   - Remove any ncurses packages (PDCursesMod is vendored + statically linked)
   - Remove TRACY_NO_INVARIANT_CHECK changes (Tracy is off by default)
   - Fix new workflow
+- C++: TTY detection under all 3 operating systems (include Windows)
 - Verify working headless mode in container
 - Verify working deployment (docker-compose example)
 
