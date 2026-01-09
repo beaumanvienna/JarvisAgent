@@ -377,10 +377,10 @@
 #define HAVE_LIBGEN_H 1
 
 /* Define to 1 if you have the `idn2' library (-lidn2). */
-#define HAVE_LIBIDN2 1
+//#define HAVE_LIBIDN2 1
 
 /* Define to 1 if you have the idn2.h header file. */
-#define HAVE_IDN2_H 1
+//#define HAVE_IDN2_H 1
 
 /* if zlib is available */
 #define HAVE_LIBZ 1
