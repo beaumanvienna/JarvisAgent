@@ -389,7 +389,7 @@
 //#define HAVE_BROTLI 1
 
 /* if zstd is available */
-#define HAVE_ZSTD 1
+//#define HAVE_ZSTD 1
 
 /* Define to 1 if you have the <locale.h> header file. */
 #define HAVE_LOCALE_H 1
