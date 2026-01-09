@@ -136,62 +136,94 @@ project "jarvisAgent"
         -- So we must guard macOS-only host calls to avoid crashing when premake runs elsewhere.
         --
         if os.ishost("macosx") then
-            local pythonInfo = os.outputof([[python3 -c "import sys, sysconfig; print(sysconfig.get_path('include') or ''); print(sysconfig.get_config_var('LIBDIR') or ''); print(sys.base_prefix or ''); print(sysconfig.get_config_var('LDLIBRARY') or '')"]])
-    
+            local pythonInfo = os.outputof([[python3 -c "import sys, sysconfig; 
+print(sysconfig.get_path('include') or ''); 
+print(sysconfig.get_config_var('LIBDIR') or ''); 
+print(sys.base_prefix or ''); 
+print(sysconfig.get_config_var('LDLIBRARY') or ''); 
+print(sysconfig.get_config_var('PYTHONFRAMEWORK') or ''); 
+print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
+
             if not pythonInfo then
                 error("python3 not found on PATH. On CI, ensure actions/setup-python ran before premake5.")
             end
-    
+
             local lines = {}
-            for line in pythonInfo:gmatch("([^\r\n]+)") do
+            for line in pythonInfo:gmatch("([^
+]+)") do
                 lines[#lines + 1] = line
             end
-    
-            if #lines < 4 then
+
+            if #lines < 6 then
                 error("Failed to query Python sysconfig paths on macOS. Output was: " .. pythonInfo)
             end
-    
+
             local pyIncludeDir = lines[1]
             local pyLibDir = lines[2]
             local pyBasePrefix = lines[3]
             local pyLdLibrary = lines[4]
-    
+            local pyFrameworkName = lines[5]
+            local pyFrameworkPrefix = lines[6]
+
             if pyIncludeDir == "" then
                 error("Failed to determine Python include directory on macOS.")
             end
-    
-            if pyLibDir == "" then
-                -- Fallback (common for framework builds): <base_prefix>/lib
-                pyLibDir = path.join(pyBasePrefix, "lib")
-            end
-    
-            local pyLibName = pyLdLibrary
-            -- Convert e.g. "libpython3.12.dylib" -> "python3.12"
-            pyLibName = pyLibName:gsub("^lib", "")
-            pyLibName = pyLibName:gsub("%.dylib$", "")
-            pyLibName = pyLibName:gsub("%.a$", "")
-    
-            if pyLibName == "" then
-                error("Failed to determine Python link library name on macOS (LDLIBRARY was: " .. pyLdLibrary .. ").")
-            end
-    
+
             includedirs { pyIncludeDir }
-            libdirs { pyLibDir }
-    
-            -- Ensure the runtime can find libpython without extra env vars.
-            linkoptions { "-Wl,-rpath," .. pyLibDir }
-    
+
+            local useFramework = (pyFrameworkName ~= "")
+
+            if useFramework then
+                --
+                -- Framework build (common on GitHub Actions macOS):
+                -- Link via -framework Python rather than -lPython.
+                --
+                print(">>> Python (macOS): linking as framework: " .. pyFrameworkName)
+
+                if pyFrameworkPrefix ~= "" then
+                    -- Usually /Library/Frameworks; add explicit search path to be safe.
+                    linkoptions { "-F" .. pyFrameworkPrefix }
+                end
+
+                linkoptions { "-framework " .. pyFrameworkName }
+            else
+                --
+                -- Non-framework build: link against libpythonX.Y in LIBDIR.
+                --
+                if pyLibDir == "" then
+                    -- Fallback: <base_prefix>/lib
+                    pyLibDir = path.join(pyBasePrefix, "lib")
+                end
+
+                local pyLibName = pyLdLibrary
+                -- Convert e.g. "libpython3.12.dylib" -> "python3.12"
+                pyLibName = pyLibName:gsub("^lib", "")
+                pyLibName = pyLibName:gsub("%.dylib$", "")
+                pyLibName = pyLibName:gsub("%.a$", "")
+
+                if pyLibName == "" then
+                    error("Failed to determine Python link library name on macOS (LDLIBRARY was: " .. pyLdLibrary .. ").")
+                end
+
+                libdirs { pyLibDir }
+
+                -- Ensure the runtime can find libpython without extra env vars.
+                linkoptions { "-Wl,-rpath," .. pyLibDir }
+
+                links { pyLibName }
+            end
 
             -- macOS frameworks needed by libcurl (SystemConfiguration/CoreFoundation)
             linkoptions { "-framework CoreFoundation", "-framework SystemConfiguration" }
+
             links {
                 "curl",
                 "ssl",
                 "crypto",
                 "z",
-                pyLibName,
                 "pdcursesmod"
             }
+
         end
 
 
