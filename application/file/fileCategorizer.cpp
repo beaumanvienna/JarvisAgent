@@ -141,7 +141,7 @@ namespace AIAssistant
     {
         std::string filename = filePath.filename().string();
 
-        if (EngineCore::IsDirectory(filePath))
+        if (EngineCore::IsDirectory(filePath.string()))
         {
             return FileCategory::SubFolder;
         }

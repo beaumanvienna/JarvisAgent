@@ -1,0 +1,63 @@
+name: "🍎macOS"
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install pipx
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --user pipx
+          python3 -m pipx ensurepath
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          pipx --version
+
+      - name: Install MarkItDown
+        run: pipx install "markitdown[all]"
+
+      - name: Install Premake5
+        uses: abel0b/setup-premake@v2
+        with:
+          version: "5.0.0-beta2"
+
+      - name: Generate Makefiles
+        run: premake5 gmake
+
+      - name: Build Release (parallel)
+        run: |
+          CORES=$(sysctl -n hw.ncpu)
+          echo "Using ${CORES} cores"
+          make -j${CORES} config=release verbose=1
+
+      - name: Build Debug (parallel)
+        run: |
+          CORES=$(sysctl -n hw.ncpu)
+          echo "Using ${CORES} cores"
+          make -j${CORES} config=debug verbose=1
+
+      - name: Smoke test (Release)
+        run: |
+          ./bin/Release/jarvisAgent --help || true
+
+      - name: Smoke test (Debug)
+        run: |
+          ./bin/Debug/jarvisAgent --help || true

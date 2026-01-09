@@ -23,7 +23,17 @@
 #include "pythonEngine.h"
 
 #include <filesystem>
-#include <Python.h>
+
+// Wrap Python.h to force linking against the Release library (python314.lib)
+// even in Debug builds, because python314_d.lib is rarely available.
+#if defined(_WIN32) && defined(_DEBUG)
+    #undef _DEBUG
+    #include <Python.h>
+    #define _DEBUG
+#else
+    #include <Python.h>
+#endif
+
 
 #include "log/log.h"
 #include "event/event.h"

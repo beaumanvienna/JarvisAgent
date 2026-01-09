@@ -74,7 +74,7 @@ namespace AIAssistant
             WorkflowDefinition m_Definition;
             WorkflowRun m_Run;
 
-            std::unordered_map<std::string, std::future<TaskExecutionResult>> m_RunningTasks;
+            std::unordered_map<std::string, std::shared_future<TaskExecutionResult>> m_RunningTasks;
         };
 
     private:
