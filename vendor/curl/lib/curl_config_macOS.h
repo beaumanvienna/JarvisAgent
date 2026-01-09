@@ -95,10 +95,10 @@
 /* #undef CURL_DISABLE_IMAP */
 
 /* disables LDAP */
-/* #undef CURL_DISABLE_LDAP */
+#define CURL_DISABLE_LDAP 1
 
 /* disables LDAPS */
-/* #undef CURL_DISABLE_LDAPS */
+#define CURL_DISABLE_LDAPS 1
 
 /* disables --libcurl option from the curl tool */
 /* #undef CURL_DISABLE_LIBCURL_OPTION */
@@ -365,13 +365,13 @@
 #define HAVE_LBER_H 1
 
 /* Use LDAPS implementation */
-#define HAVE_LDAP_SSL 1
+/* #undef HAVE_LDAP_SSL */
 
 /* Define to 1 if you have the ldap_ssl.h header file. */
 /* #undef HAVE_LDAP_SSL_H */
 
 /* Define to 1 if you have the `ldap_url_parse' function. */
-#define HAVE_LDAP_URL_PARSE 1
+/* #undef HAVE_LDAP_URL_PARSE */
 
 /* Define to 1 if you have the <libgen.h> header file. */
 #define HAVE_LIBGEN_H 1
