@@ -386,7 +386,7 @@
 #define HAVE_LIBZ 1
 
 /* if brotli is available */
-#define HAVE_BROTLI 1
+//#define HAVE_BROTLI 1
 
 /* if zstd is available */
 #define HAVE_ZSTD 1
