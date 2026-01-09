@@ -289,6 +289,11 @@ project "jarvisAgent"
         ----------------------------------------------------
         os.rmdir("vendor/curl/bin")
         os.rmdir("vendor/curl/bin-int")
+        ----------------------------------------------------
+        -- Remove generated curl config
+        ----------------------------------------------------
+        os.remove("vendor/curl/lib/curl_config.h")
+
 
         ----------------------------------------------------
         -- OpenSSL build folders

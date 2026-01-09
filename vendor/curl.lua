@@ -1,6 +1,26 @@
 
 -- 2025 JC Technolabs
 
+----------------------------------------------------
+-- Select correct curl_config.h per host OS (gmake only)
+----------------------------------------------------
+if _ACTION and _ACTION:match("^gmake") then
+    if os.ishost("linux") then
+        print(">>> curl: using Linux curl_config")
+        os.copyfile(
+            "curl/lib/curl_config_Linux.h",
+            "curl/lib/curl_config.h"
+        )
+    elseif os.ishost("macosx") then
+        print(">>> curl: using macOS curl_config")
+        os.copyfile(
+            "curl/lib/curl_config_macOS.h",
+            "curl/lib/curl_config.h"
+        )
+    end
+end
+
+
 project "curl"
     kind "StaticLib"
     language "C++"
