@@ -69,7 +69,12 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
 - **Context / State**: A key-value store that persists data across tasks within a workflow run.  
   - Example: `context["today"] = "2025-12-01"` or `context["report_url"] = "https://..."`.  
 - **Run**: A single execution instance of a workflow with its own state and logs.  
-- **Workflow File Path**: The filesystem path of the loaded `.jcwf` file.
+- **Workflow File Path**: The filesystem path of the loaded `.jcwf` file, **including both the directory and the filename**.
+  - Equivalently: `Workflow File Path = Workflow File Directory + <workflow filename>` (after resolution and normalization).
+  - The Workflow File Path MAY be provided as either an **absolute** or **relative** path.
+  - If provided as a relative path, it MUST be resolved relative to the **JarvisAgent Launch Working Directory**.
+  - After resolution, the Workflow File Path MUST be normalized and stored internally as an **absolute path**.
+  - Example (canonical form after resolution): `/home/jc/dev/jarvisAgent/workflows/aiZipDemo.jcwf`.
 - **Workflow File Directory**: The directory that contains the loaded `.jcwf` file.
 - **Workflow Base Directory**: The base directory used for resolving workflow-level relative paths.
   - If the root field `base_directory` is present and starts with `/`, it is treated as an absolute path.
@@ -79,6 +84,10 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
 - **Path Syntax**: This specification uses Unix-style paths with forward slashes (`/`). An absolute path MUST begin with `/`.
 
 - **JarvisAgent Launch Working Directory**: The process current working directory at the time JarvisAgent starts (for example, the project root when launching `./bin/Release/jarvisAgent`). This directory is used to resolve `scripts/` paths for `shell` tasks.
+  - JarvisAgent MUST capture this directory at process startup and treat it as immutable for the lifetime of the process.
+  - JarvisAgent MUST NOT change the process current working directory (CWD) at any time.
+  - The per-task `working_directory` concept in JCWF is a **path-resolution and file-placement rule only**; it MUST NOT be implemented by calling `chdir()` / `std::filesystem::current_path(...)` on the process.
+  - Executors that need a task-specific directory MUST use absolute paths and/or per-call process-spawn parameters (for example, `cwd` in Python `subprocess`), without affecting JarvisAgent's own CWD.
 
 - **JCWF Runtime**: The JarvisAgent orchestration layer that loads, validates, and runs JCWF workflows.  
 - **Environment**: Optional metadata and variables attached to a task (for example, environment variables for shell tasks, or an assistant environment for AI tasks).  
@@ -145,6 +154,11 @@ The root object has the following top-level fields:
 #### 3.1.2 Path Resolution
 
 JarvisAgent MUST resolve paths deterministically and independent of the process current working directory.
+
+As soon as a path can be resolved under these rules (i.e., once the relevant base/working directory context is known), JarvisAgent MUST convert it to an **absolute** path and store/use it internally in absolute form (after lexical normalization).
+
+
+JarvisAgent MUST NOT change the process current working directory (CWD) at any time; all path resolution and task execution MUST be implemented without mutating the process CWD.
 
 **Workflow-level paths**
 
@@ -1166,6 +1180,11 @@ This is a **JarvisAgent enforcement rule (engine/runtime)**, not a JCWF spec rul
 **Policy:** _Workflow tasks must not create or overwrite files inside the scripts folder._
 
 Scripts may be referenced as **inputs** (e.g. a shell script path), but outputs must be written into the task working directory (or another workflow-owned location).
+
+
+### Absolute path naming convention (JarvisAgent runtime)
+
+**Policy:** if a path stored in a variable/member field/signal is **guaranteed** to be absolute, that variable/member field/signal name MUST end with `Absolute` (for example `workflowFilePathAbsolute`).
 
 ### Missing source files
 
