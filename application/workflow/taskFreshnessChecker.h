@@ -53,12 +53,20 @@ namespace AIAssistant
             std::function<bool(std::string const& taskId, std::vector<std::filesystem::path>& outPaths)>;
 
         bool IsTaskUpToDate(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
-                            ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths) const;
+                            ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths,
+                            std::filesystem::path* comparedInputPath = nullptr,
+                            std::filesystem::path* comparedOutputPath = nullptr) const;
 
     private:
+        struct TimedPath
+        {
+            std::filesystem::path m_Path;
+            std::filesystem::file_time_type m_Time;
+        };
+
         bool CollectUpstreamOutputTimes(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
                                         std::unordered_set<std::string>& visitedTasks,
-                                        std::vector<std::filesystem::file_time_type>& outTimes,
+                                        std::vector<TimedPath>& outTimes,
                                         ResolveOutputPathsFn const& resolveOutputPaths) const;
     };
 

@@ -516,18 +516,23 @@ namespace AIAssistant
                             return true;
                         };
 
-                        if (freshnessChecker.IsTaskUpToDate(workflowDefinition, taskId, resolvedPaths,
-                                                            resolveUpstreamOutputs))
-                        {
-                            LOG_APP_INFO("WorkflowOrchestrator: Task '{}' is up to date → skipped", taskId);
+                        fs::path comparedInputPath;
+                        fs::path comparedOutputPath;
+                        bool const isUpToDate = freshnessChecker.IsTaskUpToDate(
+                            workflowDefinition, taskId, resolvedPaths, resolveUpstreamOutputs, &comparedInputPath,
+                            &comparedOutputPath);
 
+                        if (isUpToDate)
+                        {
                             PopulateSkippedTaskOutputsIfPossible(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                                  *taskState);
 
                             taskState->m_State = TaskInstanceStateKind::Skipped;
                             madeProgressThisTick = true;
+                            LOG_APP_INFO("WorkflowOrchestrator: Freshness passed - skipping task '{}' (input '{}' vs output '{}').", taskId, comparedInputPath.string(), comparedOutputPath.string());
                             continue;
                         }
+                        LOG_APP_INFO("WorkflowOrchestrator: Freshness failed - running task '{}' (input '{}' vs output '{}').", taskId, comparedInputPath.string(), comparedOutputPath.string());
                     }
                 }
 

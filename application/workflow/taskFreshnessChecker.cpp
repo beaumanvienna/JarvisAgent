@@ -29,6 +29,7 @@ namespace fs = std::filesystem;
 
 namespace
 {
+
     [[maybe_unused]] fs::path ResolveWorkingDirectory(AIAssistant::WorkflowDefinition const& workflowDefinition,
                                                       AIAssistant::TaskDef const& taskDefinition)
     {
@@ -92,8 +93,8 @@ namespace
 namespace AIAssistant
 {
     bool TaskFreshnessChecker::IsTaskUpToDate(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
-                                              ResolvedPaths const& resolvedPaths,
-                                              ResolveOutputPathsFn const& resolveOutputPaths) const
+                                         ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths,
+                                         std::filesystem::path* comparedInputPath, std::filesystem::path* comparedOutputPath) const
     {
         // If the task has no declared outputs, treat it as not provably up to date.
         if (resolvedPaths.m_OutputPaths.empty())
@@ -114,7 +115,7 @@ namespace AIAssistant
         // ---------------------------------------------------------
         // 1) Collect timestamps for this task's declared inputs
         // ---------------------------------------------------------
-        std::vector<fs::file_time_type> inputTimes;
+        std::vector<TimedPath> inputTimes;
 
         for (fs::path const& inputPath : resolvedPaths.m_InputPaths)
         {
@@ -122,6 +123,10 @@ namespace AIAssistant
             if (!fs::exists(resolvedInputPath, errorCode))
             {
                 // Missing input ⇒ not up to date.
+                if (comparedInputPath != nullptr)
+                {
+                    *comparedInputPath = resolvedInputPath;
+                }
                 return false;
             }
 
@@ -131,14 +136,14 @@ namespace AIAssistant
                 return false;
             }
 
-            inputTimes.push_back(writeTime);
+            inputTimes.push_back(TimedPath{resolvedInputPath, writeTime});
         }
 
         // ---------------------------------------------------------
         // 2) Collect timestamps for all upstream outputs (transitively)
         // ---------------------------------------------------------
         std::unordered_set<std::string> visitedTasks;
-        std::vector<fs::file_time_type> upstreamTimes;
+        std::vector<TimedPath> upstreamTimes;
 
         // Collect timestamps for all upstream outputs (transitively).
         // Upstream means: dependencies of this task (not the task itself).
@@ -163,12 +168,37 @@ namespace AIAssistant
             return false;
         }
 
-        fs::file_time_type latestInputTime = *std::max_element(inputTimes.begin(), inputTimes.end());
+        auto const latestInputIterator = std::max_element(
+            inputTimes.begin(), inputTimes.end(),
+            [](TimedPath const& left, TimedPath const& right)
+            {
+                return left.m_Time < right.m_Time;
+            });
+
+        fs::file_time_type latestInputTime = latestInputIterator->m_Time;
+        fs::path latestInputPath = latestInputIterator->m_Path;
+
+        if (!upstreamTimes.empty())
+        {
+            auto const upstreamLatestIterator = std::max_element(
+                upstreamTimes.begin(), upstreamTimes.end(),
+                [](TimedPath const& left, TimedPath const& right)
+                {
+                    return left.m_Time < right.m_Time;
+                });
+
+            if (upstreamLatestIterator->m_Time > latestInputTime)
+            {
+                latestInputTime = upstreamLatestIterator->m_Time;
+                latestInputPath = upstreamLatestIterator->m_Path;
+            }
+        }
 
         // ---------------------------------------------------------
         // 3) Collect timestamps for this task's outputs
         // ---------------------------------------------------------
-        std::vector<fs::file_time_type> outputTimes;
+
+        std::vector<TimedPath> outputTimes;
         outputTimes.reserve(resolvedPaths.m_OutputPaths.size());
 
         for (fs::path const& outputPath : resolvedPaths.m_OutputPaths)
@@ -176,25 +206,46 @@ namespace AIAssistant
             fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
-                // An output is missing ⇒ not up to date.
+                if (comparedOutputPath != nullptr)
+                {
+                    *comparedOutputPath = resolvedOutputPath;
+                }
                 return false;
             }
 
-            auto writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
+            fs::file_time_type const writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
                 return false;
             }
 
-            outputTimes.push_back(writeTime);
+            outputTimes.push_back(TimedPath{resolvedOutputPath, writeTime});
         }
 
         if (outputTimes.empty())
         {
+            // No outputs => cannot prove freshness.
             return false;
         }
 
-        fs::file_time_type earliestOutputTime = *std::min_element(outputTimes.begin(), outputTimes.end());
+        auto const earliestOutputIterator = std::min_element(
+            outputTimes.begin(), outputTimes.end(),
+            [](TimedPath const& left, TimedPath const& right)
+            {
+                return left.m_Time < right.m_Time;
+            });
+
+        fs::file_time_type const earliestOutputTime = earliestOutputIterator->m_Time;
+        fs::path const earliestOutputPath = earliestOutputIterator->m_Path;
+
+        if (comparedInputPath != nullptr)
+        {
+            *comparedInputPath = latestInputPath;
+        }
+        if (comparedOutputPath != nullptr)
+        {
+            *comparedOutputPath = earliestOutputPath;
+        }
 
         // Makefile-style rule extended with upstream outputs:
         // Task is up to date if all outputs exist and the oldest output
@@ -206,7 +257,7 @@ namespace AIAssistant
     bool TaskFreshnessChecker::CollectUpstreamOutputTimes(WorkflowDefinition const& workflowDefinition,
                                                           std::string const& taskId,
                                                           std::unordered_set<std::string>& visitedTasks,
-                                                          std::vector<fs::file_time_type>& outTimes,
+                                                          std::vector<TaskFreshnessChecker::TimedPath>& outTimes,
                                                           ResolveOutputPathsFn const& resolveOutputPaths) const
     {
         // Avoid infinite recursion in case validation was skipped.
@@ -256,7 +307,7 @@ namespace AIAssistant
                 return false;
             }
 
-            outTimes.push_back(writeTime);
+            outTimes.push_back(TimedPath{resolvedOutputPath, writeTime});
         }
 
         return true;

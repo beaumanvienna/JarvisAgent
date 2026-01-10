@@ -55,6 +55,25 @@ namespace AIAssistant
             return std::filesystem::absolute(path).lexically_normal();
         }
 
+
+    std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
+    if (!baseLeaf.empty())
+    {
+        auto pathIterator = path.begin();
+        if (pathIterator != path.end() && *pathIterator == baseLeaf)
+        {
+            // Avoid duplicating the base directory when the provided path already starts with it.
+            // Example: baseDirectoryPath=".../workflows" and path="workflows/aiZipDemo.jcwf".
+            std::filesystem::path const baseParent = baseDirectoryPath.parent_path();
+            if (!baseParent.empty())
+            {
+                return std::filesystem::absolute(baseParent / path).lexically_normal();
+            }
+
+            return std::filesystem::absolute(path).lexically_normal();
+        }
+    }
+
         return std::filesystem::absolute(baseDirectoryPath / path).lexically_normal();
     }
 
