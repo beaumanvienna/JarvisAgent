@@ -32,7 +32,7 @@ This entire process is **event‑driven** and **non‑blocking**.
 
 ## AI Task Materialization (STNG / CNTX / TASK / PROB)
 
-Each `ai_call` task produces a concrete file‑based environment before sending a request.
+Each `ai_call` task produces a concrete file‑based environment before sending a request. Each AI task has its own task folder under the configured queue root; non‑AI tasks use the workflows folder.
 
 ### Environment Files
 
@@ -48,7 +48,7 @@ For every AI task, the executor assembles:
 These files are written into the **task working directory**:
 
 ```
-../queue/aiZipDemo/
+./queue/aiZipDemo/
 ```
 
 ### Why files?
@@ -64,10 +64,10 @@ This design intentionally mirrors **Makefile transparency** rather than opaque i
 
 ## Unique File Naming
 
-Each AI request generates a unique PROB filename:
+Each AI task materializes its PROB from `queue_binding.prob_files` (inline or path). Filenames are task‑scoped:
 
 ```
-PROB_<taskIndex>_<monotonicTimestamp>.txt
+PROB_<taskName>.txt
 ```
 
 This ensures:
@@ -76,11 +76,7 @@ This ensures:
 - deterministic pairing between input and output,
 - safe re‑runs across application restarts.
 
-Corresponding outputs:
-
-```
-PROB_<taskIndex>_<timestamp>.output.txt
-```
+Corresponding outputs are written alongside the task outputs (e.g. `*.output.md`).
 
 ---
 
@@ -106,7 +102,7 @@ Timeouts and failures are detected per request and propagated as task failures.
 
 ## Synchronization With Shell Tasks
 
-Shell tasks (e.g. `zip_responses`) depend on AI outputs via `depends_on`.
+Shell tasks (e.g. `zip_responses`) live under the workflows folder and depend on AI outputs via `depends_on`.
 
 ### Guarantees
 
@@ -234,13 +230,13 @@ Skipped task:
 
 ### config.json Paths
 
-- Workflows folder: `../workflows`
+- Workflows folder: `./workflows`
 - Queue folder: `../queue`
 
 ### Workflow Base Directory
 
 - Defaults to the directory containing the `.jcwf`
-- For aiZipDemo: `../workflows`
+- For aiZipDemo: `./workflows`
 
 ### Task Working Directory
 
