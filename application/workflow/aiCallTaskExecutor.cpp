@@ -527,7 +527,7 @@ namespace AIAssistant
         std::string launchCWDAbsolute;
         if (Core::g_Core != nullptr)
         {
-            launchCWDAbsolute = Core::g_Core->GetLaunchCWDAbsolute();
+            launchCWDAbsolute = Core::g_Core->GetLaunchCWDAbsolute().string();
         }
 
         LOG_APP_INFO(
