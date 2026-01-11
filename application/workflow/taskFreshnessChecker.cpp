@@ -95,8 +95,10 @@ namespace
 namespace AIAssistant
 {
     bool TaskFreshnessChecker::IsTaskUpToDate(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
-                                         ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths,
-                                         std::filesystem::path* comparedInputPath, std::filesystem::path* comparedOutputPath) const
+                                              ResolvedPaths const& resolvedPaths,
+                                              ResolveOutputPathsFn const& resolveOutputPaths,
+                                              std::filesystem::path* comparedInputPath,
+                                              std::filesystem::path* comparedOutputPath) const
     {
         LOG_APP_INFO("[paths debug] debug reason=freshnessCheck taskId={} inputCount={} outputCount={}", taskId,
                      static_cast<int>(resolvedPaths.m_InputPaths.size()),
@@ -128,9 +130,10 @@ namespace AIAssistant
             fs::path const resolvedInputPath = inputPath.lexically_normal();
             if (!fs::exists(resolvedInputPath, errorCode))
             {
-                LOG_APP_INFO(
-                    "[paths debug] debug reason=freshnessMissingInput taskId={} inputPathRelative={} inputPathAbsolute={} isRelative={}",
-                    taskId, inputPath.string(), resolvedInputPath.string(), static_cast<int>(resolvedInputPath.is_relative()));
+                LOG_APP_INFO("[paths debug] debug reason=freshnessMissingInput taskId={} inputPathRelative={} "
+                             "inputPathAbsolute={} isRelative={}",
+                             taskId, inputPath.string(), resolvedInputPath.string(),
+                             static_cast<int>(resolvedInputPath.is_relative()));
 
                 // Missing input ⇒ not up to date.
                 if (comparedInputPath != nullptr)
@@ -181,24 +184,18 @@ namespace AIAssistant
             return false;
         }
 
-        auto const latestInputIterator = std::max_element(
-            inputTimes.begin(), inputTimes.end(),
-            [](TimedPath const& left, TimedPath const& right)
-            {
-                return left.m_Time < right.m_Time;
-            });
+        auto const latestInputIterator =
+            std::max_element(inputTimes.begin(), inputTimes.end(),
+                             [](TimedPath const& left, TimedPath const& right) { return left.m_Time < right.m_Time; });
 
         fs::file_time_type latestInputTime = latestInputIterator->m_Time;
         fs::path latestInputPath = latestInputIterator->m_Path;
 
         if (!upstreamTimes.empty())
         {
-            auto const upstreamLatestIterator = std::max_element(
-                upstreamTimes.begin(), upstreamTimes.end(),
-                [](TimedPath const& left, TimedPath const& right)
-                {
-                    return left.m_Time < right.m_Time;
-                });
+            auto const upstreamLatestIterator =
+                std::max_element(upstreamTimes.begin(), upstreamTimes.end(),
+                                 [](TimedPath const& left, TimedPath const& right) { return left.m_Time < right.m_Time; });
 
             if (upstreamLatestIterator->m_Time > latestInputTime)
             {
@@ -219,9 +216,10 @@ namespace AIAssistant
             fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
-                LOG_APP_INFO(
-                    "[paths debug] debug reason=freshnessMissingOutput taskId={} outputPathRelative={} outputPathAbsolute={} isRelative={}",
-                    taskId, outputPath.string(), resolvedOutputPath.string(), static_cast<int>(resolvedOutputPath.is_relative()));
+                LOG_APP_INFO("[paths debug] debug reason=freshnessMissingOutput taskId={} outputPathRelative={} "
+                             "outputPathAbsolute={} isRelative={}",
+                             taskId, outputPath.string(), resolvedOutputPath.string(),
+                             static_cast<int>(resolvedOutputPath.is_relative()));
 
                 if (comparedOutputPath != nullptr)
                 {
@@ -248,12 +246,9 @@ namespace AIAssistant
             return false;
         }
 
-        auto const earliestOutputIterator = std::min_element(
-            outputTimes.begin(), outputTimes.end(),
-            [](TimedPath const& left, TimedPath const& right)
-            {
-                return left.m_Time < right.m_Time;
-            });
+        auto const earliestOutputIterator =
+            std::min_element(outputTimes.begin(), outputTimes.end(),
+                             [](TimedPath const& left, TimedPath const& right) { return left.m_Time < right.m_Time; });
 
         fs::file_time_type const earliestOutputTime = earliestOutputIterator->m_Time;
         fs::path const earliestOutputPath = earliestOutputIterator->m_Path;
@@ -272,10 +267,10 @@ namespace AIAssistant
         // is >= the newest input or upstream output.
         bool const isUpToDate = (earliestOutputTime >= latestInputTime);
 
-        LOG_APP_INFO(
-            "[paths debug] debug reason=freshnessCompare taskId={} inputPathAbsolute={} outputPathAbsolute={} isUpToDate={} inputIsRelative={} outputIsRelative={}",
-            taskId, latestInputPath.string(), earliestOutputPath.string(), static_cast<int>(isUpToDate),
-            static_cast<int>(latestInputPath.is_relative()), static_cast<int>(earliestOutputPath.is_relative()));
+        LOG_APP_INFO("[paths debug] debug reason=freshnessCompare taskId={} inputPathAbsolute={} outputPathAbsolute={} "
+                     "isUpToDate={} inputIsRelative={} outputIsRelative={}",
+                     taskId, latestInputPath.string(), earliestOutputPath.string(), static_cast<int>(isUpToDate),
+                     static_cast<int>(latestInputPath.is_relative()), static_cast<int>(earliestOutputPath.is_relative()));
         return isUpToDate;
     }
 
@@ -329,18 +324,19 @@ namespace AIAssistant
             fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
-                LOG_APP_INFO(
-                    "[paths debug] debug reason=collectUpstreamOutputMissing taskId={} outputPathRelative={} outputPathAbsolute={} isRelative={}",
-                    taskId, outputPath.string(), resolvedOutputPath.string(), static_cast<int>(resolvedOutputPath.is_relative()));
+                LOG_APP_INFO("[paths debug] debug reason=collectUpstreamOutputMissing taskId={} outputPathRelative={} "
+                             "outputPathAbsolute={} isRelative={}",
+                             taskId, outputPath.string(), resolvedOutputPath.string(),
+                             static_cast<int>(resolvedOutputPath.is_relative()));
                 return false;
             }
 
             auto writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
-                LOG_APP_INFO(
-                    "[paths debug] debug reason=collectUpstreamOutputStatFailed taskId={} outputPathAbsolute={} errorCode={}",
-                    taskId, resolvedOutputPath.string(), errorCode.value());
+                LOG_APP_INFO("[paths debug] debug reason=collectUpstreamOutputStatFailed taskId={} outputPathAbsolute={} "
+                             "errorCode={}",
+                             taskId, resolvedOutputPath.string(), errorCode.value());
                 return false;
             }
 

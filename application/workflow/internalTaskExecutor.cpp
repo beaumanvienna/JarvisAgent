@@ -112,12 +112,31 @@ namespace AIAssistant
                 std::filesystem::path parentPath = outputPath.parent_path();
                 if (!parentPath.empty())
                 {
+                    std::error_code existsError;
+                    bool const existedBefore = std::filesystem::exists(parentPath, existsError);
+
                     LOG_APP_INFO(
-                        "[paths debug] debug reason=writeOutputEnsureParentDirectory outputPathAbsolute='{}' outputParentDirectoryAbsolute='{}'",
-                        outputPath.string(),
+                        "[folder creation debug] debug create_directories attempt path='{}' reason='internal output parent'",
                         parentPath.string());
+                    LOG_APP_INFO("[paths debug] debug reason=writeOutputEnsureParentDirectory outputPathAbsolute='{}' "
+                                 "outputParentDirectoryAbsolute='{}'",
+                                 outputPath.string(), parentPath.string());
                     std::error_code error;
                     std::filesystem::create_directories(parentPath, error);
+
+                    if (error)
+                    {
+                        LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}'",
+                                      parentPath.string(), error.value(), error.message());
+                    }
+                    else
+                    {
+                        std::error_code existsAfterError;
+                        bool const existsAfter = std::filesystem::exists(parentPath, existsAfterError);
+                        bool const created = (!existedBefore && existsAfter);
+                        LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                                     parentPath.string(), created);
+                    }
                 }
             }
         }
@@ -131,7 +150,9 @@ namespace AIAssistant
     bool InternalTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                        TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        std::filesystem::path const workflowBaseDirectoryPath(!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty() ? workflowDefinition.m_WorkflowBaseDirectoryAbsolute : workflowDefinition.m_WorkflowBaseDirectory);
+        std::filesystem::path const workflowBaseDirectoryPath(!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty()
+                                                                  ? workflowDefinition.m_WorkflowBaseDirectoryAbsolute
+                                                                  : workflowDefinition.m_WorkflowBaseDirectory);
         std::filesystem::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
         LOG_APP_INFO(
@@ -140,32 +161,38 @@ namespace AIAssistant
             "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
             "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
             "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
-            workflowRun.m_WorkflowId,
-            workflowRun.m_RunId,
-            taskDefinition.m_Id,
-            workflowDefinition.m_WorkflowFilePath,
-            workflowDefinition.m_WorkflowFilePathAbsolute,
-            workflowDefinition.m_WorkflowFileDirectory,
-            workflowDefinition.m_WorkflowFileDirectoryAbsolute,
-            workflowDefinition.m_WorkflowBaseDirectory,
-            workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
-            taskDefinition.m_WorkingDirectory,
+            workflowRun.m_WorkflowId, workflowRun.m_RunId, taskDefinition.m_Id, workflowDefinition.m_WorkflowFilePath,
+            workflowDefinition.m_WorkflowFilePathAbsolute, workflowDefinition.m_WorkflowFileDirectory,
+            workflowDefinition.m_WorkflowFileDirectoryAbsolute, workflowDefinition.m_WorkflowBaseDirectory,
+            workflowDefinition.m_WorkflowBaseDirectoryAbsolute, taskDefinition.m_WorkingDirectory,
             taskWorkingDirectoryPath.string());
         {
             std::error_code error;
-            LOG_APP_INFO(
-                "[paths debug] debug reason=ensureWorkingDirectory taskId='{}' taskWorkingDirectoryAbsolute='{}'",
-                taskDefinition.m_Id,
-                taskWorkingDirectoryPath.string());
+            std::error_code existsError;
+            bool const existedBefore = std::filesystem::exists(taskWorkingDirectoryPath, existsError);
+
+            LOG_APP_INFO("[folder creation debug] debug create_directories attempt path='{}' reason='internal task "
+                         "working_directory'",
+                         taskWorkingDirectoryPath.string());
+            LOG_APP_INFO("[paths debug] debug reason=ensureWorkingDirectory taskId='{}' taskWorkingDirectoryAbsolute='{}'",
+                         taskDefinition.m_Id, taskWorkingDirectoryPath.string());
             std::filesystem::create_directories(taskWorkingDirectoryPath, error);
             if (error)
             {
+                LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}'",
+                              taskWorkingDirectoryPath.string(), error.value(), error.message());
                 taskState.m_LastErrorMessage =
                     "Failed to create internal task working directory: " + taskWorkingDirectoryPath.string();
                 LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+
+            std::error_code existsAfterError;
+            bool const existsAfter = std::filesystem::exists(taskWorkingDirectoryPath, existsAfterError);
+            bool const created = (!existedBefore && existsAfter);
+            LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                         taskWorkingDirectoryPath.string(), created);
         }
 
         std::vector<std::filesystem::path> resolvedInputPaths;
@@ -173,7 +200,9 @@ namespace AIAssistant
         for (std::string const& inputPathString : taskDefinition.m_FileInputs)
         {
             resolvedInputPaths.push_back(TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, inputPathString));
-            LOG_APP_INFO("[paths debug] debug reason=resolveInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, inputPathString, resolvedInputPaths.back().string());
+            LOG_APP_INFO(
+                "[paths debug] debug reason=resolveInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'",
+                taskDefinition.m_Id, inputPathString, resolvedInputPaths.back().string());
         }
 
         std::vector<std::filesystem::path> resolvedOutputPaths;
@@ -182,7 +211,9 @@ namespace AIAssistant
         {
             resolvedOutputPaths.push_back(
                 TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, outputPathString));
-            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, outputPathString, resolvedOutputPaths.back().string());
+            LOG_APP_INFO(
+                "[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'",
+                taskDefinition.m_Id, outputPathString, resolvedOutputPaths.back().string());
         }
 
         {
@@ -213,10 +244,7 @@ namespace AIAssistant
         IInternalTaskRegistry* registry = nullptr;
         LOG_APP_INFO(
             "[paths debug] debug reason=internalTaskAction taskId='{}' action='{}' inputsCount='{}' outputsCount='{}'",
-            taskDefinition.m_Id,
-            action,
-            resolvedInputPaths.size(),
-            resolvedOutputPaths.size());
+            taskDefinition.m_Id, action, resolvedInputPaths.size(), resolvedOutputPaths.size());
 
         if (m_InternalTaskRegistryPtr)
         {
@@ -254,11 +282,13 @@ namespace AIAssistant
 
         for (std::filesystem::path const& inputPath : resolvedInputPaths)
         {
-            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedInput taskId='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, inputPath.string());
+            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedInput taskId='{}' inputPathAbsolute='{}'",
+                         taskDefinition.m_Id, inputPath.string());
         }
         for (std::filesystem::path const& outputPath : resolvedOutputPaths)
         {
-            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedOutput taskId='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, outputPath.string());
+            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedOutput taskId='{}' outputPathAbsolute='{}'",
+                         taskDefinition.m_Id, outputPath.string());
         }
 
         std::string taskError;

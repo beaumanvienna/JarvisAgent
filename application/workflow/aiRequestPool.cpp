@@ -49,7 +49,7 @@ namespace AIAssistant
             {
                 std::string const launchCWDAbsoluteText =
                     (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
-                LOG_APP_WARN("[paths debug] debug reason=writeAiRequestPoolTextFileCwdFallback filePathRelative='{}' "
+                LOG_APP_INFO("[paths debug] debug reason=writeAiRequestPoolTextFileCwdFallback filePathRelative='{}' "
                              "launchCWDAbsolute='{}'",
                              filePath, launchCWDAbsoluteText);
             }
@@ -61,14 +61,31 @@ namespace AIAssistant
             std::error_code errorCode;
 
             fs::path const parent = filesystemPath.parent_path();
+            fs::path const parentAbsolute = filesystemPathAbsolute.parent_path();
             if (!parent.empty())
             {
+                std::error_code existsBeforeErrorCode;
+                bool const existedBefore = fs::exists(parentAbsolute, existsBeforeErrorCode);
+
+                LOG_APP_INFO("[folder creation debug] debug create_directories attempt path='{}' reason='aiRequestPool "
+                             "parent directory'",
+                             parentAbsolute.generic_string());
+
                 fs::create_directories(parent, errorCode);
                 if (errorCode)
                 {
+                    LOG_APP_INFO("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}' "
+                                 "reason='aiRequestPool parent directory'",
+                                 parentAbsolute.generic_string(), errorCode.value(), errorCode.message());
                     outErrorMessage = "failed to create directories for: " + filePath + " (" + errorCode.message() + ")";
                     return false;
                 }
+
+                std::error_code existsAfterErrorCode;
+                bool const existsAfter = fs::exists(parentAbsolute, existsAfterErrorCode);
+                bool const created = (!existedBefore && existsAfter);
+                LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                             parentAbsolute.generic_string(), created);
             }
 
             std::ofstream outputStream(filePath, std::ios::binary | std::ios::trunc);

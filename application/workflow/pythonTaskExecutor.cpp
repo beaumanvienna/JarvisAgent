@@ -101,7 +101,9 @@ namespace AIAssistant
 
                 inputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, inputPath);
 
-                LOG_APP_INFO("[paths debug] debug reason=validateInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, fileInput, inputPath.string());
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=validateInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'",
+                    taskDefinition.m_Id, fileInput, inputPath.string());
 
                 if (!fs::exists(inputPath, errorCode))
                 {
@@ -132,27 +134,20 @@ namespace AIAssistant
         fs::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
 
-        std::string const launchCwdAbsoluteForLog = (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string();
+        std::string const launchCwdAbsoluteForLog =
+            (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string();
 
-        LOG_APP_INFO(
-            "[paths debug] debug reason=spawnPythonTask workflowId='{}' runId='{}' taskId='{}' "
-            "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' "
-            "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
-            "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
-            "launchCWDAbsolute='{}' "
-            "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
-            workflowRun.m_WorkflowId,
-            workflowRun.m_RunId,
-            taskDefinition.m_Id,
-            workflowDefinition.m_WorkflowFilePath,
-            workflowDefinition.m_WorkflowFilePathAbsolute,
-            workflowDefinition.m_WorkflowFileDirectory,
-            workflowDefinition.m_WorkflowFileDirectoryAbsolute,
-            workflowDefinition.m_WorkflowBaseDirectory,
-            workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
-            launchCwdAbsoluteForLog,
-            taskDefinition.m_WorkingDirectory,
-            taskWorkingDirectoryPath.string());
+        LOG_APP_INFO("[paths debug] debug reason=spawnPythonTask workflowId='{}' runId='{}' taskId='{}' "
+                     "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' "
+                     "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
+                     "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+                     "launchCWDAbsolute='{}' "
+                     "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
+                     workflowRun.m_WorkflowId, workflowRun.m_RunId, taskDefinition.m_Id,
+                     workflowDefinition.m_WorkflowFilePath, workflowDefinition.m_WorkflowFilePathAbsolute,
+                     workflowDefinition.m_WorkflowFileDirectory, workflowDefinition.m_WorkflowFileDirectoryAbsolute,
+                     workflowDefinition.m_WorkflowBaseDirectory, workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
+                     launchCwdAbsoluteForLog, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPath.string());
 
         if (taskWorkingDirectoryPath.empty())
         {
@@ -161,15 +156,40 @@ namespace AIAssistant
             return false;
         }
 
+        std::error_code absoluteErrorCode;
+        fs::path const taskWorkingDirectoryAbsolutePath =
+            fs::absolute(taskWorkingDirectoryPath, absoluteErrorCode).lexically_normal();
+        fs::path const& taskWorkingDirectoryPathForLog =
+            absoluteErrorCode ? taskWorkingDirectoryPath : taskWorkingDirectoryAbsolutePath;
+
+        std::error_code existsBeforeErrorCode;
+        bool const existedBefore = fs::exists(taskWorkingDirectoryPathForLog, existsBeforeErrorCode);
+
+        LOG_APP_INFO("[folder creation debug] debug create_directories attempt taskId='{}' path='{}' reason='python task "
+                     "working_directory'",
+                     taskDefinition.m_Id, taskWorkingDirectoryPathForLog.string());
+
         std::error_code createErrorCode;
         fs::create_directories(taskWorkingDirectoryPath, createErrorCode);
 
         if (createErrorCode)
         {
+            LOG_APP_ERROR("[folder creation debug] debug create_directories failed taskId='{}' path='{}' ec={} message='{}' "
+                          "reason='python task working_directory'",
+                          taskDefinition.m_Id, taskWorkingDirectoryPathForLog.string(), createErrorCode.value(),
+                          createErrorCode.message());
             taskState.m_LastErrorMessage = "PythonTaskExecutor: Failed to create working directory";
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
+
+        std::error_code existsAfterErrorCode;
+        bool const existsAfter = fs::exists(taskWorkingDirectoryPathForLog, existsAfterErrorCode);
+        bool const created = (!existedBefore && existsAfter);
+
+        LOG_APP_INFO("[folder creation debug] debug create_directories ok taskId='{}' path='{}' created={} reason='python "
+                     "task working_directory'",
+                     taskDefinition.m_Id, taskWorkingDirectoryPathForLog.string(), created);
 
         std::string errorMessage;
         if (!ValidateFileInputsExist(taskDefinition, taskWorkingDirectoryPath, errorMessage))
@@ -199,15 +219,17 @@ namespace AIAssistant
             LOG_APP_ERROR("[python] Task '{}' is missing params JSON (module/function)", taskDefinition.m_Id);
         }
 
-
         std::unordered_map<std::string, std::string> callArguments = taskState.m_InputValues;
 
         // Provide output file path arguments to Python functions when the workflow declares an output slot.
         // This avoids requiring Python scripts to re-derive the output file location.
         if ((taskDefinition.m_FileOutputs.size() == 1) && (!taskDefinition.m_Outputs.empty()))
         {
-            fs::path const outputPath = TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, taskDefinition.m_FileOutputs[0]);
-            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, taskDefinition.m_FileOutputs[0], outputPath.string());
+            fs::path const outputPath =
+                TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, taskDefinition.m_FileOutputs[0]);
+            LOG_APP_INFO(
+                "[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'",
+                taskDefinition.m_Id, taskDefinition.m_FileOutputs[0], outputPath.string());
 
             for (auto const& outputField : taskDefinition.m_Outputs)
             {
@@ -226,7 +248,6 @@ namespace AIAssistant
                 callArguments[outputName] = outputPath.string();
             }
         }
-        
 
         // Log declared file output paths (raw + resolved absolute) for debugging.
         for (std::string const& fileOutput : taskDefinition.m_FileOutputs)
@@ -242,14 +263,12 @@ namespace AIAssistant
                 outputPathAbsolute = outputPathAbsolute.lexically_normal();
             }
 
-            LOG_APP_INFO(
-                "[paths debug] debug reason=pythonDeclaredOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'",
-                taskDefinition.m_Id,
-                fileOutput,
-                outputPathAbsolute.string());
+            LOG_APP_INFO("[paths debug] debug reason=pythonDeclaredOutputPath taskId='{}' outputPathRelative='{}' "
+                         "outputPathAbsolute='{}'",
+                         taskDefinition.m_Id, fileOutput, outputPathAbsolute.string());
         }
 
-for (auto const& callArgumentPair : callArguments)
+        for (auto const& callArgumentPair : callArguments)
         {
             std::string const& argumentName = callArgumentPair.first;
             std::string const& argumentValue = callArgumentPair.second;
@@ -260,22 +279,18 @@ for (auto const& callArgumentPair : callArguments)
             }
 
             fs::path const argumentPath(argumentValue);
-            fs::path const argumentPathAbsolute = argumentPath.is_relative()
-                ? TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, argumentValue).lexically_normal()
-                : argumentPath.lexically_normal();
+            fs::path const argumentPathAbsolute =
+                argumentPath.is_relative()
+                    ? TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, argumentValue).lexically_normal()
+                    : argumentPath.lexically_normal();
 
-            LOG_APP_INFO(
-                "[paths debug] debug reason=pythonCallArgumentPath taskId='{}' argument='{}' "
-                "valueRelative='{}' valueAbsolute='{}'",
-                taskDefinition.m_Id,
-                argumentName,
-                argumentValue,
-                argumentPathAbsolute.string());
+            LOG_APP_INFO("[paths debug] debug reason=pythonCallArgumentPath taskId='{}' argument='{}' "
+                         "valueRelative='{}' valueAbsolute='{}'",
+                         taskDefinition.m_Id, argumentName, argumentValue, argumentPathAbsolute.string());
         }
 
-        bool const ok =
-            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
-                                              contextValues, pythonOutputs, errorMessage);
+        bool const ok = pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
+                                                          contextValues, pythonOutputs, errorMessage);
 
         if (!ok)
         {

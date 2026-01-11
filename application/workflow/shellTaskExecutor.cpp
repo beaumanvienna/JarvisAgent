@@ -552,20 +552,24 @@ namespace AIAssistant
         {
             taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
         }
-                if (workflowBaseDirectoryPath.empty() && taskWorkingDirectoryPath.is_relative() && !taskWorkingDirectoryPath.empty())
+        if (workflowBaseDirectoryPath.empty() && taskWorkingDirectoryPath.is_relative() && !taskWorkingDirectoryPath.empty())
         {
-            std::filesystem::path const launchCWDAbsolutePath = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
-            LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectoryCwdFallback taskId='{}' taskType='shell' taskWorkingDirectoryRelative='{}' launchCWDAbsolute='{}'",
+            std::filesystem::path const launchCWDAbsolutePath =
+                Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
+            LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectoryCwdFallback taskId='{}' taskType='shell' "
+                         "taskWorkingDirectoryRelative='{}' launchCWDAbsolute='{}'",
                          taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, launchCWDAbsolutePath.string());
         }
 
-std::filesystem::path const taskWorkingDirectoryPathAbsolute = taskWorkingDirectoryPath.empty()
-            ? taskWorkingDirectoryPath
-            : std::filesystem::absolute(taskWorkingDirectoryPath).lexically_normal();
+        std::filesystem::path const taskWorkingDirectoryPathAbsolute =
+            taskWorkingDirectoryPath.empty() ? taskWorkingDirectoryPath
+                                             : std::filesystem::absolute(taskWorkingDirectoryPath).lexically_normal();
 
-        LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectory taskId='{}' taskType='shell' taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}' workflowBaseDirectoryAbsolute='{}'",
-                     taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPathAbsolute.string(), workflowBaseDirectoryPath.string());
-
+        LOG_APP_INFO(
+            "[paths debug] debug reason=resolveTaskWorkingDirectory taskId='{}' taskType='shell' "
+            "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}' workflowBaseDirectoryAbsolute='{}'",
+            taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPathAbsolute.string(),
+            workflowBaseDirectoryPath.string());
 
         if (taskWorkingDirectoryPath.empty())
         {
@@ -578,9 +582,31 @@ std::filesystem::path const taskWorkingDirectoryPathAbsolute = taskWorkingDirect
         }
 
         std::error_code createErrorCode;
-        LOG_APP_INFO("[paths debug] debug reason=ensureWorkingDirectory taskId='{}' taskType='shell' taskWorkingDirectoryAbsolute='{}'",
+        LOG_APP_INFO("[paths debug] debug reason=ensureWorkingDirectory taskId='{}' taskType='shell' "
+                     "taskWorkingDirectoryAbsolute='{}'",
                      taskDefinition.m_Id, taskWorkingDirectoryPathAbsolute.string());
-std::filesystem::create_directories(taskWorkingDirectoryPath, createErrorCode);
+
+        std::error_code existsBeforeErrorCode;
+        bool const existedBefore = std::filesystem::exists(taskWorkingDirectoryPathAbsolute, existsBeforeErrorCode);
+        LOG_APP_INFO(
+            "[folder creation debug] debug create_directories attempt path='{}' reason='shell task working_directory'",
+            taskWorkingDirectoryPathAbsolute.string());
+        std::filesystem::create_directories(taskWorkingDirectoryPathAbsolute, createErrorCode);
+
+        if (createErrorCode)
+        {
+            LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}' "
+                          "reason='shell task working_directory'",
+                          taskWorkingDirectoryPathAbsolute.string(), createErrorCode.value(), createErrorCode.message());
+        }
+        else
+        {
+            std::error_code existsAfterErrorCode;
+            bool const existsAfter = std::filesystem::exists(taskWorkingDirectoryPathAbsolute, existsAfterErrorCode);
+            bool const created = (!existedBefore && existsAfter);
+            LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                         taskWorkingDirectoryPathAbsolute.string(), created);
+        }
 
         if (createErrorCode)
         {
@@ -631,9 +657,33 @@ std::filesystem::create_directories(taskWorkingDirectoryPath, createErrorCode);
             if (!parentPath.empty())
             {
                 std::error_code outputError;
-                LOG_APP_INFO("[paths debug] debug reason=writeOutputEnsureParentDirectory taskId='{}' taskType='shell' outputParentDirectoryAbsolute='{}'",
-                                     taskDefinition.m_Id, std::filesystem::absolute(parentPath).lexically_normal().string());
-std::filesystem::create_directories(parentPath, outputError);
+                std::filesystem::path const parentPathAbsolute = std::filesystem::absolute(parentPath).lexically_normal();
+
+                LOG_APP_INFO("[paths debug] debug reason=writeOutputEnsureParentDirectory taskId='{}' taskType='shell' "
+                             "outputParentDirectoryAbsolute='{}'",
+                             taskDefinition.m_Id, parentPathAbsolute.string());
+
+                std::error_code existsBeforeParentErrorCode;
+                bool const parentExistedBefore = std::filesystem::exists(parentPathAbsolute, existsBeforeParentErrorCode);
+                LOG_APP_INFO(
+                    "[folder creation debug] debug create_directories attempt path='{}' reason='shell output parent'",
+                    parentPathAbsolute.string());
+                std::filesystem::create_directories(parentPathAbsolute, outputError);
+
+                if (outputError)
+                {
+                    LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}' "
+                                  "reason='shell output parent'",
+                                  parentPathAbsolute.string(), outputError.value(), outputError.message());
+                }
+                else
+                {
+                    std::error_code existsAfterParentErrorCode;
+                    bool const parentExistsAfter = std::filesystem::exists(parentPathAbsolute, existsAfterParentErrorCode);
+                    bool const parentCreated = (!parentExistedBefore && parentExistsAfter);
+                    LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                                 parentPathAbsolute.string(), parentCreated);
+                }
             }
         }
 
@@ -711,17 +761,19 @@ std::filesystem::create_directories(parentPath, outputError);
             return false;
         }
 
-LOG_APP_INFO("[paths debug] debug reason=resolveShellCommandPath taskId='{}' taskType='shell' commandPathRelative='{}' commandPathIsRelative='{}' launchCWDAbsolute='{}'",
+        LOG_APP_INFO("[paths debug] debug reason=resolveShellCommandPath taskId='{}' taskType='shell' "
+                     "commandPathRelative='{}' commandPathIsRelative='{}' launchCWDAbsolute='{}'",
                      taskDefinition.m_Id, commandPath, std::filesystem::path(commandPath).is_relative(),
                      Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::filesystem::path{}.string());
-std::filesystem::path const commandPathFilesystemPath(commandPath);
+        std::filesystem::path const commandPathFilesystemPath(commandPath);
         if (commandPathFilesystemPath.is_relative())
         {
-            std::filesystem::path const jarvisAgentWorkingDirectoryPath = (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
+            std::filesystem::path const jarvisAgentWorkingDirectoryPath =
+                (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
             commandPath = (jarvisAgentWorkingDirectoryPath / commandPathFilesystemPath).lexically_normal().string();
-            LOG_APP_INFO("[paths debug] debug reason=resolveShellCommandPathResolved taskId='{}' taskType='shell' commandPathAbsolute='{}'",
+            LOG_APP_INFO("[paths debug] debug reason=resolveShellCommandPathResolved taskId='{}' taskType='shell' "
+                         "commandPathAbsolute='{}'",
                          taskDefinition.m_Id, commandPath);
-
         }
 
         if (!std::filesystem::exists(std::filesystem::path(commandPath)))
@@ -851,36 +903,44 @@ std::filesystem::path const commandPathFilesystemPath(commandPath);
         // ------------------------------------------------------------
         std::string const fullCommand = JoinArgumentsForSystem(argumentList);
 
-        LOG_APP_INFO("[paths debug] debug reason=spawnShellTask taskId='{}' taskType='shell' taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}' command='{}'",
-                     taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPathAbsolute.string(), fullCommand);
+        LOG_APP_INFO("[paths debug] debug reason=spawnShellTask taskId='{}' taskType='shell' "
+                     "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}' command='{}'",
+                     taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPathAbsolute.string(),
+                     fullCommand);
 
         for (std::string const& inputPathString : taskDefinition.m_FileInputs)
         {
             std::filesystem::path inputPath(inputPathString);
-            std::filesystem::path const inputPathAbsolute = inputPath.empty()
-                ? inputPath
-                : (inputPath.is_relative() ? (taskWorkingDirectoryPathAbsolute / inputPath).lexically_normal() : inputPath.lexically_normal());
-            LOG_APP_INFO("[paths debug] debug reason=spawnShellTaskInput taskId='{}' taskType='shell' inputPathRelative='{}' inputPathAbsolute='{}'",
+            std::filesystem::path const inputPathAbsolute =
+                inputPath.empty()
+                    ? inputPath
+                    : (inputPath.is_relative() ? (taskWorkingDirectoryPathAbsolute / inputPath).lexically_normal()
+                                               : inputPath.lexically_normal());
+            LOG_APP_INFO("[paths debug] debug reason=spawnShellTaskInput taskId='{}' taskType='shell' "
+                         "inputPathRelative='{}' inputPathAbsolute='{}'",
                          taskDefinition.m_Id, inputPathString, inputPathAbsolute.string());
         }
 
         for (std::string const& outputPathString : taskDefinition.m_FileOutputs)
         {
             std::filesystem::path outputPath(outputPathString);
-            std::filesystem::path const outputPathAbsolute = outputPath.empty()
-                ? outputPath
-                : (outputPath.is_relative() ? (taskWorkingDirectoryPathAbsolute / outputPath).lexically_normal() : outputPath.lexically_normal());
-            LOG_APP_INFO("[paths debug] debug reason=spawnShellTaskOutput taskId='{}' taskType='shell' outputPathRelative='{}' outputPathAbsolute='{}'",
+            std::filesystem::path const outputPathAbsolute =
+                outputPath.empty()
+                    ? outputPath
+                    : (outputPath.is_relative() ? (taskWorkingDirectoryPathAbsolute / outputPath).lexically_normal()
+                                                : outputPath.lexically_normal());
+            LOG_APP_INFO("[paths debug] debug reason=spawnShellTaskOutput taskId='{}' taskType='shell' "
+                         "outputPathRelative='{}' outputPathAbsolute='{}'",
                          taskDefinition.m_Id, outputPathString, outputPathAbsolute.string());
         }
-LOG_APP_INFO("[shell] Command: {}", fullCommand);
+        LOG_APP_INFO("[shell] Command: {}", fullCommand);
 
         int exitCode = -1;
         bool const executed =
             ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
-        LOG_APP_INFO("[paths debug] debug reason=shellTaskCompleted taskId='{}' taskType='shell' exitCode='{}' taskWorkingDirectoryAbsolute='{}' command='{}'",
+        LOG_APP_INFO("[paths debug] debug reason=shellTaskCompleted taskId='{}' taskType='shell' exitCode='{}' "
+                     "taskWorkingDirectoryAbsolute='{}' command='{}'",
                      taskDefinition.m_Id, exitCode, taskWorkingDirectoryPathAbsolute.string(), fullCommand);
-
 
         if (!executed)
         {

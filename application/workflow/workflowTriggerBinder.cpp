@@ -350,9 +350,10 @@ namespace AIAssistant
                         }
 
                         LOG_APP_INFO(
-                            "[paths debug] debug reason=bindTrigger workflowId={} triggerId={} watchedPathRelative={} workflowBaseDirectoryRelative={} workflowBaseDirectoryAbsolute={}",
-                            workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath, workflowDefinition.m_WorkflowBaseDirectory,
-                            workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+                            "[paths debug] debug reason=bindTrigger workflowId={} triggerId={} watchedPathRelative={} "
+                            "workflowBaseDirectoryRelative={} workflowBaseDirectoryAbsolute={}",
+                            workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath,
+                            workflowDefinition.m_WorkflowBaseDirectory, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
 
                         std::string watchedPathAbsolute = watchedPath;
 
@@ -376,9 +377,10 @@ namespace AIAssistant
                             // Spec: workflow-level relative trigger paths resolve relative to Workflow Base Directory.
                             if (!watchedPath.empty() && watchedPath.front() != '/')
                             {
-                                watchedPathAbsolute = (workflowBaseDirectoryPathAbsolute / std::filesystem::path(watchedPath))
-                                                         .lexically_normal()
-                                                         .generic_string();
+                                watchedPathAbsolute =
+                                    (workflowBaseDirectoryPathAbsolute / std::filesystem::path(watchedPath))
+                                        .lexically_normal()
+                                        .generic_string();
                             }
                             else
                             {
@@ -386,9 +388,12 @@ namespace AIAssistant
                             }
                         }
 
-                        LOG_APP_INFO(
-                            "[paths debug] debug reason=bindTriggerResolved workflowId={} triggerId={} watchedPathRelative={} watchedPathAbsolute={} workflowBaseDirectoryRelative={} workflowBaseDirectoryAbsolute={}",
-                            workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath, watchedPathAbsolute, workflowDefinition.m_WorkflowBaseDirectory, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+                        LOG_APP_INFO("[paths debug] debug reason=bindTriggerResolved workflowId={} triggerId={} "
+                                     "watchedPathRelative={} watchedPathAbsolute={} workflowBaseDirectoryRelative={} "
+                                     "workflowBaseDirectoryAbsolute={}",
+                                     workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath, watchedPathAbsolute,
+                                     workflowDefinition.m_WorkflowBaseDirectory,
+                                     workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
 
                         triggerEngine.AddFileWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPathAbsolute,
                                                           fileEvents, debounceMilliseconds, workflowTrigger.m_IsEnabled);

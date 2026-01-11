@@ -89,7 +89,8 @@ namespace AIAssistant
                 if (basePath.is_relative())
                 {
                     // [paths debug] Potential CWD-derived fallback when canonicalizing basePath (logging only).
-                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeBaseCwdFallback basePathRelative='{}' launchCWDAbsolute='{}'",
+                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeBaseCwdFallback basePathRelative='{}' "
+                                 "launchCWDAbsolute='{}'",
                                  basePath.string(),
                                  Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
                 }
@@ -105,7 +106,8 @@ namespace AIAssistant
                 if (candidatePath.is_relative())
                 {
                     // [paths debug] Potential CWD-derived fallback when canonicalizing candidatePath (logging only).
-                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeCandidateCwdFallback candidatePathRelative='{}' launchCWDAbsolute='{}'",
+                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeCandidateCwdFallback candidatePathRelative='{}' "
+                                 "launchCWDAbsolute='{}'",
                                  candidatePath.string(),
                                  Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
                 }
@@ -822,12 +824,27 @@ namespace AIAssistant
                          "taskWorkingDirectoryAbsolute='{}'",
                          workflowDefinition.m_Id, taskId, workingDirectory.string());
 
+            std::error_code existedBeforeErrorCode;
+            bool const existedBefore = fs::exists(workingDirectory, existedBeforeErrorCode);
+            LOG_APP_INFO(
+                "[folder creation debug] debug create_directories attempt path='{}' reason='task working_directory'",
+                workingDirectory.string());
+
             try
             {
                 fs::create_directories(workingDirectory);
+
+                std::error_code existsAfterErrorCode;
+                bool const existsAfter = fs::exists(workingDirectory, existsAfterErrorCode);
+                bool const created = (!existedBefore && existsAfter);
+                LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={}",
+                             workingDirectory.string(), created);
             }
             catch (fs::filesystem_error const& exception)
             {
+                LOG_APP_ERROR("[folder creation debug] debug create_directories exception path='{}' what='{}'",
+                              workingDirectory.string(), exception.what());
+
                 taskState.m_LastErrorMessage = std::string("Failed to create task working directory: ") + exception.what();
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;

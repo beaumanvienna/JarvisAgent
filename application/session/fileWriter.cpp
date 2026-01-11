@@ -42,7 +42,13 @@ namespace AIAssistant
 
         try
         {
-            fs::create_directories(filePath.parent_path());
+            fs::path const parentPath = fs::absolute(filePath.parent_path()).lexically_normal();
+            bool const existedBefore = fs::exists(parentPath);
+            LOG_APP_INFO("[folder creation debug] debug create_directories attempt path='{}' reason='fileWriter output parent'", parentPath.string());
+            fs::create_directories(parentPath);
+            bool const existsAfter = fs::exists(parentPath);
+            bool const created = (!existedBefore && existsAfter);
+            LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={} reason='fileWriter output parent'", parentPath.string(), created);
             std::ofstream out(filePath, std::ios::out | std::ios::trunc);
 
             if (!out)
@@ -66,7 +72,13 @@ namespace AIAssistant
 
         try
         {
-            fs::create_directories(filePath.parent_path());
+            fs::path const parentPath = fs::absolute(filePath.parent_path()).lexically_normal();
+            bool const existedBefore = fs::exists(parentPath);
+            LOG_APP_INFO("[folder creation debug] debug create_directories attempt path='{}' reason='fileWriter output parent'", parentPath.string());
+            fs::create_directories(parentPath);
+            bool const existsAfter = fs::exists(parentPath);
+            bool const created = (!existedBefore && existsAfter);
+            LOG_APP_INFO("[folder creation debug] debug create_directories ok path='{}' created={} reason='fileWriter output parent'", parentPath.string(), created);
             std::ofstream out(filePath, std::ios::out | std::ios::trunc);
 
             if (!out)

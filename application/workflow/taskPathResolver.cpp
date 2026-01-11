@@ -33,39 +33,44 @@ namespace AIAssistant
     TaskPathResolver::ResolveTaskWorkingDirectoryPath(std::filesystem::path const& workflowBaseDirectoryPath,
                                                       std::string const& taskWorkingDirectoryText)
     {
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveTaskWorkingDirectoryPath debug: reason=resolveTaskWorkingDirectory baseDirectoryAbsolute='{}' taskWorkingDirectoryRelative='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveTaskWorkingDirectoryPath debug: "
+                     "reason=resolveTaskWorkingDirectory baseDirectoryAbsolute='{}' taskWorkingDirectoryRelative='{}'",
                      workflowBaseDirectoryPath.string(), taskWorkingDirectoryText);
 
         std::filesystem::path const taskWorkingDirectoryPathAbsolute =
             ResolveTaskScopedPath(workflowBaseDirectoryPath, taskWorkingDirectoryText);
 
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveTaskWorkingDirectoryPath debug: reason=resolveTaskWorkingDirectory taskWorkingDirectoryAbsolute='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveTaskWorkingDirectoryPath debug: "
+                     "reason=resolveTaskWorkingDirectory taskWorkingDirectoryAbsolute='{}'",
                      taskWorkingDirectoryPathAbsolute.string());
 
         return taskWorkingDirectoryPathAbsolute;
     }
 
-std::filesystem::path TaskPathResolver::ResolveTaskScopedPath(std::filesystem::path const& taskWorkingDirectoryPath,
+    std::filesystem::path TaskPathResolver::ResolveTaskScopedPath(std::filesystem::path const& taskWorkingDirectoryPath,
                                                                   std::string const& pathText)
     {
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveTaskScopedPath debug: reason=resolveTaskScopedPath baseDirectoryAbsolute='{}' inputPathRelative='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveTaskScopedPath debug: reason=resolveTaskScopedPath "
+                     "baseDirectoryAbsolute='{}' inputPathRelative='{}'",
                      taskWorkingDirectoryPath.string(), pathText);
 
         std::filesystem::path const path{pathText};
         std::filesystem::path const resolvedPathAbsolute = ResolvePath(taskWorkingDirectoryPath, path);
 
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveTaskScopedPath debug: reason=resolveTaskScopedPath inputPathAbsolute='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveTaskScopedPath debug: reason=resolveTaskScopedPath "
+                     "inputPathAbsolute='{}'",
                      resolvedPathAbsolute.string());
 
         return resolvedPathAbsolute;
     }
 
-std::filesystem::path TaskPathResolver::ResolvePath(std::filesystem::path const& baseDirectoryPath,
+    std::filesystem::path TaskPathResolver::ResolvePath(std::filesystem::path const& baseDirectoryPath,
                                                         std::filesystem::path const& path)
     {
         if (path.empty())
         {
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='<empty>' baseDirectoryAbsolute='{}'",
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='<empty>' "
+                         "baseDirectoryAbsolute='{}'",
                          baseDirectoryPath.string());
             return std::filesystem::path{};
         }
@@ -73,47 +78,53 @@ std::filesystem::path TaskPathResolver::ResolvePath(std::filesystem::path const&
         if (path.is_absolute())
         {
             std::filesystem::path const resolvedPathAbsolute = std::filesystem::absolute(path).lexically_normal();
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' "
+                         "baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
                          path.string(), baseDirectoryPath.string(), resolvedPathAbsolute.string());
             return resolvedPathAbsolute;
         }
 
-
-    
         if (!baseDirectoryPath.empty() && !baseDirectoryPath.is_absolute())
         {
             std::string const launchCwdAbsolute =
                 (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePathCwdFallback baseDirectoryRelative='{}' launchCWDAbsolute='{}'",
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePathCwdFallback "
+                         "baseDirectoryRelative='{}' launchCWDAbsolute='{}'",
                          baseDirectoryPath.string(), launchCwdAbsolute);
         }
 
-std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
-    if (!baseLeaf.empty())
-    {
-        auto pathIterator = path.begin();
-        if (pathIterator != path.end() && *pathIterator == baseLeaf)
+        std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
+        if (!baseLeaf.empty())
         {
-            // Avoid duplicating the base directory when the provided path already starts with it.
-            // Example: baseDirectoryPath=".../workflows" and path="workflows/aiZipDemo.jcwf".
-            std::filesystem::path const baseParent = baseDirectoryPath.parent_path();
-            if (!baseParent.empty())
+            auto pathIterator = path.begin();
+            if (pathIterator != path.end() && *pathIterator == baseLeaf)
             {
-                std::filesystem::path const resolvedPathAbsolute = std::filesystem::absolute(baseParent / path).lexically_normal();
-                LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' baseDirectoryAbsolute='{}' baseParentDirectoryAbsolute='{}' inputPathAbsolute='{}'",
-                             path.string(), baseDirectoryPath.string(), baseParent.string(), resolvedPathAbsolute.string());
+                // Avoid duplicating the base directory when the provided path already starts with it.
+                // Example: baseDirectoryPath=".../workflows" and path="workflows/aiZipDemo.jcwf".
+                std::filesystem::path const baseParent = baseDirectoryPath.parent_path();
+                if (!baseParent.empty())
+                {
+                    std::filesystem::path const resolvedPathAbsolute =
+                        std::filesystem::absolute(baseParent / path).lexically_normal();
+                    LOG_APP_INFO(
+                        "[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' "
+                        "baseDirectoryAbsolute='{}' baseParentDirectoryAbsolute='{}' inputPathAbsolute='{}'",
+                        path.string(), baseDirectoryPath.string(), baseParent.string(), resolvedPathAbsolute.string());
+                    return resolvedPathAbsolute;
+                }
+
+                std::filesystem::path const resolvedPathAbsolute = std::filesystem::absolute(path).lexically_normal();
+                LOG_APP_INFO("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' "
+                             "baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
+                             path.string(), baseDirectoryPath.string(), resolvedPathAbsolute.string());
                 return resolvedPathAbsolute;
             }
-
-            std::filesystem::path const resolvedPathAbsolute = std::filesystem::absolute(path).lexically_normal();
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
-                         path.string(), baseDirectoryPath.string(), resolvedPathAbsolute.string());
-            return resolvedPathAbsolute;
         }
-    }
 
-        std::filesystem::path const resolvedPathAbsolute = std::filesystem::absolute(baseDirectoryPath / path).lexically_normal();
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
+        std::filesystem::path const resolvedPathAbsolute =
+            std::filesystem::absolute(baseDirectoryPath / path).lexically_normal();
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolvePath debug: reason=resolvePath inputPathRelative='{}' "
+                     "baseDirectoryAbsolute='{}' inputPathAbsolute='{}'",
                      path.string(), baseDirectoryPath.string(), resolvedPathAbsolute.string());
         return resolvedPathAbsolute;
     }
@@ -156,12 +167,13 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
     {
         inputPathsOut.clear();
         outputPathsOut.clear();
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths taskId='{}' workflowId='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths "
+                     "taskId='{}' workflowId='{}'",
                      taskId, workflowDefinition.m_Id);
-        LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths workflowBaseDirectoryAbsolute='{}' launchCWDAbsolute='{}'",
+        LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths "
+                     "workflowBaseDirectoryAbsolute='{}' launchCWDAbsolute='{}'",
                      workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
                      (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>");
-
 
         std::filesystem::path workflowBaseDirectoryPathAbsolute;
         if (!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty())
@@ -184,8 +196,10 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
                 }
                 else
                 {
-                    LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveWorkflowBaseDirectoryCwdFallback workflowBaseDirectoryRelative='{}' launchCWDAbsolute='<null>'",
-                             workflowBaseDirectoryPathAbsolute.string());
+                    LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: "
+                                 "reason=resolveWorkflowBaseDirectoryCwdFallback workflowBaseDirectoryRelative='{}' "
+                                 "launchCWDAbsolute='<null>'",
+                                 workflowBaseDirectoryPathAbsolute.string());
                 }
             }
 
@@ -203,7 +217,9 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
 
         if (!resolvedInputsOptional.has_value())
         {
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveInputsFailed taskId='{}'", taskId);
+            LOG_APP_INFO(
+                "[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveInputsFailed taskId='{}'",
+                taskId);
             return false;
         }
 
@@ -227,7 +243,6 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
             }
         }
 
-
         auto const hasInlineQueueContent = [&]() -> bool
         {
             auto const anyInline = [](std::vector<QueueFileRef> const& refs) -> bool
@@ -242,8 +257,10 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
                 return false;
             };
 
-            return anyInline(taskDefinition.m_QueueBinding.m_StngFiles) || anyInline(taskDefinition.m_QueueBinding.m_TaskFiles) ||
-                   anyInline(taskDefinition.m_QueueBinding.m_CntxFiles) || anyInline(taskDefinition.m_QueueBinding.m_ProbFiles);
+            return anyInline(taskDefinition.m_QueueBinding.m_StngFiles) ||
+                   anyInline(taskDefinition.m_QueueBinding.m_TaskFiles) ||
+                   anyInline(taskDefinition.m_QueueBinding.m_CntxFiles) ||
+                   anyInline(taskDefinition.m_QueueBinding.m_ProbFiles);
         };
 
         // If a task embeds inline queue content, freshness MUST depend on the JCWF file itself.
@@ -253,8 +270,10 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
             std::filesystem::path const workflowFilePath{workflowDefinition.m_WorkflowFilePath};
             std::filesystem::path const workflowFileDirectoryPath{workflowDefinition.m_WorkflowFileDirectory};
 
-            std::filesystem::path const resolvedWorkflowFilePathAbsolute = ResolvePath(workflowFileDirectoryPath, workflowFilePath);
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths inputPathRelative='{}' inputPathAbsolute='{}'",
+            std::filesystem::path const resolvedWorkflowFilePathAbsolute =
+                ResolvePath(workflowFileDirectoryPath, workflowFilePath);
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths "
+                         "inputPathRelative='{}' inputPathAbsolute='{}'",
                          workflowFilePath.string(), resolvedWorkflowFilePathAbsolute.string());
             inputPathsOut.push_back(resolvedWorkflowFilePathAbsolute);
         }
@@ -265,12 +284,16 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
             std::string expanded;
             if (!resolver.ExpandTemplates(rawInput, mergedValues, expanded))
             {
-                LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=expandInputTemplateFailed taskId='{}' inputPathRelative='{}'", taskId, rawInput);
+                LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: "
+                             "reason=expandInputTemplateFailed taskId='{}' inputPathRelative='{}'",
+                             taskId, rawInput);
                 return false;
             }
 
-            std::filesystem::path const resolvedInputPathAbsolute = ResolveTaskScopedPath(taskWorkingDirectoryPath, expanded);
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths inputPathRelative='{}' expandedInputPathRelative='{}' inputPathAbsolute='{}'",
+            std::filesystem::path const resolvedInputPathAbsolute =
+                ResolveTaskScopedPath(taskWorkingDirectoryPath, expanded);
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths "
+                         "inputPathRelative='{}' expandedInputPathRelative='{}' inputPathAbsolute='{}'",
                          rawInput, expanded, resolvedInputPathAbsolute.string());
             inputPathsOut.push_back(resolvedInputPathAbsolute);
         }
@@ -281,12 +304,16 @@ std::filesystem::path const baseLeaf = baseDirectoryPath.filename();
             std::string expanded;
             if (!resolver.ExpandTemplates(rawOutput, mergedValues, expanded))
             {
-                LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=expandOutputTemplateFailed taskId='{}' outputPathRelative='{}'", taskId, rawOutput);
+                LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: "
+                             "reason=expandOutputTemplateFailed taskId='{}' outputPathRelative='{}'",
+                             taskId, rawOutput);
                 return false;
             }
 
-            std::filesystem::path const resolvedOutputPathAbsolute = ResolveTaskScopedPath(taskWorkingDirectoryPath, expanded);
-            LOG_APP_WARN("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths outputPathRelative='{}' expandedOutputPathRelative='{}' outputPathAbsolute='{}'",
+            std::filesystem::path const resolvedOutputPathAbsolute =
+                ResolveTaskScopedPath(taskWorkingDirectoryPath, expanded);
+            LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: reason=resolveFreshnessPaths "
+                         "outputPathRelative='{}' expandedOutputPathRelative='{}' outputPathAbsolute='{}'",
                          rawOutput, expanded, resolvedOutputPathAbsolute.string());
             outputPathsOut.push_back(resolvedOutputPathAbsolute);
         }

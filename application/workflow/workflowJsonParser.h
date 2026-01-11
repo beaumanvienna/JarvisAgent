@@ -35,67 +35,49 @@ namespace AIAssistant
     public:
         // Parse a JCWF workflow JSON document into a WorkflowDefinition.
         // Returns true on success; on failure, errorMessage is populated.
-        bool ParseWorkflowJson(std::string const& jsonContent,
-                               WorkflowDefinition& workflowOut,
+        bool ParseWorkflowJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
                                std::string& errorMessage) const;
 
     private:
         // Root object parser (top-level workflow object).
-        bool ParseRootObject(simdjson::ondemand::object rootObject,
-                             WorkflowDefinition& workflowOut,
+        bool ParseRootObject(simdjson::ondemand::object rootObject, WorkflowDefinition& workflowOut,
                              std::string& errorMessage) const;
 
         // Sub-parsers (implemented in workflowJsonParserDetails.cpp)
-        bool ParseTriggers(simdjson::ondemand::value& jsonValue,
-                           std::vector<WorkflowTrigger>& triggersOut,
+        bool ParseTriggers(simdjson::ondemand::value& jsonValue, std::vector<WorkflowTrigger>& triggersOut,
                            std::string& errorMessage) const;
 
-        bool ParseTrigger(simdjson::ondemand::object& jsonObject,
-                          WorkflowTrigger& triggerOut,
+        bool ParseTrigger(simdjson::ondemand::object& jsonObject, WorkflowTrigger& triggerOut,
                           std::string& errorMessage) const;
 
-        bool ParseTasks(simdjson::ondemand::value& jsonValue,
-                        std::unordered_map<std::string, TaskDef>& tasksOut,
+        bool ParseTasks(simdjson::ondemand::value& jsonValue, std::unordered_map<std::string, TaskDef>& tasksOut,
                         std::string& errorMessage) const;
 
-        bool ParseTask(simdjson::ondemand::object& jsonObject,
-                       TaskDef& taskOut,
-                       std::string& errorMessage) const;
+        bool ParseTask(simdjson::ondemand::object& jsonObject, TaskDef& taskOut, std::string& errorMessage) const;
 
-        bool ParseTaskInputs(simdjson::ondemand::value& jsonValue,
-                             TaskIOMap& inputsOut,
-                             std::string& errorMessage) const;
+        bool ParseTaskInputs(simdjson::ondemand::value& jsonValue, TaskIOMap& inputsOut, std::string& errorMessage) const;
 
-        bool ParseTaskOutputs(simdjson::ondemand::value& jsonValue,
-                              TaskIOMap& outputsOut,
-                              std::string& errorMessage) const;
+        bool ParseTaskOutputs(simdjson::ondemand::value& jsonValue, TaskIOMap& outputsOut, std::string& errorMessage) const;
 
-        bool ParseTaskEnvironment(simdjson::ondemand::value& jsonValue,
-                                  TaskEnvironment& environmentOut,
+        bool ParseTaskEnvironment(simdjson::ondemand::value& jsonValue, TaskEnvironment& environmentOut,
                                   std::string& errorMessage) const;
 
-        bool ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue,
-                                   QueueBinding& bindingOut,
+        bool ParseTaskQueueBinding(simdjson::ondemand::value& jsonValue, QueueBinding& bindingOut,
                                    std::string& errorMessage) const;
 
-        bool ParseDataflow(simdjson::ondemand::value& jsonValue,
-                           std::vector<DataflowDef>& dataflowsOut,
+        bool ParseDataflow(simdjson::ondemand::value& jsonValue, std::vector<DataflowDef>& dataflowsOut,
                            std::string& errorMessage) const;
 
-        bool ParseSingleDataflow(simdjson::ondemand::object& jsonObject,
-                                 DataflowDef& dataflowOut,
+        bool ParseSingleDataflow(simdjson::ondemand::object& jsonObject, DataflowDef& dataflowOut,
                                  std::string& errorMessage) const;
 
-        bool ParseRetries(simdjson::ondemand::object& jsonObject,
-                          RetryPolicy& retryPolicyOut,
+        bool ParseRetries(simdjson::ondemand::object& jsonObject, RetryPolicy& retryPolicyOut,
                           std::string& errorMessage) const;
 
         // Utility helpers
-        bool ExtractRawJson(simdjson::ondemand::value& element,
-                            std::string& rawJsonOut) const;
+        bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;
 
-        bool ElementToString(simdjson::ondemand::value& element,
-                             std::string& output) const;
+        bool ElementToString(simdjson::ondemand::value& element, std::string& output) const;
 
         // string → enum maps
         TaskType StringToTaskType(std::string const& typeString) const;

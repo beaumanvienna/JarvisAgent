@@ -170,7 +170,7 @@ namespace AIAssistant
     {
         std::string const launchCWDAbsoluteText =
             (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
-        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=loadWorkflow "
+        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=loadWorkflow "
                      "workflowFilePathRelative='{}' isRelative={} launchCWDAbsolute='{}'",
                      workflowFilePath.string(), workflowFilePath.is_relative(), launchCWDAbsoluteText);
 
@@ -186,7 +186,7 @@ namespace AIAssistant
 
         workflowFilePathAbsolute = std::filesystem::absolute(workflowFilePathAbsolute).lexically_normal();
 
-        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=resolveWorkflowFilePath "
+        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=resolveWorkflowFilePath "
                      "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}'",
                      workflowFilePath.string(), workflowFilePathAbsolute.string());
 
@@ -239,7 +239,7 @@ namespace AIAssistant
         workflowDefinition.m_WorkflowBaseDirectory = workflowBaseDirectoryPathAbsolute.string();
         workflowDefinition.m_WorkflowBaseDirectoryAbsolute = workflowBaseDirectoryPathAbsolute.string();
 
-        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkf...DirectoryAbsolute='{}' workflowBaseDirectoryRelative='{}' "
+        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkf...DirectoryAbsolute='{}' workflowBaseDirectoryRelative='{}' "
                      "workflowBaseDirectoryIsRelative={} workflowBaseDirectoryAbsolute='{}'",
                      workflowDefinition.m_WorkflowFileDirectoryAbsolute, workflowBaseDirectoryRaw,
                      workflowBaseDirectoryIsRelative, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);

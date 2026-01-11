@@ -65,8 +65,7 @@ namespace AIAssistant
         };
 
         bool CollectUpstreamOutputTimes(WorkflowDefinition const& workflowDefinition, std::string const& taskId,
-                                        std::unordered_set<std::string>& visitedTasks,
-                                        std::vector<TimedPath>& outTimes,
+                                        std::unordered_set<std::string>& visitedTasks, std::vector<TimedPath>& outTimes,
                                         ResolveOutputPathsFn const& resolveOutputPaths) const;
     };
 

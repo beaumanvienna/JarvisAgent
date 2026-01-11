@@ -546,20 +546,23 @@ namespace AIAssistant
                 if (TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                                    resolvedPaths.m_InputPaths, resolvedPaths.m_OutputPaths))
                 {
-                    LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPaths workflowId='{}' runId='{}' taskId='{}' inputCount={} outputCount={}",
+                    LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPaths workflowId='{}' runId='{}' taskId='{}' "
+                                 "inputCount={} outputCount={}",
                                  workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId,
                                  static_cast<int>(resolvedPaths.m_InputPaths.size()),
                                  static_cast<int>(resolvedPaths.m_OutputPaths.size()));
 
                     for (fs::path const& inputPath : resolvedPaths.m_InputPaths)
                     {
-                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsInput workflowId='{}' runId='{}' taskId='{}' inputPathAbsolute='{}'",
+                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsInput workflowId='{}' runId='{}' "
+                                     "taskId='{}' inputPathAbsolute='{}'",
                                      workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId, inputPath.string());
                     }
 
                     for (fs::path const& outputPath : resolvedPaths.m_OutputPaths)
                     {
-                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsOutput workflowId='{}' runId='{}' taskId='{}' outputPathAbsolute='{}'",
+                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsOutput workflowId='{}' runId='{}' "
+                                     "taskId='{}' outputPathAbsolute='{}'",
                                      workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId, outputPath.string());
                     }
                     auto resolveUpstreamOutputs = [&](std::string const& upstreamTaskId,
@@ -608,13 +611,15 @@ namespace AIAssistant
             WorkflowRun const workflowRunSnapshot = workflowRun;
             TaskInstanceState const taskStateSnapshot = taskState;
 
-            activeRun.m_RunningTasks[taskId] = pool.SubmitTask(
-                [this, &workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
-                 taskStateSnapshot]() -> TaskExecutionResult
-                {
-                    return ExecuteTaskOnWorker(workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
-                                               taskStateSnapshot);
-                }).share();
+            activeRun.m_RunningTasks[taskId] =
+                pool.SubmitTask(
+                        [this, &workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
+                         taskStateSnapshot]() -> TaskExecutionResult
+                        {
+                            return ExecuteTaskOnWorker(workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
+                                                       taskStateSnapshot);
+                        })
+                    .share();
 
             dispatchedAny = true;
         }
@@ -719,8 +724,8 @@ namespace AIAssistant
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();
 
-        LOG_APP_INFO("[paths debug] debug reason=executeTask workflowId='{}' runId='{}' taskId='{}'",
-                     workerRun.m_WorkflowId, workerRun.m_RunId, taskId);
+        LOG_APP_INFO("[paths debug] debug reason=executeTask workflowId='{}' runId='{}' taskId='{}'", workerRun.m_WorkflowId,
+                     workerRun.m_RunId, taskId);
 
         bool const executedOk = executorRegistry.Execute(workflowDefinition, workerRun, taskDefinition, result.m_TaskState);
 
