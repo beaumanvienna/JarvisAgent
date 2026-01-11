@@ -22,6 +22,8 @@
 
 #include "taskFreshnessChecker.h"
 
+#include "engine.h"
+
 #include <algorithm>
 #include <system_error>
 
@@ -96,6 +98,10 @@ namespace AIAssistant
                                          ResolvedPaths const& resolvedPaths, ResolveOutputPathsFn const& resolveOutputPaths,
                                          std::filesystem::path* comparedInputPath, std::filesystem::path* comparedOutputPath) const
     {
+        LOG_APP_INFO("[paths debug] debug reason=freshnessCheck taskId={} inputCount={} outputCount={}", taskId,
+                     static_cast<int>(resolvedPaths.m_InputPaths.size()),
+                     static_cast<int>(resolvedPaths.m_OutputPaths.size()));
+
         // If the task has no declared outputs, treat it as not provably up to date.
         if (resolvedPaths.m_OutputPaths.empty())
         {
@@ -122,6 +128,10 @@ namespace AIAssistant
             fs::path const resolvedInputPath = inputPath.lexically_normal();
             if (!fs::exists(resolvedInputPath, errorCode))
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=freshnessMissingInput taskId={} inputPathRelative={} inputPathAbsolute={} isRelative={}",
+                    taskId, inputPath.string(), resolvedInputPath.string(), static_cast<int>(resolvedInputPath.is_relative()));
+
                 // Missing input ⇒ not up to date.
                 if (comparedInputPath != nullptr)
                 {
@@ -133,6 +143,9 @@ namespace AIAssistant
             auto writeTime = fs::last_write_time(resolvedInputPath, errorCode);
             if (errorCode)
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=freshnessInputStatFailed taskId={} inputPathAbsolute={} errorCode={}",
+                    taskId, resolvedInputPath.string(), errorCode.value());
                 return false;
             }
 
@@ -206,6 +219,10 @@ namespace AIAssistant
             fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=freshnessMissingOutput taskId={} outputPathRelative={} outputPathAbsolute={} isRelative={}",
+                    taskId, outputPath.string(), resolvedOutputPath.string(), static_cast<int>(resolvedOutputPath.is_relative()));
+
                 if (comparedOutputPath != nullptr)
                 {
                     *comparedOutputPath = resolvedOutputPath;
@@ -216,6 +233,9 @@ namespace AIAssistant
             fs::file_time_type const writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=freshnessOutputStatFailed taskId={} outputPathAbsolute={} errorCode={}",
+                    taskId, resolvedOutputPath.string(), errorCode.value());
                 return false;
             }
 
@@ -251,6 +271,11 @@ namespace AIAssistant
         // Task is up to date if all outputs exist and the oldest output
         // is >= the newest input or upstream output.
         bool const isUpToDate = (earliestOutputTime >= latestInputTime);
+
+        LOG_APP_INFO(
+            "[paths debug] debug reason=freshnessCompare taskId={} inputPathAbsolute={} outputPathAbsolute={} isUpToDate={} inputIsRelative={} outputIsRelative={}",
+            taskId, latestInputPath.string(), earliestOutputPath.string(), static_cast<int>(isUpToDate),
+            static_cast<int>(latestInputPath.is_relative()), static_cast<int>(earliestOutputPath.is_relative()));
         return isUpToDate;
     }
 
@@ -260,6 +285,8 @@ namespace AIAssistant
                                                           std::vector<TaskFreshnessChecker::TimedPath>& outTimes,
                                                           ResolveOutputPathsFn const& resolveOutputPaths) const
     {
+        LOG_APP_INFO("[paths debug] debug reason=collectUpstreamOutputTimes taskId={}", taskId);
+
         // Avoid infinite recursion in case validation was skipped.
         if (visitedTasks.contains(taskId))
         {
@@ -288,8 +315,12 @@ namespace AIAssistant
         std::vector<fs::path> outputPaths;
         if (!resolveOutputPaths(taskId, outputPaths))
         {
+            LOG_APP_INFO("[paths debug] debug reason=collectUpstreamOutputResolveFailed taskId={}", taskId);
             return false;
         }
+
+        LOG_APP_INFO("[paths debug] debug reason=collectUpstreamOutputResolved taskId={} outputCount={}", taskId,
+                     static_cast<int>(outputPaths.size()));
 
         std::error_code errorCode;
 
@@ -298,12 +329,18 @@ namespace AIAssistant
             fs::path const resolvedOutputPath = outputPath.lexically_normal();
             if (!fs::exists(resolvedOutputPath, errorCode))
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=collectUpstreamOutputMissing taskId={} outputPathRelative={} outputPathAbsolute={} isRelative={}",
+                    taskId, outputPath.string(), resolvedOutputPath.string(), static_cast<int>(resolvedOutputPath.is_relative()));
                 return false;
             }
 
             auto writeTime = fs::last_write_time(resolvedOutputPath, errorCode);
             if (errorCode)
             {
+                LOG_APP_INFO(
+                    "[paths debug] debug reason=collectUpstreamOutputStatFailed taskId={} outputPathAbsolute={} errorCode={}",
+                    taskId, resolvedOutputPath.string(), errorCode.value());
                 return false;
             }
 

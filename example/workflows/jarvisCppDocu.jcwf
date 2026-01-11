@@ -6,7 +6,6 @@
     "Generates Markdown documentation for each C++ header (and matching .cpp when present) in application/ and engine/.",
     "Each task is an ai_call and writes its artifacts into a per-task folder under ../queue/<workflowId>/."
   ],
-  "base_directory": ".",
   "triggers": [
     {
       "type": "auto",

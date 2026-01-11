@@ -112,6 +112,10 @@ namespace AIAssistant
                 std::filesystem::path parentPath = outputPath.parent_path();
                 if (!parentPath.empty())
                 {
+                    LOG_APP_INFO(
+                        "[paths debug] debug reason=writeOutputEnsureParentDirectory outputPathAbsolute='{}' outputParentDirectoryAbsolute='{}'",
+                        outputPath.string(),
+                        parentPath.string());
                     std::error_code error;
                     std::filesystem::create_directories(parentPath, error);
                 }
@@ -127,13 +131,32 @@ namespace AIAssistant
     bool InternalTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                        TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        (void)workflowRun;
-
-        std::filesystem::path const workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
+        std::filesystem::path const workflowBaseDirectoryPath(!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty() ? workflowDefinition.m_WorkflowBaseDirectoryAbsolute : workflowDefinition.m_WorkflowBaseDirectory);
         std::filesystem::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
+        LOG_APP_INFO(
+            "[paths debug] debug reason=executeInternalTask workflowId='{}' runId='{}' taskId='{}' taskType='internal' "
+            "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' "
+            "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
+            "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+            "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
+            workflowRun.m_WorkflowId,
+            workflowRun.m_RunId,
+            taskDefinition.m_Id,
+            workflowDefinition.m_WorkflowFilePath,
+            workflowDefinition.m_WorkflowFilePathAbsolute,
+            workflowDefinition.m_WorkflowFileDirectory,
+            workflowDefinition.m_WorkflowFileDirectoryAbsolute,
+            workflowDefinition.m_WorkflowBaseDirectory,
+            workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
+            taskDefinition.m_WorkingDirectory,
+            taskWorkingDirectoryPath.string());
         {
             std::error_code error;
+            LOG_APP_INFO(
+                "[paths debug] debug reason=ensureWorkingDirectory taskId='{}' taskWorkingDirectoryAbsolute='{}'",
+                taskDefinition.m_Id,
+                taskWorkingDirectoryPath.string());
             std::filesystem::create_directories(taskWorkingDirectoryPath, error);
             if (error)
             {
@@ -150,6 +173,7 @@ namespace AIAssistant
         for (std::string const& inputPathString : taskDefinition.m_FileInputs)
         {
             resolvedInputPaths.push_back(TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, inputPathString));
+            LOG_APP_INFO("[paths debug] debug reason=resolveInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, inputPathString, resolvedInputPaths.back().string());
         }
 
         std::vector<std::filesystem::path> resolvedOutputPaths;
@@ -158,6 +182,7 @@ namespace AIAssistant
         {
             resolvedOutputPaths.push_back(
                 TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, outputPathString));
+            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, outputPathString, resolvedOutputPaths.back().string());
         }
 
         {
@@ -186,6 +211,13 @@ namespace AIAssistant
         }
 
         IInternalTaskRegistry* registry = nullptr;
+        LOG_APP_INFO(
+            "[paths debug] debug reason=internalTaskAction taskId='{}' action='{}' inputsCount='{}' outputsCount='{}'",
+            taskDefinition.m_Id,
+            action,
+            resolvedInputPaths.size(),
+            resolvedOutputPaths.size());
+
         if (m_InternalTaskRegistryPtr)
         {
             registry = m_InternalTaskRegistryPtr.get();
@@ -218,6 +250,15 @@ namespace AIAssistant
             LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
+        }
+
+        for (std::filesystem::path const& inputPath : resolvedInputPaths)
+        {
+            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedInput taskId='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, inputPath.string());
+        }
+        for (std::filesystem::path const& outputPath : resolvedOutputPaths)
+        {
+            LOG_APP_INFO("[paths debug] debug reason=internalTaskResolvedOutput taskId='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, outputPath.string());
         }
 
         std::string taskError;

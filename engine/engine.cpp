@@ -24,6 +24,8 @@
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
+#include <filesystem>
+#include <string>
 
 int engine(int argc, char* argv[])
 {
@@ -31,7 +33,9 @@ int engine(int argc, char* argv[])
     auto engine = std::make_unique<Core>();
 
     // parse JSON file to retrieve engine config
-    ConfigParser configParser("./config.json");
+    std::filesystem::path const configFilePathAbsolute = Core::g_Core->GetLaunchCWDAbsolute() / "config.json";
+    std::string const configFilePathAbsoluteString = configFilePathAbsolute.lexically_normal().string();
+    ConfigParser configParser(configFilePathAbsoluteString.c_str());
     ConfigParser::EngineConfig engineConfig{};
     configParser.Parse(engineConfig);
     if (!configParser.ConfigParsed())

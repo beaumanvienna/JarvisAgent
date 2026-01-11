@@ -21,6 +21,7 @@
 
 #pragma once
 #include <memory>
+#include <filesystem>
 
 #include "log/log.h"
 #include "application.h"
@@ -49,6 +50,7 @@ namespace AIAssistant
         ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const;
         ThreadPool& GetThreadPool();
         TerminalManager* GetTerminalManager();
+        std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
 
         // event API
         void PushEvent(EventQueue::EventPtr eventPtr);
@@ -79,5 +81,6 @@ namespace AIAssistant
         std::unique_ptr<TerminalLogStreamBuf> m_TerminalBuf;
         std::shared_ptr<std::ofstream> m_LogFile;
         std::streambuf* m_OriginalCoutBuffer{nullptr};
+        std::filesystem::path m_LaunchCWDAbsolute;
     };
 } // namespace AIAssistant

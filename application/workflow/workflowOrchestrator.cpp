@@ -48,19 +48,30 @@ namespace AIAssistant
                 return fs::path{};
             }
 
-            return fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath).lexically_normal();
+            fs::path queueFolderPath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath);
+
+            if (queueFolderPath.is_relative())
+            {
+                queueFolderPath = Core::g_Core->GetLaunchCWDAbsolute() / queueFolderPath;
+            }
+
+            return fs::absolute(queueFolderPath).lexically_normal();
         }
 
         fs::path GetScriptsFolderPath()
         {
-            std::error_code errorCode;
-            fs::path currentPath = fs::current_path(errorCode);
-            if (errorCode)
+            if (Core::g_Core == nullptr)
             {
                 return fs::path{};
             }
 
-            return (currentPath / "scripts").lexically_normal();
+            fs::path const launchWorkingDirectoryAbsolute = Core::g_Core->GetLaunchCWDAbsolute();
+            if (launchWorkingDirectoryAbsolute.empty())
+            {
+                return fs::path{};
+            }
+
+            return (launchWorkingDirectoryAbsolute / "scripts").lexically_normal();
         }
 
         bool IsPathWithin(fs::path const& candidatePath, fs::path const& basePath)
@@ -75,6 +86,14 @@ namespace AIAssistant
             fs::path canonicalBasePath = fs::weakly_canonical(basePath, errorCode);
             if (errorCode)
             {
+                if (basePath.is_relative())
+                {
+                    // [paths debug] Potential CWD-derived fallback when canonicalizing basePath (logging only).
+                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeBaseCwdFallback basePathRelative='{}' launchCWDAbsolute='{}'",
+                                 basePath.string(),
+                                 Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
+                }
+
                 errorCode.clear();
                 canonicalBasePath = fs::absolute(basePath, errorCode).lexically_normal();
                 errorCode.clear();
@@ -83,6 +102,14 @@ namespace AIAssistant
             fs::path canonicalCandidatePath = fs::weakly_canonical(candidatePath, errorCode);
             if (errorCode)
             {
+                if (candidatePath.is_relative())
+                {
+                    // [paths debug] Potential CWD-derived fallback when canonicalizing candidatePath (logging only).
+                    LOG_APP_INFO("[paths debug] debug reason=canonicalizeCandidateCwdFallback candidatePathRelative='{}' launchCWDAbsolute='{}'",
+                                 candidatePath.string(),
+                                 Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
+                }
+
                 errorCode.clear();
                 canonicalCandidatePath = fs::absolute(candidatePath, errorCode).lexically_normal();
                 errorCode.clear();
@@ -106,8 +133,8 @@ namespace AIAssistant
                                     TaskDef const& taskDefinition, std::string const& taskId,
                                     fs::path const& workingDirectory, TaskInstanceState& taskState)
         {
-            fs::path const queueFolderPath = GetQueueFolderPath();
-            fs::path const scriptsFolderPath = GetScriptsFolderPath();
+            fs::path const queueFolderPathAbsolute = GetQueueFolderPath();
+            fs::path const scriptsFolderPathAbsolute = GetScriptsFolderPath();
 
             auto fail = [&](std::string const& message) -> bool
             {
@@ -116,12 +143,12 @@ namespace AIAssistant
                 return false;
             };
 
-            if (IsPathWithin(workingDirectory, scriptsFolderPath))
+            if (IsPathWithin(workingDirectory, scriptsFolderPathAbsolute))
             {
                 return fail("Task working_directory resolves into ./scripts. The scripts folder is reserved for tools.");
             }
 
-            if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(workingDirectory, queueFolderPath))
+            if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(workingDirectory, queueFolderPathAbsolute))
             {
                 return fail("Non-AI task working_directory resolves into the queue folder. Only ai_call tasks may use the "
                             "queue folder.");
@@ -137,12 +164,12 @@ namespace AIAssistant
 
             for (fs::path const& outputPath : resolvedOutputPaths)
             {
-                if (IsPathWithin(outputPath, scriptsFolderPath))
+                if (IsPathWithin(outputPath, scriptsFolderPathAbsolute))
                 {
                     return fail(std::string("Task file_output resolves into ./scripts: ") + outputPath.string());
                 }
 
-                if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(outputPath, queueFolderPath))
+                if (taskDefinition.m_Type != TaskType::AiCall && IsPathWithin(outputPath, queueFolderPathAbsolute))
                 {
                     return fail(std::string("Non-AI task file_output resolves into queue folder: ") + outputPath.string());
                 }
@@ -285,6 +312,18 @@ namespace AIAssistant
 
         activeRun.m_WorkflowRun.m_WorkflowId = workflowDefinition.m_Id;
         activeRun.m_WorkflowRun.m_RunId = runId.empty() ? GenerateRunId(workflowDefinition) : runId;
+
+        // [paths debug] Workflow run start context (logging only).
+        LOG_APP_INFO("[paths debug] debug reason=workflowStart workflowId='{}' runId='{}' "
+                     "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' "
+                     "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
+                     "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+                     "launchCWDAbsolute='{}'",
+                     workflowDefinition.m_Id, activeRun.m_WorkflowRun.m_RunId, workflowDefinition.m_WorkflowFilePath,
+                     workflowDefinition.m_WorkflowFilePathAbsolute, workflowDefinition.m_WorkflowFileDirectory,
+                     workflowDefinition.m_WorkflowFileDirectoryAbsolute, workflowDefinition.m_WorkflowBaseDirectory,
+                     workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
+                     Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
 
         for (auto const& taskPair : workflowDefinition.m_Tasks)
         {
@@ -518,9 +557,9 @@ namespace AIAssistant
 
                         fs::path comparedInputPath;
                         fs::path comparedOutputPath;
-                        bool const isUpToDate = freshnessChecker.IsTaskUpToDate(
-                            workflowDefinition, taskId, resolvedPaths, resolveUpstreamOutputs, &comparedInputPath,
-                            &comparedOutputPath);
+                        bool const isUpToDate =
+                            freshnessChecker.IsTaskUpToDate(workflowDefinition, taskId, resolvedPaths,
+                                                            resolveUpstreamOutputs, &comparedInputPath, &comparedOutputPath);
 
                         if (isUpToDate)
                         {
@@ -529,10 +568,14 @@ namespace AIAssistant
 
                             taskState->m_State = TaskInstanceStateKind::Skipped;
                             madeProgressThisTick = true;
-                            LOG_APP_INFO("WorkflowOrchestrator: Freshness passed - skipping task '{}' (input '{}' vs output '{}').", taskId, comparedInputPath.string(), comparedOutputPath.string());
+                            LOG_APP_INFO(
+                                "WorkflowOrchestrator: Freshness passed - skipping task '{}' (input '{}' vs output '{}').",
+                                taskId, comparedInputPath.string(), comparedOutputPath.string());
                             continue;
                         }
-                        LOG_APP_INFO("WorkflowOrchestrator: Freshness failed - running task '{}' (input '{}' vs output '{}').", taskId, comparedInputPath.string(), comparedOutputPath.string());
+                        LOG_APP_INFO(
+                            "WorkflowOrchestrator: Freshness failed - running task '{}' (input '{}' vs output '{}').",
+                            taskId, comparedInputPath.string(), comparedOutputPath.string());
                     }
                 }
 
@@ -686,14 +729,85 @@ namespace AIAssistant
             taskState.m_InputsJson = summary;
         }
 
+        fs::path workflowBaseDirectoryPath = workflowDefinition.m_WorkflowBaseDirectory;
+        if (!workflowBaseDirectoryPath.empty() && workflowBaseDirectoryPath.is_relative())
+        {
+            workflowBaseDirectoryPath = Core::g_Core->GetLaunchCWDAbsolute() / workflowBaseDirectoryPath;
+        }
+
+        fs::path const workflowBaseDirectoryPathAbsolute =
+            workflowBaseDirectoryPath.empty() ? fs::path{} : fs::absolute(workflowBaseDirectoryPath).lexically_normal();
+
         fs::path workingDirectory = taskDefinition.m_WorkingDirectory;
         if (workingDirectory.empty())
         {
-            workingDirectory = workflowDefinition.m_WorkflowBaseDirectory;
+            workingDirectory = workflowBaseDirectoryPathAbsolute;
         }
-        else if (workingDirectory.is_relative() && !workflowDefinition.m_WorkflowBaseDirectory.empty())
+        else if (workingDirectory.is_relative() && !workflowBaseDirectoryPathAbsolute.empty())
         {
-            workingDirectory = (fs::path(workflowDefinition.m_WorkflowBaseDirectory) / workingDirectory).lexically_normal();
+            workingDirectory = (workflowBaseDirectoryPathAbsolute / workingDirectory).lexically_normal();
+        }
+
+        { // could be done directly via fmt
+            std::string taskDefinitionType;
+
+            switch (taskDefinition.m_Type)
+            {
+                case TaskType::Unknown:
+                {
+                    taskDefinitionType = "TaskType::Unknown";
+                    break;
+                };
+                case TaskType::Python:
+                {
+                    taskDefinitionType = "TaskType::Python";
+                    break;
+                };
+                case TaskType::Shell:
+                {
+                    taskDefinitionType = "TaskType::Shell";
+                    break;
+                };
+                case TaskType::Internal:
+                {
+                    taskDefinitionType = "TaskType::Internal";
+                    break;
+                };
+                case TaskType::AiCall:
+                {
+                    taskDefinitionType = "TaskType::AiCall";
+                    break;
+                };
+                default:
+                {
+                    taskDefinitionType = "not found";
+                    break;
+                }
+            }
+
+            // [paths debug] Task dispatch path context (logging only).
+            LOG_APP_INFO("[paths debug] debug reason=dispatchTask workflowId='{}' taskId='{}' taskType='{}' "
+                         "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+                         "launchCWDAbsolute='{}' "
+                         "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
+                         workflowDefinition.m_Id, taskId, taskDefinitionType, workflowDefinition.m_WorkflowBaseDirectory,
+                         workflowBaseDirectoryPathAbsolute.string(),
+                         Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string(),
+                         taskDefinition.m_WorkingDirectory, workingDirectory.string());
+        }
+
+        if (!workingDirectory.empty() && workingDirectory.is_relative())
+        {
+            // [paths debug] This indicates a potential CWD-derived fallback when converting to absolute (logging only).
+            LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectoryCwdFallback workflowId='{}' taskId='{}' "
+                         "taskWorkingDirectoryRelative='{}' launchCWDAbsolute='{}'",
+                         workflowDefinition.m_Id, taskId, workingDirectory.string(),
+                         Core::g_Core != nullptr ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string());
+        }
+
+        if (!workingDirectory.empty())
+        {
+            workingDirectory = fs::absolute(workingDirectory).lexically_normal();
         }
 
         if (!ValidateTaskPathPolicy(workflowDefinition, workflowRun, taskDefinition, taskId, workingDirectory, taskState))
@@ -703,6 +817,11 @@ namespace AIAssistant
 
         if (!workingDirectory.empty())
         {
+            // [paths debug] Ensure the task working directory exists (logging only).
+            LOG_APP_INFO("[paths debug] debug reason=ensureWorkingDirectory workflowId='{}' taskId='{}' "
+                         "taskWorkingDirectoryAbsolute='{}'",
+                         workflowDefinition.m_Id, taskId, workingDirectory.string());
+
             try
             {
                 fs::create_directories(workingDirectory);
@@ -717,6 +836,50 @@ namespace AIAssistant
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();
         bool const executedOk = executorRegistry.Execute(workflowDefinition, workflowRun, taskDefinition, taskState);
+
+        { // could be done directly via fmt
+            std::string taskDefinitionType;
+
+            switch (taskDefinition.m_Type)
+            {
+                case TaskType::Unknown:
+                {
+                    taskDefinitionType = "TaskType::Unknown";
+                    break;
+                };
+                case TaskType::Python:
+                {
+                    taskDefinitionType = "TaskType::Python";
+                    break;
+                };
+                case TaskType::Shell:
+                {
+                    taskDefinitionType = "TaskType::Shell";
+                    break;
+                };
+                case TaskType::Internal:
+                {
+                    taskDefinitionType = "TaskType::Internal";
+                    break;
+                };
+                case TaskType::AiCall:
+                {
+                    taskDefinitionType = "TaskType::AiCall";
+                    break;
+                };
+                default:
+                {
+                    taskDefinitionType = "not found";
+                    break;
+                }
+            }
+
+            // [paths debug] Task execution result (logging only).
+            LOG_APP_INFO("[paths debug] debug reason=taskCompleted workflowId='{}' taskId='{}' taskType='{}' "
+                         "taskWorkingDirectoryAbsolute='{}' state='{}' lastError='{}'",
+                         workflowDefinition.m_Id, taskDefinition.m_Id, taskDefinitionType, workingDirectory.string(),
+                         static_cast<int>(taskState.m_State), taskState.m_LastErrorMessage);
+        }
 
         if (!executedOk)
         {

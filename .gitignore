@@ -24,3 +24,4 @@ __pycache__/
 vendor/curl/lib/curl_config.h
 queue
 workflows
+log

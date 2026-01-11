@@ -19,6 +19,7 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include "engine.h"
 #include "workflow/aiRequestPool.h"
 
 #include <algorithm>
@@ -43,6 +44,20 @@ namespace AIAssistant
             outErrorMessage.clear();
 
             fs::path const filesystemPath(filePath);
+
+            if (filesystemPath.is_relative())
+            {
+                std::string const launchCWDAbsoluteText =
+                    (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
+                LOG_APP_WARN("[paths debug] debug reason=writeAiRequestPoolTextFileCwdFallback filePathRelative='{}' "
+                             "launchCWDAbsolute='{}'",
+                             filePath, launchCWDAbsoluteText);
+            }
+
+            fs::path const filesystemPathAbsolute = fs::absolute(filesystemPath).lexically_normal();
+            LOG_APP_INFO("[paths debug] debug reason=writeAiRequestPoolTextFile filePathRelative='{}' filePathAbsolute='{}' "
+                         "wasRelative='{}'",
+                         filePath, filesystemPathAbsolute.generic_string(), filesystemPath.is_relative());
             std::error_code errorCode;
 
             fs::path const parent = filesystemPath.parent_path();
@@ -87,6 +102,13 @@ namespace AIAssistant
             {
                 for (std::string const& outputPath : outputFilePaths)
                 {
+                    fs::path const outputFilesystemPath(outputPath);
+                    fs::path const outputFilesystemPathAbsolute = fs::absolute(outputFilesystemPath).lexically_normal();
+                    LOG_APP_INFO("[paths debug] debug reason=writeAiCompletionOutput outputPathRelative='{}' "
+                                 "outputPathAbsolute='{}' wasRelative='{}'",
+                                 outputPath, outputFilesystemPathAbsolute.generic_string(),
+                                 outputFilesystemPath.is_relative());
+
                     std::string writeError;
                     if (!WriteTextFile(outputPath, responseText, writeError))
                     {
@@ -334,6 +356,9 @@ namespace AIAssistant
         // NOTE: ProbUtils::ProbFileInfo::timestamp is treated as "timestampNs" by convention in your codebase.
         RequestKey const requestKey{static_cast<int64_t>(probFileInfo.id), probFileInfo.timestamp};
 
+        LOG_APP_INFO("[paths debug] debug reason=probFileEvent requestId='{}' timestampNs='{}' fullFilePathAbsolute='{}'",
+                     requestKey.requestId, requestKey.requestTimestampNs, fullFilePath);
+
         std::shared_ptr<PendingEntry> pendingEntry;
 
         {
@@ -373,6 +398,9 @@ namespace AIAssistant
                 inputStream.read(fileContent.data(), static_cast<std::streamsize>(size));
             }
         }
+
+        LOG_APP_INFO("[paths debug] debug reason=probFileReadCompleted fullFilePathAbsolute='{}' bytesRead={}", fullFilePath,
+                     fileContent.size());
 
         {
             std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);

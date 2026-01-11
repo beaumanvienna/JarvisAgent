@@ -274,8 +274,8 @@ namespace AIAssistant
         auto& indexVector = m_FileWatchIndex[normalizedPath];
         indexVector.push_back(triggerIndex);
 
-        LOG_APP_INFO("TriggerEngine::AddFileWatchTrigger: registered file trigger '{}' for workflow '{}' on path '{}'",
-                     triggerId, workflowId, normalizedPath);
+        LOG_APP_INFO("[paths debug] debug TriggerEngine::AddFileWatchTrigger: reason=bindTrigger workflowId='{}' triggerId='{}' watchedPathProvided='{}' watchedPathNormalized='{}'",
+                     workflowId, triggerId, path, normalizedPath);
     }
 
     void TriggerEngine::AddManualTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled)
@@ -336,6 +336,8 @@ namespace AIAssistant
                                         std::chrono::system_clock::time_point const& now)
     {
         std::string const normalizedEventPath = NormalizePath(path);
+        LOG_APP_INFO("[paths debug] debug TriggerEngine::NotifyFileEvent: reason=triggerEvent eventPathProvided='{}' eventPathNormalized='{}' eventType='{}'",
+                     path, normalizedEventPath, static_cast<int>(fileEventType));
 
         std::unordered_set<size_t> processedIndices;
 
@@ -380,6 +382,8 @@ namespace AIAssistant
                 fileTriggerInstance.m_HasFiredOnce = true;
                 fileTriggerInstance.m_LastFireTime = now;
 
+                LOG_APP_INFO("[paths debug] debug TriggerEngine::NotifyFileEvent: reason=fireTrigger workflowId='{}' triggerId='{}' watchedPathNormalized='{}' eventPathNormalized='{}' eventType='{}'",
+                             fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId, fileTriggerInstance.m_WatchedPath, normalizedEventPath, static_cast<int>(fileEventType));
                 FireTrigger(fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId);
             }
         };

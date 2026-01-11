@@ -24,6 +24,7 @@
 #include "workflow/workflowRegistry.h"
 
 #include "engine.h"
+#include "core.h"
 #include "workflow/workflowJsonParser.h"
 
 #include <algorithm>
@@ -167,10 +168,32 @@ namespace AIAssistant
 
     bool WorkflowRegistry::LoadWorkflowFile(std::filesystem::path const& workflowFilePath)
     {
-        std::string fileText;
-        if (!ReadFileToString(workflowFilePath, fileText))
+        std::string const launchCWDAbsoluteText =
+            (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
+        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=loadWorkflow "
+                     "workflowFilePathRelative='{}' isRelative={} launchCWDAbsolute='{}'",
+                     workflowFilePath.string(), workflowFilePath.is_relative(), launchCWDAbsoluteText);
+
+        std::filesystem::path workflowFilePathAbsolute = workflowFilePath;
+        if (workflowFilePathAbsolute.is_relative())
         {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: failed to read '{}'", workflowFilePath.string());
+            if (Core::g_Core != nullptr)
+            {
+                workflowFilePathAbsolute =
+                    std::filesystem::path(Core::g_Core->GetLaunchCWDAbsolute()) / workflowFilePathAbsolute;
+            }
+        }
+
+        workflowFilePathAbsolute = std::filesystem::absolute(workflowFilePathAbsolute).lexically_normal();
+
+        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=resolveWorkflowFilePath "
+                     "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}'",
+                     workflowFilePath.string(), workflowFilePathAbsolute.string());
+
+        std::string fileText;
+        if (!ReadFileToString(workflowFilePathAbsolute, fileText))
+        {
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: failed to read '{}'", workflowFilePathAbsolute.string());
             return false;
         }
 
@@ -180,40 +203,62 @@ namespace AIAssistant
 
         if (!parser.ParseWorkflowJson(fileText, workflowDefinition, errorMessage))
         {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: parse failed for '{}': {}", workflowFilePath.string(),
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: parse failed for '{}': {}", workflowFilePathAbsolute.string(),
                          errorMessage);
             return false;
         }
 
-        workflowDefinition.m_WorkflowFilePath = workflowFilePath.lexically_normal().string();
-        workflowDefinition.m_WorkflowFileDirectory = workflowFilePath.parent_path().lexically_normal().string();
+        workflowDefinition.m_WorkflowFilePath = workflowFilePathAbsolute.lexically_normal().string();
+        workflowDefinition.m_WorkflowFilePathAbsolute = workflowFilePathAbsolute.lexically_normal().string();
 
-        std::filesystem::path const workflowFileDirectoryPath = workflowFilePath.parent_path();
+        std::filesystem::path const workflowFileDirectoryPathAbsolute =
+            workflowFilePathAbsolute.parent_path().lexically_normal();
+        workflowDefinition.m_WorkflowFileDirectory = workflowFileDirectoryPathAbsolute.string();
+        workflowDefinition.m_WorkflowFileDirectoryAbsolute = workflowFileDirectoryPathAbsolute.string();
+
+        std::string const workflowBaseDirectoryRaw = workflowDefinition.m_WorkflowBaseDirectory;
+        bool workflowBaseDirectoryIsRelative = false;
+
+        std::filesystem::path workflowBaseDirectoryPathAbsolute;
         if (workflowDefinition.m_WorkflowBaseDirectory.empty())
         {
-            workflowDefinition.m_WorkflowBaseDirectory = workflowFileDirectoryPath.lexically_normal().string();
+            workflowBaseDirectoryPathAbsolute = workflowFileDirectoryPathAbsolute;
         }
         else
         {
             std::filesystem::path baseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-            if (!baseDirectoryPath.is_absolute())
+            workflowBaseDirectoryIsRelative = workflowBaseDirectoryIsRelative;
+            if (workflowBaseDirectoryIsRelative)
             {
-                baseDirectoryPath = workflowFileDirectoryPath / baseDirectoryPath;
+                baseDirectoryPath = workflowFileDirectoryPathAbsolute / baseDirectoryPath;
             }
 
-            workflowDefinition.m_WorkflowBaseDirectory = baseDirectoryPath.lexically_normal().string();
+            workflowBaseDirectoryPathAbsolute = std::filesystem::absolute(baseDirectoryPath).lexically_normal();
         }
+
+        workflowDefinition.m_WorkflowBaseDirectory = workflowBaseDirectoryPathAbsolute.string();
+        workflowDefinition.m_WorkflowBaseDirectoryAbsolute = workflowBaseDirectoryPathAbsolute.string();
+
+        LOG_APP_WARN("[paths debug] WorkflowRegistry::LoadWorkf...DirectoryAbsolute='{}' workflowBaseDirectoryRelative='{}' "
+                     "workflowBaseDirectoryIsRelative={} workflowBaseDirectoryAbsolute='{}'",
+                     workflowDefinition.m_WorkflowFileDirectoryAbsolute, workflowBaseDirectoryRaw,
+                     workflowBaseDirectoryIsRelative, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+
+        LOG_APP_WARN(
+            "[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=workflowParsed workflowId='{}' taskCount={}",
+            workflowDefinition.m_Id, workflowDefinition.m_Tasks.size());
 
         if (workflowDefinition.m_Id.empty())
         {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id", workflowFilePath.string());
+            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id",
+                         workflowFilePathAbsolute.string());
             return false;
         }
         auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
         if (!inserted)
         {
             LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: duplicate workflow id '{}' (file '{}')",
-                         workflowDefinition.m_Id, workflowFilePath.string());
+                         workflowDefinition.m_Id, workflowFilePathAbsolute.string());
             return false;
         }
 

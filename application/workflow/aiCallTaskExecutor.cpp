@@ -148,8 +148,11 @@ namespace AIAssistant
                     return false;
                 }
 
+                LOG_APP_INFO("[paths debug] debug reason=writeInlineQueueBindingFile filePathRelative='{}' wasRelative='{}' bytes={} ",
+                             fileRef.m_Path, std::filesystem::path(fileRef.m_Path).is_relative(), fileRef.m_Content.size());
+
                 if (!AiCallTaskExecutor::WriteTextFile(fileRef.m_Path, fileRef.m_Content, outErrorMessage))
-                {
+{
                     return false;
                 }
             }
@@ -197,7 +200,8 @@ namespace AIAssistant
 
                 if (fileRef.m_HasInlineContent)
                 {
-                    LOG_APP_INFO("debug ai_call: PROB inline content path='{}' bytes={}", fileRef.m_Path,
+                    LOG_APP_INFO("[paths debug] debug reason=useInlineProbContent probPathRelative='{}' wasRelative='{}' bytes={}",
+                                 fileRef.m_Path, std::filesystem::path(fileRef.m_Path).is_relative(),
                                  fileRef.m_Content.size());
                     probStream << fileRef.m_Content;
                     continue;
@@ -205,7 +209,11 @@ namespace AIAssistant
 
                 std::filesystem::path const sourcePath =
                     TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fileRef.m_Path);
-                LOG_APP_INFO("debug ai_call: PROB source path='{}' resolved='{}'", fileRef.m_Path, sourcePath.string());
+                LOG_APP_INFO("[paths debug] debug reason=resolveProbSourcePath inputPathRelative='{}' taskWorkingDirectoryAbsolute='{}' resolvedSourcePathAbsolute='{}' wasRelative='{}'",
+                             fileRef.m_Path, taskWorkingDirectoryPath.lexically_normal().generic_string(),
+                             sourcePath.lexically_normal().generic_string(), std::filesystem::path(fileRef.m_Path).is_relative());
+                LOG_APP_INFO("[paths debug] debug reason=readProbSourceFile inputPathRelative='{}' sourcePathAbsolute='{}'",
+                             fileRef.m_Path, sourcePath.lexically_normal().generic_string());
 
                 std::string sourceText;
                 if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
@@ -216,7 +224,8 @@ namespace AIAssistant
                     return false;
                 }
 
-                LOG_APP_INFO("debug ai_call: PROB read bytes={} from '{}'", sourceText.size(), sourcePath.string());
+                LOG_APP_INFO("[paths debug] debug reason=readProbSourceFileCompleted sourcePathAbsolute='{}' bytesRead={}",
+                             sourcePath.lexically_normal().generic_string(), sourceText.size());
                 probStream << sourceText;
             }
 
@@ -282,9 +291,9 @@ namespace AIAssistant
 
                 std::filesystem::path const destPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, baseName);
 
-                LOG_APP_INFO("debug ai_call: CNTX source path='{}' resolved='{}' -> writing '{}'", fileRef.m_Path,
-                             sourcePath.string(), destPath.string());
-
+                LOG_APP_INFO("[paths debug] debug reason=materializeCntxFile sourcePathRelative='{}' sourcePathAbsolute='{}' destPathAbsolute='{}'",
+                             fileRef.m_Path, sourcePath.lexically_normal().generic_string(),
+                             destPath.lexically_normal().generic_string());
                 if (!AiCallTaskExecutor::WriteTextFile(destPath.string(), sourceText, outErrorMessage))
                 {
                     return false;
@@ -310,6 +319,10 @@ namespace AIAssistant
         outErrorMessage.clear();
 
         std::filesystem::path const filesystemPath(filePath);
+
+        std::filesystem::path const filesystemPathAbsolute = std::filesystem::absolute(filesystemPath).lexically_normal();
+        LOG_APP_INFO("[paths debug] debug reason=writeTextFile filePathRelative='{}' filePathAbsolute='{}' wasRelative='{}'",
+                     filePath, filesystemPathAbsolute.generic_string(), filesystemPath.is_relative());
         std::error_code errorCode;
 
         std::filesystem::path const parentPath = filesystemPath.parent_path();
@@ -487,6 +500,23 @@ namespace AIAssistant
     {
         std::string errorMessage;
 
+        std::string launchCWDAbsolute;
+        if (Core::g_Core != nullptr)
+        {
+            launchCWDAbsolute = Core::g_Core->GetLaunchCWDAbsolute();
+        }
+
+        LOG_APP_INFO(
+            "[paths debug] debug reason=spawnAiCallTask workflowId='{}' runId='{}' taskId='{}' "
+            "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' workflowFileDirectoryRelative='{}' "
+            "workflowFileDirectoryAbsolute='{}' workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+            "launchCWDAbsolute='{}'",
+            workflowDefinition.m_Id, workflowRun.m_RunId, taskDefinition.m_Id,
+            workflowDefinition.m_WorkflowFilePath, workflowDefinition.m_WorkflowFilePathAbsolute,
+            workflowDefinition.m_WorkflowFileDirectory, workflowDefinition.m_WorkflowFileDirectoryAbsolute,
+            workflowDefinition.m_WorkflowBaseDirectory, workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
+            launchCWDAbsolute);
+
         // ------------------------------------------------------------
         // Resolve workflow base directory (directory containing the loaded .jcwf file)
         // ------------------------------------------------------------
@@ -510,6 +540,11 @@ namespace AIAssistant
             }
         }
 
+
+        LOG_APP_INFO("[paths debug] debug reason=resolveWorkflowBaseDirectory workflowId='{}' runId='{}' selectedWorkflowBaseDirectory='{}' selectedWasRelative='{}'",
+                     workflowDefinition.m_Id, workflowRun.m_RunId,
+                     workflowBaseDirectoryPath.lexically_normal().generic_string(),
+                     workflowBaseDirectoryPath.is_relative());
         if (workflowBaseDirectoryPath.empty())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
@@ -519,6 +554,11 @@ namespace AIAssistant
 
         std::filesystem::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
+
+
+        LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectory workflowId='{}' runId='{}' taskId='{}' taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
+                     workflowDefinition.m_Id, workflowRun.m_RunId, taskDefinition.m_Id,
+                     taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPath.lexically_normal().generic_string());
 
         JarvisAgent* app = App::g_App;
         if (app == nullptr)
@@ -613,9 +653,16 @@ namespace AIAssistant
             return false;
         }
 
-        for (std::string& outputPathText : resolvedFileOutputs)
+                LOG_APP_INFO("[paths debug] debug reason=resolveTaskFileOutputs taskId='{}' taskWorkingDirectoryAbsolute='{}' fileOutputsCount={}",
+                     taskDefinition.m_Id,
+                     taskWorkingDirectoryPath.lexically_normal().generic_string(),
+                     resolvedFileOutputs.size());
+
+for (std::string& outputPathText : resolvedFileOutputs)
         {
             std::filesystem::path outputPath(outputPathText);
+            std::string const outputPathRelative = outputPathText;
+            bool const wasRelative = !outputPath.is_absolute();
             if (!outputPath.is_absolute())
             {
                 outputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, outputPath);
@@ -624,7 +671,13 @@ namespace AIAssistant
             {
                 outputPath = outputPath.lexically_normal();
             }
-            outputPathText = outputPath.string();
+            std::string const outputPathAbsolute = outputPath.lexically_normal().generic_string();
+            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}' wasRelative='{}'",
+                         taskDefinition.m_Id,
+                         outputPathRelative,
+                         outputPathAbsolute,
+                         wasRelative);
+            outputPathText = outputPathAbsolute;
         }
 
         // ------------------------------------------------------------
@@ -651,11 +704,18 @@ namespace AIAssistant
 
         std::filesystem::path const requestPath = taskWorkingDirectoryPath / BuildProbFilename(requestId, timestampNs);
 
+        LOG_APP_INFO("[paths debug] debug reason=resolveRequestPath workflowId='{}' runId='{}' taskId='{}' taskWorkingDirectoryAbsolute='{}' requestPathAbsolute='{}'",
+                     workflowDefinition.m_Id, workflowRun.m_RunId, taskDefinition.m_Id,
+                     taskWorkingDirectoryPath.lexically_normal().generic_string(),
+                     requestPath.lexically_normal().generic_string());
+
         std::string probText;
         if (!BuildProbTextFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, probText,
                                            errorMessage))
         {
-            LOG_APP_INFO("debug ai_call: failed to materialize PROB text for task '{}': {}", taskDefinition.m_Id,
+            LOG_APP_INFO("[paths debug] debug reason=buildProbTextFailed taskId='{}' taskWorkingDirectoryAbsolute='{}' error='{}'",
+                         taskDefinition.m_Id,
+                         taskWorkingDirectoryPath.lexically_normal().generic_string(),
                          errorMessage);
             requestPool->Forget(requestHandle);
             taskState.m_State = TaskInstanceStateKind::Failed;

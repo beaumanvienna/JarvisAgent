@@ -52,7 +52,7 @@ namespace AIAssistant
     std::unique_ptr<AIAssistant::Log> Core::g_Logger;
     Core* Core::g_Core{nullptr};
 
-    Core::Core()
+    Core::Core() : m_LaunchCWDAbsolute(std::filesystem::current_path())
     {
         g_Core = this;
         // signal handling
@@ -65,7 +65,7 @@ namespace AIAssistant
         m_TerminalManager = std::make_unique<TerminalManager>();
 
         m_LogFile = std::make_shared<std::ofstream>();
-        std::string filename = "/tmp/log.txt";
+        std::string filename = "log/log.txt";
         m_LogFile->open(filename, std::ios::out | std::ios::trunc);
 
         m_OriginalCoutBuffer = std::cout.rdbuf();
@@ -84,6 +84,7 @@ namespace AIAssistant
         {
             LOG_CORE_WARN("Failed to open log file {}", filename);
         }
+        LOG_CORE_INFO("Launch CWD (Absolute) {}", m_LaunchCWDAbsolute.string());
     }
 
     void Core::SignalHandler(int signal)

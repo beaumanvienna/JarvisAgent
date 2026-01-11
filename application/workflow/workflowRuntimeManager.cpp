@@ -396,8 +396,9 @@ namespace AIAssistant
                 activeRun.m_Run.m_TaskStates[taskPair.first] = taskState;
             }
 
-            LOG_APP_INFO("[WorkflowRuntimeManager] started workflow '{}' (run id '{}')", activeRun.m_Run.m_WorkflowId,
-                         activeRun.m_Run.m_RunId);
+            LOG_APP_INFO("[paths debug] debug reason=workflowStart workflowId='{}' runId='{}' taskCount={}",
+                         activeRun.m_Run.m_WorkflowId, activeRun.m_Run.m_RunId,
+                         static_cast<int>(activeRun.m_Run.m_TaskStates.size()));
 
             m_ActiveRuns.push_back(std::move(activeRun));
         }
@@ -545,6 +546,22 @@ namespace AIAssistant
                 if (TaskPathResolver::ResolveFreshnessPathsForTask(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                                    resolvedPaths.m_InputPaths, resolvedPaths.m_OutputPaths))
                 {
+                    LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPaths workflowId='{}' runId='{}' taskId='{}' inputCount={} outputCount={}",
+                                 workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId,
+                                 static_cast<int>(resolvedPaths.m_InputPaths.size()),
+                                 static_cast<int>(resolvedPaths.m_OutputPaths.size()));
+
+                    for (fs::path const& inputPath : resolvedPaths.m_InputPaths)
+                    {
+                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsInput workflowId='{}' runId='{}' taskId='{}' inputPathAbsolute='{}'",
+                                     workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId, inputPath.string());
+                    }
+
+                    for (fs::path const& outputPath : resolvedPaths.m_OutputPaths)
+                    {
+                        LOG_APP_INFO("[paths debug] debug reason=resolveFreshnessPathsOutput workflowId='{}' runId='{}' taskId='{}' outputPathAbsolute='{}'",
+                                     workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId, outputPath.string());
+                    }
                     auto resolveUpstreamOutputs = [&](std::string const& upstreamTaskId,
                                                       std::vector<fs::path>& outPaths) -> bool
                     {
@@ -573,7 +590,8 @@ namespace AIAssistant
                         PopulateSkippedTaskOutputsIfPossible(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                              taskState);
                         taskState.m_State = TaskInstanceStateKind::Skipped;
-                        LOG_APP_INFO("[WorkflowRuntimeManager] task '{}' is up to date -> skipped", taskId);
+                        LOG_APP_INFO("[paths debug] debug reason=freshnessSkip workflowId='{}' runId='{}' taskId='{}'",
+                                     workflowRun.m_WorkflowId, workflowRun.m_RunId, taskId);
                         dispatchedAny = true;
                         continue;
                     }
@@ -662,6 +680,9 @@ namespace AIAssistant
         result.m_TaskId = taskId;
         result.m_TaskState = taskStateSnapshot;
 
+        LOG_APP_INFO("[paths debug] debug reason=dispatchTask workflowId='{}' runId='{}' taskId='{}'",
+                     workflowRunSnapshot.m_WorkflowId, workflowRunSnapshot.m_RunId, taskId);
+
         result.m_TaskState.m_State = TaskInstanceStateKind::Running;
         result.m_TaskState.m_AttemptCount = taskStateSnapshot.m_AttemptCount + 1;
 
@@ -697,6 +718,10 @@ namespace AIAssistant
         }
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();
+
+        LOG_APP_INFO("[paths debug] debug reason=executeTask workflowId='{}' runId='{}' taskId='{}'",
+                     workerRun.m_WorkflowId, workerRun.m_RunId, taskId);
+
         bool const executedOk = executorRegistry.Execute(workflowDefinition, workerRun, taskDefinition, result.m_TaskState);
 
         if (!executedOk)

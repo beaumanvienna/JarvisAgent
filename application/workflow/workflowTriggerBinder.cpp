@@ -349,27 +349,48 @@ namespace AIAssistant
                             break;
                         }
 
-                        std::string resolvedWatchedPath = watchedPath;
+                        LOG_APP_INFO(
+                            "[paths debug] debug reason=bindTrigger workflowId={} triggerId={} watchedPathRelative={} workflowBaseDirectoryRelative={} workflowBaseDirectoryAbsolute={}",
+                            workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath, workflowDefinition.m_WorkflowBaseDirectory,
+                            workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+
+                        std::string watchedPathAbsolute = watchedPath;
 
                         if (!watchedPath.empty())
                         {
-                            std::filesystem::path baseDirectoryPath = workflowDefinition.m_WorkflowBaseDirectory;
-                            if (baseDirectoryPath.empty())
-                            {
-                                baseDirectoryPath = workflowDefinition.m_WorkflowFileDirectory;
-                            }
+                            std::filesystem::path workflowBaseDirectoryPathAbsolute;
 
-                            if (watchedPath.front() != '/')
+                            if (!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty())
                             {
-                                resolvedWatchedPath = (baseDirectoryPath / std::filesystem::path(watchedPath)).lexically_normal().generic_string();
+                                workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectoryAbsolute;
                             }
                             else
                             {
-                                resolvedWatchedPath = std::filesystem::path(watchedPath).lexically_normal().generic_string();
+                                workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectory;
+                                if (workflowBaseDirectoryPathAbsolute.empty())
+                                {
+                                    workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowFileDirectory;
+                                }
+                            }
+
+                            // Spec: workflow-level relative trigger paths resolve relative to Workflow Base Directory.
+                            if (!watchedPath.empty() && watchedPath.front() != '/')
+                            {
+                                watchedPathAbsolute = (workflowBaseDirectoryPathAbsolute / std::filesystem::path(watchedPath))
+                                                         .lexically_normal()
+                                                         .generic_string();
+                            }
+                            else
+                            {
+                                watchedPathAbsolute = std::filesystem::path(watchedPath).lexically_normal().generic_string();
                             }
                         }
 
-                        triggerEngine.AddFileWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, resolvedWatchedPath,
+                        LOG_APP_INFO(
+                            "[paths debug] debug reason=bindTriggerResolved workflowId={} triggerId={} watchedPathRelative={} watchedPathAbsolute={} workflowBaseDirectoryRelative={} workflowBaseDirectoryAbsolute={}",
+                            workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPath, watchedPathAbsolute, workflowDefinition.m_WorkflowBaseDirectory, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+
+                        triggerEngine.AddFileWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, watchedPathAbsolute,
                                                           fileEvents, debounceMilliseconds, workflowTrigger.m_IsEnabled);
                         break;
                     }

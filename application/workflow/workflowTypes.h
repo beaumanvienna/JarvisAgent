@@ -271,6 +271,15 @@ namespace AIAssistant
         // Workflow Base Directory: base directory used for resolving workflow-level relative paths (set by the loader).
         std::string m_WorkflowBaseDirectory;
 
+        // Workflow File Path Absolute: canonical absolute (normalized) filesystem path of the loaded .jcwf file (set by the loader).
+        std::string m_WorkflowFilePathAbsolute;
+
+        // Workflow File Directory Absolute: canonical absolute (normalized) directory containing the loaded .jcwf file (set by the loader).
+        std::string m_WorkflowFileDirectoryAbsolute;
+
+        // Workflow Base Directory Absolute: canonical absolute (normalized) base directory used for resolving workflow-level relative paths (set by the loader).
+        std::string m_WorkflowBaseDirectoryAbsolute;
+
         // JCWF: "triggers"
         std::vector<WorkflowTrigger> m_Triggers;
 

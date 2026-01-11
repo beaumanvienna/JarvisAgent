@@ -102,6 +102,7 @@ Expected JCWF JSON structure:
 */
 
 #include "workflow/workflowJsonParser.h"
+#include <filesystem>
 #include <string_view>
 
 #include "engine.h"
@@ -109,6 +110,17 @@ Expected JCWF JSON structure:
 
 namespace AIAssistant
 {
+
+    static bool IsRelativePathString(std::string const& pathText)
+    {
+        if (pathText.empty())
+        {
+            return false;
+        }
+
+        return std::filesystem::path(pathText).is_relative();
+    }
+
     // ---------------------------------------------------------
     // Implementation moved from workflowJsonParserDetails.cpp
     // (keeps TUs smaller / more balanced)
@@ -643,6 +655,64 @@ namespace AIAssistant
             return false;
         }
 
+        LOG_APP_INFO("[paths debug] debug reason=parseTaskPaths taskId={} taskType={} taskWorkingDirectoryRelative={} taskWorkingDirectoryIsRelative={} fileInputsCount={} fileOutputsCount={} stngFilesCount={} taskFilesCount={} cntxFilesCount={} probFilesCount={}",
+                     taskOut.m_Id,
+                     static_cast<int>(taskOut.m_Type),
+                     taskOut.m_WorkingDirectory,
+                     IsRelativePathString(taskOut.m_WorkingDirectory),
+                     taskOut.m_FileInputs.size(),
+                     taskOut.m_FileOutputs.size(),
+                     taskOut.m_QueueBinding.m_StngFiles.size(),
+                     taskOut.m_QueueBinding.m_TaskFiles.size(),
+                     taskOut.m_QueueBinding.m_CntxFiles.size(),
+                     taskOut.m_QueueBinding.m_ProbFiles.size());
+
+        for (std::string const& inputPath : taskOut.m_FileInputs)
+        {
+            LOG_APP_INFO("[paths debug] debug reason=parseTaskFileInput taskId={} inputPathRelative={} inputPathIsRelative={}",
+                         taskOut.m_Id,
+                         inputPath,
+                         IsRelativePathString(inputPath));
+        }
+
+        for (std::string const& outputPath : taskOut.m_FileOutputs)
+        {
+            LOG_APP_INFO("[paths debug] debug reason=parseTaskFileOutput taskId={} outputPathRelative={} outputPathIsRelative={}",
+                         taskOut.m_Id,
+                         outputPath,
+                         IsRelativePathString(outputPath));
+        }
+
+        auto logQueueFileRef = [&](char const* reason, QueueFileRef const& fileRef)
+        {
+            LOG_APP_INFO("[paths debug] debug reason={} taskId={} queueFilePathRelative={} queueFilePathIsRelative={} queueFileHasInlineContent={}",
+                         reason,
+                         taskOut.m_Id,
+                         fileRef.m_Path,
+                         IsRelativePathString(fileRef.m_Path),
+                         fileRef.m_HasInlineContent);
+        };
+
+        for (QueueFileRef const& fileRef : taskOut.m_QueueBinding.m_StngFiles)
+        {
+            logQueueFileRef("parseTaskQueueBindingStngFile", fileRef);
+        }
+
+        for (QueueFileRef const& fileRef : taskOut.m_QueueBinding.m_TaskFiles)
+        {
+            logQueueFileRef("parseTaskQueueBindingTaskFile", fileRef);
+        }
+
+        for (QueueFileRef const& fileRef : taskOut.m_QueueBinding.m_CntxFiles)
+        {
+            logQueueFileRef("parseTaskQueueBindingCntxFile", fileRef);
+        }
+
+        for (QueueFileRef const& fileRef : taskOut.m_QueueBinding.m_ProbFiles)
+        {
+            logQueueFileRef("parseTaskQueueBindingProbFile", fileRef);
+        }
+
         return true;
     }
     bool WorkflowJsonParser::ParseRetries(simdjson::ondemand::object& jsonObject, RetryPolicy& retryPolicyOut,
@@ -861,6 +931,14 @@ namespace AIAssistant
 
             outputDefinition.m_Triggers.push_back(autoTrigger);
         }
+
+        LOG_APP_INFO("[paths debug] debug reason=parseWorkflowRoot workflowId={} workflowBaseDirectoryRelative={} workflowBaseDirectoryIsRelative={} triggersCount={} tasksCount={} dataflowsCount={}",
+                     outputDefinition.m_Id,
+                     outputDefinition.m_WorkflowBaseDirectory,
+                     IsRelativePathString(outputDefinition.m_WorkflowBaseDirectory),
+                     outputDefinition.m_Triggers.size(),
+                     outputDefinition.m_Tasks.size(),
+                     outputDefinition.m_Dataflows.size());
 
         return true;
     }

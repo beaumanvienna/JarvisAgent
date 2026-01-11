@@ -40,27 +40,54 @@ namespace AIAssistant
 
         fs::path ResolveWorkflowBaseDirectory(WorkflowDefinition const& workflowDefinition)
         {
-            fs::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-
-            if (workflowBaseDirectoryPath.empty())
+            fs::path workflowBaseDirectoryPathAbsolute(workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+            if (workflowBaseDirectoryPathAbsolute.empty())
             {
-                fs::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
-                if (!workflowFileDirectoryPath.empty())
+                workflowBaseDirectoryPathAbsolute = fs::path(workflowDefinition.m_WorkflowBaseDirectory);
+            }
+
+            if (workflowBaseDirectoryPathAbsolute.empty())
+            {
+                fs::path workflowFileDirectoryPathAbsolute(workflowDefinition.m_WorkflowFileDirectoryAbsolute);
+                if (workflowFileDirectoryPathAbsolute.empty())
                 {
-                    workflowBaseDirectoryPath = workflowFileDirectoryPath;
+                    workflowFileDirectoryPathAbsolute = fs::path(workflowDefinition.m_WorkflowFileDirectory);
+                }
+
+                if (!workflowFileDirectoryPathAbsolute.empty())
+                {
+                    workflowBaseDirectoryPathAbsolute = workflowFileDirectoryPathAbsolute;
                 }
             }
 
-            if (workflowBaseDirectoryPath.empty())
+            if (workflowBaseDirectoryPathAbsolute.empty())
             {
-                fs::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
-                if (!workflowFilePath.empty())
+                fs::path workflowFilePathAbsolute(workflowDefinition.m_WorkflowFilePathAbsolute);
+                if (workflowFilePathAbsolute.empty())
                 {
-                    workflowBaseDirectoryPath = workflowFilePath.parent_path();
+                    workflowFilePathAbsolute = fs::path(workflowDefinition.m_WorkflowFilePath);
+                }
+
+                if (!workflowFilePathAbsolute.empty())
+                {
+                    workflowBaseDirectoryPathAbsolute = workflowFilePathAbsolute.parent_path();
                 }
             }
 
-            return workflowBaseDirectoryPath.lexically_normal();
+            if (workflowBaseDirectoryPathAbsolute.is_relative() && (Core::g_Core != nullptr))
+            {
+                workflowBaseDirectoryPathAbsolute =
+                    (Core::g_Core->GetLaunchCWDAbsolute() / workflowBaseDirectoryPathAbsolute).lexically_normal();
+            }
+
+            std::error_code errorCode;
+            fs::path const absolutePath = fs::absolute(workflowBaseDirectoryPathAbsolute, errorCode).lexically_normal();
+            if (errorCode)
+            {
+                return workflowBaseDirectoryPathAbsolute.lexically_normal();
+            }
+
+            return absolutePath;
         }
 
         bool ValidateFileInputsExist(TaskDef const& taskDefinition, fs::path const& taskWorkingDirectoryPath,
@@ -73,6 +100,8 @@ namespace AIAssistant
                 fs::path inputPath(fileInput);
 
                 inputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, inputPath);
+
+                LOG_APP_INFO("[paths debug] debug reason=validateInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'", taskDefinition.m_Id, fileInput, inputPath.string());
 
                 if (!fs::exists(inputPath, errorCode))
                 {
@@ -102,6 +131,28 @@ namespace AIAssistant
         fs::path const workflowBaseDirectoryPath = ResolveWorkflowBaseDirectory(workflowDefinition);
         fs::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
+
+        std::string const launchCwdAbsoluteForLog = (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : std::string();
+
+        LOG_APP_INFO(
+            "[paths debug] debug reason=spawnPythonTask workflowId='{}' runId='{}' taskId='{}' "
+            "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}' "
+            "workflowFileDirectoryRelative='{}' workflowFileDirectoryAbsolute='{}' "
+            "workflowBaseDirectoryRelative='{}' workflowBaseDirectoryAbsolute='{}' "
+            "launchCWDAbsolute='{}' "
+            "taskWorkingDirectoryRelative='{}' taskWorkingDirectoryAbsolute='{}'",
+            workflowRun.m_WorkflowId,
+            workflowRun.m_RunId,
+            taskDefinition.m_Id,
+            workflowDefinition.m_WorkflowFilePath,
+            workflowDefinition.m_WorkflowFilePathAbsolute,
+            workflowDefinition.m_WorkflowFileDirectory,
+            workflowDefinition.m_WorkflowFileDirectoryAbsolute,
+            workflowDefinition.m_WorkflowBaseDirectory,
+            workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
+            launchCwdAbsoluteForLog,
+            taskDefinition.m_WorkingDirectory,
+            taskWorkingDirectoryPath.string());
 
         if (taskWorkingDirectoryPath.empty())
         {
@@ -156,6 +207,7 @@ namespace AIAssistant
         if ((taskDefinition.m_FileOutputs.size() == 1) && (!taskDefinition.m_Outputs.empty()))
         {
             fs::path const outputPath = TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, taskDefinition.m_FileOutputs[0]);
+            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'", taskDefinition.m_Id, taskDefinition.m_FileOutputs[0], outputPath.string());
 
             for (auto const& outputField : taskDefinition.m_Outputs)
             {
@@ -174,6 +226,53 @@ namespace AIAssistant
                 callArguments[outputName] = outputPath.string();
             }
         }
+        
+
+        // Log declared file output paths (raw + resolved absolute) for debugging.
+        for (std::string const& fileOutput : taskDefinition.m_FileOutputs)
+        {
+            fs::path outputPathAbsolute(fileOutput);
+            if (outputPathAbsolute.is_relative())
+            {
+                outputPathAbsolute =
+                    TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, fileOutput).lexically_normal();
+            }
+            else
+            {
+                outputPathAbsolute = outputPathAbsolute.lexically_normal();
+            }
+
+            LOG_APP_INFO(
+                "[paths debug] debug reason=pythonDeclaredOutputPath taskId='{}' outputPathRelative='{}' outputPathAbsolute='{}'",
+                taskDefinition.m_Id,
+                fileOutput,
+                outputPathAbsolute.string());
+        }
+
+for (auto const& callArgumentPair : callArguments)
+        {
+            std::string const& argumentName = callArgumentPair.first;
+            std::string const& argumentValue = callArgumentPair.second;
+
+            if ((argumentName.find("Path") == std::string::npos) && (argumentName.find("path") == std::string::npos))
+            {
+                continue;
+            }
+
+            fs::path const argumentPath(argumentValue);
+            fs::path const argumentPathAbsolute = argumentPath.is_relative()
+                ? TaskPathResolver::ResolveTaskScopedPath(taskWorkingDirectoryPath, argumentValue).lexically_normal()
+                : argumentPath.lexically_normal();
+
+            LOG_APP_INFO(
+                "[paths debug] debug reason=pythonCallArgumentPath taskId='{}' argument='{}' "
+                "valueRelative='{}' valueAbsolute='{}'",
+                taskDefinition.m_Id,
+                argumentName,
+                argumentValue,
+                argumentPathAbsolute.string());
+        }
+
         bool const ok =
             pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
                                               contextValues, pythonOutputs, errorMessage);
