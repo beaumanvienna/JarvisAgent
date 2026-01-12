@@ -11,21 +11,21 @@ Crow-based web server, workflow runtime, and monitoring system.
 ## 1. Goals and Non-Goals
 
 ### Goals
-- Provide an **in-dashboard visual workflow editor** similar in spirit to **n8n**.
+- Provide an **in-dashboard visual workflow editor** similar in spirit to [**n8n**](https://github.com/n8n-io/n8n).
 - Use **React Flow** for node graph editing (nodes, edges, layout, interactions).
-- Treat **JCWF JSON as the canonical runtime format** (no parallel execution format).
+- Treat **JCWF JSON as the canonical runtime format** (parallel execution format).
 - Support:
   - Import existing workflows
   - Create workflows from scratch
   - Create workflows from templates
   - Edit workflows visually
-  - Validate workflows against JC spec and runtime rules
+  - Validate workflows against [JC Workflow File Format™ (JCWF)](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md) and runtime rules
   - Start workflows
   - Monitor workflow execution
   - Export workflows as `.jcwf`
 - Enable **n8n → JarvisAgent integration**, where n8n can start workflows and receive completion callbacks.
 
-### Non-Goals (initially)
+### Non-Goals
 - Replacing the JarvisAgent runtime or execution model
 - Client-side workflow execution
 - Full bidirectional lossless conversion between n8n and JCWF (initially one-way)
@@ -84,7 +84,7 @@ Crow-based web server, workflow runtime, and monitoring system.
 ## 4. Workflow Editor Design (React Flow)
 
 ### Node Representation
-Each React Flow node corresponds **1:1** with a JCWF task:
+A React Flow node can correspond with a JCWF task:
 - `taskId`
 - `type` (`ai_call`, `shell`, `python`, `internal`, etc.)
 - `label`
@@ -155,7 +155,7 @@ Each React Flow node corresponds **1:1** with a JCWF task:
 
 ---
 
-## 7. Templates (n8n-Style)
+## 7. Templates
 
 Provide built-in templates:
 - AI report pipelines
@@ -228,7 +228,6 @@ JarvisAgent POSTs to `callbackUrl`:
 - Sub-workflows (workflow-call node)
 - Partial execution (run from node)
 - Workflow versioning
-- Workflow diff viewer
 
 ---
 
@@ -250,7 +249,7 @@ JarvisAgent POSTs to `callbackUrl`:
 ## 12. Phased Implementation Plan
 
 ### Phase 1 – Backend APIs
-- Workflow CRUD
+- Workflow CRUD   (Create, Read, Update, Delete)
 - Run control
 - Validation endpoint
 - WebSocket events
@@ -286,7 +285,7 @@ JarvisAgent POSTs to `callbackUrl`:
 - JCWF remains the **single source of truth**
 - No guessing, no hidden runtime behavior
 - Validation errors are explicit and surfaced early
-- Editor convenience must never violate JC spec guarantees
+- Editor convenience must never violate [ JC Workflow File Format™ (JCWF)](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md) guarantees
 
 ---
 
