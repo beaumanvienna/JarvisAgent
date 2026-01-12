@@ -13,7 +13,7 @@ Crow-based web server, workflow runtime, and monitoring system.
 ### Goals
 - Provide an **in-dashboard visual workflow editor** similar in spirit to [**n8n**](https://github.com/n8n-io/n8n).
 - Use **React Flow** for node graph editing (nodes, edges, layout, interactions).
-- Treat **JCWF JSON as the canonical runtime format** (parallel execution format).
+- Treat **[JCWF JSON](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md) as the canonical runtime format** (parallel execution format).
 - Support:
   - Import existing workflows
   - Create workflows from scratch
