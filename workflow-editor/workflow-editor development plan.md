@@ -3,7 +3,7 @@
 
 This document describes a **concrete, implementation-oriented development plan** to add a
 **web-based workflow editor** to JarvisAgent using **React Flow**, fully compliant with the
-**JC Workflow Specification (JCWF)** and tightly integrated with JarvisAgent’s existing
+**[JC Workflow Specification™ (JCWF)](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md)** and tightly integrated with JarvisAgent’s existing
 Crow-based web server, workflow runtime, and monitoring system.
 
 ---
