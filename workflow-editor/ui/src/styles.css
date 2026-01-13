@@ -1,0 +1,106 @@
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  color-scheme: dark;
+  background: #0b0f14;
+  color: #e8eef5;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+a { color: inherit; }
+
+.appShell {
+  display: grid;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+}
+
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.brandTitle { font-weight: 700; letter-spacing: 0.2px; }
+.brandSub { opacity: 0.65; font-size: 12px; }
+
+.navButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  cursor: pointer;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.04);
+  color: inherit;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.btn:hover { background: rgba(255,255,255,0.07); }
+.btnActive {
+  border-color: rgba(120,180,255,0.55);
+  background: rgba(120,180,255,0.10);
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr;
+  height: 100%;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.muted { opacity: 0.7; }
+
+.editorShell {
+  display: grid;
+  grid-template-columns: 280px 1fr 320px;
+  height: calc(100vh - 56px);
+}
+
+.sidebar {
+  border-right: 1px solid rgba(255,255,255,0.08);
+  padding: 12px;
+}
+
+.inspector {
+  border-left: 1px solid rgba(255,255,255,0.08);
+  padding: 12px;
+}
+
+.card {
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.03);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.small { font-size: 12px; opacity: 0.75; }
+.code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 10px;
+  padding: 10px;
+  overflow: auto;
+}

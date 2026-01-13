@@ -1,0 +1,16 @@
+# --- dependencies ---
+node_modules/
+
+# --- build output ---
+dist/
+
+# --- Vite / tooling caches ---
+.vite/
+.cache/
+
+# --- logs ---
+*.log
+
+# --- environment files ---
+.env
+.env.*
