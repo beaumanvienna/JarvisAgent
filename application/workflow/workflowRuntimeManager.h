@@ -61,6 +61,15 @@ namespace AIAssistant
 
         bool TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const;
 
+
+        bool TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const;
+
+        // Returns a copy of all active runs (thread-safe snapshot).
+        std::vector<WorkflowRun> GetActiveRunsSnapshot() const;
+
+        // Returns a copy of the last completed run per workflow id (thread-safe snapshot).
+        std::unordered_map<std::string, WorkflowRun> GetLastRunsSnapshot() const;
+
     private:
         struct TaskExecutionResult
         {

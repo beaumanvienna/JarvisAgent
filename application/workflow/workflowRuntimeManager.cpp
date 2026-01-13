@@ -776,4 +776,41 @@ namespace AIAssistant
         return runId;
     }
 
-} // namespace AIAssistant
+}
+
+    bool WorkflowRuntimeManager::TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        for (ActiveRun const& activeRun : m_ActiveRuns)
+        {
+            if (activeRun.m_Run.m_RunId == runId)
+            {
+                outRun = activeRun.m_Run;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    std::vector<WorkflowRun> WorkflowRuntimeManager::GetActiveRunsSnapshot() const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        std::vector<WorkflowRun> runs;
+        runs.reserve(m_ActiveRuns.size());
+        for (ActiveRun const& activeRun : m_ActiveRuns)
+        {
+            runs.emplace_back(activeRun.m_Run);
+        }
+
+        return runs;
+    }
+
+    std::unordered_map<std::string, WorkflowRun> WorkflowRuntimeManager::GetLastRunsSnapshot() const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        return m_LastRuns; // copy
+    }
+ // namespace AIAssistant

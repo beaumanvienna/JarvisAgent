@@ -30,6 +30,8 @@
 
 namespace AIAssistant
 {
+    class WorkflowRegistry;
+    class WorkflowRuntimeManager;
     class WebServer
     {
     public:
@@ -38,6 +40,15 @@ namespace AIAssistant
 
         void Start();
         void Stop();
+
+        // Optional pointers for Workflow Editor API (set by JarvisAgent during startup).
+        // If not set, editor run-monitoring endpoints will return "not configured".
+        void SetWorkflowRegistry(WorkflowRegistry const* workflowRegistry);
+        void SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager);
+
+        // Workflow Editor: optional server-side push of run snapshots (call periodically from main thread).
+        void BroadcastWorkflowRunsSnapshot();
+
 
         void Broadcast(std::string const& jsonMessage);
         void BroadcastJSON(const std::string& jsonString);
@@ -51,6 +62,22 @@ namespace AIAssistant
         crow::response HandleChatPost(crow::request const& req);
         crow::response HandleStatusGet();
 
+
+        // Workflow editor API (Phase 1: CRUD)
+        // Workflow editor API (Phase 2: validation + run monitoring/control)
+        crow::response HandleWorkflowValidatePost(crow::request const& req);
+        crow::response HandleWorkflowValidateGet(std::string const& workflowId);
+
+        crow::response HandleWorkflowRunPost(std::string const& workflowId);
+        crow::response HandleWorkflowRunsActiveGet();
+        crow::response HandleWorkflowRunsLastGet();
+        crow::response HandleWorkflowRunCancelPost(std::string const& runId);
+
+        crow::response HandleWorkflowsListGet();
+        crow::response HandleWorkflowsCreatePost(crow::request const& req);
+        crow::response HandleWorkflowGet(std::string const& workflowId);
+        crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
+        crow::response HandleWorkflowDelete(std::string const& workflowId);
     private:
         crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};
@@ -58,5 +85,9 @@ namespace AIAssistant
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
+
+        WorkflowRegistry const* m_WorkflowRegistry = nullptr;
+        WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
+
     };
 } // namespace AIAssistant
