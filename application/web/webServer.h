@@ -50,7 +50,6 @@ namespace AIAssistant
         // Workflow Editor: optional server-side push of run snapshots (call periodically from main thread).
         void BroadcastWorkflowRunsSnapshot();
 
-
         void Broadcast(std::string const& jsonMessage);
         void BroadcastJSON(const std::string& jsonString);
         void BroadcastPythonStatus(bool pythonRunning);
@@ -59,16 +58,14 @@ namespace AIAssistant
         void RegisterRoutes();
         void RegisterWebSocket();
 
-// Static file serving (Workflow Editor UI)
-crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
-crow::response ServeWorkflowEditorIndex() const;
-crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
-
+        // Static file serving (Workflow Editor UI)
+        crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
+        crow::response ServeWorkflowEditorIndex() const;
+        crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
 
         // Handlers
         crow::response HandleChatPost(crow::request const& req);
         crow::response HandleStatusGet();
-
 
         // Workflow editor API (Phase 1: CRUD)
         // Workflow editor API (Phase 2: validation + run monitoring/control)
@@ -85,6 +82,7 @@ crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
         crow::response HandleWorkflowGet(std::string const& workflowId);
         crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
         crow::response HandleWorkflowDelete(std::string const& workflowId);
+
     private:
         crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};
@@ -95,6 +93,5 @@ crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
 
         WorkflowRegistry const* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
-
     };
 } // namespace AIAssistant

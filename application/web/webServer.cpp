@@ -256,7 +256,6 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
 
     auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
     crow::json::wvalue::list activeRunsJson;
-    activeRunsJson.reserve(activeRuns.size());
     for (auto const& run : activeRuns)
     {
         crow::json::wvalue runJson;
@@ -273,7 +272,135 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
 }
 
 
-    void WebServer::RegisterRoutes()
+    
+namespace
+{
+    std::string GetMimeType(std::filesystem::path const& path)
+    {
+        std::string const ext = path.extension().string();
+        if (ext == ".html")
+        {
+            return "text/html; charset=utf-8";
+        }
+        if (ext == ".js")
+        {
+            return "application/javascript; charset=utf-8";
+        }
+        if (ext == ".css")
+        {
+            return "text/css; charset=utf-8";
+        }
+        if (ext == ".json")
+        {
+            return "application/json; charset=utf-8";
+        }
+        if (ext == ".svg")
+        {
+            return "image/svg+xml";
+        }
+        if (ext == ".png")
+        {
+            return "image/png";
+        }
+        if (ext == ".jpg" || ext == ".jpeg")
+        {
+            return "image/jpeg";
+        }
+        if (ext == ".webp")
+        {
+            return "image/webp";
+        }
+        if (ext == ".woff2")
+        {
+            return "font/woff2";
+        }
+        if (ext == ".woff")
+        {
+            return "font/woff";
+        }
+        if (ext == ".ttf")
+        {
+            return "font/ttf";
+        }
+        return "application/octet-stream";
+    }
+
+    bool TryReadBinaryFile(std::filesystem::path const& filePath, std::string& outContent)
+    {
+        std::ifstream file(filePath, std::ios::in | std::ios::binary);
+        if (!file)
+        {
+            return false;
+        }
+
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        outContent = buffer.str();
+        return true;
+    }
+} // namespace
+
+crow::response WebServer::ServeStaticFile(std::filesystem::path const& filePath) const
+{
+    std::string content;
+    if (!TryReadBinaryFile(filePath, content))
+    {
+        return crow::response(404, "File not found");
+    }
+
+    crow::response response(200);
+    response.set_header("Content-Type", GetMimeType(filePath));
+    response.body = std::move(content);
+    return response;
+}
+
+crow::response WebServer::ServeWorkflowEditorIndex() const
+{
+    std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
+    if (!std::filesystem::exists(distIndex))
+    {
+        return crow::response(
+            500,
+            "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm run build");
+    }
+
+    return ServeStaticFile(distIndex);
+}
+
+crow::response WebServer::ServeWorkflowEditorStatic(std::string const& requestPath) const
+{
+    std::filesystem::path const distRoot = std::filesystem::path("workflow-editor") / "ui" / "dist";
+
+    if (requestPath == "/editor" || requestPath == "/editor/")
+    {
+        return ServeWorkflowEditorIndex();
+    }
+
+    // Serve assets from dist under two possible URL layouts:
+    //  - "/assets/..." (Vite default when base is "/")
+    //  - "/editor/assets/..." (if base is later set to "/editor/")
+    if (requestPath.rfind("/assets/", 0) == 0)
+    {
+        std::string const relative = requestPath.substr(std::string("/assets/").size());
+        return ServeStaticFile(distRoot / "assets" / relative);
+    }
+    if (requestPath.rfind("/editor/assets/", 0) == 0)
+    {
+        std::string const relative = requestPath.substr(std::string("/editor/assets/").size());
+        return ServeStaticFile(distRoot / "assets" / relative);
+    }
+
+    // SPA fallback: any /editor/* route should serve index.html
+    if (requestPath.rfind("/editor/", 0) == 0)
+    {
+        return ServeWorkflowEditorIndex();
+    }
+
+    return crow::response(404, "Not found");
+}
+
+
+void WebServer::RegisterRoutes()
     {
         // ---- Serve static index page ----
         CROW_ROUTE(m_Server, "/")(
@@ -290,7 +417,24 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
                 return crow::response(200, buffer.str());
             });
 
-        // ---- POST /api/chat ----
+        
+
+// ---- Workflow Editor UI (React) ----
+// Serves the production build from: workflow-editor/ui/dist
+CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
+
+// Vite default asset paths are rooted at "/assets/...".
+CROW_ROUTE(m_Server, "/assets/<path>")([this](std::string const& path)
+    {
+        return ServeWorkflowEditorStatic(std::string("/assets/") + path);
+    });
+
+// SPA fallback for any sub-route under /editor (e.g. /editor/workflows/...)
+CROW_ROUTE(m_Server, "/editor/<path>")([this](std::string const& path)
+    {
+        return ServeWorkflowEditorStatic(std::string("/editor/") + path);
+    });
+// ---- POST /api/chat ----
         CROW_ROUTE(m_Server, "/api/chat")
             .methods("POST"_method)([this](const crow::request& req) { return HandleChatPost(req); });
 
@@ -433,7 +577,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
                 }
             }
 
-            workflowsList.push_back(std::move(workflowEntry));
+            workflowsList.emplace_back(std::move(workflowEntry));
         }
 
         responseJson["workflows"] = std::move(workflowsList);
@@ -793,7 +937,6 @@ crow::response WebServer::HandleWorkflowRunsActiveGet()
     crow::json::wvalue responseJson;
     responseJson["ok"] = true;
     crow::json::wvalue::list runsJson;
-    runsJson.reserve(activeRuns.size());
     for (auto const& run : activeRuns)
     {
         crow::json::wvalue runJson;
@@ -831,10 +974,8 @@ crow::response WebServer::HandleWorkflowRunsLastGet()
     responseJson["ok"] = true;
 
     crow::json::wvalue::list runsJson;
-    runsJson.reserve(lastRuns.size());
     for (auto const& [workflowId, run] : lastRuns)
     {
-        (void)workflowId;
         crow::json::wvalue runJson;
         runJson["runId"] = run.m_RunId;
         runJson["workflowId"] = workflowId;
@@ -928,7 +1069,6 @@ else if (type == "workflow-runs-request")
     {
         auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
         crow::json::wvalue::list activeRunsJson;
-        activeRunsJson.reserve(activeRuns.size());
         for (auto const& run : activeRuns)
         {
             crow::json::wvalue runJson;
