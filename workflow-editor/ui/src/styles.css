@@ -104,3 +104,45 @@ a { color: inherit; }
   padding: 10px;
   overflow: auto;
 }
+
+
+/* React Flow custom node: TaskNode */
+.taskNode {
+  min-width: 160px;
+  max-width: 220px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #e8eef5;
+}
+
+.taskNodeSelected {
+  border-color: rgba(120,180,255,0.65);
+  box-shadow: 0 0 0 1px rgba(120,180,255,0.25);
+}
+
+.taskNodeBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.taskNodeTitle {
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.taskNodeSubtitle {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+/* Make handles subtle */
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(0,0,0,0.35);
+}

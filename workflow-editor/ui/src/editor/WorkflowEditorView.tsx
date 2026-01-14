@@ -5,122 +5,156 @@ import ReactFlow, {
   MiniMap,
   addEdge,
   type Connection,
-  type Edge,
-  type Node,
   useEdgesState,
   useNodesState
 } from "reactflow";
 import "reactflow/dist/style.css";
 
-type SelectedInfo =
-  | { kind: "none" }
-  | { kind: "node"; node: Node }
-  | { kind: "edge"; edge: Edge };
+import TaskNode from "./TaskNode";
 
-const initialNodes: Node[] = [
-  {
-    id: "ai_hello",
-    position: { x: 80, y: 80 },
-    data: { label: "ai_call: hello" },
-    type: "default"
-  },
-  {
-    id: "py_format",
-    position: { x: 420, y: 80 },
-    data: { label: "python: format output" },
-    type: "default"
-  },
-  {
-    id: "sh_zip",
-    position: { x: 760, y: 80 },
-    data: { label: "shell: zip results" },
-    type: "default"
+import type { EditorTaskNode, EditorTaskEdge } from "./types";
+import { jcwfToGraph } from "./jcwfToGraph";
+import { graphToJcwf } from "./graphToJcwf";
+import type { JcwfWorkflow } from "../jcwf/types";
+
+const nodeTypes = { task: TaskNode };
+
+const sampleWorkflow: JcwfWorkflow = {
+  version: "1.0",
+  id: "sample-editor-workflow",
+  label: "Sample Editor Workflow",
+  doc: "Hard-coded sample until the backend CRUD endpoints are wired into the UI.",
+  tasks: {
+    ai_task: {
+      id: "ai_task",
+      type: "ai_call",
+      label: "AI Task",
+      depends_on: []
+    },
+    python_task: {
+      id: "python_task",
+      type: "python",
+      label: "Python Task",
+      depends_on: ["ai_task"]
+    },
+    shell_task: {
+      id: "shell_task",
+      type: "shell",
+      label: "Shell Task",
+      depends_on: ["python_task"]
+    }
   }
-];
+};
 
-const initialEdges: Edge[] = [
-  { id: "e1", source: "ai_hello", target: "py_format" },
-  { id: "e2", source: "py_format", target: "sh_zip" }
-];
+export default function WorkflowEditorView(): JSX.Element
+{
+  const initialGraph = useMemo(() => {
+    return jcwfToGraph(sampleWorkflow);
+  }, []);
 
-export default function WorkflowEditorView(): JSX.Element {
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-  const [selection, setSelection] = useState<SelectedInfo>({ kind: "none" });
+  const [nodes, setNodes, onNodesChange] = useNodesState<EditorTaskNode>(initialGraph.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<EditorTaskEdge>(initialGraph.edges);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [lastExportError, setLastExportError] = useState<string>("");
 
   const onConnect = useCallback(
-    (connection: Connection) => {
-      setEdges((currentEdges) => {
-        return addEdge(connection, currentEdges);
-      });
+    (connection: Connection) =>
+    {
+      setEdges((currentEdges) => addEdge({ ...connection, type: "smoothstep" }, currentEdges));
     },
     [setEdges]
   );
 
-  const selectedLabel = useMemo(() => {
-    if (selection.kind === "node") {
-      return `Node: ${selection.node.id}`;
+  const onSelectionChange = useCallback(
+    (params: { nodes: EditorTaskNode[] }) =>
+    {
+      if (params.nodes.length > 0)
+      {
+        setSelectedNodeId(params.nodes[0].id);
+      }
+      else
+      {
+        setSelectedNodeId(null);
+      }
+    },
+    []
+  );
+
+  const onExportJcwf = useCallback(() =>
+  {
+    try
+    {
+      setLastExportError("");
+      const jcwf = graphToJcwf({ nodes, edges }, sampleWorkflow.id);
+      // eslint-disable-next-line no-console
+      console.log("=== Exported JCWF ===");
+      // eslint-disable-next-line no-console
+      console.log(JSON.stringify(jcwf, null, 2));
     }
-    if (selection.kind === "edge") {
-      return `Edge: ${selection.edge.id}`;
+    catch (err)
+    {
+      const message = err instanceof Error ? err.message : String(err);
+      setLastExportError(message);
     }
-    return "Nothing selected";
-  }, [selection]);
+  }, [edges, nodes]);
+
+  const selectedNode = useMemo(() =>
+  {
+    if (selectedNodeId === null)
+    {
+      return null;
+    }
+    return nodes.find((n) => n.id === selectedNodeId) ?? null;
+  }, [nodes, selectedNodeId]);
 
   return (
-    <div className="editorShell">
-      <aside className="sidebar">
-        <div className="card">
-          <div className="small">Node Palette (placeholder)</div>
-          <p className="muted">
-            Next: add buttons to insert ai_call / python / shell / internal task
-            nodes.
-          </p>
-        </div>
-
-        <div className="card">
-          <div className="small">Tips</div>
-          <ul className="muted" style={{ marginTop: 8 }}>
-            <li>Drag nodes, connect edges</li>
-            <li>Hold space / scroll to pan/zoom</li>
-            <li>Minimap + controls are enabled</li>
-          </ul>
-        </div>
-      </aside>
-
-      <div style={{ height: "100%", width: "100%" }}>
+    <div className="editorLayout">
+      <div className="editorCanvas">
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onNodeClick={(_, node) => { setSelection({ kind: "node", node }); }}
-          onEdgeClick={(_, edge) => { setSelection({ kind: "edge", edge }); }}
-          onPaneClick={() => { setSelection({ kind: "none" }); }}
+          onSelectionChange={onSelectionChange}
+          nodeTypes={nodeTypes}
           fitView
         >
           <Background />
-          <MiniMap />
           <Controls />
+          <MiniMap />
         </ReactFlow>
       </div>
 
-      <aside className="inspector">
+      <aside className="editorSidebar">
         <div className="card">
-          <div className="small">Inspector (placeholder)</div>
-          <div style={{ marginTop: 8 }}>{selectedLabel}</div>
-          <p className="muted">
-            Next: show/edit task properties here (id, type, label, doc,
-            working_directory, params).
-          </p>
+          <div className="small">Inspector</div>
+          {selectedNode ? (
+            <div className="code">
+              <div>id: {selectedNode.id}</div>
+              <div>type: {(selectedNode.data as any)?.subtitle ?? ""}</div>
+              <div>label: {(selectedNode.data as any)?.title ?? ""}</div>
+            </div>
+          ) : (
+            <p className="muted">Select a node to inspect it.</p>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="small">JCWF</div>
+          <button className="btn" onClick={onExportJcwf} type="button">
+            Export JCWF to console
+          </button>
+          {lastExportError.length > 0 ? (
+            <p className="muted" style={{ marginTop: 8 }}>
+              Export failed: {lastExportError}
+            </p>
+          ) : null}
         </div>
 
         <div className="card">
           <div className="small">Current graph (debug)</div>
-          <div className="code">
-            nodes={nodes.length}, edges={edges.length}
-          </div>
+          <div className="code">nodes={nodes.length}, edges={edges.length}</div>
         </div>
       </aside>
     </div>

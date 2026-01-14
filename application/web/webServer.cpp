@@ -255,7 +255,8 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
     msg["type"] = "workflow-runs-snapshot";
 
     auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-    crow::json::wvalue activeRunsJson = crow::json::wvalue::list();
+    crow::json::wvalue::list activeRunsJson;
+    activeRunsJson.reserve(activeRuns.size());
     for (auto const& run : activeRuns)
     {
         crow::json::wvalue runJson;
@@ -264,7 +265,7 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
         runJson["state"] = ToStringWorkflowRunState(run.m_State);
         runJson["startedAt"] = run.m_StartedAtIso8601;
         runJson["completedAt"] = run.m_CompletedAtIso8601;
-        activeRunsJson.emplace_back(std::move(runJson));
+        activeRunsJson.push_back(std::move(runJson));
     }
     msg["activeRuns"] = std::move(activeRunsJson);
 
@@ -432,7 +433,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
                 }
             }
 
-            workflowsList.emplace_back(std::move(workflowEntry));
+            workflowsList.push_back(std::move(workflowEntry));
         }
 
         responseJson["workflows"] = std::move(workflowsList);
@@ -791,7 +792,8 @@ crow::response WebServer::HandleWorkflowRunsActiveGet()
 
     crow::json::wvalue responseJson;
     responseJson["ok"] = true;
-    crow::json::wvalue runsJson = crow::json::wvalue::list();
+    crow::json::wvalue::list runsJson;
+    runsJson.reserve(activeRuns.size());
     for (auto const& run : activeRuns)
     {
         crow::json::wvalue runJson;
@@ -801,7 +803,7 @@ crow::response WebServer::HandleWorkflowRunsActiveGet()
         runJson["startedAt"] = run.m_StartedAtIso8601;
         runJson["completedAt"] = run.m_CompletedAtIso8601;
         runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
-        runsJson.emplace_back(std::move(runJson));
+        runsJson.push_back(std::move(runJson));
     }
     responseJson["runs"] = std::move(runsJson);
 
@@ -828,9 +830,11 @@ crow::response WebServer::HandleWorkflowRunsLastGet()
     crow::json::wvalue responseJson;
     responseJson["ok"] = true;
 
-    crow::json::wvalue runsJson = crow::json::wvalue::list();
+    crow::json::wvalue::list runsJson;
+    runsJson.reserve(lastRuns.size());
     for (auto const& [workflowId, run] : lastRuns)
     {
+        (void)workflowId;
         crow::json::wvalue runJson;
         runJson["runId"] = run.m_RunId;
         runJson["workflowId"] = workflowId;
@@ -838,7 +842,7 @@ crow::response WebServer::HandleWorkflowRunsLastGet()
         runJson["startedAt"] = run.m_StartedAtIso8601;
         runJson["completedAt"] = run.m_CompletedAtIso8601;
         runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
-        runsJson.emplace_back(std::move(runJson));
+        runsJson.push_back(std::move(runJson));
     }
     responseJson["runs"] = std::move(runsJson);
 
@@ -923,7 +927,8 @@ else if (type == "workflow-runs-request")
     if (workflowRuntimeManager != nullptr)
     {
         auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-        crow::json::wvalue activeRunsJson = crow::json::wvalue::list();
+        crow::json::wvalue::list activeRunsJson;
+        activeRunsJson.reserve(activeRuns.size());
         for (auto const& run : activeRuns)
         {
             crow::json::wvalue runJson;
@@ -932,7 +937,7 @@ else if (type == "workflow-runs-request")
             runJson["state"] = ToStringWorkflowRunState(run.m_State);
             runJson["startedAt"] = run.m_StartedAtIso8601;
             runJson["completedAt"] = run.m_CompletedAtIso8601;
-            activeRunsJson.emplace_back(std::move(runJson));
+            activeRunsJson.push_back(std::move(runJson));
         }
         msg["activeRuns"] = std::move(activeRunsJson);
     }

@@ -290,3 +290,24 @@ JarvisAgent POSTs to `callbackUrl`:
 ---
 
 **End of document**
+
+
+## Status Update (2026-01-13)
+
+### Completed
+- React + Vite + TypeScript scaffold for workflow editor
+- React Flow canvas rendering with left/right task handles
+- Custom `TaskNode` component
+- Crow serving built React editor at `/editor`
+- Static asset serving for Vite `dist/`
+- Editor reachable via JarvisAgent (`localhost:8080/editor`)
+
+### In Progress
+- Workflow CRUD REST endpoints (`/api/workflows*`)
+- Frontend Graph ⇄ JCWF conversion helpers
+
+### Next Steps
+- Finalize backend workflow CRUD endpoints
+- Wire frontend Open / Save / Validate to REST API
+- Implement JCWF validation endpoint
+- Add workflow list UI

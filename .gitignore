@@ -25,3 +25,4 @@ vendor/curl/lib/curl_config.h
 queue
 workflows
 log/*
+*.tsbuildinfo

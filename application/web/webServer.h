@@ -23,6 +23,7 @@
 #include "crow.h"
 #include "auxiliary/threadPool.h"
 #include <atomic>
+#include <filesystem>
 #include <future>
 #include <mutex>
 #include <string>
@@ -57,6 +58,12 @@ namespace AIAssistant
     private:
         void RegisterRoutes();
         void RegisterWebSocket();
+
+// Static file serving (Workflow Editor UI)
+crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
+crow::response ServeWorkflowEditorIndex() const;
+crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
+
 
         // Handlers
         crow::response HandleChatPost(crow::request const& req);
