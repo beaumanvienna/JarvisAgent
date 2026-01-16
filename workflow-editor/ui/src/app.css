@@ -1,0 +1,49 @@
+/* Additional lightweight UI affordances for the workflow editor.
+   Kept separate from styles.css so it can remain stable as the editor evolves. */
+
+.taskNodeBadges {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+
+.taskNodeBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  user-select: none;
+}
+
+.taskNodeBadgeDirty {
+  font-weight: 700;
+  border-style: dashed;
+  opacity: 0.9;
+}
+
+.taskNodeBadgeError {
+  border-color: rgba(255, 80, 80, 0.7);
+}
+
+.taskNodeBadgeWarning {
+  border-color: rgba(255, 200, 80, 0.7);
+}
+
+.taskNodeWarning {
+  outline: 2px solid rgba(255, 200, 80, 0.65);
+}
+
+.taskNodeDirty {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.15);
+}
+
+.taskNodeWarningText {
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.9;
+}

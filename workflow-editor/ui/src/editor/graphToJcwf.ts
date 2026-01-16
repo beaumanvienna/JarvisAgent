@@ -27,31 +27,66 @@ function buildAdjacency(graph: EditorGraph): Map<string, string[]>
 
 function findCycleNodes(graph: EditorGraph): string[]
 {
+  // Collect all nodes that participate in at least one cycle.
+  // This is intentionally conservative (it may include multiple cycles).
   const adjacency = buildAdjacency(graph);
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
+
+  // 0 = unvisited, 1 = visiting (in recursion stack), 2 = done
+  const state = new Map<string, number>();
+  const stack: string[] = [];
+  const indexInStack = new Map<string, number>();
   const cycleNodes = new Set<string>();
+
+  function markCycleFromStack(startNode: string): void
+  {
+    const startIndex = indexInStack.get(startNode);
+    if (startIndex === undefined)
+    {
+      // Should not happen, but stay safe.
+      cycleNodes.add(startNode);
+      return;
+    }
+
+    for (let i = startIndex; i < stack.length; i += 1)
+    {
+      cycleNodes.add(stack[i]);
+    }
+  }
 
   function dfs(node: string): void
   {
-    if (visiting.has(node))
+    const currentState = state.get(node) ?? 0;
+    if (currentState === 2)
     {
-      cycleNodes.add(node);
       return;
     }
-    if (visited.has(node))
+    if (currentState === 1)
     {
+      // Back-edge into current recursion stack.
+      markCycleFromStack(node);
       return;
     }
 
-    visiting.add(node);
+    state.set(node, 1);
+    indexInStack.set(node, stack.length);
+    stack.push(node);
+
     const neighbors = adjacency.get(node) ?? [];
     for (const next of neighbors)
     {
+      const nextState = state.get(next) ?? 0;
+      if (nextState === 1)
+      {
+        // Back-edge: node -> next
+        markCycleFromStack(next);
+        continue;
+      }
       dfs(next);
     }
-    visiting.delete(node);
-    visited.add(node);
+
+    stack.pop();
+    indexInStack.delete(node);
+    state.set(node, 2);
   }
 
   for (const nodeId of adjacency.keys())
@@ -71,7 +106,8 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
   }
 
   const tasks: Record<string, JcwfTask> = {};
-  for (const node of graph.nodes as EditorTaskNode[])
+  const sortedNodes = [...(graph.nodes as EditorTaskNode[])].sort((a, b) => a.id.localeCompare(b.id));
+  for (const node of sortedNodes)
   {
     const task = { ...(node.data.task as JcwfTask) };
     task.id = node.id;
@@ -93,14 +129,34 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
       {
         targetTask.depends_on = [];
       }
-      targetTask.depends_on.push(edge.source);
+      // Keep depends_on unique to avoid duplicate edges producing duplicate dependencies.
+      if (!targetTask.depends_on.includes(edge.source))
+      {
+        targetTask.depends_on.push(edge.source);
+      }
     }
+  }
+
+  // Deterministic depends_on ordering.
+  for (const taskId of Object.keys(tasks))
+  {
+    const deps = tasks[taskId].depends_on;
+    if (Array.isArray(deps))
+    {
+      deps.sort((a, b) => a.localeCompare(b));
+    }
+  }
+
+  const orderedTasks: Record<string, JcwfTask> = {};
+  for (const taskId of Object.keys(tasks).sort((a, b) => a.localeCompare(b)))
+  {
+    orderedTasks[taskId] = tasks[taskId];
   }
 
   const jcwf: JcwfFile = {
     version: "1.0",
     id: workflowId,
-    tasks,
+    tasks: orderedTasks,
   };
 
   return { ok: true, jcwf };

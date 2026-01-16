@@ -4,6 +4,7 @@ import { detectGraphCycle } from "./graphToJcwf";
 export function validateGraph(graph: EditorGraph): ValidationResult
 {
   const nodeErrorsById = new Map<string, string[]>();
+  const nodeWarningsById = new Map<string, string[]>();
 
   // id uniqueness (React Flow already needs unique ids, but we validate anyway)
   const ids = graph.nodes.map((n) => n.id);
@@ -16,6 +17,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
   for (const node of graph.nodes)
   {
     const errors: string[] = [];
+    const warnings: string[] = [];
 
     if (!node.id || node.id.length === 0)
     {
@@ -32,6 +34,16 @@ export function validateGraph(graph: EditorGraph): ValidationResult
       errors.push("Missing task.type.");
     }
 
+    // working_directory policy (keep this slightly permissive on the client; backend is authoritative)
+    if (task.working_directory === "")
+    {
+      errors.push("working_directory must not be empty.");
+    }
+    else if (task.working_directory === undefined)
+    {
+      warnings.push("working_directory is not set.");
+    }
+
     if (task.working_directory !== undefined && typeof task.working_directory !== "string")
     {
       errors.push("working_directory must be a string.");
@@ -40,6 +52,33 @@ export function validateGraph(graph: EditorGraph): ValidationResult
     if (errors.length > 0)
     {
       nodeErrorsById.set(node.id, errors);
+    }
+
+    if (warnings.length > 0)
+    {
+      nodeWarningsById.set(node.id, warnings);
+    }
+  }
+
+  // Edge sanity checks
+  const nodeIdSet = new Set<string>(graph.nodes.map((n) => n.id));
+  for (const edge of graph.edges)
+  {
+    if (edge.source === edge.target)
+    {
+      const current = nodeErrorsById.get(edge.target) ?? [];
+      current.push("Self-dependency is not allowed (task depends_on itself).");
+      nodeErrorsById.set(edge.target, current);
+      continue;
+    }
+
+    if (!nodeIdSet.has(edge.source) || !nodeIdSet.has(edge.target))
+    {
+      // This shouldn't normally happen, but can occur briefly during edits.
+      const targetId = nodeIdSet.has(edge.target) ? edge.target : edge.source;
+      const current = nodeErrorsById.get(targetId) ?? [];
+      current.push("Edge references a missing node.");
+      nodeErrorsById.set(targetId, current);
     }
   }
 
@@ -51,5 +90,5 @@ export function validateGraph(graph: EditorGraph): ValidationResult
     nodeErrorsById.set(nodeId, current);
   }
 
-  return { nodeErrorsById, cycleNodes };
+  return { nodeErrorsById, nodeWarningsById, cycleNodes };
 }

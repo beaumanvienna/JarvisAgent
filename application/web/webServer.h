@@ -68,6 +68,7 @@ namespace AIAssistant
         crow::response HandleStatusGet();
 
         // Workflow editor API (Phase 1: CRUD)
+        // All /api/workflows endpoints return application/json.
         // Workflow editor API (Phase 2: validation + run monitoring/control)
         crow::response HandleWorkflowValidatePost(crow::request const& req);
         crow::response HandleWorkflowValidateGet(std::string const& workflowId);

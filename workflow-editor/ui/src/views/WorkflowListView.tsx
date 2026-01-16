@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { listWorkflows, type WorkflowListResponse } from "../api/workflows";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { deleteWorkflow, listWorkflows, type WorkflowListResponse } from "../api/workflows";
 
 export type WorkflowListItem = {
   id: string;
@@ -8,50 +8,75 @@ export type WorkflowListItem = {
 };
 
 export default function WorkflowListView(props: {
+  refreshToken: number;
   onOpenWorkflow: (workflow: WorkflowListItem) => void;
+  onCreateNew: () => void;
 }): JSX.Element
 {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [statusText, setStatusText] = useState<string>("");
   const [response, setResponse] = useState<WorkflowListResponse | null>(null);
 
-  useEffect(() => {
-    let isCancelled = false;
-
-    async function load(): Promise<void>
+  const reload = useCallback(async (isCancelled: { value: boolean }): Promise<void> => {
+    try
     {
-      try
+      setLoading(true);
+      setError(null);
+      const data = await listWorkflows();
+      if (!isCancelled.value)
       {
-        setLoading(true);
-        setError(null);
-
-        const data = await listWorkflows();
-        if (!isCancelled)
-        {
-          setResponse(data);
-        }
-      }
-      catch (e)
-      {
-        if (!isCancelled)
-        {
-          const message = e instanceof Error ? e.message : String(e);
-          setError(message);
-        }
-      }
-      finally
-      {
-        if (!isCancelled)
-        {
-          setLoading(false);
-        }
+        setResponse(data);
       }
     }
-
-    void load();
-
-    return () => { isCancelled = true; };
+    catch (e)
+    {
+      if (!isCancelled.value)
+      {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+      }
+    }
+    finally
+    {
+      if (!isCancelled.value)
+      {
+        setLoading(false);
+      }
+    }
   }, []);
+
+  // Re-load list when entering the list view OR when the parent signals that
+  // something changed (create/save-as/delete).
+  useEffect(() => {
+    const isCancelled = { value: false };
+    void reload(isCancelled);
+    return () => { isCancelled.value = true; };
+  }, [reload, props.refreshToken]);
+
+  const onDelete = useCallback(async (workflowId: string) => {
+    const confirmed = window.confirm(`Delete workflow '${workflowId}'?`);
+    if (!confirmed)
+    {
+      return;
+    }
+
+    const isCancelled = { value: false };
+    try
+    {
+      setError(null);
+      setStatusText("Deleting…");
+      await deleteWorkflow(workflowId);
+      setStatusText(`Deleted '${workflowId}'.`);
+      await reload(isCancelled);
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`Delete failed: ${message}`);
+      setStatusText("");
+    }
+  }, [reload]);
 
   const workflows = useMemo(() => {
     return response?.workflows ?? [];
@@ -59,9 +84,23 @@ export default function WorkflowListView(props: {
 
   return (
     <div className="panel">
-      <h2 style={{ marginTop: 0 }}>Workflows</h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 0 }}>Workflows</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" type="button" onClick={props.onCreateNew}>
+            + New
+          </button>
+          <button className="btn" type="button" onClick={() => {
+            const isCancelled = { value: false };
+            void reload(isCancelled);
+          }} disabled={loading}>
+            Refresh
+          </button>
+        </div>
+      </div>
 
       {loading ? <div className="muted">Loading…</div> : null}
+      {statusText ? <div className="small">{statusText}</div> : null}
       {error ? <div className="errorText">Error: {error}</div> : null}
 
       {!loading && !error && workflows.length === 0
@@ -81,6 +120,9 @@ export default function WorkflowListView(props: {
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn" type="button" onClick={() => { props.onOpenWorkflow(item); }}>
                   Open
+                </button>
+                <button className="btn" type="button" onClick={() => { void onDelete(w.id); }}>
+                  Delete
                 </button>
               </div>
             </div>

@@ -6,10 +6,10 @@ import ReactFlow, {
   addEdge,
   useEdgesState,
   useNodesState,
-  useReactFlow,
   type Connection,
   type Node,
   type Edge,
+  type ReactFlowInstance,
 } from "reactflow";
 import "reactflow/dist/style.css";
 
@@ -19,9 +19,80 @@ import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
 import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData } from "./types";
 import type { JcwfFile, JcwfTask, JcwfTaskType } from "../jcwf/types";
-import { loadWorkflow, runWorkflow, saveWorkflow, validateDraft, type WorkflowValidationFinding } from "../api/workflows";
+import {
+  createWorkflowWithId,
+  loadWorkflow,
+  runWorkflow,
+  saveWorkflow,
+  validateDraft,
+  type WorkflowValidationFinding,
+} from "../api/workflows";
 
 const nodeTypes = { task: TaskNode };
+
+export type WorkflowPersistEvent = {
+  kind: "save" | "create" | "saveAs";
+  workflowId: string;
+};
+
+type NodeSnapshot = Record<string, string>;
+
+function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[]): string
+{
+  const signatureObject = {
+    nodes: nodes
+      .map((n) => ({
+        id: n.id,
+        task: {
+          id: n.data.task.id,
+          type: n.data.task.type,
+          label: n.data.task.label,
+          doc: n.data.task.doc,
+          working_directory: n.data.task.working_directory,
+          params: n.data.task.params,
+        },
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    edges: edges
+      .map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+      }))
+      .sort((a, b) => {
+        const keyA = `${a.source}->${a.target}:${a.id}`;
+        const keyB = `${b.source}->${b.target}:${b.id}`;
+        return keyA.localeCompare(keyB);
+      }),
+  };
+
+  return JSON.stringify(signatureObject);
+}
+
+function computeTaskSignature(task: JcwfTask): string
+{
+  // Keep stable key ordering for deterministic comparisons.
+  const signatureObject = {
+    id: task.id,
+    type: task.type,
+    label: task.label,
+    doc: task.doc,
+    working_directory: task.working_directory,
+    params: task.params,
+  };
+
+  return JSON.stringify(signatureObject);
+}
+
+function computeNodeSnapshot(nodes: EditorTaskNode[]): NodeSnapshot
+{
+  const snapshot: NodeSnapshot = {};
+  for (const node of nodes)
+  {
+    snapshot[node.id] = computeTaskSignature(node.data.task);
+  }
+  return snapshot;
+}
 
 function buildDefaultTask(taskId: string, taskType: JcwfTaskType): JcwfTask
 {
@@ -58,10 +129,13 @@ function nextId(existing: Set<string>, base: string): string
 
 export default function WorkflowEditorView(props: {
   workflowId: string | null;
+  onWorkflowCreated: (workflowId: string) => void;
+  onWorkflowPersisted?: (event: WorkflowPersistEvent) => void;
+  onDirtyStateChange?: (isDirty: boolean) => void;
   onNavigateBack: () => void;
 }): JSX.Element
 {
-  const reactFlow = useReactFlow();
+  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
   const [statusText, setStatusText] = useState<string>("");
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -69,6 +143,10 @@ export default function WorkflowEditorView(props: {
   const [backendWarnings, setBackendWarnings] = useState<WorkflowValidationFinding[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | null>(null);
+  const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
+  const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
+  const [isDirty, setIsDirty] = useState<boolean>(false);
+  const [showBackToListHint, setShowBackToListHint] = useState<boolean>(false);
 
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
@@ -79,6 +157,49 @@ export default function WorkflowEditorView(props: {
   const [edges, setEdges, onEdgesChange] = useEdgesState<EditorTaskEdge>(
     initialGraph.edges as Edge[]
   );
+
+  const currentSignature = useMemo(() => {
+    return computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]);
+  }, [nodes, edges]);
+
+  const resetToNewDraft = useCallback(() => {
+    setNodes([]);
+    setEdges([]);
+    setSelectedNodeId(null);
+    setLoadedWorkflowId(null);
+    setBackendErrors([]);
+    setBackendWarnings([]);
+    setErrorText(null);
+    setShowBackToListHint(false);
+
+    const emptySignature = computeGraphSignature([], []);
+    setLastSavedSignature(emptySignature);
+    setLastSavedNodeSnapshot({});
+    setIsDirty(false);
+    if (props.onDirtyStateChange)
+    {
+      props.onDirtyStateChange(false);
+    }
+
+    setStatusText("New workflow draft.");
+  }, [setNodes, setEdges, props.onDirtyStateChange]);
+
+  // Dirty tracking.
+  useEffect(() => {
+    if (lastSavedSignature.length === 0)
+    {
+      // First mount.
+      setLastSavedSignature(computeGraphSignature([], []));
+      return;
+    }
+
+    const nextDirty = currentSignature !== lastSavedSignature;
+    setIsDirty(nextDirty);
+    if (props.onDirtyStateChange)
+    {
+      props.onDirtyStateChange(nextDirty);
+    }
+  }, [currentSignature, lastSavedSignature, props.onDirtyStateChange]);
 
   const recomputeValidation = useCallback((graph: EditorGraph, backendFindings?: {
     errors: WorkflowValidationFinding[];
@@ -107,35 +228,69 @@ export default function WorkflowEditorView(props: {
       backendErrorsByTaskId.set(taskId, existing);
     }
 
+    const backendWarningsByTaskId = new Map<string, string[]>();
+    const sourceWarnings = backendFindings ? backendFindings.warnings : backendWarnings;
+    for (const finding of sourceWarnings)
+    {
+      const taskId = parseTaskIdFromMessage(finding.message);
+      if (!taskId)
+      {
+        continue;
+      }
+
+      const existing = backendWarningsByTaskId.get(taskId) ?? [];
+      existing.push(finding.message);
+      backendWarningsByTaskId.set(taskId, existing);
+    }
+
     const nextNodes: EditorTaskNode[] = graph.nodes.map((n) => {
       const clientErrors = validation.nodeErrorsById.get(n.id) ?? [];
       const serverErrors = backendErrorsByTaskId.get(n.id) ?? [];
       const mergedErrors = [...clientErrors, ...serverErrors];
+
+      const clientWarnings = validation.nodeWarningsById ? (validation.nodeWarningsById.get(n.id) ?? []) : [];
+      const serverWarnings = backendWarningsByTaskId.get(n.id) ?? [];
+      const mergedWarnings = [...clientWarnings, ...serverWarnings];
+
+      const savedTaskSignature = lastSavedNodeSnapshot[n.id];
+      const nodeIsDirty = savedTaskSignature ? computeTaskSignature(n.data.task) !== savedTaskSignature : true;
 
       return {
         ...n,
         data: {
           ...n.data,
           validationErrors: mergedErrors.length > 0 ? mergedErrors : undefined,
+          validationWarnings: mergedWarnings.length > 0 ? mergedWarnings : undefined,
+          isDirty: nodeIsDirty ? true : undefined,
         },
       };
     });
 
     setNodes(nextNodes);
     setEdges(graph.edges);
-  }, [setNodes, setEdges, backendErrors]);
+  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot]);
 
   const loadFromJcwf = useCallback((workflowId: string, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
     const graph = jcwfToGraph(jcwf);
+    setLastSavedSignature(computeGraphSignature(graph.nodes, graph.edges));
+    setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes));
+    setIsDirty(false);
+    if (props.onDirtyStateChange)
+    {
+      props.onDirtyStateChange(false);
+    }
     recomputeValidation(graph);
     setLoadedWorkflowId(workflowId);
     setBackendErrors([]);
     setBackendWarnings([]);
+    setSelectedNodeId(null);
+    setShowBackToListHint(false);
     setStatusText(`Loaded workflow '${workflowId}'.`);
     setErrorText(null);
-  }, [recomputeValidation]);
+  }, [recomputeValidation, props.onDirtyStateChange]);
 
+  // Respond to workflowId changes.
   useEffect(() => {
     let isCancelled = false;
 
@@ -143,6 +298,8 @@ export default function WorkflowEditorView(props: {
     {
       if (!props.workflowId)
       {
+        // "New" workflow.
+        resetToNewDraft();
         return;
       }
 
@@ -150,6 +307,7 @@ export default function WorkflowEditorView(props: {
       {
         setStatusText("Loading…");
         setErrorText(null);
+        setShowBackToListHint(false);
 
         const jcwf = await loadWorkflow(props.workflowId);
         if (!isCancelled)
@@ -170,7 +328,7 @@ export default function WorkflowEditorView(props: {
 
     void load();
     return () => { isCancelled = true; };
-  }, [props.workflowId, loadFromJcwf]);
+  }, [props.workflowId, loadFromJcwf, resetToNewDraft]);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId)
@@ -219,10 +377,10 @@ export default function WorkflowEditorView(props: {
     const task = buildDefaultTask(newId, taskType);
     const { title, subtitle } = nodeTitleFromTask(task);
 
-    const viewportCenter = reactFlow.project({
+    const viewportCenter = reactFlowInstance ? reactFlowInstance.project({
       x: window.innerWidth / 2,
       y: window.innerHeight / 2,
-    });
+    }) : { x: 0, y: 0 };
 
     const newNode: EditorTaskNode = {
       id: newId,
@@ -236,7 +394,7 @@ export default function WorkflowEditorView(props: {
     setSelectedNodeId(newId);
     setStatusText(`Added node '${newId}'.`);
     setErrorText(null);
-  }, [nodes, edges, reactFlow, recomputeValidation]);
+  }, [nodes, edges, reactFlowInstance, recomputeValidation]);
 
   const updateSelectedTaskField = useCallback((patch: Partial<JcwfTask>) => {
     if (!selectedNode)
@@ -281,13 +439,27 @@ export default function WorkflowEditorView(props: {
     return result.jcwf;
   }, [nodes, edges, loadedWorkflowId, props.workflowId]);
 
+  const notifyPersisted = useCallback((event: WorkflowPersistEvent) => {
+    if (props.onWorkflowPersisted)
+    {
+      props.onWorkflowPersisted(event);
+    }
+  }, [props.onWorkflowPersisted]);
+
+  const updateSavedBaseline = useCallback(() => {
+    setLastSavedSignature(computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]));
+    setLastSavedNodeSnapshot(computeNodeSnapshot(nodes as EditorTaskNode[]));
+    setBackendErrors([]);
+    setBackendWarnings([]);
+    setIsDirty(false);
+    if (props.onDirtyStateChange)
+    {
+      props.onDirtyStateChange(false);
+    }
+  }, [nodes, edges, props.onDirtyStateChange]);
+
   const onSave = useCallback(async () => {
     const workflowId = loadedWorkflowId ?? props.workflowId;
-    if (!workflowId)
-    {
-      setErrorText("No workflow selected.");
-      return;
-    }
 
     const jcwf = exportJcwfObject();
     if (!jcwf)
@@ -299,10 +471,44 @@ export default function WorkflowEditorView(props: {
     {
       setStatusText("Saving…");
       setErrorText(null);
-      const result = await saveWorkflow(workflowId, jcwf);
-      setStatusText(result.ok ? `Saved '${workflowId}'.` : `Save returned ok=false for '${workflowId}'.`);
-      setBackendErrors([]);
-      setBackendWarnings([]);
+      setShowBackToListHint(false);
+
+      if (workflowId)
+      {
+        const result = await saveWorkflow(workflowId, jcwf);
+        setStatusText(result.ok ? `Saved '${workflowId}'.` : `Save returned ok=false for '${workflowId}'.`);
+        updateSavedBaseline();
+        notifyPersisted({ kind: "save", workflowId });
+      }
+      else
+      {
+        const proposed = window.prompt("New workflow id:", "workflow");
+        const newId = proposed ? proposed.trim() : "";
+        if (newId.length === 0)
+        {
+          setStatusText("");
+          setErrorText("Create cancelled: workflow id is required.");
+          return;
+        }
+
+        // Ensure exported JCWF uses the new id.
+        const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
+        const exportResult = graphToJcwf(graph, newId);
+        if (!exportResult.ok)
+        {
+          setErrorText(`${exportResult.message} Cycle nodes: ${exportResult.cycleNodes.join(", ")}`);
+          setStatusText("");
+          return;
+        }
+
+        const createResult = await createWorkflowWithId(newId, exportResult.jcwf);
+        setLoadedWorkflowId(newId);
+        props.onWorkflowCreated(newId);
+        setStatusText(createResult.ok ? `Created '${newId}'.` : `Create returned ok=false for '${newId}'.`);
+        updateSavedBaseline();
+        notifyPersisted({ kind: "create", workflowId: newId });
+        setShowBackToListHint(true);
+      }
     }
     catch (e)
     {
@@ -310,7 +516,60 @@ export default function WorkflowEditorView(props: {
       setErrorText(`Save failed: ${message}`);
       setStatusText("");
     }
-  }, [loadedWorkflowId, props.workflowId, exportJcwfObject]);
+  }, [loadedWorkflowId, props.workflowId, exportJcwfObject, nodes, edges, props.onWorkflowCreated, updateSavedBaseline, notifyPersisted]);
+
+  const onSaveAs = useCallback(async () => {
+    const baseId = loadedWorkflowId ?? props.workflowId ?? "workflow";
+    const proposed = window.prompt("Save As… New workflow id:", `${baseId}_copy`);
+    const newId = proposed ? proposed.trim() : "";
+    if (newId.length === 0)
+    {
+      setStatusText("");
+      setErrorText("Save As cancelled: workflow id is required.");
+      return;
+    }
+
+    const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
+    const exportResult = graphToJcwf(graph, newId);
+    if (!exportResult.ok)
+    {
+      setErrorText(`${exportResult.message} Cycle nodes: ${exportResult.cycleNodes.join(", ")}`);
+      setStatusText("");
+      return;
+    }
+
+    try
+    {
+      setStatusText("Saving As…");
+      setErrorText(null);
+
+      const result = await createWorkflowWithId(newId, exportResult.jcwf);
+      setLoadedWorkflowId(newId);
+      props.onWorkflowCreated(newId);
+      setStatusText(result.ok ? `Saved as '${newId}'.` : `Save As returned ok=false for '${newId}'.`);
+      updateSavedBaseline();
+      notifyPersisted({ kind: "saveAs", workflowId: newId });
+      setShowBackToListHint(true);
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Save As failed: ${message}`);
+      setStatusText("");
+    }
+  }, [loadedWorkflowId, props.workflowId, nodes, edges, props.onWorkflowCreated, updateSavedBaseline, notifyPersisted]);
+
+  const onNavigateBack = useCallback(() => {
+    if (isDirty)
+    {
+      const confirmed = window.confirm("You have unsaved changes. Discard them and go back?");
+      if (!confirmed)
+      {
+        return;
+      }
+    }
+    props.onNavigateBack();
+  }, [isDirty, props.onNavigateBack]);
 
   const onValidate = useCallback(async () => {
     const jcwf = exportJcwfObject();
@@ -394,14 +653,20 @@ export default function WorkflowEditorView(props: {
 
         <div className="card">
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Workflow</div>
-          <div className="small">Loaded: <code>{loadedWorkflowId ?? props.workflowId ?? "none"}</code></div>
+          <div className="small">
+            Loaded: <code>{loadedWorkflowId ?? props.workflowId ?? "none"}</code>
+            {isDirty ? <span className="dirtyBadge">unsaved</span> : null}
+          </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-            <button className="btn" type="button" onClick={onSave} disabled={!props.workflowId}>Save</button>
+            <button className="btn" type="button" onClick={onSave}>Save</button>
+            <button className="btn" type="button" onClick={onSaveAs}>Save As…</button>
             <button className="btn" type="button" onClick={onValidate}>Validate</button>
-            <button className="btn" type="button" onClick={onRun} disabled={!props.workflowId}>Run</button>
+            <button className="btn" type="button" onClick={onRun} disabled={!loadedWorkflowId && !props.workflowId}>Run</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
-            <button className="btn" type="button" onClick={props.onNavigateBack}>Back</button>
+            <button className="btn" type="button" onClick={onNavigateBack}>
+              {showBackToListHint ? "Back to list" : "Back"}
+            </button>
           </div>
 
           {statusText ? <div className="small" style={{ marginTop: 10 }}>{statusText}</div> : null}
@@ -462,6 +727,7 @@ export default function WorkflowEditorView(props: {
           onConnect={onConnect}
           onSelectionChange={onSelectionChange}
           deleteKeyCode={["Backspace", "Delete"]}
+          onInit={setReactFlowInstance}
           fitView
         >
           <Background />
@@ -549,6 +815,14 @@ export default function WorkflowEditorView(props: {
                   ? (
                     <div className="errorText">
                       {selectedNode.data.validationErrors.join(" ")}
+                    </div>
+                  )
+                  : null}
+
+                {selectedNode.data.validationWarnings && selectedNode.data.validationWarnings.length > 0
+                  ? (
+                    <div className="warningText">
+                      {selectedNode.data.validationWarnings.join(" ")}
                     </div>
                   )
                   : null}

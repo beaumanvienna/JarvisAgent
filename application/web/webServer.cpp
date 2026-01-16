@@ -51,6 +51,27 @@ namespace AIAssistant
 {
     namespace
     {
+        void SetJsonHeaders(crow::response& response)
+        {
+            response.add_header("Content-Type", "application/json");
+            response.add_header("Cache-Control", "no-store");
+        }
+
+        crow::response MakeJsonResponse(int const httpStatus, crow::json::wvalue const& json)
+        {
+            crow::response response(httpStatus, json.dump());
+            SetJsonHeaders(response);
+            return response;
+        }
+
+        crow::response MakeJsonTextResponse(int const httpStatus, std::string const& jsonText)
+        {
+            crow::response response(httpStatus, jsonText);
+            SetJsonHeaders(response);
+            return response;
+        }
+
+
         crow::response MakeWorkflowJsonError(int const httpStatus,
                                             std::string const& errorCode,
                                             std::string const& message,
@@ -67,7 +88,7 @@ namespace AIAssistant
                 responseJson["workflowId"] = workflowId.value();
             }
 
-            return crow::response(httpStatus, responseJson.dump());
+            return MakeJsonResponse(httpStatus, responseJson);
         }
 
         
@@ -87,24 +108,24 @@ namespace AIAssistant
             responseJson["id"] = workflowId;
 
             crow::json::wvalue::list errorsList;
-for (auto const& error : errors)
-{
-    crow::json::wvalue item;
-    item["code"] = error.m_Code;
-    item["message"] = error.m_Message;
-    errorsList.push_back(std::move(item));
-}
-responseJson["errors"] = std::move(errorsList);
+            for (auto const& error : errors)
+            {
+                crow::json::wvalue item;
+                item["code"] = error.m_Code;
+                item["message"] = error.m_Message;
+                errorsList.push_back(std::move(item));
+            }
+            responseJson["errors"] = std::move(errorsList);
 
-crow::json::wvalue::list warningsList;
-for (auto const& warning : warnings)
-{
-    crow::json::wvalue item;
-    item["code"] = warning.m_Code;
-    item["message"] = warning.m_Message;
-    warningsList.push_back(std::move(item));
-}
-responseJson["warnings"] = std::move(warningsList);
+            crow::json::wvalue::list warningsList;
+            for (auto const& warning : warnings)
+            {
+                crow::json::wvalue item;
+                item["code"] = warning.m_Code;
+                item["message"] = warning.m_Message;
+                warningsList.push_back(std::move(item));
+            }
+            responseJson["warnings"] = std::move(warningsList);
 
 
             return responseJson;
@@ -737,6 +758,19 @@ crow::response WebServer::ServeStaticFile(std::filesystem::path const& filePath)
 
     crow::response response(200);
     response.set_header("Content-Type", GetMimeType(filePath));
+    response.set_header("X-Content-Type-Options", "nosniff");
+
+    std::string const fileName = filePath.filename().string();
+    bool const isIndexHtml = fileName == "index.html";
+    if (isIndexHtml)
+    {
+        response.set_header("Cache-Control", "no-cache");
+    }
+    else
+    {
+        response.set_header("Cache-Control", "public, max-age=31536000, immutable");
+    }
+
     response.body = std::move(content);
     return response;
 }
@@ -897,13 +931,13 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
             response["status"] = "queued";
             response["id"] = id;
             response["file"] = filename.string();
-            return crow::response(200, response.dump());
+            return MakeJsonResponse(200, response);
         }
         catch (const std::exception& e)
         {
             crow::json::wvalue error;
             error["error"] = e.what();
-            return crow::response(400, error.dump());
+            return MakeJsonResponse(400, error);
         }
     }
 
@@ -917,7 +951,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         status["outputs"] = 4;
         status["inflight"] = 1;
         status["completed"] = 7;
-        return crow::response(200, status.dump());
+        return MakeJsonResponse(200, status);
     }
 
     
@@ -971,7 +1005,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         }
 
         responseJson["workflows"] = std::move(workflowsList);
-        return crow::response(200, responseJson.dump());
+        return MakeJsonResponse(200, responseJson);
     }
 
     crow::response WebServer::HandleWorkflowGet(std::string const& workflowId)
@@ -1028,7 +1062,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         }
 
         // Return the raw JCWF JSON as the response body (canonical).
-        return crow::response(200, workflowJsonContent);
+        return MakeJsonTextResponse(200, workflowJsonContent);
     }
 
     crow::response WebServer::HandleWorkflowsCreatePost(crow::request const& req)
@@ -1074,7 +1108,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         responseJson["ok"] = true;
         responseJson["id"] = parsedWorkflow.m_Id;
         responseJson["savedPath"] = targetPath.string();
-        return crow::response(201, responseJson.dump());
+        return MakeJsonResponse(201, responseJson);
     }
 
     crow::response WebServer::HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId)
@@ -1127,7 +1161,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         responseJson["ok"] = true;
         responseJson["id"] = workflowId;
         responseJson["savedPath"] = targetPath.string();
-        return crow::response(200, responseJson.dump());
+        return MakeJsonResponse(200, responseJson);
     }
 
     crow::response WebServer::HandleWorkflowDelete(std::string const& workflowId)
@@ -1188,7 +1222,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["id"] = workflowId;
-        return crow::response(200, responseJson.dump());
+        return MakeJsonResponse(200, responseJson);
     }
 
 
@@ -1218,7 +1252,7 @@ crow::response WebServer::HandleWorkflowValidatePost(crow::request const& req)
 
     bool const ok = errors.empty();
     crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings);
-    return crow::response(200, responseJson.dump());
+    return MakeJsonResponse(200, responseJson);
 }
 
 
@@ -1316,7 +1350,7 @@ crow::response WebServer::HandleWorkflowValidateGet(std::string const& workflowI
                                                                     parsedWorkflowId.empty() ? workflowId : parsedWorkflowId,
                                                                     errors,
                                                                     warnings);
-    return crow::response(200, responseJson.dump());
+    return MakeJsonResponse(200, responseJson);
 }
 
 
@@ -1343,7 +1377,7 @@ crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
         responseJson["ok"] = true;
         responseJson["enqueued"] = true;
         responseJson["id"] = workflowId;
-        return crow::response(202, responseJson.dump());
+        return MakeJsonResponse(202, responseJson);
     }
 
     std::string const runId = WorkflowOrchestrator::Get().StartWorkflowRun(workflowId);
@@ -1353,7 +1387,7 @@ crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
     responseJson["enqueued"] = false;
     responseJson["id"] = workflowId;
     responseJson["runId"] = runId;
-    return crow::response(202, responseJson.dump());
+    return MakeJsonResponse(202, responseJson);
 }
 
 crow::response WebServer::HandleWorkflowRunsActiveGet()
@@ -1389,7 +1423,7 @@ crow::response WebServer::HandleWorkflowRunsActiveGet()
     }
     responseJson["runs"] = std::move(runsJson);
 
-    return crow::response(200, responseJson.dump());
+    return MakeJsonResponse(200, responseJson);
 }
 
 crow::response WebServer::HandleWorkflowRunsLastGet()
@@ -1426,7 +1460,7 @@ crow::response WebServer::HandleWorkflowRunsLastGet()
     }
     responseJson["runs"] = std::move(runsJson);
 
-    return crow::response(200, responseJson.dump());
+    return MakeJsonResponse(200, responseJson);
 }
 
 crow::response WebServer::HandleWorkflowRunGet(std::string const& runId)
@@ -1495,7 +1529,7 @@ crow::response WebServer::HandleWorkflowRunGet(std::string const& runId)
     runJson["tasks"] = std::move(tasksJson);
     responseJson["run"] = std::move(runJson);
 
-    return crow::response(200, responseJson.dump());
+    return MakeJsonResponse(200, responseJson);
 }
 
 crow::response WebServer::HandleWorkflowRunCancelPost(std::string const& runId)
@@ -1536,7 +1570,7 @@ responseJson["ok"] = true;
 responseJson["cancelRequested"] = true;
 responseJson["runId"] = runId;
 
-return crow::response(202, responseJson.dump());
+return MakeJsonResponse(202, responseJson);
 
 }
 

@@ -182,3 +182,66 @@ a { color: inherit; }
   color: #ff8a8a;
   opacity: 0.95;
 }
+
+.dirtyBadge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 200, 120, 0.35);
+  background: rgba(255, 200, 120, 0.12);
+  font-size: 11px;
+  opacity: 0.95;
+}
+
+.warningText {
+  color: #ffd08a;
+}
+
+.taskNodeWarning {
+  border-color: rgba(255, 200, 120, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 200, 120, 0.18);
+}
+
+.taskNodeWarningText {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #ffd08a;
+  opacity: 0.95;
+}
+
+.taskNodeDirty {
+  box-shadow: 0 0 0 1px rgba(255, 200, 120, 0.10);
+}
+
+.taskNodeBadges {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.taskNodeBadge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.2;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.04);
+}
+
+.taskNodeBadgeDirty {
+  border-color: rgba(255, 200, 120, 0.35);
+  background: rgba(255, 200, 120, 0.12);
+}
+
+.taskNodeBadgeError {
+  border-color: rgba(255, 120, 120, 0.45);
+  background: rgba(255, 120, 120, 0.14);
+}
+
+.taskNodeBadgeWarning {
+  border-color: rgba(255, 200, 120, 0.45);
+  background: rgba(255, 200, 120, 0.14);
+}

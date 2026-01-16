@@ -6,6 +6,8 @@ export type EditorTaskNodeData = {
   title: string;
   subtitle?: string;
   validationErrors?: string[];
+  validationWarnings?: string[];
+  isDirty?: boolean;
 };
 
 export type EditorTaskNode = Node<EditorTaskNodeData> & { type: "task" };
@@ -18,5 +20,6 @@ export type EditorGraph = {
 
 export type ValidationResult = {
   nodeErrorsById: Map<string, string[]>;
+  nodeWarningsById?: Map<string, string[]>;
   cycleNodes: string[];
 };

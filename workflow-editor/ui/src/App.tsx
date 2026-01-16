@@ -1,5 +1,5 @@
-import React, { useCallback, useMemo, useState } from "react";
-import WorkflowEditorView from "./editor/WorkflowEditorView";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import WorkflowEditorView, { type WorkflowPersistEvent } from "./editor/WorkflowEditorView";
 import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
 
 type RouteKey = "workflows" | "editor";
@@ -8,10 +8,74 @@ export default function App(): JSX.Element
 {
   const [route, setRoute] = useState<RouteKey>("workflows");
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowListItem | null>(null);
+  const [editorDirty, setEditorDirty] = useState<boolean>(false);
+  const [workflowListRefreshToken, setWorkflowListRefreshToken] = useState<number>(0);
+
+  const confirmLoseChanges = useCallback((): boolean => {
+    if (!editorDirty)
+    {
+      return true;
+    }
+    return window.confirm("You have unsaved changes. Discard them?");
+  }, [editorDirty]);
+
+  const navigate = useCallback((nextRoute: RouteKey): void => {
+    if (route === "editor" && nextRoute !== "editor")
+    {
+      if (!confirmLoseChanges())
+      {
+        return;
+      }
+    }
+    setRoute(nextRoute);
+  }, [route, confirmLoseChanges]);
+
+  useEffect(() => {
+    if (!editorDirty)
+    {
+      return;
+    }
+
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      // Standard browser behavior: setting returnValue triggers a confirm dialog.
+      event.preventDefault();
+      event.returnValue = "";
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, [editorDirty]);
 
   const onOpenWorkflow = useCallback((workflow: WorkflowListItem) => {
+    if (route === "editor" && !confirmLoseChanges())
+    {
+      return;
+    }
     setSelectedWorkflow(workflow);
     setRoute("editor");
+  }, [route, confirmLoseChanges]);
+
+  const onCreateNew = useCallback(() => {
+    if (route === "editor" && !confirmLoseChanges())
+    {
+      return;
+    }
+    setSelectedWorkflow(null);
+    setRoute("editor");
+  }, [route, confirmLoseChanges]);
+
+  const onWorkflowCreated = useCallback((workflowId: string) => {
+    setSelectedWorkflow({ id: workflowId });
+  }, []);
+
+  const onWorkflowPersisted = useCallback((event: WorkflowPersistEvent) => {
+    // Any successful create/save-as should refresh the list when the user returns.
+    if (event.kind === "create" || event.kind === "saveAs")
+    {
+      setWorkflowListRefreshToken((v) => v + 1);
+    }
   }, []);
 
   const content = useMemo(() => {
@@ -20,13 +84,25 @@ export default function App(): JSX.Element
       return (
         <WorkflowEditorView
           workflowId={selectedWorkflow?.id ?? null}
-          onNavigateBack={() => { setRoute("workflows"); }}
+          onWorkflowCreated={onWorkflowCreated}
+          onWorkflowPersisted={onWorkflowPersisted}
+          onDirtyStateChange={setEditorDirty}
+          onNavigateBack={() => {
+            setWorkflowListRefreshToken((v) => v + 1);
+            navigate("workflows");
+          }}
         />
       );
     }
 
-    return <WorkflowListView onOpenWorkflow={onOpenWorkflow} />;
-  }, [route, selectedWorkflow, onOpenWorkflow]);
+    return (
+      <WorkflowListView
+        refreshToken={workflowListRefreshToken}
+        onOpenWorkflow={onOpenWorkflow}
+        onCreateNew={onCreateNew}
+      />
+    );
+  }, [route, selectedWorkflow, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew]);
 
   return (
     <div className="appShell">
@@ -39,7 +115,7 @@ export default function App(): JSX.Element
         <nav className="navButtons">
           <button
             className={`btn ${route === "workflows" ? "btnActive" : ""}`}
-            onClick={() => { setRoute("workflows"); }}
+            onClick={() => { navigate("workflows"); }}
             type="button"
           >
             Workflows
@@ -47,12 +123,12 @@ export default function App(): JSX.Element
 
           <button
             className={`btn ${route === "editor" ? "btnActive" : ""}`}
-            onClick={() => { setRoute("editor"); }}
+            onClick={() => { navigate("editor"); }}
             type="button"
-            disabled={selectedWorkflow === null}
-            title={selectedWorkflow === null ? "Select a workflow first." : undefined}
+            disabled={selectedWorkflow === null && route !== "editor"}
+            title={selectedWorkflow === null && route !== "editor" ? "Select a workflow first." : undefined}
           >
-            Editor
+            Editor{editorDirty ? "*" : ""}
           </button>
         </nav>
       </header>
