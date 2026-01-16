@@ -146,3 +146,39 @@ a { color: inherit; }
   border: 1px solid rgba(255,255,255,0.25);
   background: rgba(0,0,0,0.35);
 }
+
+
+/* Workflow editor fields */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.input {
+  width: 100%;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.04);
+  color: inherit;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  outline: none;
+}
+.input:focus { border-color: rgba(120,180,255,0.55); }
+
+.codeInput {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.errorText {
+  color: #ff8a8a;
+}
+
+.taskNodeError {
+  border-color: rgba(255, 120, 120, 0.65);
+  box-shadow: 0 0 0 1px rgba(255, 120, 120, 0.25);
+}
+
+.taskNodeErrorText {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #ff8a8a;
+  opacity: 0.95;
+}

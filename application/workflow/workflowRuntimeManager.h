@@ -64,6 +64,13 @@ namespace AIAssistant
 
         bool TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const;
 
+        // Returns true if cancellation was requested successfully for an active run.
+        bool RequestCancelRun(std::string const& runId);
+
+        // Finds a run by run id across active and last-runs snapshots.
+        bool TryGetRunById(std::string const& runId, WorkflowRun& outRun) const;
+
+
         // Returns a copy of all active runs (thread-safe snapshot).
         std::vector<WorkflowRun> GetActiveRunsSnapshot() const;
 
@@ -84,6 +91,8 @@ namespace AIAssistant
             WorkflowRun m_Run;
 
             std::unordered_map<std::string, std::shared_future<TaskExecutionResult>> m_RunningTasks;
+
+            bool m_CancelRequested{false};
         };
 
     private:

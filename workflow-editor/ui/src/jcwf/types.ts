@@ -1,36 +1,42 @@
-export type JcwfTriggerDef = {
-  type: string;
+export type JcwfVersion = "1.0";
+export type JcwfDoc = string | string[];
+export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal";
+
+export type JcwfTask = {
   id: string;
-  enabled?: boolean;
-  params?: Record<string, unknown>;
-};
+  type: JcwfTaskType;
 
-export type JcwfAiDefaults = {
-  provider?: string;
-  model?: string;
-};
-
-export type JcwfDefaults = {
-  timeout_ms?: number;
-  ai?: JcwfAiDefaults;
-};
-
-export type JcwfTaskDef = {
-  id: string;
-  type: string;
   label?: string;
-  doc?: string;
+  doc?: JcwfDoc;
+
   working_directory?: string;
+
   depends_on?: string[];
+
   params?: Record<string, unknown>;
+
+  // editor must preserve extra fields for round-trips
+  [key: string]: unknown;
 };
 
-export type JcwfWorkflow = {
-  version: string;
+export type JcwfFile = {
+  version: JcwfVersion;
   id: string;
+
   label?: string;
-  doc?: string;
-  triggers?: JcwfTriggerDef[];
-  defaults?: JcwfDefaults;
-  tasks: Record<string, JcwfTaskDef>;
+  doc?: JcwfDoc;
+
+  tasks: Record<string, JcwfTask>;
+
+  [key: string]: unknown;
 };
+
+export function coerceTasksToRecord(tasksValue: unknown): Record<string, JcwfTask>
+{
+  if (tasksValue && typeof tasksValue === "object" && !Array.isArray(tasksValue))
+  {
+    return tasksValue as Record<string, JcwfTask>;
+  }
+
+  return {};
+}

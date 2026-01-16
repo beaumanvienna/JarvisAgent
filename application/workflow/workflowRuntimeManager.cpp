@@ -25,6 +25,9 @@
 #include <chrono>
 #include <filesystem>
 #include <optional>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 #include "core.h"
 #include "engine.h"
@@ -41,6 +44,24 @@ namespace AIAssistant
 {
     namespace
     {
+
+        std::string GetIso8601NowUTC()
+        {
+            auto const now = std::chrono::system_clock::now();
+            std::time_t const nowTimeT = std::chrono::system_clock::to_time_t(now);
+
+            std::tm utcTime{};
+#if defined(_WIN32)
+            gmtime_s(&utcTime, &nowTimeT);
+#else
+            gmtime_r(&nowTimeT, &utcTime);
+#endif
+
+            std::ostringstream stream;
+            stream << std::put_time(&utcTime, "%Y-%m-%dT%H:%M:%SZ");
+            return stream.str();
+        }
+
 
         void PopulateSkippedTaskOutputsIfPossible(WorkflowDefinition const& workflowDefinition,
                                                   WorkflowRun const& workflowRun, TaskDef const& taskDefinition,
@@ -309,6 +330,20 @@ namespace AIAssistant
             }
         }
 
+
+        // If the run is already completed (e.g. cancelled), drop the completion instead of deferring forever.
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            auto lastIt = m_LastRuns.find(completion.m_WorkflowId);
+            if (lastIt != m_LastRuns.end())
+            {
+                if (lastIt->second.m_RunId == completion.m_RunId)
+                {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
@@ -497,6 +532,35 @@ namespace AIAssistant
             workflowRun.m_IsCompleted = true;
             return;
         }
+
+// ---------------------------------------------------------
+// Cancellation gate (best-effort, cooperative)
+// ---------------------------------------------------------
+if (activeRun.m_CancelRequested)
+{
+    // Do not dispatch new work. Once all running tasks finish, mark the run cancelled.
+    if (activeRun.m_RunningTasks.empty())
+    {
+        for (auto& taskPair : workflowRun.m_TaskStates)
+        {
+            TaskInstanceState& taskState = taskPair.second;
+            if (taskState.m_State == TaskInstanceStateKind::Pending || taskState.m_State == TaskInstanceStateKind::Ready ||
+                taskState.m_State == TaskInstanceStateKind::WaitingExternal)
+            {
+                taskState.m_State = TaskInstanceStateKind::Skipped;
+                if (taskState.m_LastErrorMessage.empty())
+                {
+                    taskState.m_LastErrorMessage = "cancelled";
+                }
+            }
+        }
+
+        workflowRun.m_State = WorkflowRunState::Cancelled;
+        workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
+        workflowRun.m_IsCompleted = true;
+        return;
+    }
+}
 
         // ---------------------------------------------------------
         // 2) Dispatch newly-ready tasks (no waiting)
@@ -776,7 +840,6 @@ namespace AIAssistant
         return runId;
     }
 
-}
 
     bool WorkflowRuntimeManager::TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const
     {
@@ -793,6 +856,50 @@ namespace AIAssistant
 
         return false;
     }
+
+bool WorkflowRuntimeManager::RequestCancelRun(std::string const& runId)
+{
+    if (runId.empty())
+    {
+        return false;
+    }
+
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+    for (ActiveRun& activeRun : m_ActiveRuns)
+    {
+        if (activeRun.m_Run.m_RunId == runId)
+        {
+            activeRun.m_CancelRequested = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool WorkflowRuntimeManager::TryGetRunById(std::string const& runId, WorkflowRun& outRun) const
+{
+    if (TryGetActiveRun(runId, outRun))
+    {
+        return true;
+    }
+
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+    for (auto const& runPair : m_LastRuns)
+    {
+        WorkflowRun const& run = runPair.second;
+        if (run.m_RunId == runId)
+        {
+            outRun = run;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 
     std::vector<WorkflowRun> WorkflowRuntimeManager::GetActiveRunsSnapshot() const
     {
@@ -813,4 +920,4 @@ namespace AIAssistant
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         return m_LastRuns; // copy
     }
- // namespace AIAssistant
+} // namespace AIAssistant

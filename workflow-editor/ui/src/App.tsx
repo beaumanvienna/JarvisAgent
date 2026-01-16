@@ -1,55 +1,58 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import WorkflowEditorView from "./editor/WorkflowEditorView";
+import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
 
-type RouteKey = "dashboard" | "editor";
+type RouteKey = "workflows" | "editor";
 
-export default function App(): JSX.Element {
-  const [route, setRoute] = useState<RouteKey>("editor");
+export default function App(): JSX.Element
+{
+  const [route, setRoute] = useState<RouteKey>("workflows");
+  const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowListItem | null>(null);
+
+  const onOpenWorkflow = useCallback((workflow: WorkflowListItem) => {
+    setSelectedWorkflow(workflow);
+    setRoute("editor");
+  }, []);
 
   const content = useMemo(() => {
-    if (route === "dashboard") {
+    if (route === "editor")
+    {
       return (
-        <div className="panel">
-          <h2>Dashboard (legacy placeholder)</h2>
-          <p className="muted">
-            This is a placeholder route so we can later migrate the existing
-            <code> web/index.html</code> dashboard into React incrementally.
-          </p>
-          <div className="card">
-            <div className="small">Next</div>
-            <div>
-              Add API client + workflow list view, then wire to Crow endpoints.
-            </div>
-          </div>
-        </div>
+        <WorkflowEditorView
+          workflowId={selectedWorkflow?.id ?? null}
+          onNavigateBack={() => { setRoute("workflows"); }}
+        />
       );
     }
 
-    return <WorkflowEditorView />;
-  }, [route]);
+    return <WorkflowListView onOpenWorkflow={onOpenWorkflow} />;
+  }, [route, selectedWorkflow, onOpenWorkflow]);
 
   return (
     <div className="appShell">
       <header className="topBar">
         <div className="brand">
           <div className="brandTitle">JarvisAgent</div>
-          <div className="brandSub">Workflow Editor (React Flow)</div>
+          <div className="brandSub">Workflow Editor</div>
         </div>
 
         <nav className="navButtons">
           <button
-            className={`btn ${route === "dashboard" ? "btnActive" : ""}`}
-            onClick={() => { setRoute("dashboard"); }}
+            className={`btn ${route === "workflows" ? "btnActive" : ""}`}
+            onClick={() => { setRoute("workflows"); }}
             type="button"
           >
-            Dashboard
+            Workflows
           </button>
+
           <button
             className={`btn ${route === "editor" ? "btnActive" : ""}`}
             onClick={() => { setRoute("editor"); }}
             type="button"
+            disabled={selectedWorkflow === null}
+            title={selectedWorkflow === null ? "Select a workflow first." : undefined}
           >
-            Workflow Editor
+            Editor
           </button>
         </nav>
       </header>

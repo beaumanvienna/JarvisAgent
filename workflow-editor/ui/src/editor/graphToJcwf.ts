@@ -1,110 +1,112 @@
-import type { EditorGraph } from "./types";
-import type { JcwfWorkflow, JcwfTaskDef } from "../jcwf/types";
+import type { EditorGraph, EditorTaskEdge, EditorTaskNode } from "./types";
+import type { JcwfFile, JcwfTask } from "../jcwf/types";
 
-type CycleCheckResult = { ok: true } | { ok: false; cyclePath: string[] };
+type CycleError = { ok: false; message: string; cycleNodes: string[]; };
+type Ok = { ok: true; jcwf: JcwfFile; };
 
-function detectCycle(taskIds: string[], edges: Array<[string, string]>): CycleCheckResult
+function buildAdjacency(graph: EditorGraph): Map<string, string[]>
 {
   const adjacency = new Map<string, string[]>();
-  for (const id of taskIds)
+  for (const node of graph.nodes)
   {
-    adjacency.set(id, []);
-  }
-  for (const [from, to] of edges)
-  {
-    if (!adjacency.has(from))
-    {
-      adjacency.set(from, []);
-    }
-    adjacency.get(from)!.push(to);
+    adjacency.set(node.id, []);
   }
 
+  for (const edge of graph.edges)
+  {
+    // source -> target
+    const list = adjacency.get(edge.source);
+    if (list)
+    {
+      list.push(edge.target);
+    }
+  }
+
+  return adjacency;
+}
+
+function findCycleNodes(graph: EditorGraph): string[]
+{
+  const adjacency = buildAdjacency(graph);
   const visiting = new Set<string>();
   const visited = new Set<string>();
-  const stack: string[] = [];
+  const cycleNodes = new Set<string>();
 
-  const dfs = (node: string): CycleCheckResult =>
+  function dfs(node: string): void
   {
     if (visiting.has(node))
     {
-      const cycleStartIndex = stack.indexOf(node);
-      const cyclePath = cycleStartIndex >= 0 ? stack.slice(cycleStartIndex).concat([node]) : [node, node];
-      return { ok: false, cyclePath };
+      cycleNodes.add(node);
+      return;
     }
     if (visited.has(node))
     {
-      return { ok: true };
+      return;
     }
 
     visiting.add(node);
-    stack.push(node);
-
     const neighbors = adjacency.get(node) ?? [];
     for (const next of neighbors)
     {
-      const result = dfs(next);
-      if (!result.ok)
-      {
-        return result;
-      }
+      dfs(next);
     }
-
-    stack.pop();
     visiting.delete(node);
     visited.add(node);
-    return { ok: true };
-  };
-
-  for (const id of taskIds)
-  {
-    const result = dfs(id);
-    if (!result.ok)
-    {
-      return result;
-    }
   }
 
-  return { ok: true };
+  for (const nodeId of adjacency.keys())
+  {
+    dfs(nodeId);
+  }
+
+  return Array.from(cycleNodes);
 }
 
-export function graphToJcwf(graph: EditorGraph, workflowId: string): JcwfWorkflow
+export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleError
 {
-  const tasks: Record<string, JcwfTaskDef> = {};
-
-  const taskIds = graph.nodes.map((n) => n.id);
-  for (const node of graph.nodes)
+  const cycleNodes = findCycleNodes(graph);
+  if (cycleNodes.length > 0)
   {
-    const taskType = node.data?.subtitle ?? "internal";
-    const label = node.data?.title ?? node.id;
-
-    tasks[node.id] = {
-      id: node.id,
-      type: taskType,
-      label,
-      depends_on: []
-    };
+    return { ok: false, message: "Cycle detected. Export aborted.", cycleNodes };
   }
 
-  // edges represent depends_on: source -> target
-  for (const edge of graph.edges)
+  const tasks: Record<string, JcwfTask> = {};
+  for (const node of graph.nodes as EditorTaskNode[])
   {
-    if (tasks[edge.target] && tasks[edge.source])
+    const task = { ...(node.data.task as JcwfTask) };
+    task.id = node.id;
+    tasks[node.id] = task;
+  }
+
+  // compute depends_on from edges
+  for (const taskId of Object.keys(tasks))
+  {
+    delete tasks[taskId].depends_on;
+  }
+
+  for (const edge of graph.edges as EditorTaskEdge[])
+  {
+    const targetTask = tasks[edge.target];
+    if (targetTask)
     {
-      tasks[edge.target].depends_on = tasks[edge.target].depends_on ?? [];
-      tasks[edge.target].depends_on!.push(edge.source);
+      if (!Array.isArray(targetTask.depends_on))
+      {
+        targetTask.depends_on = [];
+      }
+      targetTask.depends_on.push(edge.source);
     }
   }
 
-  const edgesPairs: Array<[string, string]> = graph.edges.map((e) => [e.source, e.target]);
-  const cycleResult = detectCycle(taskIds, edgesPairs);
-  if (!cycleResult.ok)
-  {
-    throw new Error(`Editor graph is not a DAG. Cycle detected: ${cycleResult.cyclePath.join(" -> ")}`);
-  }
-
-  return {
+  const jcwf: JcwfFile = {
     version: "1.0",
     id: workflowId,
-    tasks
+    tasks,
   };
+
+  return { ok: true, jcwf };
+}
+
+export function detectGraphCycle(graph: EditorGraph): string[]
+{
+  return findCycleNodes(graph);
 }
