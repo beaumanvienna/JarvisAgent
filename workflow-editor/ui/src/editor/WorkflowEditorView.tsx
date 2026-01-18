@@ -4,6 +4,7 @@ import ReactFlow, {
   Controls,
   MiniMap,
   addEdge,
+  applyNodeChanges,
   useEdgesState,
   useNodesState,
   type Connection,
@@ -213,16 +214,41 @@ export default function WorkflowEditorView(props: {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runtimeTasksById, setRuntimeTasksById] = useState<RuntimeTaskSnapshotById>({});
 
+  const runtimeTasksByIdRef = useRef<RuntimeTaskSnapshotById>({});
+  useEffect(() => {
+    runtimeTasksByIdRef.current = runtimeTasksById;
+  }, [runtimeTasksById]);
+
 
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState<EditorTaskNodeData>(
+  const [nodes, setNodes] = useNodesState<EditorTaskNodeData>(
     initialGraph.nodes as Node<EditorTaskNodeData>[]
   );
 
   const [edges, setEdges, onEdgesChange] = useEdgesState<EditorTaskEdge>(
     initialGraph.edges as Edge[]
   );
+
+  const onNodesChange = useCallback((changes: unknown) => {
+    setNodes((current) => applyNodeChanges(changes as never, current));
+  }, [setNodes]);
+
+  const onNodeDragStop = useCallback((_event: unknown, node: Node) => {
+    setNodes((current) => {
+      const next = (current as Node<EditorTaskNodeData>[]).map((n) => {
+        if (n.id !== node.id)
+        {
+          return n;
+        }
+        return {
+          ...n,
+          position: node.position,
+        };
+      });
+      return next;
+    });
+  }, [setNodes]);
 
   const currentSignature = useMemo(() => {
     return computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]);
@@ -320,7 +346,7 @@ export default function WorkflowEditorView(props: {
 
       const savedTaskSignature = lastSavedNodeSnapshot[n.id];
       const nodeIsDirty = savedTaskSignature ? computeTaskSignature(n.data.task) !== savedTaskSignature : true;
-      const runtimeSnapshot = runtimeTasksById[n.id];
+      const runtimeSnapshot = runtimeTasksByIdRef.current[n.id];
 
 
       return {
@@ -338,7 +364,35 @@ export default function WorkflowEditorView(props: {
 
     setNodes(nextNodes);
     setEdges(graph.edges);
-  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot, runtimeTasksById]);
+  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot]);
+
+  useEffect(() => {
+    setNodes((current) => {
+      let changed = false;
+      const next = (current as EditorTaskNode[]).map((n) => {
+        const snapshot = runtimeTasksById[n.id];
+        const nextRuntimeState = snapshot ? snapshot.state : undefined;
+        const nextRuntimeRunId = snapshot ? snapshot.runId : undefined;
+
+        if (n.data.runtimeState === nextRuntimeState && n.data.runtimeRunId === nextRuntimeRunId)
+        {
+          return n;
+        }
+
+        changed = true;
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            runtimeState: nextRuntimeState,
+            runtimeRunId: nextRuntimeRunId,
+          },
+        };
+      });
+
+      return changed ? next : current;
+    });
+  }, [runtimeTasksById, setNodes]);
 
   const loadFromJcwf = useCallback((workflowId: string, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
@@ -360,6 +414,16 @@ export default function WorkflowEditorView(props: {
     setErrorText(null);
   }, [recomputeValidation, props.onDirtyStateChange]);
 
+  const loadFromJcwfRef = useRef(loadFromJcwf);
+  useEffect(() => {
+    loadFromJcwfRef.current = loadFromJcwf;
+  }, [loadFromJcwf]);
+
+  const resetToNewDraftRef = useRef(resetToNewDraft);
+  useEffect(() => {
+    resetToNewDraftRef.current = resetToNewDraft;
+  }, [resetToNewDraft]);
+
   // Respond to workflowId changes.
   useEffect(() => {
     let isCancelled = false;
@@ -369,7 +433,7 @@ export default function WorkflowEditorView(props: {
       if (!props.workflowId)
       {
         // "New" workflow.
-        resetToNewDraft();
+        resetToNewDraftRef.current();
         return;
       }
 
@@ -382,7 +446,7 @@ export default function WorkflowEditorView(props: {
         const jcwf = await loadWorkflow(props.workflowId);
         if (!isCancelled)
         {
-          loadFromJcwf(props.workflowId, jcwf);
+          loadFromJcwfRef.current(props.workflowId, jcwf);
         }
       }
       catch (e)
@@ -398,7 +462,7 @@ export default function WorkflowEditorView(props: {
 
     void load();
     return () => { isCancelled = true; };
-  }, [props.workflowId, loadFromJcwf, resetToNewDraft]);
+  }, [props.workflowId]);
 
   // WebSocket run monitoring.
   useEffect(() => {
@@ -476,6 +540,12 @@ export default function WorkflowEditorView(props: {
           setSelectedRunId(targetRunId);
         }
 
+        if (!targetRunId)
+        {
+          setRuntimeTasksById({});
+          return;
+        }
+
         const matchingRun = runs.find((r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId);
         if (!matchingRun)
         {
@@ -523,7 +593,7 @@ export default function WorkflowEditorView(props: {
         const nextActiveRuns: WorkflowRunListItem[] = [];
         for (const r of activeRunsUnknown as Record<string, unknown>[])
         {
-          const runId = typeof r.id === "string" ? r.id : "";
+          const runId = typeof r.runId === "string" ? r.runId : "";
           const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
           const state = typeof r.state === "string" ? r.state : "";
           if (runId.length > 0 && workflowId.length > 0)
@@ -937,6 +1007,11 @@ export default function WorkflowEditorView(props: {
                       </ul>
                     </div>
                   )
+                  : null}
+              </div>
+            )
+            : null}
+
           <div className="small">
             WebSocket: <span className={isWebSocketConnected ? "runWsConnected" : "runWsDisconnected"}>
               {isWebSocketConnected ? "connected" : "disconnected"}
@@ -980,6 +1055,7 @@ export default function WorkflowEditorView(props: {
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}
+          onNodeDragStop={onNodeDragStop}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           onSelectionChange={onSelectionChange}

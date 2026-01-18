@@ -296,6 +296,17 @@ namespace AIAssistant
             m_WorkflowRuntimeManager->Update();
         }
 
+        {
+            static std::chrono::steady_clock::time_point lastWorkflowBroadcastTime = std::chrono::steady_clock::now();
+            std::chrono::steady_clock::time_point const currentTime = std::chrono::steady_clock::now();
+
+            if (m_WebServer != nullptr && (currentTime - lastWorkflowBroadcastTime) >= 250ms)
+            {
+                m_WebServer->BroadcastWorkflowRunsSnapshot();
+                lastWorkflowBroadcastTime = currentTime;
+            }
+        }
+
         // Termination logic
         CheckIfFinished();
     }

@@ -88,6 +88,23 @@
         "coroutine": "cpp"
     },
     "editor.formatOnSave": true,
+    "C_Cpp.formatting": "clangFormat",
+    "C_Cpp.clang_format_path": "/usr/bin/clang-format",
+    "C_Cpp.clang_format_style": "file",
+    "clang-format.executable": "/usr/bin/clang-format",
+    "clang-format.style": "file",
+    "[cpp]": {
+        "editor.defaultFormatter": "xaver.clang-format"
+    },
+    "[c]": {
+        "editor.defaultFormatter": "xaver.clang-format"
+    },
+    "[typescript]": {
+        "editor.formatOnSave": false
+    },
+    "[typescriptreact]": {
+        "editor.formatOnSave": false
+    },
     "zenMode.hideLineNumbers": false,
     "CodeGPT.apiKey": "OpenAI"
 }
