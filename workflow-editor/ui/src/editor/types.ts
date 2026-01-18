@@ -1,6 +1,8 @@
 import type { Edge, Node } from "reactflow";
 import type { JcwfTask } from "../jcwf/types";
 
+export type RuntimeTaskState = "queued" | "running" | "success" | "failed" | "cancelled" | "unknown";
+
 export type EditorTaskNodeData = {
   task: JcwfTask;
   title: string;
@@ -8,6 +10,10 @@ export type EditorTaskNodeData = {
   validationErrors?: string[];
   validationWarnings?: string[];
   isDirty?: boolean;
+
+  // Live run monitoring (populated from WebSocket snapshots)
+  runtimeState?: RuntimeTaskState;
+  runtimeRunId?: string;
 };
 
 export type EditorTaskNode = Node<EditorTaskNodeData> & { type: "task" };

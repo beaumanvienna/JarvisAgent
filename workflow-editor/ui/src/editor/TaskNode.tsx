@@ -1,6 +1,31 @@
 import React from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
-import type { EditorTaskNodeData } from "./types";
+import type { EditorTaskNodeData, RuntimeTaskState } from "./types";
+
+function runtimeBadgeLabel(runtimeState: RuntimeTaskState | undefined): { label: string; className: string } | null
+{
+  if (!runtimeState)
+  {
+    return null;
+  }
+
+  switch (runtimeState)
+  {
+    case "queued":
+      return { label: "Q", className: "taskNodeBadgeQueued" };
+    case "running":
+      return { label: "R", className: "taskNodeBadgeRunning" };
+    case "success":
+      return { label: "OK", className: "taskNodeBadgeSuccess" };
+    case "failed":
+      return { label: "F", className: "taskNodeBadgeFailed" };
+    case "cancelled":
+      return { label: "C", className: "taskNodeBadgeCancelled" };
+    default:
+      return { label: "?", className: "taskNodeBadgeUnknown" };
+  }
+}
+
 
 export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Element
 {
@@ -8,10 +33,14 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const subtitle = props.data.subtitle ?? "";
   const errors = props.data.validationErrors ?? [];
   const warnings = props.data.validationWarnings ?? [];
+  const runtimeState = props.data.runtimeState;
+
   const isDirty = props.data.isDirty === true;
 
   const firstError = errors.length > 0 ? errors[0] : null;
   const firstWarning = warnings.length > 0 ? warnings[0] : null;
+
+  const runtimeBadge = runtimeBadgeLabel(runtimeState);
 
   const errorCount = errors.length;
   const warningCount = warnings.length;
@@ -22,6 +51,11 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   {
     tooltipLines.push("");
     tooltipLines.push(`Type: ${subtitle}`);
+  }
+  if (runtimeState)
+  {
+    tooltipLines.push("");
+    tooltipLines.push(`Run state: ${runtimeState}`);
   }
   if (isDirty)
   {
@@ -56,6 +90,10 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         + (isSelected ? " taskNodeSelected" : "")
         + (firstError ? " taskNodeError" : "")
         + (!firstError && firstWarning ? " taskNodeWarning" : "")
+        + (runtimeState === "running" ? " taskNodeRunning" : "")
+        + (runtimeState === "success" ? " taskNodeSuccess" : "")
+        + (runtimeState === "failed" ? " taskNodeFailed" : "")
+        + (runtimeState === "cancelled" ? " taskNodeCancelled" : "")
         + (isDirty ? " taskNodeDirty" : "")
       }
       title={tooltip}
@@ -65,6 +103,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         <div className="taskNodeTitle">
           {props.data.title}
           <span className="taskNodeBadges">
+            {runtimeBadge ? (<span className={`taskNodeBadge ${runtimeBadge.className}`}>{runtimeBadge.label}</span>) : null}
             {isDirty ? <span className="taskNodeBadge taskNodeBadgeDirty">*</span> : null}
             {errorCount > 0 ? <span className="taskNodeBadge taskNodeBadgeError">E{errorCount}</span> : null}
             {warningCount > 0 ? <span className="taskNodeBadge taskNodeBadgeWarning">W{warningCount}</span> : null}

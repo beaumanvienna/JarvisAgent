@@ -54,6 +54,11 @@ namespace AIAssistant
 
         void EnqueueWorkflowRun(std::string const& workflowId);
 
+        // Enqueue a workflow run and return the assigned run id.
+        // The run id is stable for the queued run and will match the run id
+        // observed by the UI once the run becomes active.
+        std::string EnqueueWorkflowRunAndGetRunId(std::string const& workflowId);
+
         // Must be called periodically (from main thread).
         void Update();
 
@@ -85,6 +90,12 @@ namespace AIAssistant
             TaskInstanceState m_TaskState;
         };
 
+        struct PendingRun
+        {
+            std::string m_WorkflowId;
+            std::string m_RunId;
+        };
+
         struct ActiveRun
         {
             WorkflowDefinition m_Definition;
@@ -96,7 +107,7 @@ namespace AIAssistant
         };
 
     private:
-        void StartPendingRuns(std::vector<std::string>&& workflowIds);
+        void StartPendingRuns(std::vector<PendingRun>&& pendingRuns);
 
         void TickActiveRun(ActiveRun& activeRun);
 
@@ -117,7 +128,7 @@ namespace AIAssistant
         WorkflowRegistry const* m_WorkflowRegistry = nullptr;
 
         bool m_IsRunning = false;
-        std::queue<std::string> m_PendingRuns;
+        std::queue<PendingRun> m_PendingRuns;
 
         std::vector<ActiveRun> m_ActiveRuns;
 

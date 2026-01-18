@@ -47,3 +47,30 @@
   font-size: 11px;
   opacity: 0.9;
 }
+
+
+/* Live run monitoring */
+.taskNodeBadgeRuntime {
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.taskNodeBadgeRuntimeQueued {
+  border-color: rgba(150, 180, 255, 0.55);
+}
+
+.taskNodeBadgeRuntimeRunning {
+  border-color: rgba(120, 180, 255, 0.75);
+}
+
+.taskNodeBadgeRuntimeSuccess {
+  border-color: rgba(120, 255, 170, 0.55);
+}
+
+.taskNodeBadgeRuntimeFailed {
+  border-color: rgba(255, 80, 80, 0.7);
+}
+
+.taskNodeBadgeRuntimeCancelled {
+  border-color: rgba(255, 200, 80, 0.7);
+}

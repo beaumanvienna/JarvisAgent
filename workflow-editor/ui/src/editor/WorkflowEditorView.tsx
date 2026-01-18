@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -17,7 +17,7 @@ import TaskNode from "./TaskNode";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
-import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData } from "./types";
+import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
 import type { JcwfFile, JcwfTask, JcwfTaskType } from "../jcwf/types";
 import {
   createWorkflowWithId,
@@ -36,6 +36,65 @@ export type WorkflowPersistEvent = {
 };
 
 type NodeSnapshot = Record<string, string>;
+
+type WorkflowRunListItem = {
+  runId: string;
+  workflowId: string;
+  state: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+type WorkflowRunsSnapshotMessage = {
+  type: string;
+  runs?: unknown;
+  activeRuns?: unknown;
+};
+
+export type RuntimeTaskSnapshot = {
+  taskId: string;
+  state: RuntimeTaskState;
+  runId: string;
+};
+
+type RuntimeTaskSnapshotById = Record<string, RuntimeTaskSnapshot>;
+
+function buildWebSocketUrl(pathname: string): string
+{
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${pathname}`;
+}
+
+function normalizeRuntimeState(stateText: unknown): RuntimeTaskState
+{
+  if (typeof stateText !== "string")
+  {
+    return "unknown";
+  }
+
+  const normalized = stateText.trim().toLowerCase();
+  if (normalized.includes("queue") || normalized.includes("pending"))
+  {
+    return "queued";
+  }
+  if (normalized.includes("run"))
+  {
+    return "running";
+  }
+  if (normalized.includes("success") || normalized.includes("succeed") || normalized.includes("ok") || normalized.includes("done"))
+  {
+    return "success";
+  }
+  if (normalized.includes("fail") || normalized.includes("error"))
+  {
+    return "failed";
+  }
+  if (normalized.includes("cancel"))
+  {
+    return "cancelled";
+  }
+  return "unknown";
+}
 
 function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[]): string
 {
@@ -148,6 +207,13 @@ export default function WorkflowEditorView(props: {
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [showBackToListHint, setShowBackToListHint] = useState<boolean>(false);
 
+  const webSocketRef = useRef<WebSocket | null>(null);
+  const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
+  const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [runtimeTasksById, setRuntimeTasksById] = useState<RuntimeTaskSnapshotById>({});
+
+
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<EditorTaskNodeData>(
@@ -254,6 +320,8 @@ export default function WorkflowEditorView(props: {
 
       const savedTaskSignature = lastSavedNodeSnapshot[n.id];
       const nodeIsDirty = savedTaskSignature ? computeTaskSignature(n.data.task) !== savedTaskSignature : true;
+      const runtimeSnapshot = runtimeTasksById[n.id];
+
 
       return {
         ...n,
@@ -262,13 +330,15 @@ export default function WorkflowEditorView(props: {
           validationErrors: mergedErrors.length > 0 ? mergedErrors : undefined,
           validationWarnings: mergedWarnings.length > 0 ? mergedWarnings : undefined,
           isDirty: nodeIsDirty ? true : undefined,
+          runtimeState: runtimeSnapshot ? runtimeSnapshot.state : undefined,
+          runtimeRunId: runtimeSnapshot ? runtimeSnapshot.runId : undefined,
         },
       };
     });
 
     setNodes(nextNodes);
     setEdges(graph.edges);
-  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot]);
+  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot, runtimeTasksById]);
 
   const loadFromJcwf = useCallback((workflowId: string, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
@@ -329,6 +399,160 @@ export default function WorkflowEditorView(props: {
     void load();
     return () => { isCancelled = true; };
   }, [props.workflowId, loadFromJcwf, resetToNewDraft]);
+
+  // WebSocket run monitoring.
+  useEffect(() => {
+    const socket = new WebSocket(buildWebSocketUrl("/ws"));
+    webSocketRef.current = socket;
+
+    socket.onopen = () => {
+      setIsWebSocketConnected(true);
+      try
+      {
+        socket.send(JSON.stringify({ type: "workflow-runs-request" }));
+      }
+      catch
+      {
+        // ignore
+      }
+    };
+
+    socket.onclose = () => {
+      setIsWebSocketConnected(false);
+    };
+
+    socket.onmessage = (event: MessageEvent) => {
+      let message: unknown;
+      try
+      {
+        message = JSON.parse(String(event.data)) as unknown;
+      }
+      catch
+      {
+        return;
+      }
+
+      if (!message || typeof message !== "object" || Array.isArray(message))
+      {
+        return;
+      }
+
+      const obj = message as Record<string, unknown>;
+      const messageType = typeof obj.type === "string" ? obj.type : "";
+
+      // Older snapshot shape: { type: "workflowRunsSnapshot", runs: [...] }
+      if (messageType === "workflowRunsSnapshot")
+      {
+        const runsUnknown = obj.runs;
+        if (!Array.isArray(runsUnknown))
+        {
+          return;
+        }
+
+        const runs = runsUnknown as Record<string, unknown>[];
+        const nextActiveRuns: WorkflowRunListItem[] = [];
+        for (const r of runs)
+        {
+          const runId = typeof r.runId === "string" ? r.runId : "";
+          const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
+          const state = typeof r.state === "string" ? r.state : "";
+          if (runId.length > 0 && workflowId.length > 0)
+          {
+            nextActiveRuns.push({
+              runId,
+              workflowId,
+              state,
+              startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
+              completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+            });
+          }
+        }
+
+        setActiveRuns(nextActiveRuns);
+
+        const targetRunId = selectedRunId ?? (nextActiveRuns.length > 0 ? nextActiveRuns[0].runId : null);
+        if (targetRunId && !selectedRunId)
+        {
+          setSelectedRunId(targetRunId);
+        }
+
+        const matchingRun = runs.find((r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId);
+        if (!matchingRun)
+        {
+          setRuntimeTasksById({});
+          return;
+        }
+
+        const tasksUnknown = matchingRun.tasks;
+        if (!Array.isArray(tasksUnknown))
+        {
+          setRuntimeTasksById({});
+          return;
+        }
+
+        const nextRuntime: RuntimeTaskSnapshotById = {};
+        for (const t of tasksUnknown as Record<string, unknown>[])
+        {
+          const taskId = typeof t.taskId === "string" ? t.taskId : "";
+          if (taskId.length === 0)
+          {
+            continue;
+          }
+
+          const rawState = typeof t.state === "string" ? t.state : "";
+          nextRuntime[taskId] = {
+            taskId,
+            runId: targetRunId,
+            state: normalizeRuntimeState(rawState),
+          };
+        }
+
+        setRuntimeTasksById(nextRuntime);
+        return;
+      }
+
+      // Newer snapshot shape: { type: "workflow-runs-snapshot", activeRuns: [...] }
+      if (messageType === "workflow-runs-snapshot")
+      {
+        const activeRunsUnknown = obj.activeRuns;
+        if (!Array.isArray(activeRunsUnknown))
+        {
+          return;
+        }
+
+        const nextActiveRuns: WorkflowRunListItem[] = [];
+        for (const r of activeRunsUnknown as Record<string, unknown>[])
+        {
+          const runId = typeof r.id === "string" ? r.id : "";
+          const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
+          const state = typeof r.state === "string" ? r.state : "";
+          if (runId.length > 0 && workflowId.length > 0)
+          {
+            nextActiveRuns.push({
+              runId,
+              workflowId,
+              state,
+              startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
+              completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+            });
+          }
+        }
+        setActiveRuns(nextActiveRuns);
+        return;
+      }
+    };
+
+    return () => {
+      try
+      {
+        socket.close();
+      }
+      catch
+      {
+        // ignore
+      }
+    };
+  }, [selectedRunId]);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId)
@@ -617,6 +841,16 @@ export default function WorkflowEditorView(props: {
       setStatusText("Starting workflow…");
       setErrorText(null);
       const result = await runWorkflow(workflowId);
+      if (result.ok && result.runId && result.runId.length > 0)
+      {
+        setSelectedRunId(result.runId);
+        setRuntimeTasksById({});
+        const socket = webSocketRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN)
+        {
+          socket.send(JSON.stringify({ type: "workflow-runs-request" }));
+        }
+      }
       setStatusText(result.ok ? `Run started. runId=${result.runId}` : "Run returned ok=false.");
     }
     catch (e)
@@ -703,9 +937,32 @@ export default function WorkflowEditorView(props: {
                       </ul>
                     </div>
                   )
-                  : null}
+          <div className="small">
+            WebSocket: <span className={isWebSocketConnected ? "runWsConnected" : "runWsDisconnected"}>
+              {isWebSocketConnected ? "connected" : "disconnected"}
+            </span>
+          </div>
+
+          {activeRuns.length === 0
+            ? <div className="muted" style={{ marginTop: 8 }}>No active runs.</div>
+            : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                {activeRuns.map((run) => (
+                  <button
+                    key={run.runId}
+                    className={`btn ${selectedRunId === run.runId ? "btnActive" : ""}`}
+                    type="button"
+                    onClick={() => { setSelectedRunId(run.runId); }}
+                  >
+                    <div style={{ fontWeight: 700, textAlign: "left" }}>{run.runId}</div>
+                    <div className="small" style={{ textAlign: "left" }}>{run.workflowId} • {run.state}</div>
+                  </button>
+                ))}
               </div>
-            )
+            )}
+
+          {selectedRunId
+            ? <div className="small" style={{ marginTop: 10 }}>Selected: <code>{selectedRunId}</code></div>
             : null}
         </div>
 

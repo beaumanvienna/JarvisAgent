@@ -1,24 +1,24 @@
 /* Copyright (c) 2025 JC Technolabs
-   License: GPL-3.0
+  License: GPL-3.0
 
-   Permission is hereby granted, free of charge, to any person
-   obtaining a copy of this software and associated documentation files
-   (the "Software"), to deal in the Software without restriction,
-   including without limitation the rights to use, copy, modify, merge,
-   publish, distribute, sublicense, and/or sell copies of the Software,
-   and to permit persons to whom the Software is furnished to do so,
-   subject to the following conditions:
+  Permission is hereby granted, free of charge, to any person
+  obtaining a copy of this software and associated documentation files
+  (the "Software"), to deal in the Software without restriction,
+  including without limitation the rights to use, copy, modify, merge,
+  publish, distribute, sublicense, and/or sell copies of the Software,
+  and to permit persons to whom the Software is furnished to do so,
+  subject to the following conditions:
 
-   The above copyright notice and this permission notice shall be
-   included in all copies or substantial portions of the Software.
+  The above copyright notice and this permission notice shall be
+  included in all copies or substantial portions of the Software.
 
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-   CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "workflowValidator.h"
 
@@ -38,9 +38,7 @@ namespace
 
         for (char const ch : value)
         {
-            bool const isAlphaNumeric = (ch >= 'a' && ch <= 'z')
-                                       || (ch >= 'A' && ch <= 'Z')
-                                       || (ch >= '0' && ch <= '9');
+            bool const isAlphaNumeric = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
             bool const isAllowed = isAlphaNumeric || ch == '_' || ch == '-' || ch == '.';
             if (!isAllowed)
             {
@@ -51,11 +49,8 @@ namespace
         return true;
     }
 
-    void AddIssue(std::vector<WorkflowValidationIssue>& issues,
-                  WorkflowValidationSeverity const severity,
-                  std::string const& code,
-                  std::string const& message,
-                  std::string const& path,
+    void AddIssue(std::vector<WorkflowValidationIssue>& issues, WorkflowValidationSeverity const severity,
+                  std::string const& code, std::string const& message, std::string const& path,
                   std::string const& taskId = std::string())
     {
         WorkflowValidationIssue issue;
@@ -168,14 +163,13 @@ namespace AIAssistant
 
         if (workflow.m_Version.empty())
         {
-            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_version",
-                     "Missing required field: version", "$.version");
+            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_version", "Missing required field: version",
+                     "$.version");
         }
 
         if (workflow.m_Id.empty())
         {
-            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_workflow_id",
-                     "Missing required field: id", "$.id");
+            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_workflow_id", "Missing required field: id", "$.id");
         }
         else if (!IsValidId(workflow.m_Id))
         {
@@ -185,8 +179,7 @@ namespace AIAssistant
 
         if (workflow.m_Tasks.empty())
         {
-            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_tasks",
-                     "Workflow has no tasks", "$.tasks");
+            AddIssue(issues, WorkflowValidationSeverity::Error, "missing_tasks", "Workflow has no tasks", "$.tasks");
             return;
         }
 
@@ -200,15 +193,15 @@ namespace AIAssistant
 
             if (taskId.empty())
             {
-                AddIssue(issues, WorkflowValidationSeverity::Error, "missing_task_id",
-                         "Task id is empty", "$.tasks", taskId);
+                AddIssue(issues, WorkflowValidationSeverity::Error, "missing_task_id", "Task id is empty", "$.tasks",
+                         taskId);
                 continue;
             }
 
             if (!IsValidId(taskId))
             {
-                AddIssue(issues, WorkflowValidationSeverity::Error, "invalid_task_id",
-                         "Task id contains invalid characters", "$.tasks." + taskId, taskId);
+                AddIssue(issues, WorkflowValidationSeverity::Error, "invalid_task_id", "Task id contains invalid characters",
+                         "$.tasks." + taskId, taskId);
             }
 
             if (task.m_Id.empty())
@@ -224,8 +217,8 @@ namespace AIAssistant
 
             if (!taskIds.insert(taskId).second)
             {
-                AddIssue(issues, WorkflowValidationSeverity::Error, "duplicate_task_id",
-                         "Duplicate task id: " + taskId, "$.tasks." + taskId, taskId);
+                AddIssue(issues, WorkflowValidationSeverity::Error, "duplicate_task_id", "Duplicate task id: " + taskId,
+                         "$.tasks." + taskId, taskId);
             }
 
             if (task.m_Type == TaskType::Unknown)

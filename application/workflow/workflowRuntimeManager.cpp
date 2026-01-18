@@ -154,6 +154,30 @@ namespace AIAssistant
             return true;
         }
 
+
+
+        std::unordered_map<std::string, TaskInstanceState> BuildInitialTaskStates(WorkflowDefinition const& workflowDefinition)
+        {
+            std::unordered_map<std::string, TaskInstanceState> taskStates;
+            taskStates.reserve(workflowDefinition.m_Tasks.size());
+
+            for (auto const& taskPair : workflowDefinition.m_Tasks)
+            {
+                TaskInstanceState state;
+                state.m_State = TaskInstanceStateKind::Pending;
+                state.m_AttemptCount = 0;
+                state.m_LastErrorMessage.clear();
+                state.m_InputValues.clear();
+                state.m_OutputValues.clear();
+                state.m_InputsJson.clear();
+                state.m_OutputsJson.clear();
+
+                taskStates.emplace(taskPair.first, std::move(state));
+            }
+
+            return taskStates;
+        }
+
     } // namespace
 
     WorkflowRuntimeManager::~WorkflowRuntimeManager() { Stop(); }
@@ -176,7 +200,7 @@ namespace AIAssistant
 
         m_IsRunning = false;
 
-        std::queue<std::string> emptyQueue;
+        std::queue<PendingRun> emptyQueue;
         m_PendingRuns.swap(emptyQueue);
 
         m_ActiveRuns.clear();
@@ -185,13 +209,45 @@ namespace AIAssistant
 
     void WorkflowRuntimeManager::EnqueueWorkflowRun(std::string const& workflowId)
     {
+        (void)EnqueueWorkflowRunAndGetRunId(workflowId);
+    }
+
+    std::string WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId(std::string const& workflowId)
+    {
         if (workflowId.empty())
         {
-            return;
+            return std::string();
         }
 
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        m_PendingRuns.push(workflowId);
+        WorkflowRegistry const* workflowRegistry = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistry = m_WorkflowRegistry;
+        }
+
+        std::string runId;
+        if (workflowRegistry != nullptr)
+        {
+            std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
+            if (workflowDefinition.has_value())
+            {
+                runId = GenerateRunId(workflowDefinition.value());
+            }
+        }
+
+        if (runId.empty())
+        {
+            auto const now = std::chrono::system_clock::now().time_since_epoch();
+            auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+            runId = workflowId + "_" + std::to_string(millis);
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_PendingRuns.push(PendingRun{ workflowId, runId });
+        }
+
+        return runId;
     }
 
     bool WorkflowRuntimeManager::TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const
@@ -349,7 +405,7 @@ namespace AIAssistant
 
     void WorkflowRuntimeManager::Update()
     {
-        std::vector<std::string> pendingToStart;
+        std::vector<PendingRun> pendingToStart;
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -391,51 +447,45 @@ namespace AIAssistant
             ++index;
         }
     }
-
-    void WorkflowRuntimeManager::StartPendingRuns(std::vector<std::string>&& workflowIds)
+    void WorkflowRuntimeManager::StartPendingRuns(std::vector<PendingRun>&& pendingRuns)
     {
-        WorkflowRegistry const* registry = nullptr;
+        WorkflowRegistry const* workflowRegistry = nullptr;
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
-            registry = m_WorkflowRegistry;
+            workflowRegistry = m_WorkflowRegistry;
         }
 
-        if (registry == nullptr)
+        if (workflowRegistry == nullptr)
         {
-            LOG_APP_ERROR("[WorkflowRuntimeManager] cannot start runs: WorkflowRegistry is null");
             return;
         }
 
-        for (std::string const& workflowId : workflowIds)
+        for (PendingRun const& pendingRun : pendingRuns)
         {
-            auto optionalDefinition = registry->GetWorkflow(workflowId);
-            if (!optionalDefinition.has_value())
+            if (pendingRun.m_WorkflowId.empty())
             {
-                LOG_APP_ERROR("[WorkflowRuntimeManager] unknown workflow id '{}'", workflowId);
                 continue;
             }
 
-            WorkflowDefinition const& workflowDefinition = optionalDefinition.value();
-
-            ActiveRun activeRun;
-            activeRun.m_Definition = workflowDefinition;
-
-            activeRun.m_Run.m_WorkflowId = activeRun.m_Definition.m_Id;
-            activeRun.m_Run.m_RunId = GenerateRunId(activeRun.m_Definition);
-
-            for (auto const& taskPair : activeRun.m_Definition.m_Tasks)
+            std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry->GetWorkflow(pendingRun.m_WorkflowId);
+            if (!workflowDefinition.has_value())
             {
-                TaskInstanceState taskState;
-                taskState.m_State = TaskInstanceStateKind::Pending;
-                activeRun.m_Run.m_TaskStates[taskPair.first] = taskState;
+                continue;
             }
 
-            LOG_APP_INFO("[paths debug] debug reason=workflowStart workflowId='{}' runId='{}' taskCount={}",
-                         activeRun.m_Run.m_WorkflowId, activeRun.m_Run.m_RunId,
-                         static_cast<int>(activeRun.m_Run.m_TaskStates.size()));
+            std::string const runId = pendingRun.m_RunId.empty() ? GenerateRunId(workflowDefinition.value()) : pendingRun.m_RunId;
 
-            m_ActiveRuns.push_back(std::move(activeRun));
+            ActiveRun activeRun;
+            activeRun.m_Definition = workflowDefinition.value();
+            activeRun.m_Run.m_RunId = runId;
+            activeRun.m_Run.m_WorkflowId = pendingRun.m_WorkflowId;
+            activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
+
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                m_ActiveRuns.push_back(std::move(activeRun));
+            }
         }
     }
 

@@ -245,3 +245,31 @@ a { color: inherit; }
   border-color: rgba(255, 200, 120, 0.45);
   background: rgba(255, 200, 120, 0.14);
 }
+
+
+/* Live run monitoring */
+.taskNodeQueued {
+  border-color: rgba(150, 180, 255, 0.45);
+}
+
+.taskNodeRunning {
+  border-color: rgba(120, 180, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(120, 180, 255, 0.22);
+}
+
+.taskNodeSuccess {
+  border-color: rgba(120, 255, 170, 0.55);
+  box-shadow: 0 0 0 1px rgba(120, 255, 170, 0.18);
+}
+
+.taskNodeFailed {
+  border-color: rgba(255, 120, 120, 0.75);
+}
+
+.taskNodeCancelled {
+  border-color: rgba(255, 200, 120, 0.55);
+}
+
+.taskNodeBadgeRuntime {
+  border-style: solid;
+}

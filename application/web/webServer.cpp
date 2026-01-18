@@ -654,29 +654,82 @@ void WebServer::BroadcastWorkflowRunsSnapshot()
         workflowRuntimeManager = m_WorkflowRuntimeManager;
     }
 
-    if (workflowRuntimeManager == nullptr)
+    if (!workflowRuntimeManager)
     {
         return;
     }
 
-    crow::json::wvalue msg;
-    msg["type"] = "workflow-runs-snapshot";
+    std::vector<WorkflowRun> const activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
 
-    auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-    crow::json::wvalue::list activeRunsJson;
-    for (auto const& run : activeRuns)
+    auto ToRunStateString = [](WorkflowRun const& run) -> char const*
     {
-        crow::json::wvalue runJson;
-        runJson["runId"] = run.m_RunId;
-        runJson["workflowId"] = run.m_WorkflowId;
-        runJson["state"] = ToStringWorkflowRunState(run.m_State);
-        runJson["startedAt"] = run.m_StartedAtIso8601;
-        runJson["completedAt"] = run.m_CompletedAtIso8601;
-        activeRunsJson.push_back(std::move(runJson));
-    }
-    msg["activeRuns"] = std::move(activeRunsJson);
+        if (run.m_IsCompleted)
+        {
+            return run.m_HasFailed ? "failed" : "completed";
+        }
 
-    BroadcastJSON(msg.dump());
+        // If any task is running, call the run running.
+        for (auto const& pair : run.m_TaskStates)
+        {
+            if (pair.second.m_State == TaskInstanceStateKind::Running)
+            {
+                return "running";
+            }
+        }
+
+        return "queued";
+    };
+
+    crow::json::wvalue json;
+    json["type"] = "workflowRunsSnapshot";
+
+    std::vector<crow::json::wvalue> runs;
+    runs.reserve(activeRuns.size());
+
+    for (WorkflowRun const& runSnapshot : activeRuns)
+    {
+        crow::json::wvalue run;
+        run["runId"] = runSnapshot.m_RunId;
+        run["workflowId"] = runSnapshot.m_WorkflowId;
+        run["state"] = ToRunStateString(runSnapshot);
+
+        std::vector<std::string> taskIds;
+        taskIds.reserve(runSnapshot.m_TaskStates.size());
+        for (auto const& it : runSnapshot.m_TaskStates)
+        {
+            taskIds.push_back(it.first);
+        }
+        std::sort(taskIds.begin(), taskIds.end());
+
+        std::vector<crow::json::wvalue> tasks;
+        tasks.reserve(taskIds.size());
+
+        for (std::string const& taskId : taskIds)
+        {
+            auto const taskIt = runSnapshot.m_TaskStates.find(taskId);
+            if (taskIt == runSnapshot.m_TaskStates.end())
+            {
+                continue;
+            }
+
+            TaskInstanceState const& taskState = taskIt->second;
+
+            crow::json::wvalue task;
+            task["taskId"] = taskId;
+            task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
+            task["attemptCount"] = taskState.m_AttemptCount;
+            task["lastErrorMessage"] = taskState.m_LastErrorMessage;
+
+            tasks.push_back(std::move(task));
+        }
+
+        run["tasks"] = std::move(tasks);
+        runs.push_back(std::move(run));
+    }
+
+    json["runs"] = std::move(runs);
+
+    BroadcastJSON(json.dump());
 }
 
 
@@ -1371,12 +1424,15 @@ crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
 
     if (workflowRuntimeManager != nullptr)
     {
-        workflowRuntimeManager->EnqueueWorkflowRun(workflowId);
+        std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["enqueued"] = true;
         responseJson["id"] = workflowId;
+        responseJson["runId"] = runId;
+
+        BroadcastWorkflowRunsSnapshot();
         return MakeJsonResponse(202, responseJson);
     }
 
