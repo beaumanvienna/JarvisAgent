@@ -41,6 +41,10 @@ Add validation items covering:
   - Checks that depend on current machine state and may be intentionally unmet for some workflows.
   - Optionally add a future “strict mode” to treat Tier C warnings as errors.
 
+- **Tier D — Optional / informational**: **Info**
+  - Optional fields that are missing but will fall back to safe defaults (e.g. `working_directory` defaulting to workflow base directory).
+  - UI should render as blue “info” (`I#` badges) and list these separately from warnings.
+
 ---
 
 ## Where checks should live
@@ -178,11 +182,18 @@ Current backend validator has richer issue info (severity, code, message, path, 
 
 Recommended fields per issue:
 
-- `severity`: `error | warning`
+- `severity`: `error | warning | info`
+- `tier`: `A | B | C | D`
 - `code`: stable machine-readable string
 - `message`: human-readable
 - `path`: JSON-ish path (e.g. `$.tasks.compile_lib1.params.command`)
 - `taskId`: optional
+
+Recommended response shape:
+
+- `errors`: issues where `severity=error`
+- `warnings`: issues where `severity=warning`
+- `infos`: issues where `severity=info`
 
 ---
 
