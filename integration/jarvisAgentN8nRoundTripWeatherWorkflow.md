@@ -53,17 +53,16 @@ This avoids many nested context keys while still preserving full fidelity.
    │
    ├─ HTTP Request: fetch Hamburg weather (Open-Meteo)
    │
-   ├─ Function/Set: categorize rain for today (none / light / rain)
-   │
-   ├─ HTTP Request: start JarvisAgent workflow (date, weatherJson, rainCategory, callbackUrl)
+   ├─ HTTP Request: start JarvisAgent workflow (date, weatherJson, rainIntensity, callbackUrl)
    │
    └─ Webhook: receive completion payload
         └─ HTTP Request / CMS node: publish Markdown to website
 
 (JarvisAgent) JCWF workflow
-   1) AI: choose activities based on rain category + forecast summary
-   2) Python: finalize Markdown (insert date, ensure stable sections)
-   3) Shell: POST results back to n8n callbackUrl
+   1) AI: categorize rain for today (none / light / rain)
+   2) AI: choose activities based on rain category + forecast summary
+   3) Python: finalize Markdown (insert date, ensure stable sections)
+   4) Shell: POST results back to n8n callbackUrl
 ```
 
 ## n8n workflow sketch (nodes)
@@ -89,18 +88,7 @@ Example Open-Meteo request (daily precipitation sum):
 GET https://api.open-meteo.com/v1/forecast?latitude=53.5511&longitude=9.9937&daily=precipitation_sum,precipitation_hours,weather_code&timezone=Europe%2FBerlin
 ```
 
-### 3) Categorize rain for today
-Compute a single enum for today:
-- `no_rain`
-- `some_rain`
-- `rain`
-
-Suggested thresholds (tune later):
-- `no_rain`: precipitation_sum == 0
-- `some_rain`: 0 < precipitation_sum <= 2 (mm)
-- `rain`: precipitation_sum > 2 (mm)
-
-### 4) Start JarvisAgent workflow
+### 3) Start JarvisAgent workflow
 **HTTP Request node** to JarvisAgent:
 
 - URL: `http://<jarvis-host>:8080/api/integrations/n8n/start`
@@ -117,7 +105,7 @@ Suggested thresholds (tune later):
     "timezone": "Europe/Berlin",
     "language": "de",
     "location": "Hamburg",
-    "rainCategory": "{{ $json.rainCategory }}",
+    "rainIntensity": "{{ $json.rainIntensity }}",
     "weatherJson": "{{ JSON.stringify($json.openMeteoRaw) }}"
   }
 }
@@ -127,7 +115,7 @@ JarvisAgent will write this exact request payload to:
 
 - `workflows/<workflowId>/<taskName>/n8n/<runId>/request.json`
 
-### 5) Receive + publish
+### 4) Receive + publish
 - **Webhook Trigger**: `/webhook/jarvisagent-hamburg`
 - **Publish**:
   - post returned markdown to your website/CMS, or
@@ -170,7 +158,7 @@ Since `ContextMap` currently stores strings, the `weatherJson` field should be p
         "provider": "openai",
         "model": "gpt-4.1-mini",
         "mode": "one_shot",
-        "prompt_template": "You write content for a tourist information kiosk in Hamburg. Date: {{date}} (timezone {{timezone}}).\n\nInputs:\n- location is always Hamburg\n- rainCategory is one of: no_rain | some_rain | rain\n- weatherJson is raw Open-Meteo JSON (string)\n\nTask:\nReturn STRICT JSON with keys:\n- markdown (string): a complete Markdown page for the kiosk website. Include the date in the first heading.\n- summary (string): 1-2 sentence teaser.\n- tags (array of strings): e.g. [\"outdoors\",\"museums\",\"family\"]\n\nContent rules (must follow):\n- If rainCategory=no_rain: emphasize outdoors and roaming (parks, harbor walk, etc.)\n- If rainCategory=some_rain: mixed plan, short outdoor walks + indoor attractions\n- If rainCategory=rain: focus on long indoor attractions with minimal walking outside (large museums, long tours, inside lunch)\n- Do NOT mention other cities. Hamburg only.\n- Keep suggestions realistic and non-controversial."
+        "prompt_template": "You write content for a tourist information kiosk in Hamburg. Date: {{date}} (timezone {{timezone}}).\n\nInputs:\n- location is always Hamburg\n- rainIntensity is provided . Categorize rain intensity into one of: no_rain | some_rain | rain\n- weatherJson is raw Open-Meteo JSON (string)\n\nTask:\nReturn STRICT JSON with keys:\n- markdown (string): a complete Markdown page for the kiosk website. Include the date in the first heading.\n- summary (string): 1-2 sentence teaser.\n- tags (array of strings): e.g. [\"outdoors\",\"museums\",\"family\"]\n\nContent rules (must follow):\n- If rainCategory=no_rain: emphasize outdoors and roaming (parks, harbor walk, etc.)\n- If rainCategory=some_rain: mixed plan, short outdoor walks + indoor attractions\n- If rainCategory=rain: focus on long indoor attractions with minimal walking outside (large museums, long tours, inside lunch)\n- Do NOT mention other cities. Hamburg only.\n- Keep suggestions realistic and non-controversial."
       },
       "inputs": {
         "date": { "type": "string", "required": true },
