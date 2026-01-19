@@ -22,14 +22,13 @@
 #pragma once
 
 #include <future>
-#include <mutex>
 #include <queue>
-#include <string>
 #include <unordered_map>
+#include <string>
 #include <vector>
 
-#include "workflow/aiRequestPool.h"
-#include "workflow/workflowTypes.h"
+#include "aiRequestPool.h"
+#include "workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -59,13 +58,17 @@ namespace AIAssistant
         // observed by the UI once the run becomes active.
         std::string EnqueueWorkflowRunAndGetRunId(std::string const& workflowId);
 
+        // Integration-friendly enqueue: allow specifying a run id and initial run context.
+        // If runId is empty, a run id is generated.
+        std::string EnqueueWorkflowRunWithContextAndGetRunId(std::string const& workflowId, std::string const& runId,
+                                                             ContextMap const& context);
+
         // Must be called periodically (from main thread).
         void Update();
 
         void SetRegistry(WorkflowRegistry const* workflowRegistry);
 
         bool TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const;
-
 
         bool TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const;
 
@@ -74,7 +77,6 @@ namespace AIAssistant
 
         // Finds a run by run id across active and last-runs snapshots.
         bool TryGetRunById(std::string const& runId, WorkflowRun& outRun) const;
-
 
         // Returns a copy of all active runs (thread-safe snapshot).
         std::vector<WorkflowRun> GetActiveRunsSnapshot() const;
@@ -94,6 +96,7 @@ namespace AIAssistant
         {
             std::string m_WorkflowId;
             std::string m_RunId;
+            ContextMap m_Context;
         };
 
         struct ActiveRun

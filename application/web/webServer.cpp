@@ -21,6 +21,7 @@
 
 #include <fstream>
 #include <algorithm>
+#include <chrono>
 #include <sstream>
 #include <string_view>
 #include <optional>
@@ -51,6 +52,13 @@ namespace AIAssistant
 {
     namespace
     {
+        std::string GenerateIntegrationRunId(std::string const& workflowId)
+        {
+            auto const now = std::chrono::system_clock::now().time_since_epoch();
+            auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+            return workflowId + "_" + std::to_string(millis);
+        }
+
         void SetJsonHeaders(crow::response& response)
         {
             response.add_header("Content-Type", "application/json");
@@ -71,12 +79,9 @@ namespace AIAssistant
             return response;
         }
 
-
-        crow::response MakeWorkflowJsonError(int const httpStatus,
-                                            std::string const& errorCode,
-                                            std::string const& message,
-                                            std::string const& endpoint,
-                                            std::optional<std::string> const& workflowId = std::nullopt)
+        crow::response MakeWorkflowJsonError(int const httpStatus, std::string const& errorCode, std::string const& message,
+                                             std::string const& endpoint,
+                                             std::optional<std::string> const& workflowId = std::nullopt)
         {
             crow::json::wvalue responseJson;
             responseJson["ok"] = false;
@@ -91,17 +96,15 @@ namespace AIAssistant
             return MakeJsonResponse(httpStatus, responseJson);
         }
 
-        
         struct WorkflowValidationFinding
         {
             std::string m_Code;
             std::string m_Message;
         };
 
-        crow::json::wvalue MakeWorkflowValidationResponse(bool const ok,
-                                                         std::string const& workflowId,
-                                                         std::vector<WorkflowValidationFinding> const& errors,
-                                                         std::vector<WorkflowValidationFinding> const& warnings)
+        crow::json::wvalue MakeWorkflowValidationResponse(bool const ok, std::string const& workflowId,
+                                                          std::vector<WorkflowValidationFinding> const& errors,
+                                                          std::vector<WorkflowValidationFinding> const& warnings)
         {
             crow::json::wvalue responseJson;
             responseJson["ok"] = ok;
@@ -127,7 +130,6 @@ namespace AIAssistant
             }
             responseJson["warnings"] = std::move(warningsList);
 
-
             return responseJson;
         }
 
@@ -140,8 +142,7 @@ namespace AIAssistant
 
         void DetectCyclesDfs(std::string const& nodeId,
                              std::unordered_map<std::string, std::vector<std::string>> const& adjacency,
-                             std::unordered_map<std::string, DfsState>& states,
-                             std::unordered_set<std::string>& cycleNodes)
+                             std::unordered_map<std::string, DfsState>& states, std::unordered_set<std::string>& cycleNodes)
         {
             auto const stateIt = states.find(nodeId);
             if (stateIt != states.end() && stateIt->second == DfsState::Visiting)
@@ -169,10 +170,8 @@ namespace AIAssistant
             states[nodeId] = DfsState::Visited;
         }
 
-        void ValidateJcwfJson(std::string const& workflowJsonText,
-                              std::vector<WorkflowValidationFinding>& errors,
-                              std::vector<WorkflowValidationFinding>& warnings,
-                              std::string& workflowIdOut)
+        void ValidateJcwfJson(std::string const& workflowJsonText, std::vector<WorkflowValidationFinding>& errors,
+                              std::vector<WorkflowValidationFinding>& warnings, std::string& workflowIdOut)
         {
             simdjson::ondemand::parser parser;
 
@@ -249,7 +248,7 @@ namespace AIAssistant
                 // Collect IDs first
                 for (auto taskEntry : tasksObject.value())
                 {
-                                        std::string_view taskKeyView;
+                    std::string_view taskKeyView;
                     {
                         simdjson::simdjson_result<std::string_view> keyResult = taskEntry.unescaped_key();
                         if (keyResult.error() != simdjson::SUCCESS)
@@ -267,7 +266,7 @@ namespace AIAssistant
                 // Validate each task + build adjacency
                 for (auto taskEntry : tasksObject.value())
                 {
-                                        std::string_view taskKeyView;
+                    std::string_view taskKeyView;
                     {
                         simdjson::simdjson_result<std::string_view> keyResult = taskEntry.unescaped_key();
                         if (keyResult.error() != simdjson::SUCCESS)
@@ -298,7 +297,8 @@ namespace AIAssistant
                             auto typeStr = typeField.get_string();
                             if (typeStr.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_task_type", "Task '" + taskKey + "': field 'type' must be a string"});
+                                errors.push_back(
+                                    {"invalid_task_type", "Task '" + taskKey + "': field 'type' must be a string"});
                             }
                             else
                             {
@@ -317,12 +317,14 @@ namespace AIAssistant
                             auto wdStr = wdField.get_string();
                             if (wdStr.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_working_directory", "Task '" + taskKey + "': 'working_directory' must be a string"});
+                                errors.push_back({"invalid_working_directory",
+                                                  "Task '" + taskKey + "': 'working_directory' must be a string"});
                             }
                         }
                         else
                         {
-                            warnings.push_back({"missing_working_directory", "Task '" + taskKey + "': missing 'working_directory' (recommended)"});
+                            warnings.push_back({"missing_working_directory",
+                                                "Task '" + taskKey + "': missing 'working_directory' (recommended)"});
                         }
                     }
 
@@ -335,7 +337,8 @@ namespace AIAssistant
                             auto labelStr = labelField.get_string();
                             if (labelStr.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_task_label", "Task '" + taskKey + "': field 'label' must be a string"});
+                                errors.push_back(
+                                    {"invalid_task_label", "Task '" + taskKey + "': field 'label' must be a string"});
                             }
                         }
                     }
@@ -348,7 +351,8 @@ namespace AIAssistant
                             auto docStr = docField.get_string();
                             if (docStr.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_task_doc", "Task '" + taskKey + "': field 'doc' must be a string"});
+                                errors.push_back(
+                                    {"invalid_task_doc", "Task '" + taskKey + "': field 'doc' must be a string"});
                             }
                         }
                     }
@@ -375,7 +379,8 @@ namespace AIAssistant
                             auto paramsObj = paramsField.get_object();
                             if (paramsObj.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_task_params", "Task '" + taskKey + "': field 'params' must be an object"});
+                                errors.push_back(
+                                    {"invalid_task_params", "Task '" + taskKey + "': field 'params' must be an object"});
                             }
                         }
                     }
@@ -388,7 +393,8 @@ namespace AIAssistant
                             auto dependsArray = dependsField.get_array();
                             if (dependsArray.error() != simdjson::SUCCESS)
                             {
-                                errors.push_back({"invalid_depends_on", "Task '" + taskKey + "': 'depends_on' must be an array of strings"});
+                                errors.push_back({"invalid_depends_on",
+                                                  "Task '" + taskKey + "': 'depends_on' must be an array of strings"});
                             }
                             else
                             {
@@ -399,34 +405,40 @@ namespace AIAssistant
                                     auto depStr = depValue.get_string();
                                     if (depStr.error() != simdjson::SUCCESS)
                                     {
-                                        errors.push_back({"invalid_depends_on", "Task '" + taskKey + "': 'depends_on' must contain strings only"});
+                                        errors.push_back({"invalid_depends_on",
+                                                          "Task '" + taskKey + "': 'depends_on' must contain strings only"});
                                         continue;
                                     }
 
                                     std::string const depId = std::string(depStr.value());
                                     if (depId.empty())
                                     {
-                                        errors.push_back({"invalid_dependency", "Task '" + taskKey + "': depends_on contains an empty task id"});
+                                        errors.push_back({"invalid_dependency",
+                                                          "Task '" + taskKey + "': depends_on contains an empty task id"});
                                         continue;
                                     }
 
                                     if (depId == taskKey)
                                     {
-                                        errors.push_back({"self_dependency", "Task '" + taskKey + "': depends_on must not include itself"});
+                                        errors.push_back({"self_dependency",
+                                                          "Task '" + taskKey + "': depends_on must not include itself"});
                                         continue;
                                     }
 
                                     if (dependencyIds.find(depId) != dependencyIds.end())
                                     {
-                                        warnings.push_back({"duplicate_dependency",
-                                                            "Task '" + taskKey + "': depends_on contains duplicate entry '" + depId + "'"});
+                                        warnings.push_back(
+                                            {"duplicate_dependency",
+                                             "Task '" + taskKey + "': depends_on contains duplicate entry '" + depId + "'"});
                                         continue;
                                     }
                                     dependencyIds.insert(depId);
 
                                     if (taskIds.find(depId) == taskIds.end())
                                     {
-                                        errors.push_back({"unknown_dependency", "Task '" + taskKey + "': depends_on references unknown task '" + depId + "'"});
+                                        errors.push_back(
+                                            {"unknown_dependency",
+                                             "Task '" + taskKey + "': depends_on references unknown task '" + depId + "'"});
                                     }
                                     else
                                     {
@@ -449,8 +461,9 @@ namespace AIAssistant
                                 std::string const embeddedId = std::string(idStr.value());
                                 if (embeddedId != taskKey)
                                 {
-                                    warnings.push_back({"task_id_mismatch",
-                                                        "Task key '" + taskKey + "' does not match task.id '" + embeddedId + "'"});
+                                    warnings.push_back(
+                                        {"task_id_mismatch",
+                                         "Task key '" + taskKey + "' does not match task.id '" + embeddedId + "'"});
                                 }
                             }
                         }
@@ -474,7 +487,7 @@ namespace AIAssistant
             }
         }
 
-bool IsValidWorkflowId(std::string const& workflowId)
+        bool IsValidWorkflowId(std::string const& workflowId)
         {
             if (workflowId.empty())
             {
@@ -483,9 +496,9 @@ bool IsValidWorkflowId(std::string const& workflowId)
 
             for (char const character : workflowId)
             {
-                bool const isAlphaNumeric = ((character >= 'a' && character <= 'z') ||
-                                             (character >= 'A' && character <= 'Z') ||
-                                             (character >= '0' && character <= '9'));
+                bool const isAlphaNumeric =
+                    ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                     (character >= '0' && character <= '9'));
                 bool const isAllowedSymbol = (character == '_' || character == '-');
                 if (!isAlphaNumeric && !isAllowedSymbol)
                 {
@@ -494,6 +507,12 @@ bool IsValidWorkflowId(std::string const& workflowId)
             }
 
             return true;
+        }
+
+        bool IsValidTaskName(std::string const& taskName)
+        {
+            // Same restrictions as workflow ids: simple path-segment with no slashes.
+            return IsValidWorkflowId(taskName);
         }
 
         std::filesystem::path GetWorkflowsDirectoryAbsolute(std::string& errorMessage)
@@ -516,10 +535,9 @@ bool IsValidWorkflowId(std::string const& workflowId)
             }
 
             std::filesystem::path const& launchCwdAbsolute = Core::g_Core->GetLaunchCWDAbsolute();
-            std::filesystem::path workflowsDirectoryAbsolute =
-                workflowsPathFromConfig.is_absolute()
-                    ? workflowsPathFromConfig
-                    : (launchCwdAbsolute / workflowsPathFromConfig);
+            std::filesystem::path workflowsDirectoryAbsolute = workflowsPathFromConfig.is_absolute()
+                                                                   ? workflowsPathFromConfig
+                                                                   : (launchCwdAbsolute / workflowsPathFromConfig);
 
             return std::filesystem::absolute(workflowsDirectoryAbsolute).lexically_normal();
         }
@@ -538,7 +556,8 @@ bool IsValidWorkflowId(std::string const& workflowId)
             return true;
         }
 
-        bool WriteTextFileAtomic(std::filesystem::path const& filePath, std::string const& content, std::string& errorMessage)
+        bool WriteTextFileAtomic(std::filesystem::path const& filePath, std::string const& content,
+                                 std::string& errorMessage)
         {
             errorMessage.clear();
             std::filesystem::path const parentDirectory = filePath.parent_path();
@@ -572,55 +591,55 @@ bool IsValidWorkflowId(std::string const& workflowId)
             {
                 // Try to cleanup temp file best-effort.
                 std::filesystem::remove(tempPath, errorCode);
-                errorMessage = "Failed to rename temp file to target: " + filePath.string() + " error=" + errorCode.message();
+                errorMessage =
+                    "Failed to rename temp file to target: " + filePath.string() + " error=" + errorCode.message();
                 return false;
             }
 
             return true;
         }
 
+        char const* ToStringWorkflowRunState(WorkflowRunState const state)
+        {
+            switch (state)
+            {
+                case WorkflowRunState::Pending:
+                    return "pending";
+                case WorkflowRunState::Running:
+                    return "running";
+                case WorkflowRunState::Succeeded:
+                    return "succeeded";
+                case WorkflowRunState::Failed:
+                    return "failed";
+                case WorkflowRunState::Cancelled:
+                    return "cancelled";
+                default:
+                    return "unknown";
+            }
+        }
 
-char const* ToStringWorkflowRunState(WorkflowRunState const state)
-{
-    switch (state)
-    {
-    case WorkflowRunState::Pending:
-        return "pending";
-    case WorkflowRunState::Running:
-        return "running";
-    case WorkflowRunState::Succeeded:
-        return "succeeded";
-    case WorkflowRunState::Failed:
-        return "failed";
-    case WorkflowRunState::Cancelled:
-        return "cancelled";
-    default:
-        return "unknown";
-    }
-}
-
-char const* ToStringTaskInstanceStateKind(TaskInstanceStateKind const state)
-{
-    switch (state)
-    {
-    case TaskInstanceStateKind::Pending:
-        return "pending";
-    case TaskInstanceStateKind::Ready:
-        return "ready";
-    case TaskInstanceStateKind::Running:
-        return "running";
-    case TaskInstanceStateKind::Skipped:
-        return "skipped";
-    case TaskInstanceStateKind::Succeeded:
-        return "succeeded";
-    case TaskInstanceStateKind::Failed:
-        return "failed";
-    case TaskInstanceStateKind::WaitingExternal:
-        return "waiting_external";
-    default:
-        return "unknown";
-    }
-}
+        char const* ToStringTaskInstanceStateKind(TaskInstanceStateKind const state)
+        {
+            switch (state)
+            {
+                case TaskInstanceStateKind::Pending:
+                    return "pending";
+                case TaskInstanceStateKind::Ready:
+                    return "ready";
+                case TaskInstanceStateKind::Running:
+                    return "running";
+                case TaskInstanceStateKind::Skipped:
+                    return "skipped";
+                case TaskInstanceStateKind::Succeeded:
+                    return "succeeded";
+                case TaskInstanceStateKind::Failed:
+                    return "failed";
+                case TaskInstanceStateKind::WaitingExternal:
+                    return "waiting_external";
+                default:
+                    return "unknown";
+            }
+        }
 
     } // namespace
 
@@ -633,251 +652,247 @@ char const* ToStringTaskInstanceStateKind(TaskInstanceStateKind const state)
 
     WebServer::~WebServer() { Stop(); }
 
-
-void WebServer::SetWorkflowRegistry(WorkflowRegistry const* workflowRegistry)
-{
-    std::scoped_lock<std::mutex> const lock(m_Mutex);
-    m_WorkflowRegistry = workflowRegistry;
-}
-
-void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
-{
-    std::scoped_lock<std::mutex> const lock(m_Mutex);
-    m_WorkflowRuntimeManager = workflowRuntimeManager;
-}
-
-void WebServer::BroadcastWorkflowRunsSnapshot()
-{
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+    void WebServer::SetWorkflowRegistry(WorkflowRegistry const* workflowRegistry)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
+        m_WorkflowRegistry = workflowRegistry;
     }
 
-    if (!workflowRuntimeManager)
+    void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
     {
-        return;
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        m_WorkflowRuntimeManager = workflowRuntimeManager;
     }
 
-    std::vector<WorkflowRun> const activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-
-    auto ToRunStateString = [](WorkflowRun const& run) -> char const*
+    void WebServer::BroadcastWorkflowRunsSnapshot()
     {
-        if (run.m_IsCompleted)
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
         {
-            return run.m_HasFailed ? "failed" : "completed";
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
         }
 
-        // If any task is running, call the run running.
-        for (auto const& pair : run.m_TaskStates)
+        if (!workflowRuntimeManager)
         {
-            if (pair.second.m_State == TaskInstanceStateKind::Running)
+            return;
+        }
+
+        std::vector<WorkflowRun> const activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
+
+        auto ToRunStateString = [](WorkflowRun const& run) -> char const*
+        {
+            if (run.m_IsCompleted)
             {
-                return "running";
-            }
-        }
-
-        return "queued";
-    };
-
-    crow::json::wvalue json;
-    json["type"] = "workflowRunsSnapshot";
-
-    std::vector<crow::json::wvalue> runs;
-    runs.reserve(activeRuns.size());
-
-    for (WorkflowRun const& runSnapshot : activeRuns)
-    {
-        crow::json::wvalue run;
-        run["runId"] = runSnapshot.m_RunId;
-        run["workflowId"] = runSnapshot.m_WorkflowId;
-        run["state"] = ToRunStateString(runSnapshot);
-
-        std::vector<std::string> taskIds;
-        taskIds.reserve(runSnapshot.m_TaskStates.size());
-        for (auto const& it : runSnapshot.m_TaskStates)
-        {
-            taskIds.push_back(it.first);
-        }
-        std::sort(taskIds.begin(), taskIds.end());
-
-        std::vector<crow::json::wvalue> tasks;
-        tasks.reserve(taskIds.size());
-
-        for (std::string const& taskId : taskIds)
-        {
-            auto const taskIt = runSnapshot.m_TaskStates.find(taskId);
-            if (taskIt == runSnapshot.m_TaskStates.end())
-            {
-                continue;
+                return run.m_HasFailed ? "failed" : "completed";
             }
 
-            TaskInstanceState const& taskState = taskIt->second;
+            // If any task is running, call the run running.
+            for (auto const& pair : run.m_TaskStates)
+            {
+                if (pair.second.m_State == TaskInstanceStateKind::Running)
+                {
+                    return "running";
+                }
+            }
 
-            crow::json::wvalue task;
-            task["taskId"] = taskId;
-            task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
-            task["attemptCount"] = taskState.m_AttemptCount;
-            task["lastErrorMessage"] = taskState.m_LastErrorMessage;
+            return "queued";
+        };
 
-            tasks.push_back(std::move(task));
+        crow::json::wvalue json;
+        json["type"] = "workflowRunsSnapshot";
+
+        std::vector<crow::json::wvalue> runs;
+        runs.reserve(activeRuns.size());
+
+        for (WorkflowRun const& runSnapshot : activeRuns)
+        {
+            crow::json::wvalue run;
+            run["runId"] = runSnapshot.m_RunId;
+            run["workflowId"] = runSnapshot.m_WorkflowId;
+            run["state"] = ToRunStateString(runSnapshot);
+
+            std::vector<std::string> taskIds;
+            taskIds.reserve(runSnapshot.m_TaskStates.size());
+            for (auto const& it : runSnapshot.m_TaskStates)
+            {
+                taskIds.push_back(it.first);
+            }
+            std::sort(taskIds.begin(), taskIds.end());
+
+            std::vector<crow::json::wvalue> tasks;
+            tasks.reserve(taskIds.size());
+
+            for (std::string const& taskId : taskIds)
+            {
+                auto const taskIt = runSnapshot.m_TaskStates.find(taskId);
+                if (taskIt == runSnapshot.m_TaskStates.end())
+                {
+                    continue;
+                }
+
+                TaskInstanceState const& taskState = taskIt->second;
+
+                crow::json::wvalue task;
+                task["taskId"] = taskId;
+                task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
+                task["attemptCount"] = taskState.m_AttemptCount;
+                task["lastErrorMessage"] = taskState.m_LastErrorMessage;
+
+                tasks.push_back(std::move(task));
+            }
+
+            run["tasks"] = std::move(tasks);
+            runs.push_back(std::move(run));
         }
 
-        run["tasks"] = std::move(tasks);
-        runs.push_back(std::move(run));
+        json["runs"] = std::move(runs);
+
+        BroadcastJSON(json.dump());
     }
 
-    json["runs"] = std::move(runs);
-
-    BroadcastJSON(json.dump());
-}
-
-
-    
-namespace
-{
-    std::string GetMimeType(std::filesystem::path const& path)
+    namespace
     {
-        std::string const ext = path.extension().string();
-        if (ext == ".html")
+        std::string GetMimeType(std::filesystem::path const& path)
         {
-            return "text/html; charset=utf-8";
+            std::string const ext = path.extension().string();
+            if (ext == ".html")
+            {
+                return "text/html; charset=utf-8";
+            }
+            if (ext == ".js")
+            {
+                return "application/javascript; charset=utf-8";
+            }
+            if (ext == ".css")
+            {
+                return "text/css; charset=utf-8";
+            }
+            if (ext == ".json")
+            {
+                return "application/json; charset=utf-8";
+            }
+            if (ext == ".svg")
+            {
+                return "image/svg+xml";
+            }
+            if (ext == ".png")
+            {
+                return "image/png";
+            }
+            if (ext == ".jpg" || ext == ".jpeg")
+            {
+                return "image/jpeg";
+            }
+            if (ext == ".webp")
+            {
+                return "image/webp";
+            }
+            if (ext == ".woff2")
+            {
+                return "font/woff2";
+            }
+            if (ext == ".woff")
+            {
+                return "font/woff";
+            }
+            if (ext == ".ttf")
+            {
+                return "font/ttf";
+            }
+            return "application/octet-stream";
         }
-        if (ext == ".js")
-        {
-            return "application/javascript; charset=utf-8";
-        }
-        if (ext == ".css")
-        {
-            return "text/css; charset=utf-8";
-        }
-        if (ext == ".json")
-        {
-            return "application/json; charset=utf-8";
-        }
-        if (ext == ".svg")
-        {
-            return "image/svg+xml";
-        }
-        if (ext == ".png")
-        {
-            return "image/png";
-        }
-        if (ext == ".jpg" || ext == ".jpeg")
-        {
-            return "image/jpeg";
-        }
-        if (ext == ".webp")
-        {
-            return "image/webp";
-        }
-        if (ext == ".woff2")
-        {
-            return "font/woff2";
-        }
-        if (ext == ".woff")
-        {
-            return "font/woff";
-        }
-        if (ext == ".ttf")
-        {
-            return "font/ttf";
-        }
-        return "application/octet-stream";
-    }
 
-    bool TryReadBinaryFile(std::filesystem::path const& filePath, std::string& outContent)
+        bool TryReadBinaryFile(std::filesystem::path const& filePath, std::string& outContent)
+        {
+            std::ifstream file(filePath, std::ios::in | std::ios::binary);
+            if (!file)
+            {
+                return false;
+            }
+
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            outContent = buffer.str();
+            return true;
+        }
+    } // namespace
+
+    crow::response WebServer::ServeStaticFile(std::filesystem::path const& filePath) const
     {
-        std::ifstream file(filePath, std::ios::in | std::ios::binary);
-        if (!file)
+        std::string content;
+        if (!TryReadBinaryFile(filePath, content))
         {
-            return false;
+            return crow::response(404, "File not found");
         }
 
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        outContent = buffer.str();
-        return true;
-    }
-} // namespace
+        crow::response response(200);
+        response.set_header("Content-Type", GetMimeType(filePath));
+        response.set_header("X-Content-Type-Options", "nosniff");
 
-crow::response WebServer::ServeStaticFile(std::filesystem::path const& filePath) const
-{
-    std::string content;
-    if (!TryReadBinaryFile(filePath, content))
+        std::string const fileName = filePath.filename().string();
+        bool const isIndexHtml = fileName == "index.html";
+        if (isIndexHtml)
+        {
+            response.set_header("Cache-Control", "no-cache");
+        }
+        else
+        {
+            response.set_header("Cache-Control", "public, max-age=31536000, immutable");
+        }
+
+        response.body = std::move(content);
+        return response;
+    }
+
+    crow::response WebServer::ServeWorkflowEditorIndex() const
     {
-        return crow::response(404, "File not found");
+        std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
+        if (!std::filesystem::exists(distIndex))
+        {
+            return crow::response(500,
+                                  "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm run build");
+        }
+
+        return ServeStaticFile(distIndex);
     }
 
-    crow::response response(200);
-    response.set_header("Content-Type", GetMimeType(filePath));
-    response.set_header("X-Content-Type-Options", "nosniff");
-
-    std::string const fileName = filePath.filename().string();
-    bool const isIndexHtml = fileName == "index.html";
-    if (isIndexHtml)
+    crow::response WebServer::ServeWorkflowEditorStatic(std::string const& requestPath) const
     {
-        response.set_header("Cache-Control", "no-cache");
-    }
-    else
-    {
-        response.set_header("Cache-Control", "public, max-age=31536000, immutable");
-    }
+        std::filesystem::path const distRoot = std::filesystem::path("workflow-editor") / "ui" / "dist";
 
-    response.body = std::move(content);
-    return response;
-}
+        if (requestPath == "/editor" || requestPath == "/editor/")
+        {
+            return ServeWorkflowEditorIndex();
+        }
 
-crow::response WebServer::ServeWorkflowEditorIndex() const
-{
-    std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
-    if (!std::filesystem::exists(distIndex))
-    {
-        return crow::response(
-            500,
-            "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm run build");
-    }
+        // Serve assets from dist under two possible URL layouts:
+        //  - "/assets/..." (Vite default when base is "/")
+        //  - "/editor/assets/..." (if base is later set to "/editor/")
+        if (requestPath.rfind("/assets/", 0) == 0)
+        {
+            std::string const relative = requestPath.substr(std::string("/assets/").size());
+            return ServeStaticFile(distRoot / "assets" / relative);
+        }
+        if (requestPath.rfind("/editor/assets/", 0) == 0)
+        {
+            std::string const relative = requestPath.substr(std::string("/editor/assets/").size());
+            return ServeStaticFile(distRoot / "assets" / relative);
+        }
 
-    return ServeStaticFile(distIndex);
-}
+        // SPA fallback: any /editor/* route should serve index.html
+        if (requestPath.rfind("/editor/", 0) == 0)
+        {
+            return ServeWorkflowEditorIndex();
+        }
 
-crow::response WebServer::ServeWorkflowEditorStatic(std::string const& requestPath) const
-{
-    std::filesystem::path const distRoot = std::filesystem::path("workflow-editor") / "ui" / "dist";
-
-    if (requestPath == "/editor" || requestPath == "/editor/")
-    {
-        return ServeWorkflowEditorIndex();
+        return crow::response(404, "Not found");
     }
 
-    // Serve assets from dist under two possible URL layouts:
-    //  - "/assets/..." (Vite default when base is "/")
-    //  - "/editor/assets/..." (if base is later set to "/editor/")
-    if (requestPath.rfind("/assets/", 0) == 0)
-    {
-        std::string const relative = requestPath.substr(std::string("/assets/").size());
-        return ServeStaticFile(distRoot / "assets" / relative);
-    }
-    if (requestPath.rfind("/editor/assets/", 0) == 0)
-    {
-        std::string const relative = requestPath.substr(std::string("/editor/assets/").size());
-        return ServeStaticFile(distRoot / "assets" / relative);
-    }
-
-    // SPA fallback: any /editor/* route should serve index.html
-    if (requestPath.rfind("/editor/", 0) == 0)
-    {
-        return ServeWorkflowEditorIndex();
-    }
-
-    return crow::response(404, "Not found");
-}
-
-
-void WebServer::RegisterRoutes()
+    void WebServer::RegisterRoutes()
     {
         // ---- Serve static index page ----
-        CROW_ROUTE(m_Server, "/")(
+        CROW_ROUTE(m_Server, "/")
+        (
             []()
             {
                 std::ifstream file("web/index.html");
@@ -891,24 +906,18 @@ void WebServer::RegisterRoutes()
                 return crow::response(200, buffer.str());
             });
 
-        
+        // ---- Workflow Editor UI (React) ----
+        // Serves the production build from: workflow-editor/ui/dist
+        CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
 
-// ---- Workflow Editor UI (React) ----
-// Serves the production build from: workflow-editor/ui/dist
-CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
+        // Vite default asset paths are rooted at "/assets/...".
+        CROW_ROUTE(m_Server, "/assets/<path>")
+        ([this](std::string const& path) { return ServeWorkflowEditorStatic(std::string("/assets/") + path); });
 
-// Vite default asset paths are rooted at "/assets/...".
-CROW_ROUTE(m_Server, "/assets/<path>")([this](std::string const& path)
-    {
-        return ServeWorkflowEditorStatic(std::string("/assets/") + path);
-    });
-
-// SPA fallback for any sub-route under /editor (e.g. /editor/workflows/...)
-CROW_ROUTE(m_Server, "/editor/<path>")([this](std::string const& path)
-    {
-        return ServeWorkflowEditorStatic(std::string("/editor/") + path);
-    });
-// ---- POST /api/chat ----
+        // SPA fallback for any sub-route under /editor (e.g. /editor/workflows/...)
+        CROW_ROUTE(m_Server, "/editor/<path>")
+        ([this](std::string const& path) { return ServeWorkflowEditorStatic(std::string("/editor/") + path); });
+        // ---- POST /api/chat ----
         CROW_ROUTE(m_Server, "/api/chat")
             .methods("POST"_method)([this](const crow::request& req) { return HandleChatPost(req); });
 
@@ -916,8 +925,7 @@ CROW_ROUTE(m_Server, "/editor/<path>")([this](std::string const& path)
         CROW_ROUTE(m_Server, "/api/status")([this]() { return HandleStatusGet(); });
 
         // ---- Workflow Editor: CRUD (stubs moved to real implementation) ----
-        CROW_ROUTE(m_Server, "/api/workflows")
-            .methods("GET"_method)([this]() { return HandleWorkflowsListGet(); });
+        CROW_ROUTE(m_Server, "/api/workflows").methods("GET"_method)([this]() { return HandleWorkflowsListGet(); });
 
         CROW_ROUTE(m_Server, "/api/workflows")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
@@ -932,30 +940,32 @@ CROW_ROUTE(m_Server, "/editor/<path>")([this](std::string const& path)
         CROW_ROUTE(m_Server, "/api/workflows/<string>")
             .methods("DELETE"_method)([this](std::string const& workflowId) { return HandleWorkflowDelete(workflowId); });
 
+        // ---- Workflow Editor: validation ----
+        CROW_ROUTE(m_Server, "/api/workflows/validate")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
 
-// ---- Workflow Editor: validation ----
-CROW_ROUTE(m_Server, "/api/workflows/validate")
-    .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/validate")
+            .methods("GET"_method)([this](std::string const& workflowId) { return HandleWorkflowValidateGet(workflowId); });
 
-CROW_ROUTE(m_Server, "/api/workflows/<string>/validate")
-    .methods("GET"_method)([this](std::string const& workflowId) { return HandleWorkflowValidateGet(workflowId); });
+        // ---- Workflow Editor: run control + monitoring ----
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
+            .methods("POST"_method)([this](std::string const& workflowId) { return HandleWorkflowRunPost(workflowId); });
 
-// ---- Workflow Editor: run control + monitoring ----
-CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
-    .methods("POST"_method)([this](std::string const& workflowId) { return HandleWorkflowRunPost(workflowId); });
+        CROW_ROUTE(m_Server, "/api/workflow-runs/active")
+            .methods("GET"_method)([this]() { return HandleWorkflowRunsActiveGet(); });
 
-CROW_ROUTE(m_Server, "/api/workflow-runs/active")
-    .methods("GET"_method)([this]() { return HandleWorkflowRunsActiveGet(); });
+        CROW_ROUTE(m_Server, "/api/workflow-runs/last")
+            .methods("GET"_method)([this]() { return HandleWorkflowRunsLastGet(); });
 
-CROW_ROUTE(m_Server, "/api/workflow-runs/last")
-    .methods("GET"_method)([this]() { return HandleWorkflowRunsLastGet(); });
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>")
+            .methods("GET"_method)([this](std::string const& runId) { return HandleWorkflowRunGet(runId); });
 
-CROW_ROUTE(m_Server, "/api/workflow-runs/<string>")
-    .methods("GET"_method)([this](std::string const& runId) { return HandleWorkflowRunGet(runId); });
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
+            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunCancelPost(runId); });
 
-CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
-    .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunCancelPost(runId); });
-
+        // ---- Integrations: n8n ----
+        CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
     }
 
     crow::response WebServer::HandleChatPost(const crow::request& req)
@@ -1006,8 +1016,6 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         status["completed"] = 7;
         return MakeJsonResponse(200, status);
     }
-
-    
 
     crow::response WebServer::HandleWorkflowsListGet()
     {
@@ -1065,8 +1073,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
     {
         if (!IsValidWorkflowId(workflowId))
         {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                         "Workflow id contains invalid characters",
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
                                          "GET /api/workflows/{id}", workflowId);
         }
 
@@ -1088,16 +1095,14 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
         if (!workflowDefinition.has_value())
         {
-            return MakeWorkflowJsonError(404, "workflow_not_found",
-                                         "Workflow not found",
-                                         "GET /api/workflows/{id}", workflowId);
+            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found", "GET /api/workflows/{id}",
+                                         workflowId);
         }
 
         fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
         if (workflowFilePath.empty())
         {
-            return MakeWorkflowJsonError(500, "workflow_path_missing",
-                                         "Workflow definition is missing workflow file path",
+            return MakeWorkflowJsonError(500, "workflow_path_missing", "Workflow definition is missing workflow file path",
                                          "GET /api/workflows/{id}", workflowId);
         }
 
@@ -1137,8 +1142,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
 
         if (!IsValidWorkflowId(parsedWorkflow.m_Id))
         {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                         "Parsed JCWF id contains invalid characters",
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Parsed JCWF id contains invalid characters",
                                          "POST /api/workflows");
         }
 
@@ -1146,8 +1150,8 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         if (fs::exists(targetPath))
         {
             return MakeWorkflowJsonError(409, "workflow_already_exists",
-                                         "Workflow file already exists: " + targetPath.string(),
-                                         "POST /api/workflows", parsedWorkflow.m_Id);
+                                         "Workflow file already exists: " + targetPath.string(), "POST /api/workflows",
+                                         parsedWorkflow.m_Id);
         }
 
         std::string writeErrorMessage;
@@ -1168,8 +1172,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
     {
         if (!IsValidWorkflowId(workflowId))
         {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                         "Workflow id contains invalid characters",
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
                                          "PUT /api/workflows/{id}", workflowId);
         }
 
@@ -1190,16 +1193,14 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
 
         if (parsedWorkflow.m_Id != workflowId)
         {
-            return MakeWorkflowJsonError(400, "workflow_id_mismatch",
-                                         "URL workflow id does not match parsed JCWF id",
+            return MakeWorkflowJsonError(400, "workflow_id_mismatch", "URL workflow id does not match parsed JCWF id",
                                          "PUT /api/workflows/{id}", workflowId);
         }
 
         fs::path const targetPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
         if (!fs::exists(targetPath))
         {
-            return MakeWorkflowJsonError(404, "workflow_not_found",
-                                         "Workflow file does not exist: " + targetPath.string(),
+            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow file does not exist: " + targetPath.string(),
                                          "PUT /api/workflows/{id}", workflowId);
         }
 
@@ -1221,8 +1222,7 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
     {
         if (!IsValidWorkflowId(workflowId))
         {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                         "Workflow id contains invalid characters",
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
                                          "DELETE /api/workflows/{id}", workflowId);
         }
 
@@ -1244,9 +1244,8 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
         if (!workflowDefinition.has_value())
         {
-            return MakeWorkflowJsonError(404, "workflow_not_found",
-                                         "Workflow not found",
-                                         "DELETE /api/workflows/{id}", workflowId);
+            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found", "DELETE /api/workflows/{id}",
+                                         workflowId);
         }
 
         fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
@@ -1260,8 +1259,8 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         if (errorCode)
         {
             return MakeWorkflowJsonError(500, "workflow_delete_failed",
-                                         "Failed to delete workflow file: " + workflowFilePath.string() + " error=" +
-                                             errorCode.message(),
+                                         "Failed to delete workflow file: " + workflowFilePath.string() +
+                                             " error=" + errorCode.message(),
                                          "DELETE /api/workflows/{id}", workflowId);
         }
 
@@ -1278,359 +1277,495 @@ CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
         return MakeJsonResponse(200, responseJson);
     }
 
-
-
-crow::response WebServer::HandleWorkflowValidatePost(crow::request const& req)
-{
-    std::vector<WorkflowValidationFinding> errors;
-    std::vector<WorkflowValidationFinding> warnings;
-    std::string workflowId;
-
-    try
+    crow::response WebServer::HandleWorkflowValidatePost(crow::request const& req)
     {
-        ValidateJcwfJson(req.body, errors, warnings, workflowId);
-    }
-    catch (simdjson::simdjson_error const& error)
-    {
-        return MakeWorkflowJsonError(400, "invalid_jcwf",
-                                     std::string("Invalid JSON: ") + error.what(),
-                                     "POST /api/workflows/validate");
-    }
-    catch (std::exception const& error)
-    {
-        return MakeWorkflowJsonError(400, "invalid_jcwf",
-                                     std::string("Invalid JSON: ") + error.what(),
-                                     "POST /api/workflows/validate");
-    }
+        std::vector<WorkflowValidationFinding> errors;
+        std::vector<WorkflowValidationFinding> warnings;
+        std::string workflowId;
 
-    bool const ok = errors.empty();
-    crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings);
-    return MakeJsonResponse(200, responseJson);
-}
-
-
-crow::response WebServer::HandleWorkflowValidateGet(std::string const& workflowId)
-{
-    if (!IsValidWorkflowId(workflowId))
-    {
-        return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                     "Workflow id contains invalid characters",
-                                     "GET /api/workflows/{id}/validate", workflowId);
-    }
-
-    std::string errorMessage;
-    fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-    if (workflowsDirectoryAbsolute.empty())
-    {
-        return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}/validate",
-                                     workflowId);
-    }
-
-    WorkflowRegistry const* workflowRegistryPtr = nullptr;
-    {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRegistryPtr = m_WorkflowRegistry;
-    }
-
-    std::optional<WorkflowDefinition> workflowDefinition;
-
-    if (workflowRegistryPtr != nullptr)
-    {
-        workflowDefinition = workflowRegistryPtr->GetWorkflow(workflowId);
-    }
-    else
-    {
-        WorkflowRegistry workflowRegistry;
-        if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
+        try
         {
-            return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
-                                         "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
+            ValidateJcwfJson(req.body, errors, warnings, workflowId);
+        }
+        catch (simdjson::simdjson_error const& error)
+        {
+            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
+                                         "POST /api/workflows/validate");
+        }
+        catch (std::exception const& error)
+        {
+            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
+                                         "POST /api/workflows/validate");
+        }
+
+        bool const ok = errors.empty();
+        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings);
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowValidateGet(std::string const& workflowId)
+    {
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
                                          "GET /api/workflows/{id}/validate", workflowId);
         }
 
-        workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
-    }
-    if (!workflowDefinition.has_value())
-    {
-        return MakeWorkflowJsonError(404, "workflow_not_found",
-                                     "Workflow not found: " + workflowId,
-                                     "GET /api/workflows/{id}/validate", workflowId);
+        std::string errorMessage;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
+        if (workflowsDirectoryAbsolute.empty())
+        {
+            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}/validate", workflowId);
+        }
+
+        WorkflowRegistry const* workflowRegistryPtr = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistryPtr = m_WorkflowRegistry;
+        }
+
+        std::optional<WorkflowDefinition> workflowDefinition;
+
+        if (workflowRegistryPtr != nullptr)
+        {
+            workflowDefinition = workflowRegistryPtr->GetWorkflow(workflowId);
+        }
+        else
+        {
+            WorkflowRegistry workflowRegistry;
+            if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
+            {
+                return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
+                                             "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
+                                             "GET /api/workflows/{id}/validate", workflowId);
+            }
+
+            workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
+        }
+        if (!workflowDefinition.has_value())
+        {
+            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found: " + workflowId,
+                                         "GET /api/workflows/{id}/validate", workflowId);
+        }
+
+        fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
+        if (workflowFilePath.is_relative())
+        {
+            workflowFilePath = (workflowsDirectoryAbsolute / workflowFilePath).lexically_normal();
+        }
+
+        std::string workflowJsonContent;
+        if (!ReadTextFile(workflowFilePath, workflowJsonContent))
+        {
+            return MakeWorkflowJsonError(500, "workflow_read_failed",
+                                         "Failed to read workflow file: " + workflowFilePath.string(),
+                                         "GET /api/workflows/{id}/validate", workflowId);
+        }
+
+        std::vector<WorkflowValidationFinding> errors;
+        std::vector<WorkflowValidationFinding> warnings;
+        std::string parsedWorkflowId;
+
+        try
+        {
+            ValidateJcwfJson(workflowJsonContent, errors, warnings, parsedWorkflowId);
+        }
+        catch (simdjson::simdjson_error const& error)
+        {
+            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
+                                         "GET /api/workflows/{id}/validate", workflowId);
+        }
+        catch (std::exception const& error)
+        {
+            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
+                                         "GET /api/workflows/{id}/validate", workflowId);
+        }
+
+        if (!parsedWorkflowId.empty() && parsedWorkflowId != workflowId)
+        {
+            warnings.push_back({"workflow_id_mismatch", "Workflow id in file ('" + parsedWorkflowId +
+                                                            "') does not match requested id ('" + workflowId + "')"});
+        }
+
+        bool const ok = errors.empty();
+        crow::json::wvalue responseJson =
+            MakeWorkflowValidationResponse(ok, parsedWorkflowId.empty() ? workflowId : parsedWorkflowId, errors, warnings);
+        return MakeJsonResponse(200, responseJson);
     }
 
-    fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
-    if (workflowFilePath.is_relative())
+    crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
     {
-        workflowFilePath = (workflowsDirectoryAbsolute / workflowFilePath).lexically_normal();
-    }
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
+                                         "POST /api/workflows/{id}/run", workflowId);
+        }
 
-    std::string workflowJsonContent;
-    if (!ReadTextFile(workflowFilePath, workflowJsonContent))
-    {
-        return MakeWorkflowJsonError(500, "workflow_read_failed",
-                                     "Failed to read workflow file: " + workflowFilePath.string(),
-                                     "GET /api/workflows/{id}/validate", workflowId);
-    }
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
 
-    std::vector<WorkflowValidationFinding> errors;
-    std::vector<WorkflowValidationFinding> warnings;
-    std::string parsedWorkflowId;
+        if (workflowRuntimeManager != nullptr)
+        {
+            std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
 
-    try
-    {
-        ValidateJcwfJson(workflowJsonContent, errors, warnings, parsedWorkflowId);
-    }
-    catch (simdjson::simdjson_error const& error)
-    {
-        return MakeWorkflowJsonError(400, "invalid_jcwf",
-                                     std::string("Invalid JSON: ") + error.what(),
-                                     "GET /api/workflows/{id}/validate", workflowId);
-    }
-    catch (std::exception const& error)
-    {
-        return MakeWorkflowJsonError(400, "invalid_jcwf",
-                                     std::string("Invalid JSON: ") + error.what(),
-                                     "GET /api/workflows/{id}/validate", workflowId);
-    }
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["enqueued"] = true;
+            responseJson["id"] = workflowId;
+            responseJson["runId"] = runId;
 
-    if (!parsedWorkflowId.empty() && parsedWorkflowId != workflowId)
-    {
-        warnings.push_back({"workflow_id_mismatch",
-                            "Workflow id in file ('" + parsedWorkflowId + "') does not match requested id ('" + workflowId + "')"});
-    }
+            BroadcastWorkflowRunsSnapshot();
+            return MakeJsonResponse(202, responseJson);
+        }
 
-    bool const ok = errors.empty();
-    crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok,
-                                                                    parsedWorkflowId.empty() ? workflowId : parsedWorkflowId,
-                                                                    errors,
-                                                                    warnings);
-    return MakeJsonResponse(200, responseJson);
-}
-
-
-crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
-{
-    if (!IsValidWorkflowId(workflowId))
-    {
-        return MakeWorkflowJsonError(400, "invalid_workflow_id",
-                                     "Workflow id contains invalid characters",
-                                     "POST /api/workflows/{id}/run", workflowId);
-    }
-
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
-    {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
-    }
-
-    if (workflowRuntimeManager != nullptr)
-    {
-        std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
+        std::string const runId = WorkflowOrchestrator::Get().StartWorkflowRun(workflowId);
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["enqueued"] = true;
+        responseJson["enqueued"] = false;
         responseJson["id"] = workflowId;
         responseJson["runId"] = runId;
-
-        BroadcastWorkflowRunsSnapshot();
         return MakeJsonResponse(202, responseJson);
     }
 
-    std::string const runId = WorkflowOrchestrator::Get().StartWorkflowRun(workflowId);
-
-    crow::json::wvalue responseJson;
-    responseJson["ok"] = true;
-    responseJson["enqueued"] = false;
-    responseJson["id"] = workflowId;
-    responseJson["runId"] = runId;
-    return MakeJsonResponse(202, responseJson);
-}
-
-crow::response WebServer::HandleWorkflowRunsActiveGet()
-{
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+    crow::response WebServer::HandleWorkflowRunsActiveGet()
     {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "GET /api/workflow-runs/active");
+        }
+
+        auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        crow::json::wvalue::list runsJson;
+        for (auto const& run : activeRuns)
+        {
+            crow::json::wvalue runJson;
+            runJson["runId"] = run.m_RunId;
+            runJson["workflowId"] = run.m_WorkflowId;
+            runJson["state"] = ToStringWorkflowRunState(run.m_State);
+            runJson["startedAt"] = run.m_StartedAtIso8601;
+            runJson["completedAt"] = run.m_CompletedAtIso8601;
+            runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
+            runsJson.push_back(std::move(runJson));
+        }
+        responseJson["runs"] = std::move(runsJson);
+
+        return MakeJsonResponse(200, responseJson);
     }
 
-    if (workflowRuntimeManager == nullptr)
+    crow::response WebServer::HandleWorkflowRunsLastGet()
     {
-        return MakeWorkflowJsonError(501, "not_configured",
-                                     "Workflow runtime manager not configured on web server",
-                                     "GET /api/workflow-runs/active");
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "GET /api/workflow-runs/last");
+        }
+
+        auto lastRuns = workflowRuntimeManager->GetLastRunsSnapshot();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+
+        crow::json::wvalue::list runsJson;
+        for (auto const& [workflowId, run] : lastRuns)
+        {
+            crow::json::wvalue runJson;
+            runJson["runId"] = run.m_RunId;
+            runJson["workflowId"] = workflowId;
+            runJson["state"] = ToStringWorkflowRunState(run.m_State);
+            runJson["startedAt"] = run.m_StartedAtIso8601;
+            runJson["completedAt"] = run.m_CompletedAtIso8601;
+            runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
+            runsJson.push_back(std::move(runJson));
+        }
+        responseJson["runs"] = std::move(runsJson);
+
+        return MakeJsonResponse(200, responseJson);
     }
 
-    auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-
-    crow::json::wvalue responseJson;
-    responseJson["ok"] = true;
-    crow::json::wvalue::list runsJson;
-    for (auto const& run : activeRuns)
+    crow::response WebServer::HandleWorkflowRunGet(std::string const& runId)
     {
+        if (runId.empty())
+        {
+            return MakeWorkflowJsonError(400, "invalid_run_id", "Run id is empty", "GET /api/workflow-runs/{runId}");
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "GET /api/workflow-runs/{runId}");
+        }
+
+        WorkflowRun run;
+        if (!workflowRuntimeManager->TryGetRunById(runId, run))
+        {
+            return MakeWorkflowJsonError(404, "run_not_found", "Run not found: " + runId, "GET /api/workflow-runs/{runId}",
+                                         runId);
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+
         crow::json::wvalue runJson;
         runJson["runId"] = run.m_RunId;
         runJson["workflowId"] = run.m_WorkflowId;
         runJson["state"] = ToStringWorkflowRunState(run.m_State);
         runJson["startedAt"] = run.m_StartedAtIso8601;
         runJson["completedAt"] = run.m_CompletedAtIso8601;
-        runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
-        runsJson.push_back(std::move(runJson));
-    }
-    responseJson["runs"] = std::move(runsJson);
 
-    return MakeJsonResponse(200, responseJson);
-}
+        crow::json::wvalue::list tasksJson;
+        tasksJson.reserve(run.m_TaskStates.size());
 
-crow::response WebServer::HandleWorkflowRunsLastGet()
-{
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
-    {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
-    }
-
-    if (workflowRuntimeManager == nullptr)
-    {
-        return MakeWorkflowJsonError(501, "not_configured",
-                                     "Workflow runtime manager not configured on web server",
-                                     "GET /api/workflow-runs/last");
-    }
-
-    auto lastRuns = workflowRuntimeManager->GetLastRunsSnapshot();
-
-    crow::json::wvalue responseJson;
-    responseJson["ok"] = true;
-
-    crow::json::wvalue::list runsJson;
-    for (auto const& [workflowId, run] : lastRuns)
-    {
-        crow::json::wvalue runJson;
-        runJson["runId"] = run.m_RunId;
-        runJson["workflowId"] = workflowId;
-        runJson["state"] = ToStringWorkflowRunState(run.m_State);
-        runJson["startedAt"] = run.m_StartedAtIso8601;
-        runJson["completedAt"] = run.m_CompletedAtIso8601;
-        runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
-        runsJson.push_back(std::move(runJson));
-    }
-    responseJson["runs"] = std::move(runsJson);
-
-    return MakeJsonResponse(200, responseJson);
-}
-
-crow::response WebServer::HandleWorkflowRunGet(std::string const& runId)
-{
-    if (runId.empty())
-    {
-        return MakeWorkflowJsonError(400, "invalid_run_id",
-                                     "Run id is empty",
-                                     "GET /api/workflow-runs/{runId}");
-    }
-
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
-    {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
-    }
-
-    if (workflowRuntimeManager == nullptr)
-    {
-        return MakeWorkflowJsonError(501, "not_configured",
-                                     "Workflow runtime manager not configured on web server",
-                                     "GET /api/workflow-runs/{runId}");
-    }
-
-    WorkflowRun run;
-    if (!workflowRuntimeManager->TryGetRunById(runId, run))
-    {
-        return MakeWorkflowJsonError(404, "run_not_found",
-                                     "Run not found: " + runId,
-                                     "GET /api/workflow-runs/{runId}", runId);
-    }
-
-    crow::json::wvalue responseJson;
-    responseJson["ok"] = true;
-
-    crow::json::wvalue runJson;
-    runJson["runId"] = run.m_RunId;
-    runJson["workflowId"] = run.m_WorkflowId;
-    runJson["state"] = ToStringWorkflowRunState(run.m_State);
-    runJson["startedAt"] = run.m_StartedAtIso8601;
-    runJson["completedAt"] = run.m_CompletedAtIso8601;
-
-    crow::json::wvalue::list tasksJson;
-    tasksJson.reserve(run.m_TaskStates.size());
-
-    for (auto const& taskPair : run.m_TaskStates)
-    {
-        std::string const& taskId = taskPair.first;
-        TaskInstanceState const& taskState = taskPair.second;
-
-        crow::json::wvalue taskJson;
-        taskJson["taskId"] = taskId;
-        taskJson["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
-        taskJson["attemptCount"] = static_cast<int64_t>(taskState.m_AttemptCount);
-        taskJson["startedAt"] = taskState.m_StartedAtIso8601;
-        taskJson["completedAt"] = taskState.m_CompletedAtIso8601;
-
-        if (!taskState.m_LastErrorMessage.empty())
+        for (auto const& taskPair : run.m_TaskStates)
         {
-            taskJson["error"] = taskState.m_LastErrorMessage;
+            std::string const& taskId = taskPair.first;
+            TaskInstanceState const& taskState = taskPair.second;
+
+            crow::json::wvalue taskJson;
+            taskJson["taskId"] = taskId;
+            taskJson["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
+            taskJson["attemptCount"] = static_cast<int64_t>(taskState.m_AttemptCount);
+            taskJson["startedAt"] = taskState.m_StartedAtIso8601;
+            taskJson["completedAt"] = taskState.m_CompletedAtIso8601;
+
+            if (!taskState.m_LastErrorMessage.empty())
+            {
+                taskJson["error"] = taskState.m_LastErrorMessage;
+            }
+
+            tasksJson.push_back(std::move(taskJson));
         }
 
-        tasksJson.push_back(std::move(taskJson));
+        runJson["tasks"] = std::move(tasksJson);
+        responseJson["run"] = std::move(runJson);
+
+        return MakeJsonResponse(200, responseJson);
     }
 
-    runJson["tasks"] = std::move(tasksJson);
-    responseJson["run"] = std::move(runJson);
+    crow::response WebServer::HandleWorkflowRunCancelPost(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return MakeWorkflowJsonError(400, "invalid_run_id", "Run id is empty", "POST /api/workflow-runs/{runId}/cancel");
+        }
 
-    return MakeJsonResponse(200, responseJson);
-}
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
 
-crow::response WebServer::HandleWorkflowRunCancelPost(std::string const& runId)
-{
-if (runId.empty())
-{
-    return MakeWorkflowJsonError(400, "invalid_run_id",
-                                 "Run id is empty",
-                                 "POST /api/workflow-runs/{runId}/cancel");
-}
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "POST /api/workflow-runs/{runId}/cancel", runId);
+        }
 
-WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
-{
-    std::scoped_lock<std::mutex> const lock(m_Mutex);
-    workflowRuntimeManager = m_WorkflowRuntimeManager;
-}
+        bool const cancelRequested = workflowRuntimeManager->RequestCancelRun(runId);
+        if (!cancelRequested)
+        {
+            return MakeWorkflowJsonError(404, "run_not_found", "Run not found or not active: " + runId,
+                                         "POST /api/workflow-runs/{runId}/cancel", runId);
+        }
 
-if (workflowRuntimeManager == nullptr)
-{
-    return MakeWorkflowJsonError(501, "not_configured",
-                                 "Workflow runtime manager not configured on web server",
-                                 "POST /api/workflow-runs/{runId}/cancel", runId);
-}
+        // Best-effort: push an updated snapshot to any connected editor clients.
+        BroadcastWorkflowRunsSnapshot();
 
-bool const cancelRequested = workflowRuntimeManager->RequestCancelRun(runId);
-if (!cancelRequested)
-{
-    return MakeWorkflowJsonError(404, "run_not_found",
-                                 "Run not found or not active: " + runId,
-                                 "POST /api/workflow-runs/{runId}/cancel", runId);
-}
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["cancelRequested"] = true;
+        responseJson["runId"] = runId;
 
-// Best-effort: push an updated snapshot to any connected editor clients.
-BroadcastWorkflowRunsSnapshot();
+        return MakeJsonResponse(202, responseJson);
+    }
 
-crow::json::wvalue responseJson;
-responseJson["ok"] = true;
-responseJson["cancelRequested"] = true;
-responseJson["runId"] = runId;
+    crow::response WebServer::HandleN8nStartPost(crow::request const& req)
+    {
+        // Expected body:
+        // {
+        //   "workflowId": "...",
+        //   "runId": "..." (optional),
+        //   "callbackUrl": "..." (optional),
+        //   "context": { "k": "v", ... } (optional)
+        // }
 
-return MakeJsonResponse(202, responseJson);
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string json(req.body);
+            auto doc = parser.iterate(json);
 
-}
+            auto workflowIdField = doc["workflowId"].get_string();
+            if (workflowIdField.error() != simdjson::SUCCESS)
+            {
+                return MakeWorkflowJsonError(400, "missing_workflow_id", "Missing required field: workflowId",
+                                             "POST /api/integrations/n8n/start");
+            }
 
-void WebServer::RegisterWebSocket()
+            std::string const workflowId = std::string(workflowIdField.value());
+            if (!IsValidWorkflowId(workflowId))
+            {
+                return MakeWorkflowJsonError(400, "invalid_workflow_id", "workflowId contains invalid characters",
+                                             "POST /api/integrations/n8n/start", workflowId);
+            }
+
+            std::string runId;
+            {
+                auto runIdField = doc["runId"].get_string();
+                if (runIdField.error() == simdjson::SUCCESS)
+                {
+                    runId = std::string(runIdField.value());
+                }
+            }
+
+            std::string taskName;
+            {
+                auto taskNameField = doc["taskName"].get_string();
+                if (taskNameField.error() == simdjson::SUCCESS)
+                {
+                    taskName = std::string(taskNameField.value());
+                }
+            }
+
+            if (taskName.empty())
+            {
+                taskName = "n8n";
+            }
+            else if (!IsValidTaskName(taskName))
+            {
+                return MakeWorkflowJsonError(400, "invalid_task_name", "taskName contains invalid characters",
+                                             "POST /api/integrations/n8n/start", workflowId);
+            }
+
+            if (runId.empty())
+            {
+                runId = GenerateIntegrationRunId(workflowId);
+            }
+
+            // Persist the raw request body to disk for traceability.
+            std::string workflowsDirError;
+            fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(workflowsDirError);
+            if (workflowsDirectoryAbsolute.empty())
+            {
+                return MakeWorkflowJsonError(500, "config_error", workflowsDirError, "POST /api/integrations/n8n/start");
+            }
+
+            fs::path const runsRoot = workflowsDirectoryAbsolute / workflowId / taskName / "n8n" / runId;
+            fs::path const requestJsonPath = runsRoot / "request.json";
+
+            std::string writeError;
+            if (!WriteTextFileAtomic(requestJsonPath, req.body, writeError))
+            {
+                return MakeWorkflowJsonError(500, "write_failed", writeError, "POST /api/integrations/n8n/start",
+                                             workflowId);
+            }
+
+            // Build run context (string -> string) for task executors.
+            ContextMap context;
+            context["n8n_request_path"].m_Value = requestJsonPath.string();
+            context["n8n_task"].m_Value = taskName;
+
+            {
+                auto callbackUrlField = doc["callbackUrl"].get_string();
+                if (callbackUrlField.error() == simdjson::SUCCESS)
+                {
+                    context["callbackUrl"].m_Value = std::string(callbackUrlField.value());
+                }
+            }
+
+            // Merge any provided context fields.
+            auto contextField = doc["context"];
+            if (contextField.error() == simdjson::SUCCESS)
+            {
+                simdjson::ondemand::object ctxObj;
+                if (contextField.get_object().get(ctxObj) == simdjson::SUCCESS)
+                {
+                    for (auto field : ctxObj)
+                    {
+                        simdjson::simdjson_result<std::string_view> keyResult = field.unescaped_key();
+                        if (keyResult.error() != simdjson::SUCCESS)
+                        {
+                            continue;
+                        }
+
+                        std::string const key = std::string(keyResult.value());
+
+                        if (field.value().is_string())
+                        {
+                            auto strValue = field.value().get_string();
+                            if (strValue.error() == simdjson::SUCCESS)
+                            {
+                                context[key].m_Value = std::string(strValue.value());
+                            }
+                        }
+                        else
+                        {
+                            auto rawJson = field.value().get_raw_json_string();
+                            if (rawJson.error() == simdjson::SUCCESS)
+                            {
+                                context[key].m_Value = std::string(rawJson.value().raw());
+                            }
+                        }
+                    }
+                }
+            }
+
+            WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                workflowRuntimeManager = m_WorkflowRuntimeManager;
+            }
+
+            if (workflowRuntimeManager == nullptr)
+            {
+                return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                             "POST /api/integrations/n8n/start", workflowId);
+            }
+
+            std::string const enqueuedRunId =
+                workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, runId, context);
+
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["workflowId"] = workflowId;
+            responseJson["runId"] = enqueuedRunId;
+            responseJson["requestPath"] = requestJsonPath.string();
+
+            BroadcastWorkflowRunsSnapshot();
+            return MakeJsonResponse(202, responseJson);
+        }
+        catch (std::exception const& e)
+        {
+            return MakeWorkflowJsonError(400, "invalid_json", e.what(), "POST /api/integrations/n8n/start");
+        }
+    }
+
+    void WebServer::RegisterWebSocket()
     {
         CROW_WEBSOCKET_ROUTE(m_Server, "/ws")
             .onopen(
@@ -1685,43 +1820,43 @@ void WebServer::RegisterWebSocket()
                             response["file"] = filename.string();
                             conn.send_text(response.dump());
                         }
-                        
-else if (type == "workflow-runs-request")
-{
-    WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
-    {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        workflowRuntimeManager = m_WorkflowRuntimeManager;
-    }
 
-    crow::json::wvalue msg;
-    msg["type"] = "workflow-runs-snapshot";
+                        else if (type == "workflow-runs-request")
+                        {
+                            WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+                            {
+                                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                                workflowRuntimeManager = m_WorkflowRuntimeManager;
+                            }
 
-    if (workflowRuntimeManager != nullptr)
-    {
-        auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
-        crow::json::wvalue::list activeRunsJson;
-        for (auto const& run : activeRuns)
-        {
-            crow::json::wvalue runJson;
-            runJson["runId"] = run.m_RunId;
-            runJson["workflowId"] = run.m_WorkflowId;
-            runJson["state"] = ToStringWorkflowRunState(run.m_State);
-            runJson["startedAt"] = run.m_StartedAtIso8601;
-            runJson["completedAt"] = run.m_CompletedAtIso8601;
-            activeRunsJson.push_back(std::move(runJson));
-        }
-        msg["activeRuns"] = std::move(activeRunsJson);
-    }
-    else
-    {
-        msg["activeRuns"] = crow::json::wvalue::list();
-        msg["warning"] = "workflow runtime manager not configured";
-    }
+                            crow::json::wvalue msg;
+                            msg["type"] = "workflow-runs-snapshot";
 
-    conn.send_text(msg.dump());
-}
-else if (type == "quit")
+                            if (workflowRuntimeManager != nullptr)
+                            {
+                                auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
+                                crow::json::wvalue::list activeRunsJson;
+                                for (auto const& run : activeRuns)
+                                {
+                                    crow::json::wvalue runJson;
+                                    runJson["runId"] = run.m_RunId;
+                                    runJson["workflowId"] = run.m_WorkflowId;
+                                    runJson["state"] = ToStringWorkflowRunState(run.m_State);
+                                    runJson["startedAt"] = run.m_StartedAtIso8601;
+                                    runJson["completedAt"] = run.m_CompletedAtIso8601;
+                                    activeRunsJson.push_back(std::move(runJson));
+                                }
+                                msg["activeRuns"] = std::move(activeRunsJson);
+                            }
+                            else
+                            {
+                                msg["activeRuns"] = crow::json::wvalue::list();
+                                msg["warning"] = "workflow runtime manager not configured";
+                            }
+
+                            conn.send_text(msg.dump());
+                        }
+                        else if (type == "quit")
                         {
                             auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                             Core::g_Core->PushEvent(event);

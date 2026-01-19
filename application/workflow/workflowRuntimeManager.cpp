@@ -62,7 +62,6 @@ namespace AIAssistant
             return stream.str();
         }
 
-
         void PopulateSkippedTaskOutputsIfPossible(WorkflowDefinition const& workflowDefinition,
                                                   WorkflowRun const& workflowRun, TaskDef const& taskDefinition,
                                                   std::string const& taskId, TaskInstanceState& taskState)
@@ -154,9 +153,8 @@ namespace AIAssistant
             return true;
         }
 
-
-
-        std::unordered_map<std::string, TaskInstanceState> BuildInitialTaskStates(WorkflowDefinition const& workflowDefinition)
+        std::unordered_map<std::string, TaskInstanceState>
+        BuildInitialTaskStates(WorkflowDefinition const& workflowDefinition)
         {
             std::unordered_map<std::string, TaskInstanceState> taskStates;
             taskStates.reserve(workflowDefinition.m_Tasks.size());
@@ -244,10 +242,53 @@ namespace AIAssistant
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
-            m_PendingRuns.push(PendingRun{ workflowId, runId });
+            m_PendingRuns.push(PendingRun{workflowId, runId, ContextMap{}});
         }
 
         return runId;
+    }
+
+    std::string WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId(std::string const& workflowId,
+                                                                                 std::string const& runId,
+                                                                                 ContextMap const& context)
+    {
+        if (workflowId.empty())
+        {
+            return std::string();
+        }
+
+        WorkflowRegistry const* workflowRegistry = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistry = m_WorkflowRegistry;
+        }
+
+        std::string resolvedRunId = runId;
+        if (resolvedRunId.empty())
+        {
+            if (workflowRegistry != nullptr)
+            {
+                std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
+                if (workflowDefinition.has_value())
+                {
+                    resolvedRunId = GenerateRunId(workflowDefinition.value());
+                }
+            }
+        }
+
+        if (resolvedRunId.empty())
+        {
+            auto const now = std::chrono::system_clock::now().time_since_epoch();
+            auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+            resolvedRunId = workflowId + "_" + std::to_string(millis);
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_PendingRuns.push(PendingRun{workflowId, resolvedRunId, context});
+        }
+
+        return resolvedRunId;
     }
 
     bool WorkflowRuntimeManager::TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const
@@ -386,7 +427,6 @@ namespace AIAssistant
             }
         }
 
-
         // If the run is already completed (e.g. cancelled), drop the completion instead of deferring forever.
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -474,12 +514,14 @@ namespace AIAssistant
                 continue;
             }
 
-            std::string const runId = pendingRun.m_RunId.empty() ? GenerateRunId(workflowDefinition.value()) : pendingRun.m_RunId;
+            std::string const runId =
+                pendingRun.m_RunId.empty() ? GenerateRunId(workflowDefinition.value()) : pendingRun.m_RunId;
 
             ActiveRun activeRun;
             activeRun.m_Definition = workflowDefinition.value();
             activeRun.m_Run.m_RunId = runId;
             activeRun.m_Run.m_WorkflowId = pendingRun.m_WorkflowId;
+            activeRun.m_Run.m_Context = pendingRun.m_Context;
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
 
             {
@@ -583,34 +625,35 @@ namespace AIAssistant
             return;
         }
 
-// ---------------------------------------------------------
-// Cancellation gate (best-effort, cooperative)
-// ---------------------------------------------------------
-if (activeRun.m_CancelRequested)
-{
-    // Do not dispatch new work. Once all running tasks finish, mark the run cancelled.
-    if (activeRun.m_RunningTasks.empty())
-    {
-        for (auto& taskPair : workflowRun.m_TaskStates)
+        // ---------------------------------------------------------
+        // Cancellation gate (best-effort, cooperative)
+        // ---------------------------------------------------------
+        if (activeRun.m_CancelRequested)
         {
-            TaskInstanceState& taskState = taskPair.second;
-            if (taskState.m_State == TaskInstanceStateKind::Pending || taskState.m_State == TaskInstanceStateKind::Ready ||
-                taskState.m_State == TaskInstanceStateKind::WaitingExternal)
+            // Do not dispatch new work. Once all running tasks finish, mark the run cancelled.
+            if (activeRun.m_RunningTasks.empty())
             {
-                taskState.m_State = TaskInstanceStateKind::Skipped;
-                if (taskState.m_LastErrorMessage.empty())
+                for (auto& taskPair : workflowRun.m_TaskStates)
                 {
-                    taskState.m_LastErrorMessage = "cancelled";
+                    TaskInstanceState& taskState = taskPair.second;
+                    if (taskState.m_State == TaskInstanceStateKind::Pending ||
+                        taskState.m_State == TaskInstanceStateKind::Ready ||
+                        taskState.m_State == TaskInstanceStateKind::WaitingExternal)
+                    {
+                        taskState.m_State = TaskInstanceStateKind::Skipped;
+                        if (taskState.m_LastErrorMessage.empty())
+                        {
+                            taskState.m_LastErrorMessage = "cancelled";
+                        }
+                    }
                 }
+
+                workflowRun.m_State = WorkflowRunState::Cancelled;
+                workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                workflowRun.m_IsCompleted = true;
+                return;
             }
         }
-
-        workflowRun.m_State = WorkflowRunState::Cancelled;
-        workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
-        workflowRun.m_IsCompleted = true;
-        return;
-    }
-}
 
         // ---------------------------------------------------------
         // 2) Dispatch newly-ready tasks (no waiting)
@@ -728,8 +771,7 @@ if (activeRun.m_CancelRequested)
             activeRun.m_RunningTasks[taskId] =
                 pool.SubmitTask(
                         [this, &workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
-                         taskStateSnapshot]() -> TaskExecutionResult
-                        {
+                         taskStateSnapshot]() -> TaskExecutionResult {
                             return ExecuteTaskOnWorker(workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
                                                        taskStateSnapshot);
                         })
@@ -890,7 +932,6 @@ if (activeRun.m_CancelRequested)
         return runId;
     }
 
-
     bool WorkflowRuntimeManager::TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -907,49 +948,48 @@ if (activeRun.m_CancelRequested)
         return false;
     }
 
-bool WorkflowRuntimeManager::RequestCancelRun(std::string const& runId)
-{
-    if (runId.empty())
+    bool WorkflowRuntimeManager::RequestCancelRun(std::string const& runId)
     {
+        if (runId.empty())
+        {
+            return false;
+        }
+
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        for (ActiveRun& activeRun : m_ActiveRuns)
+        {
+            if (activeRun.m_Run.m_RunId == runId)
+            {
+                activeRun.m_CancelRequested = true;
+                return true;
+            }
+        }
+
         return false;
     }
 
-    std::scoped_lock<std::mutex> const lock(m_Mutex);
-
-    for (ActiveRun& activeRun : m_ActiveRuns)
+    bool WorkflowRuntimeManager::TryGetRunById(std::string const& runId, WorkflowRun& outRun) const
     {
-        if (activeRun.m_Run.m_RunId == runId)
+        if (TryGetActiveRun(runId, outRun))
         {
-            activeRun.m_CancelRequested = true;
             return true;
         }
-    }
 
-    return false;
-}
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-bool WorkflowRuntimeManager::TryGetRunById(std::string const& runId, WorkflowRun& outRun) const
-{
-    if (TryGetActiveRun(runId, outRun))
-    {
-        return true;
-    }
-
-    std::scoped_lock<std::mutex> const lock(m_Mutex);
-
-    for (auto const& runPair : m_LastRuns)
-    {
-        WorkflowRun const& run = runPair.second;
-        if (run.m_RunId == runId)
+        for (auto const& runPair : m_LastRuns)
         {
-            outRun = run;
-            return true;
+            WorkflowRun const& run = runPair.second;
+            if (run.m_RunId == runId)
+            {
+                outRun = run;
+                return true;
+            }
         }
+
+        return false;
     }
-
-    return false;
-}
-
 
     std::vector<WorkflowRun> WorkflowRuntimeManager::GetActiveRunsSnapshot() const
     {

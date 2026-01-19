@@ -1,0 +1,41 @@
+{
+  "workflow_id": "hamburg-tourist-day-planner",
+  "name": "Hamburg Tourist Day Planner (n8n)",
+  "version": 1,
+  "description": "Generates a tourist day plan for Hamburg using weather context provided by n8n.",
+  "triggers": [
+    {
+      "type": "manual"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "plan",
+      "type": "ai_call",
+      "mode": "blocking",
+      "prompt": {
+        "system": "You are a helpful travel planner.",
+        "user": "Create a day plan for tourists in Hamburg for date={{context.date}} timezone={{context.timezone}}. Rain category: {{context.rainCategory}}. Weather JSON: {{context.weatherJson}}. Output Markdown only."
+      },
+      "outputs": {
+        "plan_markdown": "string"
+      }
+    },
+    {
+      "id": "finalize",
+      "type": "python",
+      "mode": "blocking",
+      "depends_on": ["plan"],
+      "entrypoint": "tasks/finalize.py",
+      "inputs": {
+        "plan_markdown": "${tasks.plan.outputs.plan_markdown}",
+        "n8n_request_path": "${context.n8n_request_path}",
+        "callbackUrl": "${context.callbackUrl}",
+        "n8n_task": "${context.n8n_task}"
+      },
+      "outputs": {
+        "result_markdown": "string"
+      }
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+    "name": "jarvisagent-n8n-internal",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Internal n8n custom node for JarvisAgent (repo-local bundle)",
+    "license": "UNLICENSED",
+    "main": "index.js",
+    "n8n": {
+        "n8nNodesApiVersion": 1,
+        "nodes": [
+            "nodes/JarvisAgentStartWorkflow.node.js"
+        ]
+    }
+}

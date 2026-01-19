@@ -79,6 +79,9 @@ namespace AIAssistant
         crow::response HandleWorkflowRunGet(std::string const& runId);
         crow::response HandleWorkflowRunCancelPost(std::string const& runId);
 
+        // Integrations: n8n
+        crow::response HandleN8nStartPost(crow::request const& req);
+
         crow::response HandleWorkflowsListGet();
         crow::response HandleWorkflowsCreatePost(crow::request const& req);
         crow::response HandleWorkflowGet(std::string const& workflowId);
