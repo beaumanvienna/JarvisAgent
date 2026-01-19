@@ -32,12 +32,22 @@ namespace AIAssistant
     enum class WorkflowValidationSeverity
     {
         Error = 0,
-        Warning = 1
+        Warning = 1,
+        Info = 2
+    };
+
+    enum class WorkflowValidationTier
+    {
+        A = 0,
+        B = 1,
+        C = 2,
+        D = 3
     };
 
     struct WorkflowValidationIssue
     {
         WorkflowValidationSeverity m_Severity{WorkflowValidationSeverity::Error};
+        WorkflowValidationTier m_Tier{WorkflowValidationTier::B};
         std::string m_Code;
         std::string m_Message;
 

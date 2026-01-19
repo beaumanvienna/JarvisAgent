@@ -74,3 +74,27 @@
 .taskNodeBadgeRuntimeCancelled {
   border-color: rgba(255, 200, 80, 0.7);
 }
+
+.btnLink {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.btnLink:hover {
+  text-decoration: underline;
+}
+
+.btnLink code {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}

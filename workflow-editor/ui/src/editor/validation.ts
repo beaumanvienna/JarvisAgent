@@ -5,6 +5,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
 {
   const nodeErrorsById = new Map<string, string[]>();
   const nodeWarningsById = new Map<string, string[]>();
+  const nodeInfosById = new Map<string, string[]>();
 
   // id uniqueness (React Flow already needs unique ids, but we validate anyway)
   const ids = graph.nodes.map((n) => n.id);
@@ -18,6 +19,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
   {
     const errors: string[] = [];
     const warnings: string[] = [];
+    const infos: string[] = [];
 
     if (!node.id || node.id.length === 0)
     {
@@ -41,7 +43,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
     }
     else if (task.working_directory === undefined)
     {
-      warnings.push("working_directory is not set.");
+      infos.push("working_directory is not set.");
     }
 
     if (task.working_directory !== undefined && typeof task.working_directory !== "string")
@@ -57,6 +59,11 @@ export function validateGraph(graph: EditorGraph): ValidationResult
     if (warnings.length > 0)
     {
       nodeWarningsById.set(node.id, warnings);
+    }
+
+    if (infos.length > 0)
+    {
+      nodeInfosById.set(node.id, infos);
     }
   }
 
@@ -90,5 +97,5 @@ export function validateGraph(graph: EditorGraph): ValidationResult
     nodeErrorsById.set(nodeId, current);
   }
 
-  return { nodeErrorsById, nodeWarningsById, cycleNodes };
+  return { nodeErrorsById, nodeWarningsById, nodeInfosById, cycleNodes };
 }

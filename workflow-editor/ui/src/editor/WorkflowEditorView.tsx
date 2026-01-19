@@ -201,6 +201,7 @@ export default function WorkflowEditorView(props: {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [backendErrors, setBackendErrors] = useState<WorkflowValidationFinding[]>([]);
   const [backendWarnings, setBackendWarnings] = useState<WorkflowValidationFinding[]>([]);
+  const [backendInfos, setBackendInfos] = useState<WorkflowValidationFinding[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | null>(null);
   const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
@@ -261,6 +262,7 @@ export default function WorkflowEditorView(props: {
     setLoadedWorkflowId(null);
     setBackendErrors([]);
     setBackendWarnings([]);
+    setBackendInfos([]);
     setErrorText(null);
     setShowBackToListHint(false);
 
@@ -296,6 +298,7 @@ export default function WorkflowEditorView(props: {
   const recomputeValidation = useCallback((graph: EditorGraph, backendFindings?: {
     errors: WorkflowValidationFinding[];
     warnings: WorkflowValidationFinding[];
+    infos?: WorkflowValidationFinding[];
   }) => {
     const validation = validateGraph(graph);
 
@@ -309,7 +312,7 @@ export default function WorkflowEditorView(props: {
     const sourceErrors = backendFindings ? backendFindings.errors : backendErrors;
     for (const finding of sourceErrors)
     {
-      const taskId = parseTaskIdFromMessage(finding.message);
+      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
       if (!taskId)
       {
         continue;
@@ -324,7 +327,7 @@ export default function WorkflowEditorView(props: {
     const sourceWarnings = backendFindings ? backendFindings.warnings : backendWarnings;
     for (const finding of sourceWarnings)
     {
-      const taskId = parseTaskIdFromMessage(finding.message);
+      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
       if (!taskId)
       {
         continue;
@@ -335,6 +338,21 @@ export default function WorkflowEditorView(props: {
       backendWarningsByTaskId.set(taskId, existing);
     }
 
+    const backendInfosByTaskId = new Map<string, string[]>();
+    const sourceInfos = backendFindings ? (backendFindings.infos ?? []) : backendInfos;
+    for (const finding of sourceInfos)
+    {
+      const taskId = finding.taskId ?? parseTaskIdFromMessage(finding.message);
+      if (!taskId)
+      {
+        continue;
+      }
+
+      const existing = backendInfosByTaskId.get(taskId) ?? [];
+      existing.push(finding.message);
+      backendInfosByTaskId.set(taskId, existing);
+    }
+
     const nextNodes: EditorTaskNode[] = graph.nodes.map((n) => {
       const clientErrors = validation.nodeErrorsById.get(n.id) ?? [];
       const serverErrors = backendErrorsByTaskId.get(n.id) ?? [];
@@ -343,6 +361,10 @@ export default function WorkflowEditorView(props: {
       const clientWarnings = validation.nodeWarningsById ? (validation.nodeWarningsById.get(n.id) ?? []) : [];
       const serverWarnings = backendWarningsByTaskId.get(n.id) ?? [];
       const mergedWarnings = [...clientWarnings, ...serverWarnings];
+
+      const clientInfos = validation.nodeInfosById ? (validation.nodeInfosById.get(n.id) ?? []) : [];
+      const serverInfos = backendInfosByTaskId.get(n.id) ?? [];
+      const mergedInfos = [...clientInfos, ...serverInfos];
 
       const savedTaskSignature = lastSavedNodeSnapshot[n.id];
       const nodeIsDirty = savedTaskSignature ? computeTaskSignature(n.data.task) !== savedTaskSignature : true;
@@ -355,6 +377,7 @@ export default function WorkflowEditorView(props: {
           ...n.data,
           validationErrors: mergedErrors.length > 0 ? mergedErrors : undefined,
           validationWarnings: mergedWarnings.length > 0 ? mergedWarnings : undefined,
+          validationInfos: mergedInfos.length > 0 ? mergedInfos : undefined,
           isDirty: nodeIsDirty ? true : undefined,
           runtimeState: runtimeSnapshot ? runtimeSnapshot.state : undefined,
           runtimeRunId: runtimeSnapshot ? runtimeSnapshot.runId : undefined,
@@ -364,7 +387,7 @@ export default function WorkflowEditorView(props: {
 
     setNodes(nextNodes);
     setEdges(graph.edges);
-  }, [setNodes, setEdges, backendErrors, backendWarnings, lastSavedNodeSnapshot]);
+  }, [setNodes, setEdges, backendErrors, backendWarnings, backendInfos, lastSavedNodeSnapshot]);
 
   useEffect(() => {
     setNodes((current) => {
@@ -408,6 +431,7 @@ export default function WorkflowEditorView(props: {
     setLoadedWorkflowId(workflowId);
     setBackendErrors([]);
     setBackendWarnings([]);
+    setBackendInfos([]);
     setSelectedNodeId(null);
     setShowBackToListHint(false);
     setStatusText(`Loaded workflow '${workflowId}'.`);
@@ -632,10 +656,26 @@ export default function WorkflowEditorView(props: {
     return (nodes as EditorTaskNode[]).find((n) => n.id === selectedNodeId) ?? null;
   }, [nodes, selectedNodeId]);
 
+  const selectNodeById = useCallback((nodeId: string | null) => {
+    setSelectedNodeId(nodeId);
+    setNodes((current) => {
+      const currentNodes = current as EditorTaskNode[];
+      if (!nodeId)
+      {
+        return currentNodes.map((n) => (n.selected ? { ...n, selected: false } : n));
+      }
+
+      return currentNodes.map((n) => {
+        const nextSelected = n.id === nodeId;
+        return n.selected === nextSelected ? n : { ...n, selected: nextSelected };
+      });
+    });
+  }, [setNodes]);
+
   const onSelectionChange = useCallback((params: { nodes?: Node[]; edges?: Edge[]; }) => {
     const selected = params.nodes && params.nodes.length > 0 ? params.nodes[0] : null;
-    setSelectedNodeId(selected ? selected.id : null);
-  }, []);
+    selectNodeById(selected ? selected.id : null);
+  }, [selectNodeById]);
 
   const onConnect = useCallback((connection: Connection) => {
     // Create an edge and immediately validate DAG.
@@ -879,7 +919,8 @@ export default function WorkflowEditorView(props: {
       const result = await validateDraft(jcwf);
       setBackendErrors(result.errors);
       setBackendWarnings(result.warnings);
-      recomputeValidation({ nodes: nodes as EditorTaskNode[], edges }, { errors: result.errors, warnings: result.warnings });
+      setBackendInfos(result.infos ?? []);
+      recomputeValidation({ nodes: nodes as EditorTaskNode[], edges }, { errors: result.errors, warnings: result.warnings, infos: result.infos ?? [] });
 
       if (result.ok)
       {
@@ -976,7 +1017,7 @@ export default function WorkflowEditorView(props: {
           {statusText ? <div className="small" style={{ marginTop: 10 }}>{statusText}</div> : null}
           {errorText ? <div className="errorText" style={{ marginTop: 10 }}>{errorText}</div> : null}
 
-          {(backendErrors.length > 0 || backendWarnings.length > 0)
+          {(backendErrors.length > 0 || backendWarnings.length > 0 || backendInfos.length > 0)
             ? (
               <div style={{ marginTop: 12 }}>
                 {backendErrors.length > 0
@@ -985,8 +1026,27 @@ export default function WorkflowEditorView(props: {
                       <div style={{ fontWeight: 700, marginBottom: 6 }}>Backend errors</div>
                       <ul style={{ margin: 0, paddingLeft: 18 }}>
                         {backendErrors.map((e) => (
-                          <li key={`${e.code}:${e.message}`} className="errorText" style={{ marginBottom: 4 }}>
-                            <code>{e.code}</code>: {e.message}
+                          <li
+                            key={`${e.code}:${e.message}`}
+                            className={e.tier === "A" ? "errorTextTierA" : "errorText"}
+                            style={{ marginBottom: 4 }}
+                          >
+                            <button
+                              type="button"
+                              className="btnLink"
+                              onClick={() => {
+                                if (e.taskId)
+                                {
+                                  selectNodeById(e.taskId);
+                                }
+                              }}
+                              style={{ textAlign: "left" }}
+                            >
+                              <code>{e.code}</code>: {e.message}
+                              {e.tier ? <span className="small"> (Tier <code>{e.tier}</code>)</span> : null}
+                              {e.taskId ? <span className="small"> (task: <code>{e.taskId}</code>)</span> : null}
+                              {e.path ? <span className="small"> (path: <code>{e.path}</code>)</span> : null}
+                            </button>
                           </li>
                         ))}
                       </ul>
@@ -1000,8 +1060,53 @@ export default function WorkflowEditorView(props: {
                       <div style={{ fontWeight: 700, marginBottom: 6 }}>Backend warnings</div>
                       <ul style={{ margin: 0, paddingLeft: 18 }}>
                         {backendWarnings.map((w) => (
-                          <li key={`${w.code}:${w.message}`} className="small" style={{ marginBottom: 4 }}>
-                            <code>{w.code}</code>: {w.message}
+                          <li key={`${w.code}:${w.message}`} className="warningText" style={{ marginBottom: 4 }}>
+                            <button
+                              type="button"
+                              className="btnLink"
+                              onClick={() => {
+                                if (w.taskId)
+                                {
+                                  selectNodeById(w.taskId);
+                                }
+                              }}
+                              style={{ textAlign: "left" }}
+                            >
+                              <code>{w.code}</code>: {w.message}
+                              {w.tier ? <span className="small"> (Tier <code>{w.tier}</code>)</span> : null}
+                              {w.taskId ? <span className="small"> (task: <code>{w.taskId}</code>)</span> : null}
+                              {w.path ? <span className="small"> (path: <code>{w.path}</code>)</span> : null}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                  : null}
+
+                {backendInfos.length > 0
+                  ? (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>Backend info</div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {backendInfos.map((i) => (
+                          <li key={`${i.code}:${i.message}`} className="infoText" style={{ marginBottom: 4 }}>
+                            <button
+                              type="button"
+                              className="btnLink"
+                              onClick={() => {
+                                if (i.taskId)
+                                {
+                                  selectNodeById(i.taskId);
+                                }
+                              }}
+                              style={{ textAlign: "left" }}
+                            >
+                              <code>{i.code}</code>: {i.message}
+                              {i.tier ? <span className="small"> (Tier <code>{i.tier}</code>)</span> : null}
+                              {i.taskId ? <span className="small"> (task: <code>{i.taskId}</code>)</span> : null}
+                              {i.path ? <span className="small"> (path: <code>{i.path}</code>)</span> : null}
+                            </button>
                           </li>
                         ))}
                       </ul>
@@ -1156,6 +1261,14 @@ export default function WorkflowEditorView(props: {
                   ? (
                     <div className="warningText">
                       {selectedNode.data.validationWarnings.join(" ")}
+                    </div>
+                  )
+                  : null}
+
+                {selectedNode.data.validationInfos && selectedNode.data.validationInfos.length > 0
+                  ? (
+                    <div className="infoText">
+                      {selectedNode.data.validationInfos.join(" ")}
                     </div>
                   )
                   : null}

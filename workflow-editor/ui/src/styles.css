@@ -5,14 +5,18 @@
   color: #e8eef5;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
   min-height: 100vh;
 }
 
-a { color: inherit; }
+a {
+  color: inherit;
+}
 
 .appShell {
   display: grid;
@@ -25,8 +29,8 @@ a { color: inherit; }
   align-items: center;
   justify-content: space-between;
   padding: 0 14px;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .brand {
@@ -35,8 +39,15 @@ a { color: inherit; }
   align-items: baseline;
 }
 
-.brandTitle { font-weight: 700; letter-spacing: 0.2px; }
-.brandSub { opacity: 0.65; font-size: 12px; }
+.brandTitle {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.brandSub {
+  opacity: 0.65;
+  font-size: 12px;
+}
 
 .navButtons {
   display: flex;
@@ -45,17 +56,21 @@ a { color: inherit; }
 
 .btn {
   cursor: pointer;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
   color: inherit;
   padding: 8px 10px;
   border-radius: 10px;
   font-size: 13px;
 }
-.btn:hover { background: rgba(255,255,255,0.07); }
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
 .btnActive {
-  border-color: rgba(120,180,255,0.55);
-  background: rgba(120,180,255,0.10);
+  border-color: rgba(120, 180, 255, 0.55);
+  background: rgba(120, 180, 255, 0.10);
 }
 
 .main {
@@ -68,7 +83,9 @@ a { color: inherit; }
   padding: 16px;
 }
 
-.muted { opacity: 0.7; }
+.muted {
+  opacity: 0.7;
+}
 
 .editorShell {
   display: grid;
@@ -77,29 +94,34 @@ a { color: inherit; }
 }
 
 .sidebar {
-  border-right: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
   padding: 12px;
+  overflow: auto;
 }
 
 .inspector {
-  border-left: 1px solid rgba(255,255,255,0.08);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
   padding: 12px;
 }
 
 .card {
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.03);
   border-radius: 14px;
   padding: 12px;
   margin-bottom: 10px;
 }
 
-.small { font-size: 12px; opacity: 0.75; }
+.small {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
 .code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 12px;
-  background: rgba(0,0,0,0.35);
-  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 10px;
   padding: 10px;
   overflow: auto;
@@ -110,16 +132,16 @@ a { color: inherit; }
 .taskNode {
   min-width: 160px;
   max-width: 220px;
-  border: 1px solid rgba(255,255,255,0.18);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
   border-radius: 10px;
   padding: 10px 12px;
   color: #e8eef5;
 }
 
 .taskNodeSelected {
-  border-color: rgba(120,180,255,0.65);
-  box-shadow: 0 0 0 1px rgba(120,180,255,0.25);
+  border-color: rgba(120, 180, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(120, 180, 255, 0.35), 0 0 18px rgba(120, 180, 255, 0.12);
 }
 
 .taskNodeBody {
@@ -143,24 +165,32 @@ a { color: inherit; }
 .react-flow__handle {
   width: 8px;
   height: 8px;
-  border: 1px solid rgba(255,255,255,0.25);
-  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.35);
 }
 
 
 /* Workflow editor fields */
-.field { display: flex; flex-direction: column; gap: 6px; }
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .input {
   width: 100%;
-  border: 1px solid rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
   color: inherit;
   padding: 8px 10px;
   border-radius: 10px;
   font-size: 13px;
   outline: none;
 }
-.input:focus { border-color: rgba(120,180,255,0.55); }
+
+.input:focus {
+  border-color: rgba(120, 180, 255, 0.55);
+}
 
 .codeInput {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -169,6 +199,11 @@ a { color: inherit; }
 
 .errorText {
   color: #ff8a8a;
+}
+
+.errorTextTierA {
+  color: #ff5c5c;
+  font-weight: 700;
 }
 
 .taskNodeError {
@@ -198,6 +233,14 @@ a { color: inherit; }
   color: #ffd08a;
 }
 
+.warningTextTierC {
+  color: #ffd08a;
+}
+
+.infoText {
+  color: rgba(140, 190, 255, 0.95);
+}
+
 .taskNodeWarning {
   border-color: rgba(255, 200, 120, 0.55);
   box-shadow: 0 0 0 1px rgba(255, 200, 120, 0.18);
@@ -207,6 +250,18 @@ a { color: inherit; }
   margin-top: 6px;
   font-size: 11px;
   color: #ffd08a;
+  opacity: 0.95;
+}
+
+.taskNodeInfo {
+  border-color: rgba(140, 190, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(140, 190, 255, 0.18);
+}
+
+.taskNodeInfoText {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(140, 190, 255, 0.95);
   opacity: 0.95;
 }
 
@@ -227,8 +282,8 @@ a { color: inherit; }
   border-radius: 999px;
   font-size: 11px;
   line-height: 1.2;
-  border: 1px solid rgba(255,255,255,0.18);
-  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .taskNodeBadgeDirty {
@@ -244,6 +299,11 @@ a { color: inherit; }
 .taskNodeBadgeWarning {
   border-color: rgba(255, 200, 120, 0.45);
   background: rgba(255, 200, 120, 0.14);
+}
+
+.taskNodeBadgeInfo {
+  border-color: rgba(140, 190, 255, 0.45);
+  background: rgba(140, 190, 255, 0.14);
 }
 
 
@@ -272,4 +332,9 @@ a { color: inherit; }
 
 .taskNodeBadgeRuntime {
   border-style: solid;
+}
+
+.taskNode.taskNodeSelected {
+  border-color: rgba(120, 180, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(120, 180, 255, 0.35), 0 0 18px rgba(120, 180, 255, 0.12);
 }

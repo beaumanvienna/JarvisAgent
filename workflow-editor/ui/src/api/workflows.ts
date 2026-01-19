@@ -11,6 +11,9 @@ export type WorkflowListResponse = {
 export type WorkflowValidationFinding = {
   code: string;
   message: string;
+  path?: string;
+  taskId?: string;
+  tier?: "A" | "B" | "C" | "D";
 };
 
 export type WorkflowValidationResponse = {
@@ -18,6 +21,7 @@ export type WorkflowValidationResponse = {
   id: string;
   errors: WorkflowValidationFinding[];
   warnings: WorkflowValidationFinding[];
+  infos: WorkflowValidationFinding[];
 };
 
 export type WorkflowPersistResponse = {

@@ -40,6 +40,8 @@
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowJsonParser.h"
 
+#include "workflow/workflowValidator.h"
+
 #include "workflow/workflowRuntimeManager.h"
 #include "workflow/workflowOrchestrator.h"
 #include "workflow/workflowTypes.h"
@@ -100,11 +102,54 @@ namespace AIAssistant
         {
             std::string m_Code;
             std::string m_Message;
+
+            std::string m_Path;
+            std::string m_TaskId;
+
+            std::string m_Tier;
         };
+
+        std::string ToTierString(WorkflowValidationTier const tier)
+        {
+            switch (tier)
+            {
+                case WorkflowValidationTier::A:
+                    return "A";
+                case WorkflowValidationTier::B:
+                    return "B";
+                case WorkflowValidationTier::C:
+                    return "C";
+                case WorkflowValidationTier::D:
+                    return "D";
+                default:
+                    return "B";
+            }
+        }
+
+        void AddFindingToList(crow::json::wvalue::list& list, WorkflowValidationFinding const& finding)
+        {
+            crow::json::wvalue item;
+            item["code"] = finding.m_Code;
+            item["message"] = finding.m_Message;
+            if (!finding.m_Tier.empty())
+            {
+                item["tier"] = finding.m_Tier;
+            }
+            if (!finding.m_Path.empty())
+            {
+                item["path"] = finding.m_Path;
+            }
+            if (!finding.m_TaskId.empty())
+            {
+                item["taskId"] = finding.m_TaskId;
+            }
+            list.push_back(std::move(item));
+        }
 
         crow::json::wvalue MakeWorkflowValidationResponse(bool const ok, std::string const& workflowId,
                                                           std::vector<WorkflowValidationFinding> const& errors,
-                                                          std::vector<WorkflowValidationFinding> const& warnings)
+                                                          std::vector<WorkflowValidationFinding> const& warnings,
+                                                          std::vector<WorkflowValidationFinding> const& infos)
         {
             crow::json::wvalue responseJson;
             responseJson["ok"] = ok;
@@ -113,378 +158,78 @@ namespace AIAssistant
             crow::json::wvalue::list errorsList;
             for (auto const& error : errors)
             {
-                crow::json::wvalue item;
-                item["code"] = error.m_Code;
-                item["message"] = error.m_Message;
-                errorsList.push_back(std::move(item));
+                AddFindingToList(errorsList, error);
             }
             responseJson["errors"] = std::move(errorsList);
 
             crow::json::wvalue::list warningsList;
             for (auto const& warning : warnings)
             {
-                crow::json::wvalue item;
-                item["code"] = warning.m_Code;
-                item["message"] = warning.m_Message;
-                warningsList.push_back(std::move(item));
+                AddFindingToList(warningsList, warning);
             }
             responseJson["warnings"] = std::move(warningsList);
+
+            crow::json::wvalue::list infosList;
+            for (auto const& info : infos)
+            {
+                AddFindingToList(infosList, info);
+            }
+            responseJson["infos"] = std::move(infosList);
 
             return responseJson;
         }
 
-        enum class DfsState
+        void ValidateJcwfParsedWorkflow(WorkflowDefinition const& workflow, std::vector<WorkflowValidationFinding>& errors,
+                                        std::vector<WorkflowValidationFinding>& warnings,
+                                        std::vector<WorkflowValidationFinding>& infos)
         {
-            NotVisited,
-            Visiting,
-            Visited
-        };
+            std::vector<WorkflowValidationIssue> issues;
+            WorkflowValidator::Validate(workflow, issues);
 
-        void DetectCyclesDfs(std::string const& nodeId,
-                             std::unordered_map<std::string, std::vector<std::string>> const& adjacency,
-                             std::unordered_map<std::string, DfsState>& states, std::unordered_set<std::string>& cycleNodes)
-        {
-            auto const stateIt = states.find(nodeId);
-            if (stateIt != states.end() && stateIt->second == DfsState::Visiting)
+            for (WorkflowValidationIssue const& issue : issues)
             {
-                cycleNodes.insert(nodeId);
-                return;
-            }
+                WorkflowValidationFinding finding;
+                finding.m_Code = issue.m_Code;
+                finding.m_Message = issue.m_Message;
+                finding.m_Path = issue.m_Path;
+                finding.m_TaskId = issue.m_TaskId;
+                finding.m_Tier = ToTierString(issue.m_Tier);
 
-            if (stateIt != states.end() && stateIt->second == DfsState::Visited)
-            {
-                return;
-            }
-
-            states[nodeId] = DfsState::Visiting;
-
-            auto const adjacencyIt = adjacency.find(nodeId);
-            if (adjacencyIt != adjacency.end())
-            {
-                for (auto const& nextId : adjacencyIt->second)
+                if (issue.m_Severity == WorkflowValidationSeverity::Error)
                 {
-                    DetectCyclesDfs(nextId, adjacency, states, cycleNodes);
+                    errors.push_back(std::move(finding));
+                }
+                else if (issue.m_Severity == WorkflowValidationSeverity::Info)
+                {
+                    infos.push_back(std::move(finding));
+                }
+                else
+                {
+                    warnings.push_back(std::move(finding));
                 }
             }
-
-            states[nodeId] = DfsState::Visited;
         }
 
-        void ValidateJcwfJson(std::string const& workflowJsonText, std::vector<WorkflowValidationFinding>& errors,
-                              std::vector<WorkflowValidationFinding>& warnings, std::string& workflowIdOut)
+        void ValidateJcwfJsonText(std::string const& workflowJsonText, std::vector<WorkflowValidationFinding>& errors,
+                                  std::vector<WorkflowValidationFinding>& warnings,
+                                  std::vector<WorkflowValidationFinding>& infos, std::string& workflowIdOut,
+                                  std::string& parseErrorMessageOut)
         {
-            simdjson::ondemand::parser parser;
+            errors.clear();
+            warnings.clear();
+            infos.clear();
+            workflowIdOut.clear();
+            parseErrorMessageOut.clear();
 
-            simdjson::padded_string json(workflowJsonText);
-            auto doc = parser.iterate(json);
-
-            // version
-            std::string version;
+            WorkflowJsonParser workflowJsonParser;
+            WorkflowDefinition parsedWorkflow;
+            if (!workflowJsonParser.ParseWorkflowJson(workflowJsonText, parsedWorkflow, parseErrorMessageOut))
             {
-                auto versionField = doc["version"];
-                if (versionField.error() != simdjson::SUCCESS)
-                {
-                    errors.push_back({"missing_version", "Missing required field: version"});
-                }
-                else
-                {
-                    auto versionStr = versionField.get_string();
-                    if (versionStr.error() != simdjson::SUCCESS)
-                    {
-                        errors.push_back({"invalid_version", "Field 'version' must be a string"});
-                    }
-                    else
-                    {
-                        version = std::string(versionStr.value());
-                        if (version != "1.0")
-                        {
-                            warnings.push_back({"unexpected_version", "Expected version '1.0' (got '" + version + "')"});
-                        }
-                    }
-                }
+                return;
             }
 
-            // id
-            {
-                auto idField = doc["id"];
-                if (idField.error() != simdjson::SUCCESS)
-                {
-                    errors.push_back({"missing_id", "Missing required field: id"});
-                    workflowIdOut = "";
-                }
-                else
-                {
-                    auto idStr = idField.get_string();
-                    if (idStr.error() != simdjson::SUCCESS)
-                    {
-                        errors.push_back({"invalid_id", "Field 'id' must be a string"});
-                        workflowIdOut = "";
-                    }
-                    else
-                    {
-                        workflowIdOut = std::string(idStr.value());
-                    }
-                }
-            }
-
-            // tasks
-            std::unordered_set<std::string> taskIds;
-            std::unordered_map<std::string, std::vector<std::string>> adjacency;
-            {
-                auto tasksField = doc["tasks"];
-                if (tasksField.error() != simdjson::SUCCESS)
-                {
-                    errors.push_back({"missing_tasks", "Missing required field: tasks"});
-                    return;
-                }
-
-                auto tasksObject = tasksField.get_object();
-                if (tasksObject.error() != simdjson::SUCCESS)
-                {
-                    errors.push_back({"invalid_tasks", "Field 'tasks' must be an object (dictionary)"});
-                    return;
-                }
-
-                // Collect IDs first
-                for (auto taskEntry : tasksObject.value())
-                {
-                    std::string_view taskKeyView;
-                    {
-                        simdjson::simdjson_result<std::string_view> keyResult = taskEntry.unescaped_key();
-                        if (keyResult.error() != simdjson::SUCCESS)
-                        {
-                            errors.push_back({"invalid_task_key", "Invalid task key (object field name)"});
-                            continue;
-                        }
-                        taskKeyView = keyResult.value();
-                    }
-                    std::string const taskKey(taskKeyView);
-                    taskIds.insert(taskKey);
-                    adjacency[taskKey] = {};
-                }
-
-                // Validate each task + build adjacency
-                for (auto taskEntry : tasksObject.value())
-                {
-                    std::string_view taskKeyView;
-                    {
-                        simdjson::simdjson_result<std::string_view> keyResult = taskEntry.unescaped_key();
-                        if (keyResult.error() != simdjson::SUCCESS)
-                        {
-                            errors.push_back({"invalid_task_key", "Invalid task key (object field name)"});
-                            continue;
-                        }
-                        taskKeyView = keyResult.value();
-                    }
-                    std::string const taskKey(taskKeyView);
-                    auto taskObj = taskEntry.value().get_object();
-                    if (taskObj.error() != simdjson::SUCCESS)
-                    {
-                        errors.push_back({"invalid_task", "Task '" + taskKey + "' must be an object"});
-                        continue;
-                    }
-
-                    // task.type (required)
-                    bool hasType = false;
-                    {
-                        auto typeField = taskEntry.value()["type"];
-                        if (typeField.error() != simdjson::SUCCESS)
-                        {
-                            errors.push_back({"missing_task_type", "Task '" + taskKey + "': missing required field 'type'"});
-                        }
-                        else
-                        {
-                            auto typeStr = typeField.get_string();
-                            if (typeStr.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back(
-                                    {"invalid_task_type", "Task '" + taskKey + "': field 'type' must be a string"});
-                            }
-                            else
-                            {
-                                hasType = true;
-                            }
-                        }
-                    }
-
-                    (void)hasType;
-
-                    // task.working_directory (optional but recommended)
-                    {
-                        auto wdField = taskEntry.value()["working_directory"];
-                        if (wdField.error() == simdjson::SUCCESS)
-                        {
-                            auto wdStr = wdField.get_string();
-                            if (wdStr.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back({"invalid_working_directory",
-                                                  "Task '" + taskKey + "': 'working_directory' must be a string"});
-                            }
-                        }
-                        else
-                        {
-                            warnings.push_back({"missing_working_directory",
-                                                "Task '" + taskKey + "': missing 'working_directory' (recommended)"});
-                        }
-                    }
-
-                    // task.
-                    // task.label (optional string)
-                    {
-                        auto labelField = taskEntry.value()["label"];
-                        if (labelField.error() == simdjson::SUCCESS)
-                        {
-                            auto labelStr = labelField.get_string();
-                            if (labelStr.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back(
-                                    {"invalid_task_label", "Task '" + taskKey + "': field 'label' must be a string"});
-                            }
-                        }
-                    }
-
-                    // task.doc (optional string)
-                    {
-                        auto docField = taskEntry.value()["doc"];
-                        if (docField.error() == simdjson::SUCCESS)
-                        {
-                            auto docStr = docField.get_string();
-                            if (docStr.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back(
-                                    {"invalid_task_doc", "Task '" + taskKey + "': field 'doc' must be a string"});
-                            }
-                        }
-                    }
-
-                    // task.working_directory (optional string)
-                    {
-                        auto workingDirectoryField = taskEntry.value()["working_directory"];
-                        if (workingDirectoryField.error() == simdjson::SUCCESS)
-                        {
-                            auto workingDirectoryStr = workingDirectoryField.get_string();
-                            if (workingDirectoryStr.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back({"invalid_task_working_directory",
-                                                  "Task '" + taskKey + "': field 'working_directory' must be a string"});
-                            }
-                        }
-                    }
-
-                    // task.params (optional object)
-                    {
-                        auto paramsField = taskEntry.value()["params"];
-                        if (paramsField.error() == simdjson::SUCCESS)
-                        {
-                            auto paramsObj = paramsField.get_object();
-                            if (paramsObj.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back(
-                                    {"invalid_task_params", "Task '" + taskKey + "': field 'params' must be an object"});
-                            }
-                        }
-                    }
-
-                    // task.depends_on (optional array of strings)
-                    {
-                        auto dependsField = taskEntry.value()["depends_on"];
-                        if (dependsField.error() == simdjson::SUCCESS)
-                        {
-                            auto dependsArray = dependsField.get_array();
-                            if (dependsArray.error() != simdjson::SUCCESS)
-                            {
-                                errors.push_back({"invalid_depends_on",
-                                                  "Task '" + taskKey + "': 'depends_on' must be an array of strings"});
-                            }
-                            else
-                            {
-                                std::unordered_set<std::string> dependencyIds;
-
-                                for (auto depValue : dependsArray.value())
-                                {
-                                    auto depStr = depValue.get_string();
-                                    if (depStr.error() != simdjson::SUCCESS)
-                                    {
-                                        errors.push_back({"invalid_depends_on",
-                                                          "Task '" + taskKey + "': 'depends_on' must contain strings only"});
-                                        continue;
-                                    }
-
-                                    std::string const depId = std::string(depStr.value());
-                                    if (depId.empty())
-                                    {
-                                        errors.push_back({"invalid_dependency",
-                                                          "Task '" + taskKey + "': depends_on contains an empty task id"});
-                                        continue;
-                                    }
-
-                                    if (depId == taskKey)
-                                    {
-                                        errors.push_back({"self_dependency",
-                                                          "Task '" + taskKey + "': depends_on must not include itself"});
-                                        continue;
-                                    }
-
-                                    if (dependencyIds.find(depId) != dependencyIds.end())
-                                    {
-                                        warnings.push_back(
-                                            {"duplicate_dependency",
-                                             "Task '" + taskKey + "': depends_on contains duplicate entry '" + depId + "'"});
-                                        continue;
-                                    }
-                                    dependencyIds.insert(depId);
-
-                                    if (taskIds.find(depId) == taskIds.end())
-                                    {
-                                        errors.push_back(
-                                            {"unknown_dependency",
-                                             "Task '" + taskKey + "': depends_on references unknown task '" + depId + "'"});
-                                    }
-                                    else
-                                    {
-                                        // depId -> taskKey
-                                        adjacency[depId].push_back(taskKey);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // task.id mismatch (warning)
-                    {
-                        auto idField = taskEntry.value()["id"];
-                        if (idField.error() == simdjson::SUCCESS)
-                        {
-                            auto idStr = idField.get_string();
-                            if (idStr.error() == simdjson::SUCCESS)
-                            {
-                                std::string const embeddedId = std::string(idStr.value());
-                                if (embeddedId != taskKey)
-                                {
-                                    warnings.push_back(
-                                        {"task_id_mismatch",
-                                         "Task key '" + taskKey + "' does not match task.id '" + embeddedId + "'"});
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Cycle detection (directed adjacency)
-            {
-                std::unordered_map<std::string, DfsState> states;
-                std::unordered_set<std::string> cycleNodes;
-                for (auto const& taskId : taskIds)
-                {
-                    DetectCyclesDfs(taskId, adjacency, states, cycleNodes);
-                }
-
-                for (auto const& nodeId : cycleNodes)
-                {
-                    errors.push_back({"cycle_detected", "Cycle detected involving task '" + nodeId + "'"});
-                }
-            }
+            workflowIdOut = parsedWorkflow.m_Id;
+            ValidateJcwfParsedWorkflow(parsedWorkflow, errors, warnings, infos);
         }
 
         bool IsValidWorkflowId(std::string const& workflowId)
@@ -1281,25 +1026,18 @@ namespace AIAssistant
     {
         std::vector<WorkflowValidationFinding> errors;
         std::vector<WorkflowValidationFinding> warnings;
+        std::vector<WorkflowValidationFinding> infos;
         std::string workflowId;
+        std::string parseErrorMessage;
 
-        try
+        ValidateJcwfJsonText(req.body, errors, warnings, infos, workflowId, parseErrorMessage);
+        if (!parseErrorMessage.empty())
         {
-            ValidateJcwfJson(req.body, errors, warnings, workflowId);
-        }
-        catch (simdjson::simdjson_error const& error)
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
-                                         "POST /api/workflows/validate");
-        }
-        catch (std::exception const& error)
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
-                                         "POST /api/workflows/validate");
+            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "POST /api/workflows/validate");
         }
 
         bool const ok = errors.empty();
-        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings);
+        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings, infos);
         return MakeJsonResponse(200, responseJson);
     }
 
@@ -1364,32 +1102,32 @@ namespace AIAssistant
 
         std::vector<WorkflowValidationFinding> errors;
         std::vector<WorkflowValidationFinding> warnings;
+        std::vector<WorkflowValidationFinding> infos;
         std::string parsedWorkflowId;
+        std::string parseErrorMessage;
 
-        try
+        ValidateJcwfJsonText(workflowJsonContent, errors, warnings, infos, parsedWorkflowId, parseErrorMessage);
+        if (!parseErrorMessage.empty())
         {
-            ValidateJcwfJson(workflowJsonContent, errors, warnings, parsedWorkflowId);
-        }
-        catch (simdjson::simdjson_error const& error)
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
-                                         "GET /api/workflows/{id}/validate", workflowId);
-        }
-        catch (std::exception const& error)
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", std::string("Invalid JSON: ") + error.what(),
-                                         "GET /api/workflows/{id}/validate", workflowId);
+            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "GET /api/workflows/{id}/validate",
+                                         workflowId);
         }
 
         if (!parsedWorkflowId.empty() && parsedWorkflowId != workflowId)
         {
-            warnings.push_back({"workflow_id_mismatch", "Workflow id in file ('" + parsedWorkflowId +
-                                                            "') does not match requested id ('" + workflowId + "')"});
+            WorkflowValidationFinding mismatch;
+            mismatch.m_Code = "workflow_id_mismatch";
+            mismatch.m_Message =
+                "Workflow id in file ('" + parsedWorkflowId + "') does not match requested id ('" + workflowId + "')";
+            mismatch.m_Path = "$.id";
+            mismatch.m_TaskId = std::string();
+            mismatch.m_Tier = "C";
+            warnings.push_back(std::move(mismatch));
         }
 
         bool const ok = errors.empty();
-        crow::json::wvalue responseJson =
-            MakeWorkflowValidationResponse(ok, parsedWorkflowId.empty() ? workflowId : parsedWorkflowId, errors, warnings);
+        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(
+            ok, parsedWorkflowId.empty() ? workflowId : parsedWorkflowId, errors, warnings, infos);
         return MakeJsonResponse(200, responseJson);
     }
 

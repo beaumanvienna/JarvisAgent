@@ -9,6 +9,7 @@ export type EditorTaskNodeData = {
   subtitle?: string;
   validationErrors?: string[];
   validationWarnings?: string[];
+  validationInfos?: string[];
   isDirty?: boolean;
 
   // Live run monitoring (populated from WebSocket snapshots)
@@ -27,5 +28,6 @@ export type EditorGraph = {
 export type ValidationResult = {
   nodeErrorsById: Map<string, string[]>;
   nodeWarningsById?: Map<string, string[]>;
+  nodeInfosById?: Map<string, string[]>;
   cycleNodes: string[];
 };
