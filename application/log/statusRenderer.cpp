@@ -142,8 +142,7 @@ namespace AIAssistant
             }
 
             std::ostringstream textStream;
-            textStream << "[" << name << "] "
-                       << "STATE: " << sessionStatus.state << " | Outputs: " << sessionStatus.outputs
+            textStream << "[" << name << "] " << "STATE: " << sessionStatus.state << " | Outputs: " << sessionStatus.outputs
                        << " | In flight: " << sessionStatus.inflight << " | Completed: " << sessionStatus.completed << " "
                        << spinnerGlyph;
 

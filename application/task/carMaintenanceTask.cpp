@@ -31,23 +31,22 @@ namespace fs = std::filesystem;
 namespace AIAssistant
 {
     bool CarMaintenanceTask::Execute(std::vector<fs::path> const& inputFilePaths,
-                                 std::vector<fs::path> const& outputFilePaths,
-                                 std::string& errorMessageOut)
+                                     std::vector<fs::path> const& outputFilePaths, std::string& errorMessageOut)
     {
-    if (inputFilePaths.empty())
-    {
-        errorMessageOut = "CarMaintenanceTask: no input files provided.";
-        return false;
-    }
+        if (inputFilePaths.empty())
+        {
+            errorMessageOut = "CarMaintenanceTask: no input files provided.";
+            return false;
+        }
 
-    if (outputFilePaths.empty())
-    {
-        errorMessageOut = "CarMaintenanceTask: no output files provided.";
-        return false;
-    }
+        if (outputFilePaths.empty())
+        {
+            errorMessageOut = "CarMaintenanceTask: no output files provided.";
+            return false;
+        }
 
-    fs::path const& inputFilePath = inputFilePaths[0];
-    fs::path const& outputFilePath = outputFilePaths[0];
+        fs::path const& inputFilePath = inputFilePaths[0];
+        fs::path const& outputFilePath = outputFilePaths[0];
 
         std::string inputText;
         if (!TryReadAllText(inputFilePath, inputText, errorMessageOut))
@@ -89,7 +88,8 @@ namespace AIAssistant
         return true;
     }
 
-    bool CarMaintenanceTask::TryReadAllText(fs::path const& filePath, std::string& fileContentsOut, std::string& errorMessageOut)
+    bool CarMaintenanceTask::TryReadAllText(fs::path const& filePath, std::string& fileContentsOut,
+                                            std::string& errorMessageOut)
     {
         std::error_code fileSizeErrorCode;
         std::uintmax_t const fileSizeBytes = fs::file_size(filePath, fileSizeErrorCode);
@@ -124,7 +124,8 @@ namespace AIAssistant
         return true;
     }
 
-    bool CarMaintenanceTask::TryWriteAllText(fs::path const& filePath, std::string const& fileContents, std::string& errorMessageOut)
+    bool CarMaintenanceTask::TryWriteAllText(fs::path const& filePath, std::string const& fileContents,
+                                             std::string& errorMessageOut)
     {
         fs::path const parentDirectoryPath = filePath.parent_path();
         if (!parentDirectoryPath.empty())
@@ -166,19 +167,13 @@ namespace AIAssistant
         haystackLower.resize(haystack.size());
 
         std::transform(haystack.begin(), haystack.end(), haystackLower.begin(),
-                       [](unsigned char const characterValue)
-                       {
-                           return static_cast<char>(std::tolower(characterValue));
-                       });
+                       [](unsigned char const characterValue) { return static_cast<char>(std::tolower(characterValue)); });
 
         std::string needleLower;
         needleLower.resize(needle.size());
 
         std::transform(needle.begin(), needle.end(), needleLower.begin(),
-                       [](unsigned char const characterValue)
-                       {
-                           return static_cast<char>(std::tolower(characterValue));
-                       });
+                       [](unsigned char const characterValue) { return static_cast<char>(std::tolower(characterValue)); });
 
         return haystackLower.find(needleLower) != std::string::npos;
     }
@@ -186,32 +181,29 @@ namespace AIAssistant
     std::string CarMaintenanceTask::MakeEngineManualText()
     {
         // Mock content (placeholder).
-        return
-            "Engine manual (quick notes):\n"
-            "- Check the oil level on a level surface and top up only with the correct oil grade.\n"
-            "- If you see an engine warning light, avoid heavy acceleration and schedule a diagnostic scan.\n"
-            "- Replace the air filter on schedule; a clogged filter can reduce power and fuel efficiency.\n"
-            "- Keep an eye on coolant level and look for leaks around hoses and the radiator.\n";
+        return "Engine manual (quick notes):\n"
+               "- Check the oil level on a level surface and top up only with the correct oil grade.\n"
+               "- If you see an engine warning light, avoid heavy acceleration and schedule a diagnostic scan.\n"
+               "- Replace the air filter on schedule; a clogged filter can reduce power and fuel efficiency.\n"
+               "- Keep an eye on coolant level and look for leaks around hoses and the radiator.\n";
     }
 
     std::string CarMaintenanceTask::MakeTireMaintenanceText()
     {
         // Mock content (placeholder).
-        return
-            "Tire maintenance (quick notes):\n"
-            "- Check tire pressure monthly and before long trips; adjust when the tires are cold.\n"
-            "- Inspect tread depth and wear patterns; uneven wear often points to alignment issues.\n"
-            "- Rotate tires at regular intervals to extend life and keep handling predictable.\n"
-            "- Visually inspect sidewalls for cracks, bulges, or embedded debris.\n";
+        return "Tire maintenance (quick notes):\n"
+               "- Check tire pressure monthly and before long trips; adjust when the tires are cold.\n"
+               "- Inspect tread depth and wear patterns; uneven wear often points to alignment issues.\n"
+               "- Rotate tires at regular intervals to extend life and keep handling predictable.\n"
+               "- Visually inspect sidewalls for cracks, bulges, or embedded debris.\n";
     }
 
     std::string CarMaintenanceTask::MakeRephraseRequestText()
     {
-        return
-            "I could not detect whether your question is about the engine or tires.\n"
-            "Please rephrase your car maintenance question and include one of these keywords:\n"
-            "- \"engine\" for engine-related help\n"
-            "- \"tire\" for tire-related help\n";
+        return "I could not detect whether your question is about the engine or tires.\n"
+               "Please rephrase your car maintenance question and include one of these keywords:\n"
+               "- \"engine\" for engine-related help\n"
+               "- \"tire\" for tire-related help\n";
     }
 
 } // namespace AIAssistant

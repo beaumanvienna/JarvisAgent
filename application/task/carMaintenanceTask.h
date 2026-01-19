@@ -35,12 +35,13 @@ namespace AIAssistant
         virtual ~CarMaintenanceTask() = default;
 
         bool Execute(std::vector<std::filesystem::path> const& inputFilePaths,
-                     std::vector<std::filesystem::path> const& outputFilePaths,
-                     std::string& errorMessageOut) override;
+                     std::vector<std::filesystem::path> const& outputFilePaths, std::string& errorMessageOut) override;
 
     private:
-        static bool TryReadAllText(std::filesystem::path const& filePath, std::string& fileContentsOut, std::string& errorMessageOut);
-        static bool TryWriteAllText(std::filesystem::path const& filePath, std::string const& fileContents, std::string& errorMessageOut);
+        static bool TryReadAllText(std::filesystem::path const& filePath, std::string& fileContentsOut,
+                                   std::string& errorMessageOut);
+        static bool TryWriteAllText(std::filesystem::path const& filePath, std::string const& fileContents,
+                                    std::string& errorMessageOut);
 
         static bool ContainsCaseInsensitive(std::string const& haystack, std::string const& needle);
         static std::string MakeEngineManualText();

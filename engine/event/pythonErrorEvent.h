@@ -28,8 +28,7 @@ namespace AIAssistant
     class PythonCrashedEvent : public Event
     {
     public:
-        PythonCrashedEvent(std::string message)
-            : m_Message(std::move(message)) {}
+        PythonCrashedEvent(std::string message) : m_Message(std::move(message)) {}
 
         const std::string& GetMessage() const { return m_Message; }
 
@@ -39,4 +38,4 @@ namespace AIAssistant
     private:
         std::string m_Message;
     };
-}
+} // namespace AIAssistant

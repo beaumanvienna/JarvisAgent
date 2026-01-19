@@ -68,12 +68,10 @@ namespace AIAssistant
 
         bool IsRunning() const { return m_Running; }
 
-        bool ExecuteWorkflowTask(TaskDef const& taskDefinition,
-                              std::string const& taskWorkingDirectory,
-                              std::unordered_map<std::string, std::string> const& inputValues,
-                              std::unordered_map<std::string, std::string> const& contextValues,
-                              std::unordered_map<std::string, std::string>& outputValuesOut,
-                              std::string& errorMessage);
+        bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
+                                 std::unordered_map<std::string, std::string> const& inputValues,
+                                 std::unordered_map<std::string, std::string> const& contextValues,
+                                 std::unordered_map<std::string, std::string>& outputValuesOut, std::string& errorMessage);
 
     private:
         void Reset();

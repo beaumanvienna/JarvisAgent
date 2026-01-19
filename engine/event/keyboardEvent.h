@@ -44,4 +44,4 @@ namespace AIAssistant
     private:
         char m_Key;
     };
-}
+} // namespace AIAssistant

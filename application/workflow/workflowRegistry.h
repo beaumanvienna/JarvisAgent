@@ -42,16 +42,14 @@ namespace AIAssistant
         std::vector<std::string> GetWorkflowIds() const;
         std::optional<WorkflowDefinition> GetWorkflow(std::string const& workflowId) const;
 
-
         // Returns the absolute (normalized) file path for the workflow if known.
         std::optional<std::string> TryGetWorkflowFilePathAbsolute(std::string const& workflowId) const;
 
         // Upsert a workflow by parsing provided JCWF JSON (canonical format) and storing it on disk.
         // The caller provides the target absolute path (including filename).
         // On success, the registry contains the parsed workflow keyed by its id.
-        bool UpsertWorkflowFromJson(std::string const& workflowJson,
-                                   std::filesystem::path const& workflowFilePathAbsolute,
-                                   std::string& errorMessage);
+        bool UpsertWorkflowFromJson(std::string const& workflowJson, std::filesystem::path const& workflowFilePathAbsolute,
+                                    std::string& errorMessage);
 
         // Remove a workflow from the registry. If deleteFile is true and the registry knows the file path,
         // the file will be deleted as well.

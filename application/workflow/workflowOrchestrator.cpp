@@ -604,8 +604,7 @@ namespace AIAssistant
                     inFlightTask.m_TaskId = taskId;
                     inFlightTask.m_TaskState = capturedTaskState;
                     inFlightTask.m_Future = threadPool.SubmitTask(
-                        [this, &workflowDefinition, &workflowRun, taskId, taskDefinition, capturedTaskState]() -> bool
-                        {
+                        [this, &workflowDefinition, &workflowRun, taskId, taskDefinition, capturedTaskState]() -> bool {
                             return ExecuteTaskInstance(workflowDefinition, workflowRun, taskDefinition, taskId,
                                                        *capturedTaskState);
                         });
