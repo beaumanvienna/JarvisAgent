@@ -187,3 +187,68 @@ It forms the backbone of the web dashboard system and is tightly integrated with
 
 ---
 
+---
+
+## New Routes (Workflow Editor)
+
+### Static Editor UI
+```
+GET /editor
+```
+Serves the built React + React Flow workflow editor (Vite `dist/` output).  
+This coexists with the legacy `index.html` dashboard.
+
+### Workflow Editor APIs (in progress)
+These routes are now reserved and partially implemented in `webServer.cpp`:
+
+- `GET /api/workflows`
+- `GET /api/workflows/{id}`
+- `POST /api/workflows`
+- `PUT /api/workflows/{id}`
+- `POST /api/workflows/{id}/validate`
+- `POST /api/workflows/{id}/start`
+
+They are used by the React Flow editor for **load, save, validate, and run** operations.
+Server-side validation remains authoritative.
+
+---
+
+## New Integration Routes (n8n)
+
+### Start Workflow from n8n
+```
+POST /api/integrations/n8n/start
+```
+
+**Purpose**
+- Accept workflow execution requests initiated by n8n.
+- Persist the raw request JSON to disk for traceability.
+- Enqueue a workflow run using the provided or generated `runId`.
+
+**Response**
+Returns HTTP 202 with workflow and run identifiers.
+
+**Disk Trace**
+For each request, JarvisAgent writes:
+```
+workflows/<workflowId>/<taskName>/n8n/<runId>/request.json
+```
+
+The runtime context includes:
+- `n8n_request_path`
+- `callbackUrl` (if provided)
+- All fields from the `context` object
+
+Execution status and results are retrieved via existing workflow-run endpoints.
+
+---
+
+## Notes on Evolution
+
+- The web server now serves **three roles**:
+  1. Legacy dashboard (`/`)
+  2. React-based workflow editor (`/editor`)
+  3. External workflow integrations (n8n)
+
+- No existing routes were removed.
+- Changes are additive and backward-compatible.
