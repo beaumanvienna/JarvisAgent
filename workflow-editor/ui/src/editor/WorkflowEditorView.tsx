@@ -21,6 +21,7 @@ import { validateGraph } from "./validation";
 import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
 import type { JcwfFile, JcwfTask, JcwfTaskType } from "../jcwf/types";
 import {
+  cancelRun,
   createWorkflowWithId,
   loadWorkflow,
   runWorkflow,
@@ -28,6 +29,7 @@ import {
   validateDraft,
   type WorkflowValidationFinding,
 } from "../api/workflows";
+import CreateWorkflowModal from "../components/CreateWorkflowModal";
 
 const nodeTypes = { task: TaskNode };
 
@@ -56,6 +58,8 @@ export type RuntimeTaskSnapshot = {
   taskId: string;
   state: RuntimeTaskState;
   runId: string;
+  attemptCount?: number;
+  lastErrorMessage?: string;
 };
 
 type RuntimeTaskSnapshotById = Record<string, RuntimeTaskSnapshot>;
@@ -189,6 +193,7 @@ function nextId(existing: Set<string>, base: string): string
 
 export default function WorkflowEditorView(props: {
   workflowId: string | null;
+  initialJcwf?: JcwfFile | null;
   onWorkflowCreated: (workflowId: string) => void;
   onWorkflowPersisted?: (event: WorkflowPersistEvent) => void;
   onDirtyStateChange?: (isDirty: boolean) => void;
@@ -202,12 +207,16 @@ export default function WorkflowEditorView(props: {
   const [backendErrors, setBackendErrors] = useState<WorkflowValidationFinding[]>([]);
   const [backendWarnings, setBackendWarnings] = useState<WorkflowValidationFinding[]>([]);
   const [backendInfos, setBackendInfos] = useState<WorkflowValidationFinding[]>([]);
+  const [clientErrors, setClientErrors] = useState<{ taskId: string; message: string }[]>([]);
+  const [clientInfos, setClientInfos] = useState<{ taskId: string; message: string }[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | null>(null);
   const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
   const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [showBackToListHint, setShowBackToListHint] = useState<boolean>(false);
+  const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
+  const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
   const webSocketRef = useRef<WebSocket | null>(null);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
@@ -220,6 +229,11 @@ export default function WorkflowEditorView(props: {
     runtimeTasksByIdRef.current = runtimeTasksById;
   }, [runtimeTasksById]);
 
+  // Undo/redo history (two-stack model)
+  type HistoryEntry = { nodes: EditorTaskNode[]; edges: EditorTaskEdge[] };
+  const [undoStack, setUndoStack] = useState<HistoryEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<HistoryEntry[]>([]);
+  const isUndoRedoRef = useRef<boolean>(false);
 
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
@@ -231,9 +245,109 @@ export default function WorkflowEditorView(props: {
     initialGraph.edges as Edge[]
   );
 
-  const onNodesChange = useCallback((changes: unknown) => {
+  const onNodesChangeRaw = useCallback((changes: unknown) => {
     setNodes((current) => applyNodeChanges(changes as never, current));
   }, [setNodes]);
+
+
+  // Track previous state for automatic history with debouncing
+  const prevStateRef = useRef<HistoryEntry | null>(null);
+  const nodesJsonRef = useRef<string>("");
+  const edgesJsonRef = useRef<string>("");
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPrevStateRef = useRef<HistoryEntry | null>(null);
+  const isDraggingRef = useRef<boolean>(false);
+  const skipNextEffectRef = useRef<boolean>(false);
+
+  // Helper to push to undo stack
+  const pushToUndoStack = useCallback((state: HistoryEntry) => {
+    console.log("[HISTORY] Pushing to undo stack:", state.nodes.length, "nodes, pos:", state.nodes[0]?.position);
+    setUndoStack((prev) => [...prev, state].slice(-50));
+    setRedoStack([]); // Clear redo stack on new action
+  }, []);
+
+  // Effect to automatically track state changes and push to history (debounced)
+  useEffect(() => {
+    if (isUndoRedoRef.current) return;
+    if (isDraggingRef.current) return; // Don't track during drag
+    if (skipNextEffectRef.current)
+    {
+      skipNextEffectRef.current = false;
+      // Update refs but don't push to history
+      const nodesJson = JSON.stringify(nodes);
+      const edgesJson = JSON.stringify(edges);
+      nodesJsonRef.current = nodesJson;
+      edgesJsonRef.current = edgesJson;
+      prevStateRef.current = { nodes: JSON.parse(nodesJson), edges: JSON.parse(edgesJson) };
+      return;
+    }
+
+    const nodesJson = JSON.stringify(nodes);
+    const edgesJson = JSON.stringify(edges);
+
+    // Skip if state hasn't actually changed
+    if (nodesJson === nodesJsonRef.current && edgesJson === edgesJsonRef.current)
+    {
+      return;
+    }
+
+    // Capture the state BEFORE this change (only on first change in a batch)
+    if (pendingPrevStateRef.current === null && prevStateRef.current !== null)
+    {
+      pendingPrevStateRef.current = prevStateRef.current;
+    }
+
+    // Update refs to current state immediately
+    nodesJsonRef.current = nodesJson;
+    edgesJsonRef.current = edgesJson;
+    prevStateRef.current = {
+      nodes: JSON.parse(nodesJson),
+      edges: JSON.parse(edgesJson),
+    };
+
+    // Clear any pending debounce timer
+    if (debounceTimerRef.current)
+    {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    // Debounce: push to history after 100ms of no changes
+    debounceTimerRef.current = setTimeout(() => {
+      if (pendingPrevStateRef.current !== null)
+      {
+        const stateToSave = pendingPrevStateRef.current;
+        pushToUndoStack(stateToSave);
+        pendingPrevStateRef.current = null;
+      }
+      debounceTimerRef.current = null;
+    }, 100);
+
+    return () => {
+      if (debounceTimerRef.current)
+      {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [nodes, edges, pushToUndoStack]);
+
+  // Simple pass-through for node changes
+  const onNodesChange = useCallback((changes: unknown) => {
+    onNodesChangeRaw(changes);
+  }, [onNodesChangeRaw]);
+
+  // Simple pass-through for edge changes
+  const onEdgesChangeWithUndo = useCallback((changes: unknown) => {
+    onEdgesChange(changes as never);
+  }, [onEdgesChange]);
+
+  const onNodeDragStart = useCallback(() => {
+    // Capture state before drag starts (read from refs to avoid stale closure)
+    isDraggingRef.current = true;
+    pendingPrevStateRef.current = {
+      nodes: JSON.parse(nodesJsonRef.current || "[]"),
+      edges: JSON.parse(edgesJsonRef.current || "[]"),
+    };
+  }, []);
 
   const onNodeDragStop = useCallback((_event: unknown, node: Node) => {
     setNodes((current) => {
@@ -249,7 +363,105 @@ export default function WorkflowEditorView(props: {
       });
       return next;
     });
-  }, [setNodes]);
+    // End drag and push to history
+    isDraggingRef.current = false;
+    skipNextEffectRef.current = true; // Prevent effect from also pushing
+    if (pendingPrevStateRef.current !== null)
+    {
+      const stateToSave = pendingPrevStateRef.current;
+      console.log("[DRAG STOP] Pushing pre-drag state with", stateToSave.nodes.length, "nodes, pos:", stateToSave.nodes[0]?.position);
+      pushToUndoStack(stateToSave);
+      pendingPrevStateRef.current = null;
+    }
+  }, [setNodes, pushToUndoStack]);
+
+  const undo = useCallback(() => {
+    console.log("[UNDO] Called. undoStack.length:", undoStack.length);
+    if (undoStack.length === 0)
+    {
+      console.log("[UNDO] Early return: undoStack empty");
+      return;
+    }
+
+    // Pop from undo stack
+    const entry = undoStack[undoStack.length - 1];
+
+    // Save current state for redo
+    const currentState: HistoryEntry = {
+      nodes: JSON.parse(nodesJsonRef.current || "[]"),
+      edges: JSON.parse(edgesJsonRef.current || "[]"),
+    };
+
+    console.log("[UNDO] Restoring:", entry.nodes.length, "nodes, pos:", entry.nodes[0]?.position);
+
+    isUndoRedoRef.current = true;
+    setUndoStack((prev) => prev.slice(0, -1)); // Pop
+    setRedoStack((prev) => [...prev, currentState]); // Push current to redo
+    setNodes(entry.nodes as Node<EditorTaskNodeData>[]);
+    setEdges(entry.edges);
+    // Update refs to match restored state
+    nodesJsonRef.current = JSON.stringify(entry.nodes);
+    edgesJsonRef.current = JSON.stringify(entry.edges);
+    prevStateRef.current = { nodes: entry.nodes, edges: entry.edges };
+    isUndoRedoRef.current = false;
+    setStatusText("Undo.");
+  }, [undoStack, setNodes, setEdges]);
+
+  const redo = useCallback(() => {
+    console.log("[REDO] Called. redoStack.length:", redoStack.length);
+    if (redoStack.length === 0)
+    {
+      return;
+    }
+
+    // Pop from redo stack
+    const entry = redoStack[redoStack.length - 1];
+
+    // Save current state for undo
+    const currentState: HistoryEntry = {
+      nodes: JSON.parse(nodesJsonRef.current || "[]"),
+      edges: JSON.parse(edgesJsonRef.current || "[]"),
+    };
+
+    console.log("[REDO] Restoring:", entry.nodes.length, "nodes, pos:", entry.nodes[0]?.position);
+
+    isUndoRedoRef.current = true;
+    setRedoStack((prev) => prev.slice(0, -1)); // Pop
+    setUndoStack((prev) => [...prev, currentState]); // Push current to undo
+    setNodes(entry.nodes as Node<EditorTaskNodeData>[]);
+    setEdges(entry.edges);
+    // Update refs to match restored state
+    nodesJsonRef.current = JSON.stringify(entry.nodes);
+    edgesJsonRef.current = JSON.stringify(entry.edges);
+    prevStateRef.current = { nodes: entry.nodes, edges: entry.edges };
+    isUndoRedoRef.current = false;
+    setStatusText("Redo.");
+  }, [redoStack, setNodes, setEdges]);
+
+  // Keyboard shortcuts for undo/redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+      const modifier = isMac ? e.metaKey : e.ctrlKey;
+      if (modifier && e.key === "z" && !e.shiftKey)
+      {
+        e.preventDefault();
+        undo();
+      }
+      else if (modifier && e.key === "z" && e.shiftKey)
+      {
+        e.preventDefault();
+        redo();
+      }
+      else if (modifier && e.key === "y")
+      {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [undo, redo]);
 
   const currentSignature = useMemo(() => {
     return computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]);
@@ -301,6 +513,29 @@ export default function WorkflowEditorView(props: {
     infos?: WorkflowValidationFinding[];
   }) => {
     const validation = validateGraph(graph);
+
+    // Collect client-side validation issues for sidebar display
+    const clientErrorsList: { taskId: string; message: string }[] = [];
+    const clientInfosList: { taskId: string; message: string }[] = [];
+    for (const [taskId, errors] of validation.nodeErrorsById)
+    {
+      for (const msg of errors)
+      {
+        clientErrorsList.push({ taskId, message: msg });
+      }
+    }
+    if (validation.nodeInfosById)
+    {
+      for (const [taskId, infos] of validation.nodeInfosById)
+      {
+        for (const msg of infos)
+        {
+          clientInfosList.push({ taskId, message: msg });
+        }
+      }
+    }
+    setClientErrors(clientErrorsList);
+    setClientInfos(clientInfosList);
 
     const parseTaskIdFromMessage = (message: string): string | null =>
     {
@@ -417,15 +652,30 @@ export default function WorkflowEditorView(props: {
     });
   }, [runtimeTasksById, setNodes]);
 
-  const loadFromJcwf = useCallback((workflowId: string, jcwfUnknown: unknown) => {
+  const loadFromJcwf = useCallback((workflowId: string | null, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
     const graph = jcwfToGraph(jcwf);
-    setLastSavedSignature(computeGraphSignature(graph.nodes, graph.edges));
-    setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes));
-    setIsDirty(false);
-    if (props.onDirtyStateChange)
+    // For templates (workflowId is null), mark as dirty since it's not saved yet
+    const isFromTemplate = workflowId === null;
+    if (!isFromTemplate)
     {
-      props.onDirtyStateChange(false);
+      setLastSavedSignature(computeGraphSignature(graph.nodes, graph.edges));
+      setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes));
+      setIsDirty(false);
+      if (props.onDirtyStateChange)
+      {
+        props.onDirtyStateChange(false);
+      }
+    }
+    else
+    {
+      setLastSavedSignature("");
+      setLastSavedNodeSnapshot({});
+      setIsDirty(true);
+      if (props.onDirtyStateChange)
+      {
+        props.onDirtyStateChange(true);
+      }
     }
     recomputeValidation(graph);
     setLoadedWorkflowId(workflowId);
@@ -434,7 +684,7 @@ export default function WorkflowEditorView(props: {
     setBackendInfos([]);
     setSelectedNodeId(null);
     setShowBackToListHint(false);
-    setStatusText(`Loaded workflow '${workflowId}'.`);
+    setStatusText(isFromTemplate ? "Loaded from template. Save to create workflow." : `Loaded workflow '${workflowId}'.`);
     setErrorText(null);
   }, [recomputeValidation, props.onDirtyStateChange]);
 
@@ -454,6 +704,14 @@ export default function WorkflowEditorView(props: {
 
     async function load(): Promise<void>
     {
+      // If initialJcwf is provided (template), use it directly
+      if (props.initialJcwf)
+      {
+        loadFromJcwfRef.current(null, props.initialJcwf);
+        setStatusText("Loaded from template.");
+        return;
+      }
+
       if (!props.workflowId)
       {
         // "New" workflow.
@@ -486,7 +744,7 @@ export default function WorkflowEditorView(props: {
 
     void load();
     return () => { isCancelled = true; };
-  }, [props.workflowId]);
+  }, [props.workflowId, props.initialJcwf]);
 
   // WebSocket run monitoring.
   useEffect(() => {
@@ -594,10 +852,14 @@ export default function WorkflowEditorView(props: {
           }
 
           const rawState = typeof t.state === "string" ? t.state : "";
+          const attemptCount = typeof t.attemptCount === "number" ? t.attemptCount : undefined;
+          const lastErrorMessage = typeof t.lastErrorMessage === "string" && t.lastErrorMessage.length > 0 ? t.lastErrorMessage : undefined;
           nextRuntime[taskId] = {
             taskId,
             runId: targetRunId,
             state: normalizeRuntimeState(rawState),
+            attemptCount,
+            lastErrorMessage,
           };
         }
 
@@ -792,77 +1054,7 @@ export default function WorkflowEditorView(props: {
     }
   }, [nodes, edges, props.onDirtyStateChange]);
 
-  const onSave = useCallback(async () => {
-    const workflowId = loadedWorkflowId ?? props.workflowId;
-
-    const jcwf = exportJcwfObject();
-    if (!jcwf)
-    {
-      return;
-    }
-
-    try
-    {
-      setStatusText("Saving…");
-      setErrorText(null);
-      setShowBackToListHint(false);
-
-      if (workflowId)
-      {
-        const result = await saveWorkflow(workflowId, jcwf);
-        setStatusText(result.ok ? `Saved '${workflowId}'.` : `Save returned ok=false for '${workflowId}'.`);
-        updateSavedBaseline();
-        notifyPersisted({ kind: "save", workflowId });
-      }
-      else
-      {
-        const proposed = window.prompt("New workflow id:", "workflow");
-        const newId = proposed ? proposed.trim() : "";
-        if (newId.length === 0)
-        {
-          setStatusText("");
-          setErrorText("Create cancelled: workflow id is required.");
-          return;
-        }
-
-        // Ensure exported JCWF uses the new id.
-        const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
-        const exportResult = graphToJcwf(graph, newId);
-        if (!exportResult.ok)
-        {
-          setErrorText(`${exportResult.message} Cycle nodes: ${exportResult.cycleNodes.join(", ")}`);
-          setStatusText("");
-          return;
-        }
-
-        const createResult = await createWorkflowWithId(newId, exportResult.jcwf);
-        setLoadedWorkflowId(newId);
-        props.onWorkflowCreated(newId);
-        setStatusText(createResult.ok ? `Created '${newId}'.` : `Create returned ok=false for '${newId}'.`);
-        updateSavedBaseline();
-        notifyPersisted({ kind: "create", workflowId: newId });
-        setShowBackToListHint(true);
-      }
-    }
-    catch (e)
-    {
-      const message = e instanceof Error ? e.message : String(e);
-      setErrorText(`Save failed: ${message}`);
-      setStatusText("");
-    }
-  }, [loadedWorkflowId, props.workflowId, exportJcwfObject, nodes, edges, props.onWorkflowCreated, updateSavedBaseline, notifyPersisted]);
-
-  const onSaveAs = useCallback(async () => {
-    const baseId = loadedWorkflowId ?? props.workflowId ?? "workflow";
-    const proposed = window.prompt("Save As… New workflow id:", `${baseId}_copy`);
-    const newId = proposed ? proposed.trim() : "";
-    if (newId.length === 0)
-    {
-      setStatusText("");
-      setErrorText("Save As cancelled: workflow id is required.");
-      return;
-    }
-
+  const performCreateWorkflow = useCallback(async (newId: string, mode: "create" | "saveAs") => {
     const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
     const exportResult = graphToJcwf(graph, newId);
     if (!exportResult.ok)
@@ -874,24 +1066,75 @@ export default function WorkflowEditorView(props: {
 
     try
     {
-      setStatusText("Saving As…");
+      setStatusText(mode === "create" ? "Creating…" : "Saving As…");
       setErrorText(null);
 
       const result = await createWorkflowWithId(newId, exportResult.jcwf);
       setLoadedWorkflowId(newId);
       props.onWorkflowCreated(newId);
-      setStatusText(result.ok ? `Saved as '${newId}'.` : `Save As returned ok=false for '${newId}'.`);
+      setStatusText(result.ok ? `${mode === "create" ? "Created" : "Saved as"} '${newId}'.` : `${mode === "create" ? "Create" : "Save As"} returned ok=false for '${newId}'.`);
       updateSavedBaseline();
-      notifyPersisted({ kind: "saveAs", workflowId: newId });
+      notifyPersisted({ kind: mode, workflowId: newId });
       setShowBackToListHint(true);
     }
     catch (e)
     {
       const message = e instanceof Error ? e.message : String(e);
-      setErrorText(`Save As failed: ${message}`);
+      setErrorText(`${mode === "create" ? "Create" : "Save As"} failed: ${message}`);
       setStatusText("");
     }
-  }, [loadedWorkflowId, props.workflowId, nodes, edges, props.onWorkflowCreated, updateSavedBaseline, notifyPersisted]);
+  }, [nodes, edges, props.onWorkflowCreated, updateSavedBaseline, notifyPersisted]);
+
+  const onSave = useCallback(async () => {
+    const jcwf = exportJcwfObject();
+    if (!jcwf)
+    {
+      return;
+    }
+
+    // If loadedWorkflowId is set, we can update (PUT) - it exists on backend
+    if (loadedWorkflowId)
+    {
+      try
+      {
+        setStatusText("Saving…");
+        setErrorText(null);
+        setShowBackToListHint(false);
+
+        const result = await saveWorkflow(loadedWorkflowId, jcwf);
+        setStatusText(result.ok ? `Saved '${loadedWorkflowId}'.` : `Save returned ok=false for '${loadedWorkflowId}'.`);
+        updateSavedBaseline();
+        notifyPersisted({ kind: "save", workflowId: loadedWorkflowId });
+      }
+      catch (e)
+      {
+        const message = e instanceof Error ? e.message : String(e);
+        setErrorText(`Save failed: ${message}`);
+        setStatusText("");
+      }
+    }
+    else if (props.workflowId)
+    {
+      // We have an intended ID (e.g., from template) but it's not saved yet - create it
+      await performCreateWorkflow(props.workflowId, "create");
+    }
+    else
+    {
+      // No workflow id yet - show modal to get one
+      setCreateModalMode("create");
+      setShowCreateModal(true);
+    }
+  }, [loadedWorkflowId, props.workflowId, exportJcwfObject, updateSavedBaseline, notifyPersisted, performCreateWorkflow]);
+
+  const onSaveAs = useCallback(() => {
+    setCreateModalMode("saveAs");
+    setShowCreateModal(true);
+  }, []);
+
+  const onCreateModalSubmit = useCallback((newId: string) => {
+    setShowCreateModal(false);
+    void performCreateWorkflow(newId, createModalMode);
+  }, [performCreateWorkflow, createModalMode]);
 
   const onNavigateBack = useCallback(() => {
     if (isDirty)
@@ -972,6 +1215,27 @@ export default function WorkflowEditorView(props: {
     }
   }, [loadedWorkflowId, props.workflowId]);
 
+  const onCancelRun = useCallback(async () => {
+    if (!selectedRunId)
+    {
+      return;
+    }
+
+    try
+    {
+      setStatusText("Cancelling run…");
+      setErrorText(null);
+      const result = await cancelRun(selectedRunId);
+      setStatusText(result.ok ? `Cancel requested for ${selectedRunId}.` : "Cancel returned ok=false.");
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Cancel failed: ${message}`);
+      setStatusText("");
+    }
+  }, [selectedRunId]);
+
   const onExportToConsole = useCallback(() => {
     const jcwf = exportJcwfObject();
     if (!jcwf)
@@ -982,6 +1246,98 @@ export default function WorkflowEditorView(props: {
     console.log("Exported JCWF:", JSON.stringify(jcwf, null, 2));
     setStatusText("Exported to console.");
   }, [exportJcwfObject]);
+
+  const onAutoLayout = useCallback(() => {
+    const currentNodes = nodes as EditorTaskNode[];
+    const currentEdges = edges as EditorTaskEdge[];
+
+    if (currentNodes.length === 0)
+    {
+      return;
+    }
+
+    // Build dependency map: nodeId -> set of nodes it depends on
+    const dependsOn = new Map<string, Set<string>>();
+    for (const node of currentNodes)
+    {
+      dependsOn.set(node.id, new Set());
+    }
+    for (const edge of currentEdges)
+    {
+      const deps = dependsOn.get(edge.target);
+      if (deps)
+      {
+        deps.add(edge.source);
+      }
+    }
+
+    // Compute levels using topological sort
+    const levels = new Map<string, number>();
+    const computeLevel = (nodeId: string, visited: Set<string>): number => {
+      if (levels.has(nodeId))
+      {
+        return levels.get(nodeId)!;
+      }
+      if (visited.has(nodeId))
+      {
+        return 0; // Cycle detected, treat as level 0
+      }
+      visited.add(nodeId);
+      const deps = dependsOn.get(nodeId) ?? new Set();
+      let maxDepLevel = -1;
+      for (const depId of deps)
+      {
+        maxDepLevel = Math.max(maxDepLevel, computeLevel(depId, visited));
+      }
+      const level = maxDepLevel + 1;
+      levels.set(nodeId, level);
+      return level;
+    };
+
+    for (const node of currentNodes)
+    {
+      computeLevel(node.id, new Set());
+    }
+
+    // Group nodes by level
+    const nodesByLevel = new Map<number, EditorTaskNode[]>();
+    for (const node of currentNodes)
+    {
+      const level = levels.get(node.id) ?? 0;
+      const group = nodesByLevel.get(level) ?? [];
+      group.push(node);
+      nodesByLevel.set(level, group);
+    }
+
+    // Position nodes
+    const NODE_WIDTH = 200;
+    const NODE_HEIGHT = 80;
+    const HORIZONTAL_GAP = 100;
+    const VERTICAL_GAP = 40;
+
+    const layoutedNodes: EditorTaskNode[] = [];
+    const sortedLevels = Array.from(nodesByLevel.keys()).sort((a, b) => a - b);
+
+    for (const level of sortedLevels)
+    {
+      const nodesAtLevel = nodesByLevel.get(level) ?? [];
+      const x = level * (NODE_WIDTH + HORIZONTAL_GAP) + 50;
+
+      for (let i = 0; i < nodesAtLevel.length; i++)
+      {
+        const node = nodesAtLevel[i];
+        const y = i * (NODE_HEIGHT + VERTICAL_GAP) + 50;
+        layoutedNodes.push({
+          ...node,
+          position: { x, y },
+        });
+      }
+    }
+
+    const graph: EditorGraph = { nodes: layoutedNodes, edges: currentEdges };
+    recomputeValidation(graph);
+    setStatusText("Auto-layout applied.");
+  }, [nodes, edges, recomputeValidation]);
 
   return (
     <div className="editorShell">
@@ -1004,10 +1360,19 @@ export default function WorkflowEditorView(props: {
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn" type="button" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
+                Undo
+              </button>
+              <button className="btn" type="button" onClick={redo} disabled={redoStack.length === 0} title="Redo (Ctrl+Shift+Z)">
+                Redo
+              </button>
+            </div>
             <button className="btn" type="button" onClick={onSave}>Save</button>
             <button className="btn" type="button" onClick={onSaveAs}>Save As…</button>
             <button className="btn" type="button" onClick={onValidate}>Validate</button>
             <button className="btn" type="button" onClick={onRun} disabled={!loadedWorkflowId && !props.workflowId}>Run</button>
+            <button className="btn" type="button" onClick={onAutoLayout}>Auto Layout</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
             <button className="btn" type="button" onClick={onNavigateBack}>
               {showBackToListHint ? "Back to list" : "Back"}
@@ -1016,6 +1381,52 @@ export default function WorkflowEditorView(props: {
 
           {statusText ? <div className="small" style={{ marginTop: 10 }}>{statusText}</div> : null}
           {errorText ? <div className="errorText" style={{ marginTop: 10 }}>{errorText}</div> : null}
+
+          {(clientErrors.length > 0 || clientInfos.length > 0)
+            ? (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Client validation</div>
+                {clientErrors.length > 0
+                  ? (
+                    <ul style={{ margin: 0, paddingLeft: 18, marginBottom: 6 }}>
+                      {clientErrors.map((e, idx) => (
+                        <li key={`client-err-${idx}`} className="errorText" style={{ marginBottom: 2 }}>
+                          <button
+                            type="button"
+                            className="btnLink"
+                            onClick={() => selectNodeById(e.taskId)}
+                            style={{ textAlign: "left" }}
+                          >
+                            {e.message}
+                            <span className="small"> (task: <code>{e.taskId}</code>)</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )
+                  : null}
+                {clientInfos.length > 0
+                  ? (
+                    <ul style={{ margin: 0, paddingLeft: 18 }}>
+                      {clientInfos.map((i, idx) => (
+                        <li key={`client-info-${idx}`} className="infoText" style={{ marginBottom: 2 }}>
+                          <button
+                            type="button"
+                            className="btnLink"
+                            onClick={() => selectNodeById(i.taskId)}
+                            style={{ textAlign: "left" }}
+                          >
+                            {i.message}
+                            <span className="small"> (task: <code>{i.taskId}</code>)</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )
+                  : null}
+              </div>
+            )
+            : null}
 
           {(backendErrors.length > 0 || backendWarnings.length > 0 || backendInfos.length > 0)
             ? (
@@ -1141,8 +1552,20 @@ export default function WorkflowEditorView(props: {
               </div>
             )}
 
-          {selectedRunId
-            ? <div className="small" style={{ marginTop: 10 }}>Selected: <code>{selectedRunId}</code></div>
+          {selectedRunId && activeRuns.some((r) => r.runId === selectedRunId)
+            ? (
+              <div style={{ marginTop: 10 }}>
+                <div className="small">Selected: <code>{selectedRunId}</code></div>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={onCancelRun}
+                  style={{ marginTop: 6 }}
+                >
+                  Cancel Run
+                </button>
+              </div>
+            )
             : null}
         </div>
 
@@ -1160,8 +1583,9 @@ export default function WorkflowEditorView(props: {
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}
+          onNodeDragStart={onNodeDragStart}
           onNodeDragStop={onNodeDragStop}
-          onEdgesChange={onEdgesChange}
+          onEdgesChange={onEdgesChangeWithUndo}
           onConnect={onConnect}
           onSelectionChange={onSelectionChange}
           deleteKeyCode={["Backspace", "Delete"]}
@@ -1272,10 +1696,35 @@ export default function WorkflowEditorView(props: {
                     </div>
                   )
                   : null}
+
+                {runtimeTasksById[selectedNode.id]
+                  ? (
+                    <div style={{ marginTop: 10, padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
+                      <div className="small" style={{ fontWeight: 700, marginBottom: 4 }}>Runtime</div>
+                      <div className="small">State: <code>{runtimeTasksById[selectedNode.id].state}</code></div>
+                      {runtimeTasksById[selectedNode.id].attemptCount !== undefined
+                        ? <div className="small">Attempts: {runtimeTasksById[selectedNode.id].attemptCount}</div>
+                        : null}
+                      {runtimeTasksById[selectedNode.id].lastErrorMessage
+                        ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
+                        : null}
+                    </div>
+                  )
+                  : null}
               </div>
             )}
         </div>
+
       </aside>
+
+      <CreateWorkflowModal
+        isOpen={showCreateModal}
+        defaultId={createModalMode === "saveAs" ? `${loadedWorkflowId ?? props.workflowId ?? "workflow"}_copy` : "workflow"}
+        title={createModalMode === "saveAs" ? "Save As…" : "Create Workflow"}
+        submitLabel={createModalMode === "saveAs" ? "Save As" : "Create"}
+        onCancel={() => setShowCreateModal(false)}
+        onSubmit={onCreateModalSubmit}
+      />
     </div>
   );
 }

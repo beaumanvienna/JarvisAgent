@@ -146,3 +146,18 @@ export async function deleteWorkflow(workflowId: string): Promise<WorkflowDelete
   ensureOk(response);
   return (await response.json()) as WorkflowDeleteResponse;
 }
+
+export type CancelRunResponse = {
+  ok: boolean;
+  runId: string;
+  cancelRequested: boolean;
+};
+
+export async function cancelRun(runId: string): Promise<CancelRunResponse>
+{
+  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+  ensureOk(response);
+  return (await response.json()) as CancelRunResponse;
+}

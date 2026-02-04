@@ -44,7 +44,7 @@ namespace AIAssistant
 
         // Optional pointers for Workflow Editor API (set by JarvisAgent during startup).
         // If not set, editor run-monitoring endpoints will return "not configured".
-        void SetWorkflowRegistry(WorkflowRegistry const* workflowRegistry);
+        void SetWorkflowRegistry(WorkflowRegistry* workflowRegistry);
         void SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager);
 
         // Workflow Editor: optional server-side push of run snapshots (call periodically from main thread).
@@ -96,7 +96,7 @@ namespace AIAssistant
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
 
-        WorkflowRegistry const* m_WorkflowRegistry = nullptr;
+        WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
     };
 } // namespace AIAssistant

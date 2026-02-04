@@ -101,6 +101,7 @@ A React Flow node can correspond with a JCWF task:
 - Connect dependencies
 - Pan / zoom / minimap
 - Auto-layout (DAG)
+- Undo / redo
 - Inline validation markers
 - Properties panel per node
 - Comment / note nodes (editor-only metadata)

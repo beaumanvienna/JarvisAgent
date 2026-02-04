@@ -397,7 +397,7 @@ namespace AIAssistant
 
     WebServer::~WebServer() { Stop(); }
 
-    void WebServer::SetWorkflowRegistry(WorkflowRegistry const* workflowRegistry)
+    void WebServer::SetWorkflowRegistry(WorkflowRegistry* workflowRegistry)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         m_WorkflowRegistry = workflowRegistry;
@@ -906,6 +906,16 @@ namespace AIAssistant
                                          parsedWorkflow.m_Id);
         }
 
+        // Update the main registry so the orchestrator can run this workflow
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRegistry != nullptr)
+            {
+                std::string upsertErrorMessage;
+                m_WorkflowRegistry->UpsertWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+            }
+        }
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["id"] = parsedWorkflow.m_Id;
@@ -954,6 +964,16 @@ namespace AIAssistant
         {
             return MakeWorkflowJsonError(500, "workflow_write_failed", writeErrorMessage, "PUT /api/workflows/{id}",
                                          workflowId);
+        }
+
+        // Update the main registry so the orchestrator can run this workflow
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRegistry != nullptr)
+            {
+                std::string upsertErrorMessage;
+                m_WorkflowRegistry->UpsertWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+            }
         }
 
         crow::json::wvalue responseJson;

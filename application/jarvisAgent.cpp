@@ -208,9 +208,13 @@ namespace AIAssistant
 
         WorkflowOrchestrator::Get().SetRegistry(m_WorkflowRegistry.get());
 
+        m_WebServer->SetWorkflowRegistry(m_WorkflowRegistry.get());
+
         m_WorkflowRuntimeManager = std::make_unique<WorkflowRuntimeManager>();
         m_WorkflowRuntimeManager->SetRegistry(m_WorkflowRegistry.get());
         m_WorkflowRuntimeManager->Start();
+
+        m_WebServer->SetWorkflowRuntimeManager(m_WorkflowRuntimeManager.get());
 
         m_TriggerEngine = std::make_unique<TriggerEngine>(
             [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)

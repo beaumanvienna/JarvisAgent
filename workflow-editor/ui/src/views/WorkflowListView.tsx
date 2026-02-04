@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { deleteWorkflow, listWorkflows, type WorkflowListResponse } from "../api/workflows";
+import CreateWorkflowModal from "../components/CreateWorkflowModal";
+import TemplateBrowser from "../components/TemplateBrowser";
+import type { JcwfFile } from "../jcwf/types";
 
 export type WorkflowListItem = {
   id: string;
@@ -11,12 +14,15 @@ export default function WorkflowListView(props: {
   refreshToken: number;
   onOpenWorkflow: (workflow: WorkflowListItem) => void;
   onCreateNew: () => void;
+  onCreateFromTemplate?: (workflowId: string, jcwf: JcwfFile) => void;
 }): JSX.Element
 {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [statusText, setStatusText] = useState<string>("");
   const [response, setResponse] = useState<WorkflowListResponse | null>(null);
+  const [filterText, setFilterText] = useState<string>("");
+  const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
 
   const reload = useCallback(async (isCancelled: { value: boolean }): Promise<void> => {
     try
@@ -79,15 +85,25 @@ export default function WorkflowListView(props: {
   }, [reload]);
 
   const workflows = useMemo(() => {
-    return response?.workflows ?? [];
-  }, [response]);
+    const all = response?.workflows ?? [];
+    if (filterText.trim().length === 0)
+    {
+      return all;
+    }
+    const lowerFilter = filterText.toLowerCase();
+    return all.filter((w) => {
+      const idMatch = w.id.toLowerCase().includes(lowerFilter);
+      const labelMatch = w.label ? w.label.toLowerCase().includes(lowerFilter) : false;
+      return idMatch || labelMatch;
+    });
+  }, [response, filterText]);
 
   return (
     <div className="panel">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <h2 style={{ marginTop: 0, marginBottom: 0 }}>Workflows</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" type="button" onClick={props.onCreateNew}>
+          <button className="btn" type="button" onClick={() => setShowCreateModal(true)}>
             + New
           </button>
           <button className="btn" type="button" onClick={() => {
@@ -99,12 +115,28 @@ export default function WorkflowListView(props: {
         </div>
       </div>
 
+      <div style={{ marginTop: 12, marginBottom: 8 }}>
+        <input
+          type="text"
+          placeholder="Filter by id or label…"
+          value={filterText}
+          onChange={(e) => setFilterText(e.target.value)}
+          style={{ width: 280, padding: "6px 10px" }}
+        />
+      </div>
+
       {loading ? <div className="muted">Loading…</div> : null}
       {statusText ? <div className="small">{statusText}</div> : null}
       {error ? <div className="errorText">Error: {error}</div> : null}
 
       {!loading && !error && workflows.length === 0
-        ? <div className="muted">No workflows found.</div>
+        ? (
+          <div className="muted">
+            {filterText.trim().length > 0
+              ? `No workflows match "${filterText}".`
+              : "No workflows found."}
+          </div>
+        )
         : null}
 
       <div style={{ maxWidth: 860 }}>
@@ -130,6 +162,14 @@ export default function WorkflowListView(props: {
         })}
       </div>
 
+      {props.onCreateFromTemplate
+        ? (
+          <TemplateBrowser
+            onCreateFromTemplate={props.onCreateFromTemplate}
+          />
+        )
+        : null}
+
       <div className="card" style={{ maxWidth: 860 }}>
         <div style={{ fontWeight: 700, marginBottom: 6 }}>Tip</div>
         <div className="small">
@@ -137,6 +177,17 @@ export default function WorkflowListView(props: {
           The editor will load the selected workflow by id.
         </div>
       </div>
+
+      <CreateWorkflowModal
+        isOpen={showCreateModal}
+        title="Create New Workflow"
+        submitLabel="Create"
+        onCancel={() => setShowCreateModal(false)}
+        onSubmit={(workflowId) => {
+          setShowCreateModal(false);
+          props.onOpenWorkflow({ id: workflowId });
+        }}
+      />
     </div>
   );
 }
