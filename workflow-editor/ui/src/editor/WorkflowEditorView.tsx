@@ -197,7 +197,7 @@ export default function WorkflowEditorView(props: {
   onWorkflowCreated: (workflowId: string) => void;
   onWorkflowPersisted?: (event: WorkflowPersistEvent) => void;
   onDirtyStateChange?: (isDirty: boolean) => void;
-  onNavigateBack: () => void;
+  hideTierDWarnings?: boolean;
 }): JSX.Element
 {
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -214,7 +214,6 @@ export default function WorkflowEditorView(props: {
   const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
   const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
   const [isDirty, setIsDirty] = useState<boolean>(false);
-  const [showBackToListHint, setShowBackToListHint] = useState<boolean>(false);
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
@@ -223,6 +222,9 @@ export default function WorkflowEditorView(props: {
   const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runtimeTasksById, setRuntimeTasksById] = useState<RuntimeTaskSnapshotById>({});
+  const [pendingRunId, setPendingRunId] = useState<string | null>(null);
+  const [lastRunResult, setLastRunResult] = useState<{ runId: string; state: string } | null>(null);
+  const pendingRunSeenRef = useRef<boolean>(false);
 
   const runtimeTasksByIdRef = useRef<RuntimeTaskSnapshotById>({});
   useEffect(() => {
@@ -476,7 +478,6 @@ export default function WorkflowEditorView(props: {
     setBackendWarnings([]);
     setBackendInfos([]);
     setErrorText(null);
-    setShowBackToListHint(false);
 
     const emptySignature = computeGraphSignature([], []);
     setLastSavedSignature(emptySignature);
@@ -614,6 +615,7 @@ export default function WorkflowEditorView(props: {
           validationWarnings: mergedWarnings.length > 0 ? mergedWarnings : undefined,
           validationInfos: mergedInfos.length > 0 ? mergedInfos : undefined,
           isDirty: nodeIsDirty ? true : undefined,
+          hideTierDWarnings: props.hideTierDWarnings,
           runtimeState: runtimeSnapshot ? runtimeSnapshot.state : undefined,
           runtimeRunId: runtimeSnapshot ? runtimeSnapshot.runId : undefined,
         },
@@ -622,7 +624,7 @@ export default function WorkflowEditorView(props: {
 
     setNodes(nextNodes);
     setEdges(graph.edges);
-  }, [setNodes, setEdges, backendErrors, backendWarnings, backendInfos, lastSavedNodeSnapshot]);
+  }, [setNodes, setEdges, backendErrors, backendWarnings, backendInfos, lastSavedNodeSnapshot, props.hideTierDWarnings]);
 
   useEffect(() => {
     setNodes((current) => {
@@ -651,6 +653,19 @@ export default function WorkflowEditorView(props: {
       return changed ? next : current;
     });
   }, [runtimeTasksById, setNodes]);
+
+  // Update nodes when hideTierDWarnings setting changes
+  useEffect(() => {
+    setNodes((current) => {
+      return (current as EditorTaskNode[]).map((n) => {
+        if (n.data.hideTierDWarnings === props.hideTierDWarnings)
+        {
+          return n;
+        }
+        return { ...n, data: { ...n.data, hideTierDWarnings: props.hideTierDWarnings } };
+      });
+    });
+  }, [props.hideTierDWarnings, setNodes]);
 
   const loadFromJcwf = useCallback((workflowId: string | null, jcwfUnknown: unknown) => {
     const jcwf = jcwfUnknown as JcwfFile;
@@ -683,7 +698,6 @@ export default function WorkflowEditorView(props: {
     setBackendWarnings([]);
     setBackendInfos([]);
     setSelectedNodeId(null);
-    setShowBackToListHint(false);
     setStatusText(isFromTemplate ? "Loaded from template. Save to create workflow." : `Loaded workflow '${workflowId}'.`);
     setErrorText(null);
   }, [recomputeValidation, props.onDirtyStateChange]);
@@ -723,7 +737,6 @@ export default function WorkflowEditorView(props: {
       {
         setStatusText("Loading…");
         setErrorText(null);
-        setShowBackToListHint(false);
 
         const jcwf = await loadWorkflow(props.workflowId);
         if (!isCancelled)
@@ -910,6 +923,47 @@ export default function WorkflowEditorView(props: {
     };
   }, [selectedRunId]);
 
+  // Detect when a pending run completes
+  useEffect(() => {
+    if (!pendingRunId)
+    {
+      pendingRunSeenRef.current = false;
+      return;
+    }
+
+    const run = activeRuns.find((r) => r.runId === pendingRunId);
+    if (run)
+    {
+      pendingRunSeenRef.current = true;
+    }
+
+    if (!run)
+    {
+      // Run not found in active runs - if we saw it before and now it's gone, it completed
+      if (pendingRunSeenRef.current)
+      {
+        setLastRunResult({ runId: pendingRunId, state: "completed" });
+        setStatusText(`✓ Run completed. runId=${pendingRunId}`);
+        setPendingRunId(null);
+        pendingRunSeenRef.current = false;
+      }
+      return;
+    }
+
+    const terminalStates = ["completed", "failed", "cancelled"];
+    if (terminalStates.includes(run.state))
+    {
+      setLastRunResult({ runId: run.runId, state: run.state });
+      setPendingRunId(null);
+      pendingRunSeenRef.current = false;
+
+      const stateLabel = run.state === "completed" ? "✓ Run completed successfully" :
+                         run.state === "failed" ? "✗ Run failed" :
+                         "Run cancelled";
+      setStatusText(`${stateLabel}. runId=${run.runId}`);
+    }
+  }, [activeRuns, pendingRunId]);
+
   const selectedNode = useMemo(() => {
     if (!selectedNodeId)
     {
@@ -934,10 +988,25 @@ export default function WorkflowEditorView(props: {
     });
   }, [setNodes]);
 
+  const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
+
   const onSelectionChange = useCallback((params: { nodes?: Node[]; edges?: Edge[]; }) => {
     const selected = params.nodes && params.nodes.length > 0 ? params.nodes[0] : null;
     selectNodeById(selected ? selected.id : null);
+    setSelectedEdgeIds(params.edges ? params.edges.map((e) => e.id) : []);
   }, [selectNodeById]);
+
+  const onDeleteSelectedEdges = useCallback(() => {
+    if (selectedEdgeIds.length === 0)
+    {
+      return;
+    }
+    const nextEdges = edges.filter((e) => !selectedEdgeIds.includes(e.id));
+    setEdges(nextEdges as EditorTaskEdge[]);
+    setSelectedEdgeIds([]);
+    recomputeValidation({ nodes: nodes as EditorTaskNode[], edges: nextEdges as EditorTaskEdge[] });
+    setStatusText(`Deleted ${selectedEdgeIds.length} edge(s).`);
+  }, [selectedEdgeIds, edges, nodes, setEdges, recomputeValidation]);
 
   const onConnect = useCallback((connection: Connection) => {
     // Create an edge and immediately validate DAG.
@@ -966,6 +1035,56 @@ export default function WorkflowEditorView(props: {
     setErrorText(null);
   }, [nodes, edges, recomputeValidation]);
 
+  const findNonOverlappingPosition = useCallback((
+    startX: number,
+    startY: number,
+    existingNodes: EditorTaskNode[]
+  ): { x: number; y: number } => {
+    const nodeWidth = 200;
+    const nodeHeight = 100;
+    const padding = 20;
+
+    const isOverlapping = (x: number, y: number): boolean => {
+      for (const node of existingNodes)
+      {
+        const nx = node.position.x;
+        const ny = node.position.y;
+        if (
+          x < nx + nodeWidth + padding &&
+          x + nodeWidth + padding > nx &&
+          y < ny + nodeHeight + padding &&
+          y + nodeHeight + padding > ny
+        )
+        {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let x = startX;
+    let y = startY;
+    let attempts = 0;
+    const maxAttempts = 50;
+
+    while (isOverlapping(x, y) && attempts < maxAttempts)
+    {
+      // Spiral outward to find a free spot
+      const offset = (Math.floor(attempts / 4) + 1) * (nodeWidth + padding);
+      const direction = attempts % 4;
+      switch (direction)
+      {
+        case 0: x = startX + offset; break;
+        case 1: y = startY + offset; break;
+        case 2: x = startX - offset; break;
+        case 3: y = startY - offset; break;
+      }
+      attempts++;
+    }
+
+    return { x, y };
+  }, []);
+
   const addTaskNode = useCallback((taskType: JcwfTaskType) => {
     const existingIds = new Set<string>((nodes as EditorTaskNode[]).map((n) => n.id));
     const newId = nextId(existingIds, taskType);
@@ -978,10 +1097,16 @@ export default function WorkflowEditorView(props: {
       y: window.innerHeight / 2,
     }) : { x: 0, y: 0 };
 
+    const position = findNonOverlappingPosition(
+      viewportCenter.x,
+      viewportCenter.y,
+      nodes as EditorTaskNode[]
+    );
+
     const newNode: EditorTaskNode = {
       id: newId,
       type: "task",
-      position: { x: viewportCenter.x, y: viewportCenter.y },
+      position,
       data: { task, title, subtitle },
     };
 
@@ -990,7 +1115,7 @@ export default function WorkflowEditorView(props: {
     setSelectedNodeId(newId);
     setStatusText(`Added node '${newId}'.`);
     setErrorText(null);
-  }, [nodes, edges, reactFlowInstance, recomputeValidation]);
+  }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
 
   const updateSelectedTaskField = useCallback((patch: Partial<JcwfTask>) => {
     if (!selectedNode)
@@ -1075,7 +1200,6 @@ export default function WorkflowEditorView(props: {
       setStatusText(result.ok ? `${mode === "create" ? "Created" : "Saved as"} '${newId}'.` : `${mode === "create" ? "Create" : "Save As"} returned ok=false for '${newId}'.`);
       updateSavedBaseline();
       notifyPersisted({ kind: mode, workflowId: newId });
-      setShowBackToListHint(true);
     }
     catch (e)
     {
@@ -1099,7 +1223,6 @@ export default function WorkflowEditorView(props: {
       {
         setStatusText("Saving…");
         setErrorText(null);
-        setShowBackToListHint(false);
 
         const result = await saveWorkflow(loadedWorkflowId, jcwf);
         setStatusText(result.ok ? `Saved '${loadedWorkflowId}'.` : `Save returned ok=false for '${loadedWorkflowId}'.`);
@@ -1135,18 +1258,6 @@ export default function WorkflowEditorView(props: {
     setShowCreateModal(false);
     void performCreateWorkflow(newId, createModalMode);
   }, [performCreateWorkflow, createModalMode]);
-
-  const onNavigateBack = useCallback(() => {
-    if (isDirty)
-    {
-      const confirmed = window.confirm("You have unsaved changes. Discard them and go back?");
-      if (!confirmed)
-      {
-        return;
-      }
-    }
-    props.onNavigateBack();
-  }, [isDirty, props.onNavigateBack]);
 
   const onValidate = useCallback(async () => {
     const jcwf = exportJcwfObject();
@@ -1198,6 +1309,8 @@ export default function WorkflowEditorView(props: {
       if (result.ok && result.runId && result.runId.length > 0)
       {
         setSelectedRunId(result.runId);
+        setPendingRunId(result.runId);
+        setLastRunResult(null);
         setRuntimeTasksById({});
         const socket = webSocketRef.current;
         if (socket && socket.readyState === WebSocket.OPEN)
@@ -1374,15 +1487,12 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={onRun} disabled={!loadedWorkflowId && !props.workflowId}>Run</button>
             <button className="btn" type="button" onClick={onAutoLayout}>Auto Layout</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
-            <button className="btn" type="button" onClick={onNavigateBack}>
-              {showBackToListHint ? "Back to list" : "Back"}
-            </button>
           </div>
 
           {statusText ? <div className="small" style={{ marginTop: 10 }}>{statusText}</div> : null}
           {errorText ? <div className="errorText" style={{ marginTop: 10 }}>{errorText}</div> : null}
 
-          {(clientErrors.length > 0 || clientInfos.length > 0)
+          {(clientErrors.length > 0 || (clientInfos.length > 0 && !props.hideTierDWarnings))
             ? (
               <div style={{ marginTop: 12 }}>
                 <div style={{ fontWeight: 700, marginBottom: 6 }}>Client validation</div>
@@ -1405,7 +1515,7 @@ export default function WorkflowEditorView(props: {
                     </ul>
                   )
                   : null}
-                {clientInfos.length > 0
+                {clientInfos.length > 0 && !props.hideTierDWarnings
                   ? (
                     <ul style={{ margin: 0, paddingLeft: 18 }}>
                       {clientInfos.map((i, idx) => (
@@ -1428,7 +1538,7 @@ export default function WorkflowEditorView(props: {
             )
             : null}
 
-          {(backendErrors.length > 0 || backendWarnings.length > 0 || backendInfos.length > 0)
+          {(backendErrors.length > 0 || backendWarnings.length > 0 || (backendInfos.length > 0 && !props.hideTierDWarnings))
             ? (
               <div style={{ marginTop: 12 }}>
                 {backendErrors.length > 0
@@ -1495,7 +1605,7 @@ export default function WorkflowEditorView(props: {
                   )
                   : null}
 
-                {backendInfos.length > 0
+                {backendInfos.length > 0 && !props.hideTierDWarnings
                   ? (
                     <div style={{ marginTop: 10 }}>
                       <div style={{ fontWeight: 700, marginBottom: 6 }}>Backend info</div>
@@ -1574,11 +1684,22 @@ export default function WorkflowEditorView(props: {
           <div className="small">
             Click the edge, then press <code>Delete</code> (or <code>Backspace</code>).
           </div>
+          {selectedEdgeIds.length > 0 && (
+            <button
+              className="btn"
+              type="button"
+              onClick={onDeleteSelectedEdges}
+              style={{ marginTop: 8 }}
+            >
+              Delete selected edge{selectedEdgeIds.length > 1 ? "s" : ""}
+            </button>
+          )}
         </div>
       </aside>
 
       <div style={{ position: "relative" }}>
         <ReactFlow
+          key={`rf-${props.hideTierDWarnings ? "hide" : "show"}`}
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}

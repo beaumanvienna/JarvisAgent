@@ -11,6 +11,7 @@ export type EditorTaskNodeData = {
   validationWarnings?: string[];
   validationInfos?: string[];
   isDirty?: boolean;
+  hideTierDWarnings?: boolean;
 
   // Live run monitoring (populated from WebSocket snapshots)
   runtimeState?: RuntimeTaskState;

@@ -1,7 +1,36 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import WorkflowEditorView, { type WorkflowPersistEvent } from "./editor/WorkflowEditorView";
 import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
+import SettingsModal from "./components/SettingsModal";
 import type { JcwfFile } from "./jcwf/types";
+
+export type EditorSettings = {
+  hideTierDWarnings: boolean;
+};
+
+const DEFAULT_SETTINGS: EditorSettings = {
+  hideTierDWarnings: false,
+};
+
+function loadSettings(): EditorSettings {
+  try {
+    const stored = localStorage.getItem("jarvis-editor-settings");
+    if (stored) {
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_SETTINGS;
+}
+
+function saveSettings(settings: EditorSettings): void {
+  try {
+    localStorage.setItem("jarvis-editor-settings", JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
 
 type RouteKey = "workflows" | "editor";
 
@@ -12,6 +41,13 @@ export default function App(): JSX.Element
   const [editorDirty, setEditorDirty] = useState<boolean>(false);
   const [workflowListRefreshToken, setWorkflowListRefreshToken] = useState<number>(0);
   const [initialJcwf, setInitialJcwf] = useState<JcwfFile | null>(null);
+  const [settings, setSettings] = useState<EditorSettings>(loadSettings);
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+
+  const onSettingsChange = useCallback((newSettings: EditorSettings) => {
+    setSettings(newSettings);
+    saveSettings(newSettings);
+  }, []);
 
   const confirmLoseChanges = useCallback((): boolean => {
     if (!editorDirty)
@@ -103,10 +139,7 @@ export default function App(): JSX.Element
           onWorkflowCreated={onWorkflowCreated}
           onWorkflowPersisted={onWorkflowPersisted}
           onDirtyStateChange={setEditorDirty}
-          onNavigateBack={() => {
-            setWorkflowListRefreshToken((v) => v + 1);
-            navigate("workflows");
-          }}
+          hideTierDWarnings={settings.hideTierDWarnings}
         />
       );
     }
@@ -119,11 +152,21 @@ export default function App(): JSX.Element
         onCreateFromTemplate={onCreateFromTemplate}
       />
     );
-  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate]);
+  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate, settings.hideTierDWarnings]);
 
   return (
     <div className="appShell">
       <header className="topBar">
+        <button
+          className="btn settingsBtn"
+          type="button"
+          onClick={() => setShowSettingsModal(true)}
+          title="Settings"
+          style={{ marginRight: 12, fontSize: 18, padding: "4px 10px" }}
+        >
+          ⚙
+        </button>
+
         <div className="brand">
           <div className="brandTitle">JarvisAgent</div>
           <div className="brandSub">Workflow Editor</div>
@@ -151,6 +194,14 @@ export default function App(): JSX.Element
       </header>
 
       <main className="main">{content}</main>
+
+      {showSettingsModal && (
+        <SettingsModal
+          settings={settings}
+          onSettingsChange={onSettingsChange}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
     </div>
   );
 }

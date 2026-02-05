@@ -764,22 +764,19 @@ namespace AIAssistant
 
     crow::response WebServer::HandleWorkflowsListGet()
     {
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
+        WorkflowRegistry const* workflowRegistryPtr = nullptr;
         {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows");
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistryPtr = m_WorkflowRegistry;
         }
 
-        WorkflowRegistry workflowRegistry;
-        if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
+        if (workflowRegistryPtr == nullptr)
         {
-            return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
-                                         "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
+            return MakeWorkflowJsonError(500, "registry_not_available", "Workflow registry is not available",
                                          "GET /api/workflows");
         }
 
-        std::vector<std::string> workflowIds = workflowRegistry.GetWorkflowIds();
+        std::vector<std::string> workflowIds = workflowRegistryPtr->GetWorkflowIds();
         std::sort(workflowIds.begin(), workflowIds.end());
 
         crow::json::wvalue responseJson;
@@ -793,7 +790,7 @@ namespace AIAssistant
             crow::json::wvalue workflowEntry;
             workflowEntry["id"] = workflowId;
 
-            std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
+            std::optional<WorkflowDefinition> workflowDefinition = workflowRegistryPtr->GetWorkflow(workflowId);
             if (workflowDefinition.has_value())
             {
                 if (!workflowDefinition->m_Label.empty())
@@ -822,22 +819,19 @@ namespace AIAssistant
                                          "GET /api/workflows/{id}", workflowId);
         }
 
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
+        WorkflowRegistry const* workflowRegistryPtr = nullptr;
         {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}", workflowId);
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistryPtr = m_WorkflowRegistry;
         }
 
-        WorkflowRegistry workflowRegistry;
-        if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
+        if (workflowRegistryPtr == nullptr)
         {
-            return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
-                                         "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
+            return MakeWorkflowJsonError(500, "registry_not_available", "Workflow registry is not available",
                                          "GET /api/workflows/{id}", workflowId);
         }
 
-        std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
+        std::optional<WorkflowDefinition> workflowDefinition = workflowRegistryPtr->GetWorkflow(workflowId);
         if (!workflowDefinition.has_value())
         {
             return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found", "GET /api/workflows/{id}",
@@ -851,10 +845,8 @@ namespace AIAssistant
                                          "GET /api/workflows/{id}", workflowId);
         }
 
-        if (workflowFilePath.is_relative())
-        {
-            workflowFilePath = (workflowsDirectoryAbsolute / workflowFilePath).lexically_normal();
-        }
+        // Workflow file path should already be absolute from the registry
+        workflowFilePath = fs::absolute(workflowFilePath).lexically_normal();
 
         std::string workflowJsonContent;
         if (!ReadTextFile(workflowFilePath, workflowJsonContent))
@@ -912,7 +904,7 @@ namespace AIAssistant
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                m_WorkflowRegistry->UpsertWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
             }
         }
 
@@ -972,7 +964,7 @@ namespace AIAssistant
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                m_WorkflowRegistry->UpsertWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
             }
         }
 

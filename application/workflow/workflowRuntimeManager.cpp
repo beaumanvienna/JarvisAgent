@@ -511,6 +511,9 @@ namespace AIAssistant
             std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry->GetWorkflow(pendingRun.m_WorkflowId);
             if (!workflowDefinition.has_value())
             {
+                LOG_APP_WARN(
+                    "WorkflowRuntimeManager::StartPendingRuns: workflow '{}' not found in registry, skipping run '{}'",
+                    pendingRun.m_WorkflowId, pendingRun.m_RunId);
                 continue;
             }
 

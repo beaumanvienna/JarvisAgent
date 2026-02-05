@@ -33,7 +33,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const subtitle = props.data.subtitle ?? "";
   const errors = props.data.validationErrors ?? [];
   const warnings = props.data.validationWarnings ?? [];
-  const infos = props.data.validationInfos ?? [];
+  const infos = props.data.hideTierDWarnings ? [] : (props.data.validationInfos ?? []);
   const runtimeState = props.data.runtimeState;
 
   const isDirty = props.data.isDirty === true;

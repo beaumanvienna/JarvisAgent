@@ -104,8 +104,6 @@ namespace AIAssistant
             return false;
         }
 
-        size_t loadedCount = 0;
-
         for (std::filesystem::directory_entry const& entry :
              std::filesystem::directory_iterator(workflowsDirectoryPath, errorCode))
         {
@@ -127,17 +125,10 @@ namespace AIAssistant
                 continue;
             }
 
-            if (LoadWorkflowFile(filePath))
-            {
-                loadedCount++;
-            }
+            LoadWorkflowFile(filePath);
         }
 
-        if (loadedCount == 0)
-        {
-            return false;
-        }
-
+        // Empty directories are valid - no workflows is not an error
         return true;
     }
 
@@ -395,9 +386,9 @@ static bool ValidateWorkflowDefinition(std::string const& workflowIdKey, Workflo
     return true;
 }
 
-bool WorkflowRegistry::UpsertWorkflowFromJson(std::string const& workflowJson,
-                                              std::filesystem::path const& workflowFilePathAbsolute,
-                                              std::string& errorMessage)
+bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJson,
+                                                    std::filesystem::path const& workflowFilePathAbsolute,
+                                                    std::string& errorMessage)
 {
     errorMessage.clear();
 
