@@ -855,6 +855,18 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "manual_start")
+            {
+                if (value.type() == simdjson::ondemand::json_type::boolean)
+                {
+                    outputDefinition.m_ManualStart = value.get_bool().value();
+                }
+                else
+                {
+                    errorMessage = "field 'manual_start' must be a boolean";
+                    return false;
+                }
+            }
             else if (key == "triggers")
             {
                 if (!ParseTriggers(value, outputDefinition.m_Triggers, errorMessage))

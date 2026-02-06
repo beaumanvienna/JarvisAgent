@@ -190,6 +190,14 @@ export default function App(): JSX.Element
           >
             Editor{editorDirty ? "*" : ""}
           </button>
+
+          <a
+            className="btn"
+            href="/"
+            style={{ textDecoration: "none" }}
+          >
+            Dashboard
+          </a>
         </nav>
       </header>
 

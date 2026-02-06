@@ -201,6 +201,7 @@ export default function WorkflowEditorView(props: {
 }): JSX.Element
 {
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
+  const [currentZoom, setCurrentZoom] = useState<number>(1);
 
   const [statusText, setStatusText] = useState<string>("");
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -214,6 +215,7 @@ export default function WorkflowEditorView(props: {
   const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
   const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
   const [isDirty, setIsDirty] = useState<boolean>(false);
+  const [manualStartEnabled, setManualStartEnabled] = useState<boolean>(true);
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
@@ -225,6 +227,7 @@ export default function WorkflowEditorView(props: {
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [lastRunResult, setLastRunResult] = useState<{ runId: string; state: string } | null>(null);
   const pendingRunSeenRef = useRef<boolean>(false);
+  const pendingRunLastStateRef = useRef<string>("running");
 
   const runtimeTasksByIdRef = useRef<RuntimeTaskSnapshotById>({});
   useEffect(() => {
@@ -694,6 +697,7 @@ export default function WorkflowEditorView(props: {
     }
     recomputeValidation(graph);
     setLoadedWorkflowId(workflowId);
+    setManualStartEnabled((jcwf as Record<string, unknown>)["manual_start"] !== false);
     setBackendErrors([]);
     setBackendWarnings([]);
     setBackendInfos([]);
@@ -758,6 +762,32 @@ export default function WorkflowEditorView(props: {
     void load();
     return () => { isCancelled = true; };
   }, [props.workflowId, props.initialJcwf]);
+
+  // Center the graph after a workflow loads.
+  const MIN_ZOOM = 0.67;
+  useEffect(() => {
+    if (!reactFlowInstance)
+    {
+      return;
+    }
+    const timer = setTimeout(() => {
+      reactFlowInstance.fitView({ padding: 0.15 });
+      const vp = reactFlowInstance.getViewport();
+      if (vp.zoom <= MIN_ZOOM)
+      {
+        // Graph too large to fit — show top of graph at minimum zoom
+        const allNodes = reactFlowInstance.getNodes();
+        if (allNodes.length > 0)
+        {
+          const minY = Math.min(...allNodes.map((n) => n.position.y));
+          const y = 20 - minY * MIN_ZOOM; // small top padding
+          reactFlowInstance.setViewport({ x: vp.x, y, zoom: MIN_ZOOM });
+        }
+      }
+      setCurrentZoom(reactFlowInstance.getViewport().zoom);
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [loadedWorkflowId, reactFlowInstance]);
 
   // WebSocket run monitoring.
   useEffect(() => {
@@ -935,17 +965,21 @@ export default function WorkflowEditorView(props: {
     if (run)
     {
       pendingRunSeenRef.current = true;
+      pendingRunLastStateRef.current = run.state;
     }
 
     if (!run)
     {
-      // Run not found in active runs - if we saw it before and now it's gone, it completed
+      // Run not found in active runs - if we saw it before and now it's gone, use last known state
       if (pendingRunSeenRef.current)
       {
-        setLastRunResult({ runId: pendingRunId, state: "completed" });
-        setStatusText(`✓ Run completed. runId=${pendingRunId}`);
+        const finalState = pendingRunLastStateRef.current === "failed" ? "failed" : "completed";
+        setLastRunResult({ runId: pendingRunId, state: finalState });
+        const stateLabel = finalState === "failed" ? "✗ Run failed" : "✓ Run completed";
+        setStatusText(`${stateLabel}. runId=${pendingRunId}`);
         setPendingRunId(null);
         pendingRunSeenRef.current = false;
+        pendingRunLastStateRef.current = "running";
       }
       return;
     }
@@ -1412,7 +1446,7 @@ export default function WorkflowEditorView(props: {
       computeLevel(node.id, new Set());
     }
 
-    // Group nodes by level
+    // Group nodes by level, sorted alphabetically within each level (matches jcwfToGraph)
     const nodesByLevel = new Map<number, EditorTaskNode[]>();
     for (const node of currentNodes)
     {
@@ -1420,6 +1454,10 @@ export default function WorkflowEditorView(props: {
       const group = nodesByLevel.get(level) ?? [];
       group.push(node);
       nodesByLevel.set(level, group);
+    }
+    for (const [level, group] of nodesByLevel.entries())
+    {
+      group.sort((a, b) => a.id.localeCompare(b.id));
     }
 
     // Position nodes
@@ -1484,7 +1522,7 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={onSave}>Save</button>
             <button className="btn" type="button" onClick={onSaveAs}>Save As…</button>
             <button className="btn" type="button" onClick={onValidate}>Validate</button>
-            <button className="btn" type="button" onClick={onRun} disabled={!loadedWorkflowId && !props.workflowId}>Run</button>
+            <button className="btn" type="button" onClick={onRun} disabled={(!loadedWorkflowId && !props.workflowId) || !manualStartEnabled} title={!manualStartEnabled ? "manual_start is disabled for this workflow" : undefined}>Run</button>
             <button className="btn" type="button" onClick={onAutoLayout}>Auto Layout</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
           </div>
@@ -1710,8 +1748,9 @@ export default function WorkflowEditorView(props: {
           onConnect={onConnect}
           onSelectionChange={onSelectionChange}
           deleteKeyCode={["Backspace", "Delete"]}
-          onInit={setReactFlowInstance}
-          fitView
+          minZoom={MIN_ZOOM}
+          onInit={(instance) => { setReactFlowInstance(instance); instance.fitView(); }}
+          onMoveEnd={(_event, viewport) => { setCurrentZoom(viewport.zoom); }}
         >
           <Background />
           <Controls />
@@ -1836,6 +1875,12 @@ export default function WorkflowEditorView(props: {
             )}
         </div>
 
+        <div className="card" style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Debug</div>
+          <div className="small">Zoom: {(currentZoom * 100).toFixed(0)}%</div>
+          <div className="small">Nodes: {nodes.length}</div>
+          <div className="small">Edges: {edges.length}</div>
+        </div>
       </aside>
 
       <CreateWorkflowModal

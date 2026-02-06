@@ -2,6 +2,7 @@ export type WorkflowListItem = {
   id: string;
   label?: string;
   path?: string;
+  manual_start?: boolean;
 };
 
 export type WorkflowListResponse = {
@@ -60,6 +61,12 @@ function withWorkflowId(workflowId: string, workflowJson: unknown): unknown
     return { ...existing, id: workflowId };
   }
   return workflowJson;
+}
+
+export async function reloadWorkflowRegistry(): Promise<void>
+{
+  const response = await fetch("/api/workflows/reload", { method: "POST" });
+  ensureOk(response);
 }
 
 export async function listWorkflows(): Promise<WorkflowListResponse>

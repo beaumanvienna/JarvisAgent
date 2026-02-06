@@ -20,12 +20,30 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "auxiliary/threadPool.h"
+#include "engine.h"
+#include <sstream>
 
 namespace AIAssistant
 {
     ThreadPool::ThreadPool() {}
 
-    void ThreadPool::Wait() { m_Pool.wait(); }
+    void ThreadPool::Wait()
+    {
+        LOG_CORE_INFO("[shutdown] ThreadPool::Wait() - {} threads, {} tasks queued", m_Pool.get_thread_count(),
+                      m_Pool.get_tasks_queued());
+
+        auto const ids = m_Pool.get_thread_ids();
+        for (size_t i = 0; i < ids.size(); ++i)
+        {
+            std::ostringstream oss;
+            oss << ids[i];
+            LOG_CORE_INFO("[shutdown] ThreadPool thread [{}]: id={}", i, oss.str());
+        }
+
+        m_Pool.wait();
+
+        LOG_CORE_INFO("[shutdown] ThreadPool::Wait() returned");
+    }
 
     void ThreadPool::Reset(size_t const numThreads) { m_Pool.reset(numThreads); }
 

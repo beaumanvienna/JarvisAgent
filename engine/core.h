@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <atomic>
 #include <memory>
 #include <filesystem>
 
@@ -62,6 +63,10 @@ namespace AIAssistant
     private:
         static void SignalHandler(int signal);
         void DisableCtrlCOutput();
+        void CheckSignalFlags();
+
+        static std::atomic<bool> s_ShutdownRequested;
+        static std::atomic<bool> s_ForceShutdownRequested;
 
     private:
         // THREADS_REQUIRED_BY_APP:

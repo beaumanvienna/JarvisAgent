@@ -3,6 +3,11 @@
   "id": "make-example",
   "label": "Makefile-style compilation test",
   "doc": "Compiles object files → static lib → final executable.",
+  "manual_start": true,
+  "triggers": [
+    { "type": "auto", "id": "auto", "enabled": true },
+    { "type": "manual", "id": "manual", "enabled": true }
+  ],
 
   "tasks": {
     "compile_lib1": {

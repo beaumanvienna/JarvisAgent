@@ -116,6 +116,7 @@ Describes the overall workflow:
 - **m_WorkflowFilePath**: Workflow File Path: filesystem path of the loaded .jcwf file (set by the loader).
 - **m_WorkflowFileDirectory**: Workflow File Directory: directory that contains the loaded .jcwf file (set by the loader).
 - **m_WorkflowBaseDirectory**: Workflow Base Directory: base directory used for resolving workflow-level relative paths (set by the loader).
+- **m_ManualStart**: Controls whether the workflow can be started manually via UI or CLI (default: `true`). When `false`, the workflow can only be started by its defined triggers.
 - **m_Triggers**: List of triggers for the workflow.
 - **m_Tasks**: Map of task definitions.
 - **m_Dataflows**: List of data flows.

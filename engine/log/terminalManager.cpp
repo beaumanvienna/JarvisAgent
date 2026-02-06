@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <clocale>
 #include <mutex>
+#include <unistd.h>
 
 #include "pdcursesmod/curses.h"
 
@@ -377,28 +378,35 @@ namespace AIAssistant
             return;
         }
 
+        // Raw diagnostics — bypass spdlog/TerminalLogStreamBuf (they use this object)
+        write(STDERR_FILENO, "[TM] delwin LogWindow\n", 22);
         if (m_Impl->m_LogWindow != nullptr)
         {
             delwin(m_Impl->m_LogWindow);
             m_Impl->m_LogWindow = nullptr;
         }
+        write(STDERR_FILENO, "[TM] delwin StatusWindow\n", 25);
         if (m_Impl->m_StatusWindow != nullptr)
         {
             delwin(m_Impl->m_StatusWindow);
             m_Impl->m_StatusWindow = nullptr;
         }
+        write(STDERR_FILENO, "[TM] delwin LogHeaderWindow\n", 28);
         if (m_Impl->m_LogHeaderWindow != nullptr)
         {
             delwin(m_Impl->m_LogHeaderWindow);
             m_Impl->m_LogHeaderWindow = nullptr;
         }
+        write(STDERR_FILENO, "[TM] delwin StatusHeaderWindow\n", 31);
         if (m_Impl->m_StatusHeaderWindow != nullptr)
         {
             delwin(m_Impl->m_StatusHeaderWindow);
             m_Impl->m_StatusHeaderWindow = nullptr;
         }
 
+        write(STDERR_FILENO, "[TM] endwin\n", 12);
         endwin();
+        write(STDERR_FILENO, "[TM] done\n", 10);
 
         m_Impl->m_Initialized = false;
     }

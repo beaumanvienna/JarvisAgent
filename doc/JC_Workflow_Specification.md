@@ -112,6 +112,7 @@ The root object has the following top-level fields:
   "label": "Daily Reporting Workflow",
   "doc": "Generates a daily report from XLS and sends it to an AI assistant for summarization.",
   "base_directory": ".",
+  "manual_start": true,
   "triggers": [ /* see 3.2 */ ],
   "tasks": { /* see 3.3 */ },
   "dataflow": [ /* see 3.5 */ ],
@@ -139,6 +140,10 @@ The root object has the following top-level fields:
 - `base_directory` (OPTIONAL, string)  
   - Workflow base directory override used for resolving workflow-level relative paths (see 3.1.2).  
   - If relative, it MUST be resolved relative to the Workflow File Directory. If omitted, it defaults to the Workflow File Directory.
+- `manual_start` (OPTIONAL, boolean, default: `true`)  
+  - Controls whether the workflow can be started manually (via UI or CLI).  
+  - If `false`, the workflow can only be started by its defined triggers (cron, file_watch, etc.). See 3.2.
+
 - `triggers` (OPTIONAL, array of trigger objects)  
   - Defines when and how the workflow starts. See 3.2.
 
@@ -195,11 +200,20 @@ This enables workflows to be run from any current working directory without writ
 
 ### 3.2 Triggers
 
-A workflow MAY be started by one or more triggers. Manual start is always allowed unless explicitly disabled.
+A workflow MAY be started by one or more triggers.
+
+**Default behavior:**
+
+- If no `triggers` array is provided in the JCWF file, an implicit `auto` trigger is assumed (the workflow starts automatically upon registration).
+- Manual start (via UI or CLI) is enabled by default for all workflows.
+
+**Disabling triggers:**
+
+- To prevent automatic startup: either omit the `auto` trigger from the `triggers` array, or include it with `"enabled": false`.
+- To prevent manual start: set `"manual_start": false` at the workflow root level. When `manual_start` is `false`, the workflow can only be started by its defined triggers (cron, file_watch, etc.).
+- To disable any individual trigger: set its `"enabled"` field to `false`.
 
 Each trigger has:
-
-- If no trigger is provided in the JCWF file, 'auto' is assumed as the default trigger.
 
 ```jsonc
 {
@@ -283,7 +297,9 @@ At runtime, the engine will expand designated tasks from this iterator (see task
 ```
 
 - This trigger type starts the workflow automatically upon registration without any additional parameters.
+- To suppress the default auto-start behavior, provide an explicit `triggers` array that does not include an `auto` trigger, or include one with `"enabled": false`.
 
+#### 3.2.5 Manual Triggers
 
 ```jsonc
 {
@@ -296,7 +312,9 @@ At runtime, the engine will expand designated tasks from this iterator (see task
 }
 ```
 
-Manual triggers are exposed in the web UI and/or CLI.
+- Manual triggers are exposed in the web UI and/or CLI.
+- A manual trigger entry is not required to allow manual start; manual start is enabled by default (see above).
+- An explicit manual trigger is useful to control parameters such as `exposed_in_ui`.
 
 ---
 

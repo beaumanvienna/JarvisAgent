@@ -283,6 +283,9 @@ namespace AIAssistant
         // relative paths (set by the loader).
         std::string m_WorkflowBaseDirectoryAbsolute;
 
+        // JCWF: "manual_start" (default: true)
+        bool m_ManualStart{true};
+
         // JCWF: "triggers"
         std::vector<WorkflowTrigger> m_Triggers;
 

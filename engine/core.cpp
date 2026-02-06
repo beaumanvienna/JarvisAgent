@@ -33,6 +33,9 @@
 #include "event/events.h"
 #include "curlWrapper/curlWrapper.h"
 
+std::atomic<bool> AIAssistant::Core::s_ShutdownRequested{false};
+std::atomic<bool> AIAssistant::Core::s_ForceShutdownRequested{false};
+
 extern "C" void JarvisRedirect(const char* message)
 {
     if (!message)
@@ -89,16 +92,30 @@ namespace AIAssistant
 
     void Core::SignalHandler(int signal)
     {
-        static bool sigIntReceived{false};
-        if ((signal == SIGINT) && sigIntReceived)
-        {
-            LOG_CORE_INFO("force shudown");
-            // force shudown
-            exit(EXIT_FAILURE);
-        }
+        // IMPORTANT: Signal handlers must only use async-signal-safe operations.
+        // No logging, no heap allocation, no mutex acquisition.
         if (signal == SIGINT)
         {
-            sigIntReceived = true;
+            if (s_ShutdownRequested.load(std::memory_order_relaxed))
+            {
+                // Second Ctrl+C: force immediate exit
+                s_ForceShutdownRequested.store(true, std::memory_order_relaxed);
+                _exit(EXIT_FAILURE);
+            }
+            s_ShutdownRequested.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    void Core::CheckSignalFlags()
+    {
+        if (s_ForceShutdownRequested.load(std::memory_order_relaxed))
+        {
+            LOG_CORE_INFO("Force shutdown requested");
+            exit(EXIT_FAILURE);
+        }
+
+        if (s_ShutdownRequested.exchange(false, std::memory_order_relaxed))
+        {
             LOG_CORE_INFO("Received signal SIGINT, exiting");
             auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
             g_Core->PushEvent(event);
@@ -159,6 +176,9 @@ namespace AIAssistant
                 ZoneScopedNC("event handling", green);
 #endif
 
+                // Check if SIGINT was received (async-signal-safe polling)
+                CheckSignalFlags();
+
                 // pop all pending events from queue
                 auto events = m_EventQueue.PopAll();
 
@@ -202,19 +222,25 @@ namespace AIAssistant
 
     void Core::Shutdown()
     {
+        LOG_CORE_INFO("[shutdown] stopping KeyboardInput...");
         if (m_KeyboardInput)
         {
             m_KeyboardInput->Stop();
         }
+        LOG_CORE_INFO("[shutdown] KeyboardInput stopped");
 
         CurlWrapper::GlobalCleanup();
 
+        LOG_CORE_INFO("[shutdown] stopping TerminalManager...");
         if (m_TerminalManager)
         {
             m_TerminalManager->Shutdown();
         }
+        LOG_CORE_INFO("[shutdown] TerminalManager stopped");
 
+        LOG_CORE_INFO("[shutdown] waiting for thread pool...");
         m_ThreadPool.Wait();
+        LOG_CORE_INFO("[shutdown] thread pool done");
 
         // Ensure all pending log output is flushed ---
         std::cout << std::flush;

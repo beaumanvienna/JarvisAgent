@@ -492,34 +492,44 @@ namespace AIAssistant
     {
         LOG_APP_INFO("leaving JarvisAgent");
 
+        LOG_APP_INFO("[shutdown] stopping WorkflowRuntimeManager...");
         if (m_WorkflowRuntimeManager != nullptr)
         {
             m_WorkflowRuntimeManager->Stop();
             m_WorkflowRuntimeManager.reset();
         }
+        LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
 
         m_AiRequestPool.reset();
 
         App::g_App = nullptr;
 
+        LOG_APP_INFO("[shutdown] stopping session managers...");
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnShutdown();
         }
+        LOG_APP_INFO("[shutdown] session managers stopped");
 
+        LOG_APP_INFO("[shutdown] stopping PythonEngine...");
         {
             m_PythonEngine->Stop();
             m_PythonEngine.reset();
             m_WebServer->BroadcastPythonStatus(false);
         }
+        LOG_APP_INFO("[shutdown] PythonEngine stopped");
 
+        LOG_APP_INFO("[shutdown] stopping FileWatcher...");
         {
             m_FileWatcher->Stop();
         }
+        LOG_APP_INFO("[shutdown] FileWatcher stopped");
 
+        LOG_APP_INFO("[shutdown] stopping WebServer...");
         {
             m_WebServer->Stop();
         }
+        LOG_APP_INFO("[shutdown] WebServer stopped");
     }
 
     //--------------------------------------------------------------------

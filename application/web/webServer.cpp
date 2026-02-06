@@ -409,6 +409,68 @@ namespace AIAssistant
         m_WorkflowRuntimeManager = workflowRuntimeManager;
     }
 
+    namespace
+    {
+        // Replace invalid UTF-8 bytes with the Unicode replacement character so
+        // WebSocket text frames stay valid (RFC 6455 requires valid UTF-8).
+        std::string SanitizeUtf8(std::string const& input)
+        {
+            std::string out;
+            out.reserve(input.size());
+            size_t i = 0;
+            while (i < input.size())
+            {
+                unsigned char c = static_cast<unsigned char>(input[i]);
+                size_t seqLen = 0;
+                if (c <= 0x7F)
+                {
+                    seqLen = 1;
+                }
+                else if ((c & 0xE0) == 0xC0)
+                {
+                    seqLen = 2;
+                }
+                else if ((c & 0xF0) == 0xE0)
+                {
+                    seqLen = 3;
+                }
+                else if ((c & 0xF8) == 0xF0)
+                {
+                    seqLen = 4;
+                }
+
+                if (seqLen == 0 || i + seqLen > input.size())
+                {
+                    out += "\xEF\xBF\xBD"; // U+FFFD
+                    ++i;
+                    continue;
+                }
+
+                bool valid = true;
+                for (size_t j = 1; j < seqLen; ++j)
+                {
+                    if ((static_cast<unsigned char>(input[i + j]) & 0xC0) != 0x80)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid)
+                {
+                    out.append(input, i, seqLen);
+                    i += seqLen;
+                }
+                else
+                {
+                    out += "\xEF\xBF\xBD"; // U+FFFD
+                    ++i;
+                }
+            }
+            return out;
+        }
+    } // anonymous namespace
+
     void WebServer::BroadcastWorkflowRunsSnapshot()
     {
         WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
@@ -481,7 +543,7 @@ namespace AIAssistant
                 task["taskId"] = taskId;
                 task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
                 task["attemptCount"] = taskState.m_AttemptCount;
-                task["lastErrorMessage"] = taskState.m_LastErrorMessage;
+                task["lastErrorMessage"] = SanitizeUtf8(taskState.m_LastErrorMessage);
 
                 tasks.push_back(std::move(task));
             }
@@ -672,6 +734,9 @@ namespace AIAssistant
         // ---- Workflow Editor: CRUD (stubs moved to real implementation) ----
         CROW_ROUTE(m_Server, "/api/workflows").methods("GET"_method)([this]() { return HandleWorkflowsListGet(); });
 
+        CROW_ROUTE(m_Server, "/api/workflows/reload")
+            .methods("POST"_method)([this]() { return HandleWorkflowsReloadPost(); });
+
         CROW_ROUTE(m_Server, "/api/workflows")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
 
@@ -802,12 +867,55 @@ namespace AIAssistant
                 {
                     workflowEntry["path"] = workflowDefinition->m_WorkflowFilePath;
                 }
+
+                workflowEntry["manual_start"] = workflowDefinition->m_ManualStart;
             }
 
             workflowsList.emplace_back(std::move(workflowEntry));
         }
 
         responseJson["workflows"] = std::move(workflowsList);
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowsReloadPost()
+    {
+        WorkflowRegistry* workflowRegistryPtr = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistryPtr = m_WorkflowRegistry;
+        }
+
+        if (workflowRegistryPtr == nullptr)
+        {
+            return MakeWorkflowJsonError(500, "registry_not_available", "Workflow registry is not available",
+                                         "POST /api/workflows/reload");
+        }
+
+        std::string errorMessage;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
+        if (workflowsDirectoryAbsolute.empty())
+        {
+            return MakeWorkflowJsonError(500, "config_error", errorMessage, "POST /api/workflows/reload");
+        }
+
+        workflowRegistryPtr->Clear();
+        if (!workflowRegistryPtr->LoadDirectory(workflowsDirectoryAbsolute))
+        {
+            return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
+                                         "Failed to reload workflows directory: " + workflowsDirectoryAbsolute.string(),
+                                         "POST /api/workflows/reload");
+        }
+
+        std::vector<std::string> workflowIds = workflowRegistryPtr->GetWorkflowIds();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["reloaded"] = true;
+        responseJson["workflowCount"] = static_cast<int>(workflowIds.size());
+
+        LOG_APP_INFO("Workflow registry reloaded from disk: {} workflows loaded", workflowIds.size());
+
         return MakeJsonResponse(200, responseJson);
     }
 
@@ -1151,10 +1259,24 @@ namespace AIAssistant
                                          "POST /api/workflows/{id}/run", workflowId);
         }
 
+        WorkflowRegistry* workflowRegistry = nullptr;
         WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistry = m_WorkflowRegistry;
             workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        // Enforce manual_start flag: reject manual runs for workflows that disable it.
+        if (workflowRegistry != nullptr)
+        {
+            std::optional<WorkflowDefinition> definition = workflowRegistry->GetWorkflow(workflowId);
+            if (definition.has_value() && !definition->m_ManualStart)
+            {
+                return MakeWorkflowJsonError(403, "manual_start_disabled",
+                                             "This workflow has manual_start set to false and cannot be started manually",
+                                             "POST /api/workflows/{id}/run", workflowId);
+            }
         }
 
         if (workflowRuntimeManager != nullptr)

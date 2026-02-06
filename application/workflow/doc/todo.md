@@ -1,6 +1,6 @@
 # JarvisAgent TODO List
 
-Source: the open points you provided (focused on `jarvisAgent.cpp/.h` and the `workflow/` folder).
+Last reviewed: Feb 2026
 
 ---
 
@@ -8,18 +8,18 @@ Source: the open points you provided (focused on `jarvisAgent.cpp/.h` and the `w
 
 ### ai_call architecture compliance
 - [ ] Implement **per-request overrides** for `ai_call` (model / API index / request params) instead of only `prompt_template`.
-- [ ] Fix **queue-binding path anchoring** so `STNG_` / `TASK_` / `CNTX_` files land under the **queue folder / subsystem directory**, not written “as-is” via `QueueFileRef.path`.
+- [ ] Fix **queue-binding path anchoring** so `STNG_` / `TASK_` / `CNTX_` files land under the **queue folder / subsystem directory**, not written "as-is" via `QueueFileRef.path`.
 - [ ] Implement `queue_binding.prob_files` behavior:
   - [ ] If JCWF provides `prob_files` (inline content or string ref), **consume/write** them.
-  - [ ] Decide how this interacts with the executor’s `PROB_<id>_<ts>.txt` generation (avoid conflicting sources of truth).
+  - [ ] Decide how this interacts with the executor's `PROB_<id>_<ts>.txt` generation (avoid conflicting sources of truth).
 - [ ] Finalize **ai_call output semantics**:
   - [ ] Decide whether output slots contain **text** or **file paths** by default.
   - [ ] Make pool + runtime behavior match the chosen JCWF rule (and document it).
 
 ### Workflow graph validation (load-time)
-- [ ] Enforce **version handling**: reject unknown **major** versions.
-- [ ] Add **cycle detection at load time** (reject workflows with dependency cycles instead of waiting for runtime deadlock/no-progress).
-- [ ] Parse and apply **root-level defaults** (currently not parsed; not merged into tasks).
+- [ ] Enforce **version handling**: reject unknown **major** versions (currently only checks empty).
+- [x] ~~Add **cycle detection at load time**~~ — implemented in `workflowValidator.cpp`.
+- [ ] Apply **root-level defaults** to tasks (parsed into `m_DefaultsJson` but not merged into tasks at runtime).
 
 ### Required input correctness (fail-fast)
 - [ ] Implement **required input validation**: if `TaskIOField.required` is true and not resolved, fail before dispatch.
@@ -47,14 +47,14 @@ Source: the open points you provided (focused on `jarvisAgent.cpp/.h` and the `w
 - [ ] Implement JCWF I/O semantics for `PythonTaskExecutor`:
   - [ ] Pass resolved inputs into Python execution.
   - [ ] Collect outputs back into workflow output slots for downstream dataflow.
-- [ ] Implement `InternalTaskExecutor` (currently placeholder / unsupported).
+- [x] ~~Implement `InternalTaskExecutor`~~ — has working implementation in `internalTaskExecutor.cpp`.
 
 ---
 
 ## Refactor cleanup / safety
 
 - [ ] Remove or hard-disable the old synchronous orchestrator fallback:
-  - [ ] `JarvisAgent::OnUpdate()` fallback calling `WorkflowOrchestrator::RunWorkflowOnce()` when runtime manager is null.
+  - [ ] `JarvisAgent::OnUpdate()` fallback calling `WorkflowOrchestrator::RunWorkflowOnce()` when runtime manager is null (still present).
   - [ ] Ensure no accidental reversion path that could reintroduce the `ai_call` deadlock risk.
 
 ---

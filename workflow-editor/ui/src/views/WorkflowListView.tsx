@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { deleteWorkflow, listWorkflows, type WorkflowListResponse } from "../api/workflows";
+import { deleteWorkflow, listWorkflows, reloadWorkflowRegistry, type WorkflowListResponse } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import TemplateBrowser from "../components/TemplateBrowser";
 import type { JcwfFile } from "../jcwf/types";
@@ -24,11 +24,15 @@ export default function WorkflowListView(props: {
   const [filterText, setFilterText] = useState<string>("");
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
 
-  const reload = useCallback(async (isCancelled: { value: boolean }): Promise<void> => {
+  const reload = useCallback(async (isCancelled: { value: boolean }, triggerRegistryReload?: boolean): Promise<void> => {
     try
     {
       setLoading(true);
       setError(null);
+      if (triggerRegistryReload)
+      {
+        await reloadWorkflowRegistry();
+      }
       const data = await listWorkflows();
       if (!isCancelled.value)
       {
@@ -56,7 +60,7 @@ export default function WorkflowListView(props: {
   // something changed (create/save-as/delete).
   useEffect(() => {
     const isCancelled = { value: false };
-    void reload(isCancelled);
+    void reload(isCancelled, true);
     return () => { isCancelled.value = true; };
   }, [reload, props.refreshToken]);
 
@@ -108,7 +112,7 @@ export default function WorkflowListView(props: {
           </button>
           <button className="btn" type="button" onClick={() => {
             const isCancelled = { value: false };
-            void reload(isCancelled);
+            void reload(isCancelled, true);
           }} disabled={loading}>
             Refresh
           </button>
