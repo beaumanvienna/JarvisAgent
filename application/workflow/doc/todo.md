@@ -6,6 +6,10 @@ Last reviewed: Feb 2026
 
 ## Go-live blockers (highest priority)
 
+### Platform
+- [x] ~~Fix **Windows build**~~ — guarded `<unistd.h>` behind `#ifndef _WIN32` in `terminalManager.cpp`; added `<io.h>`/`_write()`/`_fileno()` for MSVC via `RAW_STDERR` macro.
+- [x] ~~Fix **macOS build**~~ — Apple Clang's libc++ lacks C++20 chrono timezone. Integrated Howard Hinnant's `date` library (`vendor/date`) which provides the same API cross-platform. `triggerEngine.cpp` now uses `date::` for timezone resolution on all platforms.
+
 ### ai_call architecture compliance
 - [ ] Implement **per-request overrides** for `ai_call` (model / API index / request params) instead of only `prompt_template`.
 - [x] ~~Implement `queue_binding.prob_files` behavior~~ — already implemented in `BuildProbTextFromQueueBinding` + `WriteInlineQueueBindingFiles` in `aiCallTaskExecutor.cpp`. `prob_files` (inline or file ref) are consumed, concatenated, and written into the executor's `PROB_<id>_<ts>.txt`. No conflict — same pipeline.
@@ -48,6 +52,7 @@ Last reviewed: Feb 2026
 
 ## Refactor cleanup / safety
 
+- [ ] **Port `web/index.html` to React** — replace the legacy dashboard with the React frontend.
 - [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.
 
 ---

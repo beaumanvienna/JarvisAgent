@@ -30,6 +30,15 @@
 #include "core.h"
 #include "engine.h"
 
+// MSVC natively supports C++20 chrono timezone (time_zone, zoned_time, etc.).
+// Apple Clang's libc++ does not, so we use Howard Hinnant's date library on non-MSVC platforms.
+// _MSC_VER targets MSVC specifically; MinGW/Clang-on-Windows use the date library like Linux/macOS.
+#ifdef _MSC_VER
+#include <chrono>
+#else
+#include "date/tz.h"
+#endif
+
 namespace AIAssistant
 {
     // ========================================================================
@@ -133,6 +142,7 @@ namespace AIAssistant
         }
 
         // Resolve the timezone. Empty string = system local time (current_zone).
+#ifdef _MSC_VER
         std::chrono::time_zone const* tz = nullptr;
         try
         {
@@ -144,6 +154,19 @@ namespace AIAssistant
                           timezone, e.what());
             tz = std::chrono::current_zone();
         }
+#else
+        date::time_zone const* tz = nullptr;
+        try
+        {
+            tz = timezone.empty() ? date::current_zone() : date::locate_zone(timezone);
+        }
+        catch (std::runtime_error const& e)
+        {
+            LOG_APP_ERROR("CronExpression::ComputeNextFireTime: invalid timezone '{}': {}; falling back to system local",
+                          timezone, e.what());
+            tz = date::current_zone();
+        }
+#endif
 
         // Step in 60-second increments, up to one year.
         using namespace std::chrono;
@@ -154,12 +177,21 @@ namespace AIAssistant
         for (int iterationIndex = 0; iterationIndex < maxIterations; ++iterationIndex)
         {
             // Convert UTC time_point to local time in the target timezone.
-            auto const zonedTime = zoned_time{tz, candidateTime};
+#ifdef _MSC_VER
+            auto const zonedTime = std::chrono::zoned_time{tz, candidateTime};
             auto const localTime = zonedTime.get_local_time();
-            auto const localDays = floor<days>(localTime);
-            year_month_day const ymd{localDays};
-            hh_mm_ss const hms{localTime - localDays};
-            weekday const wd{localDays};
+            auto const localDays = std::chrono::floor<std::chrono::days>(localTime);
+            std::chrono::year_month_day const ymd{localDays};
+            std::chrono::hh_mm_ss const hms{localTime - localDays};
+            std::chrono::weekday const wd{localDays};
+#else
+            auto const zonedTime = date::make_zoned(tz, candidateTime);
+            auto const localTime = zonedTime.get_local_time();
+            auto const localDays = date::floor<date::days>(localTime);
+            date::year_month_day const ymd{localDays};
+            date::hh_mm_ss const hms{localTime - localDays};
+            date::weekday const wd{localDays};
+#endif
 
             int const minute = static_cast<int>(hms.minutes().count());
             int const hour = static_cast<int>(hms.hours().count());

@@ -51,6 +51,7 @@ project "jarvisAgent"
         "engine/**.cpp",
         "vendor/simdjson/simdjson.cpp",
         "vendor/simdjson/simdjson.h",
+        "vendor/date/src/tz.cpp",
     }
 
     includedirs
@@ -65,7 +66,8 @@ project "jarvisAgent"
         "vendor/openssl/include",
         "vendor/crow/include/crow",
         "vendor/asio/asio/include",
-        "vendor/pdcursesmod"
+        "vendor/pdcursesmod",
+        "vendor/date/include"
     }
 
     filter "system:linux"
@@ -121,10 +123,16 @@ project "jarvisAgent"
         end
 
         defines {
-            "LINUX"
+            "LINUX",
+            "USE_OS_TZDB=1",
+            "HAS_REMOTE_API=0"
         }
 
     filter "system:macosx"
+        defines {
+            "USE_OS_TZDB=1",
+            "HAS_REMOTE_API=0"
+        }
     
         --
         -- Robust Python discovery on macOS:
@@ -238,6 +246,17 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
 
         -- Tell libcurl headers that we're linking against the static library.
         defines { "CURL_STATICLIB", "NOMINMAX" }
+
+    -- MSVC natively supports C++20 chrono timezone — exclude vendor/date/tz.cpp.
+    -- MinGW/Clang-on-Windows compile tz.cpp like Linux/macOS.
+    filter { "system:windows", "action:vs*" }
+        removefiles { "vendor/date/src/tz.cpp" }
+
+    -- Non-MSVC Windows builds (MinGW, etc.) need the date library's tz.cpp.
+    filter { "system:windows", "action:gmake*" }
+        defines { "USE_OS_TZDB=0", "HAS_REMOTE_API=0" }
+
+    filter "system:windows"
 
         --
         -- Windows system libs (always).

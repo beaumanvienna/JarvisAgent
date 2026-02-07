@@ -25,7 +25,13 @@
 #include <algorithm>
 #include <clocale>
 #include <mutex>
+
+#ifdef _WIN32
+#include <io.h>
+#include <stdio.h>
+#else
 #include <unistd.h>
+#endif
 
 #include "pdcursesmod/curses.h"
 
@@ -378,35 +384,42 @@ namespace AIAssistant
             return;
         }
 
-        // Raw diagnostics — bypass spdlog/TerminalLogStreamBuf (they use this object)
-        write(STDERR_FILENO, "[TM] delwin LogWindow\n", 22);
+        // Raw diagnostics — bypass spdlog/TerminalLogStreamBuf (they use this object).
+        // Uses POSIX write() / Windows _write() to avoid any heap or mutex usage in signal-adjacent shutdown.
+#ifdef _WIN32
+#define RAW_STDERR(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
+#else
+#define RAW_STDERR(literal) (void)write(STDERR_FILENO, literal, sizeof(literal) - 1)
+#endif
+        RAW_STDERR("[TM] delwin LogWindow\n");
         if (m_Impl->m_LogWindow != nullptr)
         {
             delwin(m_Impl->m_LogWindow);
             m_Impl->m_LogWindow = nullptr;
         }
-        write(STDERR_FILENO, "[TM] delwin StatusWindow\n", 25);
+        RAW_STDERR("[TM] delwin StatusWindow\n");
         if (m_Impl->m_StatusWindow != nullptr)
         {
             delwin(m_Impl->m_StatusWindow);
             m_Impl->m_StatusWindow = nullptr;
         }
-        write(STDERR_FILENO, "[TM] delwin LogHeaderWindow\n", 28);
+        RAW_STDERR("[TM] delwin LogHeaderWindow\n");
         if (m_Impl->m_LogHeaderWindow != nullptr)
         {
             delwin(m_Impl->m_LogHeaderWindow);
             m_Impl->m_LogHeaderWindow = nullptr;
         }
-        write(STDERR_FILENO, "[TM] delwin StatusHeaderWindow\n", 31);
+        RAW_STDERR("[TM] delwin StatusHeaderWindow\n");
         if (m_Impl->m_StatusHeaderWindow != nullptr)
         {
             delwin(m_Impl->m_StatusHeaderWindow);
             m_Impl->m_StatusHeaderWindow = nullptr;
         }
 
-        write(STDERR_FILENO, "[TM] endwin\n", 12);
+        RAW_STDERR("[TM] endwin\n");
         endwin();
-        write(STDERR_FILENO, "[TM] done\n", 10);
+        RAW_STDERR("[TM] done\n");
+#undef RAW_STDERR
 
         m_Impl->m_Initialized = false;
     }
