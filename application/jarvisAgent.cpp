@@ -35,7 +35,6 @@
 #include "task/carMaintenanceTask.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowTriggerBinder.h"
-#include "workflow/workflowOrchestrator.h"
 #include "workflow/taskExecutorRegistry.h"
 #include "workflow/shellTaskExecutor.h"
 #include "workflow/aiCallTaskExecutor.h"
@@ -145,7 +144,7 @@ namespace AIAssistant
         m_AiRequestPool = std::make_unique<AiRequestPool>();
 
         // ---------------------------------------------------------
-        // Initialize workflow system (registry + orchestrator + triggers)
+        // Initialize workflow system (registry + runtime manager + triggers)
         // ---------------------------------------------------------
         InitializeWorkflows();
     }
@@ -206,8 +205,6 @@ namespace AIAssistant
             }
         }
 
-        WorkflowOrchestrator::Get().SetRegistry(m_WorkflowRegistry.get());
-
         m_WebServer->SetWorkflowRegistry(m_WorkflowRegistry.get());
 
         m_WorkflowRuntimeManager = std::make_unique<WorkflowRuntimeManager>();
@@ -225,15 +222,11 @@ namespace AIAssistant
                 if (m_WorkflowRuntimeManager != nullptr)
                 {
                     m_WorkflowRuntimeManager->EnqueueWorkflowRun(triggerEvent.m_WorkflowId);
-                    return;
                 }
-
-                bool const runOk = WorkflowOrchestrator::Get().RunWorkflowOnce(triggerEvent.m_WorkflowId);
-
-                if (!runOk)
+                else
                 {
-                    LOG_APP_ERROR("JarvisAgent: Workflow '{}' run from trigger '{}' failed", triggerEvent.m_WorkflowId,
-                                  triggerEvent.m_TriggerId);
+                    LOG_APP_ERROR("JarvisAgent: Trigger fired for workflow '{}' but WorkflowRuntimeManager is null",
+                                  triggerEvent.m_WorkflowId);
                 }
             });
 

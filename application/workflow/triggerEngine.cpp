@@ -124,82 +124,61 @@ namespace AIAssistant
     }
 
     std::chrono::system_clock::time_point
-    TriggerEngine::CronExpression::ComputeNextFireTime(std::chrono::system_clock::time_point const& referenceTime) const
+    TriggerEngine::CronExpression::ComputeNextFireTime(std::chrono::system_clock::time_point const& referenceTime,
+                                                       std::string const& timezone) const
     {
         if (!m_IsValid)
         {
             return referenceTime;
         }
 
-        // Simple search: step in 60 second increments, up to one year.
-        // This is enough for typical "once per minute/hour/day" cron patterns.
-        using Clock = std::chrono::system_clock;
-        using Minutes = std::chrono::minutes;
+        // Resolve the timezone. Empty string = system local time (current_zone).
+        std::chrono::time_zone const* tz = nullptr;
+        try
+        {
+            tz = timezone.empty() ? std::chrono::current_zone() : std::chrono::locate_zone(timezone);
+        }
+        catch (std::runtime_error const& e)
+        {
+            LOG_APP_ERROR("CronExpression::ComputeNextFireTime: invalid timezone '{}': {}; falling back to system local",
+                          timezone, e.what());
+            tz = std::chrono::current_zone();
+        }
 
-        Clock::time_point candidateTime = referenceTime + Minutes(1);
+        // Step in 60-second increments, up to one year.
+        using namespace std::chrono;
 
-        // Search up to 366 days.
-        int const maxIterations = 60 * 24 * 366;
+        auto candidateTime = referenceTime + minutes(1);
+
+        constexpr int maxIterations = 60 * 24 * 366;
         for (int iterationIndex = 0; iterationIndex < maxIterations; ++iterationIndex)
         {
-            std::time_t candidateTimeT = Clock::to_time_t(candidateTime);
+            // Convert UTC time_point to local time in the target timezone.
+            auto const zonedTime = zoned_time{tz, candidateTime};
+            auto const localTime = zonedTime.get_local_time();
+            auto const localDays = floor<days>(localTime);
+            year_month_day const ymd{localDays};
+            hh_mm_ss const hms{localTime - localDays};
+            weekday const wd{localDays};
 
-            std::tm timeInfo{};
-#if defined(_WIN32)
-            localtime_s(&timeInfo, &candidateTimeT);
-#else
-            std::tm* timeInfoPointer = std::localtime(&candidateTimeT);
-            if (timeInfoPointer == nullptr)
-            {
-                // Should not normally happen.
-                return referenceTime;
-            }
-            timeInfo = *timeInfoPointer;
-#endif
+            int const minute = static_cast<int>(hms.minutes().count());
+            int const hour = static_cast<int>(hms.hours().count());
+            int const dayOfMonth = static_cast<int>(static_cast<unsigned>(ymd.day()));
+            int const month = static_cast<int>(static_cast<unsigned>(ymd.month()));
+            int const dayOfWeek = wd.c_encoding(); // 0 = Sunday
 
-            int minute = timeInfo.tm_min;
-            int hour = timeInfo.tm_hour;
-            int dayOfMonth = timeInfo.tm_mday;
-            int month = timeInfo.tm_mon + 1;  // tm_mon is [0,11]
-            int dayOfWeek = timeInfo.tm_wday; // Sunday = 0
-
-            bool matches = true;
-
-            if (m_HasMinute && minute != m_Minute)
-            {
-                matches = false;
-            }
-
-            if (m_HasHour && hour != m_Hour)
-            {
-                matches = false;
-            }
-
-            if (m_HasDayOfMonth && dayOfMonth != m_DayOfMonth)
-            {
-                matches = false;
-            }
-
-            if (m_HasMonth && month != m_Month)
-            {
-                matches = false;
-            }
-
-            if (m_HasDayOfWeek && dayOfWeek != m_DayOfWeek)
-            {
-                matches = false;
-            }
+            bool const matches = (!m_HasMinute || minute == m_Minute) && (!m_HasHour || hour == m_Hour) &&
+                                 (!m_HasDayOfMonth || dayOfMonth == m_DayOfMonth) && (!m_HasMonth || month == m_Month) &&
+                                 (!m_HasDayOfWeek || dayOfWeek == m_DayOfWeek);
 
             if (matches)
             {
                 return candidateTime;
             }
 
-            candidateTime += Minutes(1);
+            candidateTime += minutes(1);
         }
 
-        // If we get here, we did not find a match in a year.
-        // Return referenceTime (caller may treat this as effectively disabled).
         LOG_APP_WARN("CronExpression::ComputeNextFireTime: no match found within one year, treating as disabled");
         return referenceTime;
     }
@@ -228,11 +207,12 @@ namespace AIAssistant
     }
 
     void TriggerEngine::AddCronTrigger(std::string const& workflowId, std::string const& triggerId,
-                                       std::string const& expression, bool isEnabled)
+                                       std::string const& expression, std::string const& timezone, bool isEnabled)
     {
         CronTriggerInstance cronTriggerInstance{};
         cronTriggerInstance.m_WorkflowId = workflowId;
         cronTriggerInstance.m_TriggerId = triggerId;
+        cronTriggerInstance.m_Timezone = timezone;
         cronTriggerInstance.m_IsEnabled = isEnabled;
 
         if (!cronTriggerInstance.m_Expression.Parse(expression))
@@ -244,13 +224,14 @@ namespace AIAssistant
         }
         else
         {
-            auto now = std::chrono::system_clock::now();
-            cronTriggerInstance.m_NextFireTime = cronTriggerInstance.m_Expression.ComputeNextFireTime(now);
+            auto const now = std::chrono::system_clock::now();
+            cronTriggerInstance.m_NextFireTime = cronTriggerInstance.m_Expression.ComputeNextFireTime(now, timezone);
         }
 
         m_CronTriggers.push_back(std::move(cronTriggerInstance));
 
-        LOG_APP_INFO("TriggerEngine::AddCronTrigger: registered cron trigger '{}' for workflow '{}'", triggerId, workflowId);
+        LOG_APP_INFO("TriggerEngine::AddCronTrigger: registered cron trigger '{}' for workflow '{}' (timezone: '{}')",
+                     triggerId, workflowId, timezone.empty() ? "system" : timezone);
     }
 
     void TriggerEngine::AddFileWatchTrigger(std::string const& workflowId, std::string const& triggerId,
@@ -328,7 +309,8 @@ namespace AIAssistant
             {
                 FireTrigger(cronTriggerInstance.m_WorkflowId, cronTriggerInstance.m_TriggerId);
 
-                cronTriggerInstance.m_NextFireTime = cronTriggerInstance.m_Expression.ComputeNextFireTime(now);
+                cronTriggerInstance.m_NextFireTime =
+                    cronTriggerInstance.m_Expression.ComputeNextFireTime(now, cronTriggerInstance.m_Timezone);
             }
         }
     }

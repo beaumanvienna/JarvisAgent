@@ -43,7 +43,6 @@
 #include "workflow/workflowValidator.h"
 
 #include "workflow/workflowRuntimeManager.h"
-#include "workflow/workflowOrchestrator.h"
 #include "workflow/workflowTypes.h"
 
 #include "event/events.h"
@@ -1279,27 +1278,21 @@ namespace AIAssistant
             }
         }
 
-        if (workflowRuntimeManager != nullptr)
+        if (workflowRuntimeManager == nullptr)
         {
-            std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
-
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = true;
-            responseJson["enqueued"] = true;
-            responseJson["id"] = workflowId;
-            responseJson["runId"] = runId;
-
-            BroadcastWorkflowRunsSnapshot();
-            return MakeJsonResponse(202, responseJson);
+            return MakeWorkflowJsonError(500, "runtime_not_available", "Workflow runtime manager is not available",
+                                         "POST /api/workflows/{id}/run", workflowId);
         }
 
-        std::string const runId = WorkflowOrchestrator::Get().StartWorkflowRun(workflowId);
+        std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
-        responseJson["enqueued"] = false;
+        responseJson["enqueued"] = true;
         responseJson["id"] = workflowId;
         responseJson["runId"] = runId;
+
+        BroadcastWorkflowRunsSnapshot();
         return MakeJsonResponse(202, responseJson);
     }
 

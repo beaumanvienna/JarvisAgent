@@ -6,13 +6,21 @@
 
 <br>
 
-JarvisAgent is a **C++ console application** that operates as a background service (“agent”) for automated AI-assisted file processing.  <br>
+JarvisAgent is a **C++ backend / React frontend** application for massively parallel AI-driven automation.  <br>
 <br>
-It monitors a queue folder for prompt and instruction files, sends them to an AI provider through a REST API, and stores the results in an output directory.<br>
+Its engine core dispatches hundreds of concurrent AI requests — think parallel requirements analysis, stock-portfolio deep-research across every position, or chapter-by-chapter processing of entire PDF books.  <br>
 <br>
-It can perform AI-driven tasks and serve as a component for workflow automation.<br>
+Office documents (Word, Excel, PowerPoint, PDF, HTML) are automatically converted to Markdown via Microsoft's [MarkItDown](https://github.com/microsoft/markitdown) — and chunked when too large — before being sent to the AI. JarvisAgent is file-heavy by design: all inputs, outputs, and intermediate results live on disk, making it a natural fit for engineering environments with large file landscapes.  <br>
 <br>
-![JarvisAgent Screenshot](example/screenshot.png)<br>
+Workflows let you chain **serial and parallel tasks** — AI calls, Python scripts, shell commands, or native C++ — in a visual graph editor with various trigger types.  <br>
+<br>
+The application ships with an **ncurses terminal UI** for local or SSH sessions and a **browser-based React dashboard** for remote monitoring. It compiles under **Linux, macOS, and Windows**.  <br>
+<br>
+
+| Terminal UI | Workflow Editor |
+|:-----------:|:---------------:|
+| ![Terminal UI](example/screenshot.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) |
+
 <br>
 
 ---
@@ -21,12 +29,14 @@ It can perform AI-driven tasks and serve as a component for workflow automation.
 
 | Layer | Responsibility | Status |
 |-------|----------------|--------|
-| **Engine** | Networking (`libcurl` and `openssl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
+| **Engine** | Networking (`libcurl` + `openssl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
 | **Event System** | Thread-safe atomic event queue and dispatcher for cross-thread communication | ✅ |
+| **Workflow Runtime** | DAG-based workflow engine — serial/parallel task execution, cron & file-watch triggers, timezone-aware scheduling | ✅ |
 | **Application** | Orchestrates queue handling, event dispatching, file tracking, and AI query flow | ✅ |
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
 | **I/O** | File watcher, categorizer, environment assembly (STNG/CNTX/TASK), automatic binary detection and MarkItDown-based document conversion | ✅ |
-| **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) with simple multi-model selection | ✅ |
+| **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) with multi-model selection | ✅ |
+| **Frontend** | React workflow editor (ReactFlow graph UI), workflow list, live run monitoring via WebSocket | ✅ |
 
 ---
 
@@ -58,7 +68,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **Thread Pool / Parallel Processing** — Configured by `maxThreads` in `config.json`; handles multiple query tasks in parallel.  
 - **JarvisAgent Application** — Orchestrates startup, event handling, file watching, categorization, and query dispatching.  
 - **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).  
-- **Terminal Renderer ** — Uses PDcurses for advanced log and status display in the console.  
+- **Terminal Renderer** — Uses PDcurses for advanced log and status display in the console.  
 
 ---
 
@@ -80,15 +90,16 @@ Any detected file modification automatically triggers selective reprocessing:
 
 ## Design Highlights
 
+- **Massively parallel AI engine** — Thread pool dispatches hundreds of concurrent AI requests for bulk processing workloads.  
 - **Multi-model support** — Compatible with **GPT-4**, **GPT-4.1-mini**, and **GPT-5** through configurable API endpoints.  
-- **Output file I/O** — Responses are written to `.output.txt` files and reused when up to date.  
-- **Smart dependency tracking** — Automatically re-evaluates files only when their inputs or environment are newer than the output.  
-- **Binary-safe file handling** — Automatically skips unsupported binary formats (ZIP, PNG, etc.) and converts supported documents (e.g., PDF, DOCX, HTML) to Markdown via MarkItDown.  
-- **Event-driven architecture** — Loosely coupled, non-blocking design.  
-- **Atomic dirty tracking** — Modified files are tracked precisely without redundant work.  
-- **Parallel querying** — Uses thread pool for concurrent AI requests.  
-- **Cross-platform** — Works on Linux, macOS, and Windows.  
-- **Web dashboard panel** — Browser-based dashboard for live monitoring of queued, in-flight, and completed tasks.  
+- **Visual workflow editor** — React-based graph UI for building DAG workflows with drag-and-drop nodes, auto-layout, and live run status.  
+- **Flexible task types** — Workflow tasks can be AI calls, Python scripts, shell commands, or native C++ — mixed freely in serial and parallel.  
+- **Cron & trigger scheduling** — Cron triggers with IANA timezone support, file-watch triggers, manual triggers, and auto-start triggers.  
+- **Office document conversion** — PDF, DOCX, XLSX, PPTX, and HTML are converted to Markdown via Microsoft MarkItDown before AI processing.  
+- **Smart dependency tracking** — Re-evaluates files only when inputs or environment have changed, preventing unnecessary re-queries.  
+- **Dual UI** — ncurses terminal UI for headless/SSH operation, plus a browser-based React dashboard for remote monitoring.  
+- **Event-driven architecture** — Loosely coupled, non-blocking design with thread-safe event queue.  
+- **Cross-platform** — Compiles and runs on **Linux** (GCC), **macOS** (Clang), and **Windows** (MSVC).  
 
 ---
 
@@ -115,6 +126,8 @@ queue/
 
 ## Planned Features
 
+- [ ] Docker deployment & CI/CD (WIP — [AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
+- [ ] n8n workflow integration ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
 - [ ] Enable HTTP/2 for improved network performance  
 
 ---

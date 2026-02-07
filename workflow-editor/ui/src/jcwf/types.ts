@@ -1,6 +1,14 @@
 export type JcwfVersion = "1.0";
 export type JcwfDoc = string | string[];
 export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal";
+export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual";
+
+export type JcwfTrigger = {
+  type: JcwfTriggerType;
+  id: string;
+  enabled?: boolean;
+  params?: Record<string, unknown>;
+};
 
 export type JcwfTask = {
   id: string;
@@ -25,6 +33,9 @@ export type JcwfFile = {
 
   label?: string;
   doc?: JcwfDoc;
+
+  manual_start?: boolean;
+  triggers?: JcwfTrigger[];
 
   tasks: Record<string, JcwfTask>;
 

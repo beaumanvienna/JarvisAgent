@@ -19,7 +19,7 @@ import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
 import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
-import type { JcwfFile, JcwfTask, JcwfTaskType } from "../jcwf/types";
+import type { JcwfFile, JcwfTask, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
   createWorkflowWithId,
@@ -216,6 +216,7 @@ export default function WorkflowEditorView(props: {
   const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [manualStartEnabled, setManualStartEnabled] = useState<boolean>(true);
+  const [triggers, setTriggers] = useState<JcwfTrigger[]>([]);
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
@@ -697,7 +698,8 @@ export default function WorkflowEditorView(props: {
     }
     recomputeValidation(graph);
     setLoadedWorkflowId(workflowId);
-    setManualStartEnabled((jcwf as Record<string, unknown>)["manual_start"] !== false);
+    setManualStartEnabled(jcwf.manual_start !== false);
+    setTriggers(Array.isArray(jcwf.triggers) ? jcwf.triggers : []);
     setBackendErrors([]);
     setBackendWarnings([]);
     setBackendInfos([]);
@@ -1191,8 +1193,19 @@ export default function WorkflowEditorView(props: {
       return null;
     }
     setErrorText(null);
+
+    // Merge workflow-level metadata that graphToJcwf doesn't handle.
+    if (triggers.length > 0)
+    {
+      result.jcwf.triggers = triggers;
+    }
+    if (!manualStartEnabled)
+    {
+      result.jcwf.manual_start = false;
+    }
+
     return result.jcwf;
-  }, [nodes, edges, loadedWorkflowId, props.workflowId]);
+  }, [nodes, edges, loadedWorkflowId, props.workflowId, triggers, manualStartEnabled]);
 
   const notifyPersisted = useCallback((event: WorkflowPersistEvent) => {
     if (props.onWorkflowPersisted)
@@ -1500,6 +1513,79 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={() => { addTaskNode("python"); }}>+ Python</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("shell"); }}>+ Shell</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("internal"); }}>+ Internal</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>Triggers</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+              <input type="checkbox" checked={manualStartEnabled} onChange={(e) => { setManualStartEnabled(e.target.checked); setIsDirty(true); }} />
+              manual_start
+            </label>
+            {triggers.map((trigger, index) => (
+              <div key={trigger.id + index} style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <span className="small" style={{ fontWeight: 600 }}>{trigger.type}: {trigger.id}</span>
+                  <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 11 }} onClick={() => {
+                    setTriggers((prev) => prev.filter((_, i) => i !== index));
+                    setIsDirty(true);
+                  }}>✕</button>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <input type="checkbox" checked={trigger.enabled !== false} onChange={(e) => {
+                    setTriggers((prev) => prev.map((t, i) => i === index ? { ...t, enabled: e.target.checked } : t));
+                    setIsDirty(true);
+                  }} />
+                  enabled
+                </label>
+                {trigger.type === "cron" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                    <input className="input" placeholder="expression (e.g. 0 8 * * *)" style={{ fontSize: 12, padding: "3px 6px" }}
+                      value={(trigger.params?.expression as string) ?? ""}
+                      onChange={(e) => {
+                        setTriggers((prev) => prev.map((t, i) => i === index ? { ...t, params: { ...t.params, expression: e.target.value } } : t));
+                        setIsDirty(true);
+                      }} />
+                    <input className="input" placeholder="timezone (e.g. America/Los_Angeles)" style={{ fontSize: 12, padding: "3px 6px" }}
+                      value={(trigger.params?.timezone as string) ?? ""}
+                      onChange={(e) => {
+                        const tz = e.target.value;
+                        setTriggers((prev) => prev.map((t, i) => i === index ? { ...t, params: { ...t.params, timezone: tz || undefined } } : t));
+                        setIsDirty(true);
+                      }} />
+                  </div>
+                ) : null}
+                {trigger.type === "file_watch" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                    <input className="input" placeholder="path" style={{ fontSize: 12, padding: "3px 6px" }}
+                      value={(trigger.params?.path as string) ?? ""}
+                      onChange={(e) => {
+                        setTriggers((prev) => prev.map((t, i) => i === index ? { ...t, params: { ...t.params, path: e.target.value } } : t));
+                        setIsDirty(true);
+                      }} />
+                  </div>
+                ) : null}
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+              <button className="btn" type="button" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                setTriggers((prev) => [...prev, { type: "auto", id: "auto", enabled: true }]);
+                setIsDirty(true);
+              }}>+ auto</button>
+              <button className="btn" type="button" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                setTriggers((prev) => [...prev, { type: "cron", id: `cron-${prev.length + 1}`, enabled: true, params: { expression: "" } }]);
+                setIsDirty(true);
+              }}>+ cron</button>
+              <button className="btn" type="button" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                setTriggers((prev) => [...prev, { type: "manual", id: "manual", enabled: true }]);
+                setIsDirty(true);
+              }}>+ manual</button>
+              <button className="btn" type="button" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                setTriggers((prev) => [...prev, { type: "file_watch", id: `file-watch-${prev.length + 1}`, enabled: true, params: { path: "", events: ["modified"] } }]);
+                setIsDirty(true);
+              }}>+ file_watch</button>
+            </div>
           </div>
         </div>
 

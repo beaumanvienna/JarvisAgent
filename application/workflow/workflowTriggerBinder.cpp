@@ -53,9 +53,10 @@ namespace
         return result;
     }
 
-    bool ParseCronParams(std::string const& paramsJson, std::string& outExpression)
+    bool ParseCronParams(std::string const& paramsJson, std::string& outExpression, std::string& outTimezone)
     {
         outExpression.clear();
+        outTimezone.clear();
 
         if (paramsJson.empty())
         {
@@ -111,7 +112,21 @@ namespace
                 std::string_view expressionView = stringResult.value();
                 outExpression.assign(expressionView.begin(), expressionView.end());
                 hasExpression = true;
-                break;
+            }
+            else if (keyView == "timezone")
+            {
+                ondemand::value value = field.value();
+
+                auto stringResult = value.get_string(false);
+                if (stringResult.error() != simdjson::SUCCESS)
+                {
+                    LOG_APP_WARN("ParseCronParams: 'timezone' must be a string, ignoring");
+                }
+                else
+                {
+                    std::string_view timezoneView = stringResult.value();
+                    outTimezone.assign(timezoneView.begin(), timezoneView.end());
+                }
             }
         }
 
@@ -319,7 +334,8 @@ namespace AIAssistant
                     case WorkflowTriggerType::Cron:
                     {
                         std::string cronExpression;
-                        if (!ParseCronParams(workflowTrigger.m_ParamsJson, cronExpression))
+                        std::string cronTimezone;
+                        if (!ParseCronParams(workflowTrigger.m_ParamsJson, cronExpression, cronTimezone))
                         {
                             LOG_APP_ERROR(
                                 "WorkflowTriggerBinder::RegisterAll: failed to parse cron params for trigger '{}' in "
@@ -329,7 +345,7 @@ namespace AIAssistant
                         }
 
                         triggerEngine.AddCronTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, cronExpression,
-                                                     workflowTrigger.m_IsEnabled);
+                                                     cronTimezone, workflowTrigger.m_IsEnabled);
                         break;
                     }
 

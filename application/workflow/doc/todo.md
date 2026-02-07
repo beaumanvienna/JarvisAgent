@@ -8,13 +8,8 @@ Last reviewed: Feb 2026
 
 ### ai_call architecture compliance
 - [ ] Implement **per-request overrides** for `ai_call` (model / API index / request params) instead of only `prompt_template`.
-- [ ] Fix **queue-binding path anchoring** so `STNG_` / `TASK_` / `CNTX_` files land under the **queue folder / subsystem directory**, not written "as-is" via `QueueFileRef.path`.
-- [ ] Implement `queue_binding.prob_files` behavior:
-  - [ ] If JCWF provides `prob_files` (inline content or string ref), **consume/write** them.
-  - [ ] Decide how this interacts with the executor's `PROB_<id>_<ts>.txt` generation (avoid conflicting sources of truth).
-- [ ] Finalize **ai_call output semantics**:
-  - [ ] Decide whether output slots contain **text** or **file paths** by default.
-  - [ ] Make pool + runtime behavior match the chosen JCWF rule (and document it).
+- [x] ~~Implement `queue_binding.prob_files` behavior~~ — already implemented in `BuildProbTextFromQueueBinding` + `WriteInlineQueueBindingFiles` in `aiCallTaskExecutor.cpp`. `prob_files` (inline or file ref) are consumed, concatenated, and written into the executor's `PROB_<id>_<ts>.txt`. No conflict — same pipeline.
+- [x] ~~Finalize **ai_call output semantics**~~ — file-path-only mode. Output slots always contain file paths, never raw text in memory. When no explicit `file_outputs` are declared, the source `.output.txt` created by the core engine is used as the default. Implemented in `BuildCompletionOutputs` / `AiRequestPool`.
 
 ### Workflow graph validation (load-time)
 - [ ] Enforce **version handling**: reject unknown **major** versions (currently only checks empty).
@@ -53,13 +48,12 @@ Last reviewed: Feb 2026
 
 ## Refactor cleanup / safety
 
-- [ ] Remove or hard-disable the old synchronous orchestrator fallback:
-  - [ ] `JarvisAgent::OnUpdate()` fallback calling `WorkflowOrchestrator::RunWorkflowOnce()` when runtime manager is null (still present).
-  - [ ] Ensure no accidental reversion path that could reintroduce the `ai_call` deadlock risk.
+- [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.
 
 ---
 
 ## Notes / follow-ups (when the above is done)
-- [ ] Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment):
-  - [ ] Clarify `doc` field accepted types (string vs array-of-strings) and implement parser support if required by the spec.
-  - [ ] Clarify cron trigger timezone support and implement binder parsing/usage for `params.timezone`.
+- [x] ~~Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment)~~:
+  - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.
+  - [x] ~~Cron trigger timezone support~~ — implemented C++20 `std::chrono::zoned_time` in `ComputeNextFireTime`, parsed `params.timezone` in `WorkflowTriggerBinder`, added trigger config UI in editor.
+  - [x] ~~README.md rewrite~~ — updated project description, added workflow editor screenshot, planned features (Docker, n8n).

@@ -107,14 +107,15 @@ namespace AIAssistant
 
         void BuildCompletionOutputs(std::vector<std::string> const& outputFilePaths,
                                     std::vector<std::string> const& outputSlotNames, std::string const& responseText,
-                                    bool& outWasFailed, std::string& outErrorMessage,
+                                    std::string const& sourceOutputFilePath, bool& outWasFailed,
+                                    std::string& outErrorMessage,
                                     std::unordered_map<std::string, std::string>& outOutputValues)
         {
             outWasFailed = false;
             outErrorMessage.clear();
             outOutputValues.clear();
 
-            // File outputs: write response to files and map slots -> paths deterministically.
+            // Explicit file outputs: write response to those paths and map slots -> paths.
             if (!outputFilePaths.empty())
             {
                 for (std::string const& outputPath : outputFilePaths)
@@ -135,7 +136,7 @@ namespace AIAssistant
                     }
                 }
 
-                // Deterministic slot mapping (mirrors your existing conventions).
+                // Deterministic slot mapping.
                 if (!outputSlotNames.empty() && outputSlotNames.size() == outputFilePaths.size())
                 {
                     for (size_t index = 0; index < outputSlotNames.size(); ++index)
@@ -161,28 +162,35 @@ namespace AIAssistant
                     return;
                 }
 
-                // Fallback: expose primary file output path.
                 outOutputValues["file"] = outputFilePaths[0];
                 return;
             }
 
-            // No file outputs: store response text in a deterministic key.
-            if (outputSlotNames.size() == 1)
+            // No explicit file outputs: use the source .output.txt path created by the core engine.
+            // Output values are always file paths (never raw text in memory).
+            if (!sourceOutputFilePath.empty())
             {
-                outOutputValues[outputSlotNames[0]] = responseText;
+                if (outputSlotNames.size() == 1)
+                {
+                    outOutputValues[outputSlotNames[0]] = sourceOutputFilePath;
+                    return;
+                }
+
+                for (std::string const& slotName : outputSlotNames)
+                {
+                    outOutputValues[slotName] = sourceOutputFilePath;
+                }
+
+                if (outOutputValues.empty())
+                {
+                    outOutputValues["file"] = sourceOutputFilePath;
+                }
                 return;
             }
 
-            for (std::string const& slotName : outputSlotNames)
-            {
-                if (slotName == "response")
-                {
-                    outOutputValues["response"] = responseText;
-                    return;
-                }
-            }
-
-            outOutputValues["text"] = responseText;
+            // No file outputs and no source path (should not happen in normal operation).
+            LOG_APP_WARN("BuildCompletionOutputs: no file outputs and no source output file path; "
+                         "output values will be empty");
         }
     } // namespace
 
@@ -336,7 +344,8 @@ namespace AIAssistant
                 std::string writeError;
 
                 BuildCompletionOutputs(pendingEntry->m_Context.m_OutputFilePaths, pendingEntry->m_Context.m_OutputSlotNames,
-                                       completion.m_ResponseText, writeFailed, writeError, completion.m_OutputValues);
+                                       completion.m_ResponseText, pendingEntry->m_SourceOutputFilePath, writeFailed,
+                                       writeError, completion.m_OutputValues);
 
                 if (writeFailed)
                 {
@@ -424,6 +433,7 @@ namespace AIAssistant
             pendingEntry->m_IsCompleted = true;
             pendingEntry->m_IsFailed = false;
             pendingEntry->m_ResponseText = std::move(fileContent);
+            pendingEntry->m_SourceOutputFilePath = fullFilePath;
             pendingEntry->conditionVariable.notify_all();
         }
 

@@ -82,9 +82,10 @@ namespace AIAssistant
 
         // Register a cron trigger.
         // expression: 5-field cron string (minute hour day month weekday).
+        // timezone: IANA timezone name (e.g. "America/Los_Angeles"). Empty = system local time.
         // enabled: if false, trigger is stored but never fires.
         void AddCronTrigger(std::string const& workflowId, std::string const& triggerId, std::string const& expression,
-                            bool isEnabled);
+                            std::string const& timezone, bool isEnabled);
 
         // Register a file-watch trigger.
         // path: file or directory path the trigger is interested in.
@@ -129,10 +130,12 @@ namespace AIAssistant
             bool Parse(std::string const& expression);
 
             // Compute the next fire time strictly after "referenceTime".
+            // timezone: IANA timezone name (e.g. "America/Los_Angeles"). Empty = system local time.
             // If no time is found within a reasonable window, returns
             // referenceTime (caller will then treat it as disabled).
             std::chrono::system_clock::time_point
-            ComputeNextFireTime(std::chrono::system_clock::time_point const& referenceTime) const;
+            ComputeNextFireTime(std::chrono::system_clock::time_point const& referenceTime,
+                                std::string const& timezone = {}) const;
 
             bool IsValid() const;
 
@@ -160,6 +163,7 @@ namespace AIAssistant
         {
             std::string m_WorkflowId;
             std::string m_TriggerId;
+            std::string m_Timezone; // IANA timezone (empty = system local)
             CronExpression m_Expression;
             std::chrono::system_clock::time_point m_NextFireTime{};
             bool m_IsEnabled{true};

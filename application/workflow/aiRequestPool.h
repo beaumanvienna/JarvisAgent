@@ -56,9 +56,8 @@ namespace AIAssistant
         std::string m_ResponseText;
         std::string m_ErrorMessage;
 
-        // Deterministic outputs for downstream dataflow:
-        //  - If file outputs were configured, values are typically file paths.
-        //  - Otherwise values contain response text (key chosen deterministically).
+        // Deterministic outputs for downstream dataflow.
+        // Values are always file paths (never raw text in memory).
         std::unordered_map<std::string, std::string> m_OutputValues;
     };
 
@@ -92,10 +91,10 @@ namespace AIAssistant
         //
         // outputFilePaths:
         //  - If non-empty: response is written to these paths on completion, and output values map to paths.
-        //  - If empty: response is stored directly into output values (text).
+        //  - If empty: the source .output.txt path (created by the core engine) is used as the default.
         //
         // outputSlotNames:
-        //  - Used to deterministically map slots to file outputs (or text output).
+        //  - Used to deterministically map slots to file output paths.
         AiRequestHandle RegisterPendingWorkflowTask(AiRequestHandle const& requestHandle, std::string const& workflowId,
                                                     std::string const& runId, std::string const& taskId,
                                                     std::vector<std::string> const& outputFilePaths,
@@ -155,6 +154,9 @@ namespace AIAssistant
 
             std::string m_ResponseText;
             std::string m_ErrorMessage;
+
+            // Path of the .output.txt file that triggered completion (set by OnProbFileEvent).
+            std::string m_SourceOutputFilePath;
 
             bool m_HasDeadline = false;
             std::chrono::steady_clock::time_point m_Deadline;
