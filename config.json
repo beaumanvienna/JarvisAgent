@@ -15,7 +15,8 @@
             "description": "High-accuracy model with strong reasoning. Use for precise technical tasks, debugging, and complex questions. Use API index 0.",
             "url": "https://api.openai.com/v1/chat/completions",
             "model": "gpt-4.1",
-            "API": "API1"
+            "API": "API1",
+            "key_name": "openai"
         },
         {
             "name": "api.openai.com/gpt-5-nano/API2",
