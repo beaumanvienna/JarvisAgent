@@ -58,6 +58,7 @@ namespace AIAssistant
         TrackedFiles m_Settings;
         TrackedFiles m_Context;
         TrackedFiles m_Tasks;
+        TrackedFiles m_Provider;
         TrackedFiles m_Requirements;
         TrackedFiles m_Subfolders;
         TrackedFiles m_Ignored;

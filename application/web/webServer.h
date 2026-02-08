@@ -89,6 +89,26 @@ namespace AIAssistant
         crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
         crow::response HandleWorkflowDelete(std::string const& workflowId);
 
+        // AI interfaces API (config.json "API interfaces")
+        crow::response HandleAiInterfacesListGet();
+        crow::response HandleAiInterfaceCreatePost(crow::request const& req);
+        crow::response HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name);
+        crow::response HandleAiInterfaceDeleteDelete(std::string const& name);
+        crow::response HandleAiInterfacesSavePost();
+        crow::response HandleConfigReloadPost();
+
+        // Key management API
+        crow::response HandleKeysStatusGet();
+        crow::response HandleKeysUnlockPost(crow::request const& req);
+
+        // Provider settings API
+        crow::response HandleProvidersListGet();
+        crow::response HandleProviderCreatePost(crow::request const& req);
+        crow::response HandleProviderUpdatePut(crow::request const& req, std::string const& providerName);
+        crow::response HandleProviderDelete(std::string const& providerName);
+        crow::response HandleProviderSetDefaultPost(std::string const& providerName);
+        crow::response HandleProvidersSavePost(crow::request const& req);
+
     private:
         crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};

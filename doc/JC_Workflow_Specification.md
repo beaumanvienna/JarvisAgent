@@ -424,8 +424,9 @@ Each task has:
     "id": "ask_ai",
     "type": "ai_call",
     "params": {
-      "provider": "openai",
+      "provider": "openai_gpt4",
       "model": "gpt-4.1-mini",
+      "request_params": { "temperature": 0.3, "max_tokens": 4096 },
       "mode": "one_shot",  // or "assistant"
       "prompt_template": "Summarize the following report:
 {{report_text}}"
@@ -441,6 +442,12 @@ Each task has:
 
   - `mode: "one_shot"` means a single request/response using the provided inputs.  
   - `mode: "assistant"` means using a long-lived assistant environment (see 3.3.6) where less context may be passed each time because conversation state is maintained externally.
+
+  **AI provider fields** (all OPTIONAL, within `params`):
+
+  - `provider` (string) — Logical name of a registered AI provider (e.g., `"openai_gpt4"`, `"anthropic_claude"`, `"local_ollama"`). See 3.3.7 for the full provider resolution model.
+  - `model` (string) — Overrides the provider's default model for this task (e.g., `"gpt-4.1-mini"`, `"claude-sonnet-4-20250514"`).
+  - `request_params` (object) — Additional request parameters merged into the API call (e.g., `temperature`, `max_tokens`, `top_p`). Provider-specific; unknown keys are passed through verbatim.
 
 - `internal`  
   Built-in C++ actions, such as updating status, writing to ChatMessagePool, or coordinating queue artifacts.
@@ -530,6 +537,89 @@ A workflow MAY define a dedicated `clean` task that removes generated artifacts.
 ```
 
 The orchestrator or UI MAY expose a “clean” action that simply runs this task (ignoring usual dependency checks).
+
+#### 3.3.7 AI Provider Configuration
+
+`ai_call` tasks target a named **provider** from JarvisAgent's provider registry. The provider registry maps logical names to connection details (endpoint URL, API key, default model, API type). Providers are configured outside the JCWF file — either via JarvisAgent's encrypted key store (`keys.json.enc`) or the Settings UI. See `engine/keys.md` for the key management design.
+
+**Resolution order** for `ai_call` tasks:
+
+1. **Task-level** `params.provider` — if present, look up this provider in the registry.
+2. **Workflow-level** `defaults.ai.provider` — if the task does not specify a provider, use the workflow default (see 3.6).
+3. **System-level** default provider — if neither task nor workflow specifies a provider, use the system default from the provider registry.
+4. If no provider can be resolved, the task MUST fail with a clear error before dispatch.
+
+**Model override:**
+
+- If `params.model` is specified on the task, it overrides the provider's `default_model`.
+- If `defaults.ai.model` is specified at the workflow level and the task does not specify `params.model`, the workflow default is used.
+- Otherwise, the provider's `default_model` is used.
+
+**Request parameters merge:**
+
+- `params.request_params` on the task is merged into the API request body.
+- If `defaults.ai.request_params` exists, the task-level object is merged on top (task wins on key conflicts).
+- Common keys: `temperature`, `max_tokens`, `top_p`, `frequency_penalty`, `presence_penalty`.
+- Unknown keys are passed through to the provider API verbatim.
+
+**Provider registry entry** (conceptual — not part of the JCWF file):
+
+| Field           | Description                                                    |
+|-----------------|----------------------------------------------------------------|
+| `display_name`  | Human-readable label (e.g., "OpenAI GPT-4").                  |
+| `endpoint`      | Full URL to the chat completions endpoint.                     |
+| `api_key`       | API key (empty for local/keyless endpoints like Ollama).       |
+| `default_model` | Default model string sent in the request body.                 |
+| `api_type`      | `"API1"` (OpenAI-compatible) or `"API2"` (Anthropic-style).   |
+
+**Example: specialized AI tasks in a single workflow**
+
+```jsonc
+{
+  "tasks": {
+    "draft_report": {
+      "id": "draft_report",
+      "type": "ai_call",
+      "label": "Draft report with Claude",
+      "params": {
+        "provider": "anthropic_claude",
+        "model": "claude-sonnet-4-20250514",
+        "request_params": { "temperature": 0.4, "max_tokens": 8192 },
+        "mode": "one_shot",
+        "prompt_template": "Write a detailed report on:\n{{topic}}"
+      }
+    },
+    "summarize_report": {
+      "id": "summarize_report",
+      "type": "ai_call",
+      "label": "Summarize with GPT-4",
+      "depends_on": ["draft_report"],
+      "params": {
+        "provider": "openai_gpt4",
+        "request_params": { "temperature": 0.1 },
+        "mode": "one_shot",
+        "prompt_template": "Summarize in 5 bullets:\n{{report}}"
+      }
+    },
+    "translate": {
+      "id": "translate",
+      "type": "ai_call",
+      "label": "Translate with local Ollama",
+      "depends_on": ["summarize_report"],
+      "params": {
+        "provider": "local_ollama",
+        "model": "llama3",
+        "mode": "one_shot",
+        "prompt_template": "Translate to German:\n{{summary}}"
+      }
+    }
+  }
+}
+```
+
+This example uses three different AI providers in a single workflow — each task targeting the best model for its role, analogous to specialized engineers in an engineering department.
+
+---
 
 #### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNTX_, PROB_)
 
@@ -701,13 +791,25 @@ If `dataflow` is omitted, tasks may rely purely on the workflow state (context) 
     "backoff_ms": 1000
   },
   "ai": {
-    "provider": "openai",
-    "model": "gpt-4.1-mini"
+    "provider": "openai_gpt4",
+    "model": "gpt-4.1-mini",
+    "request_params": { "temperature": 0.7 }
   }
 }
 ```
 
 Task-specific fields override defaults at the same key path.
+
+**`defaults` fields:**
+
+- `timeout_ms` (integer) — Default timeout for all tasks. Overridden by task-level `timeout_ms`.
+- `retries` (object) — Default retry policy. Overridden by task-level `retries`.
+  - `max_attempts` (integer)
+  - `backoff_ms` (integer)
+- `ai` (object) — Default AI provider settings for all `ai_call` tasks. Overridden by task-level `params.provider`, `params.model`, and `params.request_params` respectively. See 3.3.7 for the full resolution order.
+  - `provider` (string) — Logical provider name from the provider registry.
+  - `model` (string) — Default model override.
+  - `request_params` (object) — Default request parameters (merged with task-level; task wins on conflicts).
 
 ---
 
@@ -1011,6 +1113,24 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
     },
     "defaults": {
       "type": "object",
+      "properties": {
+        "timeout_ms": { "type": "integer" },
+        "retries": {
+          "type": "object",
+          "properties": {
+            "max_attempts": { "type": "integer" },
+            "backoff_ms": { "type": "integer" }
+          }
+        },
+        "ai": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "request_params": { "type": "object" }
+          }
+        }
+      },
       "additionalProperties": true
     }
   },
@@ -1097,7 +1217,20 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
             }
           }
         },
-        "params": { "type": "object" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "request_params": { "type": "object" },
+            "mode": {
+              "type": "string",
+              "enum": ["one_shot", "assistant"]
+            },
+            "prompt_template": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
         "inputs": {
           "type": "object",
           "additionalProperties": {
@@ -1164,6 +1297,7 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
 
 - `shell` tasks can be dangerous; JarvisAgent SHOULD provide configuration flags to disable or restrict them and MUST enforce the `scripts/` prefix rule.  
 - `ai_call` tasks send data to external services; sensitive data MUST be handled carefully.  
+- **API keys** MUST NOT be stored in JCWF files or `config.json`. They are managed in JarvisAgent's encrypted key store (`keys.json.enc`, AES-256-GCM with a master password) or provided via environment variables. See `engine/keys.md` for the key management design.  
 - JCWF files SHOULD be sourced from trusted locations; tampering can change automation behavior.  
 - Structure-based iteration over external documents and XLS files SHOULD validate inputs to avoid unexpected expansion or injection.
 

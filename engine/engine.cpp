@@ -24,6 +24,7 @@
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
+#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -44,12 +45,90 @@ int engine(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
+    // Store config file path for runtime access
+    Core::g_Core->SetConfigFilePath(configFilePathAbsolute);
+
     // check engine config
     ConfigChecker().Check(engineConfig);
     if (!engineConfig.IsValid())
     {
         // exit with error = true
         return EXIT_FAILURE;
+    }
+
+    // Initialize key manager: try encrypted keys file, then plaintext, then env var fallback
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+        std::filesystem::path const keysFilePathAbsolute =
+            Core::g_Core->GetLaunchCWDAbsolute() / engineConfig.m_KeysFilePath;
+        std::filesystem::path const plaintextKeysPathAbsolute = Core::g_Core->GetLaunchCWDAbsolute() / "keys.json";
+
+        // Always store the encrypted keys file path for potential runtime unlock
+        keyManager.SetKeysFilePath(keysFilePathAbsolute);
+
+        bool keysLoaded = false;
+
+        if (std::filesystem::exists(keysFilePathAbsolute))
+        {
+            // Try master password from environment variable
+            char const* masterPasswordEnv = std::getenv("JARVIS_MASTER_PASSWORD");
+            if (masterPasswordEnv && std::strlen(masterPasswordEnv) > 0)
+            {
+                keysLoaded = keyManager.Load(keysFilePathAbsolute, masterPasswordEnv);
+                if (!keysLoaded)
+                {
+                    keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::WrongPassword);
+                    LOG_CORE_WARN("KeyManager: failed to decrypt '{}' — wrong password?", keysFilePathAbsolute.string());
+                }
+                else
+                {
+                    keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
+                }
+            }
+            else
+            {
+                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::NoPassword);
+                LOG_CORE_WARN("KeyManager: '{}' exists but JARVIS_MASTER_PASSWORD is not set",
+                              keysFilePathAbsolute.string());
+            }
+        }
+
+        // Try plaintext keys.json (development convenience)
+        if (!keysLoaded && std::filesystem::exists(plaintextKeysPathAbsolute))
+        {
+            keysLoaded = keyManager.LoadPlaintext(plaintextKeysPathAbsolute);
+            if (keysLoaded)
+            {
+                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
+            }
+        }
+
+        // Fall back to OPENAI_API_KEY environment variable (backward compatibility)
+        if (!keysLoaded)
+        {
+            std::string endpoint;
+            std::string model;
+            std::string apiType;
+
+            if (engineConfig.m_ApiIndex < engineConfig.m_ApiInterfaces.size())
+            {
+                auto const& iface = engineConfig.m_ApiInterfaces[engineConfig.m_ApiIndex];
+                endpoint = iface.m_Url;
+                model = iface.m_Model;
+                apiType = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
+            }
+
+            keysLoaded = keyManager.LoadFromEnvironment(endpoint, model, apiType);
+            if (keysLoaded)
+            {
+                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
+            }
+        }
+
+        if (!keysLoaded)
+        {
+            LOG_CORE_WARN("KeyManager: no API keys configured — AI tasks will fail at dispatch time");
+        }
     }
 
     engine->Start(engineConfig);

@@ -43,6 +43,8 @@ namespace AIAssistant
                     return m_CategorizedFiles.m_Context;
                 case FileCategory::Task:
                     return m_CategorizedFiles.m_Tasks;
+                case FileCategory::Provider:
+                    return m_CategorizedFiles.m_Provider;
                 case FileCategory::Requirement:
                     return m_CategorizedFiles.m_Requirements;
                 case FileCategory::SubFolder:
@@ -65,6 +67,7 @@ namespace AIAssistant
         RemoveFromFiles(m_CategorizedFiles.m_Settings, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Context, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Tasks, filePath);
+        RemoveFromFiles(m_CategorizedFiles.m_Provider, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Requirements, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Subfolders, filePath);
         RemoveFromFiles(m_CategorizedFiles.m_Ignored, filePath);
@@ -88,6 +91,8 @@ namespace AIAssistant
                     return m_CategorizedFiles.m_Context;
                 case FileCategory::Task:
                     return m_CategorizedFiles.m_Tasks;
+                case FileCategory::Provider:
+                    return m_CategorizedFiles.m_Provider;
                 case FileCategory::Requirement:
                     return m_CategorizedFiles.m_Requirements;
                 case FileCategory::SubFolder:
@@ -165,6 +170,11 @@ namespace AIAssistant
         if (filename.starts_with("TASK"))
         {
             return FileCategory::Task;
+        }
+
+        if (filename.starts_with("PROV"))
+        {
+            return FileCategory::Provider;
         }
 
         // --- Detect stale PROB files (input or output) ---
@@ -338,6 +348,7 @@ namespace AIAssistant
         printCategory("Settings", m_CategorizedFiles.m_Settings);
         printCategory("Context", m_CategorizedFiles.m_Context);
         printCategory("Tasks", m_CategorizedFiles.m_Tasks);
+        printCategory("Provider", m_CategorizedFiles.m_Provider);
         printCategory("Requirements", m_CategorizedFiles.m_Requirements);
         printCategory("Subfolders", m_CategorizedFiles.m_Subfolders);
         printCategory("Ignored", m_CategorizedFiles.m_Ignored);

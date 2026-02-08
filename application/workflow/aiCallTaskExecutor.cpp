@@ -752,6 +752,78 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
+        // Per-subfolder provider settings (optional)
+        // If the task params contain "provider", resolve the full
+        // provider config and write a PROV_provider.json to the
+        // subfolder.  The file carries url (mandatory), model,
+        // api_type, temperature — but NEVER credentials / API key.
+        // The "provider" field is the KeyManager lookup ID so that
+        // SessionManager can retrieve the key at runtime.
+        // Written only once per subfolder (idempotent).
+        // ------------------------------------------------------------
+        {
+            std::string providerOverrideError;
+            std::optional<std::string> const providerOpt =
+                TryExtractStringParam(taskDefinition.m_ParamsJson, "provider", providerOverrideError);
+            std::optional<std::string> const modelOpt =
+                TryExtractStringParam(taskDefinition.m_ParamsJson, "model", providerOverrideError);
+            std::optional<std::string> const temperatureOpt =
+                TryExtractStringParam(taskDefinition.m_ParamsJson, "temperature", providerOverrideError);
+
+            if (providerOpt.has_value())
+            {
+                std::filesystem::path const providerSettingsPath = taskWorkingDirectoryPath / "PROV_provider.json";
+
+                if (!std::filesystem::exists(providerSettingsPath))
+                {
+                    // Resolve provider config from KeyManager for non-credential fields
+                    auto const* provCfg = Core::g_Core->GetKeyManager().GetProvider(providerOpt.value());
+
+                    std::string sidecarJson = "{";
+                    // provider (KeyManager lookup ID)
+                    sidecarJson += "\"provider\":\"" + providerOpt.value() + "\"";
+
+                    // url (mandatory — from KeyManager endpoint)
+                    if (provCfg && !provCfg->m_Endpoint.empty())
+                    {
+                        sidecarJson += ",\"url\":\"" + provCfg->m_Endpoint + "\"";
+                    }
+
+                    // api_type (from KeyManager)
+                    if (provCfg && !provCfg->m_ApiType.empty())
+                    {
+                        sidecarJson += ",\"api_type\":\"" + provCfg->m_ApiType + "\"";
+                    }
+
+                    // model (task param overrides provider default)
+                    if (modelOpt.has_value())
+                    {
+                        sidecarJson += ",\"model\":\"" + modelOpt.value() + "\"";
+                    }
+                    else if (provCfg && !provCfg->m_DefaultModel.empty())
+                    {
+                        sidecarJson += ",\"model\":\"" + provCfg->m_DefaultModel + "\"";
+                    }
+
+                    // temperature (optional, from task params)
+                    if (temperatureOpt.has_value())
+                    {
+                        sidecarJson += ",\"temperature\":" + temperatureOpt.value();
+                    }
+
+                    sidecarJson += "}";
+
+                    std::string sidecarError;
+                    if (!WriteTextFile(providerSettingsPath.string(), sidecarJson, sidecarError))
+                    {
+                        LOG_APP_WARN("Failed to write provider settings '{}': {}", providerSettingsPath.string(),
+                                     sidecarError);
+                    }
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
         // Asynchronous completion (event-driven)
         // ------------------------------------------------------------
         taskState.m_ExternalRequestId = requestId;

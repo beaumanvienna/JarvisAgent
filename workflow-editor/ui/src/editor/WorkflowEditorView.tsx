@@ -30,6 +30,7 @@ import {
   type WorkflowValidationFinding,
 } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
+import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
 
 const nodeTypes = { task: TaskNode };
 
@@ -1008,6 +1009,13 @@ export default function WorkflowEditorView(props: {
     return (nodes as EditorTaskNode[]).find((n) => n.id === selectedNodeId) ?? null;
   }, [nodes, selectedNodeId]);
 
+  const [aiInterfaces, setAiInterfaces] = useState<AiInterface[]>([]);
+  useEffect(() => {
+    listAiInterfaces().then((res) => {
+      if (res.ok) setAiInterfaces(res.interfaces);
+    }).catch(() => {});
+  }, []);
+
   const selectNodeById = useCallback((nodeId: string | null) => {
     setSelectedNodeId(nodeId);
     setNodes((current) => {
@@ -1876,6 +1884,22 @@ export default function WorkflowEditorView(props: {
                     <option value="internal">internal</option>
                   </select>
                 </label>
+
+                {selectedNode.data.task.type === "ai_call" && (
+                  <label className="field">
+                    <div className="small">AI Interface</div>
+                    <select
+                      className="input"
+                      value={(selectedNode.data.task.api_interface as string) ?? ""}
+                      onChange={(e) => { updateSelectedTaskField({ api_interface: e.target.value || undefined } as Partial<JcwfTask>); }}
+                    >
+                      <option value="">default (global API index)</option>
+                      {aiInterfaces.map((iface) => (
+                        <option key={iface.name} value={iface.name}>{iface.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
 
                 <label className="field">
                   <div className="small">working_directory</div>

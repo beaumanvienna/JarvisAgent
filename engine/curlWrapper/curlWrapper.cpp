@@ -30,7 +30,6 @@
 namespace AIAssistant
 {
 
-    std::string CurlWrapper::m_ApiKey;
     std::atomic<uint32_t> CurlWrapper::m_QueryCounter{0};
 
     CurlWrapper::CurlWrapper()
@@ -43,18 +42,6 @@ namespace AIAssistant
             std::lock_guard<std::mutex> lock(initMutex);
             if (!initialized)
             {
-                char* apiKeyEnv = std::getenv("OPENAI_API_KEY");
-                if (apiKeyEnv)
-                {
-                    m_ApiKey = std::string(apiKeyEnv);
-                } // if it is null, this will be caught in IsValidKey()
-
-                if (!IsValidKey(m_ApiKey))
-                {
-                    LOG_CORE_CRITICAL("Missing OPENAI_API_KEY env variable");
-                    return;
-                }
-
                 CURLcode res = curl_global_init(CURL_GLOBAL_DEFAULT);
                 if (res != CURLE_OK)
                 {
@@ -126,12 +113,11 @@ namespace AIAssistant
 
     void CurlWrapper::Clear() { m_ReadBuffer.clear(); }
 
-    bool CurlWrapper::IsValidKey(std::string const& key) { return key.size() >= 8; }
-
     bool CurlWrapper::QueryData::IsValid() const
     {
         bool urlEmpty = m_Url.empty();
         bool dataEmpty = m_Data.empty();
+        bool keyEmpty = m_ApiKey.empty();
 
         if (urlEmpty)
         {
@@ -141,8 +127,12 @@ namespace AIAssistant
         {
             LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): data empty");
         }
+        if (keyEmpty)
+        {
+            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): API key empty");
+        }
 
-        return !urlEmpty && !dataEmpty;
+        return !urlEmpty && !dataEmpty && !keyEmpty;
     }
 
     bool CurlWrapper::Query(QueryData const& queryData)
@@ -153,7 +143,7 @@ namespace AIAssistant
         }
 
         CurlSlist headers;
-        headers.Append("Authorization: Bearer " + m_ApiKey);
+        headers.Append("Authorization: Bearer " + queryData.m_ApiKey);
         headers.Append("Content-Type: application/json");
 
         auto& url = queryData.m_Url;

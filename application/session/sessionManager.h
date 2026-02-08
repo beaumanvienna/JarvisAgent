@@ -22,6 +22,7 @@
 #pragma once
 #include <future>
 #include <array>
+#include <optional>
 
 #include "engine.h"
 #include "curlWrapper/curlManager.h"
@@ -90,6 +91,7 @@ namespace AIAssistant
         void AssembleSettings();
         void AssembleContext();
         void AssembleTask();
+        void AssembleProvider();
         bool IsQueryRequired(TrackedFile& requirementFile) const;
 
     private:
@@ -133,6 +135,9 @@ namespace AIAssistant
 
         std::string m_Url;
         std::string m_Model;
+        std::string m_ApiType;
+        std::string m_ApiKey;
+        std::optional<double> m_Temperature;
 
         std::unique_ptr<ReplyParser> m_ReplyParser;
         size_t m_CompletedQueriesThisRun{0};

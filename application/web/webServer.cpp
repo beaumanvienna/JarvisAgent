@@ -19,6 +19,7 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <cstring>
 #include <fstream>
 #include <algorithm>
 #include <chrono>
@@ -46,6 +47,7 @@
 #include "workflow/workflowTypes.h"
 
 #include "event/events.h"
+#include "keys/keyEncryption.h"
 
 namespace fs = std::filesystem;
 namespace AIAssistant
@@ -775,6 +777,51 @@ namespace AIAssistant
         // ---- Integrations: n8n ----
         CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
             .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
+
+        // ---- AI interfaces API (config.json) ----
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("GET"_method)([this]() { return HandleAiInterfacesListGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
+            .methods("POST"_method)([this]() { return HandleAiInterfacesSavePost(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("PUT"_method)([this](crow::request const& req, std::string const& name)
+                                   { return HandleAiInterfaceUpdatePut(req, name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("DELETE"_method)([this](std::string const& name) { return HandleAiInterfaceDeleteDelete(name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/config/reload")
+            .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
+
+        // ---- Key management API ----
+        CROW_ROUTE(m_Server, "/api/settings/keys/status").methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/keys/unlock")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleKeysUnlockPost(req); });
+
+        // ---- Provider settings API ----
+        CROW_ROUTE(m_Server, "/api/settings/providers").methods("GET"_method)([this]() { return HandleProvidersListGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleProviderCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/save")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleProvidersSavePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("PUT"_method)([this](crow::request const& req, std::string const& name)
+                                   { return HandleProviderUpdatePut(req, name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("DELETE"_method)([this](std::string const& name) { return HandleProviderDelete(name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
+            .methods("POST"_method)([this](std::string const& name) { return HandleProviderSetDefaultPost(name); });
     }
 
     crow::response WebServer::HandleChatPost(const crow::request& req)
@@ -1805,6 +1852,857 @@ namespace AIAssistant
         msg["running"] = pythonRunning;
 
         BroadcastJSON(msg.dump());
+    }
+
+    // =========================================================================
+    // AI interfaces API handlers (config.json "API interfaces")
+    // =========================================================================
+
+    static std::string UrlDecode(std::string const& encoded)
+    {
+        std::string decoded;
+        decoded.reserve(encoded.size());
+        for (size_t i = 0; i < encoded.size(); ++i)
+        {
+            if (encoded[i] == '%' && i + 2 < encoded.size())
+            {
+                int hi = 0, lo = 0;
+                auto fromHex = [](char c) -> int
+                {
+                    if (c >= '0' && c <= '9')
+                        return c - '0';
+                    if (c >= 'A' && c <= 'F')
+                        return c - 'A' + 10;
+                    if (c >= 'a' && c <= 'f')
+                        return c - 'a' + 10;
+                    return -1;
+                };
+                hi = fromHex(encoded[i + 1]);
+                lo = fromHex(encoded[i + 2]);
+                if (hi >= 0 && lo >= 0)
+                {
+                    decoded += static_cast<char>((hi << 4) | lo);
+                    i += 2;
+                    continue;
+                }
+            }
+            else if (encoded[i] == '+')
+            {
+                decoded += ' ';
+                continue;
+            }
+            decoded += encoded[i];
+        }
+        return decoded;
+    }
+
+    crow::response WebServer::HandleAiInterfacesListGet()
+    {
+        auto const& config = Core::g_Core->GetConfig();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["api_index"] = config.m_ApiIndex;
+
+        std::vector<crow::json::wvalue> items;
+        for (auto const& iface : config.m_ApiInterfaces)
+        {
+            crow::json::wvalue item;
+            item["name"] = iface.m_Name;
+            item["description"] = iface.m_Description;
+            item["url"] = iface.m_Url;
+            item["model"] = iface.m_Model;
+            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
+            item["key_name"] = iface.m_KeyName;
+            items.push_back(std::move(item));
+        }
+        responseJson["interfaces"] = std::move(items);
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleAiInterfaceCreatePost(crow::request const& req)
+    {
+        auto& config = Core::g_Core->GetMutableConfig();
+
+        std::string name, description, url, model, apiTypeStr, keyName;
+
+        {
+            simdjson::ondemand::parser parser;
+            try
+            {
+                simdjson::padded_string json(req.body);
+                auto doc = parser.iterate(json);
+
+                std::string_view sv;
+                if (doc["url"].get_string().get(sv) == simdjson::SUCCESS)
+                    url = std::string(sv);
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["model"].get_string().get(sv) == simdjson::SUCCESS)
+                        model = std::string(sv);
+                }
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["api_type"].get_string().get(sv) == simdjson::SUCCESS)
+                        apiTypeStr = std::string(sv);
+                }
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["name"].get_string().get(sv) == simdjson::SUCCESS)
+                        name = std::string(sv);
+                }
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["description"].get_string().get(sv) == simdjson::SUCCESS)
+                        description = std::string(sv);
+                }
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["key_name"].get_string().get(sv) == simdjson::SUCCESS)
+                        keyName = std::string(sv);
+                }
+            }
+            catch (...)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_json";
+                err["message"] = "Failed to parse request body.";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
+        if (url.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_url";
+            err["message"] = "Field 'url' is required.";
+            return MakeJsonResponse(400, err);
+        }
+
+        ConfigParser::EngineConfig::ApiInterface newIface;
+        newIface.m_Url = url;
+        newIface.m_Model = model;
+        newIface.m_Description = description;
+        newIface.m_KeyName = keyName;
+        newIface.m_Name =
+            name.empty()
+                ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
+                : name;
+
+        if (apiTypeStr == "API2")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+        else
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
+
+        // Check for duplicate name
+        for (auto const& existing : config.m_ApiInterfaces)
+        {
+            if (existing.m_Name == newIface.m_Name)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "duplicate_name";
+                err["message"] = "An AI interface with name '" + newIface.m_Name + "' already exists.";
+                return MakeJsonResponse(409, err);
+            }
+        }
+
+        config.m_ApiInterfaces.push_back(std::move(newIface));
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["name"] = config.m_ApiInterfaces.back().m_Name;
+        return MakeJsonResponse(201, responseJson);
+    }
+
+    crow::response WebServer::HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name)
+    {
+        auto& config = Core::g_Core->GetMutableConfig();
+        std::string const decodedName = UrlDecode(name);
+
+        // Find the interface by name
+        ConfigParser::EngineConfig::ApiInterface* target = nullptr;
+        for (auto& iface : config.m_ApiInterfaces)
+        {
+            if (iface.m_Name == decodedName)
+            {
+                target = &iface;
+                break;
+            }
+        }
+
+        if (!target)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "AI interface '" + decodedName + "' not found.";
+            return MakeJsonResponse(404, err);
+        }
+
+        {
+            simdjson::ondemand::parser parser;
+            try
+            {
+                simdjson::padded_string json(req.body);
+                std::string_view sv;
+
+                {
+                    auto d = parser.iterate(json);
+                    if (d["url"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_Url = std::string(sv);
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["model"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_Model = std::string(sv);
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["description"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_Description = std::string(sv);
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["name"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_Name = std::string(sv);
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        std::string apiTypeStr(sv);
+                        if (apiTypeStr == "API2")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+                        else
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
+                    }
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["key_name"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_KeyName = std::string(sv);
+                }
+            }
+            catch (...)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_json";
+                err["message"] = "Failed to parse request body.";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["name"] = target->m_Name;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleAiInterfaceDeleteDelete(std::string const& name)
+    {
+        auto& config = Core::g_Core->GetMutableConfig();
+        std::string const decodedName = UrlDecode(name);
+
+        auto it = std::find_if(config.m_ApiInterfaces.begin(), config.m_ApiInterfaces.end(),
+                               [&decodedName](auto const& iface) { return iface.m_Name == decodedName; });
+
+        if (it == config.m_ApiInterfaces.end())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "AI interface '" + decodedName + "' not found.";
+            return MakeJsonResponse(404, err);
+        }
+
+        config.m_ApiInterfaces.erase(it);
+
+        // Fix API index if it now exceeds bounds
+        if (!config.m_ApiInterfaces.empty() && config.m_ApiIndex >= config.m_ApiInterfaces.size())
+        {
+            config.m_ApiIndex = config.m_ApiInterfaces.size() - 1;
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleAiInterfacesSavePost()
+    {
+        auto const& config = Core::g_Core->GetConfig();
+        auto const& configPath = Core::g_Core->GetConfigFilePath();
+
+        if (configPath.empty() || !std::filesystem::exists(configPath))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_config";
+            err["message"] = "Config file path not set or file does not exist.";
+            return MakeJsonResponse(500, err);
+        }
+
+        // Read the existing config.json
+        std::string fileContent;
+        {
+            std::ifstream ifs(configPath, std::ios::binary);
+            if (!ifs)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "read_failed";
+                err["message"] = "Failed to read config file.";
+                return MakeJsonResponse(500, err);
+            }
+            std::ostringstream oss;
+            oss << ifs.rdbuf();
+            fileContent = oss.str();
+        }
+
+        // Build the new "API interfaces" JSON array
+        std::string newArray = "[\n";
+        for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
+        {
+            auto const& iface = config.m_ApiInterfaces[i];
+            std::string apiStr =
+                (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
+
+            newArray += "        {\n";
+            newArray += "            \"name\": \"" + iface.m_Name + "\",\n";
+            if (!iface.m_Description.empty())
+            {
+                newArray += "            \"description\": \"" + iface.m_Description + "\",\n";
+            }
+            newArray += "            \"url\": \"" + iface.m_Url + "\",\n";
+            newArray += "            \"model\": \"" + iface.m_Model + "\",\n";
+            newArray += "            \"API\": \"" + apiStr + "\"";
+            if (!iface.m_KeyName.empty())
+            {
+                newArray += ",\n";
+                newArray += "            \"key_name\": \"" + iface.m_KeyName + "\"";
+            }
+            newArray += "\n";
+            newArray += "        }";
+            if (i + 1 < config.m_ApiInterfaces.size())
+            {
+                newArray += ",";
+            }
+            newArray += "\n";
+        }
+        newArray += "    ]";
+
+        // Find and replace the "API interfaces" array in the file content
+        auto keyPos = fileContent.find("\"API interfaces\"");
+        if (keyPos == std::string::npos)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "parse_failed";
+            err["message"] = "Could not find 'API interfaces' key in config.json.";
+            return MakeJsonResponse(500, err);
+        }
+
+        // Find the opening [ after "API interfaces"
+        auto arrayStart = fileContent.find('[', keyPos);
+        if (arrayStart == std::string::npos)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "parse_failed";
+            err["message"] = "Could not find array start for 'API interfaces'.";
+            return MakeJsonResponse(500, err);
+        }
+
+        // Find matching ] (skip brackets inside strings)
+        int depth = 0;
+        size_t arrayEnd = std::string::npos;
+        for (size_t i = arrayStart; i < fileContent.size(); ++i)
+        {
+            char c = fileContent[i];
+            if (c == '"')
+            {
+                ++i;
+                while (i < fileContent.size() && fileContent[i] != '"')
+                {
+                    if (fileContent[i] == '\\')
+                        ++i;
+                    ++i;
+                }
+            }
+            else if (c == '[')
+            {
+                ++depth;
+            }
+            else if (c == ']')
+            {
+                --depth;
+                if (depth == 0)
+                {
+                    arrayEnd = i;
+                    break;
+                }
+            }
+        }
+
+        if (arrayEnd == std::string::npos)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "parse_failed";
+            err["message"] = "Could not find matching ']' for 'API interfaces' array.";
+            return MakeJsonResponse(500, err);
+        }
+
+        fileContent.replace(arrayStart, arrayEnd - arrayStart + 1, newArray);
+
+        // Write back
+        {
+            std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
+            if (!ofs)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "write_failed";
+                err["message"] = "Failed to write config file.";
+                return MakeJsonResponse(500, err);
+            }
+            ofs << fileContent;
+        }
+
+        LOG_CORE_INFO("WebServer: saved {} AI interfaces to '{}'", config.m_ApiInterfaces.size(), configPath.string());
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["path"] = configPath.string();
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConfigReloadPost()
+    {
+        auto const& configPath = Core::g_Core->GetConfigFilePath();
+        if (configPath.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_config";
+            err["message"] = "Config file path not set.";
+            return MakeJsonResponse(500, err);
+        }
+
+        std::string const configPathStr = configPath.lexically_normal().string();
+        ConfigParser configParser(configPathStr);
+        ConfigParser::EngineConfig newConfig{};
+        configParser.Parse(newConfig);
+
+        if (!configParser.ConfigParsed())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "parse_failed";
+            err["message"] = "Failed to parse config.json.";
+            return MakeJsonResponse(500, err);
+        }
+
+        // Update the in-memory config (preserve m_ConfigValid from checker)
+        auto& config = Core::g_Core->GetMutableConfig();
+        config.m_ApiInterfaces = std::move(newConfig.m_ApiInterfaces);
+        config.m_ApiIndex = newConfig.m_ApiIndex;
+
+        LOG_CORE_INFO("WebServer: reloaded config.json — {} AI interfaces", config.m_ApiInterfaces.size());
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["interface_count"] = config.m_ApiInterfaces.size();
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    // =========================================================================
+    // Key management API handlers
+    // =========================================================================
+
+    crow::response WebServer::HandleKeysStatusGet()
+    {
+        auto const& keyManager = Core::g_Core->GetKeyManager();
+        auto status = keyManager.GetKeyLoadStatus();
+
+        crow::json::wvalue responseJson;
+
+        std::string statusStr;
+        std::string message;
+        switch (status)
+        {
+            case KeyManager::KeyLoadStatus::Ok:
+                statusStr = "ok";
+                message = "Keys loaded successfully.";
+                break;
+            case KeyManager::KeyLoadStatus::NoPassword:
+                statusStr = "no_password";
+                message = "No master password provided. Please enter your master password.";
+                break;
+            case KeyManager::KeyLoadStatus::WrongPassword:
+                statusStr = "wrong_password";
+                message = "Incorrect master password provided. Please enter the correct password.";
+                break;
+            case KeyManager::KeyLoadStatus::NoKeysFile:
+                statusStr = "no_keys_file";
+                message = "No encrypted keys file found.";
+                break;
+        }
+
+        responseJson["ok"] = true;
+        responseJson["status"] = statusStr;
+        responseJson["message"] = message;
+        responseJson["has_providers"] = keyManager.HasProviders();
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleKeysUnlockPost(crow::request const& req)
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        // Parse master_password from request body
+        std::string masterPassword;
+        {
+            simdjson::ondemand::parser parser;
+            try
+            {
+                simdjson::padded_string json(req.body);
+                auto doc = parser.iterate(json);
+
+                std::string_view sv;
+                if (doc["master_password"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    masterPassword = std::string(sv);
+                }
+            }
+            catch (...)
+            {
+                // malformed body
+            }
+        }
+
+        if (masterPassword.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_password";
+            err["message"] = "Request body must contain 'master_password'.";
+            return MakeJsonResponse(400, err);
+        }
+
+        if (keyManager.Unlock(masterPassword))
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["status"] = "ok";
+            responseJson["message"] = "Keys unlocked successfully.";
+            return MakeJsonResponse(200, responseJson);
+        }
+
+        crow::json::wvalue err;
+        err["ok"] = false;
+        err["status"] = "wrong_password";
+        err["message"] = "Incorrect master password. Please try again.";
+        return MakeJsonResponse(401, err);
+    }
+
+    // =========================================================================
+    // Provider settings API handlers
+    // =========================================================================
+
+    crow::response WebServer::HandleProvidersListGet()
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["default_provider"] = keyManager.GetDefaultProviderName();
+
+        std::vector<std::string> names = keyManager.GetProviderNames();
+
+        crow::json::wvalue::list providersList;
+        providersList.reserve(names.size());
+
+        for (std::string const& name : names)
+        {
+            auto const* provider = keyManager.GetProvider(name);
+            if (!provider)
+            {
+                continue;
+            }
+
+            crow::json::wvalue entry;
+            entry["name"] = name;
+            entry["display_name"] = provider->m_DisplayName;
+            entry["endpoint"] = provider->m_Endpoint;
+            entry["default_model"] = provider->m_DefaultModel;
+            entry["api_type"] = provider->m_ApiType;
+            entry["has_key"] = !provider->m_ApiKey.empty();
+            // API key is intentionally NOT returned for security.
+            providersList.push_back(std::move(entry));
+        }
+
+        responseJson["providers"] = std::move(providersList);
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleProviderCreatePost(crow::request const& req)
+    {
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string json(req.body);
+            auto doc = parser.iterate(json);
+
+            std::string_view name;
+            if (doc["name"].get_string().get(name) != simdjson::SUCCESS || name.empty())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "missing_name";
+                err["message"] = "'name' is required and must be a non-empty string";
+                return MakeJsonResponse(400, err);
+            }
+
+            KeyManager::ProviderConfig config;
+
+            std::string_view sv;
+            if (doc["display_name"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_DisplayName = std::string(sv);
+            }
+            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Endpoint = std::string(sv);
+            }
+            if (doc["api_key"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ApiKey = std::string(sv);
+            }
+            if (doc["default_model"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_DefaultModel = std::string(sv);
+            }
+            if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ApiType = std::string(sv);
+            }
+
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (!keyManager.AddProvider(std::string(name), std::move(config)))
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "already_exists";
+                err["message"] = "Provider '" + std::string(name) + "' already exists";
+                return MakeJsonResponse(409, err);
+            }
+
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["name"] = std::string(name);
+            return MakeJsonResponse(201, responseJson);
+        }
+        catch (std::exception const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_json";
+            err["message"] = std::string("JSON parse error: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+    }
+
+    crow::response WebServer::HandleProviderUpdatePut(crow::request const& req, std::string const& providerName)
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        auto const* existing = keyManager.GetProvider(providerName);
+        if (!existing)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Provider '" + providerName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string json(req.body);
+            auto doc = parser.iterate(json);
+
+            // Start from existing config, overlay provided fields
+            KeyManager::ProviderConfig config = *existing;
+
+            std::string_view sv;
+            if (doc["display_name"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_DisplayName = std::string(sv);
+            }
+            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Endpoint = std::string(sv);
+            }
+            if (doc["api_key"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ApiKey = std::string(sv);
+            }
+            if (doc["default_model"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_DefaultModel = std::string(sv);
+            }
+            if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ApiType = std::string(sv);
+            }
+
+            keyManager.UpdateProvider(providerName, std::move(config));
+
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["name"] = providerName;
+            return MakeJsonResponse(200, responseJson);
+        }
+        catch (std::exception const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_json";
+            err["message"] = std::string("JSON parse error: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+    }
+
+    crow::response WebServer::HandleProviderDelete(std::string const& providerName)
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        if (!keyManager.RemoveProvider(providerName))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Provider '" + providerName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleProviderSetDefaultPost(std::string const& providerName)
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        if (!keyManager.GetProvider(providerName))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Provider '" + providerName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        keyManager.SetDefaultProvider(providerName);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["default_provider"] = providerName;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleProvidersSavePost(crow::request const& req)
+    {
+        auto& keyManager = Core::g_Core->GetKeyManager();
+
+        // Master password: try request body first, then env var
+        std::string masterPassword;
+        {
+            simdjson::ondemand::parser parser;
+            try
+            {
+                simdjson::padded_string json(req.body);
+                auto doc = parser.iterate(json);
+
+                std::string_view sv;
+                if (doc["master_password"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    masterPassword = std::string(sv);
+                }
+            }
+            catch (...)
+            {
+                // Body might be empty or not JSON — fall through to env var
+            }
+        }
+
+        if (masterPassword.empty())
+        {
+            char const* envPassword = std::getenv("JARVIS_MASTER_PASSWORD");
+            if (envPassword && std::strlen(envPassword) > 0)
+            {
+                masterPassword = std::string(envPassword);
+            }
+        }
+
+        if (masterPassword.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_password";
+            err["message"] = "Master password required. Provide in request body or set JARVIS_MASTER_PASSWORD env var.";
+            return MakeJsonResponse(400, err);
+        }
+
+        std::filesystem::path const keysFilePath =
+            Core::g_Core->GetLaunchCWDAbsolute() / Core::g_Core->GetConfig().m_KeysFilePath;
+
+        // If an encrypted file already exists, verify the password matches before overwriting
+        if (std::filesystem::exists(keysFilePath))
+        {
+            std::ifstream verifyFile(keysFilePath, std::ios::binary);
+            if (verifyFile)
+            {
+                std::vector<uint8_t> existingBlob((std::istreambuf_iterator<char>(verifyFile)),
+                                                  std::istreambuf_iterator<char>());
+                verifyFile.close();
+
+                if (!existingBlob.empty())
+                {
+                    std::string decrypted = KeyEncryption::Decrypt(existingBlob, masterPassword);
+                    if (decrypted.empty())
+                    {
+                        crow::json::wvalue err;
+                        err["ok"] = false;
+                        err["error"] = "wrong_password";
+                        err["message"] =
+                            "Incorrect master password. The password must match the one used to create the keys file.";
+                        return MakeJsonResponse(403, err);
+                    }
+                }
+            }
+        }
+
+        if (!keyManager.Save(keysFilePath, masterPassword))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "save_failed";
+            err["message"] = "Failed to save encrypted keys file to '" + keysFilePath.string() + "'";
+            return MakeJsonResponse(500, err);
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["path"] = keysFilePath.string();
+        return MakeJsonResponse(200, responseJson);
     }
 
 } // namespace AIAssistant

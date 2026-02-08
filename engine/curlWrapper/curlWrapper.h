@@ -35,6 +35,7 @@ namespace AIAssistant
         {
             std::string m_Url;
             std::string m_Data;
+            std::string m_ApiKey;
             bool IsValid() const;
         };
 
@@ -73,12 +74,6 @@ namespace AIAssistant
         void Clear();
 
         static void GlobalCleanup();
-
-    private:
-        bool IsValidKey(std::string const& key);
-
-    private:
-        static std::string m_ApiKey;
 
     private:
         bool m_Initialized{false};

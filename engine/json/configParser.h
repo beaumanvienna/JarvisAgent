@@ -48,10 +48,17 @@ namespace AIAssistant
 
             struct ApiInterface
             {
+                std::string m_Name;
+                std::string m_Description;
                 std::string m_Url;
                 std::string m_Model;
+                std::string m_KeyName;
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
             };
+
+            // Generate a unique interface name from URL domain + model
+            static std::string GenerateInterfaceName(std::string const& url, std::string const& model,
+                                                     std::string const& apiType);
 
             size_t m_MaxThreads{0};
             std::chrono::milliseconds m_SleepDuration{0};
@@ -61,6 +68,7 @@ namespace AIAssistant
             size_t m_ApiIndex{0};
             std::vector<ApiInterface> m_ApiInterfaces;
             size_t m_MaxFileSizekB{20};
+            std::string m_KeysFilePath{"keys.json.enc"};
             bool m_ConfigValid{false};
 
             bool IsValid() const { return m_ConfigValid; }
@@ -82,6 +90,10 @@ namespace AIAssistant
             InterfaceType,
             ApiIndex,
             MaxFileSizekB,
+            KeysFile,
+            InterfaceName,
+            InterfaceDescription,
+            InterfaceKeyName,
             NumConfigFields
         };
 
@@ -89,19 +101,23 @@ namespace AIAssistant
 
         static constexpr std::array<std::string_view, ConfigFields::NumConfigFields> ConfigFieldNames = //
             {
-                "Format",          //
-                "Description",     //
-                "Author",          //
-                "QueueFolder",     //
-                "WorkflowsFolder", //
-                "MaxThreads",      //
-                "SleepTime",       //
-                "Verbose",         //
-                "Url",             //
-                "Model",           //
-                "InterfaceType",   //
-                "IndexAPI",        //
-                "MaxFileSizekB"    //
+                "Format",               //
+                "Description",          //
+                "Author",               //
+                "QueueFolder",          //
+                "WorkflowsFolder",      //
+                "MaxThreads",           //
+                "SleepTime",            //
+                "Verbose",              //
+                "Url",                  //
+                "Model",                //
+                "InterfaceType",        //
+                "IndexAPI",             //
+                "MaxFileSizekB",        //
+                "KeysFile",             //
+                "InterfaceName",        //
+                "InterfaceDescription", //
+                "InterfaceKeyName"      //
         };
 
     public:

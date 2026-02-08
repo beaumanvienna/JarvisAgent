@@ -53,6 +53,7 @@ Categorizes files so SessionManagers and the AI system understand what a file re
 - **Settings** (`STNG_*`)
 - **Context** (`CNTX_*`)
 - **Task** (`TASK_*`)
+- **Provider** (`PROV_*`) — provider configuration (never sent to AI)
 - **Requirement** (default for non‑binary, non‑ignored files)
 - **SubFolder**
 - **Ignored**

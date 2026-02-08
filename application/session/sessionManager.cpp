@@ -28,6 +28,8 @@
 #include "json/jsonHelper.h"
 #include "log/statusRenderer.h"
 #include "auxiliary/file.h"
+#include "keys/keyManager.h"
+#include "simdjson/simdjson.h"
 
 namespace AIAssistant
 {
@@ -38,6 +40,14 @@ namespace AIAssistant
 
         m_Url = api.m_Url;
         m_Model = api.m_Model;
+        m_ApiType = (api.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
+
+        // Resolve API key from KeyManager default provider
+        auto const* defaultProvider = Core::g_Core->GetKeyManager().GetDefaultProvider();
+        if (defaultProvider)
+        {
+            m_ApiKey = defaultProvider->m_ApiKey;
+        }
     }
 
     void SessionManager::OnUpdate()
@@ -206,15 +216,30 @@ namespace AIAssistant
         // example request data (model: gpt-4.1, content: Hello from C++!), all quotes are part of json format:
         // {"model": "gpt-4.1","messages": [{"role": "user", "content": "Hello from C++!"}]}
         // -----------+++++++--------------------------------------------+++++++++++++++----
-        auto makeRequestDataAPI1 = [](std::string const& model, std::string const& message) -> std::string
-        { return R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}]})"; };
+        auto makeRequestDataAPI1 = [](std::string const& model, std::string const& message,
+                                      std::optional<double> temperature) -> std::string
+        {
+            std::string json =
+                R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" + message + R"("}])";
+            if (temperature.has_value())
+            {
+                json += R"(,"temperature": )" + std::to_string(temperature.value());
+            }
+            json += "}";
+            return json;
+        };
 
-        // example request data (model: gpt-5-nano, content: write a haiku about ai), all quotes are part of json format:
-        //{"model": "gpt-5-nano", "input": "write a haiku about ai", "store": true}
-        // ----------++++++++++-------------++++++++++++++++++++++------------++++-
-        auto makeRequestDataAPI2 = [](std::string const& model, std::string const& message,
-                                      std::string const& store) -> std::string
-        { return R"({"model": ")" + model + R"(", "input": ")" + message + R"(", "store": )" + store + "}"; };
+        auto makeRequestDataAPI2 = [](std::string const& model, std::string const& message, std::string const& store,
+                                      std::optional<double> temperature) -> std::string
+        {
+            std::string json = R"({"model": ")" + model + R"(", "input": ")" + message + R"(", "store": )" + store;
+            if (temperature.has_value())
+            {
+                json += R"(, "temperature": )" + std::to_string(temperature.value());
+            }
+            json += "}";
+            return json;
+        };
 
         // retrieve prompt data from queue
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
@@ -226,29 +251,19 @@ namespace AIAssistant
 
         bool store{false};
         std::string requestData;
+        if (m_ApiType == "API2")
         {
-            auto apiIndex = Core::g_Core->GetConfig().m_ApiIndex;
-            auto& api = Core::g_Core->GetConfig().m_ApiInterfaces[apiIndex];
-            switch (api.m_InterfaceType)
-            {
-                case ConfigParser::EngineConfig::InterfaceType::API1:
-                {
-                    requestData = makeRequestDataAPI1(m_Model, sanitizedMessage);
-                    break;
-                }
-                case ConfigParser::EngineConfig::InterfaceType::API2:
-                {
-                    requestData = makeRequestDataAPI2(m_Model, sanitizedMessage, store ? "true" : "false");
-                    break;
-                }
-                default:
-                    break; // no more checking here in the run loop
-            };
+            requestData = makeRequestDataAPI2(m_Model, sanitizedMessage, store ? "true" : "false", m_Temperature);
+        }
+        else
+        {
+            requestData = makeRequestDataAPI1(m_Model, sanitizedMessage, m_Temperature);
         }
 
         CurlWrapper::QueryData queryData = {
-            .m_Url = m_Url,       //
-            .m_Data = requestData //
+            .m_Url = m_Url,        //
+            .m_Data = requestData, //
+            .m_ApiKey = m_ApiKey   //
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();
@@ -336,6 +351,14 @@ namespace AIAssistant
             AssembleTask();
             m_FileCategorizer.GetCategorizedFiles().m_Tasks.SetDirty(false);
             environmentUpdate = true;
+        }
+
+        // PROV files: resolve provider/model/key overrides.
+        // NOT part of the environment (content is never sent to AI).
+        if (categorized.m_Provider.GetDirty())
+        {
+            AssembleProvider();
+            m_FileCategorizer.GetCategorizedFiles().m_Provider.SetDirty(false);
         }
 
         if (environmentUpdate)
@@ -448,6 +471,107 @@ namespace AIAssistant
             if (isModified)
             {
                 tasks.DecrementModifiedFiles();
+            }
+        }
+    }
+
+    void SessionManager::AssembleProvider()
+    {
+        auto& provider = m_FileCategorizer.GetCategorizedFiles().m_Provider;
+        if (provider.GetModifiedFiles() == 0)
+        {
+            return;
+        }
+
+        auto& map = provider.m_Map;
+        for (auto& element : map)
+        {
+            bool isModified = element.second->IsModified();
+            element.second->MarkModified(false);
+            if (!isModified)
+            {
+                continue;
+            }
+            provider.DecrementModifiedFiles();
+
+            auto content = element.second->GetContent();
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string const padded(content);
+
+            // simdjson ondemand is single-pass, so re-iterate for each field.
+            std::string_view urlView;
+            std::string_view providerName;
+            std::string_view modelView;
+            std::string_view apiTypeView;
+            double temperatureVal{};
+
+            {
+                auto d = parser.iterate(padded);
+                [[maybe_unused]] auto e = d["url"].get_string().get(urlView);
+            }
+            {
+                auto d = parser.iterate(padded);
+                [[maybe_unused]] auto e = d["provider"].get_string().get(providerName);
+            }
+            {
+                auto d = parser.iterate(padded);
+                [[maybe_unused]] auto e = d["model"].get_string().get(modelView);
+            }
+            {
+                auto d = parser.iterate(padded);
+                [[maybe_unused]] auto e = d["api_type"].get_string().get(apiTypeView);
+            }
+            bool hasTemp = false;
+            {
+                auto d = parser.iterate(padded);
+                hasTemp = (d["temperature"].get_double().get(temperatureVal) == simdjson::SUCCESS);
+            }
+
+            // url (mandatory — read from file, not from KeyManager)
+            if (urlView.size() > 0)
+            {
+                m_Url = std::string(urlView);
+            }
+            else
+            {
+                LOG_CORE_WARN("SessionManager '{}': PROV file missing mandatory 'url' field", m_Name);
+            }
+
+            // model (optional)
+            if (modelView.size() > 0)
+            {
+                m_Model = std::string(modelView);
+            }
+
+            // api_type (optional)
+            if (apiTypeView.size() > 0)
+            {
+                m_ApiType = std::string(apiTypeView);
+            }
+
+            // temperature (optional)
+            if (hasTemp)
+            {
+                m_Temperature = temperatureVal;
+            }
+
+            // provider name → KeyManager lookup for API key ONLY (credentials never in PROV file)
+            if (providerName.size() > 0)
+            {
+                auto const* prov = Core::g_Core->GetKeyManager().GetProvider(std::string(providerName));
+                if (prov)
+                {
+                    if (!prov->m_ApiKey.empty())
+                    {
+                        m_ApiKey = prov->m_ApiKey;
+                    }
+                    LOG_CORE_INFO("SessionManager '{}': provider '{}' key resolved from KeyManager", m_Name, providerName);
+                }
+                else
+                {
+                    LOG_CORE_WARN("SessionManager '{}': provider '{}' not found in KeyManager (no API key)", m_Name,
+                                  providerName);
+                }
             }
         }
     }

@@ -9,6 +9,8 @@ build
 *.a
 *.o
 /config.json
+/keys.json
+/keys.json.enc
 
 # Python cache
 __pycache__/
@@ -21,6 +23,8 @@ __pycache__/
 *.dll
 *.dylib
 
+compile_commands.json
+.cache/
 vendor/curl/lib/curl_config.h
 queue
 log/*

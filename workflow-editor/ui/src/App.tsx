@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import WorkflowEditorView, { type WorkflowPersistEvent } from "./editor/WorkflowEditorView";
 import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
+import ProvidersSettingsView from "./views/ProvidersSettingsView";
+import AiManagerView from "./views/AiManagerView";
 import SettingsModal from "./components/SettingsModal";
+import MasterPasswordDialog from "./components/MasterPasswordDialog";
+import { getKeysStatus, type KeysStatusResponse } from "./api/keys";
 import type { JcwfFile } from "./jcwf/types";
 
 export type EditorSettings = {
@@ -32,7 +36,7 @@ function saveSettings(settings: EditorSettings): void {
   }
 }
 
-type RouteKey = "workflows" | "editor";
+type RouteKey = "workflows" | "editor" | "ai-manager" | "settings";
 
 export default function App(): JSX.Element
 {
@@ -43,6 +47,17 @@ export default function App(): JSX.Element
   const [initialJcwf, setInitialJcwf] = useState<JcwfFile | null>(null);
   const [settings, setSettings] = useState<EditorSettings>(loadSettings);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [keysStatus, setKeysStatus] = useState<KeysStatusResponse | null>(null);
+  const [masterPassword, setMasterPassword] = useState<string | null>(null);
+
+  // Check master password / keys status on mount
+  useEffect(() => {
+    getKeysStatus()
+      .then((status) => setKeysStatus(status))
+      .catch(() => {
+        // Server not reachable — don't block the UI
+      });
+  }, []);
 
   const onSettingsChange = useCallback((newSettings: EditorSettings) => {
     setSettings(newSettings);
@@ -144,6 +159,16 @@ export default function App(): JSX.Element
       );
     }
 
+    if (route === "ai-manager")
+    {
+      return <AiManagerView />;
+    }
+
+    if (route === "settings")
+    {
+      return <ProvidersSettingsView appMasterPassword={masterPassword} />;
+    }
+
     return (
       <WorkflowListView
         refreshToken={workflowListRefreshToken}
@@ -191,6 +216,22 @@ export default function App(): JSX.Element
             Editor{editorDirty ? "*" : ""}
           </button>
 
+          <button
+            className={`btn ${route === "ai-manager" ? "btnActive" : ""}`}
+            onClick={() => { navigate("ai-manager"); }}
+            type="button"
+          >
+            AI Manager
+          </button>
+
+          <button
+            className={`btn ${route === "settings" ? "btnActive" : ""}`}
+            onClick={() => { navigate("settings"); }}
+            type="button"
+          >
+            AI Keys
+          </button>
+
           <a
             className="btn"
             href="/"
@@ -210,6 +251,17 @@ export default function App(): JSX.Element
           onClose={() => setShowSettingsModal(false)}
         />
       )}
+
+      {keysStatus &&
+        (keysStatus.status === "no_password" || keysStatus.status === "wrong_password") && (
+          <MasterPasswordDialog
+            reason={keysStatus.status}
+            onUnlocked={(pw) => {
+              setMasterPassword(pw);
+              setKeysStatus({ ...keysStatus, status: "ok" });
+            }}
+          />
+        )}
     </div>
   );
 }

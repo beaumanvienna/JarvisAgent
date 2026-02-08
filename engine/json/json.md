@@ -28,15 +28,18 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 
     "API interfaces": [
         {
+            "name": "api.openai.com/gpt-4.1/API1",
+            "description": "High-accuracy model with strong reasoning.",
             "url": "https://api.openai.com/v1/chat/completions",
             "model": "gpt-4.1",
             "API": "API1",
-            "description": "Human-readable hint (currently ignored by parser)"
+            "key_name": "openai"
         }
     ],
 
     "API index": 0,
-    "max file size in kB": 24
+    "max file size in kB": 24,
+    "keys_file": "keys.json.enc"
 }
 ```
 
@@ -55,6 +58,7 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 | `API interfaces` | array | List of API endpoints/models. | Parsed by `ConfigParser::ParseInterfaces()`. |
 | `API index` | number | Selects active interface in `API interfaces`. | Stored as `EngineConfig::m_ApiIndex`. Must point to an existing entry (see `ConfigChecker`). |
 | `max file size in kB` | number | Maximum allowed file size for queue items. | Stored as `EngineConfig::m_MaxFileSizekB`. Defaults applied if out of range. |
+| `keys_file` | string | Path to the encrypted keys file. | Stored as `EngineConfig::m_KeysFilePath`. Defaults to `"keys.json.enc"` if not specified. |
 
 ---
 
@@ -81,10 +85,18 @@ struct EngineConfig
 
     struct ApiInterface
     {
+        std::string m_Name;
+        std::string m_Description;
         std::string m_Url;
         std::string m_Model;
+        std::string m_KeyName;
         InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
     };
+
+    // Generate a unique interface name from URL domain + model + API type
+    static std::string GenerateInterfaceName(std::string const& url,
+                                             std::string const& model,
+                                             std::string const& apiType);
 
     size_t m_MaxThreads{0};
     std::chrono::milliseconds m_SleepDuration{0};
@@ -94,6 +106,7 @@ struct EngineConfig
     size_t m_ApiIndex{0};
     std::vector<ApiInterface> m_ApiInterfaces;
     size_t m_MaxFileSizekB{20};
+    std::string m_KeysFilePath{"keys.json.enc"};
     bool m_ConfigValid{false};
 
     bool IsValid() const { return m_ConfigValid; }
@@ -110,6 +123,7 @@ struct EngineConfig
 - `m_ApiInterfaces` from `"API interfaces"` (via `ParseInterfaces`)
 - `m_ApiIndex` from `"API index"`
 - `m_MaxFileSizekB` from `"max file size in kB"`
+- `m_KeysFilePath` from `"keys_file"` (defaults to `"keys.json.enc"`)
 
 **Logged-only (not stored):**
 
@@ -179,12 +193,13 @@ void ParseInterfaces(simdjson::ondemand::array jsonArray,
 
 - Iterates the `"API interfaces"` array.
 - For each element:
+  - `"name"` (string) → `ApiInterface::m_Name`. If not provided, auto-generated from URL domain + model + API type via `GenerateInterfaceName()` (e.g. `api.openai.com/gpt-4.1/API1`).
+  - `"description"` (string) → `ApiInterface::m_Description`. Optional human-readable hint.
   - `"url"` (string) → `ApiInterface::m_Url`
   - `"model"` (string) → `ApiInterface::m_Model`
   - `"API"` (string) → maps `"API1"` / `"API2"` to `InterfaceType::API1` / `API2`, otherwise `CORE_HARD_STOP`.
+  - `"key_name"` (string) → `ApiInterface::m_KeyName`. Optional reference to an API key by name (as stored in the encrypted keys file). If empty, the default (first available) key is used at runtime.
 - Appends each `ApiInterface` to `engineConfig.m_ApiInterfaces`.
-
-**Note:** Any additional fields inside each API interface object (for example `"description"`) are currently **silently ignored** (not stored and not logged) by `ParseInterfaces()`.
 
 ---
 

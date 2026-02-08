@@ -194,6 +194,18 @@ a {
   outline: none;
 }
 
+select.input option {
+  background: #fff;
+  color: #222;
+}
+
+@media (prefers-color-scheme: dark) {
+  select.input option {
+    background: #1e2530;
+    color: #e8eef5;
+  }
+}
+
 .input:focus {
   border-color: rgba(120, 180, 255, 0.55);
 }

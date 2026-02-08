@@ -33,6 +33,7 @@
 
 #include "log/terminalManager.h"
 #include "log/terminalLogStreamBuf.h"
+#include "keys/keyManager.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -48,9 +49,14 @@ namespace AIAssistant
         void Shutdown();
         bool Verbose() const;
         ConfigParser::EngineConfig const& GetConfig() const;
+        ConfigParser::EngineConfig& GetMutableConfig() { return m_EngineConfig; }
         ConfigParser::EngineConfig::InterfaceType const& GetInterfaceType() const;
+        void SetConfigFilePath(std::filesystem::path const& path) { m_ConfigFilePath = path; }
+        std::filesystem::path const& GetConfigFilePath() const { return m_ConfigFilePath; }
         ThreadPool& GetThreadPool();
         TerminalManager* GetTerminalManager();
+        KeyManager& GetKeyManager() { return m_KeyManager; }
+        KeyManager const& GetKeyManager() const { return m_KeyManager; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
 
         // event API
@@ -87,5 +93,9 @@ namespace AIAssistant
         std::shared_ptr<std::ofstream> m_LogFile;
         std::streambuf* m_OriginalCoutBuffer{nullptr};
         std::filesystem::path m_LaunchCWDAbsolute;
+        std::filesystem::path m_ConfigFilePath;
+
+        // key management
+        KeyManager m_KeyManager;
     };
 } // namespace AIAssistant

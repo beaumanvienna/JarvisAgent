@@ -147,6 +147,14 @@ namespace AIAssistant
                 LOG_CORE_INFO("API index: {}", engineConfig.m_ApiIndex);
                 ++fieldOccurances[ConfigFields::ApiIndex];
             }
+            else if (jsonObjectKey == "keys_file")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                std::string_view keysFile = jsonObject.value().get_string();
+                LOG_CORE_INFO("keys_file: {}", keysFile);
+                engineConfig.m_KeysFilePath = keysFile;
+                ++fieldOccurances[ConfigFields::KeysFile];
+            }
             else
             {
                 // Try to get the value as a string for display
@@ -207,6 +215,45 @@ namespace AIAssistant
 
     bool ConfigParser::ConfigParsed() const { return m_State == State::ConfigOk; }
 
+    std::string ConfigParser::EngineConfig::GenerateInterfaceName(std::string const& url, std::string const& model,
+                                                                  std::string const& apiType)
+    {
+        // Extract domain from URL: "https://api.openai.com/v1/..." → "api.openai.com"
+        std::string domain;
+        auto schemeEnd = url.find("://");
+        if (schemeEnd != std::string::npos)
+        {
+            auto domainStart = schemeEnd + 3;
+            auto domainEnd = url.find('/', domainStart);
+            if (domainEnd == std::string::npos)
+            {
+                domainEnd = url.size();
+            }
+            domain = url.substr(domainStart, domainEnd - domainStart);
+        }
+        else
+        {
+            domain = url;
+        }
+
+        if (domain.empty())
+        {
+            domain = "unknown";
+        }
+
+        std::string name = domain;
+        if (!model.empty())
+        {
+            name += "/" + model;
+        }
+        if (!apiType.empty())
+        {
+            name += "/" + apiType;
+        }
+
+        return name;
+    }
+
     void ConfigParser::ParseInterfaces(simdjson::ondemand::array jsonArray, EngineConfig& engineConfig,
                                        FieldOccurances& fieldOccurances)
     {
@@ -222,7 +269,31 @@ namespace AIAssistant
             {
                 std::string_view jsonObjectKey = field.unescaped_key();
 
-                if (jsonObjectKey == "url")
+                if (jsonObjectKey == "name")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view name = field.value().get_string();
+                    LOG_CORE_INFO("name: {}", name);
+                    apiInterface.m_Name = name;
+                    ++fieldOccurances[ConfigFields::InterfaceName];
+                }
+                else if (jsonObjectKey == "description")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view description = field.value().get_string();
+                    LOG_CORE_INFO("description: {}", description);
+                    apiInterface.m_Description = description;
+                    ++fieldOccurances[ConfigFields::InterfaceDescription];
+                }
+                else if (jsonObjectKey == "key_name")
+                {
+                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
+                    std::string_view keyName = field.value().get_string();
+                    LOG_CORE_INFO("key_name: {}", keyName);
+                    apiInterface.m_KeyName = keyName;
+                    ++fieldOccurances[ConfigFields::InterfaceKeyName];
+                }
+                else if (jsonObjectKey == "url")
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
                     std::string_view url = field.value().get_string();
@@ -258,6 +329,27 @@ namespace AIAssistant
                     ++fieldOccurances[ConfigFields::InterfaceType];
                 }
             }
+
+            // Auto-generate name from URL domain + model + API type if not provided
+            if (apiInterface.m_Name.empty())
+            {
+                std::string apiTypeStr;
+                switch (apiInterface.m_InterfaceType)
+                {
+                    case EngineConfig::InterfaceType::API1:
+                        apiTypeStr = "API1";
+                        break;
+                    case EngineConfig::InterfaceType::API2:
+                        apiTypeStr = "API2";
+                        break;
+                    default:
+                        break;
+                }
+                apiInterface.m_Name =
+                    EngineConfig::GenerateInterfaceName(apiInterface.m_Url, apiInterface.m_Model, apiTypeStr);
+                LOG_CORE_INFO("auto-generated interface name: {}", apiInterface.m_Name);
+            }
+
             engineConfig.m_ApiInterfaces.push_back(std::move(apiInterface));
         }
     }

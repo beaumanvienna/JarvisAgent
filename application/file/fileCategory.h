@@ -28,6 +28,7 @@ namespace AIAssistant
         Settings,
         Context,
         Task,
+        Provider,
         Requirement,
         SubFolder,
         Ignored,

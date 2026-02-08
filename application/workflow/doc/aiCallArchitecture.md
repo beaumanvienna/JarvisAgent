@@ -68,6 +68,7 @@ Within a workflow run, a single `ai_call` task instance goes through:
      - `STNG_*`
      - `CNTX_*`
      - `TASK_*`
+     - `PROV_*` (optional — provider override, never sent to AI)
 
 2. **Submit**
    - Create `PROB_<id>_<timestamp>.txt` (the “go” signal)
