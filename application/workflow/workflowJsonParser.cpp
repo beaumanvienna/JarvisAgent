@@ -757,6 +757,63 @@ namespace AIAssistant
         return true;
     }
 
+    bool WorkflowJsonParser::ParseDefaults(simdjson::ondemand::object& jsonObject, WorkflowDefaults& defaultsOut,
+                                           std::string& errorMessage) const
+    {
+        for (auto field : jsonObject)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "failed to read defaults key: ";
+                errorMessage += simdjson::error_message(keyResult.error());
+                return false;
+            }
+
+            std::string_view keyView = keyResult.value();
+            std::string key(keyView.begin(), keyView.end());
+
+            simdjson::ondemand::value value = field.value();
+
+            if (key == "timeout_ms")
+            {
+                auto timeoutResult = value.get_int64();
+                if (timeoutResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "defaults field 'timeout_ms' must be integer";
+                    return false;
+                }
+
+                defaultsOut.m_TimeoutMs = static_cast<uint64_t>(timeoutResult.value());
+            }
+            else if (key == "retries")
+            {
+                auto objectResult = value.get_object();
+                if (objectResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "defaults field 'retries' must be object";
+                    return false;
+                }
+
+                simdjson::ondemand::object retriesObject = objectResult.value();
+                if (!ParseRetries(retriesObject, defaultsOut.m_RetryPolicy, errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (key == "ai")
+            {
+                // AI defaults are resolved at dispatch time (see aiCallTaskExecutor); skip here.
+            }
+            else
+            {
+                LOG_CORE_WARN("Unknown field in defaults: {}", key);
+            }
+        }
+
+        return true;
+    }
+
     bool WorkflowJsonParser::ParseWorkflowJson(std::string const& jsonContent, WorkflowDefinition& outputDefinition,
                                                std::string& errorMessage) const
     {
@@ -815,11 +872,44 @@ namespace AIAssistant
                     return false;
                 }
 
-                if (version != "1.0")
+                // Parse "major.minor" and enforce version gate
                 {
-                    errorMessage = "unsupported JCWF version: ";
-                    errorMessage += version;
-                    return false;
+                    constexpr int KNOWN_MAJOR = 1;
+                    constexpr int KNOWN_MINOR = 0;
+
+                    auto const dotPos = version.find('.');
+                    if (dotPos == std::string::npos || dotPos == 0 || dotPos == version.size() - 1)
+                    {
+                        errorMessage = "malformed JCWF version (expected 'major.minor'): " + version;
+                        return false;
+                    }
+
+                    int major = 0;
+                    int minor = 0;
+                    try
+                    {
+                        major = std::stoi(version.substr(0, dotPos));
+                        minor = std::stoi(version.substr(dotPos + 1));
+                    }
+                    catch (...)
+                    {
+                        errorMessage = "malformed JCWF version (non-numeric): " + version;
+                        return false;
+                    }
+
+                    if (major != KNOWN_MAJOR)
+                    {
+                        errorMessage = "unsupported JCWF major version " + std::to_string(major) +
+                                       " (supported: " + std::to_string(KNOWN_MAJOR) + "): " + version;
+                        return false;
+                    }
+
+                    if (minor > KNOWN_MINOR)
+                    {
+                        LOG_CORE_WARN("JCWF version {} has minor version newer than known ({}). "
+                                      "Some features may be unsupported.",
+                                      version, std::to_string(KNOWN_MAJOR) + "." + std::to_string(KNOWN_MINOR));
+                    }
                 }
 
                 outputDefinition.m_Version = version;
@@ -899,6 +989,26 @@ namespace AIAssistant
                     errorMessage = "failed to read 'defaults' JSON";
                     return false;
                 }
+
+                // Re-parse the raw JSON into the typed struct (simdjson is single-pass).
+                {
+                    simdjson::ondemand::parser defaultsParser;
+                    simdjson::padded_string paddedDefaults(outputDefinition.m_DefaultsJson);
+                    simdjson::ondemand::document defaultsDoc;
+                    simdjson::error_code ec = defaultsParser.iterate(paddedDefaults).get(defaultsDoc);
+                    if (ec)
+                    {
+                        errorMessage = "failed to re-parse 'defaults' JSON: ";
+                        errorMessage += simdjson::error_message(ec);
+                        return false;
+                    }
+
+                    simdjson::ondemand::object defaultsObj = defaultsDoc.get_object();
+                    if (!ParseDefaults(defaultsObj, outputDefinition.m_Defaults, errorMessage))
+                    {
+                        return false;
+                    }
+                }
             }
             else
             {
@@ -935,6 +1045,29 @@ namespace AIAssistant
             };
 
             outputDefinition.m_Triggers.push_back(autoTrigger);
+        }
+
+        // Apply workflow-level defaults to tasks (task-level values take precedence).
+        {
+            WorkflowDefaults const& defaults = outputDefinition.m_Defaults;
+
+            for (auto& [taskId, task] : outputDefinition.m_Tasks)
+            {
+                if (task.m_TimeoutMs == 0 && defaults.m_TimeoutMs != 0)
+                {
+                    task.m_TimeoutMs = defaults.m_TimeoutMs;
+                }
+
+                if (task.m_RetryPolicy.m_MaxAttempts == 0 && defaults.m_RetryPolicy.m_MaxAttempts != 0)
+                {
+                    task.m_RetryPolicy.m_MaxAttempts = defaults.m_RetryPolicy.m_MaxAttempts;
+                }
+
+                if (task.m_RetryPolicy.m_BackoffMs == 0 && defaults.m_RetryPolicy.m_BackoffMs != 0)
+                {
+                    task.m_RetryPolicy.m_BackoffMs = defaults.m_RetryPolicy.m_BackoffMs;
+                }
+            }
         }
 
         LOG_APP_INFO("[paths debug] debug reason=parseWorkflowRoot workflowId={} workflowBaseDirectoryRelative={} "

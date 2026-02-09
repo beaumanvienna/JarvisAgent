@@ -74,6 +74,9 @@ namespace AIAssistant
         bool ParseRetries(simdjson::ondemand::object& jsonObject, RetryPolicy& retryPolicyOut,
                           std::string& errorMessage) const;
 
+        bool ParseDefaults(simdjson::ondemand::object& jsonObject, WorkflowDefaults& defaultsOut,
+                           std::string& errorMessage) const;
+
         // Utility helpers
         bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;
 

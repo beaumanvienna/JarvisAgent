@@ -59,8 +59,10 @@ namespace AIAssistant
             //  - optional input -> simply omit it
             if (inputField.m_IsRequired)
             {
-                LOG_APP_ERROR("DataflowResolver: Missing input '{}' for task '{}'", inputName, taskId);
-                return std::nullopt;
+                LOG_APP_ERROR("DataflowResolver: Missing required input '{}' for task '{}'", inputName, taskId);
+                resolvedInputs.m_ErrorMessage =
+                    "required input '" + inputName + "' for task '" + taskId + "' could not be resolved";
+                return resolvedInputs;
             }
         }
 

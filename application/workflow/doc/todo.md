@@ -16,20 +16,20 @@ Last reviewed: Feb 2026
 - [x] ~~Finalize **ai_call output semantics**~~ — file-path-only mode. Output slots always contain file paths, never raw text in memory. When no explicit `file_outputs` are declared, the source `.output.txt` created by the core engine is used as the default. Implemented in `BuildCompletionOutputs` / `AiRequestPool`.
 
 ### Workflow graph validation (load-time)
-- [ ] Enforce **version handling**: reject unknown **major** versions (currently only checks empty).
+- [x] ~~Enforce **version handling**~~ — parser now splits `"major.minor"`, rejects unknown major (only `1` accepted), warns on minor > known (`1.0`). Malformed or non-numeric versions are rejected. Validator retains defense-in-depth empty check.
 - [x] ~~Add **cycle detection at load time**~~ — implemented in `workflowValidator.cpp`.
-- [ ] Apply **root-level defaults** to tasks (parsed into `m_DefaultsJson` but not merged into tasks at runtime).
+- [x] ~~Apply **root-level defaults** to tasks~~ — `defaults` parsed into `WorkflowDefaults` struct (`timeout_ms`, `retries`). Post-parse merge loop applies them to every task whose field is still zero. AI defaults deferred to dispatch time. Raw JSON kept for serialization.
 
 ### Required input correctness (fail-fast)
-- [ ] Implement **required input validation**: if `TaskIOField.required` is true and not resolved, fail before dispatch.
+- [x] ~~Implement **required input validation**~~ — was already implemented in `DataflowResolver` + `workflowValidator`. Added `m_ErrorMessage` to `TaskResolvedInputs` so the specific missing input name propagates to `TaskInstanceState.m_LastErrorMessage` (previously only logged, not surfaced).
 
 ---
 
 ## Runtime execution gaps (core functionality)
 
-### Modes and triggers
-- [ ] Implement `mode: "per_item"` task expansion (iterator/instance expansion pipeline in `WorkflowRuntimeManager`).
-- [ ] Implement **structure triggers** semantics (iterator extraction + task expansion and triggering).
+### Modes, filters, and per_item expansion
+- [ ] Implement `mode: "per_item"` task expansion with **filter nodes** (CSV, text lines, Lucene query via Python bridge). See `application/workflow/doc/perItem_structureTriggers.md` for dev plan.
+- [x] ~~Update **JC Workflow Specification** for filters + per_item~~ — bumped spec to v1.1: added §3.7 (Filters), `"filters"` root-level array, `"filter"` field on tasks, filter JSON Schema `$def`, query language reference, filter manifest freshness scheme, fan-out node description, security note for unbounded expansion.
 
 ### Dataflow and context resolution
 - [ ] Implement `dataflow.mapping` evaluation (mapping object is parsed/stored but currently ignored).

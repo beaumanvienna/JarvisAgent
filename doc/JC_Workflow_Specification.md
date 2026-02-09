@@ -29,6 +29,64 @@ This specification focuses on:
 
 ---
 
+## Table of Contents
+
+- [1. Introduction](#1-introduction)
+  - [1.1 Requirements Language](#11-requirements-language)
+- [2. Terminology](#2-terminology)
+- [3. JCWF JSON Specification](#3-jcwf-json-specification)
+  - [3.1 Root Object](#31-root-object)
+    - [3.1.1 Fields](#311-fields)
+    - [3.1.2 Path Resolution](#312-path-resolution)
+  - [3.2 Triggers](#32-triggers)
+    - [3.2.1 Cron Triggers](#321-cron-triggers)
+    - [3.2.2 File-Watch Triggers](#322-file-watch-triggers)
+    - [3.2.3 Structure-Based Triggers](#323-structure-based-triggers)
+    - [3.2.4 Auto Triggers](#324-auto-triggers)
+    - [3.2.5 Manual Triggers](#325-manual-triggers)
+  - [3.3 Tasks](#33-tasks)
+    - [3.3.1 Task Types](#331-task-types)
+    - [3.3.2 Mode: single vs per_item](#332-mode-single-vs-per_item)
+    - [3.3.3 Timeouts and Retries](#333-timeouts-and-retries)
+    - [3.3.4 Inputs & Outputs (Data Slots)](#334-inputs--outputs-data-slots)
+    - [3.3.5 Clean Tasks](#335-clean-tasks)
+    - [3.3.6 Environment and Queue Integration](#336-environment-and-queue-integration-stng_-task_-cntx_-prob_-prov_)
+    - [3.3.7 AI Provider Configuration](#337-ai-provider-configuration)
+  - [3.4 Dependency Semantics and Up-to-Date Checks](#34-dependency-semantics-and-up-to-date-checks)
+  - [3.5 Data Flow](#35-data-flow)
+  - [3.6 Defaults](#36-defaults)
+  - [3.7 Filters *(new in v1.1)*](#37-filters-new-in-v11)
+    - [3.7.1 Filter Fields](#371-filter-fields)
+    - [3.7.2 Source Kind: csv](#372-source-kind-csv)
+    - [3.7.3 Source Kind: text_lines](#373-source-kind-text_lines)
+    - [3.7.4 Source Kind: query](#374-source-kind-query)
+    - [3.7.5 Source Kind: polarion_query](#375-source-kind-polarion_query)
+    - [3.7.6 Filter Manifest](#376-filter-manifest)
+    - [3.7.7 Filter Builder (Frontend)](#377-filter-builder-frontend)
+- [4. Execution Model](#4-execution-model)
+  - [4.1 High-Level Flow](#41-high-level-flow)
+  - [4.2 C++ Side: Core Orchestrator](#42-c-side-core-orchestrator)
+  - [4.3 Python Side: Task Executor](#43-python-side-task-executor)
+    - [4.3.1 Python logging and subprocess output](#431-python-logging-and-subprocess-output)
+  - [4.4 Web UI: Monitoring and Control](#44-web-ui-monitoring-and-control)
+- [5. Managing Dependencies](#5-managing-dependencies)
+  - [5.1 Readiness Rule](#51-readiness-rule)
+  - [5.2 Parallel Execution](#52-parallel-execution)
+  - [5.3 Failure Propagation](#53-failure-propagation)
+- [6. Handling Triggers](#6-handling-triggers)
+  - [6.1 Time-Based (Cron)](#61-time-based-cron)
+  - [6.2 File-Based](#62-file-based)
+  - [6.3 Filter-Driven Expansion](#63-filter-driven-expansion)
+  - [6.4 Manual](#64-manual)
+- [7. Monitoring and Reporting](#7-monitoring-and-reporting)
+- [8. Data Flow](#8-data-flow)
+  - [8.1 Task Input Resolution](#81-task-input-resolution)
+  - [8.2 Outputs and Context](#82-outputs-and-context)
+- [9. JSON Schema (Draft)](#9-json-schema-draft)
+- [10. Security Considerations](#10-security-considerations)
+
+---
+
 ## 1. Introduction
 
 JarvisAgent orchestrates a variety of automation tasks: document-to-markdown conversion (PDF, DOCX, XLSX, PPTX), AI assistant queries, file watching, and more.  
@@ -39,7 +97,7 @@ The JC Workflow File (JCWF) provides a declarative way to describe these tasks a
 - Parallelize non-dependent tasks.  
 - Track progress and expose status to the web dashboard.
 
-You can think of each workflow as a pipeline: a sequence/DAG of stages for automation tasks.
+You can think of each workflow as a pipeline: a sequence/DAG () of stages for automation tasks.
 
 This document defines:
 
@@ -91,7 +149,7 @@ The key words **"MUST"**, **"MUST NOT"**, **"REQUIRED"**, **"SHALL"**, **"SHALL 
 
 - **JCWF Runtime**: The JarvisAgent orchestration layer that loads, validates, and runs JCWF workflows.  
 - **Environment**: Optional metadata and variables attached to a task (for example, environment variables for shell tasks, or an assistant environment for AI tasks).  
-- **Queue Files**: Optional STNG_, TASK_, CNTX_, PROB_ artifacts used by JarvisAgent’s queue-based execution; JCWF can reference these explicitly per task.
+- **Queue Files**: Optional STNG_, TASK_, CNTX_, PROB_, PROV_ artifacts used by JarvisAgent’s queue-based execution; JCWF can reference these explicitly per task.
   - In addition to file paths, a JCWF MAY embed queue file content inline (see 3.3.6) to make the workflow self-contained.
 
 ---
@@ -107,13 +165,14 @@ The root object has the following top-level fields:
 
 ```jsonc
 {
-  "version": "1.0",
+  "version": "1.1",
   "id": "daily-report",
   "label": "Daily Reporting Workflow",
   "doc": "Generates a daily report from XLS and sends it to an AI assistant for summarization.",
   "base_directory": ".",
   "manual_start": true,
   "triggers": [ /* see 3.2 */ ],
+  "filters": [ /* see 3.7 */ ],
   "tasks": { /* see 3.3 */ },
   "dataflow": [ /* see 3.5 */ ],
   "defaults": { /* see 3.6 */ }
@@ -123,8 +182,9 @@ The root object has the following top-level fields:
 #### 3.1.1 Fields
 
 - `version` (REQUIRED, string)  
-  - The JCWF spec version. For this document, `"1.0"` is assumed.  
-  - Implementations MUST reject unknown major versions.
+  - The JCWF spec version. For this document, `"1.1"` is assumed.  
+  - Implementations MUST reject unknown major versions.  
+  - Implementations SHOULD warn on unknown minor versions but continue parsing.
 
 - `id` (REQUIRED, string)  
   - Unique identifier for this workflow within the JarvisAgent environment.  
@@ -152,6 +212,9 @@ The root object has the following top-level fields:
 
 - `dataflow` (OPTIONAL, array)  
   - Explicit data wiring between task outputs and inputs. See 3.5.
+
+- `filters` (OPTIONAL, array) *(new in v1.1)*  
+  - Declares filter nodes for per_item task expansion. See 3.7.
 
 - `defaults` (OPTIONAL, object)  
   - Default settings for tasks, retries, timeouts, etc. See 3.6.
@@ -183,7 +246,7 @@ JarvisAgent MUST NOT change the process current working directory (CWD) at any t
    - Task working directories MAY contain `..` segments; JarvisAgent MUST resolve them after lexical normalization (escaping upward is allowed).
 2. Unless explicitly stated otherwise for a specific field, any **task-scoped** relative file path MUST be resolved relative to the task `working_directory`, including (but not limited to):
    - `file_inputs` and `file_outputs`
-   - `queue_binding` file references (`stng_files`, `task_files`, `cntx_files`, `prob_files`), including inline `{ "path": "...", "content": "..." }`
+   - `queue_binding` file references (`stng_files`, `task_files`, `cntx_files`, `prob_files`, `prov_files`), including inline `{ "path": "...", "content": "..." }`
 
 **Exceptions**
 
@@ -284,6 +347,8 @@ Used for “for each row / section” style operations. These do not schedule ti
 ```
 
 At runtime, the engine will expand designated tasks from this iterator (see tasks with `"mode": "per_item"` in 3.3.2).
+
+**Note:** Structure triggers are a placeholder that was never implemented. Per_item task expansion is driven by **filter nodes** (see 3.7), which provide CSV files, text file lines, and Lucene-style queries with complex boolean expressions, range selections, and a manifest-based freshness scheme.
 
 #### 3.2.4 Auto Triggers
 
@@ -428,8 +493,7 @@ Each task has:
       "model": "gpt-4.1-mini",
       "request_params": { "temperature": 0.3, "max_tokens": 4096 },
       "mode": "one_shot",  // or "assistant"
-      "prompt_template": "Summarize the following report:
-{{report_text}}"
+      "prompt_template": "Summarize the following report:\n{{report_text}}"
     },
     "inputs": {
       "report_text": { "type": "string" }
@@ -457,11 +521,45 @@ Each task has:
 - `mode: "single"` (default)  
   Task executes once per workflow run.
 
-- `mode: "per_item"`  
-  Task is expanded per iterator item (for example, each row in XLS, each subsection in a document).  
-  The expansion is driven by a structure trigger (3.2.3) or by explicit dataflow list sources.
+- `mode: "per_item"` *(updated in v1.1)*  
+  Task is expanded per iterator item (for example, each row in a CSV, each line in a text file, each query hit from a Lucene-style index).  
+  The expansion is driven by a **filter node** (3.7) referenced via the task's `"filter"` field. For backward compatibility, expansion may also be driven by a structure trigger (3.2.3) or by explicit dataflow list sources.
 
-Example:
+- `filter` (OPTIONAL, string) *(new in v1.1)*  
+  References a filter node by ID (see 3.7). Required when `mode` is `"per_item"` and no structure trigger drives the expansion.
+
+**Fan-out behavior:** When a `per_item` task references a filter, the runtime creates one task instance per matched item. In the workflow editor, an auto-generated **fan-out node** visually represents this parallel expansion between the filter node and the task node. The fan-out node displays item count and progress at runtime.
+
+**Output file naming:** Each per_item instance produces an output file named `<filterID>-<itemNumber>.txt` in the task's `working_directory`.
+
+**Error policy:** If an item instance fails, remaining items continue execution (continue-on-error). The parent task reports partial failure with per-item error details.
+
+**Max items:** Filters support a configurable `max_items` limit (default: 10000). Set to 0 for no limit.
+
+Example (v1.1 — filter-driven):
+
+```jsonc
+{
+  "id": "summarize_req",
+  "type": "ai_call",
+  "mode": "per_item",
+  "filter": "reviewed-reqs",
+  "params": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "mode": "one_shot"
+  },
+  "inputs": {
+    "req_id":   { "type": "string" },
+    "req_body": { "type": "string" }
+  },
+  "outputs": {
+    "summary": { "type": "string" }
+  }
+}
+```
+
+Example (v1.0 — structure trigger / template-driven):
 
 ```jsonc
 {
@@ -621,7 +719,7 @@ This example uses three different AI providers in a single workflow — each tas
 
 ---
 
-#### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNTX_, PROB_)
+#### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNTX_, PROB_, PROV_)
 
 Tasks MAY describe additional environment and queue-related details:
 
@@ -638,7 +736,8 @@ Tasks MAY describe additional environment and queue-related details:
   "stng_files": ["STNG_daily.txt"],
   "task_files": ["TASK_summarize.txt"],
   "cntx_files": ["CNTX_daily.txt"],
-  "prob_files": ["PROB_daily.txt"]
+  "prob_files": ["PROB_daily.txt"],
+  "prov_files": ["PROV_provider.json"]
 }
 ```
 
@@ -653,8 +752,9 @@ Tasks MAY describe additional environment and queue-related details:
   - `task_files` (OPTIONAL, array): TASK_ files representing work instructions.  
   - `cntx_files` (OPTIONAL, array): CNTX_ context files (background information).  
 - `prob_files` (OPTIONAL, array): PROB_ files representing problems/requests (the concrete work item) that the task should address.  
+  - `prov_files` (OPTIONAL, array): PROV_ provider configuration files. Written by `AiCallTaskExecutor` when a task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. Read by `SessionManager` to resolve provider config from `KeyManager`.
 
-Each entry in `stng_files` / `task_files` / `cntx_files` / `prob_files` MAY be either:
+Each entry in `stng_files` / `task_files` / `cntx_files` / `prob_files` / `prov_files` MAY be either:
 
 - A string (path to an existing file), or
 - An inline object with file content:
@@ -673,7 +773,7 @@ This inline form is RECOMMENDED when a workflow is generated automatically and s
 - If a `queue_binding` entry is an inline object `{ "path": "...", "content": "..." }` and `path` is relative, it MUST be resolved relative to the task `working_directory`.
 - When writing inline `content`, the runtime MUST create the parent directory of the target `path` if it does not exist.
 
-JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNTX_/PROB_ files when it is an AI or queue-integrated task.
+JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNTX_/PROB_/PROV_ files when it is an AI or queue-integrated task.
 
 ---
 
@@ -737,7 +837,14 @@ Rules:
 
 3. Per-item mode  
    - For `mode: "per_item"` tasks, the same freshness rules apply per item.  
-   - `file_inputs` and `file_outputs` may use templates (for example, `"output/${inputs.section_title}.summary.txt"`). The runtime evaluates templates per item before checking timestamps.
+   - `file_inputs` and `file_outputs` may use templates (for example, `"output/${inputs.section_title}.summary.txt"`). The runtime evaluates templates per item before checking timestamps.  
+   - *(v1.1)* For filter-driven per_item tasks, the runtime writes a **filter manifest** (`<workflowBaseDir>/<filterID>/<filterID>.manifest.json`) recording the evaluated item list and a SHA-256 hash of the filter expression (`query_hash`). Per-item freshness rules:  
+     - **CSV / text_lines sources:** input timestamp = source file mtime. Output timestamp = mtime of `<filterID>-<k>.txt`.  
+     - **Query sources:** input timestamp = `doc_path` mtime if available; otherwise the item is always considered stale.  
+     - If `query_hash` changes (filter expression was edited), **all items** are considered stale (full re-run).  
+     - **New items** (not in previous manifest) are always stale.  
+     - **Removed items** (in manifest but not in new results): output files are orphaned; runtime logs a warning but does not delete them.  
+   - The file-driven philosophy applies throughout: CSV/text sources are consumed directly via their source file; query/database sources produce a small text-file snippet per item (`<filterID>-<k>.txt`) that downstream tasks consume.
 
 4. Interaction with triggers  
    - A trigger (cron, file, structure, manual) creates a new workflow run.  
@@ -813,9 +920,212 @@ Task-specific fields override defaults at the same key path.
 
 ---
 
+### 3.7 Filters *(new in v1.1)*
+
+Filters are declared at the workflow root level under the `"filters"` key. Each filter defines a data source and selection criteria that produce a list of items for `per_item` task expansion.
+
+A filter node has no executor and no `depends_on` — it is purely declarative. In the workflow editor, filters appear as a distinct node type (different visual style from task nodes) with an output port that connects to a fan-out node.
+
+```jsonc
+"filters": [
+  {
+    "id": "reviewed-reqs",
+    "source": {
+      "kind": "query",
+      "index_path": "data/index",
+      "query": "(type:requirement OR type:defect) AND tags:JC AND created:[20230101 TO 20231231]",
+      "fields": ["id", "title", "body", "status"]
+    },
+    "binding": "hit",
+    "max_items": 10000
+  }
+]
+```
+
+#### 3.7.1 Filter Fields
+
+- `id` (REQUIRED, string) — Unique filter identifier within the workflow.
+- `source` (REQUIRED, object) — Defines the data source and selection criteria.
+  - `kind` (REQUIRED, string) — One of `"csv"`, `"text_lines"`, or `"query"`.
+- `binding` (REQUIRED, string) — Prefix for injected input variables (e.g. `"hit"` → `hit.id`, `hit.title`).
+- `max_items` (OPTIONAL, integer, default: 10000) — Maximum number of items. Set to 0 for no limit.
+
+#### 3.7.2 Source Kind: `csv`
+
+Iterates over rows of a CSV file, with optional row range selection.
+
+```jsonc
+{
+  "kind": "csv",
+  "path": "data/items.csv",
+  "delimiter": ",",
+  "has_header": true,
+  "range": "10-20"
+}
+```
+
+- `path` (REQUIRED) — CSV file path, resolved relative to the Workflow Base Directory.
+- `delimiter` (OPTIONAL, default `","`) — Field delimiter.
+- `has_header` (OPTIONAL, default `true`) — If true, the first row is treated as column names.
+- `range` (OPTIONAL) — Row range (1-based, inclusive). Examples: `"10-20"` (rows 10–20), `"5-"` (row 5 to end), `"-50"` (first 50 rows). Omit for all rows.
+
+**Item shape** (injected under the binding prefix):
+
+| Key               | Value                                   |
+|-------------------|-----------------------------------------|
+| `<binding>.index`      | 0-based index within the selected range |
+| `<binding>.row_number` | 1-based row number in the source file   |
+| `<binding>.<col_name>` | Cell value (header names, if present)   |
+| `<binding>.col_0` …    | Cell value by positional index          |
+| `<binding>.line`       | Full CSV line as raw string             |
+
+**Freshness:** file modification time of `path`.
+
+#### 3.7.3 Source Kind: `text_lines`
+
+Iterates over lines of a text file.
+
+```jsonc
+{
+  "kind": "text_lines",
+  "path": "data/requirements.txt",
+  "skip_empty": true
+}
+```
+
+- `path` (REQUIRED) — Text file path, resolved relative to the Workflow Base Directory.
+- `skip_empty` (OPTIONAL, default `true`) — If true, empty lines are skipped.
+
+**Item shape:**
+
+| Key                | Value                       |
+|--------------------|-----------------------------|
+| `<binding>.index`  | 0-based line number         |
+| `<binding>.text`   | Full line content (trimmed) |
+
+**Freshness:** file modification time of `path`.
+
+#### 3.7.4 Source Kind: `query`
+
+Iterates over hits from a Lucene-style query against an index.
+
+```jsonc
+{
+  "kind": "query",
+  "index_path": "data/index",
+  "query": "(type:requirement OR type:defect) AND tags:JC AND created:[20230101 TO 20231231]",
+  "fields": ["id", "title", "body", "status"]
+}
+```
+
+- `index_path` (REQUIRED) — Path to the query index, resolved relative to the Workflow Base Directory.
+- `query` (REQUIRED) — Lucene-style query expression.
+- `fields` (OPTIONAL) — List of stored fields to extract per hit.
+
+**Query language features:**
+
+| Feature           | Syntax                         | Example                                         |
+|-------------------|--------------------------------|--------------------------------------------------|
+| Field match       | `field:value`                  | `tags:JC`                                        |
+| Boolean AND       | `expr AND expr`                | `tags:JC AND status:reviewed`                    |
+| Boolean OR        | `expr OR expr`                 | `type:requirement OR type:defect`                |
+| Grouping          | `(expr)`                       | `(type:requirement OR type:defect) AND tags:JC`  |
+| Range (inclusive)  | `field:[lo TO hi]`             | `created:[20230101 TO 20231231]`                 |
+| Range (exclusive)  | `field:{lo TO hi}`             | `priority:{1 TO 5}`                              |
+| Wildcard          | `field:val*`                   | `title:sys*`                                     |
+| Negation          | `NOT expr` or `-field:value`   | `NOT status:archived`                            |
+
+**Item shape:**
+
+| Key                  | Value                                    |
+|----------------------|------------------------------------------|
+| `<binding>.index`    | 0-based hit number                       |
+| `<binding>.<field>`  | Stored field value (e.g. `hit.id`)       |
+| `<binding>.doc_path` | Filesystem path of the source document   |
+
+**Freshness:** `doc_path` mtime if available; otherwise the item is always considered stale.
+
+**Implementation note:** The query engine uses a Python bridge (Whoosh / pylucene) via `PythonEngine` for index evaluation.
+
+#### 3.7.5 Source Kind: `polarion_query`
+
+Iterates over work items from a Polarion ALM REST API query. The filter evaluation issues paginated HTTP requests via libcurl in C++.
+
+```jsonc
+{
+  "kind": "polarion_query",
+  "base_url": "https://polarion.example.com/polarion",
+  "project_id": "MYPROJECT",
+  "query": "tags:JC AND system:Propulsion AND majorSection:10",
+  "fields": ["id", "title", "description", "status", "tags"],
+  "key_name": "polarion_prod",
+  "page_size": 100
+}
+```
+
+- `base_url` (REQUIRED) — Polarion server base URL (scheme + host + context path).
+- `project_id` (REQUIRED) — Polarion project identifier.
+- `query` (REQUIRED) — Polarion work item query expression (Lucene-style syntax as supported by the Polarion REST API).
+- `fields` (OPTIONAL) — List of work item fields to retrieve. If omitted, the API returns default fields.
+- `key_name` (REQUIRED) — Named credential from `KeyManager` for HTTP Basic authentication (`user:password`). Credentials MUST NOT appear in the JCWF file.
+- `page_size` (OPTIONAL, integer, default: 100) — Number of items per page. The runtime paginates automatically until all results are fetched or `max_items` is reached.
+
+**REST API mapping:**
+
+```
+GET {base_url}/rest/v1/projects/{project_id}/workitems
+  ?query={url_encoded_query}
+  &fields[workitems]={comma_separated_fields}
+  &page[size]={page_size}
+  &page[number]={N}
+```
+
+Authentication: HTTP Basic via `key_name` → `KeyManager` lookup (same pattern as AI provider keys).
+
+**Pagination:** The `FilterEngine` fetches pages sequentially, writing each item to `<filterID>/<filterID>-<k>.json` as it goes. Peak memory usage is bounded to one page. Pagination stops when:
+- The API returns fewer items than `page_size` (last page), or
+- `max_items` is reached.
+
+**Item shape:**
+
+| Key                  | Value                                         |
+|----------------------|-----------------------------------------------|
+| `<binding>.index`    | 0-based item number (across all pages)        |
+| `<binding>.id`       | Polarion work item ID                         |
+| `<binding>.<field>`  | Field value (e.g. `item.title`, `item.status`) |
+
+**Freshness:** The filter manifest `query_hash` tracks the query expression. Since Polarion is a remote source with no local mtime, items fetched via `polarion_query` are always considered stale unless the `query_hash` is unchanged **and** the manifest `evaluated_at` is within a configurable staleness window (default: re-evaluate every run). Implementations MAY add a `cache_ttl_seconds` field to allow caching across runs.
+
+**Implementation note:** The paginated fetch is performed in C++ by a new `PolarionClient` class using libcurl (already vendored). This keeps the HTTP round-trips efficient and avoids Python GIL overhead for potentially thousands of items.
+
+#### 3.7.6 Filter Manifest
+
+Each filter evaluation writes a manifest file to `<workflowBaseDir>/<filterID>/<filterID>.manifest.json` containing:
+
+- `filter_id` — The filter's ID.
+- `evaluated_at` — ISO 8601 timestamp of the evaluation.
+- `query_hash` — SHA-256 hash of the normalized filter expression. If the expression changes, all items are considered stale.
+- `item_count` — Number of matched items.
+- `items[]` — Per-item entries with `index`, `key` (stable identity), `source_path`, and `source_mtime`.
+
+The manifest enables cross-run freshness comparison: new items are always stale, removed items produce a warning, and existing items are checked per the standard freshness rules.
+
+#### 3.7.7 Filter Builder (Frontend)
+
+The workflow editor provides a visual **filter builder dialog** for constructing complex queries:
+
+- **Visual grouping** — nested AND/OR groups via add/remove buttons.
+- **Operator selector** — `=`, `!=`, `range`, `wildcard`, `exists`.
+- **Range inputs** — two-field input for `[lo TO hi]` ranges.
+- **Live preview** — renders the query string in real time.
+- **Test (dry run)** — evaluates the filter and shows matching item count without running tasks.
+- **CSV/text mode** — file path picker, row range input, column preview, skip-empty toggle.
+
+---
+
 ## 4. Execution Model
 
-This section describes how JarvisAgent should execute JCWF workflows across the C++ core, Python engines, and the web UI.
+This section describes how JarvisAgent should execute JCWF workflows across the C++ core, Python engine, and the web UI.
 
 ### 4.1 High-Level Flow
 
@@ -853,7 +1163,7 @@ Responsibilities:
 - Track task status (`Pending`, `Ready`, `Running`, `Skipped`, `Succeeded`, `Failed`).  
 - Emit events for UI and logging (for example, `WorkflowRunStartedEvent`, `TaskStatusChangedEvent`).
 
-Recommended data structures (conceptual):
+Recommended data structures (implemented in `workflowTypes.h`; shown here in simplified form):
 
 - `WorkflowDefinition`  
   - `std::string id;`  
@@ -884,19 +1194,19 @@ Recommended data structures (conceptual):
   - `std::unordered_map<std::string, TaskInstanceState> taskStates;`  
   - `JsonLikeState context;`
 
-The core orchestrator SHOULD be deterministic and thread-safe. It MAY use a task queue and worker threads, but heavy work (document conversion, AI calls) is delegated to Python or external processes.
+The core orchestrator SHOULD be deterministic and thread-safe. It MAY use a task queue and worker threads. Document conversion is delegated to external Python processes (e.g. markitdown), while AI calls are issued by the C++ `SessionManager` on a thread pool.
 
-For tasks that integrate with the existing queue system, the orchestrator MAY map task execution to creation or consumption of STNG_, TASK_, CNTX_, and PROB_ files in the queue directories according to `queue_binding`.
+For tasks that integrate with the existing queue system, the orchestrator MAY map task execution to creation or consumption of STNG_, TASK_, CNTX_, PROB_, and PROV_ files in the queue directories according to `queue_binding`.
 
 ---
 
-### 4.3 Python Side: Task Executors
+### 4.3 Python Side: Task Executor
 
-Python is responsible for:
+Python is one of four task executors (`python`, `ai_call`, `shell`, `internal`). The `PythonEngine` is responsible for:
 
-- Implementing `python` tasks’ logic.  
-- Acting as a bridge for `ai_call` tasks (HTTP requests to AI providers).  
-- Optional helpers for reading XLS, documents, and other sources for structure-based iteration.
+- Executing `python` tasks' logic (user-defined Python modules/functions).  
+- Optional helpers for reading XLS, documents, and other sources (e.g. markitdown for document conversion).
+
 
 Python interface expectations:
 
@@ -910,10 +1220,6 @@ Python interface expectations:
       # return: dict of outputs, e.g. {"markdown_path": "..."}
       ...
   ```
-
-- For `ai_call` tasks, either:  
-  - A generic function that takes provider/model/mode/prompt and optional assistant/environment identifiers, or  
-  - A specific module for workflow-specific logic.
 
 Python tasks SHOULD avoid blocking the GIL unnecessarily (for example, use I/O-bound calls, async HTTP). Long-running CPU tasks MAY be done via separate processes if needed.
 
@@ -1013,11 +1319,9 @@ If a task fails (after all retries):
 - Integrated with the existing FileWatcher.  
 - When a relevant event is received (path and event type), the orchestrator checks matching triggers and starts a run.
 
-### 6.3 Structure-Based
+### 6.3 Filter-Driven Expansion
 
-- The runtime uses the structure trigger parameters to preprocess input sources (XLS, documents, etc.).  
-- It builds an iterator collection (for example, list of rows or sections).  
-- For `per_item` tasks, the orchestrator creates one task instance per item, injecting the k-th item as inputs.
+The runtime evaluates **filter nodes** (see 3.7) to enumerate items from CSV files, text file lines, or Lucene-style query indexes. For each matched item, the orchestrator creates a task instance (`taskId#k`), injects item values as inputs under the filter's binding prefix, and writes an output file named `<filterID>-<k>.txt`. A filter manifest tracks the item list and expression hash for freshness comparison across runs.
 
 ### 6.4 Manual
 
@@ -1077,18 +1381,18 @@ The exact policy is left to the implementation, but JCWF is designed so that fut
 
 ## 9. JSON Schema (Draft)
 
-Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is suitable for validation and editor tooling.
+Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is suitable for validation and editor tooling.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "JC Workflow File (JCWF) v1.0",
+  "title": "JC Workflow File (JCWF) v1.1",
   "type": "object",
   "required": ["version", "id", "tasks"],
   "properties": {
     "version": {
       "type": "string",
-      "pattern": "^1\.0$"
+      "pattern": "^1\.[01]$"
     },
     "id": { "type": "string" },
     "label": { "type": "string" },
@@ -1110,6 +1414,10 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
     "dataflow": {
       "type": "array",
       "items": { "$ref": "#/$defs/dataflow" }
+    },
+    "filters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filter" }
     },
     "defaults": {
       "type": "object",
@@ -1172,6 +1480,7 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
           "enum": ["single", "per_item"],
           "default": "single"
         },
+        "filter": { "type": "string" },
         "working_directory": { "type": "string" },
         "depends_on": {
           "type": "array",
@@ -1212,6 +1521,10 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
               "items": { "$ref": "#/$defs/queue_file_ref" }
             },
             "prob_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "prov_files": {
               "type": "array",
               "items": { "$ref": "#/$defs/queue_file_ref" }
             }
@@ -1285,6 +1598,41 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
         "to_input": { "type": "string" },
         "mapping": { "type": "object" }
       }
+    },
+
+    "filter": {
+      "type": "object",
+      "required": ["id", "source", "binding"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["csv", "text_lines", "query", "polarion_query"]
+            },
+            "path": { "type": "string" },
+            "delimiter": { "type": "string", "default": "," },
+            "has_header": { "type": "boolean", "default": true },
+            "range": { "type": "string" },
+            "skip_empty": { "type": "boolean", "default": true },
+            "index_path": { "type": "string" },
+            "query": { "type": "string" },
+            "fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "base_url": { "type": "string" },
+            "project_id": { "type": "string" },
+            "key_name": { "type": "string" },
+            "page_size": { "type": "integer", "default": 100 }
+          }
+        },
+        "binding": { "type": "string" },
+        "max_items": { "type": "integer", "default": 10000 }
+      }
     }
   }
 }
@@ -1300,10 +1648,11 @@ Below is a simplified JSON Schema for JCWF v1.0. It is not exhaustive but is sui
 - **API keys** MUST NOT be stored in JCWF files or `config.json`. They are managed in JarvisAgent's encrypted key store (`keys.json.enc`, AES-256-GCM with a master password) or provided via environment variables. See `engine/keys.md` for the key management design.  
 - JCWF files SHOULD be sourced from trusted locations; tampering can change automation behavior.  
 - Structure-based iteration over external documents and XLS files SHOULD validate inputs to avoid unexpected expansion or injection.
+- Filter nodes with `max_items: 0` (no limit) SHOULD be used with caution; unbounded expansion can exhaust system resources.
 
 ---
 
-*End of JC Workflow File (JCWF) Specification v1.0*
+*End of JC Workflow File (JCWF) Specification v1.1*
 ---
 
 ## Project conventions and runtime enforcement

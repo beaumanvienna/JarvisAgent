@@ -867,6 +867,14 @@ namespace AIAssistant
 
         TaskResolvedInputs const& resolvedInputs = optionalResolvedInputs.value();
 
+        if (!resolvedInputs.m_ErrorMessage.empty())
+        {
+            result.m_TaskState.m_State = TaskInstanceStateKind::Failed;
+            result.m_TaskState.m_LastErrorMessage = resolvedInputs.m_ErrorMessage;
+            result.m_ExecuteOk = false;
+            return result;
+        }
+
         result.m_TaskState.m_InputValues = resolvedInputs.m_StringValues;
 
         {

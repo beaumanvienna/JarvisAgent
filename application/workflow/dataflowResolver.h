@@ -36,6 +36,7 @@ namespace AIAssistant
     struct TaskResolvedInputs
     {
         std::unordered_map<std::string, std::string> m_StringValues;
+        std::string m_ErrorMessage;
     };
 
     // -------------------------------------------------------------

@@ -253,6 +253,16 @@ namespace AIAssistant
     using TaskDefinition = TaskDef;
 
     // ---------------------------------------------------------------------
+    // Workflow-level defaults (applied to tasks that don't override them)
+    // ---------------------------------------------------------------------
+
+    struct WorkflowDefaults
+    {
+        uint64_t m_TimeoutMs{0};
+        RetryPolicy m_RetryPolicy;
+    };
+
+    // ---------------------------------------------------------------------
     // Workflow definition (static configuration)
     // ---------------------------------------------------------------------
 
@@ -299,8 +309,9 @@ namespace AIAssistant
         // JCWF: "dataflow"
         std::vector<DataflowDef> m_Dataflows;
 
-        // JCWF: "defaults" – kept as raw JSON; the orchestrator can interpret.
+        // JCWF: "defaults" – raw JSON kept for serialization; parsed fields in m_Defaults.
         std::string m_DefaultsJson;
+        WorkflowDefaults m_Defaults;
     };
 
     // ---------------------------------------------------------------------
