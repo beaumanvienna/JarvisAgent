@@ -15,11 +15,13 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 
 import TaskNode from "./TaskNode";
+import FilterNode from "./FilterNode";
+import FilterBuilderDialog from "./FilterBuilderDialog";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
-import type { EditorGraph, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
-import type { JcwfFile, JcwfTask, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
+import type { EditorGraph, EditorFilterNode, EditorFilterNodeData, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
+import type { JcwfFile, JcwfFilter, JcwfFilterSource, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
   createWorkflowWithId,
@@ -32,7 +34,7 @@ import {
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
 
-const nodeTypes = { task: TaskNode };
+const nodeTypes = { task: TaskNode, filter: FilterNode };
 
 export type WorkflowPersistEvent = {
   kind: "save" | "create" | "saveAs";
@@ -221,6 +223,9 @@ export default function WorkflowEditorView(props: {
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
+  const [showFilterBuilder, setShowFilterBuilder] = useState<boolean>(false);
+  const [editingFilter, setEditingFilter] = useState<JcwfFilter | null>(null);
+
   const webSocketRef = useRef<WebSocket | null>(null);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
   const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
@@ -244,8 +249,9 @@ export default function WorkflowEditorView(props: {
 
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
-  const [nodes, setNodes] = useNodesState<EditorTaskNodeData>(
-    initialGraph.nodes as Node<EditorTaskNodeData>[]
+  type AnyNodeData = EditorTaskNodeData | EditorFilterNodeData;
+  const [nodes, setNodes] = useNodesState<AnyNodeData>(
+    initialGraph.nodes as Node<AnyNodeData>[]
   );
 
   const [edges, setEdges, onEdgesChange] = useEdgesState<EditorTaskEdge>(
@@ -594,7 +600,14 @@ export default function WorkflowEditorView(props: {
       backendInfosByTaskId.set(taskId, existing);
     }
 
-    const nextNodes: EditorTaskNode[] = graph.nodes.map((n) => {
+    const nextNodes = graph.nodes.map((n) => {
+      // Filter nodes pass through without validation decorations
+      if (n.type === "filter")
+      {
+        return n;
+      }
+
+      const taskNode = n as EditorTaskNode;
       const clientErrors = validation.nodeErrorsById.get(n.id) ?? [];
       const serverErrors = backendErrorsByTaskId.get(n.id) ?? [];
       const mergedErrors = [...clientErrors, ...serverErrors];
@@ -608,14 +621,14 @@ export default function WorkflowEditorView(props: {
       const mergedInfos = [...clientInfos, ...serverInfos];
 
       const savedTaskSignature = lastSavedNodeSnapshot[n.id];
-      const nodeIsDirty = savedTaskSignature ? computeTaskSignature(n.data.task) !== savedTaskSignature : true;
+      const nodeIsDirty = savedTaskSignature ? computeTaskSignature(taskNode.data.task) !== savedTaskSignature : true;
       const runtimeSnapshot = runtimeTasksByIdRef.current[n.id];
 
 
       return {
-        ...n,
+        ...taskNode,
         data: {
-          ...n.data,
+          ...taskNode.data,
           validationErrors: mergedErrors.length > 0 ? mergedErrors : undefined,
           validationWarnings: mergedWarnings.length > 0 ? mergedWarnings : undefined,
           validationInfos: mergedInfos.length > 0 ? mergedInfos : undefined,
@@ -634,21 +647,25 @@ export default function WorkflowEditorView(props: {
   useEffect(() => {
     setNodes((current) => {
       let changed = false;
-      const next = (current as EditorTaskNode[]).map((n) => {
+      const next = current.map((n) => {
+        // Filter nodes have no runtime state
+        if (n.type === "filter") { return n; }
+
+        const taskNode = n as Node<EditorTaskNodeData>;
         const snapshot = runtimeTasksById[n.id];
         const nextRuntimeState = snapshot ? snapshot.state : undefined;
         const nextRuntimeRunId = snapshot ? snapshot.runId : undefined;
 
-        if (n.data.runtimeState === nextRuntimeState && n.data.runtimeRunId === nextRuntimeRunId)
+        if (taskNode.data.runtimeState === nextRuntimeState && taskNode.data.runtimeRunId === nextRuntimeRunId)
         {
           return n;
         }
 
         changed = true;
         return {
-          ...n,
+          ...taskNode,
           data: {
-            ...n.data,
+            ...taskNode.data,
             runtimeState: nextRuntimeState,
             runtimeRunId: nextRuntimeRunId,
           },
@@ -662,12 +679,14 @@ export default function WorkflowEditorView(props: {
   // Update nodes when hideTierDWarnings setting changes
   useEffect(() => {
     setNodes((current) => {
-      return (current as EditorTaskNode[]).map((n) => {
-        if (n.data.hideTierDWarnings === props.hideTierDWarnings)
+      return current.map((n) => {
+        if (n.type === "filter") { return n; }
+        const taskNode = n as Node<EditorTaskNodeData>;
+        if (taskNode.data.hideTierDWarnings === props.hideTierDWarnings)
         {
           return n;
         }
-        return { ...n, data: { ...n.data, hideTierDWarnings: props.hideTierDWarnings } };
+        return { ...taskNode, data: { ...taskNode.data, hideTierDWarnings: props.hideTierDWarnings } };
       });
     });
   }, [props.hideTierDWarnings, setNodes]);
@@ -679,8 +698,8 @@ export default function WorkflowEditorView(props: {
     const isFromTemplate = workflowId === null;
     if (!isFromTemplate)
     {
-      setLastSavedSignature(computeGraphSignature(graph.nodes, graph.edges));
-      setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes));
+      setLastSavedSignature(computeGraphSignature(graph.nodes as EditorTaskNode[], graph.edges));
+      setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task")));
       setIsDirty(false);
       if (props.onDirtyStateChange)
       {
@@ -1001,12 +1020,22 @@ export default function WorkflowEditorView(props: {
     }
   }, [activeRuns, pendingRunId]);
 
-  const selectedNode = useMemo(() => {
+  const selectedNode = useMemo((): EditorTaskNode | null => {
     if (!selectedNodeId)
     {
       return null;
     }
-    return (nodes as EditorTaskNode[]).find((n) => n.id === selectedNodeId) ?? null;
+    const found = nodes.find((n) => n.id === selectedNodeId && n.type === "task");
+    return (found as EditorTaskNode | undefined) ?? null;
+  }, [nodes, selectedNodeId]);
+
+  const selectedFilterNode = useMemo((): EditorFilterNode | null => {
+    if (!selectedNodeId)
+    {
+      return null;
+    }
+    const found = nodes.find((n) => n.id === selectedNodeId && n.type === "filter");
+    return (found as EditorFilterNode | undefined) ?? null;
   }, [nodes, selectedNodeId]);
 
   const [aiInterfaces, setAiInterfaces] = useState<AiInterface[]>([]);
@@ -1160,6 +1189,80 @@ export default function WorkflowEditorView(props: {
     setStatusText(`Added node '${newId}'.`);
     setErrorText(null);
   }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
+
+  const addFilterNode = useCallback(() => {
+    const existingIds = new Set<string>(nodes.map((n) => n.id));
+    let filterId = "filter_1";
+    let counter = 1;
+    while (existingIds.has(`filter:${filterId}`))
+    {
+      counter += 1;
+      filterId = `filter_${counter}`;
+    }
+
+    const filter: JcwfFilter = {
+      id: filterId,
+      source: { kind: "csv", path: "" },
+      binding: "item",
+    };
+
+    const viewportCenter = reactFlowInstance ? reactFlowInstance.project({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+    }) : { x: 0, y: 0 };
+
+    const position = findNonOverlappingPosition(
+      viewportCenter.x,
+      viewportCenter.y,
+      nodes as EditorTaskNode[]
+    );
+
+    const newNode: EditorFilterNode = {
+      id: `filter:${filterId}`,
+      type: "filter",
+      position,
+      data: { filter, title: filterId, subtitle: filter.source.kind },
+    };
+
+    const graph: EditorGraph = { nodes: [...nodes, newNode] as EditorNode[], edges };
+    recomputeValidation(graph);
+    setSelectedNodeId(newNode.id);
+    setStatusText(`Added filter '${filterId}'.`);
+    setErrorText(null);
+  }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
+
+  const openFilterBuilder = useCallback((filter: JcwfFilter) => {
+    setEditingFilter(structuredClone(filter));
+    setShowFilterBuilder(true);
+  }, []);
+
+  const onFilterBuilderSave = useCallback((updatedFilter: JcwfFilter) => {
+    setShowFilterBuilder(false);
+    setEditingFilter(null);
+
+    const nextNodes = nodes.map((n) => {
+      if (n.type !== "filter") { return n; }
+      const filterNode = n as EditorFilterNode;
+      if (filterNode.data.filter.id !== updatedFilter.id && n.id !== `filter:${updatedFilter.id}`)
+      {
+        return n;
+      }
+      return {
+        ...filterNode,
+        id: `filter:${updatedFilter.id}`,
+        data: {
+          ...filterNode.data,
+          filter: updatedFilter,
+          title: updatedFilter.id,
+          subtitle: updatedFilter.source.kind,
+        },
+      };
+    });
+
+    const graph: EditorGraph = { nodes: nextNodes as EditorNode[], edges };
+    recomputeValidation(graph);
+    setIsDirty(true);
+  }, [nodes, edges, recomputeValidation]);
 
   const updateSelectedTaskField = useCallback((patch: Partial<JcwfTask>) => {
     if (!selectedNode)
@@ -1521,6 +1624,8 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={() => { addTaskNode("python"); }}>+ Python</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("shell"); }}>+ Shell</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("internal"); }}>+ Internal</button>
+            <hr style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.08)", margin: "4px 0" }} />
+            <button className="btn" type="button" style={{ borderColor: "rgba(180,140,255,0.35)", color: "rgba(200,170,255,0.95)" }} onClick={addFilterNode}>+ Filter</button>
           </div>
         </div>
 
@@ -1856,133 +1961,182 @@ export default function WorkflowEditorView(props: {
         <div className="card">
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Inspector</div>
 
-          {!selectedNode
-            ? <div className="muted">Select a node to edit its properties.</div>
-            : (
+          {selectedFilterNode
+            ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div className="small">taskId: <code>{selectedNode.id}</code></div>
+                <div className="small" style={{ color: "rgba(200,170,255,0.95)" }}>filter: <code>{selectedFilterNode.data.filter.id}</code></div>
+                <div className="small">Source: <code>{selectedFilterNode.data.filter.source.kind}</code></div>
+                <div className="small">Binding: <code>{selectedFilterNode.data.filter.binding ?? "item"}</code></div>
+                {selectedFilterNode.data.filter.source.path && (
+                  <div className="small">Path: <code>{selectedFilterNode.data.filter.source.path}</code></div>
+                )}
+                {selectedFilterNode.data.filter.source.query && (
+                  <div className="small">Query: <code>{selectedFilterNode.data.filter.source.query}</code></div>
+                )}
+                {selectedFilterNode.data.runtimeItemCount !== undefined && (
+                  <div className="small">Items: {selectedFilterNode.data.runtimeItemCount}</div>
+                )}
+                <button
+                  className="btn"
+                  type="button"
+                  style={{ borderColor: "rgba(180,140,255,0.45)" }}
+                  onClick={() => openFilterBuilder(selectedFilterNode.data.filter)}
+                >
+                  Edit Filter…
+                </button>
+              </div>
+            )
+            : !selectedNode
+              ? <div className="muted">Select a node to edit its properties.</div>
+              : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="small">taskId: <code>{selectedNode.id}</code></div>
 
-                <label className="field">
-                  <div className="small">Label</div>
-                  <input
-                    className="input"
-                    value={(selectedNode.data.task.label ?? "") as string}
-                    onChange={(e) => { updateSelectedTaskField({ label: e.target.value }); }}
-                  />
-                </label>
-
-                <label className="field">
-                  <div className="small">Type</div>
-                  <select
-                    className="input"
-                    value={selectedNode.data.task.type}
-                    onChange={(e) => { updateSelectedTaskField({ type: e.target.value as JcwfTaskType }); }}
-                  >
-                    <option value="ai_call">ai_call</option>
-                    <option value="python">python</option>
-                    <option value="shell">shell</option>
-                    <option value="internal">internal</option>
-                  </select>
-                </label>
-
-                {selectedNode.data.task.type === "ai_call" && (
                   <label className="field">
-                    <div className="small">AI Interface</div>
+                    <div className="small">Label</div>
+                    <input
+                      className="input"
+                      value={(selectedNode.data.task.label ?? "") as string}
+                      onChange={(e) => { updateSelectedTaskField({ label: e.target.value }); }}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <div className="small">Type</div>
                     <select
                       className="input"
-                      value={(selectedNode.data.task.api_interface as string) ?? ""}
-                      onChange={(e) => { updateSelectedTaskField({ api_interface: e.target.value || undefined } as Partial<JcwfTask>); }}
+                      value={selectedNode.data.task.type}
+                      onChange={(e) => { updateSelectedTaskField({ type: e.target.value as JcwfTaskType }); }}
                     >
-                      <option value="">default (global API index)</option>
-                      {aiInterfaces.map((iface) => (
-                        <option key={iface.name} value={iface.name}>{iface.name}</option>
-                      ))}
+                      <option value="ai_call">ai_call</option>
+                      <option value="python">python</option>
+                      <option value="shell">shell</option>
+                      <option value="internal">internal</option>
                     </select>
                   </label>
-                )}
 
-                <label className="field">
-                  <div className="small">working_directory</div>
-                  <input
-                    className="input"
-                    value={(selectedNode.data.task.working_directory ?? "") as string}
-                    onChange={(e) => { updateSelectedTaskField({ working_directory: e.target.value }); }}
-                    placeholder="(optional)"
-                  />
-                </label>
+                  <label className="field">
+                    <div className="small">Mode</div>
+                    <select
+                      className="input"
+                      value={selectedNode.data.task.mode ?? "single"}
+                      onChange={(e) => { updateSelectedTaskField({ mode: e.target.value as JcwfTaskMode }); }}
+                    >
+                      <option value="single">single</option>
+                      <option value="per_item">per_item</option>
+                    </select>
+                  </label>
 
-                <label className="field">
-                  <div className="small">doc</div>
-                  <textarea
-                    className="input"
-                    value={typeof selectedNode.data.task.doc === "string" ? selectedNode.data.task.doc : ""}
-                    onChange={(e) => { updateSelectedTaskField({ doc: e.target.value }); }}
-                    placeholder="(optional, string)"
-                    rows={4}
-                  />
-                </label>
+                  {selectedNode.data.task.mode === "per_item" && (
+                    <label className="field">
+                      <div className="small">Filter ID</div>
+                      <input
+                        className="input"
+                        value={(selectedNode.data.task.filter ?? "") as string}
+                        onChange={(e) => { updateSelectedTaskField({ filter: e.target.value || undefined } as Partial<JcwfTask>); }}
+                        placeholder="filter id (e.g. work_items)"
+                      />
+                    </label>
+                  )}
 
-                <label className="field">
-                  <div className="small">params (JSON)</div>
-                  <textarea
-                    className="input codeInput"
-                    value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
-                    onChange={(e) => {
-                      try
-                      {
-                        const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
-                        updateSelectedTaskField({ params: parsed });
-                        setErrorText(null);
-                      }
-                      catch
-                      {
-                        setErrorText("params is not valid JSON.");
-                      }
-                    }}
-                    rows={8}
-                  />
-                </label>
+                  {selectedNode.data.task.type === "ai_call" && (
+                    <label className="field">
+                      <div className="small">AI Interface</div>
+                      <select
+                        className="input"
+                        value={(selectedNode.data.task.api_interface as string) ?? ""}
+                        onChange={(e) => { updateSelectedTaskField({ api_interface: e.target.value || undefined } as Partial<JcwfTask>); }}
+                      >
+                        <option value="">default (global API index)</option>
+                        {aiInterfaces.map((iface) => (
+                          <option key={iface.name} value={iface.name}>{iface.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
 
-                {selectedNode.data.validationErrors && selectedNode.data.validationErrors.length > 0
-                  ? (
-                    <div className="errorText">
-                      {selectedNode.data.validationErrors.join(" ")}
-                    </div>
-                  )
-                  : null}
+                  <label className="field">
+                    <div className="small">working_directory</div>
+                    <input
+                      className="input"
+                      value={(selectedNode.data.task.working_directory ?? "") as string}
+                      onChange={(e) => { updateSelectedTaskField({ working_directory: e.target.value }); }}
+                      placeholder="(optional)"
+                    />
+                  </label>
 
-                {selectedNode.data.validationWarnings && selectedNode.data.validationWarnings.length > 0
-                  ? (
-                    <div className="warningText">
-                      {selectedNode.data.validationWarnings.join(" ")}
-                    </div>
-                  )
-                  : null}
+                  <label className="field">
+                    <div className="small">doc</div>
+                    <textarea
+                      className="input"
+                      value={typeof selectedNode.data.task.doc === "string" ? selectedNode.data.task.doc : ""}
+                      onChange={(e) => { updateSelectedTaskField({ doc: e.target.value }); }}
+                      placeholder="(optional, string)"
+                      rows={4}
+                    />
+                  </label>
 
-                {selectedNode.data.validationInfos && selectedNode.data.validationInfos.length > 0
-                  ? (
-                    <div className="infoText">
-                      {selectedNode.data.validationInfos.join(" ")}
-                    </div>
-                  )
-                  : null}
+                  <label className="field">
+                    <div className="small">params (JSON)</div>
+                    <textarea
+                      className="input codeInput"
+                      value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
+                      onChange={(e) => {
+                        try
+                        {
+                          const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
+                          updateSelectedTaskField({ params: parsed });
+                          setErrorText(null);
+                        }
+                        catch
+                        {
+                          setErrorText("params is not valid JSON.");
+                        }
+                      }}
+                      rows={8}
+                    />
+                  </label>
 
-                {runtimeTasksById[selectedNode.id]
-                  ? (
-                    <div style={{ marginTop: 10, padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
-                      <div className="small" style={{ fontWeight: 700, marginBottom: 4 }}>Runtime</div>
-                      <div className="small">State: <code>{runtimeTasksById[selectedNode.id].state}</code></div>
-                      {runtimeTasksById[selectedNode.id].attemptCount !== undefined
-                        ? <div className="small">Attempts: {runtimeTasksById[selectedNode.id].attemptCount}</div>
-                        : null}
-                      {runtimeTasksById[selectedNode.id].lastErrorMessage
-                        ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
-                        : null}
-                    </div>
-                  )
-                  : null}
-              </div>
-            )}
+                  {selectedNode.data.validationErrors && selectedNode.data.validationErrors.length > 0
+                    ? (
+                      <div className="errorText">
+                        {selectedNode.data.validationErrors.join(" ")}
+                      </div>
+                    )
+                    : null}
+
+                  {selectedNode.data.validationWarnings && selectedNode.data.validationWarnings.length > 0
+                    ? (
+                      <div className="warningText">
+                        {selectedNode.data.validationWarnings.join(" ")}
+                      </div>
+                    )
+                    : null}
+
+                  {selectedNode.data.validationInfos && selectedNode.data.validationInfos.length > 0
+                    ? (
+                      <div className="infoText">
+                        {selectedNode.data.validationInfos.join(" ")}
+                      </div>
+                    )
+                    : null}
+
+                  {runtimeTasksById[selectedNode.id]
+                    ? (
+                      <div style={{ marginTop: 10, padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
+                        <div className="small" style={{ fontWeight: 700, marginBottom: 4 }}>Runtime</div>
+                        <div className="small">State: <code>{runtimeTasksById[selectedNode.id].state}</code></div>
+                        {runtimeTasksById[selectedNode.id].attemptCount !== undefined
+                          ? <div className="small">Attempts: {runtimeTasksById[selectedNode.id].attemptCount}</div>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].lastErrorMessage
+                          ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
+                          : null}
+                      </div>
+                    )
+                    : null}
+                </div>
+              )}
         </div>
 
         <div className="card" style={{ marginTop: 8 }}>
@@ -2001,6 +2155,15 @@ export default function WorkflowEditorView(props: {
         onCancel={() => setShowCreateModal(false)}
         onSubmit={onCreateModalSubmit}
       />
+
+      {editingFilter && (
+        <FilterBuilderDialog
+          isOpen={showFilterBuilder}
+          filter={editingFilter}
+          onSave={onFilterBuilderSave}
+          onCancel={() => { setShowFilterBuilder(false); setEditingFilter(null); }}
+        />
+      )}
     </div>
   );
 }

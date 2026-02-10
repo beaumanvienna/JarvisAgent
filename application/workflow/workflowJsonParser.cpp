@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -104,6 +104,7 @@ Expected JCWF JSON structure:
 #include "workflow/workflowJsonParser.h"
 #include <filesystem>
 #include <string_view>
+#include <unordered_set>
 
 #include "engine.h"
 #include "workflow/workflowTypes.h"
@@ -643,6 +644,14 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "filter")
+            {
+                if (!ElementToString(value, taskOut.m_Filter))
+                {
+                    errorMessage = "task field 'filter' must be string";
+                    return false;
+                }
+            }
             else
             {
                 LOG_CORE_WARN("Unknown field in task '{}': {}", taskOut.m_Id, key);
@@ -875,7 +884,7 @@ namespace AIAssistant
                 // Parse "major.minor" and enforce version gate
                 {
                     constexpr int KNOWN_MAJOR = 1;
-                    constexpr int KNOWN_MINOR = 0;
+                    constexpr int KNOWN_MINOR = 1;
 
                     auto const dotPos = version.find('.');
                     if (dotPos == std::string::npos || dotPos == 0 || dotPos == version.size() - 1)
@@ -982,6 +991,13 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "filters")
+            {
+                if (!ParseFilters(value, outputDefinition.m_Filters, errorMessage))
+                {
+                    return false;
+                }
+            }
             else if (key == "defaults")
             {
                 if (!ExtractRawJson(value, outputDefinition.m_DefaultsJson))
@@ -1070,11 +1086,31 @@ namespace AIAssistant
             }
         }
 
+        // Validate that every task's "filter" reference points to an existing filter ID.
+        {
+            std::unordered_set<std::string> filterIds;
+            for (auto const& filter : outputDefinition.m_Filters)
+            {
+                filterIds.insert(filter.m_Id);
+            }
+
+            for (auto const& [taskId, task] : outputDefinition.m_Tasks)
+            {
+                if (!task.m_Filter.empty() && filterIds.find(task.m_Filter) == filterIds.end())
+                {
+                    errorMessage = "task '" + taskId + "' references unknown filter '" + task.m_Filter + "'";
+                    return false;
+                }
+            }
+        }
+
         LOG_APP_INFO("[paths debug] debug reason=parseWorkflowRoot workflowId={} workflowBaseDirectoryRelative={} "
-                     "workflowBaseDirectoryIsRelative={} triggersCount={} tasksCount={} dataflowsCount={}",
+                     "workflowBaseDirectoryIsRelative={} triggersCount={} tasksCount={} dataflowsCount={} "
+                     "filtersCount={}",
                      outputDefinition.m_Id, outputDefinition.m_WorkflowBaseDirectory,
                      IsRelativePathString(outputDefinition.m_WorkflowBaseDirectory), outputDefinition.m_Triggers.size(),
-                     outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size());
+                     outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size(),
+                     outputDefinition.m_Filters.size());
 
         return true;
     }

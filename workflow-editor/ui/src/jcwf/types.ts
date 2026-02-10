@@ -1,6 +1,8 @@
-export type JcwfVersion = "1.0";
+export type JcwfVersion = "1.0" | "1.1";
 export type JcwfDoc = string | string[];
 export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal";
+export type JcwfTaskMode = "single" | "per_item";
+export type JcwfFilterSourceKind = "csv" | "text_lines" | "query" | "polarion_query";
 export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual";
 
 export type JcwfTrigger = {
@@ -10,9 +12,35 @@ export type JcwfTrigger = {
   params?: Record<string, unknown>;
 };
 
+export type JcwfFilterSource = {
+  kind: JcwfFilterSourceKind;
+  path?: string;
+  query?: string;
+  index_path?: string;
+  fields?: string[];
+  delimiter?: string;
+  columns?: string[];
+  header_row?: number;
+  range?: string;
+  base_url?: string;
+  project_id?: string;
+  key_name?: string;
+  page_size?: number;
+};
+
+export type JcwfFilter = {
+  id: string;
+  source: JcwfFilterSource;
+  binding?: string;
+  max_items?: number;
+};
+
 export type JcwfTask = {
   id: string;
   type: JcwfTaskType;
+
+  mode?: JcwfTaskMode;
+  filter?: string;
 
   label?: string;
   doc?: JcwfDoc;
@@ -38,6 +66,8 @@ export type JcwfFile = {
   triggers?: JcwfTrigger[];
 
   tasks: Record<string, JcwfTask>;
+
+  filters?: JcwfFilter[];
 
   [key: string]: unknown;
 };

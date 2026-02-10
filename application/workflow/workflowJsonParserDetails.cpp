@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -647,5 +647,320 @@ namespace AIAssistant
     // ---------------------------------------------------------------------
     // Retries
     // ---------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------
+    // Filters (v1.1)
+    // ---------------------------------------------------------------------
+
+    bool WorkflowJsonParser::ParseFilters(simdjson::ondemand::value& jsonValue, std::vector<FilterDef>& filtersOut,
+                                          std::string& errorMessage) const
+    {
+        if (!RequireArray(jsonValue, "filters", errorMessage))
+        {
+            return false;
+        }
+
+        auto arrayResult = jsonValue.get_array();
+        if (arrayResult.error() != simdjson::SUCCESS)
+        {
+            errorMessage = "failed to read 'filters' array: ";
+            errorMessage += simdjson::error_message(arrayResult.error());
+            return false;
+        }
+
+        simdjson::ondemand::array filterArray = arrayResult.value();
+
+        for (simdjson::ondemand::value filterValue : filterArray)
+        {
+            FilterDef filter;
+
+            auto objectResult = filterValue.get_object();
+            if (objectResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "filter entry must be an object: ";
+                errorMessage += simdjson::error_message(objectResult.error());
+                return false;
+            }
+
+            simdjson::ondemand::object filterObject = objectResult.value();
+
+            if (!ParseFilter(filterObject, filter, errorMessage))
+            {
+                return false;
+            }
+
+            filtersOut.push_back(std::move(filter));
+        }
+
+        return true;
+    }
+
+    bool WorkflowJsonParser::ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut,
+                                         std::string& errorMessage) const
+    {
+        bool hasId = false;
+        bool hasSource = false;
+        bool hasBinding = false;
+
+        for (auto field : jsonObject)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "failed to read filter field key: ";
+                errorMessage += simdjson::error_message(keyResult.error());
+                return false;
+            }
+
+            std::string_view keyView = keyResult.value();
+            std::string key(keyView.begin(), keyView.end());
+
+            simdjson::ondemand::value value = field.value();
+
+            if (key == "id")
+            {
+                if (!ElementToString(value, filterOut.m_Id))
+                {
+                    errorMessage = "filter field 'id' must be string";
+                    return false;
+                }
+
+                hasId = true;
+            }
+            else if (key == "source")
+            {
+                if (!RequireObject(value, "filter.source", errorMessage))
+                {
+                    return false;
+                }
+
+                auto sourceObjectResult = value.get_object();
+                if (sourceObjectResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "failed to read filter 'source' object: ";
+                    errorMessage += simdjson::error_message(sourceObjectResult.error());
+                    return false;
+                }
+
+                simdjson::ondemand::object sourceObject = sourceObjectResult.value();
+
+                if (!ParseFilterSource(sourceObject, filterOut.m_Source, errorMessage))
+                {
+                    return false;
+                }
+
+                hasSource = true;
+            }
+            else if (key == "binding")
+            {
+                if (!ElementToString(value, filterOut.m_Binding))
+                {
+                    errorMessage = "filter field 'binding' must be string";
+                    return false;
+                }
+
+                hasBinding = true;
+            }
+            else if (key == "max_items")
+            {
+                auto maxItemsResult = value.get_int64();
+                if (maxItemsResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "filter field 'max_items' must be integer";
+                    return false;
+                }
+
+                filterOut.m_MaxItems = static_cast<uint32_t>(maxItemsResult.value());
+            }
+            else
+            {
+                LOG_CORE_WARN("Unknown field in filter '{}': {}", filterOut.m_Id, key);
+            }
+        }
+
+        if (!hasId)
+        {
+            errorMessage = "filter missing required field: id";
+            return false;
+        }
+
+        if (!hasSource)
+        {
+            errorMessage = "filter '" + filterOut.m_Id + "' missing required field: source";
+            return false;
+        }
+
+        if (!hasBinding)
+        {
+            errorMessage = "filter '" + filterOut.m_Id + "' missing required field: binding";
+            return false;
+        }
+
+        if (filterOut.m_Source.m_Kind.empty())
+        {
+            errorMessage = "filter '" + filterOut.m_Id + "' source missing required field: kind";
+            return false;
+        }
+
+        LOG_APP_INFO("[filter] parsed filter id={} kind={} binding={} maxItems={}", filterOut.m_Id,
+                     filterOut.m_Source.m_Kind, filterOut.m_Binding, filterOut.m_MaxItems);
+
+        return true;
+    }
+
+    bool WorkflowJsonParser::ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut,
+                                               std::string& errorMessage) const
+    {
+        for (auto field : jsonObject)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "failed to read filter source field key: ";
+                errorMessage += simdjson::error_message(keyResult.error());
+                return false;
+            }
+
+            std::string_view keyView = keyResult.value();
+            std::string key(keyView.begin(), keyView.end());
+
+            simdjson::ondemand::value value = field.value();
+
+            if (key == "kind")
+            {
+                if (!ElementToString(value, sourceOut.m_Kind))
+                {
+                    errorMessage = "filter source field 'kind' must be string";
+                    return false;
+                }
+            }
+            else if (key == "path")
+            {
+                if (!ElementToString(value, sourceOut.m_Path))
+                {
+                    errorMessage = "filter source field 'path' must be string";
+                    return false;
+                }
+            }
+            else if (key == "delimiter")
+            {
+                if (!ElementToString(value, sourceOut.m_Delimiter))
+                {
+                    errorMessage = "filter source field 'delimiter' must be string";
+                    return false;
+                }
+            }
+            else if (key == "has_header")
+            {
+                auto boolResult = value.get_bool();
+                if (boolResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "filter source field 'has_header' must be bool";
+                    return false;
+                }
+
+                sourceOut.m_HasHeader = boolResult.value();
+            }
+            else if (key == "range")
+            {
+                if (!ElementToString(value, sourceOut.m_Range))
+                {
+                    errorMessage = "filter source field 'range' must be string";
+                    return false;
+                }
+            }
+            else if (key == "skip_empty")
+            {
+                auto boolResult = value.get_bool();
+                if (boolResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "filter source field 'skip_empty' must be bool";
+                    return false;
+                }
+
+                sourceOut.m_SkipEmpty = boolResult.value();
+            }
+            else if (key == "index_path")
+            {
+                if (!ElementToString(value, sourceOut.m_IndexPath))
+                {
+                    errorMessage = "filter source field 'index_path' must be string";
+                    return false;
+                }
+            }
+            else if (key == "query")
+            {
+                if (!ElementToString(value, sourceOut.m_Query))
+                {
+                    errorMessage = "filter source field 'query' must be string";
+                    return false;
+                }
+            }
+            else if (key == "fields")
+            {
+                auto arrayResult = value.get_array();
+                if (arrayResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "filter source field 'fields' must be array of strings";
+                    return false;
+                }
+
+                simdjson::ondemand::array fieldsArray = arrayResult.value();
+                for (simdjson::ondemand::value fieldValue : fieldsArray)
+                {
+                    auto stringResult = fieldValue.get_string(false);
+                    if (stringResult.error() != simdjson::SUCCESS)
+                    {
+                        errorMessage = "filter source field 'fields' must be array of strings";
+                        return false;
+                    }
+
+                    std::string_view fieldView = stringResult.value();
+                    sourceOut.m_Fields.emplace_back(fieldView.begin(), fieldView.end());
+                }
+            }
+            else if (key == "base_url")
+            {
+                if (!ElementToString(value, sourceOut.m_BaseUrl))
+                {
+                    errorMessage = "filter source field 'base_url' must be string";
+                    return false;
+                }
+            }
+            else if (key == "project_id")
+            {
+                if (!ElementToString(value, sourceOut.m_ProjectId))
+                {
+                    errorMessage = "filter source field 'project_id' must be string";
+                    return false;
+                }
+            }
+            else if (key == "key_name")
+            {
+                if (!ElementToString(value, sourceOut.m_KeyName))
+                {
+                    errorMessage = "filter source field 'key_name' must be string";
+                    return false;
+                }
+            }
+            else if (key == "page_size")
+            {
+                auto pageSizeResult = value.get_int64();
+                if (pageSizeResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "filter source field 'page_size' must be integer";
+                    return false;
+                }
+
+                sourceOut.m_PageSize = static_cast<uint32_t>(pageSizeResult.value());
+            }
+            else
+            {
+                LOG_CORE_WARN("Unknown field in filter source: {}", key);
+            }
+        }
+
+        return true;
+    }
 
 } // namespace AIAssistant

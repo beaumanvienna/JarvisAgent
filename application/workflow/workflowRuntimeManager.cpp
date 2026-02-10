@@ -540,6 +540,12 @@ namespace AIAssistant
         WorkflowRun& workflowRun = activeRun.m_Run;
 
         // ---------------------------------------------------------
+        // 0) Harvest filter evaluation completions + aggregate per-item results
+        // ---------------------------------------------------------
+        HarvestFilterEvalCompletions(activeRun);
+        AggregatePerItemResults(activeRun);
+
+        // ---------------------------------------------------------
         // 1) Harvest completed worker tasks (non-blocking)
         // ---------------------------------------------------------
         for (auto iterator = activeRun.m_RunningTasks.begin(); iterator != activeRun.m_RunningTasks.end();)
@@ -593,7 +599,7 @@ namespace AIAssistant
             iterator = activeRun.m_RunningTasks.erase(iterator);
         }
 
-        if (workflowRun.m_HasFailed && activeRun.m_RunningTasks.empty())
+        if (workflowRun.m_HasFailed && activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty())
         {
             // Ensure WaitingExternal tasks don't linger forever once the run is failed.
             JarvisAgent* app = App::g_App;
@@ -682,7 +688,11 @@ namespace AIAssistant
                 continue;
             }
 
-            auto defIterator = workflowDefinition.m_Tasks.find(taskId);
+            // For child instances (taskId#k), look up the parent's TaskDef
+            std::string const parentId = ParentTaskId(taskId);
+            bool const isChild = IsChildInstance(taskId);
+
+            auto defIterator = workflowDefinition.m_Tasks.find(parentId);
             if (defIterator == workflowDefinition.m_Tasks.end())
             {
                 taskState.m_State = TaskInstanceStateKind::Failed;
@@ -693,12 +703,26 @@ namespace AIAssistant
 
             TaskDef const& taskDefinition = defIterator->second;
 
-            if (!IsTaskReady(workflowRun, taskDefinition))
+            // Child instances skip DAG readiness (parent manages them)
+            if (!isChild && !IsTaskReady(workflowRun, taskDefinition))
             {
                 continue;
             }
 
-            // Freshness check + skip
+            // Per-item parent tasks: dispatch filter evaluation, not normal execution
+            if (!isChild && taskDefinition.m_Mode == TaskMode::PerItem && !taskDefinition.m_Filter.empty())
+            {
+                if (activeRun.m_FilterEvalTasks.find(taskId) == activeRun.m_FilterEvalTasks.end() &&
+                    activeRun.m_PerItemChildren.find(taskId) == activeRun.m_PerItemChildren.end())
+                {
+                    DispatchFilterEvaluation(activeRun, taskId, taskDefinition);
+                    dispatchedAny = true;
+                }
+                continue;
+            }
+
+            // Freshness check + skip (not for child instances — already handled during fan-out)
+            if (!isChild)
             {
                 TaskFreshnessChecker freshnessChecker;
                 TaskFreshnessChecker::ResolvedPaths resolvedPaths;
@@ -792,7 +816,7 @@ namespace AIAssistant
             return;
         }
 
-        if (!dispatchedAny && activeRun.m_RunningTasks.empty())
+        if (!dispatchedAny && activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty())
         {
             bool hasWaitingExternal = false;
             bool hasPendingOrReady = false;
@@ -1021,4 +1045,392 @@ namespace AIAssistant
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         return m_LastRuns; // copy
     }
+
+    // =================================================================
+    // Per-item fan-out helpers
+    // =================================================================
+
+    FilterDef const* WorkflowRuntimeManager::FindFilterDef(WorkflowDefinition const& workflowDef,
+                                                           std::string const& filterId) const
+    {
+        for (auto const& filter : workflowDef.m_Filters)
+        {
+            if (filter.m_Id == filterId)
+            {
+                return &filter;
+            }
+        }
+        return nullptr;
+    }
+
+    std::string WorkflowRuntimeManager::ParentTaskId(std::string const& instanceId)
+    {
+        auto const pos = instanceId.find('#');
+        if (pos == std::string::npos)
+        {
+            return instanceId;
+        }
+        return instanceId.substr(0, pos);
+    }
+
+    bool WorkflowRuntimeManager::IsChildInstance(std::string const& instanceId)
+    {
+        return instanceId.find('#') != std::string::npos;
+    }
+
+    void WorkflowRuntimeManager::DispatchFilterEvaluation(ActiveRun& activeRun, std::string const& taskId,
+                                                          TaskDef const& taskDef)
+    {
+        WorkflowDefinition const& workflowDef = activeRun.m_Definition;
+        WorkflowRun& workflowRun = activeRun.m_Run;
+
+        FilterDef const* filterDef = FindFilterDef(workflowDef, taskDef.m_Filter);
+        if (!filterDef)
+        {
+            auto& taskState = workflowRun.m_TaskStates[taskId];
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage =
+                "per_item task '" + taskId + "' references unknown filter '" + taskDef.m_Filter + "'";
+            workflowRun.m_HasFailed = true;
+            return;
+        }
+
+        // Resolve workflow base directory (same logic as ExecuteTaskOnWorker)
+        std::string workflowBaseDir = workflowDef.m_WorkflowBaseDirectoryAbsolute;
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowBaseDirectory;
+        }
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowFileDirectoryAbsolute;
+        }
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowFileDirectory;
+        }
+
+        FilterDef const filterDefCopy = *filterDef;
+        std::string const parentTaskId = taskId;
+
+        if (Core::g_Core == nullptr)
+        {
+            auto& taskState = workflowRun.m_TaskStates[taskId];
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "Core is null";
+            workflowRun.m_HasFailed = true;
+            return;
+        }
+
+        ThreadPool& pool = Core::g_Core->GetThreadPool();
+
+        workflowRun.m_TaskStates[taskId].m_State = TaskInstanceStateKind::Running;
+
+        activeRun.m_FilterEvalTasks[taskId] =
+            pool.SubmitTask(
+                    [filterDefCopy, workflowBaseDir, parentTaskId]() -> FilterEvalResult
+                    {
+                        FilterEvalResult result;
+                        result.m_ParentTaskId = parentTaskId;
+
+                        std::string errorMessage;
+                        FilterEngine engine;
+                        result.m_Items = engine.Evaluate(filterDefCopy, workflowBaseDir, errorMessage);
+
+                        if (!errorMessage.empty())
+                        {
+                            result.m_Success = false;
+                            result.m_ErrorMessage = errorMessage;
+                            return result;
+                        }
+
+                        // Build and write manifest
+                        FilterManifestManager manifestManager;
+                        result.m_Manifest = manifestManager.BuildManifest(filterDefCopy.m_Id, result.m_Items, filterDefCopy);
+
+                        std::string manifestError;
+                        if (!manifestManager.WriteManifest(result.m_Manifest, workflowBaseDir, manifestError))
+                        {
+                            LOG_APP_WARN("[per_item] failed to write manifest for filter '{}': {}", filterDefCopy.m_Id,
+                                         manifestError);
+                        }
+
+                        result.m_Success = true;
+                        return result;
+                    })
+                .share();
+
+        LOG_APP_INFO("[per_item] dispatched filter evaluation for task '{}' (filter '{}')", taskId, taskDef.m_Filter);
+    }
+
+    void WorkflowRuntimeManager::HarvestFilterEvalCompletions(ActiveRun& activeRun)
+    {
+        WorkflowRun& workflowRun = activeRun.m_Run;
+
+        for (auto it = activeRun.m_FilterEvalTasks.begin(); it != activeRun.m_FilterEvalTasks.end();)
+        {
+            std::shared_future<FilterEvalResult>& future = it->second;
+
+            if (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+            {
+                ++it;
+                continue;
+            }
+
+            std::string const parentTaskId = it->first;
+            FilterEvalResult evalResult;
+            bool gotResult = false;
+
+            try
+            {
+                evalResult = future.get();
+                gotResult = true;
+            }
+            catch (std::exception const& e)
+            {
+                auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
+                if (stateIt != workflowRun.m_TaskStates.end())
+                {
+                    stateIt->second.m_State = TaskInstanceStateKind::Failed;
+                    stateIt->second.m_LastErrorMessage = std::string("filter evaluation threw: ") + e.what();
+                }
+                workflowRun.m_HasFailed = true;
+            }
+            catch (...)
+            {
+                auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
+                if (stateIt != workflowRun.m_TaskStates.end())
+                {
+                    stateIt->second.m_State = TaskInstanceStateKind::Failed;
+                    stateIt->second.m_LastErrorMessage = "filter evaluation threw unknown exception";
+                }
+                workflowRun.m_HasFailed = true;
+            }
+
+            if (gotResult)
+            {
+                if (!evalResult.m_Success)
+                {
+                    auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
+                    if (stateIt != workflowRun.m_TaskStates.end())
+                    {
+                        stateIt->second.m_State = TaskInstanceStateKind::Failed;
+                        stateIt->second.m_LastErrorMessage = evalResult.m_ErrorMessage;
+                    }
+                    workflowRun.m_HasFailed = true;
+                }
+                else
+                {
+                    // Look up the task definition to get the filter binding
+                    auto defIt = activeRun.m_Definition.m_Tasks.find(parentTaskId);
+                    if (defIt != activeRun.m_Definition.m_Tasks.end())
+                    {
+                        FanOutPerItemChildren(activeRun, parentTaskId, evalResult, defIt->second);
+                    }
+                    else
+                    {
+                        auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
+                        if (stateIt != workflowRun.m_TaskStates.end())
+                        {
+                            stateIt->second.m_State = TaskInstanceStateKind::Failed;
+                            stateIt->second.m_LastErrorMessage = "task definition not found after filter eval";
+                        }
+                        workflowRun.m_HasFailed = true;
+                    }
+                }
+            }
+
+            it = activeRun.m_FilterEvalTasks.erase(it);
+        }
+    }
+
+    void WorkflowRuntimeManager::FanOutPerItemChildren(ActiveRun& activeRun, std::string const& parentTaskId,
+                                                       FilterEvalResult const& evalResult, TaskDef const& taskDef)
+    {
+        WorkflowRun& workflowRun = activeRun.m_Run;
+        WorkflowDefinition const& workflowDef = activeRun.m_Definition;
+
+        FilterDef const* filterDef = FindFilterDef(workflowDef, taskDef.m_Filter);
+        std::string const binding = filterDef ? filterDef->m_Binding : "item";
+
+        std::vector<std::string> childIds;
+        childIds.reserve(evalResult.m_Items.size());
+
+        // Read previous manifest for freshness comparison
+        FilterManifestManager manifestManager;
+        FilterManifest previousManifest;
+        std::string prevManifestError;
+
+        std::string workflowBaseDir = workflowDef.m_WorkflowBaseDirectoryAbsolute;
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowBaseDirectory;
+        }
+
+        bool const hasPreviousManifest =
+            manifestManager.ReadManifest(taskDef.m_Filter, workflowBaseDir, previousManifest, prevManifestError);
+
+        FilterManifestDiff diff;
+        if (hasPreviousManifest)
+        {
+            diff = manifestManager.CompareManifests(previousManifest, evalResult.m_Manifest);
+        }
+
+        size_t skippedCount = 0;
+
+        for (auto const& item : evalResult.m_Items)
+        {
+            std::string const childId = parentTaskId + "#" + std::to_string(item.m_Index);
+            childIds.push_back(childId);
+
+            TaskInstanceState childState;
+            childState.m_State = TaskInstanceStateKind::Pending;
+            childState.m_AttemptCount = 0;
+
+            // Inject filter item values with binding prefix
+            for (auto const& [fieldName, fieldValue] : item.m_Values)
+            {
+                childState.m_InputValues[binding + "." + fieldName] = fieldValue;
+            }
+
+            // Also inject the raw index and key
+            childState.m_InputValues[binding + "._index"] = std::to_string(item.m_Index);
+            childState.m_InputValues[binding + "._key"] = item.m_Key;
+            childState.m_InputValues[binding + "._source_path"] = item.m_SourcePath;
+
+            // Per-item freshness: skip if unchanged and outputs exist
+            if (hasPreviousManifest && !diff.m_ExpressionChanged)
+            {
+                bool isUnchanged = false;
+                for (size_t unchangedIdx : diff.m_UnchangedIndices)
+                {
+                    if (unchangedIdx == item.m_Index)
+                    {
+                        isUnchanged = true;
+                        break;
+                    }
+                }
+
+                if (isUnchanged)
+                {
+                    // Check if output files exist (simple existence check)
+                    bool outputsExist = true;
+                    for (auto const& fileOutput : taskDef.m_FileOutputs)
+                    {
+                        // Substitute binding variables in the output path
+                        std::string resolvedOutput = fileOutput;
+                        for (auto const& [k, v] : childState.m_InputValues)
+                        {
+                            std::string const placeholder = "{{" + k + "}}";
+                            size_t pos = resolvedOutput.find(placeholder);
+                            while (pos != std::string::npos)
+                            {
+                                resolvedOutput.replace(pos, placeholder.size(), v);
+                                pos = resolvedOutput.find(placeholder, pos + v.size());
+                            }
+                        }
+
+                        if (!resolvedOutput.empty() && !fs::exists(resolvedOutput))
+                        {
+                            outputsExist = false;
+                            break;
+                        }
+                    }
+
+                    if (outputsExist && !taskDef.m_FileOutputs.empty())
+                    {
+                        childState.m_State = TaskInstanceStateKind::Skipped;
+                        ++skippedCount;
+                    }
+                }
+            }
+
+            workflowRun.m_TaskStates[childId] = std::move(childState);
+        }
+
+        activeRun.m_PerItemChildren[parentTaskId] = std::move(childIds);
+
+        LOG_APP_INFO("[per_item] fan-out for task '{}': {} children ({} skipped as fresh)", parentTaskId,
+                     evalResult.m_Items.size(), skippedCount);
+    }
+
+    void WorkflowRuntimeManager::AggregatePerItemResults(ActiveRun& activeRun)
+    {
+        WorkflowRun& workflowRun = activeRun.m_Run;
+
+        for (auto const& [parentTaskId, childIds] : activeRun.m_PerItemChildren)
+        {
+            auto parentIt = workflowRun.m_TaskStates.find(parentTaskId);
+            if (parentIt == workflowRun.m_TaskStates.end())
+            {
+                continue;
+            }
+
+            // Parent must be Running (set during DispatchFilterEvaluation)
+            if (parentIt->second.m_State != TaskInstanceStateKind::Running)
+            {
+                continue;
+            }
+
+            bool allTerminal = true;
+            bool anyFailed = false;
+            size_t succeededCount = 0;
+            size_t skippedCount = 0;
+
+            for (std::string const& childId : childIds)
+            {
+                auto childIt = workflowRun.m_TaskStates.find(childId);
+                if (childIt == workflowRun.m_TaskStates.end())
+                {
+                    allTerminal = false;
+                    continue;
+                }
+
+                TaskInstanceStateKind const childState = childIt->second.m_State;
+
+                if (!IsTerminal(childState))
+                {
+                    allTerminal = false;
+                }
+
+                if (childState == TaskInstanceStateKind::Failed)
+                {
+                    anyFailed = true;
+                }
+                else if (childState == TaskInstanceStateKind::Succeeded)
+                {
+                    ++succeededCount;
+                }
+                else if (childState == TaskInstanceStateKind::Skipped)
+                {
+                    ++skippedCount;
+                }
+            }
+
+            if (!allTerminal)
+            {
+                continue;
+            }
+
+            if (anyFailed)
+            {
+                parentIt->second.m_State = TaskInstanceStateKind::Failed;
+                parentIt->second.m_LastErrorMessage =
+                    "per_item: one or more child instances failed (" + std::to_string(childIds.size()) + " total)";
+                workflowRun.m_HasFailed = true;
+            }
+            else
+            {
+                parentIt->second.m_State = TaskInstanceStateKind::Succeeded;
+            }
+
+            parentIt->second.m_OutputsJson = "children=" + std::to_string(childIds.size()) +
+                                             ";succeeded=" + std::to_string(succeededCount) +
+                                             ";skipped=" + std::to_string(skippedCount);
+
+            LOG_APP_INFO("[per_item] parent '{}' completed: {} children, {} succeeded, {} skipped", parentTaskId,
+                         childIds.size(), succeededCount, skippedCount);
+        }
+    }
+
 } // namespace AIAssistant

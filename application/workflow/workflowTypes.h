@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
    License: GPL-3.0
 
    Permission is hereby granted, free of charge, to any person
@@ -195,6 +195,50 @@ namespace AIAssistant
     };
 
     // ---------------------------------------------------------------------
+    // Filter definitions (v1.1)
+    // ---------------------------------------------------------------------
+
+    struct FilterSource
+    {
+        // Source kind: "csv", "text_lines", "query", "polarion_query"
+        std::string m_Kind;
+
+        // csv / text_lines: source file path (resolved relative to Workflow Base Directory)
+        std::string m_Path;
+
+        // csv only
+        std::string m_Delimiter{","};
+        bool m_HasHeader{true};
+        std::string m_Range; // e.g. "10-20", "5-", "-50"
+
+        // text_lines only
+        bool m_SkipEmpty{true};
+
+        // query only: path to query index
+        std::string m_IndexPath;
+
+        // query / polarion_query: query expression
+        std::string m_Query;
+
+        // query / polarion_query: fields to extract per hit
+        std::vector<std::string> m_Fields;
+
+        // polarion_query only
+        std::string m_BaseUrl;
+        std::string m_ProjectId;
+        std::string m_KeyName; // KeyManager credential name (never stored in JCWF)
+        uint32_t m_PageSize{100};
+    };
+
+    struct FilterDef
+    {
+        std::string m_Id;
+        FilterSource m_Source;
+        std::string m_Binding;      // prefix for injected inputs (e.g. "item", "row")
+        uint32_t m_MaxItems{10000}; // 0 = unlimited
+    };
+
+    // ---------------------------------------------------------------------
     // Task definition (static configuration)
     // ---------------------------------------------------------------------
 
@@ -247,6 +291,9 @@ namespace AIAssistant
 
         // Raw JSON for task-specific "params" object.
         std::string m_ParamsJson;
+
+        // JCWF v1.1: "filter" — references a filter ID for per_item expansion.
+        std::string m_Filter;
     };
 
     // Compatibility alias for code that used TaskDefinition naming today
@@ -308,6 +355,9 @@ namespace AIAssistant
 
         // JCWF: "dataflow"
         std::vector<DataflowDef> m_Dataflows;
+
+        // JCWF v1.1: "filters" — filter definitions for per_item expansion.
+        std::vector<FilterDef> m_Filters;
 
         // JCWF: "defaults" – raw JSON kept for serialization; parsed fields in m_Defaults.
         std::string m_DefaultsJson;

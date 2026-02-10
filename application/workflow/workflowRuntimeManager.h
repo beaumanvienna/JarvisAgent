@@ -28,6 +28,8 @@
 #include <vector>
 
 #include "aiRequestPool.h"
+#include "workflow/filter/filterEngine.h"
+#include "workflow/filter/filterManifest.h"
 #include "workflowTypes.h"
 
 namespace AIAssistant
@@ -92,6 +94,15 @@ namespace AIAssistant
             TaskInstanceState m_TaskState;
         };
 
+        struct FilterEvalResult
+        {
+            std::string m_ParentTaskId;
+            bool m_Success{false};
+            std::string m_ErrorMessage;
+            std::vector<FilterItem> m_Items;
+            FilterManifest m_Manifest;
+        };
+
         struct PendingRun
         {
             std::string m_WorkflowId;
@@ -105,6 +116,12 @@ namespace AIAssistant
             WorkflowRun m_Run;
 
             std::unordered_map<std::string, std::shared_future<TaskExecutionResult>> m_RunningTasks;
+
+            // Per-item fan-out: filter evaluation futures (parent taskId → future)
+            std::unordered_map<std::string, std::shared_future<FilterEvalResult>> m_FilterEvalTasks;
+
+            // Per-item fan-out: parent taskId → child instance IDs (e.g. "taskA" → ["taskA#0", "taskA#1"])
+            std::unordered_map<std::string, std::vector<std::string>> m_PerItemChildren;
 
             bool m_CancelRequested{false};
         };
@@ -124,6 +141,16 @@ namespace AIAssistant
 
         void DrainAiRequestCompletions();
         bool TryApplyAiCompletion(AiRequestCompletion const& completion);
+
+        // Per-item fan-out helpers
+        FilterDef const* FindFilterDef(WorkflowDefinition const& workflowDef, std::string const& filterId) const;
+        void DispatchFilterEvaluation(ActiveRun& activeRun, std::string const& taskId, TaskDef const& taskDef);
+        void HarvestFilterEvalCompletions(ActiveRun& activeRun);
+        void FanOutPerItemChildren(ActiveRun& activeRun, std::string const& parentTaskId, FilterEvalResult const& evalResult,
+                                   TaskDef const& taskDef);
+        void AggregatePerItemResults(ActiveRun& activeRun);
+        static std::string ParentTaskId(std::string const& instanceId);
+        static bool IsChildInstance(std::string const& instanceId);
 
     private:
         mutable std::mutex m_Mutex;

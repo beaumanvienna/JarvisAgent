@@ -1,11 +1,19 @@
-import type { EditorGraph, EditorTaskEdge, EditorTaskNode } from "./types";
-import type { JcwfFile, JcwfTask } from "../jcwf/types";
+import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
+import type { JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 
 function displayTitle(task: JcwfTask): { title: string; subtitle?: string }
 {
   return {
     title: task.label && task.label.length > 0 ? task.label : task.id,
-    subtitle: task.type,
+    subtitle: task.mode === "per_item" ? `${task.type} (per_item)` : task.type,
+  };
+}
+
+function filterDisplayTitle(filter: JcwfFilter): { title: string; subtitle?: string }
+{
+  return {
+    title: filter.id,
+    subtitle: filter.source.kind,
   };
 }
 
@@ -95,17 +103,32 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     }
   }
 
-  const nodes: EditorTaskNode[] = taskEntries.map(([taskId, taskValue]) => {
+  const taskNodes: EditorTaskNode[] = taskEntries.map(([taskId, taskValue]) => {
     const task = taskValue as JcwfTask;
     const { title, subtitle } = displayTitle(task);
     const position = positionByTaskId.get(taskId) ?? { x: 0, y: 0 };
     return {
       id: taskId,
-      type: "task",
+      type: "task" as const,
       position,
       data: { task, title, subtitle },
     };
   });
+
+  // Filter nodes — placed to the left of the leftmost task column
+  const filters = Array.isArray(jcwf.filters) ? jcwf.filters : [];
+  const filterNodes: EditorFilterNode[] = filters.map((filter, index) => {
+    const { title, subtitle } = filterDisplayTitle(filter);
+    const minX = sortedLevels.length > 0 ? (sortedLevels[0] * cellW) : 0;
+    return {
+      id: `filter:${filter.id}`,
+      type: "filter" as const,
+      position: { x: minX - cellW, y: index * cellH },
+      data: { filter, title, subtitle },
+    };
+  });
+
+  const nodes: EditorNode[] = [...filterNodes, ...taskNodes];
 
   const edges: EditorTaskEdge[] = [];
   for (const [taskId, taskValue] of taskEntries)
@@ -123,6 +146,20 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
         id: `dep:${depId}->${taskId}`,
         source: depId,
         target: taskId,
+      });
+    }
+
+    // Auto fan-out edge: filter → per_item task
+    if (task.mode === "per_item" && task.filter)
+    {
+      const filterNodeId = `filter:${task.filter}`;
+      edges.push({
+        id: `fanout:${filterNodeId}->${taskId}`,
+        source: filterNodeId,
+        target: taskId,
+        style: { strokeDasharray: "6 3", stroke: "rgba(180, 140, 255, 0.7)" },
+        label: "per_item",
+        labelStyle: { fill: "rgba(180, 140, 255, 0.9)", fontSize: 10 },
       });
     }
   }

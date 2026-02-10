@@ -1,0 +1,68 @@
+{
+  "version": "1.1",
+  "id": "goKartComplianceCheck",
+  "label": "Go-Kart Procurement Compliance Check",
+  "doc": [
+    "Fetches all procurement requirements from the Polarion mockup and uses AI",
+    "to assess each requirement against our platform go-kart specification.",
+    "",
+    "For each requirement the AI determines:",
+    "  - COMPLIANT or NON-COMPLIANT",
+    "  - What needs to change if non-compliant",
+    "  - Estimated cost and difficulty"
+  ],
+  "base_directory": ".",
+  "manual_start": true,
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "filters": [
+    {
+      "id": "polarion-reqs",
+      "source": {
+        "kind": "polarion_query",
+        "base_url": "http://localhost:18080/polarion",
+        "project_id": "GoKartProcurement",
+        "query": "type:requirement",
+        "fields": ["id", "title", "description", "status", "severity", "priority"],
+        "key_name": "polarion",
+        "page_size": 100
+      },
+      "binding": "req",
+      "max_items": 100
+    }
+  ],
+  "tasks": {
+    "assessRequirement": {
+      "id": "assessRequirement",
+      "type": "ai_call",
+      "label": "Assess requirement compliance",
+      "doc": "For each Polarion requirement, AI compares it against our platform go-kart spec.",
+      "mode": "per_item",
+      "filter": "polarion-reqs",
+      "working_directory": "../queue/goKartComplianceCheck/01_assessRequirement",
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "Write succinct technical assessments. Be direct and factual.\nUse bullet points. State compliance status clearly at the top of your response.\nIf non-compliant, quantify the gap and estimate cost in EUR.\nKeep each assessment under 200 words.\n"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_compareRequirement.txt",
+            "content": "Compare the procurement requirement (PROB) to our platform go-kart design (CNTX).\n\n1. State: COMPLIANT or NON-COMPLIANT\n2. Quote the specific requirement value and our platform value\n3. If non-compliant:\n   - Explain what needs to change in our platform design\n   - Estimate the engineering cost (EUR) and timeline\n   - Rate difficulty: LOW / MEDIUM / HIGH\n4. If compliant: briefly confirm which platform feature satisfies it\n"
+          }
+        ],
+        "cntx_files": [
+          "../../../workflows/goKartPlatformSpec.md"
+        ]
+      }
+    }
+  }
+}

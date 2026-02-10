@@ -1067,7 +1067,7 @@ Iterates over work items from a Polarion ALM REST API query. The filter evaluati
 - `project_id` (REQUIRED) — Polarion project identifier.
 - `query` (REQUIRED) — Polarion work item query expression (Lucene-style syntax as supported by the Polarion REST API).
 - `fields` (OPTIONAL) — List of work item fields to retrieve. If omitted, the API returns default fields.
-- `key_name` (REQUIRED) — Named credential from `KeyManager` for HTTP Basic authentication (`user:password`). Credentials MUST NOT appear in the JCWF file.
+- `key_name` (REQUIRED) — Named credential from `KeyManager` for Bearer token (PAT) authentication. The `api_key` field of the resolved provider is sent as `Authorization: Bearer <token>`. Credentials MUST NOT appear in the JCWF file.
 - `page_size` (OPTIONAL, integer, default: 100) — Number of items per page. The runtime paginates automatically until all results are fetched or `max_items` is reached.
 
 **REST API mapping:**
@@ -1080,7 +1080,7 @@ GET {base_url}/rest/v1/projects/{project_id}/workitems
   &page[number]={N}
 ```
 
-Authentication: HTTP Basic via `key_name` → `KeyManager` lookup (same pattern as AI provider keys).
+Authentication: Bearer token (PAT) via `key_name` → `KeyManager` lookup (same pattern as AI provider keys).
 
 **Pagination:** The `FilterEngine` fetches pages sequentially, writing each item to `<filterID>/<filterID>-<k>.json` as it goes. Peak memory usage is bounded to one page. Pagination stops when:
 - The API returns fewer items than `page_size` (last page), or

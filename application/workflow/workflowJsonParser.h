@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -76,6 +76,15 @@ namespace AIAssistant
 
         bool ParseDefaults(simdjson::ondemand::object& jsonObject, WorkflowDefaults& defaultsOut,
                            std::string& errorMessage) const;
+
+        // Filter parsers (v1.1)
+        bool ParseFilters(simdjson::ondemand::value& jsonValue, std::vector<FilterDef>& filtersOut,
+                          std::string& errorMessage) const;
+
+        bool ParseFilter(simdjson::ondemand::object& jsonObject, FilterDef& filterOut, std::string& errorMessage) const;
+
+        bool ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut,
+                               std::string& errorMessage) const;
 
         // Utility helpers
         bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;

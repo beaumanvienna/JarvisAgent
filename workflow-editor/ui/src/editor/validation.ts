@@ -17,6 +17,12 @@ export function validateGraph(graph: EditorGraph): ValidationResult
 
   for (const node of graph.nodes)
   {
+    // Filter nodes are not validated here
+    if (node.type === "filter")
+    {
+      continue;
+    }
+
     const errors: string[] = [];
     const warnings: string[] = [];
     const infos: string[] = [];
@@ -30,7 +36,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
       errors.push("Duplicate task id.");
     }
 
-    const task = node.data.task;
+    const task = (node.data as { task: { type?: string; working_directory?: string } }).task;
     if (!task.type)
     {
       errors.push("Missing task.type.");

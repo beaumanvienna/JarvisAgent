@@ -1,5 +1,5 @@
 import type { Edge, Node } from "reactflow";
-import type { JcwfTask } from "../jcwf/types";
+import type { JcwfFilter, JcwfTask } from "../jcwf/types";
 
 export type RuntimeTaskState = "queued" | "running" | "success" | "failed" | "cancelled" | "unknown";
 
@@ -18,11 +18,21 @@ export type EditorTaskNodeData = {
   runtimeRunId?: string;
 };
 
+export type EditorFilterNodeData = {
+  filter: JcwfFilter;
+  title: string;
+  subtitle?: string;
+  runtimeItemCount?: number;
+  runtimeProgress?: string;
+};
+
 export type EditorTaskNode = Node<EditorTaskNodeData> & { type: "task" };
+export type EditorFilterNode = Node<EditorFilterNodeData> & { type: "filter" };
+export type EditorNode = EditorTaskNode | EditorFilterNode;
 export type EditorTaskEdge = Edge;
 
 export type EditorGraph = {
-  nodes: EditorTaskNode[];
+  nodes: EditorNode[];
   edges: EditorTaskEdge[];
 };
 

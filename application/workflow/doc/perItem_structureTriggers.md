@@ -520,10 +520,63 @@ GET {base_url}/rest/v1/projects/{project_id}/workitems
   &page[number]={N}
 ```
 
-Responsibilities:
+#### Authentication — Bearer Token (Personal Access Token)
+
+Polarion uses Personal Access Tokens (PATs) with the Bearer scheme:
+
+```
+Authorization: Bearer <personal_access_token>
+```
+
+The PAT is stored in `KeyManager` as a provider entry.  The JCWF
+filter's `key_name` field references the provider by logical name.
+At runtime, `PolarionClient` resolves the key via:
+
+```
+source.m_KeyName → KeyManager::GetProvider(name) → provider->m_ApiKey
+```
+
+**Adding the Polarion PAT:**
+
+Use the **AI Keys** page in the workflow editor UI (or the
+`POST /api/settings/providers` backend endpoint) to create a provider
+entry:
+
+- **Name:** `polarion_pat` (or any logical name)
+- **API Key:** the Polarion Personal Access Token
+
+Then click **Save Encrypted** to persist to `keys.json.enc`.
+
+Only `api_key` is used by `PolarionClient`.  The other provider
+fields (`endpoint`, `default_model`, `api_type`) are unused — the
+Polarion server URL comes from `source.m_BaseUrl` in the JCWF
+filter definition, not from the provider config.
+
+**JCWF filter example:**
+
+```jsonc
+{
+    "id": "polarion-reqs",
+    "source": {
+        "kind": "polarion_query",
+        "base_url": "https://polarion.example.com/polarion",
+        "project_id": "MyProject",
+        "key_name": "polarion_pat",
+        "query": "type:requirement AND status:approved",
+        "fields": ["id", "title", "status", "severity"],
+        "page_size": 100
+    },
+    "binding": "item",
+    "max_items": 10000
+}
+```
+
+Credentials never appear in JCWF files — only the logical key name.
+
+#### Responsibilities
 
 - URL-encode the query expression and field list.
-- HTTP Basic authentication via `key_name` → `KeyManager` lookup
+- Bearer token authentication via `key_name` → `KeyManager` lookup
   (same pattern as AI provider keys — credentials never in JCWF).
 - Paginate automatically (`page[size]` default 100).  Stop when the
   API returns fewer items than `page_size` or `max_items` is reached.
@@ -532,14 +585,14 @@ Responsibilities:
   bounding peak memory to one page of results.
 - Return the full item list to `FilterEngine` for manifest creation.
 
-Integration with `FilterEngine`:
+#### Integration with `FilterEngine`
 
 - `FilterEngine::Evaluate` dispatches to `PolarionClient::FetchAll`
   when `source.kind == "polarion_query"`.
 - The returned items follow the same `FilterItem` shape as other
   source kinds (index, binding fields, key for stable identity).
 
-Error handling:
+#### Error handling
 
 - HTTP errors (4xx/5xx) → filter evaluation fails, task does not
   fan out.
@@ -639,6 +692,7 @@ Error handling:
 6. **Orphan cleanup:** No automatic deletion.  Runtime logs a warning
    for output files whose source items are no longer in the result set.
 7. **Polarion REST API:** C++ `PolarionClient` class using libcurl
-   (already vendored).  Paginated fetch with `page[size]=100`.
-   Credentials via `KeyManager` (`key_name` field).  Peak memory
-   bounded to one page.  Items written to disk incrementally.
+   (already vendored).  Bearer token (PAT) authentication via
+   `KeyManager` (`key_name` → `provider.api_key`).  Paginated fetch
+   with `page[size]=100`.  Peak memory bounded to one page.  Items
+   written to disk incrementally.

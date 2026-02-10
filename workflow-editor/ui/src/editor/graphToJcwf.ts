@@ -1,5 +1,5 @@
-import type { EditorGraph, EditorTaskEdge, EditorTaskNode } from "./types";
-import type { JcwfFile, JcwfTask } from "../jcwf/types";
+import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
+import type { JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 
 type CycleError = { ok: false; message: string; cycleNodes: string[]; };
 type Ok = { ok: true; jcwf: JcwfFile; };
@@ -105,14 +105,23 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     return { ok: false, message: "Cycle detected. Export aborted.", cycleNodes };
   }
 
+  // Separate task nodes and filter nodes
+  const taskNodes = (graph.nodes as EditorNode[]).filter((n): n is EditorTaskNode => n.type === "task");
+  const filterNodes = (graph.nodes as EditorNode[]).filter((n): n is EditorFilterNode => n.type === "filter");
+
   const tasks: Record<string, JcwfTask> = {};
-  const sortedNodes = [...(graph.nodes as EditorTaskNode[])].sort((a, b) => a.id.localeCompare(b.id));
+  const sortedNodes = [...taskNodes].sort((a, b) => a.id.localeCompare(b.id));
   for (const node of sortedNodes)
   {
     const task = { ...(node.data.task as JcwfTask) };
     task.id = node.id;
     tasks[node.id] = task;
   }
+
+  // Collect filters sorted by id
+  const filters: JcwfFilter[] = filterNodes
+    .map((n) => ({ ...n.data.filter }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 
   // compute depends_on from edges
   for (const taskId of Object.keys(tasks))
@@ -153,10 +162,13 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     orderedTasks[taskId] = tasks[taskId];
   }
 
+  const hasFilters = filters.length > 0;
+
   const jcwf: JcwfFile = {
-    version: "1.0",
+    version: hasFilters ? "1.1" : "1.0",
     id: workflowId,
     tasks: orderedTasks,
+    ...(hasFilters ? { filters } : {}),
   };
 
   return { ok: true, jcwf };
