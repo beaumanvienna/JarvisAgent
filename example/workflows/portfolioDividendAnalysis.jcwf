@@ -1,0 +1,191 @@
+{
+  "version": "1.1",
+  "id": "portfolioDividendAnalysis",
+  "label": "Portfolio Dividend Analysis",
+  "doc": [
+    "Analyzes a 60-position investment portfolio for dividend income.",
+    "",
+    "For each position the AI looks up the current annual dividend yield,",
+    "computes the weighted contribution to portfolio income, and reports",
+    "the 5-year dividend trend.",
+    "",
+    "A final aggregation task combines all per-position reports into an",
+    "account summary with the estimated total portfolio dividend yield."
+  ],
+  "base_directory": ".",
+  "manual_start": true,
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "defaults": {
+    "timeout_ms": 30000,
+    "ai": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini"
+    }
+  },
+  "filters": [
+    {
+      "id": "positions",
+      "source": {
+        "kind": "csv",
+        "path": "port62pos.csv",
+        "delimiter": ",",
+        "has_header": true
+      },
+      "binding": "pos",
+      "max_items": 100
+    }
+  ],
+  "tasks": {
+    "lookupDividend": {
+      "id": "lookupDividend",
+      "type": "ai_call",
+      "label": "Look up dividend for position",
+      "doc": "For each portfolio position, find the annual dividend yield and compute the weighted contribution.",
+      "mode": "per_item",
+      "filter": "positions",
+      "working_directory": "../queue/portfolioDividendAnalysis/01_lookupDividend",
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "Be succinct and precise. Report numbers clearly.\nUse a consistent structured format.\nKeep each position analysis under 150 words.\n"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_dividendLookup.txt",
+            "content": "For the stock or ETF position provided (PROB):\n\n1. Look up the current annual dividend yield (%)\n2. Look up the annual dividend per share ($)\n3. Given the portfolio allocation percentage, compute the\n   weighted dividend contribution to total portfolio yield:\n     weighted contribution = yield * allocation / 100\n4. State whether the dividend has been growing, stable,\n   or declining over the past 5 years\n\nFormat your response exactly as:\n  Symbol: <TICKER>\n  Name: <full name>\n  Allocation: <X.XX%>\n  Dividend Yield: <X.XX%>\n  Annual Dividend/Share: $<X.XX>\n  Weighted Contribution: <X.XXXX%>\n  Dividend Trend (5yr): Growing | Stable | Declining\n  Notes: <one-line note>\n"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_portfolio.txt",
+            "content": "This is a 60-position investment portfolio.\nYou are analyzing one position at a time.\nThe allocation percentage represents how much of the total\nportfolio value is invested in this position.\nIf the security is a bond ETF or fixed-income fund, report\nthe SEC yield or distribution yield as the dividend yield.\n"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_{{pos.Symbol}}.txt",
+            "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nPortfolio Allocation: {{pos.Percentage}}\n"
+          }
+        ]
+      },
+      "params": {
+        "mode": "one_shot"
+      },
+      "outputs": {
+        "dividend_report": {
+          "type": "string"
+        }
+      }
+    },
+    "portfolioSummary": {
+      "id": "portfolioSummary",
+      "type": "ai_call",
+      "label": "Portfolio dividend summary",
+      "doc": "Aggregates all per-position dividend reports into an account-level summary.",
+      "mode": "single",
+      "depends_on": [
+        "lookupDividend"
+      ],
+      "working_directory": "../queue/portfolioDividendAnalysis/02_portfolioSummary",
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_succinct.txt",
+            "content": "Be succinct and professional. Present a clear executive summary.\nUse tables where appropriate. Round percentages to two decimals.\n"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_portfolioSummary.txt",
+            "content": "You are given dividend reports for all 60 positions in a portfolio (CNTX files).\n\nProduce an account summary with:\n\n1. **Estimated Total Portfolio Dividend Yield** \u2014 sum of all weighted contributions\n2. **Top 10 Dividend Contributors** \u2014 sorted by weighted contribution (table)\n3. **Bottom 10 Contributors** \u2014 positions with lowest or zero yield (table)\n4. **Dividend Trend Overview** \u2014 how many positions are Growing / Stable / Declining\n5. **Asset Class Breakdown** \u2014 group positions into Equities, REITs, Bond ETFs,\n   and other categories; show subtotal yield per group\n6. **Key Observations** \u2014 3-5 bullet points about the portfolio's income profile,\n   concentration risk, and suggestions for improvement\n"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_summarize.txt",
+            "content": "Analyze all 60 dividend reports provided as context files and produce a comprehensive portfolio dividend summary as described in the TASK file.\n"
+          }
+        ],
+        "cntx_files": [
+          "../01_lookupDividend/PROB_LQD.output.txt",
+          "../01_lookupDividend/PROB_BNDX.output.txt",
+          "../01_lookupDividend/PROB_WELL.output.txt",
+          "../01_lookupDividend/PROB_JPM.output.txt",
+          "../01_lookupDividend/PROB_T.output.txt",
+          "../01_lookupDividend/PROB_SPG.output.txt",
+          "../01_lookupDividend/PROB_BAC.output.txt",
+          "../01_lookupDividend/PROB_D.output.txt",
+          "../01_lookupDividend/PROB_JNJ.output.txt",
+          "../01_lookupDividend/PROB_LTC.output.txt",
+          "../01_lookupDividend/PROB_O.output.txt",
+          "../01_lookupDividend/PROB_SO.output.txt",
+          "../01_lookupDividend/PROB_MAIN.output.txt",
+          "../01_lookupDividend/PROB_NEE.output.txt",
+          "../01_lookupDividend/PROB_DUK.output.txt",
+          "../01_lookupDividend/PROB_VZ.output.txt",
+          "../01_lookupDividend/PROB_COST.output.txt",
+          "../01_lookupDividend/PROB_PFE.output.txt",
+          "../01_lookupDividend/PROB_NLY.output.txt",
+          "../01_lookupDividend/PROB_RITM.output.txt",
+          "../01_lookupDividend/PROB_AVGO.output.txt",
+          "../01_lookupDividend/PROB_IEF.output.txt",
+          "../01_lookupDividend/PROB_IEI.output.txt",
+          "../01_lookupDividend/PROB_SHY.output.txt",
+          "../01_lookupDividend/PROB_IRM.output.txt",
+          "../01_lookupDividend/PROB_AFL.output.txt",
+          "../01_lookupDividend/PROB_MRK.output.txt",
+          "../01_lookupDividend/PROB_ABBV.output.txt",
+          "../01_lookupDividend/PROB_RY.output.txt",
+          "../01_lookupDividend/PROB_WFC.output.txt",
+          "../01_lookupDividend/PROB_MDT.output.txt",
+          "../01_lookupDividend/PROB_TD.output.txt",
+          "../01_lookupDividend/PROB_DIS.output.txt",
+          "../01_lookupDividend/PROB_AMGN.output.txt",
+          "../01_lookupDividend/PROB_HD.output.txt",
+          "../01_lookupDividend/PROB_TGT.output.txt",
+          "../01_lookupDividend/PROB_AAPL.output.txt",
+          "../01_lookupDividend/PROB_RTX.output.txt",
+          "../01_lookupDividend/PROB_XOM.output.txt",
+          "../01_lookupDividend/PROB_TROW.output.txt",
+          "../01_lookupDividend/PROB_MSFT.output.txt",
+          "../01_lookupDividend/PROB_WM.output.txt",
+          "../01_lookupDividend/PROB_CMCSA.output.txt",
+          "../01_lookupDividend/PROB_UNP.output.txt",
+          "../01_lookupDividend/PROB_CAT.output.txt",
+          "../01_lookupDividend/PROB_NKE.output.txt",
+          "../01_lookupDividend/PROB_KO.output.txt",
+          "../01_lookupDividend/PROB_PSX.output.txt",
+          "../01_lookupDividend/PROB_LMT.output.txt",
+          "../01_lookupDividend/PROB_TXRH.output.txt",
+          "../01_lookupDividend/PROB_WBD.output.txt",
+          "../01_lookupDividend/PROB_CSCO.output.txt",
+          "../01_lookupDividend/PROB_BA.output.txt",
+          "../01_lookupDividend/PROB_CVX.output.txt",
+          "../01_lookupDividend/PROB_V.output.txt",
+          "../01_lookupDividend/PROB_MMM.output.txt",
+          "../01_lookupDividend/PROB_EL.output.txt",
+          "../01_lookupDividend/PROB_UNH.output.txt",
+          "../01_lookupDividend/PROB_OXY.output.txt",
+          "../01_lookupDividend/PROB_UPS.output.txt"
+        ]
+      },
+      "params": {
+        "mode": "one_shot"
+      },
+      "outputs": {
+        "summary": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

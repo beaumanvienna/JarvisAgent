@@ -395,6 +395,11 @@ namespace AIAssistant
         // Produced output values by logical slot name (e.g. "markdown_path").
         std::unordered_map<std::string, std::string> m_OutputValues;
 
+        // Per-item child instance ID (e.g. "lookupDividend#0"). Set by the runtime
+        // before calling Execute() so the executor can use it for request pool binding.
+        // Empty for single-mode tasks (executor falls back to TaskDef.m_Id).
+        std::string m_TaskInstanceId;
+
         // ai_call correlation (required for event-driven async completion)
         int64_t m_ExternalRequestId{0};
         int64_t m_ExternalRequestTimestampNs{0};

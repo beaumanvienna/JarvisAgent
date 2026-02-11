@@ -460,6 +460,22 @@ namespace AIAssistant
         }
 
         // -----------------------------------------------------------------------------------
+        // Path-based AI completion routing for non-PROB_<id>_<ts> output files
+        // (e.g., PROB_NVDA.output.txt written by SessionManager for workflow ai_call tasks)
+        // -----------------------------------------------------------------------------------
+        if (!filePath.empty() && m_AiRequestPool != nullptr)
+        {
+            std::string const stem = filePath.stem().string();
+            if (stem.ends_with(".output"))
+            {
+                if (m_AiRequestPool->OnOutputFileCreated(filePath.string()))
+                {
+                    LOG_APP_INFO("AiRequestPool: path-based completion matched '{}'", filePath.string());
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------------------------
         // Forward remaining file events to correct SessionManager
         // -----------------------------------------------------------------------------------
 

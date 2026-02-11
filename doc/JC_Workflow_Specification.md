@@ -721,59 +721,242 @@ This example uses three different AI providers in a single workflow — each tas
 
 #### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNTX_, PROB_, PROV_)
 
-Tasks MAY describe additional environment and queue-related details:
+An `ai_call` task maps to a **queue folder** — a directory that the JarvisAgent
+**SessionManager** watches.  Files placed in that folder are categorized by
+filename prefix and together drive the AI query pipeline.
+
+##### 3.3.6.1 Queue Folder and the SessionManager
+
+Each `ai_call` task declares a `working_directory` that points to a queue
+folder.  JarvisAgent creates one **SessionManager** instance per watched folder.
+The SessionManager continuously monitors the folder for file changes and
+performs the following:
+
+1. **Categorize** every file by its filename prefix (see 3.3.6.2).
+2. **Assemble the environment** from all STNG_, CNTX_, and TASK_ files (concatenated).
+3. **Dispatch an AI query** for every *requirement file* — i.e., any file that
+   is not STNG_, CNTX_, TASK_, PROV_, a `.output.*` file, or a binary file.
+   The query message is `environment + requirement_content`.
+4. **Write the AI response** to `<stem>.output.<ext>` (e.g., `PROB_NVDA.txt` →
+   `PROB_NVDA.output.txt`).
+5. **Track freshness** — a requirement is re-sent only when its own content or
+   the environment changes (timestamp comparison with the existing output file).
+
+The SessionManager state machine progresses through:
+`CompilingEnvironment` → `SendingQueries` → `AllQueriesSent` → `AllResponsesReceived`.
+
+##### 3.3.6.2 File Categories
+
+| Prefix / Pattern    | Category       | Role                                                                                              |
+|----------------------|----------------|---------------------------------------------------------------------------------------------------|
+| `STNG_*`             | Settings       | **Environment** — sets tone, style, and constraints for the AI (e.g., "be succinct").             |
+| `TASK_*`             | Task           | **Environment** — work instructions describing *what* the AI should produce.                      |
+| `CNTX_*`             | Context        | **Environment** — background information the AI needs to reference.                               |
+| `PROB_*` / any text  | Requirement    | **Query trigger** — each requirement file produces one AI call. Content is appended to the environment and sent as the full prompt. |
+| `PROV_*`             | Provider       | **Configuration** — endpoint URL, model, API type. Never sent to AI. Never contains credentials.  |
+| `*.output.*`         | Ignored        | **Output** — AI response files. Ignored by the categorizer to avoid feedback loops.               |
+| Binary / oversized   | Ignored        | Silently skipped.                                                                                 |
+
+**Key principle:** STNG + CNTX + TASK files form the *shared environment*.
+Every other eligible text file in the folder is a *requirement* and triggers its
+own independent AI query.  The full prompt for each query is:
+
+```
+[all STNG content] + [all CNTX content] + [all TASK content] + [requirement file content]
+```
+
+##### 3.3.6.3 Output Naming Convention
+
+The SessionManager derives the output filename from the requirement filename by
+inserting `.output` before the extension:
+
+| Requirement File          | Output File                  |
+|---------------------------|------------------------------|
+| `PROB_NVDA.txt`           | `PROB_NVDA.output.txt`       |
+| `PROB_summarize.txt`      | `PROB_summarize.output.txt`  |
+| `my_question.txt`         | `my_question.output.txt`     |
+
+For `ai_call` tasks, the **PROB files are the requirement files**.  The
+workflow executor writes PROB files to the task's queue folder; the
+SessionManager dispatches them.
+
+##### 3.3.6.4 `queue_binding` — Declaring Queue Files in JCWF
+
+The `queue_binding` object on a task definition tells the workflow executor
+which files to create in the queue folder before the SessionManager processes
+them.
 
 ```jsonc
-"environment": {
-  "name": "assistant_env_daily_reports",
-  "variables": {
-    "PROJECT": "DailyReports",
-    "LOCALE": "en-US"
-  },
-  "assistant_id": "daily-report-assistant"
-},
 "queue_binding": {
-  "stng_files": ["STNG_daily.txt"],
-  "task_files": ["TASK_summarize.txt"],
-  "cntx_files": ["CNTX_daily.txt"],
-  "prob_files": ["PROB_daily.txt"],
-  "prov_files": ["PROV_provider.json"]
+  "stng_files": [ ... ],
+  "task_files": [ ... ],
+  "cntx_files": [ ... ],
+  "prob_files": [ ... ],
+  "prov_files": [ ... ]
 }
 ```
 
-- `environment` (OPTIONAL, object)  
-  - `name` (OPTIONAL, string): Logical name for this environment.  
-  - `variables` (OPTIONAL, object): Key-value environment variables for shell or Python tasks.  
-  - `assistant_id` (OPTIONAL, string): Identifier for an AI assistant environment.  
-    - For `ai_call` tasks with `mode: "assistant"`, this MAY reference a preconfigured assistant that keeps its own long-lived context. In that case, JCWF does not need to send full context on every call; the backend can rely on the assistant’s stored state.
+- `stng_files` (OPTIONAL, array) — Settings files. Written once; become part of the environment.
+- `task_files` (OPTIONAL, array) — Task instruction files. Written once; become part of the environment.
+- `cntx_files` (OPTIONAL, array) — Context files. Written once (or materialized from upstream task outputs); become part of the environment.
+- `prob_files` (REQUIRED for `ai_call`) — Problem/requirement files. **Each PROB file triggers one AI query.** For `per_item` tasks, each item instance writes its own PROB file with a unique name.
+- `prov_files` (OPTIONAL, array) — Provider configuration. Written by the executor when the task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. The SessionManager reads PROV files to resolve the provider config from the KeyManager.
 
-- `queue_binding` (OPTIONAL, object)  
-  - `stng_files` (OPTIONAL, array): STNG_ settings files associated with this task, for example, the tone of the AI.  
-  - `task_files` (OPTIONAL, array): TASK_ files representing work instructions.  
-  - `cntx_files` (OPTIONAL, array): CNTX_ context files (background information).  
-- `prob_files` (OPTIONAL, array): PROB_ files representing problems/requests (the concrete work item) that the task should address.  
-  - `prov_files` (OPTIONAL, array): PROV_ provider configuration files. Written by `AiCallTaskExecutor` when a task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. Read by `SessionManager` to resolve provider config from `KeyManager`.
+Each entry MAY be either:
 
-Each entry in `stng_files` / `task_files` / `cntx_files` / `prob_files` / `prov_files` MAY be either:
-
-- A string (path to an existing file), or
-- An inline object with file content:
+- A **string** (path to an existing file), or
+- An **inline object** with file content:
 
 ```jsonc
 { "path": "TASK_summarize.txt", "content": "Summarize the report in 5 bullets." }
 ```
 
-If `content` is present, the runtime MUST write (or overwrite) the file at `path` before the task executes.
-This inline form is RECOMMENDED when a workflow is generated automatically and should be runnable without additional files.
+If `content` is present, the runtime MUST write (or overwrite) the file at
+`path` before the SessionManager processes the folder.  This inline form is
+RECOMMENDED when a workflow should be self-contained and runnable without
+additional files.
 
+##### 3.3.6.5 Path Resolution for `queue_binding`
 
-**Path resolution for `queue_binding`:**
+- Relative paths in `queue_binding` entries MUST be resolved relative to the task `working_directory`.
+- When writing inline `content`, the runtime MUST create parent directories if they do not exist.
+- For `cntx_files` path-only entries referencing upstream task outputs (e.g., `"../01_taskA/PROB_foo.output.txt"`), the runtime MUST **materialize** a copy as `CNTX_<filename>` in the current task's working directory so that the SessionManager categorizes it as Context.
 
-- If a `queue_binding` entry is a relative path string, it MUST be resolved relative to the task `working_directory`.
-- If a `queue_binding` entry is an inline object `{ "path": "...", "content": "..." }` and `path` is relative, it MUST be resolved relative to the task `working_directory`.
-- When writing inline `content`, the runtime MUST create the parent directory of the target `path` if it does not exist.
+##### 3.3.6.6 Per-Item Template Substitution *(v1.1)*
 
-JarvisAgent MAY use `queue_binding` to map between high-level tasks and the low-level queue directories. A task can thus have an explicit array of associated STNG_/TASK_/CNTX_/PROB_/PROV_ files when it is an AI or queue-integrated task.
+For `mode: "per_item"` tasks driven by a filter, the runtime MUST perform
+`{{binding.field}}` template substitution on **both** the inline `content`
+**and** the `path` of all `queue_binding` file types (`stng_files`,
+`task_files`, `cntx_files`, `prob_files`).
+
+This uses the same `{{key}}` syntax as `prompt_template` (see 3.3.1).
+
+Available template variables correspond to the filter item's bound values,
+prefixed by the filter's `binding` name:
+
+- `{{binding.fieldName}}` — value of `fieldName` from the filter item (e.g., `{{pos.Symbol}}`).
+- `{{binding._index}}` — 0-based item index within the result set.
+- `{{binding._key}}` — stable identity key (e.g., first column value for CSV sources).
+- `{{binding._source_path}}` — filesystem path of the filter source file.
+
+**Example — per-symbol AI call with a CSV filter (`"binding": "pos"`):**
+
+```jsonc
+"prob_files": [
+  {
+    "path": "PROB_{{pos.Symbol}}.txt",
+    "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nAllocation: {{pos.Percentage}}\n"
+  }
+]
+```
+
+For a portfolio with 60 positions, this produces 60 uniquely named PROB files
+(e.g., `PROB_NVDA.txt`, `PROB_AAPL.txt`, …).  The SessionManager dispatches
+each as an independent AI query and writes the corresponding output files
+(`PROB_NVDA.output.txt`, `PROB_AAPL.output.txt`, …).
+
+**Note:** `{{key}}` substitution applies to `queue_binding` inline `content`
+and `path` strings.  For `file_inputs` and `file_outputs` path templates, use
+`${inputs.key}` syntax (see 3.4).
+
+##### 3.3.6.7 Consuming Upstream Outputs as CNTX Files
+
+A downstream task can reference per-item output files from an upstream task's
+queue folder as `cntx_files`.  The runtime materializes them as `CNTX_*` files
+in the downstream task's working directory so they become part of its
+environment.
+
+```jsonc
+"cntx_files": [
+  "../01_lookupDividend/PROB_NVDA.output.txt",
+  "../01_lookupDividend/PROB_AAPL.output.txt"
+]
+```
+
+Each path-only entry is copied into the current task folder as
+`CNTX_PROB_NVDA.output.txt`, etc.
+
+##### 3.3.6.8 `environment` (Legacy / Optional)
+
+Tasks MAY also declare an `environment` object for shell or Python tasks:
+
+```jsonc
+"environment": {
+  "name": "assistant_env_daily_reports",
+  "variables": { "PROJECT": "DailyReports", "LOCALE": "en-US" },
+  "assistant_id": "daily-report-assistant"
+}
+```
+
+- `name` (OPTIONAL, string): Logical name for this environment.
+- `variables` (OPTIONAL, object): Key-value environment variables for shell or Python tasks.
+- `assistant_id` (OPTIONAL, string): For `ai_call` tasks with `mode: "assistant"`, references a preconfigured assistant that keeps its own long-lived context.
+
+##### 3.3.6.9 Complete AI Call Example
+
+A two-task workflow where the first task makes 60 per-item AI calls and the
+second task summarizes all results:
+
+```jsonc
+{
+  "tasks": {
+    "lookupDividend": {
+      "type": "ai_call",
+      "mode": "per_item",
+      "filter": "positions",
+      "working_directory": "../queue/portfolio/01_lookupDividend",
+      "queue_binding": {
+        "stng_files": [{ "path": "STNG_style.txt", "content": "Be concise.\n" }],
+        "task_files": [{ "path": "TASK_lookup.txt", "content": "Look up the dividend yield.\n" }],
+        "prob_files": [{
+          "path": "PROB_{{pos.Symbol}}.txt",
+          "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nAllocation: {{pos.Percentage}}\n"
+        }]
+      }
+    },
+    "portfolioSummary": {
+      "type": "ai_call",
+      "mode": "single",
+      "depends_on": ["lookupDividend"],
+      "working_directory": "../queue/portfolio/02_portfolioSummary",
+      "queue_binding": {
+        "stng_files": [{ "path": "STNG_style.txt", "content": "Be professional.\n" }],
+        "task_files": [{ "path": "TASK_summary.txt", "content": "Summarize dividend data.\n" }],
+        "prob_files": [{ "path": "PROB_summarize.txt", "content": "Produce the portfolio summary.\n" }],
+        "cntx_files": [
+          "../01_lookupDividend/PROB_NVDA.output.txt",
+          "../01_lookupDividend/PROB_AAPL.output.txt"
+        ]
+      }
+    }
+  }
+}
+```
+
+**Folder state after task 1 completes (01_lookupDividend):**
+
+```
+STNG_style.txt            ← environment (settings)
+TASK_lookup.txt           ← environment (task)
+PROV_provider.json        ← provider config (not sent to AI)
+PROB_NVDA.txt             ← requirement → triggers AI query
+PROB_NVDA.output.txt      ← AI response (output)
+PROB_AAPL.txt             ← requirement → triggers AI query
+PROB_AAPL.output.txt      ← AI response (output)
+… (60 PROB / output pairs)
+```
+
+**Folder state after task 2 completes (02_portfolioSummary):**
+
+```
+STNG_style.txt            ← environment (settings)
+TASK_summary.txt          ← environment (task)
+CNTX_PROB_NVDA.output.txt ← materialized from task 1 output (context)
+CNTX_PROB_AAPL.output.txt ← materialized from task 1 output (context)
+… (60 CNTX files)
+PROB_summarize.txt        ← requirement → triggers AI query
+PROB_summarize.output.txt ← AI response (output)
+```
 
 ---
 

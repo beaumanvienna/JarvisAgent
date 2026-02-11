@@ -61,8 +61,13 @@ namespace AIAssistant
         std::unordered_map<std::string, std::string> m_OutputValues;
     };
 
-    // Tracks pending ai_call requests (identified by PROB_<id>_<ts>) and
-    // allows reacting to their corresponding output artifact (PROB_<id>_<ts>.output.txt).
+    // Tracks pending ai_call requests and allows reacting to their corresponding
+    // output artifacts.  Supports two completion mechanisms:
+    //
+    //  1. PROB_<id>_<ts> naming — legacy path via OnProbFileEvent().
+    //  2. Path-based matching  — new path via OnOutputFileCreated().
+    //     The executor registers the expected output path (e.g. PROB_NVDA.output.txt);
+    //     the pool matches incoming file events by canonical path.
     //
     // IMPORTANT:
     //  - This pool must not require blocking waits for the workflow runtime.
@@ -99,10 +104,14 @@ namespace AIAssistant
                                                     std::string const& runId, std::string const& taskId,
                                                     std::vector<std::string> const& outputFilePaths,
                                                     std::vector<std::string> const& outputSlotNames,
-                                                    uint64_t const timeoutMs);
+                                                    uint64_t const timeoutMs, std::string const& expectedOutputPath = "");
 
         // Returns true if the event was consumed by this pool.
         bool OnProbFileEvent(ProbUtils::ProbFileInfo const& probFileInfo, std::string const& fullFilePath);
+
+        // Path-based completion: called for any .output.txt file event.
+        // Returns true if the path matches a registered expected output.
+        bool OnOutputFileCreated(std::string const& fullFilePath);
 
         // Non-blocking: if the request is completed (success or failure), returns true and consumes the result.
         // If not completed yet, returns false.
@@ -140,6 +149,8 @@ namespace AIAssistant
 
             std::vector<std::string> m_OutputFilePaths;
             std::vector<std::string> m_OutputSlotNames;
+
+            std::string m_ExpectedOutputPath;
         };
 
         struct PendingEntry
@@ -196,6 +207,9 @@ namespace AIAssistant
 
         std::mutex m_CompletedMutex;
         std::queue<AiRequestCompletion> m_Completed;
+
+        std::mutex m_OutputPathMutex;
+        std::unordered_map<std::string, std::shared_ptr<PendingEntry>> m_PendingByOutputPath;
 
         std::mutex m_IdMutex;
         int64_t m_NextRequestId = 1;

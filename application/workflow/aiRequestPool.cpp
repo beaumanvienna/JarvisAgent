@@ -246,12 +246,10 @@ namespace AIAssistant
         return requestHandle;
     }
 
-    AiRequestHandle AiRequestPool::RegisterPendingWorkflowTask(AiRequestHandle const& requestHandle,
-                                                               std::string const& workflowId, std::string const& runId,
-                                                               std::string const& taskId,
-                                                               std::vector<std::string> const& outputFilePaths,
-                                                               std::vector<std::string> const& outputSlotNames,
-                                                               uint64_t const timeoutMs)
+    AiRequestHandle AiRequestPool::RegisterPendingWorkflowTask(
+        AiRequestHandle const& requestHandle, std::string const& workflowId, std::string const& runId,
+        std::string const& taskId, std::vector<std::string> const& outputFilePaths,
+        std::vector<std::string> const& outputSlotNames, uint64_t const timeoutMs, std::string const& expectedOutputPath)
     {
         if (!requestHandle.IsValid())
         {
@@ -291,12 +289,84 @@ namespace AIAssistant
 
             pendingEntry->m_Context.m_OutputFilePaths = outputFilePaths;
             pendingEntry->m_Context.m_OutputSlotNames = std::move(sortedSlotNames);
+            pendingEntry->m_Context.m_ExpectedOutputPath = expectedOutputPath;
+        }
+
+        // Register in path-based lookup map (for non-PROB_<id>_<ts> naming).
+        if (!expectedOutputPath.empty())
+        {
+            std::string const canonicalPath = fs::absolute(fs::path(expectedOutputPath)).lexically_normal().generic_string();
+
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+            m_PendingByOutputPath[canonicalPath] = pendingEntry;
+
+            LOG_APP_INFO("[AiRequestPool] registered expected output path: '{}'", canonicalPath);
         }
 
         // If the request had already completed (rare but possible), ensure we queue now that binding exists.
         QueueCompletionIfNeeded(pendingEntry);
 
         return registered;
+    }
+
+    bool AiRequestPool::OnOutputFileCreated(std::string const& fullFilePath)
+    {
+        std::string const canonicalPath = fs::absolute(fs::path(fullFilePath)).lexically_normal().generic_string();
+
+        std::shared_ptr<PendingEntry> pendingEntry;
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+
+            auto const iterator = m_PendingByOutputPath.find(canonicalPath);
+            if (iterator == m_PendingByOutputPath.end())
+            {
+                return false;
+            }
+
+            pendingEntry = iterator->second;
+            m_PendingByOutputPath.erase(iterator);
+        }
+
+        // Read file content.
+        std::string fileContent;
+        {
+            std::ifstream inputStream(fullFilePath, std::ios::binary);
+            if (!inputStream.is_open())
+            {
+                std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+                pendingEntry->m_IsCompleted = true;
+                pendingEntry->m_IsFailed = true;
+                pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
+                pendingEntry->conditionVariable.notify_all();
+                QueueCompletionIfNeeded(pendingEntry);
+                return true;
+            }
+
+            inputStream.seekg(0, std::ios::end);
+            std::streamoff const size = inputStream.tellg();
+            inputStream.seekg(0, std::ios::beg);
+
+            if (size > 0)
+            {
+                fileContent.resize(static_cast<std::size_t>(size));
+                inputStream.read(fileContent.data(), static_cast<std::streamsize>(size));
+            }
+        }
+
+        LOG_APP_INFO("[AiRequestPool] OnOutputFileCreated matched path='{}' bytesRead={}", fullFilePath, fileContent.size());
+
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+            pendingEntry->m_IsCompleted = true;
+            pendingEntry->m_IsFailed = false;
+            pendingEntry->m_ResponseText = std::move(fileContent);
+            pendingEntry->m_SourceOutputFilePath = fullFilePath;
+            pendingEntry->conditionVariable.notify_all();
+        }
+
+        QueueCompletionIfNeeded(pendingEntry);
+        return true;
     }
 
     void AiRequestPool::QueueCompletionIfNeeded(std::shared_ptr<PendingEntry> const& pendingEntry)

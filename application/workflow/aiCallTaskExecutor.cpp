@@ -278,7 +278,23 @@ namespace AIAssistant
                     return false;
                 }
 
-                std::string baseName = sourcePath.filename().string();
+                // Strip ".output" from the stem so the materialized CNTX file is not
+                // ignored by the FileCategorizer (which treats *.output.* as output files).
+                // Example: PROB_NVDA.output.txt  →  CNTX_PROB_NVDA.txt
+                std::string baseName;
+                {
+                    std::filesystem::path const srcFilename = sourcePath.filename();
+                    std::string stem = srcFilename.stem().string();
+                    std::string ext = srcFilename.extension().string();
+
+                    if (stem.size() > 7 && stem.ends_with(".output"))
+                    {
+                        stem.erase(stem.size() - 7); // remove ".output"
+                    }
+
+                    baseName = stem + ext;
+                }
+
                 if (!StartsWith(baseName, "CNTX_"))
                 {
                     baseName = "CNTX_" + baseName;
@@ -500,7 +516,8 @@ namespace AIAssistant
 
     bool AiCallTaskExecutor::WriteInlineQueueBindingFiles(QueueBinding const& queueBinding, std::string& outErrorMessage)
     {
-        // ai_call: write environment artifacts (STNG/TASK/CNTX). PROB submission is created by this executor.
+        // Write all environment artifacts (STNG/TASK/CNTX) and PROB requirement files.
+        // The SessionManager will categorize them and dispatch AI queries for PROB files.
         if (!WriteInlineQueueFileRefs(queueBinding.m_StngFiles, outErrorMessage))
         {
             return false;
@@ -512,6 +529,11 @@ namespace AIAssistant
         }
 
         if (!WriteInlineQueueFileRefs(queueBinding.m_CntxFiles, outErrorMessage))
+        {
+            return false;
+        }
+
+        if (!WriteInlineQueueFileRefs(queueBinding.m_ProbFiles, outErrorMessage))
         {
             return false;
         }
@@ -598,7 +620,8 @@ namespace AIAssistant
             return false;
         }
 
-        std::string const taskIdForBinding = taskDefinition.m_Id;
+        std::string const taskIdForBinding =
+            taskState.m_TaskInstanceId.empty() ? taskDefinition.m_Id : taskState.m_TaskInstanceId;
         if (taskIdForBinding.empty())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
@@ -635,10 +658,50 @@ namespace AIAssistant
             }
         };
 
+        // Per-item tasks: substitute {{binding.field}} placeholders in inline paths BEFORE localization
+        if (!taskState.m_InputValues.empty())
+        {
+            auto const substituteInlinePaths = [&](std::vector<QueueFileRef>& fileRefs)
+            {
+                for (QueueFileRef& fileRef : fileRefs)
+                {
+                    if (fileRef.m_HasInlineContent && !fileRef.m_Path.empty())
+                    {
+                        fileRef.m_Path = ApplySimpleTemplate(fileRef.m_Path, taskState);
+                    }
+                }
+            };
+
+            substituteInlinePaths(localizedQueueBinding.m_StngFiles);
+            substituteInlinePaths(localizedQueueBinding.m_TaskFiles);
+            substituteInlinePaths(localizedQueueBinding.m_CntxFiles);
+            substituteInlinePaths(localizedQueueBinding.m_ProbFiles);
+        }
+
         localizeInlineFileRefs(localizedQueueBinding.m_StngFiles);
         localizeInlineFileRefs(localizedQueueBinding.m_TaskFiles);
         localizeInlineFileRefs(localizedQueueBinding.m_CntxFiles);
         localizeInlineFileRefs(localizedQueueBinding.m_ProbFiles);
+
+        // Per-item tasks: substitute {{binding.field}} placeholders in inline content
+        if (!taskState.m_InputValues.empty())
+        {
+            auto const substituteInlineContent = [&](std::vector<QueueFileRef>& fileRefs)
+            {
+                for (QueueFileRef& fileRef : fileRefs)
+                {
+                    if (fileRef.m_HasInlineContent && !fileRef.m_Content.empty())
+                    {
+                        fileRef.m_Content = ApplySimpleTemplate(fileRef.m_Content, taskState);
+                    }
+                }
+            };
+
+            substituteInlineContent(localizedQueueBinding.m_StngFiles);
+            substituteInlineContent(localizedQueueBinding.m_TaskFiles);
+            substituteInlineContent(localizedQueueBinding.m_CntxFiles);
+            substituteInlineContent(localizedQueueBinding.m_ProbFiles);
+        }
 
         if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
         {
@@ -653,6 +716,34 @@ namespace AIAssistant
             taskState.m_LastErrorMessage = errorMessage;
             return false;
         }
+
+        // ------------------------------------------------------------
+        // Determine expected output path from the first PROB file.
+        // The SessionManager writes output as <stem>.output.<ext>.
+        // ------------------------------------------------------------
+        std::string expectedOutputPath;
+        for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
+        {
+            if (probFile.m_HasInlineContent && !probFile.m_Path.empty())
+            {
+                std::filesystem::path const probPath(probFile.m_Path);
+                std::filesystem::path outputPath = probPath;
+                outputPath.replace_filename(probPath.stem().string() + ".output" + probPath.extension().string());
+                expectedOutputPath = outputPath.lexically_normal().generic_string();
+                break;
+            }
+        }
+
+        if (expectedOutputPath.empty())
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "ai_call has no inline prob_files — cannot determine expected output path";
+            return false;
+        }
+
+        LOG_APP_INFO("[paths debug] debug reason=resolveExpectedOutput workflowId='{}' runId='{}' taskId='{}' "
+                     "expectedOutputPath='{}'",
+                     workflowDefinition.m_Id, workflowRun.m_RunId, taskIdForBinding, expectedOutputPath);
 
         // ------------------------------------------------------------
         // Determine output mapping for completion (deterministic)
@@ -675,16 +766,9 @@ namespace AIAssistant
             return false;
         }
 
-        LOG_APP_INFO("[paths debug] debug reason=resolveTaskFileOutputs taskId='{}' taskWorkingDirectoryAbsolute='{}' "
-                     "fileOutputsCount={}",
-                     taskDefinition.m_Id, taskWorkingDirectoryPath.lexically_normal().generic_string(),
-                     resolvedFileOutputs.size());
-
         for (std::string& outputPathText : resolvedFileOutputs)
         {
             std::filesystem::path outputPath(outputPathText);
-            std::string const outputPathRelative = outputPathText;
-            bool const wasRelative = !outputPath.is_absolute();
             if (!outputPath.is_absolute())
             {
                 outputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, outputPath);
@@ -693,15 +777,13 @@ namespace AIAssistant
             {
                 outputPath = outputPath.lexically_normal();
             }
-            std::string const outputPathAbsolute = outputPath.lexically_normal().generic_string();
-            LOG_APP_INFO("[paths debug] debug reason=resolveOutputPath taskId='{}' outputPathRelative='{}' "
-                         "outputPathAbsolute='{}' wasRelative='{}'",
-                         taskDefinition.m_Id, outputPathRelative, outputPathAbsolute, wasRelative);
-            outputPathText = outputPathAbsolute;
+            outputPathText = outputPath.lexically_normal().generic_string();
         }
 
         // ------------------------------------------------------------
-        // Build prompt + submit request (PROB_<id>_<ts>.txt)
+        // Register with AiRequestPool for path-based completion routing.
+        // PROB files are already written by WriteInlineQueueBindingFiles;
+        // the SessionManager dispatches the AI query and writes the .output.txt.
         // ------------------------------------------------------------
         int64_t const requestId = requestPool->AllocateRequestId();
         int64_t const timestampNs = NowTimestampNs();
@@ -710,44 +792,14 @@ namespace AIAssistant
         requestHandle.requestId = requestId;
         requestHandle.requestTimestampNs = timestampNs;
 
-        // Register *workflow-bound* request BEFORE writing PROB (so completion can be routed deterministically).
         AiRequestHandle const registered = requestPool->RegisterPendingWorkflowTask(
             requestHandle, workflowRun.m_WorkflowId, workflowRun.m_RunId, taskIdForBinding, resolvedFileOutputs,
-            outputSlotNames, taskDefinition.m_TimeoutMs);
+            outputSlotNames, taskDefinition.m_TimeoutMs, expectedOutputPath);
 
         if (!registered.IsValid())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "AiRequestPool::RegisterPendingWorkflowTask failed";
-            return false;
-        }
-
-        std::filesystem::path const requestPath = taskWorkingDirectoryPath / BuildProbFilename(requestId, timestampNs);
-
-        LOG_APP_INFO("[paths debug] debug reason=resolveRequestPath workflowId='{}' runId='{}' taskId='{}' "
-                     "taskWorkingDirectoryAbsolute='{}' requestPathAbsolute='{}'",
-                     workflowDefinition.m_Id, workflowRun.m_RunId, taskDefinition.m_Id,
-                     taskWorkingDirectoryPath.lexically_normal().generic_string(),
-                     requestPath.lexically_normal().generic_string());
-
-        std::string probText;
-        if (!BuildProbTextFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, probText,
-                                           errorMessage))
-        {
-            LOG_APP_INFO(
-                "[paths debug] debug reason=buildProbTextFailed taskId='{}' taskWorkingDirectoryAbsolute='{}' error='{}'",
-                taskDefinition.m_Id, taskWorkingDirectoryPath.lexically_normal().generic_string(), errorMessage);
-            requestPool->Forget(requestHandle);
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
-        }
-
-        if (!WriteTextFile(requestPath.string(), probText, errorMessage))
-        {
-            requestPool->Forget(requestHandle);
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
             return false;
         }
 

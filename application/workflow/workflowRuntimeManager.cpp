@@ -899,7 +899,11 @@ namespace AIAssistant
             return result;
         }
 
-        result.m_TaskState.m_InputValues = resolvedInputs.m_StringValues;
+        // Merge dataflow-resolved inputs into existing values (preserves per_item filter bindings)
+        for (auto const& [key, value] : resolvedInputs.m_StringValues)
+        {
+            result.m_TaskState.m_InputValues[key] = value;
+        }
 
         {
             std::string summary;
@@ -914,6 +918,10 @@ namespace AIAssistant
         }
 
         TaskExecutorRegistry& executorRegistry = TaskExecutorRegistry::Get();
+
+        // Propagate the actual task instance ID so executors can use it for request pool binding.
+        // For per_item children this is e.g. "lookupDividend#0"; for single tasks it equals taskDefinition.m_Id.
+        result.m_TaskState.m_TaskInstanceId = taskId;
 
         LOG_APP_INFO("[paths debug] debug reason=executeTask workflowId='{}' runId='{}' taskId='{}'", workerRun.m_WorkflowId,
                      workerRun.m_RunId, taskId);

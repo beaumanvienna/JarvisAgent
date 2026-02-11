@@ -477,7 +477,7 @@ export default function WorkflowEditorView(props: {
   }, [undo, redo]);
 
   const currentSignature = useMemo(() => {
-    return computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]);
+    return computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
   }, [nodes, edges]);
 
   const resetToNewDraft = useCallback(() => {
@@ -698,7 +698,7 @@ export default function WorkflowEditorView(props: {
     const isFromTemplate = workflowId === null;
     if (!isFromTemplate)
     {
-      setLastSavedSignature(computeGraphSignature(graph.nodes as EditorTaskNode[], graph.edges));
+      setLastSavedSignature(computeGraphSignature(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task"), graph.edges));
       setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task")));
       setIsDirty(false);
       if (props.onDirtyStateChange)
@@ -1326,8 +1326,8 @@ export default function WorkflowEditorView(props: {
   }, [props.onWorkflowPersisted]);
 
   const updateSavedBaseline = useCallback(() => {
-    setLastSavedSignature(computeGraphSignature(nodes as EditorTaskNode[], edges as EditorTaskEdge[]));
-    setLastSavedNodeSnapshot(computeNodeSnapshot(nodes as EditorTaskNode[]));
+    setLastSavedSignature(computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]));
+    setLastSavedNodeSnapshot(computeNodeSnapshot(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[]));
     setBackendErrors([]);
     setBackendWarnings([]);
     setIsDirty(false);
