@@ -125,6 +125,18 @@ queue/
 
 ---
 
+## Example Workflows
+
+| Workflow | Highlights |
+|----------|------------|
+| [Go-Kart Compliance Check](example/workflows/goKartComplianceCheck.md) | Polarion integration, per-item fan-out, `{{template}}` substitution |
+| [Portfolio Dividend Analysis](example/workflows/portfolioDividendAnalysis.md) | CSV filter, 60-position fan-out, glob-based aggregation |
+| [AI Car Maintenance Pipeline](example/workflows/aiCarMaintenancePipeline.md) | Retrieves user manuals based on AI categorization, multi-stage pipeline |
+| [Vehicle Troubleshooting Guide](example/workflows/vehicleTroubleshootingGuide.md) | AI-generated flow charts based on user prompt, shell + AI pipeline |
+| [Make-Style Build Example](example/workflows/make_example.md) | Classic dependency graph, file I/O, shell tasks |
+
+---
+
 ## Planned Features
 
 - [ ] Docker deployment & CI/CD (WIP — [AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
