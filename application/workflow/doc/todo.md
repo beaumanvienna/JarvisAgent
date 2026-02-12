@@ -29,6 +29,7 @@ Last reviewed: Feb 2026
 
 ### Modes, filters, and per_item expansion
 - [ ] Implement `mode: "per_item"` task expansion with **filter nodes** (CSV, text lines, Lucene query via Python bridge). See `application/workflow/doc/perItem_structureTriggers.md` for dev plan.
+- [ ] **Create `text_lines` example workflow + documentation** — `EvaluateTextLines` is fully implemented in `filterEngine.cpp` but has no demo JCWF exercising it. Create an example workflow with a `.txt` input file, a `text_lines` filter, a per-item AI task, and a corresponding `.md` doc.
 - [x] ~~Update **JC Workflow Specification** for filters + per_item~~ — bumped spec to v1.1: added §3.7 (Filters), `"filters"` root-level array, `"filter"` field on tasks, filter JSON Schema `$def`, query language reference, filter manifest freshness scheme, fan-out node description, security note for unbounded expansion.
 
 ### Dataflow and context resolution
@@ -51,6 +52,47 @@ Last reviewed: Feb 2026
 ---
 
 ## Refactor cleanup / safety
+
+- [ ] **Unify template substitution syntax: `${...}` → `{{...}}`**
+
+  Currently two different syntaxes exist:
+  - `${input[0]}`, `${output[0]}`, `${slot.NAME}`, `${env.NAME}` — shell task args
+  - `{{binding.field}}` — per-item filter value injection in ai_call queue_binding
+
+  **Goal:** single `{{...}}` syntax everywhere.  Migrate shell executor to
+  `{{input[0]}}`, `{{output[0]}}`, `{{slot.NAME}}`, `{{env.NAME}}`.  Remove
+  the `${...}` codepath entirely (no backwards-compatibility needed).
+
+  **Implementation plan:**
+  1. Create a shared `TemplateEngine` (or free function) used by both executors.
+  2. Migrate `ShellTaskExecutor::ExpandTemplateInArg()` to `{{...}}`.
+  3. Migrate `EnsureDefaultInputOutputArgs()` literals to `{{...}}`.
+  4. Update `DataflowResolver` references.
+  5. Update all example JCWF files.
+  6. Update all documentation.
+  7. Verify all tests / workflows still pass on Linux, macOS, Windows.
+
+  **Files to update:**
+
+  C++ implementation:
+  - `application/workflow/shellTaskExecutor.cpp` — bulk of `${...}` expansion logic (21 occurrences)
+  - `application/workflow/shellTaskExecutor.h` — function signatures if renamed
+  - `application/workflow/aiCallTaskExecutor.cpp` — `ApplySimpleTemplate()` becomes the shared implementation
+  - `application/workflow/aiCallTaskExecutor.h` — move `ApplySimpleTemplate` to shared location
+  - `application/workflow/dataflowResolver.cpp` — 3 references to `${...}` patterns
+  - `application/workflow/dataflowResolver.h` — 2 references to `${...}` patterns
+
+  Example workflows (JCWF):
+  - `example/workflows/make_example.jcwf` — 6 occurrences (`${input[N]}`, `${output[N]}`)
+  - `example/workflows/aiZipDemo.jcwf` — 4 occurrences
+  - `example/workflows/aiCarMaintenancePipeline.jcwf` — 2 occurrences
+  - `example/workflows/vehicleTroubleshootingGuide.jcwf` — 8 occurrences
+  - `example/workflows/hamburg-tourist-day-planner.jcwf` — 4 occurrences
+
+  Documentation (MD):
+  - `example/workflows/make_example.md` — 15 references to `${...}` syntax
+  - `example/workflows/aiCarMaintenancePipeline.md` — 2 references
+  - `example/workflows/vehicleTroubleshootingGuide.md` — 2 references
 
 - [ ] **Port `web/index.html` to React** — replace the legacy dashboard with the React frontend.
 - [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.

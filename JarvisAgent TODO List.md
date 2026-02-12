@@ -31,8 +31,8 @@ This list tracks the remaining work for JarvisAgent.
 ---
 
 ## 4. Workflow system
-- Manual trigger via browser-based terminal prompt (remote control from a web page)
-- Workflows for individual lines from spreadsheets
+- ~~Manual trigger via browser-based terminal prompt~~ — dropped; workflow editor UI covers trigger/run/status
+- ~~Workflows for individual lines from spreadsheets~~ — done: `csv` and `text_lines` per-item filters + `portfolioDividendAnalysis` and `goKartComplianceCheck` demo workflows
 
 ---
 
