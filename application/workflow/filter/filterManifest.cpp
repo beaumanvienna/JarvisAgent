@@ -362,7 +362,11 @@ namespace AIAssistant
         auto const now = std::chrono::system_clock::now();
         auto const timeT = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
+#ifdef _WIN32
+        gmtime_s(&tm, &timeT);
+#else
         gmtime_r(&timeT, &tm);
+#endif
 
         std::ostringstream oss;
         oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
@@ -388,12 +392,15 @@ namespace AIAssistant
         }
 
         // Convert file_time to system_clock time
-        auto const sctp =
-            std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::clock_cast<std::chrono::system_clock>(ftime));
+        auto const sctp = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::file_clock::to_sys(ftime));
         auto const timeT = std::chrono::system_clock::to_time_t(sctp);
 
         std::tm tm{};
+#ifdef _WIN32
+        gmtime_s(&tm, &timeT);
+#else
         gmtime_r(&timeT, &tm);
+#endif
 
         std::ostringstream oss;
         oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");

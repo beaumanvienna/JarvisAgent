@@ -389,7 +389,11 @@ namespace AIAssistant
 #ifdef _WIN32
 #define RAW_STDERR(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
 #else
-#define RAW_STDERR(literal) (void)write(STDERR_FILENO, literal, sizeof(literal) - 1)
+#define RAW_STDERR(literal)                                                             \
+    do                                                                                  \
+    {                                                                                   \
+        [[maybe_unused]] auto rc_ = write(STDERR_FILENO, literal, sizeof(literal) - 1); \
+    } while (0)
 #endif
         RAW_STDERR("[TM] delwin LogWindow\n");
         if (m_Impl->m_LogWindow != nullptr)

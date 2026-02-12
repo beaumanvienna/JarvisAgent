@@ -798,7 +798,7 @@ them.
 
 - `stng_files` (OPTIONAL, array) — Settings files. Written once; become part of the environment.
 - `task_files` (OPTIONAL, array) — Task instruction files. Written once; become part of the environment.
-- `cntx_files` (OPTIONAL, array) — Context files. Written once (or materialized from upstream task outputs); become part of the environment.
+- `cntx_files` (OPTIONAL, array) — Context files. Written once (or materialized from upstream task outputs); become part of the environment. Entries MAY contain **glob patterns** (`*`, `?`) to dynamically match files at execution time (see 3.3.6.7).
 - `prob_files` (REQUIRED for `ai_call`) — Problem/requirement files. **Each PROB file triggers one AI query.** For `per_item` tasks, each item instance writes its own PROB file with a unique name.
 - `prov_files` (OPTIONAL, array) — Provider configuration. Written by the executor when the task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. The SessionManager reads PROV files to resolve the provider config from the KeyManager.
 
@@ -821,6 +821,7 @@ additional files.
 - Relative paths in `queue_binding` entries MUST be resolved relative to the task `working_directory`.
 - When writing inline `content`, the runtime MUST create parent directories if they do not exist.
 - For `cntx_files` path-only entries referencing upstream task outputs (e.g., `"../01_taskA/PROB_foo.output.txt"`), the runtime MUST **materialize** a copy as `CNTX_<filename>` in the current task's working directory so that the SessionManager categorizes it as Context.
+- If a `cntx_files` path contains **glob characters** (`*` or `?`), the runtime MUST expand the pattern against the filesystem before materialization. See 3.3.6.7 for details.
 
 ##### 3.3.6.6 Per-Item Template Substitution *(v1.1)*
 
@@ -866,6 +867,38 @@ queue folder as `cntx_files`.  The runtime materializes them as `CNTX_*` files
 in the downstream task's working directory so they become part of its
 environment.
 
+###### Glob Patterns *(v1.1)*
+
+When the number of upstream outputs is not known at authoring time (e.g.,
+CSV-driven or Polarion-query-driven per-item tasks), `cntx_files` entries MAY
+use **glob patterns** (`*` matches any sequence of characters, `?` matches a
+single character):
+
+```jsonc
+"cntx_files": [
+  "../01_lookupDividend/PROB_*.output.txt"
+]
+```
+
+The runtime MUST:
+
+1. Detect glob characters (`*` or `?`) in the path.
+2. Resolve the parent directory relative to the task `working_directory`.
+3. Match the filename pattern against all regular files in that directory.
+4. Sort matches lexicographically for deterministic ordering.
+5. Expand each match into an individual `cntx_files` entry.
+6. Log the pattern and match count (for diagnostics).
+7. Warn (but not fail) if the pattern matches zero files.
+
+Each matched file is then materialized as `CNTX_<basename>` in the
+downstream task's working directory.  The `.output` suffix is stripped from the
+stem to prevent the `FileCategorizer` from treating the materialized file as an
+output file (e.g., `PROB_NVDA.output.txt` → `CNTX_PROB_NVDA.txt`).
+
+###### Explicit File References
+
+Individual files MAY still be listed explicitly:
+
 ```jsonc
 "cntx_files": [
   "../01_lookupDividend/PROB_NVDA.output.txt",
@@ -873,8 +906,7 @@ environment.
 ]
 ```
 
-Each path-only entry is copied into the current task folder as
-`CNTX_PROB_NVDA.output.txt`, etc.
+Glob and explicit entries MAY be mixed in the same array.
 
 ##### 3.3.6.8 `environment` (Legacy / Optional)
 
@@ -924,8 +956,7 @@ second task summarizes all results:
         "task_files": [{ "path": "TASK_summary.txt", "content": "Summarize dividend data.\n" }],
         "prob_files": [{ "path": "PROB_summarize.txt", "content": "Produce the portfolio summary.\n" }],
         "cntx_files": [
-          "../01_lookupDividend/PROB_NVDA.output.txt",
-          "../01_lookupDividend/PROB_AAPL.output.txt"
+          "../01_lookupDividend/PROB_*.output.txt"
         ]
       }
     }

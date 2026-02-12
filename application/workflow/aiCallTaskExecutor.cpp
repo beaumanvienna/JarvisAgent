@@ -178,64 +178,126 @@ namespace AIAssistant
             return true;
         }
 
-        static bool BuildProbTextFromQueueBinding(std::filesystem::path const& taskWorkingDirectoryPath,
-                                                  std::vector<AIAssistant::QueueFileRef> const& probFiles,
-                                                  std::string& outProbText, std::string& outErrorMessage)
+        static bool StartsWith(std::string const& value, std::string const& prefix) { return value.rfind(prefix, 0) == 0; }
+
+        static bool ContainsGlobChars(std::string const& path)
         {
-            if (probFiles.empty())
+            return path.find('*') != std::string::npos || path.find('?') != std::string::npos;
+        }
+
+        // Simple glob matcher supporting '*' (any sequence) and '?' (single char).
+        static bool MatchGlob(std::string const& pattern, std::string const& text)
+        {
+            size_t pIdx = 0;
+            size_t tIdx = 0;
+            size_t starP = std::string::npos;
+            size_t starT = 0;
+
+            while (tIdx < text.size())
             {
-                outErrorMessage = "queue_binding.prob_files is empty - cannot materialize PROB";
-                return false;
+                if (pIdx < pattern.size() && (pattern[pIdx] == text[tIdx] || pattern[pIdx] == '?'))
+                {
+                    ++pIdx;
+                    ++tIdx;
+                }
+                else if (pIdx < pattern.size() && pattern[pIdx] == '*')
+                {
+                    starP = pIdx;
+                    starT = tIdx;
+                    ++pIdx;
+                }
+                else if (starP != std::string::npos)
+                {
+                    pIdx = starP + 1;
+                    ++starT;
+                    tIdx = starT;
+                }
+                else
+                {
+                    return false;
+                }
             }
 
-            std::ostringstream probStream;
-            bool isFirst = true;
-
-            for (AIAssistant::QueueFileRef const& fileRef : probFiles)
+            while (pIdx < pattern.size() && pattern[pIdx] == '*')
             {
-                if (!isFirst)
-                {
-                    probStream << "\n\n";
-                }
-                isFirst = false;
+                ++pIdx;
+            }
 
-                if (fileRef.m_HasInlineContent)
+            return pIdx == pattern.size();
+        }
+
+        // Expand glob patterns in cntx_files into individual QueueFileRef entries.
+        // Non-glob entries are passed through unchanged.
+        static bool ExpandCntxFileGlobs(std::filesystem::path const& taskWorkingDirectoryPath,
+                                        std::vector<AIAssistant::QueueFileRef> const& cntxFiles,
+                                        std::vector<AIAssistant::QueueFileRef>& outExpanded, std::string& outErrorMessage)
+        {
+            outExpanded.clear();
+
+            for (AIAssistant::QueueFileRef const& fileRef : cntxFiles)
+            {
+                if (fileRef.m_HasInlineContent || !ContainsGlobChars(fileRef.m_Path))
                 {
-                    LOG_APP_INFO(
-                        "[paths debug] debug reason=useInlineProbContent probPathRelative='{}' wasRelative='{}' bytes={}",
-                        fileRef.m_Path, std::filesystem::path(fileRef.m_Path).is_relative(), fileRef.m_Content.size());
-                    probStream << fileRef.m_Content;
+                    outExpanded.push_back(fileRef);
                     continue;
                 }
 
-                std::filesystem::path const sourcePath =
-                    TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fileRef.m_Path);
-                LOG_APP_INFO("[paths debug] debug reason=resolveProbSourcePath inputPathRelative='{}' "
-                             "taskWorkingDirectoryAbsolute='{}' resolvedSourcePathAbsolute='{}' wasRelative='{}'",
-                             fileRef.m_Path, taskWorkingDirectoryPath.lexically_normal().generic_string(),
-                             sourcePath.lexically_normal().generic_string(),
-                             std::filesystem::path(fileRef.m_Path).is_relative());
-                LOG_APP_INFO("[paths debug] debug reason=readProbSourceFile inputPathRelative='{}' sourcePathAbsolute='{}'",
-                             fileRef.m_Path, sourcePath.lexically_normal().generic_string());
-
-                std::string sourceText;
-                if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
+                // Resolve the glob path relative to the task working directory.
+                std::filesystem::path globPath(fileRef.m_Path);
+                if (!globPath.is_absolute())
                 {
-                    std::ostringstream errorStream;
-                    errorStream << "Missing PROB source '" << sourcePath.string() << "': " << outErrorMessage;
-                    outErrorMessage = errorStream.str();
+                    globPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, globPath);
+                }
+                else
+                {
+                    globPath = globPath.lexically_normal();
+                }
+
+                std::filesystem::path const parentDir = globPath.parent_path();
+                std::string const filenamePattern = globPath.filename().string();
+
+                if (!std::filesystem::is_directory(parentDir))
+                {
+                    outErrorMessage = "cntx_files glob directory does not exist: " + parentDir.string();
                     return false;
                 }
 
-                LOG_APP_INFO("[paths debug] debug reason=readProbSourceFileCompleted sourcePathAbsolute='{}' bytesRead={}",
-                             sourcePath.lexically_normal().generic_string(), sourceText.size());
-                probStream << sourceText;
+                // Collect matching entries, then sort for deterministic ordering.
+                std::vector<std::filesystem::path> matches;
+                for (auto const& entry : std::filesystem::directory_iterator(parentDir))
+                {
+                    if (!entry.is_regular_file())
+                    {
+                        continue;
+                    }
+
+                    if (MatchGlob(filenamePattern, entry.path().filename().string()))
+                    {
+                        matches.push_back(entry.path());
+                    }
+                }
+
+                std::sort(matches.begin(), matches.end());
+
+                LOG_APP_INFO("[paths debug] debug reason=expandCntxGlob pattern='{}' parentDir='{}' matchCount={}",
+                             fileRef.m_Path, parentDir.string(), matches.size());
+
+                if (matches.empty())
+                {
+                    LOG_APP_WARN("cntx_files glob matched zero files: {}", fileRef.m_Path);
+                }
+
+                for (std::filesystem::path const& matchPath : matches)
+                {
+                    AIAssistant::QueueFileRef expanded{};
+                    expanded.m_Path = matchPath.lexically_normal().string();
+                    expanded.m_HasInlineContent = false;
+                    outExpanded.push_back(std::move(expanded));
+                }
             }
 
-            outProbText = probStream.str();
             return true;
         }
-        static bool StartsWith(std::string const& value, std::string const& prefix) { return value.rfind(prefix, 0) == 0; }
 
         static bool MaterializeCntxFilesFromQueueBinding(std::filesystem::path const& taskWorkingDirectoryPath,
                                                          std::vector<AIAssistant::QueueFileRef> const& cntxFiles,
@@ -710,7 +772,18 @@ namespace AIAssistant
             return false;
         }
 
-        if (!MaterializeCntxFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_CntxFiles, errorMessage))
+        // Expand glob patterns (e.g. "../01_lookupDividend/PROB_*.output.txt") into
+        // individual file references before materialization.
+        std::vector<QueueFileRef> expandedCntxFiles;
+        if (!ExpandCntxFileGlobs(taskWorkingDirectoryPath, localizedQueueBinding.m_CntxFiles, expandedCntxFiles,
+                                 errorMessage))
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+
+        if (!MaterializeCntxFilesFromQueueBinding(taskWorkingDirectoryPath, expandedCntxFiles, errorMessage))
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
