@@ -321,12 +321,18 @@ namespace AIAssistant
             item.m_Index = itemIndex;
             item.m_SourceIndex = itemIndex;
 
-            // Extract work item ID
+            // Extract work item ID (JSON:API id is "Project/WI-ID")
             std::string_view idSv;
             if (obj["id"].get_string().get(idSv) == simdjson::SUCCESS)
             {
                 item.m_Key = std::string(idSv);
                 item.m_Values["id"] = std::string(idSv);
+
+                // Derive a filename-safe work_item_id by stripping the project prefix.
+                // e.g. "GoKartProcurement/REQ-003" → "REQ-003"
+                std::string fullId(idSv);
+                auto const slashPos = fullId.rfind('/');
+                item.m_Values["work_item_id"] = (slashPos != std::string::npos) ? fullId.substr(slashPos + 1) : fullId;
             }
 
             // Extract attributes
@@ -335,7 +341,7 @@ namespace AIAssistant
             {
                 if (requestedFields.empty())
                 {
-                    // Extract all string attributes
+                    // Extract all attributes (strings or rich-text objects with "value" key)
                     for (auto field : attributes)
                     {
                         std::string_view keySv = field.unescaped_key();
@@ -343,6 +349,19 @@ namespace AIAssistant
                         if (field.value().get_string().get(valSv) == simdjson::SUCCESS)
                         {
                             item.m_Values[std::string(keySv)] = std::string(valSv);
+                        }
+                        else
+                        {
+                            // Polarion rich-text fields: {"type":"text/plain","value":"..."}
+                            simdjson::ondemand::object richObj;
+                            if (field.value().get_object().get(richObj) == simdjson::SUCCESS)
+                            {
+                                std::string_view richVal;
+                                if (richObj["value"].get_string().get(richVal) == simdjson::SUCCESS)
+                                {
+                                    item.m_Values[std::string(keySv)] = std::string(richVal);
+                                }
+                            }
                         }
                     }
                 }
@@ -354,6 +373,19 @@ namespace AIAssistant
                         if (attributes[fieldName].get_string().get(valSv) == simdjson::SUCCESS)
                         {
                             item.m_Values[fieldName] = std::string(valSv);
+                        }
+                        else
+                        {
+                            // Polarion rich-text fields: {"type":"text/plain","value":"..."}
+                            simdjson::ondemand::object richObj;
+                            if (attributes[fieldName].get_object().get(richObj) == simdjson::SUCCESS)
+                            {
+                                std::string_view richVal;
+                                if (richObj["value"].get_string().get(richVal) == simdjson::SUCCESS)
+                                {
+                                    item.m_Values[fieldName] = std::string(richVal);
+                                }
+                            }
                         }
                     }
                 }

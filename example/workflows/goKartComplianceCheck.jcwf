@@ -13,6 +13,13 @@
   ],
   "base_directory": ".",
   "manual_start": true,
+  "defaults": {
+    "timeout_ms": 30000,
+    "ai": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini"
+    }
+  },
   "triggers": [
     {
       "type": "manual",
@@ -61,6 +68,12 @@
         ],
         "cntx_files": [
           "../../../workflows/goKartPlatformSpec.md"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_{{req.work_item_id}}.txt",
+            "content": "Requirement ID: {{req.work_item_id}}\nTitle: {{req.title}}\nSeverity: {{req.severity}}\nPriority: {{req.priority}}\nStatus: {{req.status}}\n\nDescription:\n{{req.description}}\n"
+          }
         ]
       }
     }

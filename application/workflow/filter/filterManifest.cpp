@@ -391,9 +391,13 @@ namespace AIAssistant
             return "";
         }
 
-        // Convert file_time to system_clock time
-        auto const sctp = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::file_clock::to_sys(ftime));
-        auto const timeT = std::chrono::system_clock::to_time_t(sctp);
+        // Convert file_time to system_clock time.
+        // file_clock::to_sys() is C++20 but MSVC does not implement it yet,
+        // so we use a portable clock-offset approach instead.
+        auto const fileNow = std::filesystem::file_time_type::clock::now();
+        auto const sysNow = std::chrono::system_clock::now();
+        auto const sysTime = sysNow + std::chrono::duration_cast<std::chrono::system_clock::duration>(ftime - fileNow);
+        auto const timeT = std::chrono::system_clock::to_time_t(sysTime);
 
         std::tm tm{};
 #ifdef _WIN32
