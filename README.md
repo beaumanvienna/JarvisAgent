@@ -6,11 +6,11 @@
 
 <br>
 
-JarvisAgent is a **C++ backend / React frontend** application for massively parallel AI-driven automation.  <br>
+JarvisAgent is a **C++ backend / React frontend** application for parallel AI-driven automation.  <br>
 <br>
-Its engine core dispatches hundreds of concurrent AI requests — think parallel requirements analysis, stock-portfolio deep-research across every position, or chapter-by-chapter processing of entire PDF books.  <br>
+Its engine core dispatches many concurrent AI requests — think parallel requirements analysis, stock-portfolio deep-research across every position, or chapter-by-chapter processing of entire PDF books.  <br>
 <br>
-Office documents (Word, Excel, PowerPoint, PDF, HTML) are automatically converted to Markdown via Microsoft's [MarkItDown](https://github.com/microsoft/markitdown) — and chunked when too large — before being sent to the AI. JarvisAgent is file-heavy by design: all inputs, outputs, and intermediate results live on disk, making it a natural fit for engineering environments with large file landscapes.  <br>
+Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to Markdown via Microsoft's [MarkItDown](https://github.com/microsoft/markitdown) — and chunked when too large — before being sent to the AI. JarvisAgent is file-oriented by design: all inputs, outputs, and intermediate results live on disk, making it a natural fit for engineering environments with large file landscapes.  <br>
 <br>
 Workflows let you chain **serial and parallel tasks** — AI calls, Python scripts, shell commands, or native C++ — in a visual graph editor with various trigger types.  <br>
 <br>
