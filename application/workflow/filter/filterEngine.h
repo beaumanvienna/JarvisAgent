@@ -77,6 +77,9 @@ namespace AIAssistant
 
         // Trim leading/trailing whitespace.
         static std::string Trim(std::string const& s);
+
+        // Add zero-padded index_padded and row_number_padded fields to all items.
+        static void AddPaddedIndices(std::vector<FilterItem>& items);
     };
 
 } // namespace AIAssistant

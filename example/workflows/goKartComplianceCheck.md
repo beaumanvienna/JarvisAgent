@@ -53,8 +53,8 @@ This is the first workflow to combine **three v1.1 features** end-to-end:
 4. **AI dispatch** — Each child writes its queue files (STNG, TASK, CNTX, PROB)
    into the shared task working directory, then dispatches an async AI request.
 
-5. **Completion** — Output files `PROB_REQ-001.output.txt` through
-   `PROB_REQ-018.output.txt` are written as AI responses arrive. The parent task
+5. **Completion** — Output files `PROB_REQ-001_000.output.txt` through
+   `PROB_REQ-018_017.output.txt` are written as AI responses arrive. The parent task
    completes when all 18 children succeed.
 
 ---
@@ -166,7 +166,7 @@ After filter evaluation, each child task instance has access to:
     "task_files": [{ "path": "TASK_compareRequirement.txt", "content": "..." }],
     "cntx_files": ["../../../workflows/goKartPlatformSpec.md"],
     "prob_files": [{
-      "path": "PROB_{{req.work_item_id}}.txt",
+      "path": "PROB_{{req.work_item_id}}_{{req.index_padded}}.txt",
       "content": "Requirement ID: {{req.work_item_id}}\nTitle: {{req.title}}\n..."
     }]
   }
@@ -176,8 +176,10 @@ After filter evaluation, each child task instance has access to:
 - **`mode: "per_item"`** + **`filter: "polarion-reqs"`** — triggers fan-out.
 - **`cntx_files`** — the platform spec is materialized as `CNTX_goKartPlatformSpec.md`
   in the task working directory. Every child shares this context.
-- **`prob_files`** — template-substituted per child. `PROB_REQ-001.txt` through
-  `PROB_REQ-018.txt`, each containing that requirement's details.
+- **`prob_files`** — template-substituted per child. `PROB_REQ-001_000.txt` through
+  `PROB_REQ-018_017.txt`, each containing that requirement's details. The
+  `{{req.index_padded}}` suffix ensures unique filenames even if two work items
+  shared the same ID prefix.
 
 ---
 
@@ -191,13 +193,13 @@ queue/goKartComplianceCheck/01_assessRequirement/
   TASK_compareRequirement.txt          ← written once (shared)
   CNTX_goKartPlatformSpec.md           ← materialized from upstream path
 
-  PROB_REQ-001.txt                     ← per-item input (requirement details)
-  PROB_REQ-001.output.txt              ← per-item output (AI compliance assessment)
-  PROB_REQ-002.txt
-  PROB_REQ-002.output.txt
+  PROB_REQ-001_000.txt                 ← per-item input (requirement details)
+  PROB_REQ-001_000.output.txt          ← per-item output (AI compliance assessment)
+  PROB_REQ-002_001.txt
+  PROB_REQ-002_001.output.txt
   ...
-  PROB_REQ-018.txt
-  PROB_REQ-018.output.txt
+  PROB_REQ-018_017.txt
+  PROB_REQ-018_017.output.txt
 ```
 
 Additionally, a filter manifest is written to:

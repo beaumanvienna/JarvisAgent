@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "workflow/aiCallTaskExecutor.h"
+#include "workflow/templateEngine.h"
 
 #include <algorithm>
 #include <chrono>
@@ -131,6 +132,90 @@ namespace AIAssistant
             }
 
             return true;
+        }
+
+        // Build a flat key-value map from the workflow "defaults" JSON, prefixed with "defaults.".
+        // E.g. {"ai":{"provider":"openai","model":"gpt-4.1-mini"}} becomes:
+        //   "defaults.ai.provider" -> "openai"
+        //   "defaults.ai.model"    -> "gpt-4.1-mini"
+        static std::unordered_map<std::string, std::string> BuildDefaultsMap(std::string const& defaultsJson)
+        {
+            std::unordered_map<std::string, std::string> result;
+            if (defaultsJson.empty())
+            {
+                return result;
+            }
+
+            try
+            {
+                simdjson::ondemand::parser parser;
+                simdjson::padded_string padded(defaultsJson);
+                simdjson::ondemand::document doc = parser.iterate(padded);
+                simdjson::ondemand::object root = doc.get_object().value();
+
+                for (auto field : root)
+                {
+                    std::string_view const key = field.unescaped_key().value();
+                    simdjson::ondemand::value val = field.value();
+                    simdjson::ondemand::json_type const type = val.type().value();
+
+                    if (type == simdjson::ondemand::json_type::object)
+                    {
+                        simdjson::ondemand::object nested = val.get_object().value();
+                        for (auto nestedField : nested)
+                        {
+                            std::string_view const nk = nestedField.unescaped_key().value();
+                            simdjson::ondemand::value nv = nestedField.value();
+                            simdjson::ondemand::json_type const nt = nv.type().value();
+
+                            std::string fullKey = "defaults." + std::string(key) + "." + std::string(nk);
+
+                            if (nt == simdjson::ondemand::json_type::string)
+                            {
+                                result[fullKey] = std::string(nv.get_string().value());
+                            }
+                            else if (nt == simdjson::ondemand::json_type::number)
+                            {
+                                result[fullKey] = std::to_string(nv.get_int64().value());
+                            }
+                        }
+                    }
+                    else if (type == simdjson::ondemand::json_type::string)
+                    {
+                        result["defaults." + std::string(key)] = std::string(val.get_string().value());
+                    }
+                    else if (type == simdjson::ondemand::json_type::number)
+                    {
+                        result["defaults." + std::string(key)] = std::to_string(val.get_int64().value());
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Silently fall through — result will be empty or partial.
+            }
+
+            return result;
+        }
+
+        static std::string ExpandWithDefaults(std::string const& raw,
+                                              std::unordered_map<std::string, std::string> const& defaultsMap)
+        {
+            if (raw.find("{{") == std::string::npos || defaultsMap.empty())
+            {
+                return raw;
+            }
+
+            TemplateContext ctx{};
+            ctx.m_InputValues = &defaultsMap;
+
+            std::string expanded;
+            std::string error;
+            if (ExpandTemplate(raw, ctx, TemplateMode::Lenient, expanded, error))
+            {
+                return expanded;
+            }
+            return raw;
         }
 
         static bool WriteInlineQueueFileRefs(std::vector<QueueFileRef> const& fileRefs, std::string& outErrorMessage)
@@ -385,6 +470,91 @@ namespace AIAssistant
             return true;
         }
 
+        // Materialize non-inline PROB file references into the working directory.
+        // After materialization the QueueFileRef entries are updated in-place so that
+        // the downstream expectedOutputPath logic (which checks m_HasInlineContent)
+        // can find them.
+        static bool MaterializeProbFilesFromQueueBinding(std::filesystem::path const& taskWorkingDirectoryPath,
+                                                         std::vector<AIAssistant::QueueFileRef>& probFiles,
+                                                         std::string& outErrorMessage)
+        {
+            std::unordered_set<std::string> usedFilenames;
+
+            for (size_t index = 0; index < probFiles.size(); ++index)
+            {
+                AIAssistant::QueueFileRef& fileRef = probFiles[index];
+
+                // Inline PROB files are handled by WriteInlineQueueBindingFiles().
+                if (fileRef.m_HasInlineContent)
+                {
+                    continue;
+                }
+
+                if (fileRef.m_Path.empty())
+                {
+                    outErrorMessage = "queue_binding contains PROB file with empty 'path'";
+                    return false;
+                }
+
+                std::filesystem::path sourcePath(fileRef.m_Path);
+                if (!sourcePath.is_absolute())
+                {
+                    sourcePath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, sourcePath);
+                }
+                else
+                {
+                    sourcePath = sourcePath.lexically_normal();
+                }
+
+                std::string sourceText;
+                if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
+                {
+                    std::ostringstream errorStream;
+                    errorStream << "Missing PROB source '" << sourcePath.string() << "': " << outErrorMessage;
+                    outErrorMessage = errorStream.str();
+                    return false;
+                }
+
+                // Build destination filename with PROB_ prefix.
+                std::string baseName;
+                {
+                    std::filesystem::path const srcFilename = sourcePath.filename();
+                    baseName = srcFilename.string();
+                }
+
+                if (!StartsWith(baseName, "PROB_"))
+                {
+                    baseName = "PROB_" + baseName;
+                }
+
+                if (usedFilenames.find(baseName) != usedFilenames.end())
+                {
+                    std::ostringstream renamed;
+                    renamed << "PROB_" << index << "_" << sourcePath.filename().string();
+                    baseName = renamed.str();
+                }
+                usedFilenames.insert(baseName);
+
+                std::filesystem::path const destPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, baseName);
+
+                LOG_APP_INFO("[paths debug] debug reason=materializeProbFile sourcePathRelative='{}' "
+                             "sourcePathAbsolute='{}' destPathAbsolute='{}'",
+                             fileRef.m_Path, sourcePath.lexically_normal().generic_string(),
+                             destPath.lexically_normal().generic_string());
+                if (!AiCallTaskExecutor::WriteTextFile(destPath.string(), sourceText, outErrorMessage))
+                {
+                    return false;
+                }
+
+                // Update the ref so downstream logic treats it as inline.
+                fileRef.m_Path = destPath.string();
+                fileRef.m_Content = sourceText;
+                fileRef.m_HasInlineContent = true;
+            }
+
+            return true;
+        }
+
     } // namespace
 
     std::string AiCallTaskExecutor::BuildProbFilename(int64_t const requestId, int64_t const timestampNs)
@@ -504,39 +674,13 @@ namespace AIAssistant
 
     std::string AiCallTaskExecutor::ApplySimpleTemplate(std::string const& templateText, TaskInstanceState const& taskState)
     {
-        // Replaces occurrences of {{key}} with the corresponding taskState.m_InputValues[key].
-        // This is intentionally simple and deterministic (no conditionals, loops, etc.).
-        std::string result = templateText;
+        TemplateContext context;
+        context.m_InputValues = &taskState.m_InputValues;
 
-        std::size_t searchStart = 0;
-        for (;;)
-        {
-            std::size_t const openPos = result.find("{{", searchStart);
-            if (openPos == std::string::npos)
-            {
-                break;
-            }
-
-            std::size_t const closePos = result.find("}}", openPos + 2);
-            if (closePos == std::string::npos)
-            {
-                break;
-            }
-
-            std::string const key = result.substr(openPos + 2, closePos - (openPos + 2));
-
-            std::string replacement;
-            auto const iterator = taskState.m_InputValues.find(key);
-            if (iterator != taskState.m_InputValues.end())
-            {
-                replacement = iterator->second;
-            }
-
-            result.replace(openPos, (closePos + 2) - openPos, replacement);
-            searchStart = openPos + replacement.size();
-        }
-
-        return result;
+        std::string expandedOut;
+        std::string errorMessage;
+        ExpandTemplate(templateText, context, TemplateMode::Lenient, expandedOut, errorMessage);
+        return expandedOut;
     }
 
     std::string AiCallTaskExecutor::TryBuildPromptFromParams(TaskDef const& taskDefinition,
@@ -790,6 +934,13 @@ namespace AIAssistant
             return false;
         }
 
+        if (!MaterializeProbFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, errorMessage))
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+
         // ------------------------------------------------------------
         // Determine expected output path from the first PROB file.
         // The SessionManager writes output as <stem>.output.<ext>.
@@ -888,12 +1039,19 @@ namespace AIAssistant
         // ------------------------------------------------------------
         {
             std::string providerOverrideError;
-            std::optional<std::string> const providerOpt =
+            std::optional<std::string> rawProviderOpt =
                 TryExtractStringParam(taskDefinition.m_ParamsJson, "provider", providerOverrideError);
-            std::optional<std::string> const modelOpt =
+            std::optional<std::string> rawModelOpt =
                 TryExtractStringParam(taskDefinition.m_ParamsJson, "model", providerOverrideError);
             std::optional<std::string> const temperatureOpt =
                 TryExtractStringParam(taskDefinition.m_ParamsJson, "temperature", providerOverrideError);
+
+            // Expand {{defaults.*}} templates in provider/model params.
+            auto const defaultsMap = BuildDefaultsMap(workflowDefinition.m_DefaultsJson);
+            std::optional<std::string> const providerOpt =
+                rawProviderOpt ? std::optional(ExpandWithDefaults(*rawProviderOpt, defaultsMap)) : std::nullopt;
+            std::optional<std::string> const modelOpt =
+                rawModelOpt ? std::optional(ExpandWithDefaults(*rawModelOpt, defaultsMap)) : std::nullopt;
 
             if (providerOpt.has_value())
             {

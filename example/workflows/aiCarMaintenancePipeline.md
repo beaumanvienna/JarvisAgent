@@ -173,8 +173,8 @@ Per the JCWF spec, `depends_on` means:
 - `scripts/zipTool.sh`
 
 **Arguments (from JCWF):**
-- `${output[0]}` → `answer.zip`
-- `${input[0]}` → `.../answer.output.txt`
+- `{{output[0]}}` → `answer.zip`
+- `{{input[0]}}` → `.../answer.output.txt`
 
 So the effective call is conceptually:
 

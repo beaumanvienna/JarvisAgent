@@ -28,10 +28,10 @@
       "depends_on": ["plan"],
       "entrypoint": "tasks/finalize.py",
       "inputs": {
-        "plan_markdown": "${tasks.plan.outputs.plan_markdown}",
-        "n8n_request_path": "${context.n8n_request_path}",
-        "callbackUrl": "${context.callbackUrl}",
-        "n8n_task": "${context.n8n_task}"
+        "plan_markdown": "{{tasks.plan.outputs.plan_markdown}}",
+        "n8n_request_path": "{{context.n8n_request_path}}",
+        "callbackUrl": "{{context.callbackUrl}}",
+        "n8n_task": "{{context.n8n_task}}"
       },
       "outputs": {
         "result_markdown": "string"

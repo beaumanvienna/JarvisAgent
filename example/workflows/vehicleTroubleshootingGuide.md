@@ -215,8 +215,8 @@ Configured command:
 
 ```bash
 scripts/convertGuidePdf.sh
-  ${input[0]}
-  ${output[0]}
+  {{input[0]}}
+  {{output[0]}}
 ```
 
 ## Notes on Mermaid compatibility

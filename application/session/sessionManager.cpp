@@ -30,6 +30,7 @@
 #include "auxiliary/file.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
+#include "workflow/aiRequestPool.h"
 
 namespace AIAssistant
 {
@@ -324,6 +325,18 @@ namespace AIAssistant
         };
 
         m_QueryFutures.push_back(threadpool.SubmitTask(query));
+
+        // Signal the AiRequestPool that curl was dispatched for this PROB file.
+        // This confirms the handoff from file-placement to HTTP dispatch.
+        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+        if (jarvisAgent != nullptr)
+        {
+            AiRequestPool* requestPool = jarvisAgent->GetAiRequestPool();
+            if (requestPool != nullptr)
+            {
+                requestPool->OnCurlDispatched(inputFilename);
+            }
+        }
     }
 
     void SessionManager::CheckForUpdates()
@@ -499,27 +512,46 @@ namespace AIAssistant
             simdjson::padded_string const padded(content);
 
             // simdjson ondemand is single-pass, so re-iterate for each field.
-            std::string_view urlView;
-            std::string_view providerName;
-            std::string_view modelView;
-            std::string_view apiTypeView;
+            // IMPORTANT: string_views from get_string() point into the parser's
+            // internal buffer, which is overwritten on each parser.iterate() call.
+            // Convert to std::string immediately to avoid dangling views.
+            std::string urlStr;
+            std::string providerStr;
+            std::string modelStr;
+            std::string apiTypeStr;
             double temperatureVal{};
 
             {
                 auto d = parser.iterate(padded);
-                [[maybe_unused]] auto e = d["url"].get_string().get(urlView);
+                std::string_view sv;
+                if (d["url"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    urlStr = std::string(sv);
+                }
             }
             {
                 auto d = parser.iterate(padded);
-                [[maybe_unused]] auto e = d["provider"].get_string().get(providerName);
+                std::string_view sv;
+                if (d["provider"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    providerStr = std::string(sv);
+                }
             }
             {
                 auto d = parser.iterate(padded);
-                [[maybe_unused]] auto e = d["model"].get_string().get(modelView);
+                std::string_view sv;
+                if (d["model"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    modelStr = std::string(sv);
+                }
             }
             {
                 auto d = parser.iterate(padded);
-                [[maybe_unused]] auto e = d["api_type"].get_string().get(apiTypeView);
+                std::string_view sv;
+                if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    apiTypeStr = std::string(sv);
+                }
             }
             bool hasTemp = false;
             {
@@ -528,9 +560,9 @@ namespace AIAssistant
             }
 
             // url (mandatory — read from file, not from KeyManager)
-            if (urlView.size() > 0)
+            if (!urlStr.empty())
             {
-                m_Url = std::string(urlView);
+                m_Url = urlStr;
             }
             else
             {
@@ -538,15 +570,15 @@ namespace AIAssistant
             }
 
             // model (optional)
-            if (modelView.size() > 0)
+            if (!modelStr.empty())
             {
-                m_Model = std::string(modelView);
+                m_Model = modelStr;
             }
 
             // api_type (optional)
-            if (apiTypeView.size() > 0)
+            if (!apiTypeStr.empty())
             {
-                m_ApiType = std::string(apiTypeView);
+                m_ApiType = apiTypeStr;
             }
 
             // temperature (optional)
@@ -556,21 +588,21 @@ namespace AIAssistant
             }
 
             // provider name → KeyManager lookup for API key ONLY (credentials never in PROV file)
-            if (providerName.size() > 0)
+            if (!providerStr.empty())
             {
-                auto const* prov = Core::g_Core->GetKeyManager().GetProvider(std::string(providerName));
+                auto const* prov = Core::g_Core->GetKeyManager().GetProvider(providerStr);
                 if (prov)
                 {
                     if (!prov->m_ApiKey.empty())
                     {
                         m_ApiKey = prov->m_ApiKey;
                     }
-                    LOG_CORE_INFO("SessionManager '{}': provider '{}' key resolved from KeyManager", m_Name, providerName);
+                    LOG_CORE_INFO("SessionManager '{}': provider '{}' key resolved from KeyManager", m_Name, providerStr);
                 }
                 else
                 {
                     LOG_CORE_WARN("SessionManager '{}': provider '{}' not found in KeyManager (no API key)", m_Name,
-                                  providerName);
+                                  providerStr);
                 }
             }
         }

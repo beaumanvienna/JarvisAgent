@@ -71,7 +71,7 @@
         ],
         "prob_files": [
           {
-            "path": "PROB_{{req.work_item_id}}.txt",
+            "path": "PROB_{{req.work_item_id}}_{{req.index_padded}}.txt",
             "content": "Requirement ID: {{req.work_item_id}}\nTitle: {{req.title}}\nSeverity: {{req.severity}}\nPriority: {{req.priority}}\nStatus: {{req.status}}\n\nDescription:\n{{req.description}}\n"
           }
         ]

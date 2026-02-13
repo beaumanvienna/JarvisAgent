@@ -50,15 +50,16 @@ This is a two-task pipeline that showcases:
    (`lookupDividend#0` through `lookupDividend#59`). Each child receives
    the CSV fields as `{{pos.*}}` template variables.
 
-3. **Template substitution** — For each child, `{{pos.Symbol}}` is replaced
-   in both the PROB filename (`PROB_NVDA.txt`) and its content.
+3. **Template substitution** — For each child, `{{pos.Symbol}}` and
+   `{{pos.row_number_padded}}` are replaced in both the PROB filename
+   (e.g. `PROB_NVDA_037.txt`) and its content.
 
 4. **AI dispatch** — 60 async AI requests are dispatched in parallel. Each
    asks the model to look up dividend yield, compute weighted contribution,
    and report the 5-year trend.
 
-5. **Completion** — Output files `PROB_LQD.output.txt` through
-   `PROB_UPS.output.txt` are written as responses arrive.
+5. **Completion** — Output files `PROB_LQD_001.output.txt` through
+   `PROB_UPS_060.output.txt` are written as responses arrive.
 
 6. **Aggregation** — Once all 60 children succeed, `portfolioSummary` becomes
    ready. Its `cntx_files` glob pattern `../01_lookupDividend/PROB_*.output.txt`
@@ -167,7 +168,7 @@ Each child task instance has access to:
     "task_files": [{ "path": "TASK_dividendLookup.txt", "content": "..." }],
     "cntx_files": [{ "path": "CNTX_portfolio.txt", "content": "..." }],
     "prob_files": [{
-      "path": "PROB_{{pos.Symbol}}.txt",
+      "path": "PROB_{{pos.Symbol}}_{{pos.row_number_padded}}.txt",
       "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nPortfolio Allocation: {{pos.Percentage}}\n"
     }]
   }
@@ -176,8 +177,9 @@ Each child task instance has access to:
 
 - **`mode: "per_item"`** + **`filter: "positions"`** — triggers fan-out of
   60 children.
-- **`prob_files`** — template-substituted per child. Produces `PROB_LQD.txt`,
-  `PROB_BNDX.txt`, ..., `PROB_UPS.txt`.
+- **`prob_files`** — template-substituted per child. Produces `PROB_LQD_001.txt`,
+  `PROB_BNDX_002.txt`, ..., `PROB_UPS_060.txt`. The `{{pos.row_number_padded}}`
+  suffix ensures unique filenames even if two rows share the same symbol.
 - **`cntx_files`** — inline content providing portfolio-level context
   (shared by all children).
 - The AI is instructed to return a structured report with yield, weighted
@@ -224,13 +226,13 @@ queue/portfolioDividendAnalysis/01_lookupDividend/
   TASK_dividendLookup.txt               ← written once (shared)
   CNTX_portfolio.txt                    ← written once (shared)
 
-  PROB_LQD.txt                          ← per-item input (position details)
-  PROB_LQD.output.txt                   ← per-item output (dividend report)
-  PROB_BNDX.txt
-  PROB_BNDX.output.txt
+  PROB_LQD_001.txt                      ← per-item input (position details)
+  PROB_LQD_001.output.txt               ← per-item output (dividend report)
+  PROB_BNDX_002.txt
+  PROB_BNDX_002.output.txt
   ...
-  PROB_UPS.txt
-  PROB_UPS.output.txt                   ← 60 pairs total
+  PROB_UPS_060.txt
+  PROB_UPS_060.output.txt               ← 60 pairs total
 
 queue/portfolioDividendAnalysis/02_portfolioSummary/
   STNG_succinct.txt
@@ -238,10 +240,10 @@ queue/portfolioDividendAnalysis/02_portfolioSummary/
   PROB_summarize.txt
   PROB_summarize.output.txt             ← final portfolio summary
 
-  CNTX_PROB_LQD.txt                    ← materialized from glob (60 files)
-  CNTX_PROB_BNDX.txt
+  CNTX_PROB_LQD_001.txt                ← materialized from glob (60 files)
+  CNTX_PROB_BNDX_002.txt
   ...
-  CNTX_PROB_UPS.txt
+  CNTX_PROB_UPS_060.txt
 ```
 
 A filter manifest is written to:
@@ -257,7 +259,7 @@ whose CSV row has changed are re-evaluated.
 
 ## 7. Sample Output
 
-### Per-Position Report (PROB_NVDA.output.txt)
+### Per-Position Report (PROB_NVDA_037.output.txt)
 
 ```
 Symbol: NVDA

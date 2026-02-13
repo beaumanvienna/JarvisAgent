@@ -51,7 +51,9 @@ namespace AIAssistant
                 resolvedPath = (std::filesystem::path(workflowBaseDir) / resolvedPath).string();
             }
 
-            return EvaluateCsv(filter, resolvedPath, errorMessage);
+            auto items = EvaluateCsv(filter, resolvedPath, errorMessage);
+            AddPaddedIndices(items);
+            return items;
         }
 
         if (kind == "text_lines")
@@ -62,21 +64,75 @@ namespace AIAssistant
                 resolvedPath = (std::filesystem::path(workflowBaseDir) / resolvedPath).string();
             }
 
-            return EvaluateTextLines(filter, resolvedPath, errorMessage);
+            auto items = EvaluateTextLines(filter, resolvedPath, errorMessage);
+            AddPaddedIndices(items);
+            return items;
         }
 
         if (kind == "query")
         {
-            return EvaluateQuery(filter, workflowBaseDir, errorMessage);
+            auto items = EvaluateQuery(filter, workflowBaseDir, errorMessage);
+            AddPaddedIndices(items);
+            return items;
         }
 
         if (kind == "polarion_query")
         {
-            return EvaluatePolarionQuery(filter, workflowBaseDir, errorMessage);
+            auto items = EvaluatePolarionQuery(filter, workflowBaseDir, errorMessage);
+            AddPaddedIndices(items);
+            return items;
         }
 
         errorMessage = "filter '" + filter.m_Id + "': unknown source kind '" + kind + "'";
         return {};
+    }
+
+    void FilterEngine::AddPaddedIndices(std::vector<FilterItem>& items)
+    {
+        if (items.empty())
+        {
+            return;
+        }
+
+        // Determine padding width from the largest index and row_number
+        size_t maxIndex = items.back().m_Index;
+        size_t maxRowNumber = 0;
+        for (auto const& item : items)
+        {
+            if (item.m_SourceIndex > maxRowNumber)
+            {
+                maxRowNumber = item.m_SourceIndex;
+            }
+        }
+
+        auto zeroPad = [](size_t value, int width) -> std::string
+        {
+            std::string s = std::to_string(value);
+            if (static_cast<int>(s.size()) < width)
+            {
+                s.insert(0, width - static_cast<int>(s.size()), '0');
+            }
+            return s;
+        };
+
+        int const indexWidth = static_cast<int>(std::to_string(maxIndex).size());
+        int const rowWidth = static_cast<int>(std::to_string(maxRowNumber).size());
+
+        // Use at least 3 digits for readability
+        int const padIndex = std::max(indexWidth, 3);
+        int const padRow = std::max(rowWidth, 3);
+
+        for (auto& item : items)
+        {
+            item.m_Values["index_padded"] = zeroPad(item.m_Index, padIndex);
+
+            auto rowIt = item.m_Values.find("row_number");
+            if (rowIt != item.m_Values.end())
+            {
+                size_t rowNum = item.m_SourceIndex;
+                item.m_Values["row_number_padded"] = zeroPad(rowNum, padRow);
+            }
+        }
     }
 
     // -----------------------------------------------------------------

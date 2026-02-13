@@ -24,6 +24,7 @@
 #include "dataflowResolver.h"
 
 #include "engine.h"
+#include "workflow/templateEngine.h"
 
 namespace AIAssistant
 {
@@ -66,7 +67,7 @@ namespace AIAssistant
             }
         }
 
-        // Step 2: expand templates inside resolved values (e.g. ${inputs.section_title})
+        // Step 2: expand templates inside resolved values (e.g. {{inputs.section_title}})
         for (auto& inputValuePair : resolvedInputs.m_StringValues)
         {
             std::string expandedValue;
@@ -128,41 +129,14 @@ namespace AIAssistant
                                            std::unordered_map<std::string, std::string> const& inputValues,
                                            std::string& expandedOut) const
     {
-        expandedOut.clear();
+        TemplateContext context;
+        context.m_InputValues = &inputValues;
 
-        std::string::size_type currentIndex = 0;
-        while (currentIndex < rawValue.size())
+        std::string errorMessage;
+        if (!ExpandTemplate(rawValue, context, TemplateMode::Strict, expandedOut, errorMessage))
         {
-            std::string::size_type startIndex = rawValue.find("${inputs.", currentIndex);
-            if (startIndex == std::string::npos)
-            {
-                // No more templates, append remaining literal text.
-                expandedOut += rawValue.substr(currentIndex);
-                break;
-            }
-
-            // Append literal text before the template.
-            expandedOut += rawValue.substr(currentIndex, startIndex - currentIndex);
-
-            std::string::size_type closeBraceIndex = rawValue.find('}', startIndex + 1);
-            if (closeBraceIndex == std::string::npos)
-            {
-                // Malformed template.
-                return false;
-            }
-
-            // "${inputs." is 9 characters.
-            std::string key = rawValue.substr(startIndex + 9, closeBraceIndex - (startIndex + 9));
-
-            auto valueIterator = inputValues.find(key);
-            if (valueIterator == inputValues.end())
-            {
-                // Reference to unknown input key.
-                return false;
-            }
-
-            expandedOut += valueIterator->second;
-            currentIndex = closeBraceIndex + 1;
+            LOG_APP_ERROR("DataflowResolver: Template expansion failed: {}", errorMessage);
+            return false;
         }
 
         return true;

@@ -36,6 +36,27 @@ Last reviewed: Feb 2026
 - [ ] Implement `dataflow.mapping` evaluation (mapping object is parsed/stored but currently ignored).
 - [ ] Implement **context-based input resolution** (from run context / params / defaults) where `DataflowResolver` has TODOs.
 
+### Workflow housekeeping — "Clean" command
+- [ ] Implement a **"Clean" command** for a given JCWF that deletes all **output artifacts** produced by running the workflow. Only output artifacts are deleted; source/input files are never touched.
+
+  **What to delete:**
+  1. **Queue task folders** — everything under `queue/<workflowId>/` (per-task subdirectories like `01_classifyQuestion/`).
+  2. **Explicitly declared output files** — all `file_outputs` declared in shell/ai_call/python tasks, resolved from the JCWF definition (e.g. `myapp`, `*.o`, `*.a`).
+  3. **AI call `.output.txt` files** — predictable naming convention (`<probfile>.output.txt`).
+  4. **Per-item / filter output artifacts** — fan-out generated files, matched via wildcard (e.g. `PROB_*_001.txt`, per-item output files).
+  5. **Working directory artifacts** — if `working_directory` is set and differs from `queue/<workflowId>`, clean that too.
+
+  **What to NOT delete:**
+  - Source files referenced as inputs (e.g. `lib1.cpp`, `main.cpp`, `message.txt`).
+  - The JCWF file itself.
+  - The `scripts/` folder or any read-only assets.
+  - Filter source files (e.g. the CSV input, not the generated per-item outputs).
+
+  **Implementation:**
+  - **Backend**: `DELETE /api/workflows/<id>/clean` endpoint in `webServer.cpp`.
+  - **Logic**: `WorkflowRuntimeManager::CleanWorkflow(workflowId)` — reads the JCWF definition, enumerates task output paths and queue folders, deletes them.
+  - **UI**: "Clean" button (broom icon) in the editor toolbar; shows confirmation dialog before executing.
+
 ### Reliability features
 - [ ] Implement **retries/backoff** from `RetryPolicy` in `WorkflowRuntimeManager`.
 - [ ] Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime.
@@ -53,46 +74,7 @@ Last reviewed: Feb 2026
 
 ## Refactor cleanup / safety
 
-- [ ] **Unify template substitution syntax: `${...}` → `{{...}}`**
-
-  Currently two different syntaxes exist:
-  - `${input[0]}`, `${output[0]}`, `${slot.NAME}`, `${env.NAME}` — shell task args
-  - `{{binding.field}}` — per-item filter value injection in ai_call queue_binding
-
-  **Goal:** single `{{...}}` syntax everywhere.  Migrate shell executor to
-  `{{input[0]}}`, `{{output[0]}}`, `{{slot.NAME}}`, `{{env.NAME}}`.  Remove
-  the `${...}` codepath entirely (no backwards-compatibility needed).
-
-  **Implementation plan:**
-  1. Create a shared `TemplateEngine` (or free function) used by both executors.
-  2. Migrate `ShellTaskExecutor::ExpandTemplateInArg()` to `{{...}}`.
-  3. Migrate `EnsureDefaultInputOutputArgs()` literals to `{{...}}`.
-  4. Update `DataflowResolver` references.
-  5. Update all example JCWF files.
-  6. Update all documentation.
-  7. Verify all tests / workflows still pass on Linux, macOS, Windows.
-
-  **Files to update:**
-
-  C++ implementation:
-  - `application/workflow/shellTaskExecutor.cpp` — bulk of `${...}` expansion logic (21 occurrences)
-  - `application/workflow/shellTaskExecutor.h` — function signatures if renamed
-  - `application/workflow/aiCallTaskExecutor.cpp` — `ApplySimpleTemplate()` becomes the shared implementation
-  - `application/workflow/aiCallTaskExecutor.h` — move `ApplySimpleTemplate` to shared location
-  - `application/workflow/dataflowResolver.cpp` — 3 references to `${...}` patterns
-  - `application/workflow/dataflowResolver.h` — 2 references to `${...}` patterns
-
-  Example workflows (JCWF):
-  - `example/workflows/make_example.jcwf` — 6 occurrences (`${input[N]}`, `${output[N]}`)
-  - `example/workflows/aiZipDemo.jcwf` — 4 occurrences
-  - `example/workflows/aiCarMaintenancePipeline.jcwf` — 2 occurrences
-  - `example/workflows/vehicleTroubleshootingGuide.jcwf` — 8 occurrences
-  - `example/workflows/hamburg-tourist-day-planner.jcwf` — 4 occurrences
-
-  Documentation (MD):
-  - `example/workflows/make_example.md` — 15 references to `${...}` syntax
-  - `example/workflows/aiCarMaintenancePipeline.md` — 2 references
-  - `example/workflows/vehicleTroubleshootingGuide.md` — 2 references
+- [x] ~~**Unify template substitution syntax: `${...}` → `{{...}}`**~~ — created shared `templateEngine.h/.cpp` with `ExpandTemplate()` supporting strict (shell) and lenient (ai_call) modes. Migrated `ShellTaskExecutor`, `AiCallTaskExecutor`, and `DataflowResolver` to use the shared engine. Updated all 5 example JCWF files and 3 documentation files. No `${...}` template references remain in the codebase.
 
 - [ ] **Port `web/index.html` to React** — replace the legacy dashboard with the React frontend.
 - [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.

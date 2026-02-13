@@ -134,10 +134,10 @@ From the logs and the current architecture, these are the main components that p
         - For example, for `compile_lib1`:
           - `file_inputs`: `["lib1.cpp"]` → resolved as `../workflows/lib1.cpp`
           - `file_outputs`: `["lib1.o"]`   → resolved as `../workflows/lib1.o`
-     2. Resolves any **dataflow inputs/outputs** (like `${input[0]}`, `${output[0]}` in `params.args`).
+     2. Resolves any **dataflow inputs/outputs** (like `{{input[0]}}`, `{{output[0]}}` in `params.args`).
      3. Constructs the **final command line** from the JCWF `params`:
         - `command`: `scripts/compile.sh`
-        - `args`: `["${input[0]}", "${output[0]}", "-O3"]` → becomes `.../lib1.cpp .../lib1.o -O3`.
+        - `args`: `["{{input[0]}}", "{{output[0]}}", "-O3"]` → becomes `.../lib1.cpp .../lib1.o -O3`.
      4. Spawns a **child process** to run the command.
      5. Collects the exit code and reports success/failure back to the orchestrator.
 
@@ -208,7 +208,7 @@ Let’s look at `compile_lib1` as a concrete example, step by step.
   "file_outputs": ["lib1.o"],
   "params": {
     "command": "scripts/compile.sh",
-    "args": ["${input[0]}", "${output[0]}", "-O3"]
+    "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
   },
   "outputs": {
     "object": { "type": "string" }
@@ -223,8 +223,8 @@ Let’s look at `compile_lib1` as a concrete example, step by step.
 3. The executor:
    - Resolves `file_inputs[0] = "lib1.cpp"` → `../workflows/lib1.cpp`.
    - Resolves `file_outputs[0] = "lib1.o"`  → `../workflows/lib1.o`.
-   - Maps `${input[0]}` → the resolved input path.
-   - Maps `${output[0]}` → the resolved output path.
+   - Maps `{{input[0]}}` → the resolved input path.
+   - Maps `{{output[0]}}` → the resolved output path.
 4. It constructs the command:
 
    ```text
@@ -464,7 +464,7 @@ DAG order:
 compile_lib1 resolves:
 - file_inputs[0] -> ../workflows/lib1.cpp
 - file_outputs[0] -> ../workflows/lib1.o
-args: ["${input[0]}", "${output[0]}"] -> becomes the resolved paths.
+args: ["{{input[0]}}", "{{output[0]}}"] -> becomes the resolved paths.
 
 ## 5. Re-running the workflow
 
@@ -500,7 +500,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["lib1.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["${input[0]}", "${output[0]}", "-O3"]
+        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
       },
       "outputs": {
         "object": { "type": "string" }
@@ -514,7 +514,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["lib2.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["${input[0]}", "${output[0]}", "-O3"]
+        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
       },
       "outputs": {
         "object": { "type": "string" }
@@ -529,7 +529,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["libmylib.a"],
       "params": {
         "command": "scripts/archive.sh",
-        "args": ["${input[0]}", "${input[1]}", "${output[0]}"]
+        "args": ["{{input[0]}}", "{{input[1]}}", "{{output[0]}}"]
       },
       "inputs": {
         "obj1": { "type": "string", "required": true },
@@ -547,7 +547,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["main.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["${input[0]}", "${output[0]}", "-O3"]
+        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
       },
       "outputs": {
         "object": { "type": "string" }
@@ -561,7 +561,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["app.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["${input[0]}", "${output[0]}", "-O3"]
+        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
       },
       "outputs": {
         "object": { "type": "string" }
@@ -576,7 +576,7 @@ With freshness checks implemented for JCWF:
       "file_outputs": ["myapp"],
       "params": {
         "command": "scripts/link.sh",
-        "args": ["${input[0]}", "${input[1]}", "${input[2]}", "${output[0]}", "-O3"]
+        "args": ["{{input[0]}}", "{{input[1]}}", "{{input[2]}}", "{{output[0]}}", "-O3"]
       },
       "inputs": {
         "main_obj": { "type": "string", "required": true },

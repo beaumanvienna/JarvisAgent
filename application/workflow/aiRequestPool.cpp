@@ -309,6 +309,39 @@ namespace AIAssistant
         return registered;
     }
 
+    void AiRequestPool::OnCurlDispatched(std::string const& probFilePath)
+    {
+        // Derive expected output path from PROB path: PROB_x.txt → PROB_x.output.txt
+        fs::path const probPath(probFilePath);
+        fs::path expectedOutputPath = probPath;
+        expectedOutputPath.replace_filename(probPath.stem().string() + ".output" + probPath.extension().string());
+
+        std::string const canonicalPath = fs::absolute(expectedOutputPath).lexically_normal().generic_string();
+
+        std::shared_ptr<PendingEntry> pendingEntry;
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+
+            auto const iterator = m_PendingByOutputPath.find(canonicalPath);
+            if (iterator == m_PendingByOutputPath.end())
+            {
+                LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: no pending request for '{}'", canonicalPath);
+                return;
+            }
+
+            pendingEntry = iterator->second;
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+            pendingEntry->m_CurlDispatched = true;
+        }
+
+        LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: curl issued for PROB '{}' (expected output '{}')", probFilePath,
+                     canonicalPath);
+    }
+
     bool AiRequestPool::OnOutputFileCreated(std::string const& fullFilePath)
     {
         std::string const canonicalPath = fs::absolute(fs::path(fullFilePath)).lexically_normal().generic_string();
@@ -617,7 +650,25 @@ namespace AIAssistant
 
                 entry->m_IsCompleted = true;
                 entry->m_IsFailed = true;
-                entry->m_ErrorMessage = "ai_call timed out waiting for output artifact";
+
+                if (!entry->m_CurlDispatched)
+                {
+                    entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched by SessionManager "
+                                            "(files placed in queue but SessionManager did not pick them up)";
+                }
+                else
+                {
+                    entry->m_ErrorMessage = "ai_call timed out waiting for output artifact "
+                                            "(curl was dispatched but no response received)";
+                }
+
+                std::string const& taskId = entry->m_Context.m_TaskId;
+                if (!taskId.empty())
+                {
+                    LOG_APP_WARN("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
+                                 entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
+                }
+
                 entry->conditionVariable.notify_all();
 
                 becameCompleted = true;

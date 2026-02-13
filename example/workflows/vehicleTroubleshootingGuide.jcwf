@@ -4,6 +4,13 @@
   "label": "Vehicle Troubleshooting Guide (CFG + PDF)",
   "doc": "Generate Mermaid control-flow graphs for engine codes 244/250/301, combine into an MD guide, then convert to PDF via md2pdf-mermaid.",
   "base_directory": ".",
+  "defaults": {
+    "timeout_ms": 30000,
+    "ai": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini"
+    }
+  },
   "triggers": [
     {
       "type": "auto",
@@ -30,8 +37,8 @@
         "code244.output.md"
       ],
       "params": {
-        "provider": "${defaults.ai.provider}",
-        "model": "${defaults.ai.model}",
+        "provider": "{{defaults.ai.provider}}",
+        "model": "{{defaults.ai.model}}",
         "mode": "one_shot"
       },
       "queue_binding": {
@@ -76,8 +83,8 @@
         "code250.output.md"
       ],
       "params": {
-        "provider": "${defaults.ai.provider}",
-        "model": "${defaults.ai.model}",
+        "provider": "{{defaults.ai.provider}}",
+        "model": "{{defaults.ai.model}}",
         "mode": "one_shot"
       },
       "queue_binding": {
@@ -122,8 +129,8 @@
         "code301.output.md"
       ],
       "params": {
-        "provider": "${defaults.ai.provider}",
-        "model": "${defaults.ai.model}",
+        "provider": "{{defaults.ai.provider}}",
+        "model": "{{defaults.ai.model}}",
         "mode": "one_shot"
       },
       "queue_binding": {
@@ -213,8 +220,8 @@
       "params": {
         "command": "scripts/convertGuidePdf.sh",
         "args": [
-          "${input[0]}",
-          "${output[0]}"
+          "{{input[0]}}",
+          "{{output[0]}}"
         ]
       },
       "file_inputs": [

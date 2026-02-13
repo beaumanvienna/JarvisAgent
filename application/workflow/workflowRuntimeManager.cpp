@@ -592,6 +592,8 @@ namespace AIAssistant
 
                 if (!result.m_ExecuteOk)
                 {
+                    LOG_APP_WARN("[workflow] task '{}' failed in run '{}': {}", result.m_TaskId, workflowRun.m_RunId,
+                                 result.m_TaskState.m_LastErrorMessage);
                     workflowRun.m_HasFailed = true;
                 }
             }
@@ -630,6 +632,7 @@ namespace AIAssistant
                 }
             }
 
+            LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
             workflowRun.m_IsCompleted = true;
             return;
         }
@@ -812,6 +815,14 @@ namespace AIAssistant
         // ---------------------------------------------------------
         if (IsRunTerminal(activeRun))
         {
+            if (workflowRun.m_HasFailed)
+            {
+                LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
+            }
+            else
+            {
+                LOG_APP_INFO("[workflow] run '{}' completed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
+            }
             workflowRun.m_IsCompleted = true;
             return;
         }

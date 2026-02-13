@@ -113,6 +113,11 @@ namespace AIAssistant
         // Returns true if the path matches a registered expected output.
         bool OnOutputFileCreated(std::string const& fullFilePath);
 
+        // Signal that the SessionManager has dispatched a curl request for a PROB file.
+        // Confirms the handoff from file-placement to HTTP dispatch actually happened.
+        // probFilePath: absolute path of the PROB file being sent.
+        void OnCurlDispatched(std::string const& probFilePath);
+
         // Non-blocking: if the request is completed (success or failure), returns true and consumes the result.
         // If not completed yet, returns false.
         bool TryConsumeResult(AiRequestHandle const& requestHandle, bool& outWasFailed, std::string& outResponseText,
@@ -171,6 +176,8 @@ namespace AIAssistant
 
             bool m_HasDeadline = false;
             std::chrono::steady_clock::time_point m_Deadline;
+
+            bool m_CurlDispatched = false;
 
             bool m_HasQueuedCompletion = false;
             RequestContext m_Context;

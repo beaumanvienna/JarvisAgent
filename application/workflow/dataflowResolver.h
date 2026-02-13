@@ -46,7 +46,7 @@ namespace AIAssistant
     //   * explicit dataflow rules ("from_task", "from_output")
     //   * workflow run context (future extension)
     //   * literal/default values (future extension)
-    //   * template expansion (${inputs.x})
+    //   * template expansion ({{inputs.x}})
     //
     // Does not execute tasks; only collects input values.
     // -------------------------------------------------------------
@@ -67,7 +67,7 @@ namespace AIAssistant
                                          std::string const& targetTaskId, std::string const& targetInputName,
                                          std::string& resolvedValueOut) const;
 
-        // Template expansion: resolve ${inputs.x} inside a string.
+        // Template expansion: resolve {{inputs.x}} inside a string.
         bool ExpandTemplates(std::string const& rawValue, std::unordered_map<std::string, std::string> const& inputValues,
                              std::string& expandedOut) const;
     };

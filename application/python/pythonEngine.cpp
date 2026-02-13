@@ -325,9 +325,46 @@ namespace AIAssistant
                     }
                     break;
                 }
+
+                case PythonTask::Type::WorkflowTask:
+                {
+                    if (task.m_WorkflowRequest)
+                    {
+                        ExecuteWorkflowTaskOnWorker(task.m_WorkflowRequest);
+                    }
+                    break;
+                }
             }
 
             PyGILState_Release(gilState);
+
+            // Check stop request between tasks so we don't block on a backlog
+            // of queued OnEvent tasks during shutdown.
+            {
+                std::unique_lock<std::mutex> lock(m_QueueMutex);
+                if (m_StopRequested)
+                {
+                    break;
+                }
+            }
+        }
+
+        // Drain remaining WorkflowTask requests so callers don't block forever
+        // on resultFuture.get() during shutdown.
+        {
+            std::unique_lock<std::mutex> lock(m_QueueMutex);
+            while (!m_TaskQueue.empty())
+            {
+                PythonTask remaining = std::move(m_TaskQueue.front());
+                m_TaskQueue.pop();
+
+                if (remaining.m_Type == PythonTask::Type::WorkflowTask && remaining.m_WorkflowRequest)
+                {
+                    remaining.m_WorkflowRequest->m_ErrorMessage = "PythonEngine shutting down";
+                    remaining.m_WorkflowRequest->m_Success = false;
+                    remaining.m_WorkflowRequest->m_Promise.set_value(false);
+                }
+            }
         }
     }
 
@@ -504,6 +541,13 @@ namespace AIAssistant
         LOG_APP_INFO("Python engine stopped");
     }
 
+    // ============================================================================
+    //   ExecuteWorkflowTask — public API (called from thread pool worker)
+    //
+    //   Enqueues work onto the PythonEngine worker thread and blocks until
+    //   completion.  This avoids a GIL deadlock where the thread pool worker
+    //   and the PythonEngine worker thread both compete for GIL + m_InterpreterMutex.
+    // ============================================================================
     bool PythonEngine::ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
                                            std::unordered_map<std::string, std::string> const& inputValues,
                                            std::unordered_map<std::string, std::string> const& contextValues,
@@ -524,13 +568,40 @@ namespace AIAssistant
             return false;
         }
 
-        // NOTE:
-        // - We do not change the process working directory here (std::filesystem::current_path / os.chdir),
-        //   because that is process-global and would break parallel task execution.
-        // - Task-scoped path resolution is handled by the workflow runtime and the task executor.
+        // Build the request and enqueue it onto the worker thread.
+        auto request = std::make_shared<WorkflowTaskRequest>();
+        request->m_TaskDefinition = &taskDefinition;
+        request->m_TaskWorkingDirectory = taskWorkingDirectory;
+        request->m_InputValues = &inputValues;
+        request->m_ContextValues = &contextValues;
 
-        PyGILState_STATE gilState = PyGILState_Ensure();
-        std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
+        std::future<bool> resultFuture = request->m_Promise.get_future();
+
+        PythonTask task;
+        task.m_Type = PythonTask::Type::WorkflowTask;
+        task.m_WorkflowRequest = request;
+        EnqueueTask(task);
+
+        // Block until the worker thread completes the Python call.
+        bool const ok = resultFuture.get();
+
+        outputValuesOut = std::move(request->m_OutputValues);
+        errorMessage = request->m_ErrorMessage;
+        return ok;
+    }
+
+    // ============================================================================
+    //   ExecuteWorkflowTaskOnWorker — runs on the PythonEngine worker thread
+    //   (GIL is already held by the caller in WorkerLoop)
+    // ============================================================================
+    void PythonEngine::ExecuteWorkflowTaskOnWorker(std::shared_ptr<WorkflowTaskRequest> const& request)
+    {
+        TaskDef const& taskDefinition = *request->m_TaskDefinition;
+        std::string const& taskWorkingDirectory = request->m_TaskWorkingDirectory;
+        std::unordered_map<std::string, std::string> const& inputValues = *request->m_InputValues;
+        std::unordered_map<std::string, std::string> const& contextValues = *request->m_ContextValues;
+
+        // NOTE: GIL is already held — we are on the worker thread.
 
         auto pyObjectToUtf8 = [](PyObject* object) -> std::string
         {
@@ -583,6 +654,13 @@ namespace AIAssistant
             return message;
         };
 
+        auto fail = [&](std::string const& msg)
+        {
+            request->m_ErrorMessage = msg;
+            request->m_Success = false;
+            request->m_Promise.set_value(false);
+        };
+
         // --------------------------------------------------------------------
         // Parse params JSON to get module + function
         // --------------------------------------------------------------------
@@ -592,10 +670,8 @@ namespace AIAssistant
         PyObject* jsonModule = PyImport_ImportModule("json");
         if (jsonModule == nullptr)
         {
-            errorMessage =
-                "PythonEngine::ExecuteWorkflowTask: failed to import python module 'json': " + consumePythonException();
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: failed to import python module 'json': " +
+                        consumePythonException());
         }
 
         PyObject* paramsDict = PyObject_CallMethod(jsonModule, "loads", "s", taskDefinition.m_ParamsJson.c_str());
@@ -603,11 +679,10 @@ namespace AIAssistant
 
         if (paramsDict == nullptr || !PyDict_Check(paramsDict))
         {
-            errorMessage =
+            std::string const msg =
                 "PythonEngine::ExecuteWorkflowTask: failed to parse task params JSON: " + consumePythonException();
             Py_XDECREF(paramsDict);
-            PyGILState_Release(gilState);
-            return false;
+            return fail(msg);
         }
 
         PyObject* moduleObject = PyDict_GetItemString(paramsDict, "module");     // borrowed
@@ -616,11 +691,9 @@ namespace AIAssistant
         if (moduleObject == nullptr || functionObject == nullptr || !PyUnicode_Check(moduleObject) ||
             !PyUnicode_Check(functionObject))
         {
-            errorMessage =
-                "PythonEngine::ExecuteWorkflowTask: task params JSON must contain string fields 'module' and 'function'";
             Py_DECREF(paramsDict);
-            PyGILState_Release(gilState);
-            return false;
+            return fail(
+                "PythonEngine::ExecuteWorkflowTask: task params JSON must contain string fields 'module' and 'function'");
         }
 
         {
@@ -635,9 +708,7 @@ namespace AIAssistant
 
         if (moduleName.empty() || functionName.empty())
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: empty module/function in task params";
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: empty module/function in task params");
         }
 
         // --------------------------------------------------------------------
@@ -646,10 +717,8 @@ namespace AIAssistant
         PyObject* taskModule = PyImport_ImportModule(moduleName.c_str());
         if (taskModule == nullptr)
         {
-            errorMessage =
-                "PythonEngine::ExecuteWorkflowTask: failed to import '" + moduleName + "': " + consumePythonException();
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: failed to import '" + moduleName +
+                        "': " + consumePythonException());
         }
 
         PyObject* taskFunction = PyObject_GetAttrString(taskModule, functionName.c_str());
@@ -657,10 +726,8 @@ namespace AIAssistant
 
         if (taskFunction == nullptr || !PyCallable_Check(taskFunction))
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: '" + moduleName + "." + functionName + "' is not callable";
             Py_XDECREF(taskFunction);
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: '" + moduleName + "." + functionName + "' is not callable");
         }
 
         // --------------------------------------------------------------------
@@ -669,10 +736,8 @@ namespace AIAssistant
         PyObject* kwargs = PyDict_New();
         if (kwargs == nullptr)
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate kwargs dict";
             Py_DECREF(taskFunction);
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate kwargs dict");
         }
 
         for (auto const& inputPair : inputValues)
@@ -737,11 +802,9 @@ namespace AIAssistant
         {
             if (!attachContextDictToKwargs(kwargs))
             {
-                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate context dict";
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
-                PyGILState_Release(gilState);
-                return false;
+                return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate context dict");
             }
         }
 
@@ -751,11 +814,9 @@ namespace AIAssistant
         PyObject* argsTuple = PyTuple_New(0);
         if (argsTuple == nullptr)
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple";
             Py_DECREF(kwargs);
             Py_DECREF(taskFunction);
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple");
         }
 
         PyObject* resultObject = PyObject_Call(taskFunction, argsTuple, kwargs);
@@ -771,30 +832,24 @@ namespace AIAssistant
 
             if (!looksLikeMissingContext)
             {
-                errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + firstException;
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
-                PyGILState_Release(gilState);
-                return false;
+                return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + firstException);
             }
 
             if (!attachContextDictToKwargs(kwargs))
             {
-                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate context dict";
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
-                PyGILState_Release(gilState);
-                return false;
+                return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate context dict");
             }
 
             argsTuple = PyTuple_New(0);
             if (argsTuple == nullptr)
             {
-                errorMessage = "PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple";
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
-                PyGILState_Release(gilState);
-                return false;
+                return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple");
             }
 
             resultObject = PyObject_Call(taskFunction, argsTuple, kwargs);
@@ -802,20 +857,16 @@ namespace AIAssistant
 
             if (resultObject == nullptr)
             {
-                errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException();
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
-                PyGILState_Release(gilState);
-                return false;
+                return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException());
             }
         }
         else if (resultObject == nullptr)
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException();
             Py_DECREF(kwargs);
             Py_DECREF(taskFunction);
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException());
         }
 
         Py_DECREF(kwargs);
@@ -825,17 +876,16 @@ namespace AIAssistant
         if (resultObject == Py_None)
         {
             Py_DECREF(resultObject);
-            PyGILState_Release(gilState);
-            return true;
+            request->m_Success = true;
+            request->m_Promise.set_value(true);
+            return;
         }
 
         if (!PyDict_Check(resultObject))
         {
-            errorMessage = "PythonEngine::ExecuteWorkflowTask: expected dict return value (or None) from '" + moduleName +
-                           "." + functionName + "'";
             Py_DECREF(resultObject);
-            PyGILState_Release(gilState);
-            return false;
+            return fail("PythonEngine::ExecuteWorkflowTask: expected dict return value (or None) from '" + moduleName + "." +
+                        functionName + "'");
         }
 
         // Extract output values as strings.
@@ -859,13 +909,13 @@ namespace AIAssistant
             std::string const key = keyUtf8;
             std::string const value = pyObjectToUtf8(valueObject);
 
-            outputValuesOut[key] = value;
+            request->m_OutputValues[key] = value;
         }
 
         Py_DECREF(resultObject);
 
-        PyGILState_Release(gilState);
-        return true;
+        request->m_Success = true;
+        request->m_Promise.set_value(true);
     }
 
 } // namespace AIAssistant

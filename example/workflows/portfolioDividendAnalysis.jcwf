@@ -72,7 +72,7 @@
         ],
         "prob_files": [
           {
-            "path": "PROB_{{pos.Symbol}}.txt",
+            "path": "PROB_{{pos.Symbol}}_{{pos.row_number_padded}}.txt",
             "content": "Symbol: {{pos.Symbol}}\nName: {{pos.Name}}\nPortfolio Allocation: {{pos.Percentage}}\n"
           }
         ]

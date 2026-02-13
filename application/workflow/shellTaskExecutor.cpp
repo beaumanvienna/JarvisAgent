@@ -26,6 +26,7 @@
 #include "engine.h"
 #include "core.h"
 #include "shellTaskExecutor.h"
+#include "workflow/templateEngine.h"
 
 #include <cctype>
 #include <cstdio>
@@ -132,170 +133,23 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Join a list of file paths into a single space-separated string.
-        // Example: ["a.cpp","b.cpp"] → "a.cpp b.cpp"
-        // (This matches Makefile-style variable expansion semantics.)
-        // ------------------------------------------------------------
-        std::string JoinFileList(std::vector<std::string> const& files)
-        {
-            std::string joined;
-
-            for (size_t index = 0; index < files.size(); ++index)
-            {
-                joined += files[index];
-
-                if (index + 1 < files.size())
-                {
-                    joined += " ";
-                }
-            }
-
-            return joined;
-        }
-
-        // ------------------------------------------------------------
-        // Expand JCWF templates inside a single argument string.
-        //
-        // Supported patterns:
-        //   * ${inputs}        → space-separated list of file_inputs
-        //   * ${outputs}       → space-separated list of file_outputs
-        //   * ${input[N]}      → N-th file_input (0-based)
-        //   * ${output[N]}     → N-th file_output (0-based)
-        //   * ${slot.NAME}     → value from taskState.m_InputValues["NAME"]
-        //   * ${env.NAME}      → value from taskDefinition.m_Environment.m_Variables["NAME"]
-        //                        (empty string if not found)
-        //
-        // Returns false on:
-        //   * malformed pattern (missing closing '}')
-        //   * invalid index
-        //   * unknown slot.NAME
-        //
-        // This keeps misconfigurations explicit.
+        // Expand JCWF {{...}} templates inside a single argument string
+        // using the shared TemplateEngine (strict mode).
         // ------------------------------------------------------------
         bool ExpandTemplatesStrict(std::string const& raw, TaskDef const& taskDefinition, TaskInstanceState const& taskState,
                                    std::string& expandedOut)
         {
-            expandedOut.clear();
+            TemplateContext context;
+            context.m_FileInputs = &taskDefinition.m_FileInputs;
+            context.m_FileOutputs = &taskDefinition.m_FileOutputs;
+            context.m_InputValues = &taskState.m_InputValues;
+            context.m_EnvVariables = &taskDefinition.m_Environment.m_Variables;
 
-            size_t currentIndex = 0;
-
-            while (currentIndex < raw.size())
+            std::string errorMessage;
+            if (!ExpandTemplate(raw, context, TemplateMode::Strict, expandedOut, errorMessage))
             {
-                size_t startIndex = raw.find("${", currentIndex);
-                if (startIndex == std::string::npos)
-                {
-                    expandedOut += raw.substr(currentIndex);
-                    break;
-                }
-
-                // Copy literal prefix.
-                expandedOut += raw.substr(currentIndex, startIndex - currentIndex);
-
-                size_t closeBraceIndex = raw.find('}', startIndex + 2);
-                if (closeBraceIndex == std::string::npos)
-                {
-                    // Malformed template.
-                    LOG_APP_ERROR("ShellTaskExecutor: Malformed template in argument '{}' (missing closing brace)", raw);
-                    return false;
-                }
-
-                std::string key = raw.substr(startIndex + 2, closeBraceIndex - (startIndex + 2));
-                std::string replacement;
-
-                // ${inputs}
-                if (key == "inputs")
-                {
-                    replacement = JoinFileList(taskDefinition.m_FileInputs);
-                }
-                // ${outputs}
-                else if (key == "outputs")
-                {
-                    replacement = JoinFileList(taskDefinition.m_FileOutputs);
-                }
-                // ${input[N]}
-                else if (key.rfind("input[", 0) == 0 && key.back() == ']')
-                {
-                    std::string indexString = key.substr(6, key.size() - 7);
-                    try
-                    {
-                        size_t index = static_cast<size_t>(std::stoul(indexString));
-                        if (index >= taskDefinition.m_FileInputs.size())
-                        {
-                            LOG_APP_ERROR("ShellTaskExecutor: input index {} out of range for '{}' in argument '{}'", index,
-                                          key, raw);
-                            return false;
-                        }
-
-                        replacement = taskDefinition.m_FileInputs[index];
-                    }
-                    catch (...)
-                    {
-                        LOG_APP_ERROR("ShellTaskExecutor: Failed to parse input index from '{}' in argument '{}'", key, raw);
-                        return false;
-                    }
-                }
-                // ${output[N]}
-                else if (key.rfind("output[", 0) == 0 && key.back() == ']')
-                {
-                    std::string indexString = key.substr(7, key.size() - 8);
-                    try
-                    {
-                        size_t index = static_cast<size_t>(std::stoul(indexString));
-                        if (index >= taskDefinition.m_FileOutputs.size())
-                        {
-                            LOG_APP_ERROR("ShellTaskExecutor: output index {} out of range for '{}' in argument '{}'", index,
-                                          key, raw);
-                            return false;
-                        }
-
-                        replacement = taskDefinition.m_FileOutputs[index];
-                    }
-                    catch (...)
-                    {
-                        LOG_APP_ERROR("ShellTaskExecutor: Failed to parse output index from '{}' in argument '{}'", key,
-                                      raw);
-                        return false;
-                    }
-                }
-                // ${slot.NAME}
-                else if (key.rfind("slot.", 0) == 0)
-                {
-                    std::string slotName = key.substr(5);
-                    auto iterator = taskState.m_InputValues.find(slotName);
-                    if (iterator == taskState.m_InputValues.end())
-                    {
-                        LOG_APP_ERROR("ShellTaskExecutor: Unknown slot '{}' referenced in argument '{}'", slotName, raw);
-                        return false;
-                    }
-
-                    replacement = iterator->second;
-                }
-                // ${env.NAME}
-                else if (key.rfind("env.", 0) == 0)
-                {
-                    std::string envName = key.substr(4);
-                    auto iterator = taskDefinition.m_Environment.m_Variables.find(envName);
-                    if (iterator != taskDefinition.m_Environment.m_Variables.end())
-                    {
-                        replacement = iterator->second;
-                    }
-                    else
-                    {
-                        // Missing env variable → expand as empty string.
-                        LOG_APP_WARN("ShellTaskExecutor: Environment variable '{}' not found for argument '{}'", envName,
-                                     raw);
-                        replacement.clear();
-                    }
-                }
-                else
-                {
-                    // Unknown pattern.
-                    LOG_APP_ERROR("ShellTaskExecutor: Unknown template pattern '{}' in argument '{}'", key, raw);
-                    return false;
-                }
-
-                expandedOut += replacement;
-                currentIndex = closeBraceIndex + 1;
+                LOG_APP_ERROR("ShellTaskExecutor: Template expansion failed for argument '{}': {}", raw, errorMessage);
+                return false;
             }
 
             return true;
@@ -361,8 +215,8 @@ namespace AIAssistant
         // Scan raw args for the presence of any input/output macros.
         //
         // Used to implement Option B:
-        //   - If no input macro is present, inject "${inputs}" at the front.
-        //   - If no output macro is present, append "${outputs}".
+        //   - If no input macro is present, inject "{{inputs}}" at the front.
+        //   - If no output macro is present, append "{{outputs}}".
         // ------------------------------------------------------------
         void EnsureDefaultInputOutputArgs(std::vector<std::string>& rawArgs)
         {
@@ -371,12 +225,12 @@ namespace AIAssistant
 
             for (std::string const& argument : rawArgs)
             {
-                if (argument.find("${inputs}") != std::string::npos || argument.find("${input[") != std::string::npos)
+                if (argument.find("{{inputs}}") != std::string::npos || argument.find("{{input[") != std::string::npos)
                 {
                     hasInputMacro = true;
                 }
 
-                if (argument.find("${outputs}") != std::string::npos || argument.find("${output[") != std::string::npos)
+                if (argument.find("{{outputs}}") != std::string::npos || argument.find("{{output[") != std::string::npos)
                 {
                     hasOutputMacro = true;
                 }
@@ -384,12 +238,12 @@ namespace AIAssistant
 
             if (!hasInputMacro)
             {
-                rawArgs.insert(rawArgs.begin(), std::string("${inputs}"));
+                rawArgs.insert(rawArgs.begin(), std::string("{{inputs}}"));
             }
 
             if (!hasOutputMacro)
             {
-                rawArgs.push_back(std::string("${outputs}"));
+                rawArgs.push_back(std::string("{{outputs}}"));
             }
         }
 
@@ -788,7 +642,7 @@ namespace AIAssistant
         // ------------------------------------------------------------
         // 3) Derive logical output values up front
         //
-        // This ensures templates like ${output[0]} and dataflow outputs
+        // This ensures templates like {{output[0]}} and dataflow outputs
         // are consistent with file_outputs.
         // ------------------------------------------------------------
         std::unordered_map<std::string, std::string> derivedOutputs;
@@ -796,7 +650,7 @@ namespace AIAssistant
 
         // ------------------------------------------------------------
         // 4) Collect raw args from JCWF, then apply Option B defaults
-        //    (auto-prepend ${inputs} / auto-append ${outputs} if absent).
+        //    (auto-prepend {{inputs}} / auto-append {{outputs}} if absent).
         // ------------------------------------------------------------
         std::vector<std::string> rawArgs;
 

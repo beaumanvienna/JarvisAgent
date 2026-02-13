@@ -22,6 +22,7 @@
 #pragma once
 
 #include <string>
+#include <future>
 #include <queue>
 #include <thread>
 #include <mutex>
@@ -39,6 +40,21 @@ namespace AIAssistant
 {
     class Event;
 
+    struct WorkflowTaskRequest
+    {
+        TaskDef const* m_TaskDefinition{nullptr};
+        std::string m_TaskWorkingDirectory;
+        std::unordered_map<std::string, std::string> const* m_InputValues{nullptr};
+        std::unordered_map<std::string, std::string> const* m_ContextValues{nullptr};
+
+        // Result (filled by worker)
+        std::unordered_map<std::string, std::string> m_OutputValues;
+        std::string m_ErrorMessage;
+        bool m_Success{false};
+
+        std::promise<bool> m_Promise;
+    };
+
     struct PythonTask
     {
         enum class Type
@@ -46,11 +62,13 @@ namespace AIAssistant
             OnStart,
             OnUpdate,
             OnEvent,
-            Shutdown
+            Shutdown,
+            WorkflowTask
         };
 
         Type m_Type{};
         std::shared_ptr<Event> m_EventPtr;
+        std::shared_ptr<WorkflowTaskRequest> m_WorkflowRequest;
     };
 
     class PythonEngine
@@ -84,6 +102,9 @@ namespace AIAssistant
         void StartWorkerThread();
         void WorkerLoop();
         void EnqueueTask(PythonTask const& task);
+
+        // Executes a workflow task under the GIL (called on worker thread only)
+        void ExecuteWorkflowTaskOnWorker(std::shared_ptr<WorkflowTaskRequest> const& request);
 
     private:
         bool m_Running{false};
