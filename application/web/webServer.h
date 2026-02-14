@@ -74,6 +74,7 @@ namespace AIAssistant
         crow::response HandleWorkflowValidateGet(std::string const& workflowId);
 
         crow::response HandleWorkflowRunPost(std::string const& workflowId);
+        crow::response HandleWorkflowCleanDelete(std::string const& workflowId);
         crow::response HandleWorkflowRunsActiveGet();
         crow::response HandleWorkflowRunsLastGet();
         crow::response HandleWorkflowRunGet(std::string const& runId);

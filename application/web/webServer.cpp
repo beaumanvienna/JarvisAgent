@@ -762,6 +762,10 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
             .methods("POST"_method)([this](std::string const& workflowId) { return HandleWorkflowRunPost(workflowId); });
 
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
+            .methods("DELETE"_method)([this](std::string const& workflowId)
+                                      { return HandleWorkflowCleanDelete(workflowId); });
+
         CROW_ROUTE(m_Server, "/api/workflow-runs/active")
             .methods("GET"_method)([this]() { return HandleWorkflowRunsActiveGet(); });
 
@@ -1313,11 +1317,17 @@ namespace AIAssistant
             workflowRuntimeManager = m_WorkflowRuntimeManager;
         }
 
-        // Enforce manual_start flag: reject manual runs for workflows that disable it.
+        // Validate that the workflow exists and enforce manual_start flag.
         if (workflowRegistry != nullptr)
         {
             std::optional<WorkflowDefinition> definition = workflowRegistry->GetWorkflow(workflowId);
-            if (definition.has_value() && !definition->m_ManualStart)
+            if (!definition.has_value())
+            {
+                return MakeWorkflowJsonError(404, "workflow_not_found",
+                                             "No workflow with id '" + workflowId + "' is registered",
+                                             "POST /api/workflows/{id}/run", workflowId);
+            }
+            if (!definition->m_ManualStart)
             {
                 return MakeWorkflowJsonError(403, "manual_start_disabled",
                                              "This workflow has manual_start set to false and cannot be started manually",
@@ -1341,6 +1351,42 @@ namespace AIAssistant
 
         BroadcastWorkflowRunsSnapshot();
         return MakeJsonResponse(202, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowCleanDelete(std::string const& workflowId)
+    {
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
+                                         "DELETE /api/workflows/{id}/clean", workflowId);
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(500, "runtime_not_available", "Workflow runtime manager is not available",
+                                         "DELETE /api/workflows/{id}/clean", workflowId);
+        }
+
+        std::string errorMessage;
+        bool const ok = workflowRuntimeManager->CleanWorkflow(workflowId, errorMessage);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = ok;
+        responseJson["id"] = workflowId;
+
+        if (!ok)
+        {
+            responseJson["error"] = errorMessage;
+            return MakeJsonResponse(ok ? 200 : 409, responseJson);
+        }
+
+        return MakeJsonResponse(200, responseJson);
     }
 
     crow::response WebServer::HandleWorkflowRunsActiveGet()

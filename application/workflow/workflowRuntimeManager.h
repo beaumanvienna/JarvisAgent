@@ -86,6 +86,11 @@ namespace AIAssistant
         // Returns a copy of the last completed run per workflow id (thread-safe snapshot).
         std::unordered_map<std::string, WorkflowRun> GetLastRunsSnapshot() const;
 
+        // Deletes all output artifacts produced by running the given workflow.
+        // Returns true on success.  On failure, outErrorMessage describes the issue.
+        // Source/input files are never touched.
+        bool CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage);
+
     private:
         struct TaskExecutionResult
         {

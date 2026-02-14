@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -375,6 +376,9 @@ namespace AIAssistant
 
         // How many attempts already made for this instance.
         uint32_t m_AttemptCount{0};
+
+        // Retry backoff: if non-zero, the task should not be re-dispatched until this time.
+        std::chrono::steady_clock::time_point m_RetryAfterTime{};
 
         // Last error message, if any.
         std::string m_LastErrorMessage;

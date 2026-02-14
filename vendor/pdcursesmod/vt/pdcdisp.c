@@ -106,6 +106,11 @@ static void put_to_stdout(const char* buff, size_t bytes_out)
                 if (bytes_cached)
                     memmove(tbuff, tbuff + bytes_written, bytes_cached);
             }
+        if (bytes_cached && !buff)
+        {
+            bytes_cached = 0; /* write failed during flush — discard to avoid outer-loop spin */
+            break;
+        }
     }
 }
 

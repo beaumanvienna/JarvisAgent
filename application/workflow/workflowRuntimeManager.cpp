@@ -133,6 +133,36 @@ namespace AIAssistant
                     state == TaskInstanceStateKind::Failed);
         }
 
+        // Returns true if the task was rescheduled for retry (caller should NOT mark run as failed).
+        // Returns false if retries are exhausted or the policy has no retries configured.
+        bool TryScheduleRetry(TaskInstanceState& taskState, TaskDef const& taskDef, std::string const& taskId,
+                              std::string const& runId)
+        {
+            RetryPolicy const& policy = taskDef.m_RetryPolicy;
+
+            if (policy.m_MaxAttempts == 0)
+            {
+                return false;
+            }
+
+            if (taskState.m_AttemptCount >= policy.m_MaxAttempts)
+            {
+                LOG_APP_WARN("[retry] task '{}' in run '{}' exhausted all {} retries: {}", taskId, runId,
+                             policy.m_MaxAttempts, taskState.m_LastErrorMessage);
+                return false;
+            }
+
+            uint32_t const backoffMs = policy.m_BackoffMs * (taskState.m_AttemptCount + 1);
+
+            taskState.m_State = TaskInstanceStateKind::Pending;
+            taskState.m_RetryAfterTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(backoffMs);
+
+            LOG_APP_INFO("[retry] task '{}' in run '{}' scheduled for retry (attempt {}/{}, backoff {}ms): {}", taskId,
+                         runId, taskState.m_AttemptCount + 1, policy.m_MaxAttempts, backoffMs, taskState.m_LastErrorMessage);
+
+            return true;
+        }
+
         bool IsTaskReady(WorkflowRun const& workflowRun, TaskDef const& taskDefinition)
         {
             for (std::string const& dependencyId : taskDefinition.m_DependsOn)
@@ -373,12 +403,25 @@ namespace AIAssistant
 
             TaskInstanceState& taskState = stateIterator->second;
 
+            bool retryScheduled = false;
+
             if (completion.m_WasFailed)
             {
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 taskState.m_LastErrorMessage =
                     completion.m_ErrorMessage.empty() ? "ai_call failed" : completion.m_ErrorMessage;
-                activeRun.m_Run.m_HasFailed = true;
+
+                std::string const parentId = ParentTaskId(completion.m_TaskId);
+                auto defIt = activeRun.m_Definition.m_Tasks.find(parentId);
+                if (defIt != activeRun.m_Definition.m_Tasks.end() &&
+                    TryScheduleRetry(taskState, defIt->second, completion.m_TaskId, activeRun.m_Run.m_RunId))
+                {
+                    retryScheduled = true;
+                }
+                else
+                {
+                    activeRun.m_Run.m_HasFailed = true;
+                }
             }
             else
             {
@@ -386,9 +429,36 @@ namespace AIAssistant
                 taskState.m_LastErrorMessage.clear();
             }
 
-            taskState.m_OutputValues = completion.m_OutputValues;
-
+            // Forget the old request handle before potentially clearing correlation IDs.
             {
+                JarvisAgent* app = App::g_App;
+                AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+
+                if (requestPool != nullptr)
+                {
+                    AiRequestHandle requestHandle{};
+                    requestHandle.requestId = taskState.m_ExternalRequestId;
+                    requestHandle.requestTimestampNs = taskState.m_ExternalRequestTimestampNs;
+
+                    if (requestHandle.IsValid())
+                    {
+                        requestPool->Forget(requestHandle);
+                    }
+                }
+            }
+
+            if (retryScheduled)
+            {
+                // Clear external request correlation so the next attempt registers fresh.
+                taskState.m_ExternalRequestId = 0;
+                taskState.m_ExternalRequestTimestampNs = 0;
+                taskState.m_OutputValues.clear();
+                taskState.m_OutputsJson.clear();
+            }
+            else
+            {
+                taskState.m_OutputValues = completion.m_OutputValues;
+
                 std::string summary;
                 for (auto const& p : taskState.m_OutputValues)
                 {
@@ -398,21 +468,6 @@ namespace AIAssistant
                     summary += ";";
                 }
                 taskState.m_OutputsJson = summary;
-            }
-
-            JarvisAgent* app = App::g_App;
-            AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
-
-            if (requestPool != nullptr)
-            {
-                AiRequestHandle requestHandle{};
-                requestHandle.requestId = taskState.m_ExternalRequestId;
-                requestHandle.requestTimestampNs = taskState.m_ExternalRequestTimestampNs;
-
-                if (requestHandle.IsValid())
-                {
-                    requestPool->Forget(requestHandle);
-                }
             }
 
             return true;
@@ -578,9 +633,19 @@ namespace AIAssistant
                 {
                     stateIterator->second.m_State = TaskInstanceStateKind::Failed;
                     stateIterator->second.m_LastErrorMessage = "task future threw";
-                }
 
-                workflowRun.m_HasFailed = true;
+                    std::string const parentId = ParentTaskId(iterator->first);
+                    auto defIt = workflowDefinition.m_Tasks.find(parentId);
+                    if (defIt == workflowDefinition.m_Tasks.end() ||
+                        !TryScheduleRetry(stateIterator->second, defIt->second, iterator->first, workflowRun.m_RunId))
+                    {
+                        workflowRun.m_HasFailed = true;
+                    }
+                }
+                else
+                {
+                    workflowRun.m_HasFailed = true;
+                }
             }
             else
             {
@@ -594,7 +659,18 @@ namespace AIAssistant
                 {
                     LOG_APP_WARN("[workflow] task '{}' failed in run '{}': {}", result.m_TaskId, workflowRun.m_RunId,
                                  result.m_TaskState.m_LastErrorMessage);
-                    workflowRun.m_HasFailed = true;
+
+                    std::string const parentId = ParentTaskId(result.m_TaskId);
+                    auto defIt = workflowDefinition.m_Tasks.find(parentId);
+                    if (stateIterator != workflowRun.m_TaskStates.end() && defIt != workflowDefinition.m_Tasks.end() &&
+                        TryScheduleRetry(stateIterator->second, defIt->second, result.m_TaskId, workflowRun.m_RunId))
+                    {
+                        // Retry scheduled — do not fail the run.
+                    }
+                    else
+                    {
+                        workflowRun.m_HasFailed = true;
+                    }
                 }
             }
 
@@ -687,6 +763,13 @@ namespace AIAssistant
             TaskInstanceState& taskState = taskPair.second;
 
             if (taskState.m_State != TaskInstanceStateKind::Pending && taskState.m_State != TaskInstanceStateKind::Ready)
+            {
+                continue;
+            }
+
+            // Respect retry backoff: skip if the retry-after time hasn't arrived yet.
+            if (taskState.m_RetryAfterTime != std::chrono::steady_clock::time_point{} &&
+                std::chrono::steady_clock::now() < taskState.m_RetryAfterTime)
             {
                 continue;
             }
@@ -831,6 +914,7 @@ namespace AIAssistant
         {
             bool hasWaitingExternal = false;
             bool hasPendingOrReady = false;
+            bool hasRetryPending = false;
 
             for (auto const& taskPair : workflowRun.m_TaskStates)
             {
@@ -843,11 +927,18 @@ namespace AIAssistant
                 else if (state == TaskInstanceStateKind::Pending || state == TaskInstanceStateKind::Ready)
                 {
                     hasPendingOrReady = true;
+
+                    // A task waiting for retry backoff is not a deadlock.
+                    if (taskPair.second.m_RetryAfterTime != std::chrono::steady_clock::time_point{})
+                    {
+                        hasRetryPending = true;
+                    }
                 }
             }
 
             // WaitingExternal means we are legitimately waiting for filesystem-driven completion.
-            if (!hasWaitingExternal && hasPendingOrReady)
+            // Retry-pending tasks are also legitimately waiting (for their backoff timer).
+            if (!hasWaitingExternal && !hasRetryPending && hasPendingOrReady)
             {
                 LOG_APP_CRITICAL("[WorkflowRuntimeManager] deadlock/cycle detected in workflow '{}' (run id '{}')",
                                  workflowRun.m_WorkflowId, workflowRun.m_RunId);
@@ -1063,6 +1154,272 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         return m_LastRuns; // copy
+    }
+
+    // =================================================================
+    // Clean command
+    // =================================================================
+
+    bool WorkflowRuntimeManager::CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage)
+    {
+        outErrorMessage.clear();
+
+        if (workflowId.empty())
+        {
+            outErrorMessage = "workflow id is empty";
+            return false;
+        }
+
+        // Reject if there is an active run for this workflow.
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            for (ActiveRun const& activeRun : m_ActiveRuns)
+            {
+                if (activeRun.m_Run.m_WorkflowId == workflowId)
+                {
+                    outErrorMessage =
+                        "cannot clean workflow '" + workflowId + "' while run '" + activeRun.m_Run.m_RunId + "' is active";
+                    return false;
+                }
+            }
+        }
+
+        // Fetch workflow definition from registry.
+        WorkflowRegistry const* workflowRegistry = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRegistry = m_WorkflowRegistry;
+        }
+
+        if (workflowRegistry == nullptr)
+        {
+            outErrorMessage = "workflow registry is not available";
+            return false;
+        }
+
+        std::optional<WorkflowDefinition> const workflowDefOpt = workflowRegistry->GetWorkflow(workflowId);
+        if (!workflowDefOpt.has_value())
+        {
+            outErrorMessage = "workflow '" + workflowId + "' not found in registry";
+            return false;
+        }
+
+        WorkflowDefinition const& workflowDef = workflowDefOpt.value();
+
+        // Resolve the workflow base directory (same logic as ExecuteTaskOnWorker / DispatchFilterEvaluation).
+        std::string workflowBaseDir = workflowDef.m_WorkflowBaseDirectoryAbsolute;
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowBaseDirectory;
+        }
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowFileDirectoryAbsolute;
+        }
+        if (workflowBaseDir.empty())
+        {
+            workflowBaseDir = workflowDef.m_WorkflowFileDirectory;
+        }
+
+        fs::path const workflowBasePath = fs::absolute(fs::path(workflowBaseDir)).lexically_normal();
+
+        size_t filesDeleted = 0;
+        size_t dirsDeleted = 0;
+        std::vector<std::string> errors;
+
+        // ---------------------------------------------------------------
+        // 1) Delete queue/<workflowId>/ recursively
+        // ---------------------------------------------------------------
+        if (Core::g_Core != nullptr)
+        {
+            fs::path const queueRoot =
+                fs::absolute(fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath)).lexically_normal();
+            fs::path const queueWorkflowDir = queueRoot / workflowId;
+
+            if (fs::exists(queueWorkflowDir))
+            {
+                std::error_code ec;
+                auto const removed = fs::remove_all(queueWorkflowDir, ec);
+                if (ec)
+                {
+                    errors.push_back("failed to remove queue directory '" + queueWorkflowDir.string() +
+                                     "': " + ec.message());
+                }
+                else
+                {
+                    dirsDeleted += 1;
+                    filesDeleted += (removed > 1) ? (removed - 1) : 0;
+                    LOG_APP_INFO("[clean] removed queue directory '{}' ({} entries)", queueWorkflowDir.string(), removed);
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 2) Delete declared file_outputs and working directories per task
+        // ---------------------------------------------------------------
+        // Collect working directories to try cleaning up (empty dirs only).
+        std::vector<fs::path> workingDirsToClean;
+
+        for (auto const& [taskId, taskDef] : workflowDef.m_Tasks)
+        {
+            // Resolve task working directory.
+            fs::path taskWorkDir;
+            if (!taskDef.m_WorkingDirectory.empty())
+            {
+                taskWorkDir =
+                    TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBasePath, taskDef.m_WorkingDirectory);
+            }
+
+            // Delete declared file_outputs.
+            for (std::string const& fileOutputTemplate : taskDef.m_FileOutputs)
+            {
+                if (fileOutputTemplate.empty())
+                {
+                    continue;
+                }
+
+                // file_outputs may contain glob-like patterns (e.g. "*.o").
+                // Resolve relative to the task working directory.
+                fs::path const outputPath(fileOutputTemplate);
+                fs::path resolvedPath;
+
+                if (outputPath.is_absolute())
+                {
+                    resolvedPath = outputPath.lexically_normal();
+                }
+                else if (!taskWorkDir.empty())
+                {
+                    resolvedPath = (taskWorkDir / outputPath).lexically_normal();
+                }
+                else
+                {
+                    resolvedPath = (workflowBasePath / outputPath).lexically_normal();
+                }
+
+                // If the path contains glob characters, expand and delete matching files.
+                std::string const resolvedStr = resolvedPath.string();
+                if (resolvedStr.find('*') != std::string::npos || resolvedStr.find('?') != std::string::npos)
+                {
+                    fs::path const parentDir = resolvedPath.parent_path();
+                    std::string const pattern = resolvedPath.filename().string();
+
+                    if (fs::exists(parentDir) && fs::is_directory(parentDir))
+                    {
+                        std::error_code ec;
+                        for (auto const& entry : fs::directory_iterator(parentDir, ec))
+                        {
+                            if (!entry.is_regular_file())
+                            {
+                                continue;
+                            }
+
+                            std::string const filename = entry.path().filename().string();
+
+                            // Simple glob match: support only '*' as "match anything".
+                            bool matches = false;
+                            if (pattern == "*")
+                            {
+                                matches = true;
+                            }
+                            else if (pattern.front() == '*')
+                            {
+                                // e.g. "*.o" — check suffix
+                                std::string const suffix = pattern.substr(1);
+                                if (filename.size() >= suffix.size() &&
+                                    filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0)
+                                {
+                                    matches = true;
+                                }
+                            }
+                            else if (pattern.back() == '*')
+                            {
+                                // e.g. "PROB_*" — check prefix
+                                std::string const prefix = pattern.substr(0, pattern.size() - 1);
+                                if (filename.size() >= prefix.size() && filename.compare(0, prefix.size(), prefix) == 0)
+                                {
+                                    matches = true;
+                                }
+                            }
+
+                            if (matches)
+                            {
+                                std::error_code removeEc;
+                                if (fs::remove(entry.path(), removeEc))
+                                {
+                                    ++filesDeleted;
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Literal file path.
+                    if (fs::exists(resolvedPath) && fs::is_regular_file(resolvedPath))
+                    {
+                        std::error_code ec;
+                        if (fs::remove(resolvedPath, ec))
+                        {
+                            ++filesDeleted;
+                            LOG_APP_INFO("[clean] removed file '{}'", resolvedPath.string());
+                        }
+                        else if (ec)
+                        {
+                            errors.push_back("failed to remove '" + resolvedPath.string() + "': " + ec.message());
+                        }
+                    }
+                }
+            }
+
+            // Remember working directories for empty-directory cleanup.
+            if (!taskWorkDir.empty() && fs::exists(taskWorkDir) && fs::is_directory(taskWorkDir))
+            {
+                workingDirsToClean.push_back(taskWorkDir);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 3) Clean up empty working directories (deepest first)
+        // ---------------------------------------------------------------
+        // Sort by path length descending so child dirs are removed before parents.
+        std::sort(workingDirsToClean.begin(), workingDirsToClean.end(),
+                  [](fs::path const& a, fs::path const& b) { return a.string().size() > b.string().size(); });
+
+        for (fs::path const& dirPath : workingDirsToClean)
+        {
+            if (!fs::exists(dirPath))
+            {
+                continue;
+            }
+
+            if (fs::is_empty(dirPath))
+            {
+                std::error_code ec;
+                if (fs::remove(dirPath, ec))
+                {
+                    ++dirsDeleted;
+                    LOG_APP_INFO("[clean] removed empty directory '{}'", dirPath.string());
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Summary
+        // ---------------------------------------------------------------
+        if (!errors.empty())
+        {
+            outErrorMessage = "clean completed with errors:";
+            for (std::string const& err : errors)
+            {
+                outErrorMessage += " [" + err + "]";
+            }
+            LOG_APP_WARN("[clean] workflow '{}': {} files, {} dirs deleted, {} errors", workflowId, filesDeleted,
+                         dirsDeleted, errors.size());
+            return false;
+        }
+
+        LOG_APP_INFO("[clean] workflow '{}': {} files, {} dirs deleted", workflowId, filesDeleted, dirsDeleted);
+        return true;
     }
 
     // =================================================================
