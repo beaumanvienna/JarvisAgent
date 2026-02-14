@@ -222,25 +222,38 @@ namespace AIAssistant
 
     void Core::Shutdown()
     {
-        LOG_CORE_INFO("[shutdown] stopping KeyboardInput...");
+        auto const shutdownStart = std::chrono::steady_clock::now();
+        auto elapsed = [&]()
+        {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - shutdownStart)
+                          .count();
+            return ms;
+        };
+
+        LOG_CORE_INFO("[shutdown +{}ms] stopping KeyboardInput...", elapsed());
         if (m_KeyboardInput)
         {
             m_KeyboardInput->Stop();
         }
-        LOG_CORE_INFO("[shutdown] KeyboardInput stopped");
+        LOG_CORE_INFO("[shutdown +{}ms] KeyboardInput stopped", elapsed());
 
+        LOG_CORE_INFO("[shutdown +{}ms] CurlWrapper::GlobalCleanup...", elapsed());
         CurlWrapper::GlobalCleanup();
+        LOG_CORE_INFO("[shutdown +{}ms] CurlWrapper cleaned up", elapsed());
 
-        LOG_CORE_INFO("[shutdown] stopping TerminalManager...");
+        // Wait for thread pool BEFORE tearing down TerminalManager.
+        // Thread pool tasks may still be logging; destroying ncurses
+        // while they write causes hangs in put_to_stdout.
+        LOG_CORE_INFO("[shutdown +{}ms] waiting for thread pool ({} threads)...", elapsed(), m_ThreadPool.Size());
+        m_ThreadPool.Wait();
+        LOG_CORE_INFO("[shutdown +{}ms] thread pool done", elapsed());
+
+        LOG_CORE_INFO("[shutdown +{}ms] stopping TerminalManager...", elapsed());
         if (m_TerminalManager)
         {
             m_TerminalManager->Shutdown();
         }
-        LOG_CORE_INFO("[shutdown] TerminalManager stopped");
-
-        LOG_CORE_INFO("[shutdown] waiting for thread pool...");
-        m_ThreadPool.Wait();
-        LOG_CORE_INFO("[shutdown] thread pool done");
+        LOG_CORE_INFO("[shutdown +{}ms] TerminalManager stopped", elapsed());
 
         // Ensure all pending log output is flushed ---
         std::cout << std::flush;

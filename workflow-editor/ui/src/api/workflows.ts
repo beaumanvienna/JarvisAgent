@@ -154,6 +154,23 @@ export async function deleteWorkflow(workflowId: string): Promise<WorkflowDelete
   return (await response.json()) as WorkflowDeleteResponse;
 }
 
+export type CleanWorkflowResponse = {
+  ok: boolean;
+  workflowId: string;
+  deletedFiles?: number;
+  deletedDirs?: number;
+  errors?: string[];
+};
+
+export async function cleanWorkflow(workflowId: string): Promise<CleanWorkflowResponse>
+{
+  const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}/clean`, {
+    method: "DELETE",
+  });
+  ensureOk(response);
+  return (await response.json()) as CleanWorkflowResponse;
+}
+
 export type CancelRunResponse = {
   ok: boolean;
   runId: string;

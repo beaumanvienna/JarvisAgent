@@ -1812,7 +1812,9 @@ namespace AIAssistant
                                 msg["warning"] = "workflow runtime manager not configured";
                             }
 
-                            conn.send_text(msg.dump());
+                            {
+                                conn.send_text(msg.dump());
+                            }
                         }
                         else if (type == "quit")
                         {
@@ -1836,7 +1838,13 @@ namespace AIAssistant
                     {
                         crow::json::wvalue error;
                         error["error"] = e.what();
-                        conn.send_text(error.dump());
+                        try
+                        {
+                            conn.send_text(error.dump());
+                        }
+                        catch (...)
+                        {
+                        }
                     }
                 });
     }
@@ -1876,18 +1884,38 @@ namespace AIAssistant
     void WebServer::Broadcast(const std::string& jsonMessage)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        for (auto* client : m_Clients)
-        {
-            client->send_text(jsonMessage);
-        }
+        m_PendingBroadcasts.push_back(jsonMessage);
     }
 
     void WebServer::BroadcastJSON(std::string const& jsonString)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        for (auto* client : m_Clients)
+        m_PendingBroadcasts.push_back(jsonString);
+    }
+
+    void WebServer::DrainPendingBroadcasts()
+    {
+        std::vector<std::string> pending;
         {
-            client->send_text(jsonString);
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            if (m_PendingBroadcasts.empty())
+                return;
+            pending.swap(m_PendingBroadcasts);
+        }
+        // No mutex needed here — called only from Crow's I/O thread (onmessage),
+        // and m_Clients is not modified outside Crow's I/O thread callbacks.
+        for (auto const& msg : pending)
+        {
+            for (auto* client : m_Clients)
+            {
+                try
+                {
+                    client->send_text(msg);
+                }
+                catch (...)
+                {
+                }
+            }
         }
     }
 

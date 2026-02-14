@@ -24,6 +24,7 @@ import type { EditorGraph, EditorFilterNode, EditorFilterNodeData, EditorNode, E
 import type { JcwfFile, JcwfFilter, JcwfFilterSource, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
+  cleanWorkflow,
   createWorkflowWithId,
   loadWorkflow,
   runWorkflow,
@@ -230,6 +231,7 @@ export default function WorkflowEditorView(props: {
   const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
   const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const selectedRunIdRef = useRef<string | null>(null);
   const [runtimeTasksById, setRuntimeTasksById] = useState<RuntimeTaskSnapshotById>({});
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [lastRunResult, setLastRunResult] = useState<{ runId: string; state: string } | null>(null);
@@ -811,169 +813,207 @@ export default function WorkflowEditorView(props: {
     return () => clearTimeout(timer);
   }, [loadedWorkflowId, reactFlowInstance]);
 
-  // WebSocket run monitoring.
+  // Keep selectedRunIdRef in sync with state.
   useEffect(() => {
-    const socket = new WebSocket(buildWebSocketUrl("/ws"));
-    webSocketRef.current = socket;
+    selectedRunIdRef.current = selectedRunId;
+  }, [selectedRunId]);
 
-    socket.onopen = () => {
-      setIsWebSocketConnected(true);
-      try
-      {
-        socket.send(JSON.stringify({ type: "workflow-runs-request" }));
-      }
-      catch
-      {
-        // ignore
-      }
-    };
+  // WebSocket run monitoring — single connection for the lifetime of the component.
+  useEffect(() => {
+    let unmounted = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    socket.onclose = () => {
-      setIsWebSocketConnected(false);
-    };
+    function connect()
+    {
+      if (unmounted) return;
 
-    socket.onmessage = (event: MessageEvent) => {
-      let message: unknown;
-      try
-      {
-        message = JSON.parse(String(event.data)) as unknown;
-      }
-      catch
-      {
-        return;
-      }
+      const socket = new WebSocket(buildWebSocketUrl("/ws"));
+      webSocketRef.current = socket;
 
-      if (!message || typeof message !== "object" || Array.isArray(message))
-      {
-        return;
-      }
+      let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-      const obj = message as Record<string, unknown>;
-      const messageType = typeof obj.type === "string" ? obj.type : "";
-
-      // Older snapshot shape: { type: "workflowRunsSnapshot", runs: [...] }
-      if (messageType === "workflowRunsSnapshot")
-      {
-        const runsUnknown = obj.runs;
-        if (!Array.isArray(runsUnknown))
+      socket.onopen = () => {
+        setIsWebSocketConnected(true);
+        try
         {
-          return;
+          socket.send(JSON.stringify({ type: "workflow-runs-request" }));
         }
-
-        const runs = runsUnknown as Record<string, unknown>[];
-        const nextActiveRuns: WorkflowRunListItem[] = [];
-        for (const r of runs)
+        catch
         {
-          const runId = typeof r.runId === "string" ? r.runId : "";
-          const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
-          const state = typeof r.state === "string" ? r.state : "";
-          if (runId.length > 0 && workflowId.length > 0)
+          // ignore
+        }
+        pollTimer = setInterval(() => {
+          try
           {
-            nextActiveRuns.push({
-              runId,
-              workflowId,
-              state,
-              startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
-              completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
-            });
+            if (socket.readyState === WebSocket.OPEN)
+            {
+              socket.send(JSON.stringify({ type: "workflow-runs-request" }));
+            }
           }
-        }
-
-        setActiveRuns(nextActiveRuns);
-
-        const targetRunId = selectedRunId ?? (nextActiveRuns.length > 0 ? nextActiveRuns[0].runId : null);
-        if (targetRunId && !selectedRunId)
-        {
-          setSelectedRunId(targetRunId);
-        }
-
-        if (!targetRunId)
-        {
-          setRuntimeTasksById({});
-          return;
-        }
-
-        const matchingRun = runs.find((r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId);
-        if (!matchingRun)
-        {
-          setRuntimeTasksById({});
-          return;
-        }
-
-        const tasksUnknown = matchingRun.tasks;
-        if (!Array.isArray(tasksUnknown))
-        {
-          setRuntimeTasksById({});
-          return;
-        }
-
-        const nextRuntime: RuntimeTaskSnapshotById = {};
-        for (const t of tasksUnknown as Record<string, unknown>[])
-        {
-          const taskId = typeof t.taskId === "string" ? t.taskId : "";
-          if (taskId.length === 0)
+          catch
           {
-            continue;
+            // ignore
+          }
+        }, 500);
+      };
+
+      socket.onclose = () => {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        setIsWebSocketConnected(false);
+        if (!unmounted)
+        {
+          reconnectTimer = setTimeout(connect, 2000);
+        }
+      };
+
+      socket.onmessage = (event: MessageEvent) => {
+        let message: unknown;
+        try
+        {
+          message = JSON.parse(String(event.data)) as unknown;
+        }
+        catch
+        {
+          return;
+        }
+
+        if (!message || typeof message !== "object" || Array.isArray(message))
+        {
+          return;
+        }
+
+        const obj = message as Record<string, unknown>;
+        const messageType = typeof obj.type === "string" ? obj.type : "";
+
+        // Older snapshot shape: { type: "workflowRunsSnapshot", runs: [...] }
+        if (messageType === "workflowRunsSnapshot")
+        {
+          const runsUnknown = obj.runs;
+          if (!Array.isArray(runsUnknown))
+          {
+            return;
           }
 
-          const rawState = typeof t.state === "string" ? t.state : "";
-          const attemptCount = typeof t.attemptCount === "number" ? t.attemptCount : undefined;
-          const lastErrorMessage = typeof t.lastErrorMessage === "string" && t.lastErrorMessage.length > 0 ? t.lastErrorMessage : undefined;
-          nextRuntime[taskId] = {
-            taskId,
-            runId: targetRunId,
-            state: normalizeRuntimeState(rawState),
-            attemptCount,
-            lastErrorMessage,
-          };
-        }
+          const runs = runsUnknown as Record<string, unknown>[];
+          const nextActiveRuns: WorkflowRunListItem[] = [];
+          for (const r of runs)
+          {
+            const runId = typeof r.runId === "string" ? r.runId : "";
+            const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
+            const state = typeof r.state === "string" ? r.state : "";
+            if (runId.length > 0 && workflowId.length > 0)
+            {
+              nextActiveRuns.push({
+                runId,
+                workflowId,
+                state,
+                startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
+                completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+              });
+            }
+          }
 
-        setRuntimeTasksById(nextRuntime);
-        return;
-      }
+          setActiveRuns(nextActiveRuns);
 
-      // Newer snapshot shape: { type: "workflow-runs-snapshot", activeRuns: [...] }
-      if (messageType === "workflow-runs-snapshot")
-      {
-        const activeRunsUnknown = obj.activeRuns;
-        if (!Array.isArray(activeRunsUnknown))
-        {
+          const curSelectedRunId = selectedRunIdRef.current;
+          const targetRunId = curSelectedRunId ?? (nextActiveRuns.length > 0 ? nextActiveRuns[0].runId : null);
+          if (targetRunId && !curSelectedRunId)
+          {
+            setSelectedRunId(targetRunId);
+          }
+
+          if (!targetRunId)
+          {
+            setRuntimeTasksById({});
+            return;
+          }
+
+          const matchingRun = runs.find((r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId);
+          if (!matchingRun)
+          {
+            setRuntimeTasksById({});
+            return;
+          }
+
+          const tasksUnknown = matchingRun.tasks;
+          if (!Array.isArray(tasksUnknown))
+          {
+            setRuntimeTasksById({});
+            return;
+          }
+
+          const nextRuntime: RuntimeTaskSnapshotById = {};
+          for (const t of tasksUnknown as Record<string, unknown>[])
+          {
+            const taskId = typeof t.taskId === "string" ? t.taskId : "";
+            if (taskId.length === 0)
+            {
+              continue;
+            }
+
+            const rawState = typeof t.state === "string" ? t.state : "";
+            const attemptCount = typeof t.attemptCount === "number" ? t.attemptCount : undefined;
+            const lastErrorMessage = typeof t.lastErrorMessage === "string" && t.lastErrorMessage.length > 0 ? t.lastErrorMessage : undefined;
+            nextRuntime[taskId] = {
+              taskId,
+              runId: targetRunId,
+              state: normalizeRuntimeState(rawState),
+              attemptCount,
+              lastErrorMessage,
+            };
+          }
+
+          setRuntimeTasksById(nextRuntime);
           return;
         }
 
-        const nextActiveRuns: WorkflowRunListItem[] = [];
-        for (const r of activeRunsUnknown as Record<string, unknown>[])
+        // Newer snapshot shape: { type: "workflow-runs-snapshot", activeRuns: [...] }
+        if (messageType === "workflow-runs-snapshot")
         {
-          const runId = typeof r.runId === "string" ? r.runId : "";
-          const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
-          const state = typeof r.state === "string" ? r.state : "";
-          if (runId.length > 0 && workflowId.length > 0)
+          const activeRunsUnknown = obj.activeRuns;
+          if (!Array.isArray(activeRunsUnknown))
           {
-            nextActiveRuns.push({
-              runId,
-              workflowId,
-              state,
-              startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
-              completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
-            });
+            return;
           }
+
+          const nextActiveRuns: WorkflowRunListItem[] = [];
+          for (const r of activeRunsUnknown as Record<string, unknown>[])
+          {
+            const runId = typeof r.runId === "string" ? r.runId : "";
+            const workflowId = typeof r.workflowId === "string" ? r.workflowId : "";
+            const state = typeof r.state === "string" ? r.state : "";
+            if (runId.length > 0 && workflowId.length > 0)
+            {
+              nextActiveRuns.push({
+                runId,
+                workflowId,
+                state,
+                startedAt: typeof r.startedAt === "string" ? r.startedAt : undefined,
+                completedAt: typeof r.completedAt === "string" ? r.completedAt : undefined,
+              });
+            }
+          }
+          setActiveRuns(nextActiveRuns);
+          return;
         }
-        setActiveRuns(nextActiveRuns);
-        return;
-      }
-    };
+      };
+    }
+
+    connect();
 
     return () => {
+      unmounted = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       try
       {
-        socket.close();
+        webSocketRef.current?.close();
       }
       catch
       {
         // ignore
       }
     };
-  }, [selectedRunId]);
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Detect when a pending run completes
   useEffect(() => {
@@ -1486,6 +1526,40 @@ export default function WorkflowEditorView(props: {
     }
   }, [loadedWorkflowId, props.workflowId]);
 
+  const onClean = useCallback(async () => {
+    const workflowId = loadedWorkflowId ?? props.workflowId;
+    if (!workflowId)
+    {
+      setErrorText("No workflow selected.");
+      return;
+    }
+
+    if (!window.confirm(`Clean all generated outputs for "${workflowId}"?`))
+    {
+      return;
+    }
+
+    try
+    {
+      setStatusText("Cleaning…");
+      setErrorText(null);
+      const result = await cleanWorkflow(workflowId);
+      setStatusText(result.ok
+        ? `Clean completed for "${workflowId}".`
+        : "Clean returned ok=false.");
+      if (result.errors && result.errors.length > 0)
+      {
+        setErrorText(`Clean warnings: ${result.errors.join("; ")}`);
+      }
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Clean failed: ${message}`);
+      setStatusText("");
+    }
+  }, [loadedWorkflowId, props.workflowId]);
+
   const onCancelRun = useCallback(async () => {
     if (!selectedRunId)
     {
@@ -1722,6 +1796,7 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={onSaveAs}>Save As…</button>
             <button className="btn" type="button" onClick={onValidate}>Validate</button>
             <button className="btn" type="button" onClick={onRun} disabled={(!loadedWorkflowId && !props.workflowId) || !manualStartEnabled} title={!manualStartEnabled ? "manual_start is disabled for this workflow" : undefined}>Run</button>
+            <button className="btn" type="button" onClick={onClean} disabled={!loadedWorkflowId && !props.workflowId}>Clean</button>
             <button className="btn" type="button" onClick={onAutoLayout}>Auto Layout</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
           </div>

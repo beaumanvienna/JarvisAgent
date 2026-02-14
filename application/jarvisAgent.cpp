@@ -260,22 +260,6 @@ namespace AIAssistant
         // --- Python OnUpdate disabled ---
         // m_PythonEngine->OnUpdate();
 
-        {
-            static std::chrono::steady_clock::time_point lastBroadcastTime = std::chrono::steady_clock::now();
-
-            std::chrono::steady_clock::time_point const currentTime = std::chrono::steady_clock::now();
-
-            std::chrono::steady_clock::duration const timeSinceLastBroadcast = currentTime - lastBroadcastTime;
-
-            if (timeSinceLastBroadcast >= 1s)
-            {
-                bool const pythonRunning = m_PythonEngine->IsRunning();
-                m_WebServer->BroadcastPythonStatus(pythonRunning);
-
-                lastBroadcastTime = currentTime;
-            }
-        }
-
         if (m_AiRequestPool != nullptr)
         {
             m_AiRequestPool->Update();
@@ -291,17 +275,6 @@ namespace AIAssistant
         if (m_WorkflowRuntimeManager != nullptr)
         {
             m_WorkflowRuntimeManager->Update();
-        }
-
-        {
-            static std::chrono::steady_clock::time_point lastWorkflowBroadcastTime = std::chrono::steady_clock::now();
-            std::chrono::steady_clock::time_point const currentTime = std::chrono::steady_clock::now();
-
-            if (m_WebServer != nullptr && (currentTime - lastWorkflowBroadcastTime) >= 250ms)
-            {
-                m_WebServer->BroadcastWorkflowRunsSnapshot();
-                lastWorkflowBroadcastTime = currentTime;
-            }
         }
 
         // Termination logic

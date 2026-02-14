@@ -118,6 +118,11 @@ namespace AIAssistant
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
 
+        // Messages queued by main-thread callers (BroadcastJSON, Broadcast, etc.)
+        // and drained from Crow's I/O thread in onmessage.
+        std::vector<std::string> m_PendingBroadcasts;
+        void DrainPendingBroadcasts();
+
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
     };
