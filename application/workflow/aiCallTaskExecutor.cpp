@@ -909,41 +909,10 @@ namespace AIAssistant
             substituteInlineContent(localizedQueueBinding.m_ProbFiles);
         }
 
-        if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
-        {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
-        }
-
-        // Expand glob patterns (e.g. "../01_lookupDividend/PROB_*.output.txt") into
-        // individual file references before materialization.
-        std::vector<QueueFileRef> expandedCntxFiles;
-        if (!ExpandCntxFileGlobs(taskWorkingDirectoryPath, localizedQueueBinding.m_CntxFiles, expandedCntxFiles,
-                                 errorMessage))
-        {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
-        }
-
-        if (!MaterializeCntxFilesFromQueueBinding(taskWorkingDirectoryPath, expandedCntxFiles, errorMessage))
-        {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
-        }
-
-        if (!MaterializeProbFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, errorMessage))
-        {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
-        }
-
         // ------------------------------------------------------------
         // Determine expected output path from the first PROB file.
         // The SessionManager writes output as <stem>.output.<ext>.
+        // Computed before file writes so we can register with the pool early.
         // ------------------------------------------------------------
         std::string expectedOutputPath;
         for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
@@ -1005,9 +974,10 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Register with AiRequestPool for path-based completion routing.
-        // PROB files are already written by WriteInlineQueueBindingFiles;
-        // the SessionManager dispatches the AI query and writes the .output.txt.
+        // Register with AiRequestPool BEFORE writing queue files.
+        // This starts the file-activity watchdog so that stalled
+        // file placement or missing environment files are caught
+        // within seconds instead of waiting for the full timeout.
         // ------------------------------------------------------------
         int64_t const requestId = requestPool->AllocateRequestId();
         int64_t const timestampNs = NowTimestampNs();
@@ -1028,14 +998,10 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Per-subfolder provider settings (optional)
-        // If the task params contain "provider", resolve the full
-        // provider config and write a PROV_provider.json to the
-        // subfolder.  The file carries url (mandatory), model,
-        // api_type, temperature — but NEVER credentials / API key.
-        // The "provider" field is the KeyManager lookup ID so that
-        // SessionManager can retrieve the key at runtime.
-        // Written only once per subfolder (idempotent).
+        // Per-subfolder provider settings (optional).
+        // MUST be written BEFORE any other queue file (STNG, CNTX,
+        // TASK, PROB) so that the SessionManager sees the override
+        // before the environment becomes complete.
         // ------------------------------------------------------------
         {
             std::string providerOverrideError;
@@ -1059,26 +1025,30 @@ namespace AIAssistant
 
                 if (!std::filesystem::exists(providerSettingsPath))
                 {
-                    // Resolve provider config from KeyManager for non-credential fields
+                    // Warn if the folder already has files — PROV must come first.
+                    if (std::filesystem::exists(taskWorkingDirectoryPath) &&
+                        !std::filesystem::is_empty(taskWorkingDirectoryPath))
+                    {
+                        LOG_APP_WARN("[ai_call] PROV file for task '{}' is being placed after other files "
+                                     "already exist in '{}'. PROV should always be the first file in the queue folder.",
+                                     taskIdForBinding, taskWorkingDirectoryPath.string());
+                    }
+
                     auto const* provCfg = Core::g_Core->GetKeyManager().GetProvider(providerOpt.value());
 
                     std::string sidecarJson = "{";
-                    // provider (KeyManager lookup ID)
                     sidecarJson += "\"provider\":\"" + providerOpt.value() + "\"";
 
-                    // url (mandatory — from KeyManager endpoint)
                     if (provCfg && !provCfg->m_Endpoint.empty())
                     {
                         sidecarJson += ",\"url\":\"" + provCfg->m_Endpoint + "\"";
                     }
 
-                    // api_type (from KeyManager)
                     if (provCfg && !provCfg->m_ApiType.empty())
                     {
                         sidecarJson += ",\"api_type\":\"" + provCfg->m_ApiType + "\"";
                     }
 
-                    // model (task param overrides provider default)
                     if (modelOpt.has_value())
                     {
                         sidecarJson += ",\"model\":\"" + modelOpt.value() + "\"";
@@ -1088,7 +1058,6 @@ namespace AIAssistant
                         sidecarJson += ",\"model\":\"" + provCfg->m_DefaultModel + "\"";
                     }
 
-                    // temperature (optional, from task params)
                     if (temperatureOpt.has_value())
                     {
                         sidecarJson += ",\"temperature\":" + temperatureOpt.value();
@@ -1105,6 +1074,49 @@ namespace AIAssistant
                 }
             }
         }
+
+        // ------------------------------------------------------------
+        // Write queue files.  Kick the file-activity watchdog after
+        // each step so the 5 s inactivity window restarts.
+        // ------------------------------------------------------------
+        if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
+        {
+            requestPool->Forget(requestHandle);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+        requestPool->KickFileActivityWatchdog(requestHandle);
+
+        // Expand glob patterns (e.g. "../01_lookupDividend/PROB_*.output.txt") into
+        // individual file references before materialization.
+        std::vector<QueueFileRef> expandedCntxFiles;
+        if (!ExpandCntxFileGlobs(taskWorkingDirectoryPath, localizedQueueBinding.m_CntxFiles, expandedCntxFiles,
+                                 errorMessage))
+        {
+            requestPool->Forget(requestHandle);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+
+        if (!MaterializeCntxFilesFromQueueBinding(taskWorkingDirectoryPath, expandedCntxFiles, errorMessage))
+        {
+            requestPool->Forget(requestHandle);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+        requestPool->KickFileActivityWatchdog(requestHandle);
+
+        if (!MaterializeProbFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, errorMessage))
+        {
+            requestPool->Forget(requestHandle);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+        requestPool->KickFileActivityWatchdog(requestHandle);
 
         // ------------------------------------------------------------
         // Asynchronous completion (event-driven)

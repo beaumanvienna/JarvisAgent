@@ -37,7 +37,8 @@ namespace AIAssistant
 {
     namespace
     {
-        uint64_t const kDefaultTimeoutMs = 300000; // 5 minutes
+        uint64_t const kDefaultTimeoutMs = 300000;     // 5 minutes
+        uint64_t const kFileActivityWatchdogMs = 5000; // 5 seconds — max gap between file writes or curl dispatch
 
         bool WriteTextFile(std::string const& filePath, std::string const& fileContent, std::string& outErrorMessage)
         {
@@ -234,9 +235,14 @@ namespace AIAssistant
 
         uint64_t const effectiveTimeoutMs = (timeoutMs > 0) ? timeoutMs : kDefaultTimeoutMs;
 
+        auto const now = std::chrono::steady_clock::now();
+
         pendingEntry->m_Handle = requestHandle;
         pendingEntry->m_HasDeadline = true;
-        pendingEntry->m_Deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(effectiveTimeoutMs);
+        pendingEntry->m_Deadline = now + std::chrono::milliseconds(effectiveTimeoutMs);
+
+        pendingEntry->m_FileActivityWatchdogActive = true;
+        pendingEntry->m_FileActivityDeadline = now + std::chrono::milliseconds(kFileActivityWatchdogMs);
 
         {
             std::scoped_lock<std::mutex> const lock(m_MapMutex);
@@ -336,10 +342,46 @@ namespace AIAssistant
         {
             std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
             pendingEntry->m_CurlDispatched = true;
+            pendingEntry->m_FileActivityWatchdogActive = false;
         }
 
-        LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: curl issued for PROB '{}' (expected output '{}')", probFilePath,
-                     canonicalPath);
+        LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: curl issued for PROB '{}' (expected output '{}') — "
+                     "file-activity watchdog cleared",
+                     probFilePath, canonicalPath);
+    }
+
+    void AiRequestPool::KickFileActivityWatchdog(AiRequestHandle const& requestHandle)
+    {
+        if (!requestHandle.IsValid())
+        {
+            return;
+        }
+
+        std::shared_ptr<PendingEntry> pendingEntry;
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_MapMutex);
+
+            auto const iterator = m_PendingRequests.find(MakeKey(requestHandle));
+            if (iterator == m_PendingRequests.end())
+            {
+                return;
+            }
+
+            pendingEntry = iterator->second;
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+
+            if (!pendingEntry->m_FileActivityWatchdogActive || pendingEntry->m_CurlDispatched)
+            {
+                return;
+            }
+
+            pendingEntry->m_FileActivityDeadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(kFileActivityWatchdogMs);
+        }
     }
 
     bool AiRequestPool::OnOutputFileCreated(std::string const& fullFilePath)
@@ -643,35 +685,61 @@ namespace AIAssistant
                     continue;
                 }
 
-                if (now < entry->m_Deadline)
+                // --- File-activity watchdog (t1 phase) ---
+                // Fires quickly (5 s) if the executor placed files but the
+                // SessionManager never dispatched a curl request.
+                if (entry->m_FileActivityWatchdogActive && !entry->m_CurlDispatched && now >= entry->m_FileActivityDeadline)
                 {
-                    continue;
+                    entry->m_IsCompleted = true;
+                    entry->m_IsFailed = true;
+                    entry->m_ErrorMessage = "ai_call file-activity watchdog expired: no curl dispatch within " +
+                                            std::to_string(kFileActivityWatchdogMs / 1000) +
+                                            "s of last queue-file write "
+                                            "(check that the environment is complete: STNG + CNTX + TASK files present)";
+
+                    std::string const& taskId = entry->m_Context.m_TaskId;
+                    if (!taskId.empty())
+                    {
+                        LOG_APP_WARN("[AiRequestPool] file-activity watchdog for task '{}' (workflow '{}', run '{}'): {}",
+                                     taskId, entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
+                    }
+
+                    entry->conditionVariable.notify_all();
+                    becameCompleted = true;
                 }
 
-                entry->m_IsCompleted = true;
-                entry->m_IsFailed = true;
-
-                if (!entry->m_CurlDispatched)
+                if (becameCompleted)
                 {
-                    entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched by SessionManager "
-                                            "(files placed in queue but SessionManager did not pick them up)";
+                    // Skip the main deadline check — already failed.
                 }
-                else
+                // --- Main deadline (t2 phase) ---
+                else if (now >= entry->m_Deadline)
                 {
-                    entry->m_ErrorMessage = "ai_call timed out waiting for output artifact "
-                                            "(curl was dispatched but no response received)";
+                    entry->m_IsCompleted = true;
+                    entry->m_IsFailed = true;
+
+                    if (!entry->m_CurlDispatched)
+                    {
+                        entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched by SessionManager "
+                                                "(files placed in queue but SessionManager did not pick them up)";
+                    }
+                    else
+                    {
+                        entry->m_ErrorMessage = "ai_call timed out waiting for output artifact "
+                                                "(curl was dispatched but no response received)";
+                    }
+
+                    std::string const& taskId = entry->m_Context.m_TaskId;
+                    if (!taskId.empty())
+                    {
+                        LOG_APP_WARN("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
+                                     entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
+                    }
+
+                    entry->conditionVariable.notify_all();
+
+                    becameCompleted = true;
                 }
-
-                std::string const& taskId = entry->m_Context.m_TaskId;
-                if (!taskId.empty())
-                {
-                    LOG_APP_WARN("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
-                                 entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
-                }
-
-                entry->conditionVariable.notify_all();
-
-                becameCompleted = true;
             }
 
             if (becameCompleted)

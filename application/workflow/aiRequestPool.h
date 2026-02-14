@@ -118,6 +118,11 @@ namespace AIAssistant
         // probFilePath: absolute path of the PROB file being sent.
         void OnCurlDispatched(std::string const& probFilePath);
 
+        // Resets the file-activity watchdog for the given request.
+        // Call after each queue-file write so the watchdog knows the executor is still making progress.
+        // The watchdog fires if no file activity AND no curl dispatch happens within the watchdog window.
+        void KickFileActivityWatchdog(AiRequestHandle const& requestHandle);
+
         // Non-blocking: if the request is completed (success or failure), returns true and consumes the result.
         // If not completed yet, returns false.
         bool TryConsumeResult(AiRequestHandle const& requestHandle, bool& outWasFailed, std::string& outResponseText,
@@ -178,6 +183,12 @@ namespace AIAssistant
             std::chrono::steady_clock::time_point m_Deadline;
 
             bool m_CurlDispatched = false;
+
+            // File-activity watchdog (t1 phase).
+            // Active from registration until OnCurlDispatched.  Fires if no file
+            // writes and no curl dispatch happen within the watchdog window.
+            bool m_FileActivityWatchdogActive = true;
+            std::chrono::steady_clock::time_point m_FileActivityDeadline;
 
             bool m_HasQueuedCompletion = false;
             RequestContext m_Context;

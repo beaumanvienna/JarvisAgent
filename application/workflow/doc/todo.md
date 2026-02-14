@@ -93,6 +93,12 @@ Last reviewed: Feb 2026
 
 ---
 
+## Bugs
+
+- [ ] **`POST /api/workflows/{id}/run` accepts non-existent workflow IDs** — the endpoint returns `{"enqueued":true,"ok":true}` even when the workflow ID doesn't exist in the registry. The error is only caught later when `WorkflowRuntimeManager::StartPendingRuns` logs `"workflow not found in registry, skipping run"`. Fix: validate the ID against the registry in the handler and return an error response (HTTP 404) immediately.
+
+---
+
 ## Notes / follow-ups (when the above is done)
 - [x] ~~Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment)~~:
   - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.

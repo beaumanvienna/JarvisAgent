@@ -221,6 +221,19 @@ namespace AIAssistant
 
         std::unordered_map<std::string, std::string> callArguments = taskState.m_InputValues;
 
+        // Inject resolved file_inputs as input[0], input[1], ... so Python functions
+        // can access them the same way shell tasks do via {{input[0]}} template expansion.
+        for (size_t i = 0; i < taskDefinition.m_FileInputs.size(); ++i)
+        {
+            std::string const key = "input[" + std::to_string(i) + "]";
+            if (!callArguments.contains(key))
+            {
+                fs::path const inputPath =
+                    TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fs::path(taskDefinition.m_FileInputs[i]));
+                callArguments[key] = inputPath.string();
+            }
+        }
+
         // Provide output file path arguments to Python functions when the workflow declares an output slot.
         // This avoids requiring Python scripts to re-derive the output file location.
         if ((taskDefinition.m_FileOutputs.size() == 1) && (!taskDefinition.m_Outputs.empty()))

@@ -1,0 +1,183 @@
+{
+  "version": "1.1",
+  "id": "bookSummaryPipeline",
+  "label": "Book Summary Pipeline (text_lines demo)",
+  "doc": [
+    "Converts a PDF book to markdown, extracts chapter titles,",
+    "fans out one AI call per chapter to generate a summary,",
+    "then combines all summaries into a single markdown document.",
+    "",
+    "Demonstrates: shell task, python task, text_lines filter,",
+    "per_item fan-out, ai_call, dataflow, and python combine."
+  ],
+  "base_directory": ".",
+  "manual_start": true,
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {}
+    }
+  ],
+  "defaults": {
+    "timeout_ms": 60000,
+    "ai": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini"
+    }
+  },
+  "filters": [
+    {
+      "id": "chapters",
+      "source": {
+        "kind": "text_lines",
+        "path": "bookSummaryPipeline/02_extractChapters/chapters.txt",
+        "skip_empty": true
+      },
+      "binding": "ch",
+      "max_items": 100
+    }
+  ],
+  "tasks": {
+    "convertToMarkdown": {
+      "id": "convertToMarkdown",
+      "type": "shell",
+      "label": "Convert PDF to Markdown (markitdown)",
+      "mode": "single",
+      "working_directory": "bookSummaryPipeline/01_convertToMarkdown",
+      "file_inputs": [
+        "../../in.pdf"
+      ],
+      "file_outputs": [
+        "in.md"
+      ],
+      "params": {
+        "command": "scripts/runMarkitdown.sh",
+        "args": [
+          "{{input[0]}}",
+          "{{output[0]}}"
+        ]
+      }
+    },
+    "extractChapters": {
+      "id": "extractChapters",
+      "type": "python",
+      "label": "Extract chapter titles from markdown",
+      "mode": "single",
+      "depends_on": [
+        "convertToMarkdown"
+      ],
+      "working_directory": "bookSummaryPipeline/02_extractChapters",
+      "file_inputs": [
+        "../01_convertToMarkdown/in.md"
+      ],
+      "file_outputs": [
+        "chapters.txt"
+      ],
+      "inputs": {
+        "context": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "outputPath": {
+          "type": "string"
+        },
+        "chapter_count": {
+          "type": "string"
+        },
+        "ai_output_glob": {
+          "type": "string"
+        }
+      },
+      "params": {
+        "module": "extractChapters",
+        "function": "run"
+      }
+    },
+    "summarizeChapter": {
+      "id": "summarizeChapter",
+      "type": "ai_call",
+      "label": "Summarize one chapter",
+      "doc": "Per-item AI call: summarizes each chapter based on its title.",
+      "mode": "per_item",
+      "filter": "chapters",
+      "depends_on": [
+        "extractChapters"
+      ],
+      "working_directory": "../queue/bookSummaryPipeline/03_summarizeChapter",
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_style.txt",
+            "content": "Write succinct, well-structured summaries in markdown format.\nUse bullet points and subheadings where appropriate.\nKeep each chapter summary under 300 words.\n"
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_summarize.txt",
+            "content": "Read the chapter title carefully and understand the context of the book.\nThe book is a technical reference on graphics programming with Vulkan.\nWrite a concise summary of what this chapter covers, including:\n- The main topic and why it matters\n- Key concepts and techniques introduced\n- How it builds on previous chapters (if applicable)\n"
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_book.txt",
+            "content": "This is a technical book about 3D graphics programming using the Vulkan API.\nIt covers the full rendering pipeline from device setup to advanced techniques.\n"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_{{ch.row_number_padded}}.txt",
+            "content": "Summarize the following chapter:\n\n{{ch.text}}\n"
+          }
+        ]
+      },
+      "params": {
+        "mode": "one_shot"
+      }
+    },
+    "combineSummaries": {
+      "id": "combineSummaries",
+      "type": "python",
+      "label": "Combine all chapter summaries into one document",
+      "mode": "single",
+      "depends_on": [
+        "summarizeChapter"
+      ],
+      "working_directory": "bookSummaryPipeline/04_combineSummaries",
+      "file_outputs": [
+        "book_summary.md"
+      ],
+      "inputs": {
+        "input_glob": {
+          "type": "string",
+          "required": true
+        },
+        "context": {
+          "type": "object"
+        }
+      },
+      "outputs": {
+        "outputPath": {
+          "type": "string"
+        },
+        "chapter_count": {
+          "type": "string"
+        }
+      },
+      "params": {
+        "module": "combineSummaries",
+        "function": "run"
+      }
+    }
+  },
+  "dataflow": [
+    {
+      "from_task": "extractChapters",
+      "from_output": "ai_output_glob",
+      "to_task": "combineSummaries",
+      "to_input": "input_glob"
+    }
+  ]
+}

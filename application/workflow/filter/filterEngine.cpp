@@ -289,6 +289,7 @@ namespace AIAssistant
             item.m_SourcePath = resolvedPath;
 
             item.m_Values["index"] = std::to_string(resultIndex);
+            item.m_Values["row_number"] = std::to_string(lineNumber);
             item.m_Values["text"] = line;
 
             // Stable identity: the line content itself
