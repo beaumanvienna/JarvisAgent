@@ -83,6 +83,9 @@ namespace AIAssistant
 
     public:
         std::string const& GetName() const { return m_Name; }
+        size_t GetInflightCount() const { return m_QueryFutures.size(); }
+        size_t GetCompletedCount() const { return m_CompletedQueriesThisRun; }
+        std::string_view GetStateName() const { return StateMachine::StateNames[m_StateMachine.GetState()]; }
 
     private:
         void DispatchQuery(TrackedFile& requirementFile);

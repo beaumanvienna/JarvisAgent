@@ -69,6 +69,10 @@ namespace AIAssistant
 
         IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
 
+        size_t GetSessionManagerCount() const { return m_SessionManagers.size(); }
+        size_t GetSessionManagerInflightTotal() const;
+        size_t GetSessionManagersWithInflight() const;
+
     private:
         void CheckIfFinished();
         void InitializeWorkflows();

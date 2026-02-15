@@ -867,13 +867,41 @@ namespace AIAssistant
     crow::response WebServer::HandleStatusGet()
     {
         crow::json::wvalue status;
+        status["ok"] = true;
 
-        status["type"] = "status";
-        status["name"] = "../queue/ICE";
-        status["state"] = "SendingQueries";
-        status["outputs"] = 4;
-        status["inflight"] = 1;
-        status["completed"] = 7;
+        // Workflows
+        size_t registeredWorkflows = 0;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRegistry != nullptr)
+            {
+                registeredWorkflows = m_WorkflowRegistry->GetWorkflowIds().size();
+            }
+        }
+        status["workflows_registered"] = static_cast<int64_t>(registeredWorkflows);
+
+        size_t activeWorkflowRuns = 0;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRuntimeManager != nullptr)
+            {
+                activeWorkflowRuns = m_WorkflowRuntimeManager->GetActiveRunsSnapshot().size();
+            }
+        }
+        status["workflow_runs_active"] = static_cast<int64_t>(activeWorkflowRuns);
+
+        // Session managers
+        JarvisAgent* app = App::g_App;
+        status["session_managers_total"] = static_cast<int64_t>(app ? app->GetSessionManagerCount() : 0);
+        status["session_managers_with_inflight"] = static_cast<int64_t>(app ? app->GetSessionManagersWithInflight() : 0);
+        status["session_managers_inflight_total"] = static_cast<int64_t>(app ? app->GetSessionManagerInflightTotal() : 0);
+
+        // WebSocket clients
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            status["websocket_clients"] = static_cast<int64_t>(m_Clients.size());
+        }
+
         return MakeJsonResponse(200, status);
     }
 

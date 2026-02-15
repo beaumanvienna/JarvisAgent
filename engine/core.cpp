@@ -20,6 +20,9 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <csignal>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #ifndef _WIN32
 #include <termios.h>
 #include <unistd.h>
@@ -222,6 +225,22 @@ namespace AIAssistant
 
     void Core::Shutdown()
     {
+        // --- shutdown watchdog: force-kill if shutdown exceeds 2 seconds ---
+        std::mutex watchdogMutex;
+        std::condition_variable watchdogCV;
+        bool watchdogDiffused = false;
+        std::thread watchdog(
+            [&]()
+            {
+                std::unique_lock<std::mutex> lock(watchdogMutex);
+                if (!watchdogCV.wait_for(lock, std::chrono::seconds(2), [&] { return watchdogDiffused; }))
+                {
+                    std::cerr << "[shutdown watchdog] timeout expired — forcing exit" << std::endl;
+                    _exit(EXIT_FAILURE);
+                }
+            });
+        watchdog.detach();
+
         auto const shutdownStart = std::chrono::steady_clock::now();
         auto elapsed = [&]()
         {
@@ -272,6 +291,14 @@ namespace AIAssistant
         {
             m_LogFile->close();
         }
+
+        // --- diffuse the shutdown watchdog ---
+        {
+            std::lock_guard<std::mutex> lock(watchdogMutex);
+            watchdogDiffused = true;
+        }
+        watchdogCV.notify_one();
+        std::cout << "shutdown complete" << std::endl;
     }
 
     bool Core::Verbose() const { return m_EngineConfig.m_Verbose; }

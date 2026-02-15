@@ -528,4 +528,27 @@ namespace AIAssistant
         return std::chrono::duration_cast<std::chrono::nanoseconds>(m_StartupTime.time_since_epoch()).count();
     }
 
+    size_t JarvisAgent::GetSessionManagerInflightTotal() const
+    {
+        size_t total = 0;
+        for (auto const& [name, sm] : m_SessionManagers)
+        {
+            total += sm->GetInflightCount();
+        }
+        return total;
+    }
+
+    size_t JarvisAgent::GetSessionManagersWithInflight() const
+    {
+        size_t count = 0;
+        for (auto const& [name, sm] : m_SessionManagers)
+        {
+            if (sm->GetInflightCount() > 0)
+            {
+                ++count;
+            }
+        }
+        return count;
+    }
+
 } // namespace AIAssistant
