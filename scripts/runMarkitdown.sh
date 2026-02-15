@@ -9,8 +9,18 @@ fi
 input_file="$1"
 output_file="$2"
 
+# Heartbeat helper — resets the inactivity watchdog timer.
+# JARVIS_PORT and JARVIS_TASK_ID are set by the runtime for shell tasks.
+heartbeat() {
+    if [ -n "${JARVIS_PORT:-}" ] && [ -n "${JARVIS_TASK_ID:-}" ]; then
+        curl -s -X POST "http://localhost:${JARVIS_PORT}/api/task/${JARVIS_TASK_ID}/heartbeat" > /dev/null 2>&1 || true
+    fi
+}
+
 mkdir -p "$(dirname "$output_file")"
 
 echo "[runMarkitdown.sh] Converting '$input_file' -> '$output_file'"
+heartbeat
 markitdown "$input_file" > "$output_file"
+heartbeat
 echo "[runMarkitdown.sh] Done ($(wc -c < "$output_file") bytes)"

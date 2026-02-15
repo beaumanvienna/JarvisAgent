@@ -346,6 +346,28 @@ Falls back to `JARVIS_MASTER_PASSWORD` environment variable if not provided in b
 
 ---
 
+## Task Heartbeat
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/task/<taskId>/heartbeat` | Reset the inactivity watchdog timer for a running task. |
+
+**Response (200):**
+```json
+{ "message": "Heartbeat received." }
+```
+
+**Response (404):**
+```json
+{ "error": "Task not found or no active watchdog." }
+```
+
+Called by task code (shell scripts, Python, etc.) to signal liveness during long-running operations. Each heartbeat resets the `timeout_ms` inactivity timer. Shell child processes receive `JARVIS_PORT` and `JARVIS_TASK_ID` environment variables for this purpose.
+
+See **JC Workflow Specification §3.3.3** for full semantics and code examples.
+
+---
+
 ## Shutdown
 
 | Method | Path | Description |

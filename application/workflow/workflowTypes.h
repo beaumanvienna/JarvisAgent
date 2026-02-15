@@ -23,8 +23,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +35,29 @@
 
 namespace AIAssistant
 {
+    // ---------------------------------------------------------------------
+    // TaskWatchdog — inactivity-based timeout for running tasks
+    // ---------------------------------------------------------------------
+    // Shared between the executor (implicit heartbeat on stdout / progress)
+    // and the REST endpoint (explicit heartbeat from task code).
+    // Thread-safe: all access through atomics.
+
+    struct TaskWatchdog
+    {
+        void Kick() { m_LastActivityMs.store(NowMs(), std::memory_order_release); }
+
+        int64_t ElapsedSinceLastKickMs() const { return NowMs() - m_LastActivityMs.load(std::memory_order_acquire); }
+
+        std::atomic<int64_t> m_LastActivityMs{0};
+
+    private:
+        static int64_t NowMs()
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        }
+    };
+
     // ---------------------------------------------------------------------
     // Workflows → triggers
     // ---------------------------------------------------------------------
@@ -407,6 +432,10 @@ namespace AIAssistant
         // ai_call correlation (required for event-driven async completion)
         int64_t m_ExternalRequestId{0};
         int64_t m_ExternalRequestTimestampNs{0};
+
+        // Inactivity watchdog (shared with WRM and REST heartbeat endpoint).
+        // Executors kick this on progress (stdout lines, loop iterations, etc.).
+        std::shared_ptr<TaskWatchdog> m_Watchdog;
     };
 
     // ---------------------------------------------------------------------

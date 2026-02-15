@@ -16,6 +16,26 @@ import glob
 import os
 import re
 import sys
+import urllib.request
+
+
+def _heartbeat():
+    """Reset the inactivity watchdog timer via the Jarvis REST API.
+
+    JARVIS_PORT and JARVIS_TASK_ID are set by the runtime for task processes.
+    Silently ignored when running outside the runtime (standalone CLI).
+    """
+    port = os.environ.get("JARVIS_PORT", "")
+    task_id = os.environ.get("JARVIS_TASK_ID", "")
+    if port and task_id:
+        try:
+            req = urllib.request.Request(
+                f"http://localhost:{port}/api/task/{task_id}/heartbeat",
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=2)
+        except Exception:
+            pass
 
 
 def combine_summaries(input_glob, output_file):
@@ -48,6 +68,8 @@ def combine_summaries(input_glob, output_file):
 
             out.write(content)
             out.write("\n\n")
+
+            _heartbeat()  # keep watchdog alive while processing chapters
 
     print(f"Combined {len(files)} summaries into {output_file}")
     return {"output_file": output_file, "chapter_count": str(len(files))}

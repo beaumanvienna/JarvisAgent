@@ -625,6 +625,13 @@ namespace AIAssistant
                     std::string_view jsonView = jsonResult.value();
                     std::string mappingStringValue(jsonView.begin(), jsonView.end());
 
+                    // Strip surrounding JSON quotes from string values so they are stored clean.
+                    if (mappingStringValue.size() >= 2 && mappingStringValue.front() == '"' &&
+                        mappingStringValue.back() == '"')
+                    {
+                        mappingStringValue = mappingStringValue.substr(1, mappingStringValue.size() - 2);
+                    }
+
                     dataflowOut.m_Mapping[mappingKey] = mappingStringValue;
                 }
             }

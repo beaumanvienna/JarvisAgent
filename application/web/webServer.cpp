@@ -827,6 +827,34 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
             .methods("POST"_method)([this](std::string const& name) { return HandleProviderSetDefaultPost(name); });
 
+        // ---- POST /api/task/<taskId>/heartbeat ----
+        CROW_ROUTE(m_Server, "/api/task/<string>/heartbeat")
+            .methods("POST"_method)(
+                [](std::string const& taskId)
+                {
+                    JarvisAgent* app = App::g_App;
+                    if (app == nullptr || app->GetWorkflowRuntimeManager() == nullptr)
+                    {
+                        crow::json::wvalue response;
+                        response["error"] = "Runtime not available.";
+                        return crow::response(503, response);
+                    }
+
+                    bool const found = app->GetWorkflowRuntimeManager()->Heartbeat(taskId);
+                    crow::json::wvalue response;
+                    if (found)
+                    {
+                        LOG_APP_INFO("[watchdog] Heartbeat received for task '{}'", taskId);
+                        response["message"] = "Heartbeat received.";
+                        return crow::response(200, response);
+                    }
+                    else
+                    {
+                        response["error"] = "Task not found or no active watchdog.";
+                        return crow::response(404, response);
+                    }
+                });
+
         // ---- POST /api/shutdown ----
         CROW_ROUTE(m_Server, "/api/shutdown")
             .methods("POST"_method)(

@@ -67,6 +67,20 @@ namespace AIAssistant
             }
         }
 
+        // Step 1b: inject mapping entries from dataflow edges targeting this task.
+        for (auto const& dataflowEdge : workflowDefinition.m_Dataflows)
+        {
+            if (dataflowEdge.m_ToTask != taskId)
+            {
+                continue;
+            }
+
+            for (auto const& [mappingKey, mappingValue] : dataflowEdge.m_Mapping)
+            {
+                resolvedInputs.m_StringValues[mappingKey] = mappingValue;
+            }
+        }
+
         // Step 2: expand templates inside resolved values (e.g. {{inputs.section_title}})
         for (auto& inputValuePair : resolvedInputs.m_StringValues)
         {

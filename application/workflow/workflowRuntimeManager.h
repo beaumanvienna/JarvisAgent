@@ -93,6 +93,10 @@ namespace AIAssistant
         // Source/input files are never touched.
         bool CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage);
 
+        // Heartbeat watchdog: called by the REST endpoint to reset the inactivity timer.
+        // Returns true if the task was found and kicked.
+        bool Heartbeat(std::string const& taskInstanceId);
+
     private:
         struct TaskExecutionResult
         {
@@ -172,5 +176,12 @@ namespace AIAssistant
         std::unordered_map<std::string, WorkflowRun> m_LastRuns;
 
         std::vector<AiRequestCompletion> m_DeferredAiCompletions;
+
+        // Heartbeat watchdog tracking (taskInstanceId → watchdog)
+        mutable std::mutex m_WatchdogMutex;
+        std::unordered_map<std::string, std::shared_ptr<TaskWatchdog>> m_ActiveWatchdogs;
+
+        void RegisterWatchdog(std::string const& taskInstanceId, std::shared_ptr<TaskWatchdog> const& watchdog);
+        void UnregisterWatchdog(std::string const& taskInstanceId);
     };
 } // namespace AIAssistant

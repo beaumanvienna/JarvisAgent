@@ -40,7 +40,10 @@
 #if defined(_WIN32)
 #include <process.h>
 #else
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "simdjson/simdjson.h"
@@ -323,6 +326,223 @@ namespace AIAssistant
             exitCodeOut = ClosePipe(pipe);
             return exitCodeOut >= 0;
         }
+#if !defined(_WIN32)
+        // ------------------------------------------------------------
+        // Execute a command with inactivity watchdog using fork/exec/poll.
+        //
+        // - Stdout/stderr activity is an implicit heartbeat.
+        // - The TaskWatchdog (if non-null) is also checked for explicit
+        //   REST heartbeats from the task code.
+        // - If no activity for inactivityTimeoutMs, the process group
+        //   is killed and exitCodeOut is set to 124 (timeout).
+        // - Environment variables JARVIS_PORT and JARVIS_TASK_ID are
+        //   set in the child process for heartbeat API access.
+        // ------------------------------------------------------------
+        bool ExecuteCommandWithWatchdog(std::string const& command, std::string const& taskId,
+                                        std::filesystem::path const& workingDirectoryPath, uint64_t inactivityTimeoutMs,
+                                        TaskWatchdog* watchdog, int& exitCodeOut)
+        {
+            exitCodeOut = -1;
+
+            int pipefd[2];
+            if (pipe(pipefd) == -1)
+            {
+                LOG_APP_ERROR("ShellTaskExecutor: pipe() failed for task '{}'", taskId);
+                return false;
+            }
+
+            pid_t const pid = fork();
+            if (pid == -1)
+            {
+                close(pipefd[0]);
+                close(pipefd[1]);
+                LOG_APP_ERROR("ShellTaskExecutor: fork() failed for task '{}'", taskId);
+                return false;
+            }
+
+            if (pid == 0)
+            {
+                // ── Child process ──────────────────────────────────────────
+                setpgid(0, 0); // new process group for clean kill
+
+                close(pipefd[0]); // close read end
+                dup2(pipefd[1], STDOUT_FILENO);
+                dup2(pipefd[1], STDERR_FILENO);
+                close(pipefd[1]);
+
+                // Set environment variables for heartbeat API
+                setenv("JARVIS_PORT", "8080", 1);
+                setenv("JARVIS_TASK_ID", taskId.c_str(), 1);
+
+                // Change to working directory and exec
+                if (chdir(workingDirectoryPath.c_str()) != 0)
+                {
+                    _exit(127);
+                }
+
+                execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
+                _exit(127); // exec failed
+            }
+
+            // ── Parent process ─────────────────────────────────────────
+            close(pipefd[1]); // close write end
+
+            struct pollfd pfd
+            {
+            };
+            pfd.fd = pipefd[0];
+            pfd.events = POLLIN;
+
+            // Poll interval: check every 500ms or at the timeout, whichever is smaller.
+            int const pollIntervalMs = static_cast<int>(std::min(inactivityTimeoutMs, static_cast<uint64_t>(500)));
+
+            std::string pending;
+            pending.reserve(4096);
+            char buffer[4096];
+            bool timedOut = false;
+
+            // Kick watchdog at start
+            if (watchdog)
+            {
+                watchdog->Kick();
+            }
+
+            for (;;)
+            {
+                int const ret = poll(&pfd, 1, pollIntervalMs);
+
+                if (ret < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    break; // poll error
+                }
+
+                if (ret == 0)
+                {
+                    // No stdout activity this interval — check watchdog
+                    if (watchdog)
+                    {
+                        int64_t const inactiveMs = watchdog->ElapsedSinceLastKickMs();
+                        if (static_cast<uint64_t>(inactiveMs) > inactivityTimeoutMs)
+                        {
+                            LOG_APP_ERROR("ShellTaskExecutor: Task '{}' inactivity timeout ({}ms idle, {}ms limit)", taskId,
+                                          inactiveMs, inactivityTimeoutMs);
+                            timedOut = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+
+                // Data available
+                if (pfd.revents & POLLIN)
+                {
+                    ssize_t const n = read(pipefd[0], buffer, sizeof(buffer) - 1);
+                    if (n <= 0)
+                    {
+                        break; // EOF or error
+                    }
+
+                    // Stdout activity = implicit heartbeat
+                    if (watchdog)
+                    {
+                        watchdog->Kick();
+                    }
+
+                    buffer[n] = '\0';
+                    pending.append(buffer, static_cast<size_t>(n));
+
+                    // Process complete lines
+                    for (;;)
+                    {
+                        size_t const newlineIndex = pending.find('\n');
+                        if (newlineIndex == std::string::npos)
+                        {
+                            break;
+                        }
+
+                        std::string line = pending.substr(0, newlineIndex);
+                        pending.erase(0, newlineIndex + 1);
+
+                        if (!line.empty() && line.back() == '\r')
+                        {
+                            line.pop_back();
+                        }
+
+                        if (!line.empty())
+                        {
+                            LOG_APP_INFO("[shell:{}] {}", taskId, line);
+                        }
+                    }
+                }
+
+                if (pfd.revents & (POLLHUP | POLLERR))
+                {
+                    // Drain remaining data
+                    for (;;)
+                    {
+                        ssize_t const n = read(pipefd[0], buffer, sizeof(buffer) - 1);
+                        if (n <= 0)
+                        {
+                            break;
+                        }
+                        buffer[n] = '\0';
+                        pending.append(buffer, static_cast<size_t>(n));
+                    }
+                    break;
+                }
+            }
+
+            // Flush any remaining partial line
+            if (!pending.empty())
+            {
+                if (pending.back() == '\r')
+                {
+                    pending.pop_back();
+                }
+                if (!pending.empty())
+                {
+                    LOG_APP_INFO("[shell:{}] {}", taskId, pending);
+                }
+            }
+
+            close(pipefd[0]);
+
+            if (timedOut)
+            {
+                // Kill the entire process group
+                kill(-pid, SIGTERM);
+                usleep(200000); // 200ms grace period
+                kill(-pid, SIGKILL);
+                waitpid(pid, nullptr, 0);
+                exitCodeOut = 124; // conventional timeout exit code
+                return true;
+            }
+
+            // Wait for child and extract exit code
+            int status = 0;
+            waitpid(pid, &status, 0);
+
+            if (WIFEXITED(status))
+            {
+                exitCodeOut = WEXITSTATUS(status);
+            }
+            else if (WIFSIGNALED(status))
+            {
+                exitCodeOut = 128 + WTERMSIG(status);
+            }
+            else
+            {
+                exitCodeOut = -1;
+            }
+
+            return exitCodeOut >= 0;
+        }
+#endif // !_WIN32
+
     } // anonymous namespace
 
     bool ShellTaskExecutor::ValidateScriptPath(std::string const& path) const
@@ -790,8 +1010,23 @@ namespace AIAssistant
         LOG_APP_INFO("[shell] Command: {}", fullCommand);
 
         int exitCode = -1;
-        bool const executed =
-            ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
+        bool executed = false;
+
+#if !defined(_WIN32)
+        // Use fork/exec/poll watchdog when timeout is configured (inactivity-based).
+        if (taskDefinition.m_TimeoutMs > 0 && taskState.m_Watchdog)
+        {
+            LOG_APP_INFO("[shell] Task '{}' inactivity watchdog: {}ms", taskDefinition.m_Id, taskDefinition.m_TimeoutMs);
+            executed = ExecuteCommandWithWatchdog(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath,
+                                                  taskDefinition.m_TimeoutMs, taskState.m_Watchdog.get(), exitCode);
+        }
+        else
+#endif
+        {
+            executed =
+                ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
+        }
+
         LOG_APP_INFO("[paths debug] debug reason=shellTaskCompleted taskId='{}' taskType='shell' exitCode='{}' "
                      "taskWorkingDirectoryAbsolute='{}' command='{}'",
                      taskDefinition.m_Id, exitCode, taskWorkingDirectoryPathAbsolute.string(), fullCommand);
@@ -802,6 +1037,16 @@ namespace AIAssistant
                           taskDefinition.m_Id);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Failed to execute shell command";
+            return false;
+        }
+
+        if (exitCode == 124)
+        {
+            LOG_APP_ERROR("ShellTaskExecutor: Task '{}' timed out (inactivity > {}ms)", taskDefinition.m_Id,
+                          taskDefinition.m_TimeoutMs);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage =
+                "ShellTaskExecutor: Task timed out (inactivity > " + std::to_string(taskDefinition.m_TimeoutMs) + "ms)";
             return false;
         }
 

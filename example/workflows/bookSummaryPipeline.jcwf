@@ -52,6 +52,7 @@
       "file_outputs": [
         "in.md"
       ],
+      "timeout_ms": 30000,
       "params": {
         "command": "scripts/runMarkitdown.sh",
         "args": [
@@ -91,6 +92,7 @@
           "type": "string"
         }
       },
+      "timeout_ms": 20000,
       "params": {
         "module": "extractChapters",
         "function": "run"
@@ -166,6 +168,7 @@
           "type": "string"
         }
       },
+      "timeout_ms": 20000,
       "params": {
         "module": "combineSummaries",
         "function": "run"

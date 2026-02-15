@@ -583,10 +583,51 @@ Example (v1.0 — structure trigger / template-driven):
 }
 ```
 
-#### 3.3.3 Timeouts and Retries
+#### 3.3.3 Timeouts, Heartbeat Watchdog, and Retries
 
 - `timeout_ms` (OPTIONAL, integer)  
-  Maximum execution time per task instance. If exceeded, the task is considered failed.
+  **Inactivity watchdog timeout** per task instance. The runtime starts a watchdog timer when the task begins. Any **heartbeat** resets the timer. If no heartbeat is received within `timeout_ms` milliseconds, the runtime considers the task hung and terminates it.
+
+  **Implicit heartbeats (automatic):**  
+  For `shell` tasks, every line of stdout/stderr output counts as a heartbeat. A script that produces regular output will never trigger the inactivity watchdog, even if it runs for hours.
+
+  **Explicit heartbeats (from task code):**  
+  Tasks can send a heartbeat via the REST API to reset the watchdog timer:
+
+  ```
+  POST /api/task/<task_id>/heartbeat
+  ```
+
+  The runtime sets two environment variables in shell child processes:
+  - `JARVIS_PORT` — the web server port (e.g. `8080`)
+  - `JARVIS_TASK_ID` — the current task instance ID
+
+  **Shell (bash):**
+  ```bash
+  #!/usr/bin/env bash
+  for item in "$@"; do
+      process_item "$item"
+      # Keep watchdog alive in long loops
+      curl -s -X POST "http://localhost:${JARVIS_PORT}/api/task/${JARVIS_TASK_ID}/heartbeat" > /dev/null
+  done
+  ```
+
+  **Python:**
+  ```python
+  import os, requests
+
+  port = os.environ.get("JARVIS_PORT", "8080")
+  task_id = os.environ.get("JARVIS_TASK_ID", "")
+
+  for item in items:
+      result = process(item)
+      # Keep watchdog alive
+      requests.post(f"http://localhost:{port}/api/task/{task_id}/heartbeat")
+  ```
+
+  If `timeout_ms` is omitted or `0`, no watchdog is active and the task may run indefinitely.
+
+  **AI code-generation guidance:** When generating shell or Python code for tasks that contain loops or long-running operations, always include a heartbeat call inside each iteration. This ensures the watchdog timer resets on every loop pass, preventing false timeout kills for legitimately long-running tasks while still catching truly hung processes.
 
 - `retries` (OPTIONAL, object)  
   - `max_attempts` (integer)  

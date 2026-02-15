@@ -286,6 +286,31 @@ namespace AIAssistant
         }
     }
 
+    bool WorkflowRuntimeManager::Heartbeat(std::string const& taskInstanceId)
+    {
+        std::lock_guard<std::mutex> lock(m_WatchdogMutex);
+        auto it = m_ActiveWatchdogs.find(taskInstanceId);
+        if (it == m_ActiveWatchdogs.end())
+        {
+            return false;
+        }
+        it->second->Kick();
+        return true;
+    }
+
+    void WorkflowRuntimeManager::RegisterWatchdog(std::string const& taskInstanceId,
+                                                  std::shared_ptr<TaskWatchdog> const& watchdog)
+    {
+        std::lock_guard<std::mutex> lock(m_WatchdogMutex);
+        m_ActiveWatchdogs[taskInstanceId] = watchdog;
+    }
+
+    void WorkflowRuntimeManager::UnregisterWatchdog(std::string const& taskInstanceId)
+    {
+        std::lock_guard<std::mutex> lock(m_WatchdogMutex);
+        m_ActiveWatchdogs.erase(taskInstanceId);
+    }
+
     void WorkflowRuntimeManager::EnqueueWorkflowRun(std::string const& workflowId)
     {
         (void)EnqueueWorkflowRunAndGetRunId(workflowId);
@@ -1079,7 +1104,23 @@ namespace AIAssistant
         LOG_APP_INFO("[paths debug] debug reason=executeTask workflowId='{}' runId='{}' taskId='{}'", workerRun.m_WorkflowId,
                      workerRun.m_RunId, taskId);
 
+        // Create inactivity watchdog for tasks with timeout_ms (excluding ai_call which has its own).
+        std::shared_ptr<TaskWatchdog> watchdog;
+        if (taskDefinition.m_TimeoutMs > 0 && taskDefinition.m_Type != TaskType::AiCall)
+        {
+            watchdog = std::make_shared<TaskWatchdog>();
+            watchdog->Kick(); // initial heartbeat = now
+            result.m_TaskState.m_Watchdog = watchdog;
+            const_cast<WorkflowRuntimeManager*>(this)->RegisterWatchdog(taskId, watchdog);
+        }
+
         bool const executedOk = executorRegistry.Execute(workflowDefinition, workerRun, taskDefinition, result.m_TaskState);
+
+        // Unregister watchdog before returning.
+        if (watchdog)
+        {
+            const_cast<WorkflowRuntimeManager*>(this)->UnregisterWatchdog(taskId);
+        }
 
         if (!executedOk)
         {
@@ -1089,6 +1130,23 @@ namespace AIAssistant
             }
             result.m_ExecuteOk = false;
             return result;
+        }
+
+        // Post-execution inactivity check for synchronous tasks (python, internal).
+        // Shell tasks enforce timeout inline via fork/exec/poll watchdog.
+        if (watchdog && taskDefinition.m_Type != TaskType::Shell)
+        {
+            int64_t const inactiveMs = watchdog->ElapsedSinceLastKickMs();
+            if (static_cast<uint64_t>(inactiveMs) > taskDefinition.m_TimeoutMs)
+            {
+                LOG_APP_WARN("Task '{}' exceeded inactivity timeout ({}ms inactive, {}ms limit)", taskId, inactiveMs,
+                             taskDefinition.m_TimeoutMs);
+                result.m_TaskState.m_State = TaskInstanceStateKind::Failed;
+                result.m_TaskState.m_LastErrorMessage = "Task timed out (inactivity: " + std::to_string(inactiveMs) +
+                                                        "ms, limit: " + std::to_string(taskDefinition.m_TimeoutMs) + "ms)";
+                result.m_ExecuteOk = false;
+                return result;
+            }
         }
 
         {
