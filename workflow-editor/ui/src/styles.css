@@ -327,29 +327,65 @@ select.input option {
 
 /* Live run monitoring */
 .taskNodeQueued {
-  border-color: rgba(150, 180, 255, 0.45);
+  border-color: rgba(160, 160, 170, 0.55);
 }
 
 .taskNodeRunning {
-  border-color: rgba(120, 180, 255, 0.75);
-  box-shadow: 0 0 0 1px rgba(120, 180, 255, 0.22);
+  border-color: rgba(255, 210, 80, 0.85);
+  box-shadow: 0 0 6px rgba(255, 210, 80, 0.3), 0 0 0 1px rgba(255, 210, 80, 0.25);
 }
 
 .taskNodeSuccess {
-  border-color: rgba(120, 255, 170, 0.55);
-  box-shadow: 0 0 0 1px rgba(120, 255, 170, 0.18);
+  border-color: rgba(100, 230, 150, 0.7);
+  box-shadow: 0 0 0 1px rgba(100, 230, 150, 0.2);
+}
+
+.taskNodeFresh {
+  border-color: rgba(100, 230, 150, 0.35);
 }
 
 .taskNodeFailed {
-  border-color: rgba(255, 120, 120, 0.75);
+  border-color: rgba(255, 90, 90, 0.85);
+  box-shadow: 0 0 0 1px rgba(255, 90, 90, 0.25);
 }
 
 .taskNodeCancelled {
   border-color: rgba(255, 200, 120, 0.55);
 }
 
-.taskNodeBadgeRuntime {
-  border-style: solid;
+.taskNodeBadgeQueued {
+  border-color: rgba(160, 160, 170, 0.45);
+  background: rgba(160, 160, 170, 0.14);
+}
+
+.taskNodeBadgeRunning {
+  border-color: rgba(255, 210, 80, 0.55);
+  background: rgba(255, 210, 80, 0.16);
+}
+
+.taskNodeBadgeSuccess {
+  border-color: rgba(100, 230, 150, 0.50);
+  background: rgba(100, 230, 150, 0.14);
+}
+
+.taskNodeBadgeFresh {
+  border-color: rgba(100, 230, 150, 0.30);
+  background: rgba(100, 230, 150, 0.08);
+}
+
+.taskNodeBadgeFailed {
+  border-color: rgba(255, 90, 90, 0.55);
+  background: rgba(255, 90, 90, 0.16);
+}
+
+.taskNodeBadgeCancelled {
+  border-color: rgba(255, 200, 120, 0.45);
+  background: rgba(255, 200, 120, 0.14);
+}
+
+.taskNodeBadgeUnknown {
+  border-color: rgba(160, 160, 170, 0.35);
+  background: rgba(160, 160, 170, 0.10);
 }
 
 .taskNode.taskNodeSelected {

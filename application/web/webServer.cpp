@@ -1802,6 +1802,19 @@ namespace AIAssistant
                                     runJson["state"] = ToStringWorkflowRunState(run.m_State);
                                     runJson["startedAt"] = run.m_StartedAtIso8601;
                                     runJson["completedAt"] = run.m_CompletedAtIso8601;
+
+                                    crow::json::wvalue::list tasksJson;
+                                    for (auto const& [taskId, taskState] : run.m_TaskStates)
+                                    {
+                                        crow::json::wvalue taskJson;
+                                        taskJson["taskId"] = taskId;
+                                        taskJson["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
+                                        taskJson["attemptCount"] = static_cast<int64_t>(taskState.m_AttemptCount);
+                                        taskJson["lastErrorMessage"] = SanitizeUtf8(taskState.m_LastErrorMessage);
+                                        tasksJson.push_back(std::move(taskJson));
+                                    }
+                                    runJson["tasks"] = std::move(tasksJson);
+
                                     activeRunsJson.push_back(std::move(runJson));
                                 }
                                 msg["activeRuns"] = std::move(activeRunsJson);
@@ -1873,6 +1886,23 @@ namespace AIAssistant
         }
 
         m_Running = false;
+
+        // Force-close all WebSocket connections before stopping.
+        // Crow's I/O loop won't exit while connections are open.
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            for (auto* client : m_Clients)
+            {
+                try
+                {
+                    client->close("server shutting down");
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
         m_Server.stop();
         if (m_ServerTask.valid())
         {

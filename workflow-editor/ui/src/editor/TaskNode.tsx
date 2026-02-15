@@ -19,6 +19,8 @@ function runtimeBadgeLabel(runtimeState: RuntimeTaskState | undefined): { label:
       return { label: "OK", className: "taskNodeBadgeSuccess" };
     case "failed":
       return { label: "F", className: "taskNodeBadgeFailed" };
+    case "fresh":
+      return { label: "✓", className: "taskNodeBadgeFresh" };
     case "cancelled":
       return { label: "C", className: "taskNodeBadgeCancelled" };
     default:
@@ -104,8 +106,10 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         + (firstError ? " taskNodeError" : "")
         + (!firstError && firstWarning ? " taskNodeWarning" : "")
         + (!firstError && !firstWarning && firstInfo ? " taskNodeInfo" : "")
+        + (runtimeState === "queued" ? " taskNodeQueued" : "")
         + (runtimeState === "running" ? " taskNodeRunning" : "")
         + (runtimeState === "success" ? " taskNodeSuccess" : "")
+        + (runtimeState === "fresh" ? " taskNodeFresh" : "")
         + (runtimeState === "failed" ? " taskNodeFailed" : "")
         + (runtimeState === "cancelled" ? " taskNodeCancelled" : "")
         + (isDirty ? " taskNodeDirty" : "")

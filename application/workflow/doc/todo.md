@@ -28,8 +28,8 @@ Last reviewed: Feb 2026
 ## Runtime execution gaps (core functionality)
 
 ### Modes, filters, and per_item expansion
-- [ ] Implement `mode: "per_item"` task expansion with **filter nodes** (CSV, text lines, Lucene query via Python bridge). See `application/workflow/doc/perItem_structureTriggers.md` for dev plan.
-- [ ] **Create `text_lines` example workflow + documentation** — `EvaluateTextLines` is fully implemented in `filterEngine.cpp` but has no demo JCWF exercising it. Create an example workflow with a `.txt` input file, a `text_lines` filter, a per-item AI task, and a corresponding `.md` doc.
+- [x] ~~Implement `mode: "per_item"` task expansion with **filter nodes**~~ — full pipeline: `DispatchFilterEvaluation`, `FanOutPerItemChildren`, `AggregatePerItemResults` in `workflowRuntimeManager.cpp`. Filter engine supports CSV, text_lines, Lucene/Polarion. Includes manifest freshness and skip-if-fresh logic.
+- [x] ~~**Create `text_lines` example workflow + documentation**~~ — `example/workflows/bookSummaryPipeline.jcwf`: shell→python→text_lines filter→per_item ai_call→python combine. Demonstrates the full per_item pipeline.
 - [x] ~~Update **JC Workflow Specification** for filters + per_item~~ — bumped spec to v1.1: added §3.7 (Filters), `"filters"` root-level array, `"filter"` field on tasks, filter JSON Schema `$def`, query language reference, filter manifest freshness scheme, fan-out node description, security note for unbounded expansion.
 
 ### Dataflow and context resolution
@@ -37,28 +37,10 @@ Last reviewed: Feb 2026
 - [ ] Implement **context-based input resolution** (from run context / params / defaults) where `DataflowResolver` has TODOs.
 
 ### Workflow housekeeping — "Clean" command
-- [ ] Implement a **"Clean" command** for a given JCWF that deletes all **output artifacts** produced by running the workflow. Only output artifacts are deleted; source/input files are never touched.
-
-  **What to delete:**
-  1. **Queue task folders** — everything under `queue/<workflowId>/` (per-task subdirectories like `01_classifyQuestion/`).
-  2. **Explicitly declared output files** — all `file_outputs` declared in shell/ai_call/python tasks, resolved from the JCWF definition (e.g. `myapp`, `*.o`, `*.a`).
-  3. **AI call `.output.txt` files** — predictable naming convention (`<probfile>.output.txt`).
-  4. **Per-item / filter output artifacts** — fan-out generated files, matched via wildcard (e.g. `PROB_*_001.txt`, per-item output files).
-  5. **Working directory artifacts** — if `working_directory` is set and differs from `queue/<workflowId>`, clean that too.
-
-  **What to NOT delete:**
-  - Source files referenced as inputs (e.g. `lib1.cpp`, `main.cpp`, `message.txt`).
-  - The JCWF file itself.
-  - The `scripts/` folder or any read-only assets.
-  - Filter source files (e.g. the CSV input, not the generated per-item outputs).
-
-  **Implementation:**
-  - **Backend**: `DELETE /api/workflows/<id>/clean` endpoint in `webServer.cpp`.
-  - **Logic**: `WorkflowRuntimeManager::CleanWorkflow(workflowId)` — reads the JCWF definition, enumerates task output paths and queue folders, deletes them.
-  - **UI**: "Clean" button (broom icon) in the editor toolbar; shows confirmation dialog before executing.
+- [x] ~~Implement a **"Clean" command**~~ — `DELETE /api/workflows/<id>/clean` endpoint + `WorkflowRuntimeManager::CleanWorkflow()` + "Clean" button in editor toolbar with confirmation dialog. Deletes queue task folders, declared `file_outputs`, and empty working directories.
 
 ### Reliability features
-- [ ] Implement **retries/backoff** from `RetryPolicy` in `WorkflowRuntimeManager`.
+- [x] ~~Implement **retries/backoff** from `RetryPolicy`~~ — `TryScheduleRetry` in `workflowRuntimeManager.cpp`: linear backoff (`m_BackoffMs * attempt`), `m_RetryAfterTime` respected by dispatch loop, deadlock detector accounts for retry-pending tasks.
 - [ ] Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime.
 
 ---
@@ -95,7 +77,7 @@ Last reviewed: Feb 2026
 
 ## Bugs
 
-- [ ] **`POST /api/workflows/{id}/run` accepts non-existent workflow IDs** — the endpoint returns `{"enqueued":true,"ok":true}` even when the workflow ID doesn't exist in the registry. The error is only caught later when `WorkflowRuntimeManager::StartPendingRuns` logs `"workflow not found in registry, skipping run"`. Fix: validate the ID against the registry in the handler and return an error response (HTTP 404) immediately.
+- [x] ~~**`POST /api/workflows/{id}/run` accepts non-existent workflow IDs**~~ — fixed: handler now validates workflow ID against registry and returns HTTP 404 immediately.
 
 ---
 

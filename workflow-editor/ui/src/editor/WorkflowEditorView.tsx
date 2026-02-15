@@ -82,13 +82,17 @@ function normalizeRuntimeState(stateText: unknown): RuntimeTaskState
   }
 
   const normalized = stateText.trim().toLowerCase();
-  if (normalized.includes("queue") || normalized.includes("pending"))
+  if (normalized.includes("queue") || normalized.includes("pending") || normalized === "ready")
   {
     return "queued";
   }
-  if (normalized.includes("run"))
+  if (normalized.includes("run") || normalized.includes("waiting_external"))
   {
     return "running";
+  }
+  if (normalized === "skipped")
+  {
+    return "fresh";
   }
   if (normalized.includes("success") || normalized.includes("succeed") || normalized.includes("ok") || normalized.includes("done"))
   {
@@ -227,6 +231,7 @@ export default function WorkflowEditorView(props: {
   const [showFilterBuilder, setShowFilterBuilder] = useState<boolean>(false);
   const [editingFilter, setEditingFilter] = useState<JcwfFilter | null>(null);
 
+  const loadedJcwfRef = useRef<JcwfFile | null>(null);
   const webSocketRef = useRef<WebSocket | null>(null);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
   const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
@@ -487,6 +492,7 @@ export default function WorkflowEditorView(props: {
     setEdges([]);
     setSelectedNodeId(null);
     setLoadedWorkflowId(null);
+    loadedJcwfRef.current = null;
     setBackendErrors([]);
     setBackendWarnings([]);
     setBackendInfos([]);
@@ -719,6 +725,7 @@ export default function WorkflowEditorView(props: {
       }
     }
     recomputeValidation(graph);
+    loadedJcwfRef.current = jcwf;
     setLoadedWorkflowId(workflowId);
     setManualStartEnabled(jcwf.manual_start !== false);
     setTriggers(Array.isArray(jcwf.triggers) ? jcwf.triggers : []);
@@ -994,6 +1001,44 @@ export default function WorkflowEditorView(props: {
             }
           }
           setActiveRuns(nextActiveRuns);
+
+          // Extract task snapshots for the selected (or first) run
+          const curSelectedRunId = selectedRunIdRef.current;
+          const targetRunId = curSelectedRunId ?? (nextActiveRuns.length > 0 ? nextActiveRuns[0].runId : null);
+          if (targetRunId && !curSelectedRunId)
+          {
+            setSelectedRunId(targetRunId);
+          }
+
+          if (!targetRunId)
+          {
+            setRuntimeTasksById({});
+            return;
+          }
+
+          const matchingRun = (activeRunsUnknown as Record<string, unknown>[]).find(
+            (r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId
+          );
+          if (!matchingRun || !Array.isArray(matchingRun.tasks))
+          {
+            setRuntimeTasksById({});
+            return;
+          }
+
+          const nextRuntime: RuntimeTaskSnapshotById = {};
+          for (const t of matchingRun.tasks as Record<string, unknown>[])
+          {
+            const taskId = typeof t.taskId === "string" ? t.taskId : "";
+            if (taskId.length === 0) { continue; }
+            nextRuntime[taskId] = {
+              taskId,
+              runId: targetRunId,
+              state: normalizeRuntimeState(typeof t.state === "string" ? t.state : ""),
+              attemptCount: typeof t.attemptCount === "number" ? t.attemptCount : undefined,
+              lastErrorMessage: typeof t.lastErrorMessage === "string" && t.lastErrorMessage.length > 0 ? t.lastErrorMessage : undefined,
+            };
+          }
+          setRuntimeTasksById(nextRuntime);
           return;
         }
       };
@@ -1345,17 +1390,33 @@ export default function WorkflowEditorView(props: {
     }
     setErrorText(null);
 
-    // Merge workflow-level metadata that graphToJcwf doesn't handle.
+    // Start from the original loaded JCWF to preserve workflow-level fields
+    // (defaults, base_directory, label, doc, dataflow, etc.) that graphToJcwf
+    // does not handle.  Then overwrite graph-derived fields.
+    const merged: JcwfFile = {
+      ...(loadedJcwfRef.current ?? {}),
+      ...result.jcwf,
+    };
+
+    // Merge workflow-level metadata managed by editor state.
     if (triggers.length > 0)
     {
-      result.jcwf.triggers = triggers;
+      merged.triggers = triggers;
+    }
+    else
+    {
+      delete merged.triggers;
     }
     if (!manualStartEnabled)
     {
-      result.jcwf.manual_start = false;
+      merged.manual_start = false;
+    }
+    else
+    {
+      delete merged.manual_start;
     }
 
-    return result.jcwf;
+    return merged;
   }, [nodes, edges, loadedWorkflowId, props.workflowId, triggers, manualStartEnabled]);
 
   const notifyPersisted = useCallback((event: WorkflowPersistEvent) => {
@@ -1392,7 +1453,19 @@ export default function WorkflowEditorView(props: {
       setStatusText(mode === "create" ? "Creating…" : "Saving As…");
       setErrorText(null);
 
-      const result = await createWorkflowWithId(newId, exportResult.jcwf);
+      const merged: JcwfFile = {
+        ...(loadedJcwfRef.current ?? {}),
+        ...exportResult.jcwf,
+      };
+      if (triggers.length > 0)
+      {
+        merged.triggers = triggers;
+      }
+      if (!manualStartEnabled)
+      {
+        merged.manual_start = false;
+      }
+      const result = await createWorkflowWithId(newId, merged);
       setLoadedWorkflowId(newId);
       props.onWorkflowCreated(newId);
       setStatusText(result.ok ? `${mode === "create" ? "Created" : "Saved as"} '${newId}'.` : `${mode === "create" ? "Create" : "Save As"} returned ok=false for '${newId}'.`);

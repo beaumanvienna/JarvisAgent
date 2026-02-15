@@ -1,7 +1,7 @@
 import type { Edge, Node } from "reactflow";
 import type { JcwfFilter, JcwfTask } from "../jcwf/types";
 
-export type RuntimeTaskState = "queued" | "running" | "success" | "failed" | "cancelled" | "unknown";
+export type RuntimeTaskState = "queued" | "running" | "success" | "fresh" | "failed" | "cancelled" | "unknown";
 
 export type EditorTaskNodeData = {
   task: JcwfTask;
