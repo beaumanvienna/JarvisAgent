@@ -62,6 +62,12 @@ namespace AIAssistant
 
     void FileWatcher::Stop()
     {
+        SignalStop();
+        WaitStop();
+    }
+
+    void FileWatcher::SignalStop()
+    {
         if (!m_Running)
         {
             return;
@@ -69,10 +75,16 @@ namespace AIAssistant
 
         m_Running = false;
         m_StopCV.notify_one();
+    }
+
+    void FileWatcher::WaitStop()
+    {
         if (m_WatchTask.valid())
         {
-            m_WatchTask.wait(); // wait for graceful exit
+            m_WatchTask.wait();
+#ifndef NDEBUG
             LOG_APP_INFO("File watcher stopped");
+#endif
         }
     }
 

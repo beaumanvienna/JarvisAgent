@@ -474,50 +474,51 @@ namespace AIAssistant
     {
         LOG_APP_INFO("leaving JarvisAgent");
 
-        // Signal thread pool stop FIRST so curl progress callbacks abort in-flight requests immediately.
-        Core::g_Core->GetThreadPool().RequestStop();
-
-        LOG_APP_INFO("[shutdown] stopping WorkflowRuntimeManager...");
-        if (m_WorkflowRuntimeManager != nullptr)
-        {
-            m_WorkflowRuntimeManager->Stop();
-            m_WorkflowRuntimeManager.reset();
-        }
-        LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
+        // ── Phase 1: signal all subsystems (non-blocking) ──────────────────
+        Core::g_Core->SignalShutdown(); // sets global flag + ThreadPool::RequestStop()
 
         if (m_AiRequestPool != nullptr)
         {
             m_AiRequestPool->Shutdown();
         }
-        m_AiRequestPool.reset();
 
+        LOG_APP_INFO("[shutdown] phase 1: signalling all subsystems...");
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->SignalStop();
+        }
+        m_PythonEngine->SignalStop();
+        m_FileWatcher->SignalStop();
+        m_WebServer->SignalStop();
+        LOG_APP_INFO("[shutdown] phase 1 complete — all subsystems signalled");
+
+        // ── Phase 2: wait for all subsystems (blocking, but parallel) ──────
+        LOG_APP_INFO("[shutdown] phase 2: waiting for subsystems...");
+
+        if (m_WorkflowRuntimeManager != nullptr)
+        {
+            m_WorkflowRuntimeManager->WaitStop();
+            m_WorkflowRuntimeManager.reset();
+        }
+        LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
+
+        m_AiRequestPool.reset();
         App::g_App = nullptr;
 
-        LOG_APP_INFO("[shutdown] stopping session managers...");
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnShutdown();
         }
         LOG_APP_INFO("[shutdown] session managers stopped");
 
-        LOG_APP_INFO("[shutdown] stopping PythonEngine...");
-        {
-            m_PythonEngine->Stop();
-            m_PythonEngine.reset();
-            m_WebServer->BroadcastPythonStatus(false);
-        }
+        m_PythonEngine->WaitStop();
+        m_PythonEngine.reset();
         LOG_APP_INFO("[shutdown] PythonEngine stopped");
 
-        LOG_APP_INFO("[shutdown] stopping FileWatcher...");
-        {
-            m_FileWatcher->Stop();
-        }
+        m_FileWatcher->WaitStop();
         LOG_APP_INFO("[shutdown] FileWatcher stopped");
 
-        LOG_APP_INFO("[shutdown] stopping WebServer...");
-        {
-            m_WebServer->Stop();
-        }
+        m_WebServer->WaitStop();
         LOG_APP_INFO("[shutdown] WebServer stopped");
     }
 

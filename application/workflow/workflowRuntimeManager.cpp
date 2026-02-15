@@ -224,20 +224,35 @@ namespace AIAssistant
 
     void WorkflowRuntimeManager::Stop()
     {
+        SignalStop();
+        WaitStop();
+    }
+
+    void WorkflowRuntimeManager::SignalStop()
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        m_IsRunning = false;
+
+        std::queue<PendingRun> emptyQueue;
+        m_PendingRuns.swap(emptyQueue);
+
+        for (auto& activeRun : m_ActiveRuns)
+        {
+            activeRun.m_CancelRequested = true;
+        }
+    }
+
+    void WorkflowRuntimeManager::WaitStop()
+    {
         std::vector<std::shared_future<TaskExecutionResult>> taskFutures;
         std::vector<std::shared_future<FilterEvalResult>> filterFutures;
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-            m_IsRunning = false;
-
-            std::queue<PendingRun> emptyQueue;
-            m_PendingRuns.swap(emptyQueue);
-
             for (auto& activeRun : m_ActiveRuns)
             {
-                activeRun.m_CancelRequested = true;
                 for (auto& [id, future] : activeRun.m_RunningTasks)
                 {
                     taskFutures.push_back(future);

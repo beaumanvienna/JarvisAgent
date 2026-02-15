@@ -200,9 +200,9 @@
 
     // ---- Quit Button ----
     document.getElementById("quitBtn").onclick = () => {
-      const msg = { type: "quit" };
-      ws.send(JSON.stringify(msg));
-      log("⛔ Quit requested from UI\n");
+      fetch("/api/shutdown", { method: "POST" })
+        .then(() => log("⛔ Shutdown initiated\n"))
+        .catch(err => log("⚠️ Shutdown request failed: " + err + "\n"));
     };
 
     function log(text) {

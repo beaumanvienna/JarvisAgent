@@ -386,7 +386,10 @@ namespace AIAssistant
 
         // Raw diagnostics — bypass spdlog/TerminalLogStreamBuf (they use this object).
         // Uses POSIX write() / Windows _write() to avoid any heap or mutex usage in signal-adjacent shutdown.
-#ifdef _WIN32
+        // Debug-only: silenced in release builds.
+#ifdef NDEBUG
+#define RAW_STDERR(literal) ((void)0)
+#elif defined(_WIN32)
 #define RAW_STDERR(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
 #else
 #define RAW_STDERR(literal)                                                             \

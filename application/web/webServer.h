@@ -24,8 +24,8 @@
 #include "auxiliary/threadPool.h"
 #include <atomic>
 #include <filesystem>
-#include <future>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_set>
 
@@ -41,6 +41,8 @@ namespace AIAssistant
 
         void Start();
         void Stop();
+        void SignalStop();
+        void WaitStop();
 
         // Optional pointers for Workflow Editor API (set by JarvisAgent during startup).
         // If not set, editor run-monitoring endpoints will return "not configured".
@@ -113,7 +115,7 @@ namespace AIAssistant
     private:
         crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};
-        std::future<void> m_ServerTask;
+        std::thread m_ServerThread;
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;

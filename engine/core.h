@@ -47,6 +47,8 @@ namespace AIAssistant
         void Start(ConfigParser::EngineConfig const& engineConfig);
         void Run(std::unique_ptr<AIAssistant::Application>&);
         void Shutdown();
+        void SignalShutdown();
+        [[nodiscard]] bool IsShuttingDown() const { return m_ShuttingDown.load(); }
         bool Verbose() const;
         ConfigParser::EngineConfig const& GetConfig() const;
         ConfigParser::EngineConfig& GetMutableConfig() { return m_EngineConfig; }
@@ -76,8 +78,9 @@ namespace AIAssistant
 
     private:
         // THREADS_REQUIRED_BY_APP:
-        // file watcher, keyboard input, and web server need threads
-        static constexpr size_t THREADS_REQUIRED_BY_APP = 3;
+        // file watcher and keyboard input need threads (web server uses its own thread)
+        static constexpr size_t THREADS_REQUIRED_BY_APP = 2;
+        std::atomic<bool> m_ShuttingDown{false};
         ThreadPool m_ThreadPool;
         EventQueue m_EventQueue;
 

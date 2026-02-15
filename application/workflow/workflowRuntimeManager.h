@@ -52,6 +52,8 @@ namespace AIAssistant
 
         void Start();
         void Stop();
+        void SignalStop();
+        void WaitStop();
 
         void EnqueueWorkflowRun(std::string const& workflowId);
 

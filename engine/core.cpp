@@ -223,6 +223,13 @@ namespace AIAssistant
         } while (!app->IsFinished());
     }
 
+    void Core::SignalShutdown()
+    {
+        m_ShuttingDown = true;
+        m_ThreadPool.RequestStop();
+        LOG_CORE_INFO("[shutdown] global shutdown signal set");
+    }
+
     void Core::Shutdown()
     {
         auto const shutdownStart = std::chrono::steady_clock::now();
@@ -275,7 +282,9 @@ namespace AIAssistant
             m_LogFile->close();
         }
 
+#ifndef NDEBUG
         std::cout << "shutdown complete" << std::endl;
+#endif
     }
 
     bool Core::Verbose() const { return m_EngineConfig.m_Verbose; }

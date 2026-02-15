@@ -43,6 +43,8 @@ namespace AIAssistant
 
         void Start();
         void Stop();
+        void SignalStop();
+        void WaitStop();
 
     private:
         void Watch();

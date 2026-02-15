@@ -79,6 +79,8 @@ namespace AIAssistant
 
         bool Initialize(std::string const& scriptPath);
         void Stop();
+        void SignalStop();
+        void WaitStop();
 
         void OnStart();
         void OnUpdate();

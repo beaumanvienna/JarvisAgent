@@ -494,6 +494,12 @@ namespace AIAssistant
     // ============================================================================
     void PythonEngine::Stop()
     {
+        SignalStop();
+        WaitStop();
+    }
+
+    void PythonEngine::SignalStop()
+    {
         if (!m_Running)
         {
             return;
@@ -510,10 +516,18 @@ namespace AIAssistant
         // tell the worker thread to stop
         m_StopRequested = true;
         m_QueueCondition.notify_all();
+    }
 
+    void PythonEngine::WaitStop()
+    {
         if (m_WorkerThread.joinable())
         {
             m_WorkerThread.join();
+        }
+
+        if (!m_Running)
+        {
+            return;
         }
 
         // clean up Python references safely under the GIL

@@ -346,6 +346,20 @@ Falls back to `JARVIS_MASTER_PASSWORD` environment variable if not provided in b
 
 ---
 
+## Shutdown
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/shutdown` | Initiate a graceful server shutdown. |
+
+**Response (200):**
+```json
+{ "message": "Shutdown initiated." }
+```
+Triggers the same shutdown sequence as pressing `q` or Ctrl+C: global shutdown signal → two-phase parallel subsystem shutdown → watchdog safety net (6s).
+
+---
+
 ## WebSocket — `/ws`
 
 A persistent WebSocket connection for real-time communication.
@@ -356,7 +370,6 @@ A persistent WebSocket connection for real-time communication.
 |------|--------|-------------|
 | `chat` | `subsystem`, `message` | Submit a chat message (same as POST /api/chat but via WS). Creates a `PROB_<id>_<ts>.txt` file. |
 | `workflow-runs-request` | — | Request the current workflow runs snapshot. |
-| `quit` | — | Initiate a graceful server shutdown. |
 
 ### Server → Client Messages
 
@@ -364,6 +377,5 @@ A persistent WebSocket connection for real-time communication.
 |------|-------------|
 | `queued` | Acknowledgement of a chat message with `id` and `file` path. |
 | `workflow-runs-snapshot` | Full snapshot of active runs with per-task states. Sent on request and after run/cancel actions. |
-| `quit-ack` | Confirms shutdown has been initiated. |
 | `python-status` | Broadcast when Python engine status changes (`{ "running": true/false }`). |
 | *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on next `onmessage`. |

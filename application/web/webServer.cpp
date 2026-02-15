@@ -826,6 +826,19 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
             .methods("POST"_method)([this](std::string const& name) { return HandleProviderSetDefaultPost(name); });
+
+        // ---- POST /api/shutdown ----
+        CROW_ROUTE(m_Server, "/api/shutdown")
+            .methods("POST"_method)(
+                []()
+                {
+                    auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
+                    Core::g_Core->PushEvent(event);
+
+                    crow::json::wvalue response;
+                    response["message"] = "Shutdown initiated.";
+                    return crow::response(200, response);
+                });
     }
 
     crow::response WebServer::HandleChatPost(const crow::request& req)
@@ -1857,19 +1870,6 @@ namespace AIAssistant
                                 conn.send_text(msg.dump());
                             }
                         }
-                        else if (type == "quit")
-                        {
-                            auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                            Core::g_Core->PushEvent(event);
-
-                            crow::json::wvalue response;
-                            response["type"] = "quit-ack";
-                            response["message"] = "Shutdown initiated.";
-                            conn.send_text(response.dump());
-
-                            return;
-                        }
-
                         else
                         {
                             conn.send_text(R"({"error":"unknown type"})");
@@ -1898,7 +1898,7 @@ namespace AIAssistant
         }
 
         m_Running = true;
-        m_ServerTask = Core::g_Core->GetThreadPool().SubmitTask(
+        m_ServerThread = std::thread(
             [this]()
             {
                 LOG_APP_INFO("Crow web server started at http://localhost:8080");
@@ -1907,6 +1907,12 @@ namespace AIAssistant
     }
 
     void WebServer::Stop()
+    {
+        SignalStop();
+        WaitStop();
+    }
+
+    void WebServer::SignalStop()
     {
         if (!m_Running)
         {
@@ -1932,16 +1938,14 @@ namespace AIAssistant
         }
 
         m_Server.stop();
-        if (m_ServerTask.valid())
+    }
+
+    void WebServer::WaitStop()
+    {
+        if (m_ServerThread.joinable())
         {
-            if (m_ServerTask.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
-            {
-                LOG_APP_ERROR("[shutdown] Crow server task did not exit within 2s");
-            }
-            else
-            {
-                LOG_APP_INFO("Crow web server stopped");
-            }
+            m_ServerThread.join();
+            LOG_APP_INFO("Crow web server stopped");
         }
     }
 
