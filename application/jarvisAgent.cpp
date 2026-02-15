@@ -474,6 +474,9 @@ namespace AIAssistant
     {
         LOG_APP_INFO("leaving JarvisAgent");
 
+        // Signal thread pool stop FIRST so curl progress callbacks abort in-flight requests immediately.
+        Core::g_Core->GetThreadPool().RequestStop();
+
         LOG_APP_INFO("[shutdown] stopping WorkflowRuntimeManager...");
         if (m_WorkflowRuntimeManager != nullptr)
         {
@@ -482,6 +485,10 @@ namespace AIAssistant
         }
         LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
 
+        if (m_AiRequestPool != nullptr)
+        {
+            m_AiRequestPool->Shutdown();
+        }
         m_AiRequestPool.reset();
 
         App::g_App = nullptr;

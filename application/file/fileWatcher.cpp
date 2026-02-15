@@ -68,6 +68,7 @@ namespace AIAssistant
         }
 
         m_Running = false;
+        m_StopCV.notify_one();
         if (m_WatchTask.valid())
         {
             m_WatchTask.wait(); // wait for graceful exit
@@ -96,7 +97,14 @@ namespace AIAssistant
 
         while (m_Running)
         {
-            std::this_thread::sleep_for(m_Interval);
+            {
+                std::unique_lock<std::mutex> lock(m_StopMutex);
+                m_StopCV.wait_for(lock, m_Interval, [this] { return !m_Running.load(); });
+                if (!m_Running)
+                {
+                    break;
+                }
+            }
 
             if (!EngineCore::FileExists(m_PathToWatch.string()))
             {

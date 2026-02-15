@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <atomic>
 #include <iostream>
 #include <mutex>
 #include "BS_thread_pool/BS_thread_pool.hpp"
@@ -33,13 +34,30 @@ namespace AIAssistant
         ThreadPool();
 
         void Wait();
+        void RequestStop();
+        void Shutdown();
         void Reset(size_t const numThreads);
         [[nodiscard]] size_t Size() const;
+        [[nodiscard]] bool IsStopped() const { return m_Stopped.load(); }
 
         template <typename FunctionType, typename ReturnType = std::invoke_result_t<std::decay_t<FunctionType>>>
         [[nodiscard]] std::future<ReturnType> SubmitTask(FunctionType&& task)
         {
             std::lock_guard<std::mutex> guard(m_Mutex);
+            if (m_Stopped)
+            {
+                std::cerr << "[ThreadPool] WARNING: SubmitTask called after Shutdown" << std::endl;
+                std::promise<ReturnType> p;
+                if constexpr (std::is_void_v<ReturnType>)
+                {
+                    p.set_value();
+                }
+                else
+                {
+                    p.set_value(ReturnType{});
+                }
+                return p.get_future();
+            }
             return m_Pool.submit_task(task);
         }
         [[nodiscard]] std::vector<std::thread::id> GetThreadIDs() const { return m_Pool.get_thread_ids(); }
@@ -47,5 +65,6 @@ namespace AIAssistant
     private:
         BS::thread_pool<> m_Pool;
         std::mutex m_Mutex;
+        std::atomic<bool> m_Stopped{false};
     };
 } // namespace AIAssistant

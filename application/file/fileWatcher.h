@@ -24,6 +24,8 @@
 #include <filesystem>
 #include <chrono>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <unordered_map>
 #include "event/eventQueue.h"
 #include "event/filesystemEvent.h"
@@ -50,5 +52,8 @@ namespace AIAssistant
         std::chrono::milliseconds m_Interval;
         std::atomic<bool> m_Running{false};
         std::future<void> m_WatchTask;
+
+        std::mutex m_StopMutex;
+        std::condition_variable m_StopCV;
     };
 } // namespace AIAssistant

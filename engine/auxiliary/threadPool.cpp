@@ -45,6 +45,21 @@ namespace AIAssistant
         LOG_CORE_INFO("[shutdown] ThreadPool::Wait() returned");
     }
 
+    void ThreadPool::RequestStop()
+    {
+        m_Stopped = true;
+        LOG_CORE_INFO("[shutdown] ThreadPool::RequestStop() - stop flag set, curl callbacks will abort");
+    }
+
+    void ThreadPool::Shutdown()
+    {
+        m_Stopped = true;
+        LOG_CORE_INFO("[shutdown] ThreadPool::Shutdown() - refusing new tasks, waiting for {} queued",
+                      m_Pool.get_tasks_queued());
+        m_Pool.wait();
+        LOG_CORE_INFO("[shutdown] ThreadPool::Shutdown() complete");
+    }
+
     void ThreadPool::Reset(size_t const numThreads) { m_Pool.reset(numThreads); }
 
     [[nodiscard]] size_t ThreadPool::Size() const { return m_Pool.get_thread_count(); }

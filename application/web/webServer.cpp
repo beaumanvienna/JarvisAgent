@@ -1934,8 +1934,14 @@ namespace AIAssistant
         m_Server.stop();
         if (m_ServerTask.valid())
         {
-            m_ServerTask.wait();
-            LOG_APP_INFO("Crow web server stopped");
+            if (m_ServerTask.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
+            {
+                LOG_APP_ERROR("[shutdown] Crow server task did not exit within 2s");
+            }
+            else
+            {
+                LOG_APP_INFO("Crow web server stopped");
+            }
         }
     }
 

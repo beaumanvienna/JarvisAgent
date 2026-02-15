@@ -79,6 +79,8 @@ namespace AIAssistant
         AiRequestPool() = default;
         ~AiRequestPool() = default;
 
+        void Shutdown();
+
         AiRequestPool(AiRequestPool const&) = delete;
         AiRequestPool& operator=(AiRequestPool const&) = delete;
 
@@ -231,5 +233,7 @@ namespace AIAssistant
 
         std::mutex m_IdMutex;
         int64_t m_NextRequestId = 1;
+
+        std::atomic<bool> m_ShuttingDown{false};
     };
 } // namespace AIAssistant

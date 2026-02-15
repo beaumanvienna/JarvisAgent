@@ -224,15 +224,51 @@ namespace AIAssistant
 
     void WorkflowRuntimeManager::Stop()
     {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        std::vector<std::shared_future<TaskExecutionResult>> taskFutures;
+        std::vector<std::shared_future<FilterEvalResult>> filterFutures;
 
-        m_IsRunning = false;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        std::queue<PendingRun> emptyQueue;
-        m_PendingRuns.swap(emptyQueue);
+            m_IsRunning = false;
 
-        m_ActiveRuns.clear();
-        m_DeferredAiCompletions.clear();
+            std::queue<PendingRun> emptyQueue;
+            m_PendingRuns.swap(emptyQueue);
+
+            for (auto& activeRun : m_ActiveRuns)
+            {
+                activeRun.m_CancelRequested = true;
+                for (auto& [id, future] : activeRun.m_RunningTasks)
+                {
+                    taskFutures.push_back(future);
+                }
+                for (auto& [id, future] : activeRun.m_FilterEvalTasks)
+                {
+                    filterFutures.push_back(future);
+                }
+            }
+        }
+
+        for (auto& f : taskFutures)
+        {
+            if (f.valid())
+            {
+                f.wait_for(std::chrono::milliseconds(500));
+            }
+        }
+        for (auto& f : filterFutures)
+        {
+            if (f.valid())
+            {
+                f.wait_for(std::chrono::milliseconds(500));
+            }
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_ActiveRuns.clear();
+            m_DeferredAiCompletions.clear();
+        }
     }
 
     void WorkflowRuntimeManager::EnqueueWorkflowRun(std::string const& workflowId)

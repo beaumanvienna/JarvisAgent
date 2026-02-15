@@ -158,11 +158,24 @@ namespace AIAssistant
             return totalSize;
         };
 
+        // Progress callback: abort transfer if thread pool is shutting down.
+        auto progressCallback = [](void* /*clientp*/, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/, curl_off_t /*ultotal*/,
+                                   curl_off_t /*ulnow*/) -> int
+        {
+            if (Core::g_Core != nullptr && Core::g_Core->GetThreadPool().IsStopped())
+            {
+                return 1; // non-zero aborts the transfer
+            }
+            return 0;
+        };
+
         curl_easy_setopt(m_Curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_HTTPHEADER, headers.Get());
         curl_easy_setopt(m_Curl, CURLOPT_POSTFIELDS, data.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_WRITEFUNCTION, static_cast<CurlWriteCallback>(write_callback));
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
+        curl_easy_setopt(m_Curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(m_Curl, CURLOPT_XFERINFOFUNCTION, static_cast<curl_xferinfo_callback>(progressCallback));
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
@@ -182,6 +195,10 @@ namespace AIAssistant
         if (res == CURLE_OK)
         {
             LOG_CORE_INFO("Response:\n{}", m_ReadBuffer);
+        }
+        else if (res == CURLE_ABORTED_BY_CALLBACK)
+        {
+            LOG_CORE_INFO("[shutdown] curl request aborted (query {})", m_QueryCounter.load());
         }
         else
         {

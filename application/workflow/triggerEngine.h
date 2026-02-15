@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -201,6 +202,7 @@ namespace AIAssistant
         static bool IsPathMatch(std::string const& watchedPath, std::string const& eventPath);
 
     private:
+        mutable std::mutex m_Mutex;
         TriggerCallback m_TriggerCallback;
 
         std::vector<CronTriggerInstance> m_CronTriggers;

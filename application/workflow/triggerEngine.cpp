@@ -225,22 +225,35 @@ namespace AIAssistant
 
     void TriggerEngine::AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled)
     {
-        LOG_APP_INFO("TriggerEngine::AddAutoTrigger: registered auto trigger '{}' for workflow '{}'", triggerId, workflowId);
-
-        if (!isEnabled)
+        bool shouldFire = false;
         {
-            LOG_APP_INFO("TriggerEngine::AddAutoTrigger: trigger '{}' for workflow '{}' is disabled; not firing", triggerId,
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            LOG_APP_INFO("TriggerEngine::AddAutoTrigger: registered auto trigger '{}' for workflow '{}'", triggerId,
                          workflowId);
-            return;
+
+            if (!isEnabled)
+            {
+                LOG_APP_INFO("TriggerEngine::AddAutoTrigger: trigger '{}' for workflow '{}' is disabled; not firing",
+                             triggerId, workflowId);
+            }
+            else
+            {
+                shouldFire = true;
+            }
         }
 
         // Auto triggers start the workflow immediately upon registration.
-        FireTrigger(workflowId, triggerId);
+        // Fire outside the lock to avoid potential deadlock with callback.
+        if (shouldFire)
+        {
+            FireTrigger(workflowId, triggerId);
+        }
     }
 
     void TriggerEngine::AddCronTrigger(std::string const& workflowId, std::string const& triggerId,
                                        std::string const& expression, std::string const& timezone, bool isEnabled)
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         CronTriggerInstance cronTriggerInstance{};
         cronTriggerInstance.m_WorkflowId = workflowId;
         cronTriggerInstance.m_TriggerId = triggerId;
@@ -270,6 +283,7 @@ namespace AIAssistant
                                             std::string const& path, std::vector<FileEventType> const& events,
                                             uint32_t debounceMilliseconds, bool isEnabled)
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         std::string const normalizedPath = NormalizePath(path);
 
         FileWatchTriggerInstance fileTriggerInstance{};
@@ -294,6 +308,7 @@ namespace AIAssistant
 
     void TriggerEngine::AddManualTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled)
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         ManualTriggerInstance manualTriggerInstance{};
         manualTriggerInstance.m_WorkflowId = workflowId;
         manualTriggerInstance.m_TriggerId = triggerId;
@@ -307,6 +322,7 @@ namespace AIAssistant
 
     void TriggerEngine::ClearWorkflowTriggers(std::string const& workflowId)
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         LOG_APP_INFO("TriggerEngine::ClearWorkflowTriggers: clearing triggers for workflow '{}'", workflowId);
 
         EraseWorkflowFromVector(m_CronTriggers, workflowId);
@@ -324,26 +340,36 @@ namespace AIAssistant
 
     void TriggerEngine::Tick(std::chrono::system_clock::time_point const& now)
     {
-        for (CronTriggerInstance& cronTriggerInstance : m_CronTriggers)
+        std::vector<TriggerFiredEvent> eventsToFire;
+
         {
-            if (!cronTriggerInstance.m_IsEnabled)
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            for (CronTriggerInstance& cronTriggerInstance : m_CronTriggers)
             {
-                continue;
-            }
+                if (!cronTriggerInstance.m_IsEnabled)
+                {
+                    continue;
+                }
 
-            if (!cronTriggerInstance.m_Expression.IsValid())
-            {
-                continue;
-            }
+                if (!cronTriggerInstance.m_Expression.IsValid())
+                {
+                    continue;
+                }
 
-            // If next fire time is in the past or now, fire and schedule the next one.
-            if (cronTriggerInstance.m_NextFireTime <= now)
-            {
-                FireTrigger(cronTriggerInstance.m_WorkflowId, cronTriggerInstance.m_TriggerId);
+                // If next fire time is in the past or now, fire and schedule the next one.
+                if (cronTriggerInstance.m_NextFireTime <= now)
+                {
+                    eventsToFire.push_back({cronTriggerInstance.m_WorkflowId, cronTriggerInstance.m_TriggerId});
 
-                cronTriggerInstance.m_NextFireTime =
-                    cronTriggerInstance.m_Expression.ComputeNextFireTime(now, cronTriggerInstance.m_Timezone);
+                    cronTriggerInstance.m_NextFireTime =
+                        cronTriggerInstance.m_Expression.ComputeNextFireTime(now, cronTriggerInstance.m_Timezone);
+                }
             }
+        }
+
+        for (auto const& event : eventsToFire)
+        {
+            FireTrigger(event.m_WorkflowId, event.m_TriggerId);
         }
     }
 
@@ -355,106 +381,128 @@ namespace AIAssistant
                      "eventPathNormalized='{}' eventType='{}'",
                      path, normalizedEventPath, static_cast<int>(fileEventType));
 
-        std::unordered_set<size_t> processedIndices;
+        std::vector<TriggerFiredEvent> eventsToFire;
 
-        auto processIndex = [&](size_t triggerIndex)
         {
-            if (triggerIndex >= m_FileWatchTriggers.size())
-            {
-                return;
-            }
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-            processedIndices.insert(triggerIndex);
+            std::unordered_set<size_t> processedIndices;
 
-            FileWatchTriggerInstance& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
+            auto processIndex = [&](size_t triggerIndex)
+            {
+                if (triggerIndex >= m_FileWatchTriggers.size())
+                {
+                    return;
+                }
 
-            if (!fileTriggerInstance.m_IsEnabled)
-            {
-                return;
-            }
+                processedIndices.insert(triggerIndex);
 
-            if (!ContainsEvent(fileTriggerInstance.m_Events, fileEventType))
-            {
-                return;
-            }
+                FileWatchTriggerInstance& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
 
-            bool canFire = false;
-            if (!fileTriggerInstance.m_HasFiredOnce)
-            {
-                canFire = true;
-            }
-            else
-            {
-                auto elapsed =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - fileTriggerInstance.m_LastFireTime);
-                if (elapsed >= fileTriggerInstance.m_DebounceInterval)
+                if (!fileTriggerInstance.m_IsEnabled)
+                {
+                    return;
+                }
+
+                if (!ContainsEvent(fileTriggerInstance.m_Events, fileEventType))
+                {
+                    return;
+                }
+
+                bool canFire = false;
+                if (!fileTriggerInstance.m_HasFiredOnce)
                 {
                     canFire = true;
                 }
-            }
-
-            if (canFire)
-            {
-                fileTriggerInstance.m_HasFiredOnce = true;
-                fileTriggerInstance.m_LastFireTime = now;
-
-                LOG_APP_INFO("[paths debug] debug TriggerEngine::NotifyFileEvent: reason=fireTrigger workflowId='{}' "
-                             "triggerId='{}' watchedPathNormalized='{}' eventPathNormalized='{}' eventType='{}'",
-                             fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId,
-                             fileTriggerInstance.m_WatchedPath, normalizedEventPath, static_cast<int>(fileEventType));
-                FireTrigger(fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId);
-            }
-        };
-
-        // Fast path: exact match using index.
-        {
-            auto iterator = m_FileWatchIndex.find(normalizedEventPath);
-            if (iterator != m_FileWatchIndex.end())
-            {
-                std::vector<size_t> const& indices = iterator->second;
-                for (size_t triggerIndex : indices)
+                else
                 {
-                    processIndex(triggerIndex);
+                    auto elapsed =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - fileTriggerInstance.m_LastFireTime);
+                    if (elapsed >= fileTriggerInstance.m_DebounceInterval)
+                    {
+                        canFire = true;
+                    }
                 }
+
+                if (canFire)
+                {
+                    fileTriggerInstance.m_HasFiredOnce = true;
+                    fileTriggerInstance.m_LastFireTime = now;
+
+                    LOG_APP_INFO("[paths debug] debug TriggerEngine::NotifyFileEvent: reason=fireTrigger workflowId='{}' "
+                                 "triggerId='{}' watchedPathNormalized='{}' eventPathNormalized='{}' eventType='{}'",
+                                 fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId,
+                                 fileTriggerInstance.m_WatchedPath, normalizedEventPath, static_cast<int>(fileEventType));
+                    eventsToFire.push_back({fileTriggerInstance.m_WorkflowId, fileTriggerInstance.m_TriggerId});
+                }
+            };
+
+            // Fast path: exact match using index.
+            {
+                auto iterator = m_FileWatchIndex.find(normalizedEventPath);
+                if (iterator != m_FileWatchIndex.end())
+                {
+                    std::vector<size_t> const& indices = iterator->second;
+                    for (size_t triggerIndex : indices)
+                    {
+                        processIndex(triggerIndex);
+                    }
+                }
+            }
+
+            // Slow path: prefix (directory) matches.
+            for (size_t triggerIndex = 0; triggerIndex < m_FileWatchTriggers.size(); ++triggerIndex)
+            {
+                if (processedIndices.contains(triggerIndex))
+                {
+                    continue;
+                }
+
+                FileWatchTriggerInstance const& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
+                if (!IsPathMatch(fileTriggerInstance.m_WatchedPath, normalizedEventPath))
+                {
+                    continue;
+                }
+
+                processIndex(triggerIndex);
             }
         }
 
-        // Slow path: prefix (directory) matches.
-        for (size_t triggerIndex = 0; triggerIndex < m_FileWatchTriggers.size(); ++triggerIndex)
+        for (auto const& event : eventsToFire)
         {
-            if (processedIndices.contains(triggerIndex))
-            {
-                continue;
-            }
-
-            FileWatchTriggerInstance const& fileTriggerInstance = m_FileWatchTriggers[triggerIndex];
-            if (!IsPathMatch(fileTriggerInstance.m_WatchedPath, normalizedEventPath))
-            {
-                continue;
-            }
-
-            processIndex(triggerIndex);
+            FireTrigger(event.m_WorkflowId, event.m_TriggerId);
         }
     }
 
     void TriggerEngine::FireManualTrigger(std::string const& workflowId, std::string const& triggerId)
     {
-        for (ManualTriggerInstance const& manualTriggerInstance : m_ManualTriggers)
+        bool found = false;
         {
-            if (!manualTriggerInstance.m_IsEnabled)
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            for (ManualTriggerInstance const& manualTriggerInstance : m_ManualTriggers)
             {
-                continue;
-            }
+                if (!manualTriggerInstance.m_IsEnabled)
+                {
+                    continue;
+                }
 
-            if (manualTriggerInstance.m_WorkflowId == workflowId && manualTriggerInstance.m_TriggerId == triggerId)
-            {
-                FireTrigger(workflowId, triggerId);
-                return;
+                if (manualTriggerInstance.m_WorkflowId == workflowId && manualTriggerInstance.m_TriggerId == triggerId)
+                {
+                    found = true;
+                    break;
+                }
             }
         }
 
-        LOG_APP_WARN("TriggerEngine::FireManualTrigger: manual trigger '{}' for workflow '{}' not found or disabled",
-                     triggerId, workflowId);
+        if (found)
+        {
+            FireTrigger(workflowId, triggerId);
+        }
+        else
+        {
+            LOG_APP_WARN("TriggerEngine::FireManualTrigger: manual trigger '{}' for workflow '{}' not found or disabled",
+                         triggerId, workflowId);
+        }
     }
 
     void TriggerEngine::FireTrigger(std::string const& workflowId, std::string const& triggerId) const

@@ -24,9 +24,13 @@
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
+#include <mutex>
 #include <string>
+#include <thread>
 
 int engine(int argc, char* argv[])
 {
@@ -141,9 +145,31 @@ int engine(int argc, char* argv[])
 
     engine->Run(app);
 
-    // shutdown
+    // shutdown — start watchdog that covers the entire sequence
+    std::mutex watchdogMutex;
+    std::condition_variable watchdogCV;
+    bool watchdogDiffused = false;
+    std::thread watchdog(
+        [&]()
+        {
+            std::unique_lock<std::mutex> lock(watchdogMutex);
+            if (!watchdogCV.wait_for(lock, std::chrono::seconds(6), [&] { return watchdogDiffused; }))
+            {
+                std::cerr << "[shutdown watchdog] timeout expired — forcing exit" << std::endl;
+                _exit(EXIT_FAILURE);
+            }
+        });
+    watchdog.detach();
+
     app->OnShutdown();
     engine->Shutdown();
+
+    // diffuse the watchdog
+    {
+        std::lock_guard<std::mutex> lock(watchdogMutex);
+        watchdogDiffused = true;
+    }
+    watchdogCV.notify_one();
 
     return EXIT_SUCCESS;
 }

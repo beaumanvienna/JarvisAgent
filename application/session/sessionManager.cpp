@@ -204,7 +204,17 @@ namespace AIAssistant
             });
     }
 
-    void SessionManager::OnShutdown() {}
+    void SessionManager::OnShutdown()
+    {
+        for (auto& future : m_QueryFutures)
+        {
+            if (future.valid())
+            {
+                future.wait_for(std::chrono::milliseconds(50));
+            }
+        }
+        m_QueryFutures.clear();
+    }
 
     bool SessionManager::IsIdle() const { return m_StateMachine.GetState() == StateMachine::State::AllResponsesReceived; }
 

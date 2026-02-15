@@ -225,22 +225,6 @@ namespace AIAssistant
 
     void Core::Shutdown()
     {
-        // --- shutdown watchdog: force-kill if shutdown exceeds 2 seconds ---
-        std::mutex watchdogMutex;
-        std::condition_variable watchdogCV;
-        bool watchdogDiffused = false;
-        std::thread watchdog(
-            [&]()
-            {
-                std::unique_lock<std::mutex> lock(watchdogMutex);
-                if (!watchdogCV.wait_for(lock, std::chrono::seconds(2), [&] { return watchdogDiffused; }))
-                {
-                    std::cerr << "[shutdown watchdog] timeout expired — forcing exit" << std::endl;
-                    _exit(EXIT_FAILURE);
-                }
-            });
-        watchdog.detach();
-
         auto const shutdownStart = std::chrono::steady_clock::now();
         auto elapsed = [&]()
         {
@@ -256,16 +240,15 @@ namespace AIAssistant
         }
         LOG_CORE_INFO("[shutdown +{}ms] KeyboardInput stopped", elapsed());
 
+        // Shut down thread pool BEFORE curl global cleanup and TerminalManager.
+        // Thread pool tasks use curl handles and may still be logging.
+        LOG_CORE_INFO("[shutdown +{}ms] shutting down thread pool ({} threads)...", elapsed(), m_ThreadPool.Size());
+        m_ThreadPool.Shutdown();
+        LOG_CORE_INFO("[shutdown +{}ms] thread pool done", elapsed());
+
         LOG_CORE_INFO("[shutdown +{}ms] CurlWrapper::GlobalCleanup...", elapsed());
         CurlWrapper::GlobalCleanup();
         LOG_CORE_INFO("[shutdown +{}ms] CurlWrapper cleaned up", elapsed());
-
-        // Wait for thread pool BEFORE tearing down TerminalManager.
-        // Thread pool tasks may still be logging; destroying ncurses
-        // while they write causes hangs in put_to_stdout.
-        LOG_CORE_INFO("[shutdown +{}ms] waiting for thread pool ({} threads)...", elapsed(), m_ThreadPool.Size());
-        m_ThreadPool.Wait();
-        LOG_CORE_INFO("[shutdown +{}ms] thread pool done", elapsed());
 
         LOG_CORE_INFO("[shutdown +{}ms] stopping TerminalManager...", elapsed());
         if (m_TerminalManager)
@@ -292,12 +275,6 @@ namespace AIAssistant
             m_LogFile->close();
         }
 
-        // --- diffuse the shutdown watchdog ---
-        {
-            std::lock_guard<std::mutex> lock(watchdogMutex);
-            watchdogDiffused = true;
-        }
-        watchdogCV.notify_one();
         std::cout << "shutdown complete" << std::endl;
     }
 

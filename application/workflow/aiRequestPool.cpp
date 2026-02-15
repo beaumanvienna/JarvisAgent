@@ -203,6 +203,42 @@ namespace AIAssistant
         return requestKey;
     }
 
+    void AiRequestPool::Shutdown()
+    {
+        m_ShuttingDown = true;
+
+        std::vector<std::shared_ptr<PendingEntry>> entries;
+        {
+            std::scoped_lock<std::mutex> const lock(m_MapMutex);
+            entries.reserve(m_PendingRequests.size());
+            for (auto& [key, entry] : m_PendingRequests)
+            {
+                entries.push_back(entry);
+            }
+        }
+
+        for (auto& entry : entries)
+        {
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if (!entry->m_IsCompleted)
+            {
+                entry->m_IsCompleted = true;
+                entry->m_IsFailed = true;
+                entry->m_ErrorMessage = "shutdown";
+            }
+            entry->conditionVariable.notify_all();
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_MapMutex);
+            m_PendingRequests.clear();
+        }
+        {
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+            m_PendingByOutputPath.clear();
+        }
+    }
+
     int64_t AiRequestPool::AllocateRequestId()
     {
         std::scoped_lock<std::mutex> const lock(m_IdMutex);
