@@ -641,7 +641,8 @@ Inputs and outputs are declared to aid validation and UI:
 ```jsonc
 "inputs": {
   "source_path": { "type": "string", "required": true },
-  "config": { "type": "object", "required": false }
+  "config": { "type": "object", "required": false },
+  "greeting": { "type": "string", "required": true, "default": "Hello World" }
 },
 "outputs": {
   "markdown_path": { "type": "string" }
@@ -650,6 +651,7 @@ Inputs and outputs are declared to aid validation and UI:
 
 - Each key is a data slot name.  
 - Types are advisory but useful for sanity checks and editor tooling.
+- `default` (OPTIONAL, string): Fallback value used when neither a dataflow edge nor the run context provides a value for this input. See §8.1 for the full resolution chain.
 
 **Relationship to `file_inputs` / `file_outputs`:**
 
@@ -1613,24 +1615,45 @@ Data flow is a combination of:
 
 ### 8.1 Task Input Resolution
 
-When a task starts, its inputs are resolved from:
+When a task starts, the runtime resolves each declared input through a **priority chain**. The first mechanism that produces a value wins:
 
-1. Dataflow links (`from_task` to `to_task`).  
-2. Context fields (for example, `context["config"]`).  
-3. Static literals provided in `params` or `defaults` (such as `provider`, `model`).
+1. **Dataflow edges** — explicit `from_task.from_output → to_task.to_input` wiring declared in the `"dataflow"` array.
+2. **Run context** — lookup by input name in the workflow run's shared `ContextMap`. Context values can be seeded at run start (via the REST API) or auto-published by upstream tasks (see §8.2).
+3. **Input default** — the `"default"` field on the input declaration (see §3.3.4).
 
-If a required input cannot be resolved, the task MUST fail fast with a validation error.
+If none of these mechanisms resolve a value:
+- **Required** inputs (`"required": true`) cause the task to **fail immediately** with a descriptive error.
+- **Optional** inputs are silently omitted.
 
-**Note (shell tasks):** `${input[i]}` / `${output[i]}` template expansion is based on `file_inputs` / `file_outputs` and does not require named `inputs` / `outputs` declarations.
+After all inputs are resolved, template expansion (`{{inputs.slot_name}}`) is applied to substitute resolved values into `params.args` and other template-enabled fields.
+
+**Note (shell tasks):** `${input[i]}` / `${output[i]}` positional template expansion is based on `file_inputs` / `file_outputs` and does not require named `inputs` / `outputs` declarations.
 
 ### 8.2 Outputs and Context
 
-Task outputs MAY be written to:
+Task outputs are written to two destinations:
 
-- Local task outputs (for dataflow).  
-- Shared context, if configured (for example, `write_to_context: true`, which may be added in a future revision).
+1. **Local task outputs** — stored in `TaskInstanceState.m_OutputValues` for downstream dataflow wiring.
+2. **Shared run context** — when a task succeeds, the runtime **automatically publishes** all its output values into the workflow run's `ContextMap` under composite keys of the form `taskId.outputName`.
 
-The exact policy is left to the implementation, but JCWF is designed so that future versions can specify context writes explicitly.
+For example, if task `convertToMarkdown` produces output `markdown_path`, the context key `convertToMarkdown.markdown_path` becomes available to all downstream tasks. A downstream task can declare an input named `convertToMarkdown.markdown_path` and it will resolve via the context lookup (step 2 of §8.1) without requiring an explicit `dataflow` edge.
+
+**Initial context from REST API:**
+
+The `POST /api/workflows/<id>/run` endpoint accepts an optional JSON body to seed the run context before any task executes:
+
+```json
+{
+  "context": {
+    "user_name": "Alice",
+    "environment": "production"
+  }
+}
+```
+
+These values are available to all tasks via the context lookup (step 2 of §8.1). If a body is omitted or empty, the run starts with an empty context.
+
+**Freshness note:** The Makefile-style freshness checker (§3.3.3) only compares `file_inputs` / `file_outputs` timestamps. Context values and input defaults are invisible to freshness. Tasks whose inputs come solely from context or defaults will always re-run (no `file_outputs` to prove freshness). Tasks that mix file and context inputs may be incorrectly skipped if only the context value changed between runs.
 
 ---
 

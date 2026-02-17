@@ -135,6 +135,10 @@ namespace AIAssistant
         // Advisory type (string, object, json, etc.) – matches JCWF "type".
         std::string m_Type;
         bool m_IsRequired{false};
+
+        // Optional default value (JCWF "default" field on the input declaration).
+        // Used as fallback when neither dataflow nor run context provides a value.
+        std::string m_Default;
     };
 
     using TaskIOMap = std::unordered_map<std::string, TaskIOField>;

@@ -33,15 +33,15 @@ Last reviewed: Feb 2026
 - [x] ~~Update **JC Workflow Specification** for filters + per_item~~ — bumped spec to v1.1: added §3.7 (Filters), `"filters"` root-level array, `"filter"` field on tasks, filter JSON Schema `$def`, query language reference, filter manifest freshness scheme, fan-out node description, security note for unbounded expansion.
 
 ### Dataflow and context resolution
-- [ ] Implement `dataflow.mapping` evaluation (mapping object is parsed/stored but currently ignored).
-- [ ] Implement **context-based input resolution** (from run context / params / defaults) where `DataflowResolver` has TODOs.
+- [x] ~~Implement `dataflow.mapping` evaluation~~ — mapping values are injected into `resolvedInputs.m_StringValues` in `DataflowResolver`. Fixed parser to strip surrounding JSON quotes from string values so they are stored clean.
+- [x] ~~Implement **context-based input resolution**~~ — full 3-step resolution chain in `DataflowResolver`: (1) dataflow edges, (2) `workflowRun.m_Context` lookup, (3) input-level `"default"` fallback. Task outputs auto-publish to context as `taskId.outputName` keys. `POST /api/workflows/<id>/run` accepts optional `{"context": {...}}` body to seed initial values. `TaskIOField.m_Default` parsed from JCWF `"default"` field.
 
 ### Workflow housekeeping — "Clean" command
 - [x] ~~Implement a **"Clean" command**~~ — `DELETE /api/workflows/<id>/clean` endpoint + `WorkflowRuntimeManager::CleanWorkflow()` + "Clean" button in editor toolbar with confirmation dialog. Deletes queue task folders, declared `file_outputs`, and empty working directories.
 
 ### Reliability features
 - [x] ~~Implement **retries/backoff** from `RetryPolicy`~~ — `TryScheduleRetry` in `workflowRuntimeManager.cpp`: linear backoff (`m_BackoffMs * attempt`), `m_RetryAfterTime` respected by dispatch loop, deadlock detector accounts for retry-pending tasks.
-- [ ] Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime.
+- [x] ~~Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime~~ — inactivity watchdog: `TaskWatchdog` atomic struct, shell executor uses `fork()/exec()/poll()` with stdout as implicit heartbeat + process group kill on timeout; REST `POST /api/task/<id>/heartbeat` for explicit heartbeats; python/internal get post-execution inactivity check. Spec §3.3.3 updated, bookSummaryPipeline demo added.
 
 ---
 

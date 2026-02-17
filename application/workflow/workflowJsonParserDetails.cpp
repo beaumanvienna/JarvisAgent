@@ -277,6 +277,14 @@ namespace AIAssistant
 
                     ioField.m_IsRequired = boolResult.value();
                 }
+                else if (subKey == "default")
+                {
+                    if (!ElementToString(subValue, ioField.m_Default))
+                    {
+                        errorMessage = "task input field 'default' must be string";
+                        return false;
+                    }
+                }
                 else
                 {
                     LOG_CORE_WARN("Unknown field in workflow task input '{}': {}", key, subKey);

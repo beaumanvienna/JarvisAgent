@@ -53,6 +53,7 @@ Represents a value in the context map for workflow runs.
 Defines input/output fields for tasks:
 - **m_Type**: Advisory type (string, object, etc.).
 - **m_IsRequired**: Indicates if the field is required.
+- **m_Default**: Optional default value (string). Used as fallback when neither dataflow edges nor run context provide a value for an input.
 
 ### TaskEnvironment
 Describes the environment for tasks:

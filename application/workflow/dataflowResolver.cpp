@@ -51,9 +51,22 @@ namespace AIAssistant
                 continue;
             }
 
-            // 2) TODO: context-based resolution from workflowRun.m_Context.
+            // 2) Run context: check workflowRun.m_Context for a matching key.
+            {
+                auto contextIterator = workflowRun.m_Context.find(inputName);
+                if (contextIterator != workflowRun.m_Context.end())
+                {
+                    resolvedInputs.m_StringValues[inputName] = contextIterator->second.m_Value;
+                    continue;
+                }
+            }
 
-            // 3) TODO: defaults / literals (JCWF-level) if introduced.
+            // 3) Input-level default value (JCWF "default" field on the input declaration).
+            if (!inputField.m_Default.empty())
+            {
+                resolvedInputs.m_StringValues[inputName] = inputField.m_Default;
+                continue;
+            }
 
             // If not resolved by any mechanism:
             //  - required input -> fail

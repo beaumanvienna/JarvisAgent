@@ -1,0 +1,93 @@
+{
+  "id": "inputResolutionTest",
+  "version": "1.0",
+  "label": "Input Resolution Test (context + defaults)",
+  "doc": "Exercises the 3-step input resolution chain: (1) dataflow edges, (2) run context lookup, (3) input-level defaults. Also tests auto-publish of task outputs to context and REST-seeded initial context.",
+  "manual_start": true,
+  "base_directory": ".",
+  "tasks": {
+    "echoDefault": {
+      "type": "shell",
+      "label": "Echo default value",
+      "doc": "Input 'greeting' has a default value. No dataflow or context provides it, so the default should be used.",
+      "working_directory": "inputResolutionTest/01_echoDefault",
+      "inputs": {
+        "greeting": {
+          "type": "string",
+          "required": true,
+          "default": "Hello World"
+        }
+      },
+      "params": {
+        "command": "scripts/echoInput.sh",
+        "args": [
+          "greeting",
+          "{{inputs.greeting}}"
+        ]
+      }
+    },
+
+    "echoContext": {
+      "type": "shell",
+      "label": "Echo context-seeded value",
+      "doc": "Input 'user_name' has no default and no dataflow. It must be resolved from the run context seeded via the REST API body.",
+      "working_directory": "inputResolutionTest/02_echoContext",
+      "inputs": {
+        "user_name": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "params": {
+        "command": "scripts/echoInput.sh",
+        "args": [
+          "user_name",
+          "{{inputs.user_name}}"
+        ]
+      }
+    },
+
+    "produceValue": {
+      "type": "shell",
+      "label": "Produce an output value",
+      "doc": "Writes a known string to its output file. The runtime auto-publishes this to context as 'produceValue.result'.",
+      "working_directory": "inputResolutionTest/03_produceValue",
+      "file_outputs": [
+        "result.txt"
+      ],
+      "outputs": {
+        "result": {
+          "type": "string"
+        }
+      },
+      "params": {
+        "command": "scripts/echoInput.sh",
+        "args": [
+          "producing",
+          "ContextPropagationWorks"
+        ]
+      }
+    },
+
+    "consumeContext": {
+      "type": "shell",
+      "label": "Consume auto-published context",
+      "doc": "Input 'produceValue.result' is NOT wired via dataflow. It should resolve from the auto-published context key 'produceValue.result'.",
+      "depends_on": ["produceValue"],
+      "working_directory": "inputResolutionTest/04_consumeContext",
+      "inputs": {
+        "produceValue.result": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "params": {
+        "command": "scripts/echoInput.sh",
+        "args": [
+          "upstream_result",
+          "{{inputs.produceValue.result}}"
+        ]
+      }
+    }
+  }
+}

@@ -535,6 +535,13 @@ namespace AIAssistant
             {
                 taskState.m_OutputValues = completion.m_OutputValues;
 
+                // Publish ai_call outputs into the run context.
+                for (auto const& [outputName, outputValue] : taskState.m_OutputValues)
+                {
+                    std::string const contextKey = completion.m_TaskId + "." + outputName;
+                    activeRun.m_Run.m_Context[contextKey] = ContextValue{outputValue};
+                }
+
                 std::string summary;
                 for (auto const& p : taskState.m_OutputValues)
                 {
@@ -729,6 +736,17 @@ namespace AIAssistant
                 if (stateIterator != workflowRun.m_TaskStates.end())
                 {
                     stateIterator->second = result.m_TaskState;
+                }
+
+                // Publish successful task outputs into the run context so downstream
+                // tasks can resolve them via context lookup (without explicit dataflow wiring).
+                if (result.m_ExecuteOk && stateIterator != workflowRun.m_TaskStates.end())
+                {
+                    for (auto const& [outputName, outputValue] : result.m_TaskState.m_OutputValues)
+                    {
+                        std::string const contextKey = result.m_TaskId + "." + outputName;
+                        workflowRun.m_Context[contextKey] = ContextValue{outputValue};
+                    }
                 }
 
                 if (!result.m_ExecuteOk)

@@ -760,7 +760,8 @@ namespace AIAssistant
 
         // ---- Workflow Editor: run control + monitoring ----
         CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
-            .methods("POST"_method)([this](std::string const& workflowId) { return HandleWorkflowRunPost(workflowId); });
+            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
+                                    { return HandleWorkflowRunPost(req, workflowId); });
 
         CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
             .methods("DELETE"_method)([this](std::string const& workflowId)
@@ -1370,7 +1371,7 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
-    crow::response WebServer::HandleWorkflowRunPost(std::string const& workflowId)
+    crow::response WebServer::HandleWorkflowRunPost(crow::request const& req, std::string const& workflowId)
     {
         if (!IsValidWorkflowId(workflowId))
         {
@@ -1410,7 +1411,56 @@ namespace AIAssistant
                                          "POST /api/workflows/{id}/run", workflowId);
         }
 
-        std::string const runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
+        // Parse optional JSON body: { "context": { "key": "value", ... } }
+        ContextMap context;
+        if (!req.body.empty())
+        {
+            try
+            {
+                simdjson::ondemand::parser parser;
+                simdjson::padded_string json = simdjson::padded_string(req.body.data(), req.body.size());
+                simdjson::ondemand::document document = parser.iterate(json);
+
+                auto contextResult = document["context"].get_object();
+                if (contextResult.error() == simdjson::SUCCESS)
+                {
+                    for (auto field : contextResult.value())
+                    {
+                        auto keyResult = field.unescaped_key();
+                        if (keyResult.error() != simdjson::SUCCESS)
+                        {
+                            continue;
+                        }
+
+                        std::string_view keyView = keyResult.value();
+                        std::string key(keyView.begin(), keyView.end());
+
+                        simdjson::ondemand::value value = field.value();
+                        auto stringResult = value.get_string();
+                        if (stringResult.error() == simdjson::SUCCESS)
+                        {
+                            std::string_view valueView = stringResult.value();
+                            context[key] = ContextValue{std::string(valueView.begin(), valueView.end())};
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Malformed body is not fatal — run without context.
+                LOG_APP_WARN("HandleWorkflowRunPost: failed to parse request body for context (workflow '{}')", workflowId);
+            }
+        }
+
+        std::string runId;
+        if (context.empty())
+        {
+            runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
+        }
+        else
+        {
+            runId = workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, std::string(), context);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;

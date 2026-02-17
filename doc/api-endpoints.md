@@ -155,6 +155,18 @@ Each finding has: `code`, `message`, `path` (JSON pointer), `taskId`, `tier`.
 | POST | `/api/workflow-runs/<runId>/cancel` | Request cancellation of an active run. |
 
 ### POST /api/workflows/\<id\>/run
+
+**Request body (optional):**
+```json
+{
+  "context": {
+    "user_name": "Alice",
+    "environment": "production"
+  }
+}
+```
+When provided, the `context` key-value pairs are seeded into the workflow run's `ContextMap` before any task executes. Tasks can resolve these values via the context lookup step of input resolution (see JC Workflow Specification §8.1). If the body is omitted or empty, the run starts with an empty context.
+
 **Response (202):**
 ```json
 { "ok": true, "enqueued": true, "id": "jarvisCppDocu", "runId": "jarvisCppDocu_1771127438" }
