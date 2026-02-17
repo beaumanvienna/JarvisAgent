@@ -68,7 +68,8 @@ namespace AIAssistant
                                                              ContextMap const& context);
 
         // Must be called periodically (from main thread).
-        void Update();
+        // Returns true if any workflow run changed state (completed, failed, new run started).
+        bool Update();
 
         void SetRegistry(WorkflowRegistry const* workflowRegistry);
 
@@ -92,6 +93,8 @@ namespace AIAssistant
         // Returns true on success.  On failure, outErrorMessage describes the issue.
         // Source/input files are never touched.
         bool CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage);
+
+        void GetRunCounters(uint64_t& outCompleted, uint64_t& outFailed) const;
 
         // Heartbeat watchdog: called by the REST endpoint to reset the inactivity timer.
         // Returns true if the task was found and kicked.
@@ -174,6 +177,9 @@ namespace AIAssistant
         std::vector<ActiveRun> m_ActiveRuns;
 
         std::unordered_map<std::string, WorkflowRun> m_LastRuns;
+
+        uint64_t m_TotalCompletedRuns{0};
+        uint64_t m_TotalFailedRuns{0};
 
         std::vector<AiRequestCompletion> m_DeferredAiCompletions;
 

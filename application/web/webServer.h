@@ -51,17 +51,24 @@ namespace AIAssistant
 
         // Workflow Editor: optional server-side push of run snapshots (call periodically from main thread).
         void BroadcastWorkflowRunsSnapshot();
+        void BroadcastWorkflowRunsLastSnapshot();
 
         void Broadcast(std::string const& jsonMessage);
         void BroadcastJSON(const std::string& jsonString);
         void BroadcastPythonStatus(bool pythonRunning);
 
+        // Drain queued broadcasts to connected WS clients.
+        // Must be called periodically from the main thread (JarvisAgent::OnUpdate).
+        void DrainPendingBroadcasts();
+
     private:
         void RegisterRoutes();
         void RegisterWebSocket();
 
-        // Static file serving (Workflow Editor UI)
+        // Static file serving (Dashboard + Workflow Editor UI)
         crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
+        crow::response ServeDashboardIndex() const;
+        crow::response ServeDashboardStatic(std::string const& requestPath) const;
         crow::response ServeWorkflowEditorIndex() const;
         crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
 
@@ -120,10 +127,7 @@ namespace AIAssistant
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
 
-        // Messages queued by main-thread callers (BroadcastJSON, Broadcast, etc.)
-        // and drained from Crow's I/O thread in onmessage.
         std::vector<std::string> m_PendingBroadcasts;
-        void DrainPendingBroadcasts();
 
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;

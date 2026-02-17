@@ -212,6 +212,16 @@ namespace AIAssistant
         contextValues["_workflow_base_directory"] = workflowBaseDirectoryPath.string();
         contextValues["_task_working_directory"] = taskWorkingDirectoryPath.string();
 
+        // Inject resolved file_inputs into the context dict (not kwargs) so that
+        // Python functions can access them via context['_file_input_0'] etc. without
+        // polluting the function signature.
+        for (size_t i = 0; i < taskDefinition.m_FileInputs.size(); ++i)
+        {
+            fs::path const inputPath =
+                TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fs::path(taskDefinition.m_FileInputs[i]));
+            contextValues["_file_input_" + std::to_string(i)] = inputPath.string();
+        }
+
         std::unordered_map<std::string, std::string> pythonOutputs;
 
         if (taskDefinition.m_ParamsJson.empty())
@@ -220,19 +230,6 @@ namespace AIAssistant
         }
 
         std::unordered_map<std::string, std::string> callArguments = taskState.m_InputValues;
-
-        // Inject resolved file_inputs as input[0], input[1], ... so Python functions
-        // can access them the same way shell tasks do via {{input[0]}} template expansion.
-        for (size_t i = 0; i < taskDefinition.m_FileInputs.size(); ++i)
-        {
-            std::string const key = "input[" + std::to_string(i) + "]";
-            if (!callArguments.contains(key))
-            {
-                fs::path const inputPath =
-                    TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, fs::path(taskDefinition.m_FileInputs[i]));
-                callArguments[key] = inputPath.string();
-            }
-        }
 
         // Provide output file path arguments to Python functions when the workflow declares an output slot.
         // This avoids requiring Python scripts to re-derive the output file location.

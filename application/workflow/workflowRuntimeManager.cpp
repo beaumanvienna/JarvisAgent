@@ -581,8 +581,9 @@ namespace AIAssistant
         return false;
     }
 
-    void WorkflowRuntimeManager::Update()
+    bool WorkflowRuntimeManager::Update()
     {
+        bool stateChanged = false;
         std::vector<PendingRun> pendingToStart;
 
         {
@@ -590,7 +591,7 @@ namespace AIAssistant
 
             if (!m_IsRunning)
             {
-                return;
+                return false;
             }
 
             while (!m_PendingRuns.empty())
@@ -603,6 +604,7 @@ namespace AIAssistant
         if (!pendingToStart.empty())
         {
             StartPendingRuns(std::move(pendingToStart));
+            stateChanged = true;
         }
 
         DrainAiRequestCompletions();
@@ -615,15 +617,35 @@ namespace AIAssistant
             {
                 {
                     std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+                    // Finalise the overall run state (was left at Pending/Running by TickActiveRun).
+                    if (m_ActiveRuns[index].m_Run.m_State != WorkflowRunState::Cancelled)
+                    {
+                        m_ActiveRuns[index].m_Run.m_State =
+                            m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
+                    }
+
                     m_LastRuns[m_ActiveRuns[index].m_Run.m_WorkflowId] = m_ActiveRuns[index].m_Run;
+
+                    if (m_ActiveRuns[index].m_Run.m_HasFailed)
+                    {
+                        ++m_TotalFailedRuns;
+                    }
+                    else
+                    {
+                        ++m_TotalCompletedRuns;
+                    }
                 }
 
                 m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
+                stateChanged = true;
                 continue;
             }
 
             ++index;
         }
+
+        return stateChanged;
     }
     void WorkflowRuntimeManager::StartPendingRuns(std::vector<PendingRun>&& pendingRuns)
     {
@@ -1281,6 +1303,13 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         return m_LastRuns; // copy
+    }
+
+    void WorkflowRuntimeManager::GetRunCounters(uint64_t& outCompleted, uint64_t& outFailed) const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        outCompleted = m_TotalCompletedRuns;
+        outFailed = m_TotalFailedRuns;
     }
 
     // =================================================================

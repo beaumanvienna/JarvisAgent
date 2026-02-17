@@ -47,9 +47,7 @@ Last reviewed: Feb 2026
 
 ## Executor completeness
 
-- [ ] Implement JCWF I/O semantics for `PythonTaskExecutor`:
-  - [ ] Pass resolved inputs into Python execution.
-  - [ ] Collect outputs back into workflow output slots for downstream dataflow.
+- [x] ~~Implement JCWF I/O semantics for `PythonTaskExecutor`~~ — already implemented: resolved inputs passed as Python **kwargs** via `PythonEngine::ExecuteWorkflowTask`; return `dict` collected into `TaskInstanceState.m_OutputValues`; `file_inputs`/`file_outputs` injected as positional keys (`input[0]`, etc.); `BuildOutputSlotMap` fills missing output slots. Verified with `bookSummaryPipeline` (`extractChapters.py`, `combineSummaries.py`).
 - [x] ~~Implement `InternalTaskExecutor`~~ — has working implementation in `internalTaskExecutor.cpp`.
 
 ---

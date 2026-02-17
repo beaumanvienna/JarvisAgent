@@ -38,6 +38,7 @@
 #include "web/webServer.h"
 #include "web/chatMessages.h"
 
+#include "session/sessionManager.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowJsonParser.h"
 
@@ -558,6 +559,47 @@ namespace AIAssistant
         BroadcastJSON(json.dump());
     }
 
+    void WebServer::BroadcastWorkflowRunsLastSnapshot()
+    {
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (!workflowRuntimeManager)
+        {
+            return;
+        }
+
+        auto lastRuns = workflowRuntimeManager->GetLastRunsSnapshot();
+
+        uint64_t completedCount = 0;
+        uint64_t failedCount = 0;
+        workflowRuntimeManager->GetRunCounters(completedCount, failedCount);
+
+        crow::json::wvalue json;
+        json["type"] = "workflowRunsLastSnapshot";
+        json["totalCompleted"] = static_cast<int64_t>(completedCount);
+        json["totalFailed"] = static_cast<int64_t>(failedCount);
+
+        crow::json::wvalue::list runsJson;
+        for (auto const& [workflowId, run] : lastRuns)
+        {
+            crow::json::wvalue runJson;
+            runJson["runId"] = run.m_RunId;
+            runJson["workflowId"] = workflowId;
+            runJson["state"] = ToStringWorkflowRunState(run.m_State);
+            runJson["startedAt"] = run.m_StartedAtIso8601;
+            runJson["completedAt"] = run.m_CompletedAtIso8601;
+            runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
+            runsJson.push_back(std::move(runJson));
+        }
+        json["runs"] = std::move(runsJson);
+
+        BroadcastJSON(json.dump());
+    }
+
     namespace
     {
         std::string GetMimeType(std::filesystem::path const& path)
@@ -652,6 +694,32 @@ namespace AIAssistant
         return response;
     }
 
+    crow::response WebServer::ServeDashboardIndex() const
+    {
+        std::filesystem::path const distIndex = std::filesystem::path("dashboard") / "ui" / "dist" / "index.html";
+        if (!std::filesystem::exists(distIndex))
+        {
+            return crow::response(500, "Dashboard UI build not found. Please run: cd dashboard/ui && npm run build");
+        }
+
+        return ServeStaticFile(distIndex);
+    }
+
+    crow::response WebServer::ServeDashboardStatic(std::string const& requestPath) const
+    {
+        std::filesystem::path const distRoot = std::filesystem::path("dashboard") / "ui" / "dist";
+
+        // Dashboard assets live under /dash-assets/...
+        if (requestPath.rfind("/dash-assets/", 0) == 0)
+        {
+            std::string const relative = requestPath.substr(std::string("/dash-assets/").size());
+            return ServeStaticFile(distRoot / relative);
+        }
+
+        // Fallback to dashboard index (SPA)
+        return ServeDashboardIndex();
+    }
+
     crow::response WebServer::ServeWorkflowEditorIndex() const
     {
         std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
@@ -698,21 +766,13 @@ namespace AIAssistant
 
     void WebServer::RegisterRoutes()
     {
-        // ---- Serve static index page ----
-        CROW_ROUTE(m_Server, "/")
-        (
-            []()
-            {
-                std::ifstream file("web/index.html");
-                if (!file)
-                {
-                    return crow::response(404, "index.html not found");
-                }
+        // ---- Dashboard UI (React) ----
+        // Serves the production build from: dashboard/ui/dist
+        CROW_ROUTE(m_Server, "/")([this]() { return ServeDashboardIndex(); });
 
-                std::stringstream buffer;
-                buffer << file.rdbuf();
-                return crow::response(200, buffer.str());
-            });
+        // Dashboard assets: /dash-assets/...
+        CROW_ROUTE(m_Server, "/dash-assets/<path>")
+        ([this](std::string const& path) { return ServeDashboardStatic(std::string("/dash-assets/") + path); });
 
         // ---- Workflow Editor UI (React) ----
         // Serves the production build from: workflow-editor/ui/dist
@@ -1469,6 +1529,7 @@ namespace AIAssistant
         responseJson["runId"] = runId;
 
         BroadcastWorkflowRunsSnapshot();
+        BroadcastWorkflowRunsLastSnapshot();
         return MakeJsonResponse(202, responseJson);
     }
 
@@ -1670,8 +1731,9 @@ namespace AIAssistant
                                          "POST /api/workflow-runs/{runId}/cancel", runId);
         }
 
-        // Best-effort: push an updated snapshot to any connected editor clients.
+        // Best-effort: push an updated snapshot to any connected editor/dashboard clients.
         BroadcastWorkflowRunsSnapshot();
+        BroadcastWorkflowRunsLastSnapshot();
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -1834,6 +1896,7 @@ namespace AIAssistant
             responseJson["requestPath"] = requestJsonPath.string();
 
             BroadcastWorkflowRunsSnapshot();
+            BroadcastWorkflowRunsLastSnapshot();
             return MakeJsonResponse(202, responseJson);
         }
         catch (std::exception const& e)
@@ -1848,9 +1911,35 @@ namespace AIAssistant
             .onopen(
                 [this](crow::websocket::connection& conn)
                 {
-                    std::lock_guard<std::mutex> lock(m_Mutex);
-                    m_Clients.insert(&conn);
+                    {
+                        std::lock_guard<std::mutex> lock(m_Mutex);
+                        m_Clients.insert(&conn);
+
+                        // Queue current session manager states for the new client.
+                        // Cannot call conn.send_text() from onopen (CROW_ENFORCE_WS_SPEC).
+                        // Broadcasting to all clients is harmless — existing clients just get a refresh.
+                        JarvisAgent* app = App::g_App;
+                        if (app)
+                        {
+                            app->ForEachSessionManager(
+                                [this](SessionManager& sm)
+                                {
+                                    crow::json::wvalue msg;
+                                    msg["type"] = "status";
+                                    msg["name"] = sm.GetName();
+                                    msg["state"] = std::string(sm.GetStateName());
+                                    msg["outputs"] = sm.GetOutputsCount();
+                                    msg["inflight"] = sm.GetInflightCount();
+                                    msg["completed"] = sm.GetCompletedCount();
+                                    m_PendingBroadcasts.push_back(msg.dump());
+                                });
+                        }
+                    }
                     LOG_APP_INFO("WebSocket client connected");
+
+                    // Queue current workflow run snapshots.
+                    BroadcastWorkflowRunsSnapshot();
+                    BroadcastWorkflowRunsLastSnapshot();
                 })
             .onclose(
                 [this](crow::websocket::connection& conn, const std::string& reason, uint16_t code)
@@ -1862,6 +1951,9 @@ namespace AIAssistant
             .onmessage(
                 [this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
                 {
+                    // Drain queued broadcasts on every incoming message (runs on Crow's I/O thread).
+                    DrainPendingBroadcasts();
+
                     try
                     {
                         simdjson::ondemand::parser parser;
@@ -1869,6 +1961,12 @@ namespace AIAssistant
                         auto doc = parser.iterate(json);
 
                         std::string type = std::string(doc["type"].get_string().value());
+
+                        // Heartbeat from dashboard — drain only, no response needed.
+                        if (type == "ping")
+                        {
+                            return;
+                        }
 
                         if (type == "chat")
                         {
@@ -2042,25 +2140,34 @@ namespace AIAssistant
     void WebServer::DrainPendingBroadcasts()
     {
         std::vector<std::string> pending;
+        std::unordered_set<crow::websocket::connection*> clients;
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
             if (m_PendingBroadcasts.empty())
                 return;
             pending.swap(m_PendingBroadcasts);
+            clients = m_Clients; // snapshot
         }
-        // No mutex needed here — called only from Crow's I/O thread (onmessage),
-        // and m_Clients is not modified outside Crow's I/O thread callbacks.
-        for (auto const& msg : pending)
+
+        // Build a single JSON batch envelope to avoid multiple rapid send_text calls
+        // (Crow's dispatch-based send overlaps async writes when called in a loop).
+        std::string batch = R"({"type":"batch","messages":[)";
+        for (size_t i = 0; i < pending.size(); ++i)
         {
-            for (auto* client : m_Clients)
+            if (i > 0)
+                batch += ',';
+            batch += pending[i];
+        }
+        batch += "]}";
+
+        for (auto* client : clients)
+        {
+            try
             {
-                try
-                {
-                    client->send_text(msg);
-                }
-                catch (...)
-                {
-                }
+                client->send_text(batch);
+            }
+            catch (...)
+            {
             }
         }
     }

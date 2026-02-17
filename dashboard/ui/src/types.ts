@@ -1,0 +1,69 @@
+export interface StatusResponse {
+  ok: boolean;
+  workflows_registered: number;
+  workflow_runs_active: number;
+  session_managers_total: number;
+  session_managers_with_inflight: number;
+  session_managers_inflight_total: number;
+  websocket_clients: number;
+}
+
+export interface WorkflowEntry {
+  id: string;
+  label?: string;
+  path?: string;
+  manual_start?: boolean;
+}
+
+export interface WorkflowsListResponse {
+  ok: boolean;
+  workflows: WorkflowEntry[];
+}
+
+export interface TaskSnapshot {
+  taskId: string;
+  state: string;
+  attemptCount: number;
+  lastErrorMessage: string;
+}
+
+export interface RunSnapshot {
+  runId: string;
+  workflowId: string;
+  state: string;
+  tasks: TaskSnapshot[];
+}
+
+export interface WorkflowRunsSnapshot {
+  type: "workflowRunsSnapshot";
+  runs: RunSnapshot[];
+}
+
+export interface SessionStatus {
+  name: string;
+  state: string;
+  outputs: number;
+  inflight: number;
+  completed: number;
+}
+
+export interface PythonStatus {
+  type: "python-status";
+  running: boolean;
+}
+
+export interface LastRunInfo {
+  runId: string;
+  workflowId: string;
+  state: string;
+  taskCount: number;
+  startedAt: string;
+  completedAt: string;
+}
+
+export interface LastRunsResponse {
+  ok: boolean;
+  runs: LastRunInfo[];
+}
+
+export type WsMessage = WorkflowRunsSnapshot | SessionStatus | PythonStatus;

@@ -23,6 +23,10 @@ __pycache__/
 *.dll
 *.dylib
 
+# React UI build artifacts
+node_modules/
+**/ui/dist/
+
 compile_commands.json
 .cache/
 vendor/curl/lib/curl_config.h

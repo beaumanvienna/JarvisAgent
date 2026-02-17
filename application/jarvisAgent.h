@@ -73,6 +73,14 @@ namespace AIAssistant
         size_t GetSessionManagerInflightTotal() const;
         size_t GetSessionManagersWithInflight() const;
 
+        template <typename Func> void ForEachSessionManager(Func&& func)
+        {
+            for (auto& [name, sm] : m_SessionManagers)
+            {
+                func(*sm);
+            }
+        }
+
     private:
         void CheckIfFinished();
         void InitializeWorkflows();

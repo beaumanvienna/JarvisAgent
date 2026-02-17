@@ -1,0 +1,224 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Consolas", "Monaco", "Courier New", monospace;
+  background: #0a0a0a;
+  color: #c8d6c0;
+  min-height: 100vh;
+}
+
+/* ---- Status Bar ---- */
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  background: #111;
+  border-bottom: 1px solid #222;
+}
+
+.status-bar-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.title {
+  font-size: 1.2rem;
+  font-weight: bold;
+  color: #44a01c;
+}
+
+.led-row {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.led-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.led {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.led-label {
+  font-size: 0.75rem;
+  color: #8a8a8a;
+}
+
+.python-warning {
+  color: #ef4444;
+  font-weight: bold;
+  font-size: 0.8rem;
+}
+
+.run-counters {
+  display: flex;
+  gap: 12px;
+  margin-left: 12px;
+  font-size: 0.75rem;
+  border-left: 1px solid #333;
+  padding-left: 12px;
+}
+
+.counter-ok {
+  color: #22c55e;
+}
+
+.counter-fail {
+  color: #ef4444;
+  font-weight: bold;
+}
+
+.status-bar-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: bold;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.btn-editor {
+  background: #44a01c;
+  color: #111;
+}
+
+.btn-editor:hover {
+  background: #5cc028;
+}
+
+.btn-quit {
+  background: #c33;
+  color: white;
+}
+
+.btn-quit:hover {
+  background: #e44;
+}
+
+.btn-small {
+  font-size: 0.7rem;
+  padding: 3px 10px;
+}
+
+.btn-run {
+  background: #2563eb;
+  color: white;
+}
+
+.btn-run:hover {
+  background: #3b82f6;
+}
+
+.btn-run:disabled {
+  background: #334155;
+  color: #666;
+  cursor: not-allowed;
+}
+
+/* ---- Main content ---- */
+.main-content {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- Panels ---- */
+.panel {
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 8px;
+  padding: 14px 18px;
+}
+
+.panel h2 {
+  font-size: 0.95rem;
+  color: #44a01c;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #1a1a1a;
+  padding-bottom: 6px;
+}
+
+.muted {
+  color: #555;
+  font-size: 0.8rem;
+}
+
+/* ---- Data Tables ---- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.data-table th {
+  text-align: left;
+  color: #6a8a5a;
+  font-weight: 600;
+  padding: 4px 10px 6px 0;
+  border-bottom: 1px solid #1a2a14;
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid #151515;
+  vertical-align: middle;
+}
+
+.data-table tbody tr:hover {
+  background: #151515;
+}
+
+.mono {
+  font-family: inherit;
+  color: #b0c8a0;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- State colors ---- */
+.state-running {
+  color: #eab308;
+  font-weight: bold;
+}
+
+.state-completed {
+  color: #22c55e;
+}
+
+.state-failed {
+  color: #ef4444;
+  font-weight: bold;
+}
+
+.state-queued {
+  color: #8a8a8a;
+}

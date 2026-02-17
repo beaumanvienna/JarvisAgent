@@ -274,7 +274,11 @@ namespace AIAssistant
 
         if (m_WorkflowRuntimeManager != nullptr)
         {
-            m_WorkflowRuntimeManager->Update();
+            if (m_WorkflowRuntimeManager->Update())
+            {
+                m_WebServer->BroadcastWorkflowRunsSnapshot();
+                m_WebServer->BroadcastWorkflowRunsLastSnapshot();
+            }
         }
 
         // Termination logic
@@ -454,7 +458,7 @@ namespace AIAssistant
 
         if (!filePath.empty())
         {
-            auto sessionManagerName = filePath.parent_path().string();
+            auto sessionManagerName = fs::relative(filePath.parent_path()).string();
 
             if (!m_SessionManagers.contains(sessionManagerName))
             {

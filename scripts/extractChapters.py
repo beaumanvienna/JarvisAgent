@@ -76,7 +76,7 @@ def run(**kwargs):
     context = kwargs.get("context", {})
     wd = context.get("_task_working_directory", ".")
 
-    input_path = kwargs.get("input_file", "") or kwargs.get("input[0]", "")
+    input_path = kwargs.get("input_file", "") or kwargs.get("input[0]", "") or context.get("_file_input_0", "")
     output_path = kwargs.get("output_file", "") or kwargs.get("outputPath", "")
 
     if not output_path:

@@ -917,9 +917,28 @@ namespace AIAssistant
         std::string expectedOutputPath;
         for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
         {
-            if (probFile.m_HasInlineContent && !probFile.m_Path.empty())
+            if (!probFile.m_Path.empty())
             {
-                std::filesystem::path const probPath(probFile.m_Path);
+                std::filesystem::path probPath(probFile.m_Path);
+
+                // For non-inline (path-reference) PROB files, resolve relative to
+                // the task working directory — they will be materialized into
+                // the working directory later by MaterializeProbFilesFromQueueBinding.
+                if (!probFile.m_HasInlineContent)
+                {
+                    if (!probPath.is_absolute())
+                    {
+                        probPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, probPath);
+                    }
+                    // Build the destination filename the same way MaterializeProbFilesFromQueueBinding does.
+                    std::string baseName = probPath.filename().string();
+                    if (baseName.rfind("PROB_", 0) != 0)
+                    {
+                        baseName = "PROB_" + baseName;
+                    }
+                    probPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, baseName);
+                }
+
                 std::filesystem::path outputPath = probPath;
                 outputPath.replace_filename(probPath.stem().string() + ".output" + probPath.extension().string());
                 expectedOutputPath = outputPath.lexically_normal().generic_string();
@@ -930,7 +949,7 @@ namespace AIAssistant
         if (expectedOutputPath.empty())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "ai_call has no inline prob_files — cannot determine expected output path";
+            taskState.m_LastErrorMessage = "ai_call has no prob_files — cannot determine expected output path";
             return false;
         }
 
