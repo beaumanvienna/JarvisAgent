@@ -108,16 +108,13 @@ namespace AIAssistant
         auto it = map.find(filePath.string());
         if (it != map.end())
         {
-            if (it->second->CheckIfContentChanged())
+            if (!it->second->IsModified())
             {
-                if (!it->second->IsModified())
-                {
-                    it->second->MarkModified();
-                    categoryMap.IncrementModifiedFiles();
-                }
-                categoryMap.SetDirty();
-                LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
+                it->second->MarkModified();
+                categoryMap.IncrementModifiedFiles();
             }
+            categoryMap.SetDirty();
+            LOG_APP_INFO("FileCategorizer::ModifyFile: Modified file: {}", filePath.string());
         }
         else
         {

@@ -5,6 +5,14 @@
   "doc": "Exercises the 3-step input resolution chain: (1) dataflow edges, (2) run context lookup, (3) input-level defaults. Also tests auto-publish of task outputs to context and REST-seeded initial context.",
   "manual_start": true,
   "base_directory": ".",
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual-run",
+      "enabled": true,
+      "params": {}
+    }
+  ],
   "tasks": {
     "echoDefault": {
       "type": "shell",

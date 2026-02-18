@@ -56,7 +56,7 @@ Last reviewed: Feb 2026
 
 - [x] ~~**Unify template substitution syntax: `${...}` → `{{...}}`**~~ — created shared `templateEngine.h/.cpp` with `ExpandTemplate()` supporting strict (shell) and lenient (ai_call) modes. Migrated `ShellTaskExecutor`, `AiCallTaskExecutor`, and `DataflowResolver` to use the shared engine. Updated all 5 example JCWF files and 3 documentation files. No `${...}` template references remain in the codebase.
 
-- [ ] **Port `web/index.html` to React** — replace the legacy dashboard with the React frontend.
+- [x] ~~**Port `web/index.html` to React**~~ — replaced legacy `web/index.html` with React 18 + Vite + TypeScript dashboard (`dashboard/ui/`). Live WebSocket monitoring, workflow run controls, session manager table, status LEDs. Old `web/` folder deleted.
 - [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.
 
 ---

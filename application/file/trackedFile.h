@@ -25,9 +25,6 @@
 #include <string>
 #include <atomic>
 #include <mutex>
-#include <fstream>
-#include <sstream>
-#include <optional>
 
 #include "file/fileCategory.h"
 
@@ -50,18 +47,10 @@ namespace AIAssistant
         std::string GetContent();
         FileCategory GetCategory() const;
 
-        // called when file changes on disk
-        // to make sure it really changed
-        bool CheckIfContentChanged();
-
-    private:
-        std::string ComputeFileHash() const;
-
     private:
         fs::path m_Path;
         FileCategory m_FileCategory;
         std::atomic<bool> m_Modified{true}; // all new files start "modified"
-        std::string m_LastHash;
         mutable std::mutex m_Mutex;
     };
 } // namespace AIAssistant

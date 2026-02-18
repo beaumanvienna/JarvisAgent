@@ -23,8 +23,6 @@
 #include "log/log.h"
 #include <fstream>
 #include <sstream>
-#include <iomanip>
-#include <openssl/sha.h> // if available, otherwise use std::hash fallback
 
 #include "engine.h"
 
@@ -32,7 +30,6 @@ namespace AIAssistant
 {
     TrackedFile::TrackedFile(fs::path const& path, FileCategory fileCategory) : m_Path(path), m_FileCategory{fileCategory}
     {
-        m_LastHash = ComputeFileHash();
         MarkModified(true);
     }
 
@@ -53,47 +50,5 @@ namespace AIAssistant
         return buffer.str();
     }
 
-    bool TrackedFile::CheckIfContentChanged()
-    {
-        std::lock_guard lock(m_Mutex);
-
-        std::string newHash = ComputeFileHash();
-        if (newHash != m_LastHash)
-        {
-            m_LastHash = newHash;
-            return true;
-        }
-        return false;
-    }
-
     FileCategory TrackedFile::GetCategory() const { return m_FileCategory; }
-
-    std::string TrackedFile::ComputeFileHash() const
-    {
-        std::ifstream file(m_Path, std::ios::binary);
-        if (!file.is_open())
-        {
-            return {};
-        }
-
-        std::ostringstream oss;
-        oss << file.rdbuf();
-        std::string data = oss.str();
-
-#if __has_include(<openssl/sha.h>)
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), hash);
-
-        std::ostringstream hex;
-        for (unsigned char c : hash)
-        {
-            hex << std::hex << std::setw(2) << std::setfill('0') << (int)c;
-        }
-
-        return hex.str();
-#else
-        // fallback: lightweight std::hash
-        return std::to_string(std::hash<std::string>{}(data));
-#endif
-    }
 } // namespace AIAssistant

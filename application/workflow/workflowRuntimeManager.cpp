@@ -685,6 +685,8 @@ namespace AIAssistant
             activeRun.m_Run.m_RunId = runId;
             activeRun.m_Run.m_WorkflowId = pendingRun.m_WorkflowId;
             activeRun.m_Run.m_Context = pendingRun.m_Context;
+            activeRun.m_Run.m_State = WorkflowRunState::Running;
+            activeRun.m_Run.m_StartedAtIso8601 = GetIso8601NowUTC();
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
 
             {
@@ -757,7 +759,14 @@ namespace AIAssistant
                 auto stateIterator = workflowRun.m_TaskStates.find(result.m_TaskId);
                 if (stateIterator != workflowRun.m_TaskStates.end())
                 {
-                    stateIterator->second = result.m_TaskState;
+                    // Guard against overwriting a terminal state that was already set
+                    // by DrainAiRequestCompletions (race: completion arrived before
+                    // the worker future was harvested).
+                    auto const currentState = stateIterator->second.m_State;
+                    if (currentState != TaskInstanceStateKind::Succeeded && currentState != TaskInstanceStateKind::Failed)
+                    {
+                        stateIterator->second = result.m_TaskState;
+                    }
                 }
 
                 // Publish successful task outputs into the run context so downstream
