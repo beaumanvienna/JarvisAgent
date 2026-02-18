@@ -12,7 +12,7 @@
     }
   ],
   "defaults": {
-    "timeout_ms": 15000,
+    "timeout_ms": 60000,
     "ai": {
       "provider": "openai",
       "model": "gpt-4.1-mini"

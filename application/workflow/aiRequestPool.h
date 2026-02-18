@@ -183,6 +183,7 @@ namespace AIAssistant
 
             bool m_HasDeadline = false;
             std::chrono::steady_clock::time_point m_Deadline;
+            uint64_t m_TimeoutMs = 0; // stored so the deadline can be deferred until curl dispatch
 
             bool m_CurlDispatched = false;
 

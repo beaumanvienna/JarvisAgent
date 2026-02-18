@@ -274,8 +274,8 @@ namespace AIAssistant
         auto const now = std::chrono::steady_clock::now();
 
         pendingEntry->m_Handle = requestHandle;
-        pendingEntry->m_HasDeadline = true;
-        pendingEntry->m_Deadline = now + std::chrono::milliseconds(effectiveTimeoutMs);
+        pendingEntry->m_HasDeadline = false; // deadline deferred until curl dispatch
+        pendingEntry->m_TimeoutMs = effectiveTimeoutMs;
 
         pendingEntry->m_FileActivityWatchdogActive = true;
         pendingEntry->m_FileActivityDeadline = now + std::chrono::milliseconds(kFileActivityWatchdogMs);
@@ -379,11 +379,21 @@ namespace AIAssistant
             std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
             pendingEntry->m_CurlDispatched = true;
             pendingEntry->m_FileActivityWatchdogActive = false;
+
+            // Activate the main deadline now that curl has been dispatched.
+            // This gives the AI backend the full timeout window from the moment
+            // the HTTP request is sent, rather than from task registration.
+            if (!pendingEntry->m_HasDeadline && pendingEntry->m_TimeoutMs > 0)
+            {
+                pendingEntry->m_HasDeadline = true;
+                pendingEntry->m_Deadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(pendingEntry->m_TimeoutMs);
+            }
         }
 
         LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: curl issued for PROB '{}' (expected output '{}') — "
-                     "file-activity watchdog cleared",
-                     probFilePath, canonicalPath);
+                     "file-activity watchdog cleared, deadline set to {}ms",
+                     probFilePath, canonicalPath, pendingEntry->m_TimeoutMs);
     }
 
     void AiRequestPool::KickFileActivityWatchdog(AiRequestHandle const& requestHandle)

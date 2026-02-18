@@ -126,26 +126,49 @@ namespace AIAssistant
             }
 
             // Detect added or modified files
-            for (auto& file : fs::recursive_directory_iterator(m_PathToWatch))
+            try
             {
-                if (!IsValidFile(file))
+                std::error_code iterEc;
+                for (auto it = fs::recursive_directory_iterator(m_PathToWatch, fs::directory_options::skip_permission_denied,
+                                                                iterEc);
+                     it != fs::recursive_directory_iterator(); it.increment(iterEc))
                 {
-                    continue;
-                }
+                    if (iterEc)
+                    {
+                        iterEc.clear();
+                        continue;
+                    }
 
-                fs::file_time_type const currentTime = fs::last_write_time(file);
-                std::string const pathStr = file.path().string();
+                    auto const& file = *it;
+                    if (!IsValidFile(file))
+                    {
+                        continue;
+                    }
 
-                if (!files.contains(pathStr))
-                {
-                    Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr));
-                    files[pathStr] = currentTime;
+                    fs::file_time_type const currentTime = fs::last_write_time(file, iterEc);
+                    if (iterEc)
+                    {
+                        iterEc.clear();
+                        continue;
+                    }
+
+                    std::string const pathStr = file.path().string();
+
+                    if (!files.contains(pathStr))
+                    {
+                        Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr));
+                        files[pathStr] = currentTime;
+                    }
+                    else if (files[pathStr] != currentTime)
+                    {
+                        Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr));
+                        files[pathStr] = currentTime;
+                    }
                 }
-                else if (files[pathStr] != currentTime)
-                {
-                    Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr));
-                    files[pathStr] = currentTime;
-                }
+            }
+            catch (fs::filesystem_error const&)
+            {
+                // Directory was modified (e.g. clean) while iterating — safe to retry next cycle.
             }
 
             // Detect removed files

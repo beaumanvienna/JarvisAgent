@@ -94,7 +94,7 @@ namespace AIAssistant
         //      in taskState.m_InputValues, use that.
         //
         // This provides a deterministic mapping for file-based workflows like
-        // the make_example.jcwf test.
+        // the make-example.jcwf test.
         // ------------------------------------------------------------
         void BuildOutputSlotMap(TaskDef const& taskDefinition, TaskInstanceState const& taskState,
                                 std::unordered_map<std::string, std::string>& outputSlotMapOut)

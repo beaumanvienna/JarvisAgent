@@ -32,4 +32,5 @@ compile_commands.json
 vendor/curl/lib/curl_config.h
 queue
 log/*
+test/log.txt
 *.tsbuildinfo

@@ -1,0 +1,182 @@
+{
+  "base_url": "http://localhost:8080",
+  "poll_interval_sec": 3,
+  "default_timeout_sec": 300,
+  "workflows": {
+    "ai-zip-demo": {
+      "label": "AI Topic Trio + Zip",
+      "timeout_sec": 120,
+      "context": {},
+      "prerequisites": [],
+      "expected_artifacts": [
+        {
+          "glob": "queue/aiZipDemo/01_ai_stl_random/stl.output.md",
+          "min_bytes": 200
+        },
+        {
+          "glob": "queue/aiZipDemo/02_ai_python_trivia_random/pythonTrivia.output.md",
+          "min_bytes": 200
+        },
+        {
+          "glob": "queue/aiZipDemo/03_ai_vulkan_method_random/vulkanRendering.output.md",
+          "min_bytes": 200
+        },
+        {
+          "glob": "workflows/aiZipDemo/04_zip_responses/aiResponses.zip",
+          "min_bytes": 100
+        }
+      ]
+    },
+    "aiCarMaintenancePipeline": {
+      "label": "AI Car Maintenance Pipeline",
+      "timeout_sec": 180,
+      "context": {},
+      "prerequisites": [
+        "example/workflows/message.txt"
+      ],
+      "expected_artifacts": [
+        {
+          "glob": "queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.txt",
+          "min_bytes": 3
+        },
+        {
+          "glob": "queue/aiCarMaintenancePipeline/03_answerWithManual/answer.output.txt",
+          "min_bytes": 100
+        },
+        {
+          "glob": "workflows/aiCarMaintenancePipeline/04_zipAnswer/answer.zip",
+          "min_bytes": 50
+        }
+      ]
+    },
+    "bookSummaryPipeline": {
+      "label": "Book Summary Pipeline",
+      "timeout_sec": 600,
+      "context": {},
+      "prerequisites": [
+        "example/workflows/in.pdf"
+      ],
+      "expected_artifacts": [
+        {
+          "glob": "workflows/bookSummaryPipeline/01_convertToMarkdown/in.md",
+          "min_bytes": 500
+        },
+        {
+          "glob": "workflows/bookSummaryPipeline/02_extractChapters/chapters.txt",
+          "min_bytes": 20
+        },
+        {
+          "glob": "workflows/bookSummaryPipeline/04_combineSummaries/book_summary.md",
+          "min_bytes": 500
+        }
+      ]
+    },
+    "goKartComplianceCheck": {
+      "label": "Go-Kart Compliance Check",
+      "timeout_sec": 300,
+      "context": {},
+      "prerequisites": [
+        "__polarion_mock__"
+      ],
+      "expected_artifacts": [
+        {
+          "glob": "queue/goKartComplianceCheck/01_assessRequirement/PROB_*.output.txt",
+          "min_bytes": 100,
+          "min_count": 15
+        }
+      ]
+    },
+    "inputResolutionTest": {
+      "label": "Input Resolution Test",
+      "timeout_sec": 60,
+      "context": {
+        "user_name": "TestUser"
+      },
+      "prerequisites": [],
+      "expected_artifacts": []
+    },
+    "jarvisCppDocu": {
+      "label": "JarvisAgent C++ Docu Generator",
+      "timeout_sec": 600,
+      "context": {},
+      "prerequisites": [],
+      "expected_artifacts": [
+        {
+          "glob": "queue/jarvisCppDocu/*/docu.output.md",
+          "min_bytes": 200,
+          "min_count": 60
+        }
+      ]
+    },
+    "make-example": {
+      "label": "Makefile-style compilation test",
+      "timeout_sec": 60,
+      "context": {},
+      "prerequisites": [],
+      "expected_artifacts": [
+        {
+          "glob": "workflows/myapp",
+          "min_bytes": 1
+        }
+      ]
+    },
+    "portfolioDividendAnalysis": {
+      "label": "Portfolio Dividend Analysis",
+      "timeout_sec": 600,
+      "context": {},
+      "prerequisites": [
+        "example/workflows/port62pos.csv"
+      ],
+      "expected_artifacts": [
+        {
+          "glob": "queue/portfolioDividendAnalysis/01_lookupDividend/PROB_*.output.txt",
+          "min_bytes": 50,
+          "min_count": 50
+        },
+        {
+          "glob": "queue/portfolioDividendAnalysis/02_portfolioSummary/PROB_summarize.output.txt",
+          "min_bytes": 300
+        }
+      ]
+    },
+    "vehicleTroubleshootingGuide": {
+      "label": "Vehicle Troubleshooting Guide",
+      "timeout_sec": 180,
+      "context": {},
+      "prerequisites": [],
+      "expected_artifacts": [
+        {
+          "glob": "queue/vehicleTroubleshootingGuide/01_aiCode244/code244.output.md",
+          "min_bytes": 100
+        },
+        {
+          "glob": "queue/vehicleTroubleshootingGuide/02_aiCode250/code250.output.md",
+          "min_bytes": 100
+        },
+        {
+          "glob": "queue/vehicleTroubleshootingGuide/03_aiCode301/code301.output.md",
+          "min_bytes": 100
+        },
+        {
+          "glob": "workflows/vehicleTroubleshootingGuide/04_combineGuideMd/engineTroubleshootingGuide.md",
+          "min_bytes": 200
+        },
+        {
+          "glob": "workflows/vehicleTroubleshootingGuide/05_convertGuidePdf/Vehicle Troubleshooting Guide.pdf",
+          "min_bytes": 500
+        }
+      ]
+    }
+  },
+  "run_order": [
+    "make-example",
+    "inputResolutionTest",
+    "ai-zip-demo",
+    "aiCarMaintenancePipeline",
+    "vehicleTroubleshootingGuide",
+    "jarvisCppDocu",
+    "goKartComplianceCheck",
+    "bookSummaryPipeline",
+    "portfolioDividendAnalysis"
+  ]
+}
