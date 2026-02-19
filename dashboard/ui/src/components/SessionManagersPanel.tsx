@@ -6,7 +6,7 @@ interface Props {
 
 export default function SessionManagersPanel({ sessions }: Props) {
   const entries = Array.from(sessions.values()).sort((a, b) =>
-    a.name.localeCompare(b.name)
+    b.inflight - a.inflight || b.outputs - a.outputs || a.name.localeCompare(b.name)
   );
 
   if (entries.length === 0) {
