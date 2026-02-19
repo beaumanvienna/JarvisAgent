@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Use system Chrome so Playwright does not need its own Chromium download
+export CHROME_PATH="/usr/bin/google-chrome"
+
 echo "[convertGuidePdf.sh debug v3] argv_count=$#"
 arg_index=0
 for arg in "$@"

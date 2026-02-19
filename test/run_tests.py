@@ -139,11 +139,11 @@ def check_prerequisites(prereqs):
     for p in prereqs:
         if p == "__polarion_mock__":
             try:
-                r = requests.get("http://localhost:18080/polarion", timeout=3)
+                r = requests.get("http://localhost:18080/polarion/rest/v1/health", timeout=3)
                 if r.status_code >= 400:
-                    missing.append("Polarion mock (http://localhost:18080/polarion)")
+                    missing.append("Polarion mock (http://localhost:18080)")
             except requests.ConnectionError:
-                missing.append("Polarion mock (http://localhost:18080/polarion)")
+                missing.append("Polarion mock (http://localhost:18080)")
         else:
             full_path = PROJECT_ROOT / p
             if not full_path.exists():
