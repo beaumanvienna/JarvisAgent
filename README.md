@@ -17,9 +17,9 @@ Workflows let you chain **serial and parallel tasks** — AI calls, Python scrip
 The application ships with an **ncurses terminal UI** for local or SSH sessions and a **browser-based React dashboard** for remote monitoring. It compiles under **Linux, macOS, and Windows**.  <br>
 <br>
 
-| Terminal UI | Workflow Editor |
-|:-----------:|:---------------:|
-| ![Terminal UI](example/screenshot.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) |
+| Terminal UI | Dashboard | Workflow Editor |
+|:-----------:|:---------:|:---------------:|
+| ![Terminal UI](example/screenshot.png) | ![Dashboard](example/screenshot_dashboard.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) |
 
 <br>
 
