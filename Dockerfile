@@ -1,3 +1,11 @@
+# ---- Dashboard build stage ----
+FROM node:20-slim AS dashboard-builder
+WORKDIR /ui
+COPY dashboard/ui/package.json dashboard/ui/package-lock.json ./
+RUN npm ci
+COPY dashboard/ui/ ./
+RUN npm run build
+
 # ---- Builder stage ----
 FROM ubuntu:24.04 AS builder
 
@@ -71,7 +79,8 @@ COPY --from=builder /app/bin/Release/jarvisAgent /app/jarvisAgent
 COPY --chown=appuser:appuser config.json /app/config.json
 COPY --chown=appuser:appuser scripts /app/scripts
 COPY --chown=appuser:appuser example/workflows /app/example/workflows
-COPY --chown=appuser:appuser dashboard/ui/dist /app/dashboard/ui/dist
+COPY --from=dashboard-builder /ui/dist /app/dashboard/ui/dist
+RUN chown -R appuser:appuser /app/dashboard
 
 RUN mkdir -p /app/queue /app/workflows /app/log && chown -R appuser:appuser /app
 
