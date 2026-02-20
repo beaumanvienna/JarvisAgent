@@ -12,15 +12,26 @@ This list tracks the remaining work for JarvisAgent.
 ---
 
 ## 2. Dockerization (in progress)
-- Finish / merge PR #1 (Ahmet): “CI/CD build and docker for deployment”
-  - Update Dockerfile build + runtime stages to Ubuntu 24.04
-  - Remove deadsnakes PPA / hardcoded Python version; use system Python (`python3`, `python3-dev`, `python3-pip`)
-  - Remove any ncurses packages (PDCursesMod is vendored + statically linked)
-  - Remove TRACY_NO_INVARIANT_CHECK changes (Tracy is off by default)
-  - Fix new workflow
+
+### 2a. Install Docker Engine on dev machine
+- Install Docker Engine + Docker Compose on Ubuntu
+- Verify `docker run hello-world` works without sudo
+
+### 2b. Pull in and fix Ahmet's PR #1
+- Merge / cherry-pick PR #1 (Ahmet): "CI/CD build and docker for deployment"
+- Update Dockerfile build + runtime stages to Ubuntu 24.04
+- Remove deadsnakes PPA / hardcoded Python version; use system Python (`python3`, `python3-dev`, `python3-pip`)
+- Remove any ncurses packages (PDCursesMod is vendored + statically linked)
+- Remove TRACY_NO_INVARIANT_CHECK changes (Tracy is off by default)
 - C++: TTY detection under all 3 operating systems (include Windows)
+- Fix CI workflow for Docker build
+
+### 2c. Test in Docker
+- Build Docker image locally
 - Verify working headless mode in container
+- Verify dashboard + REST API accessible from host
 - Verify working deployment (docker-compose example)
+- Run test suite against containerized JarvisAgent
 
 ---
 

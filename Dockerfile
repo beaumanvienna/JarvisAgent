@@ -1,86 +1,85 @@
-
-FROM ubuntu:22.04 AS builder
-
+# ---- Builder stage ----
+FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     build-essential \
-    git \
     wget \
     ca-certificates \
     python3 \
-    python3-pip \
-    libncurses5 \
-    libncurses5-dev \
-    libncursesw5 \
-    libncursesw5-dev \
+    python3-dev \
     libssl-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
-RUN pip3 install "markitdown[all]"
-
 # premake5
 RUN cd /tmp && \
-    wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz && \
+    wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz && \
     tar -xzf premake-5.0.0-beta2-linux.tar.gz && \
     mv premake5 /usr/local/bin/ && \
     chmod +x /usr/local/bin/premake5 && \
     rm premake-5.0.0-beta2-linux.tar.gz
 
-
 WORKDIR /app
-
 COPY . .
+
 RUN premake5 gmake
-RUN export MAKEFLAGS=-j$(nproc) && \
-    make config=release verbose=1
+RUN make -j$(nproc) config=release verbose=1
 
-FROM ubuntu:22.04
-
+# ---- Runtime stage ----
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
+    python3-dev \
     python3-pip \
-    libncurses5 \
-    libncursesw5 \
-    libssl3 \
+    python3-venv \
+    pipx \
+    libssl3t64 \
     zlib1g \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# markitdown for PDF-to-markdown conversion
+RUN pipx install "markitdown[all]"
 
-RUN pip3 install "markitdown[all]"
+# md2pdf-mermaid for markdown-to-PDF conversion
+RUN pipx install md2pdf-mermaid
 
+# Google Chrome for Playwright (used by md2pdf-mermaid)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget gnupg && \
+    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.local/bin:$PATH"
+ENV CHROME_PATH="/usr/bin/google-chrome"
 
 RUN useradd -m -u 1001 -s /bin/bash appuser
 
-
 WORKDIR /app
 
-
+# Binary from builder
 COPY --from=builder /app/bin/Release/jarvisAgent /app/jarvisAgent
 
-
+# Runtime assets
 COPY --chown=appuser:appuser config.json /app/config.json
-COPY --chown=appuser:appuser web /app/web
 COPY --chown=appuser:appuser scripts /app/scripts
+COPY --chown=appuser:appuser example/workflows /app/example/workflows
+COPY --chown=appuser:appuser dashboard/ui/dist /app/dashboard/ui/dist
 
-RUN mkdir -p /app/queue && chown -R appuser:appuser /app
+RUN mkdir -p /app/queue /app/workflows /app/log && chown -R appuser:appuser /app
 
-# Switch to non-root user
 USER appuser
 
 EXPOSE 8080
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')" || exit 1
 
-# Run the application
 CMD ["./jarvisAgent"]
-

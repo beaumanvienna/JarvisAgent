@@ -22,8 +22,9 @@ Makefile
 !README.md
 LICENSE
 
-# Example files
-example/
+# Example files (except workflows needed at runtime)
+example/screenshot*
+example/*.md
 
 # Premake generated files
 *.make
@@ -39,6 +40,17 @@ Makefile
 
 # Logs
 *.log
+log/
+
+# Runtime directories (created empty in container)
+queue/
+workflows/
+
+# Test suite (not needed in container)
+test/
+
+# Node modules
+**/node_modules/
 
 # Temporary files
 *.tmp

@@ -482,6 +482,9 @@ namespace AIAssistant
     {
         m_Impl->m_StatusLinesCallback = std::move(statusLinesCallback);
         m_Impl->m_StatusHeightCallback = std::move(statusHeightCallback);
-        m_Impl->RecreateWindowsIfNeeded();
+        if (m_Impl->m_Initialized)
+        {
+            m_Impl->RecreateWindowsIfNeeded();
+        }
     }
 } // namespace AIAssistant
