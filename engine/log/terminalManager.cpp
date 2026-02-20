@@ -355,6 +355,14 @@ namespace AIAssistant
             return;
         }
 
+#ifndef _WIN32
+        // check if a TTY is available before initializing ncurses
+        if (!isatty(STDOUT_FILENO))
+        {
+            return;
+        }
+#endif
+
         std::setlocale(LC_ALL, "");
 
         initscr();
