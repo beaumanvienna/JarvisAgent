@@ -34,11 +34,18 @@
 
 int engine(int argc, char* argv[])
 {
+    // Check for config.json before initializing the engine
+    std::filesystem::path const configFilePathAbsolute = std::filesystem::current_path() / "config.json";
+    if (!std::filesystem::exists(configFilePathAbsolute))
+    {
+        std::cerr << "Error: config.json not found in " << std::filesystem::current_path().string() << std::endl;
+        return EXIT_FAILURE;
+    }
+
     // create engine (including the logger)
     auto engine = std::make_unique<Core>();
 
     // parse JSON file to retrieve engine config
-    std::filesystem::path const configFilePathAbsolute = Core::g_Core->GetLaunchCWDAbsolute() / "config.json";
     std::string const configFilePathAbsoluteString = configFilePathAbsolute.lexically_normal().string();
     ConfigParser configParser(configFilePathAbsoluteString.c_str());
     ConfigParser::EngineConfig engineConfig{};
