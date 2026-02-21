@@ -84,11 +84,11 @@ class _JarvisRedirect:
     def __init__(self):
         try:
             C = _jarvis_cdll()
-            C.JarvisRedirect.argtypes = [ctypes.c_char_p]
-            C.JarvisRedirect.restype = None
-            self._redirect = C.JarvisRedirect
+            C.JarvisRedirectPython.argtypes = [ctypes.c_char_p]
+            C.JarvisRedirectPython.restype = None
+            self._redirect = C.JarvisRedirectPython
         except Exception as exception:
-            notify_python_error(f"Failed to initialize JarvisRedirect: {exception}")
+            notify_python_error(f"Failed to initialize JarvisRedirectPython: {exception}")
             self._redirect = None
 
         # Local buffer to assemble complete lines before sending to C++
