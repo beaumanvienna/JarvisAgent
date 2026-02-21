@@ -21,6 +21,15 @@ import sys
 import ctypes
 import traceback
 
+
+def _jarvis_cdll():
+    """Load the host executable's symbol table via ctypes.
+    On Linux/macOS, CDLL(None) returns the main process handle.
+    On Windows, CDLL(None) returns python3.dll — use sys.executable instead."""
+    if sys.platform == "win32":
+        return ctypes.CDLL(sys.executable)
+    return ctypes.CDLL(None)
+
 from helpers.log import log_info, log_warn, log_error
 from helpers.fileutils import (
     is_pdf,
@@ -39,7 +48,7 @@ from helpers.chunk_combiner import handle_chunk_output_added
 class _JarvisPyStatus:
     def __init__(self):
         try:
-            C = ctypes.CDLL(None)
+            C = _jarvis_cdll()
             C.JarvisPyStatus.argtypes = [ctypes.c_char_p]
             C.JarvisPyStatus.restype = None
             self._send = C.JarvisPyStatus
@@ -74,7 +83,7 @@ def notify_python_error(message: str):
 class _JarvisRedirect:
     def __init__(self):
         try:
-            C = ctypes.CDLL(None)
+            C = _jarvis_cdll()
             C.JarvisRedirect.argtypes = [ctypes.c_char_p]
             C.JarvisRedirect.restype = None
             self._redirect = C.JarvisRedirect
@@ -93,7 +102,8 @@ class _JarvisRedirect:
             return
 
         if self._redirect is None:
-            notify_python_error("JarvisRedirect.write() called but redirect function is missing")
+            # Do NOT call notify_python_error/log_error here — that would
+            # call print() which re-enters write(), causing infinite recursion.
             return
 
         try:

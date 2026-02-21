@@ -158,17 +158,18 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 
 JarvisAgent depends on
 * python3 and python3 development headers
-* libssl
-* libz
+* libz (Linux — linked at build time; vendored on Windows, included in Xcode SDK on macOS)
 * premake5
 * markitdown (document conversion)
 * md2pdf-mermaid (Markdown → PDF with Mermaid diagram support)
 * playwright (headless Chrome, used by md2pdf-mermaid)
 
+> OpenSSL and libcurl are vendored in the repository and built from source on all platforms.
+
 ### Linux (Ubuntu / Debian)
 
 ```bash
-sudo apt install -y python3 python3-pip python3-dev python3-venv libssl-dev zlib1g-dev
+sudo apt install -y python3 python3-pip python3-dev python3-venv zlib1g-dev
 ```
 
 Premake5: `git clone https://github.com/premake/premake-core`, build it with `./Bootstrap.sh`, copy the executable to `/usr/bin`.
@@ -176,14 +177,14 @@ Premake5: `git clone https://github.com/premake/premake-core`, build it with `./
 ### macOS
 
 ```bash
-brew install python3 openssl zlib
+brew install python3
 ```
 
 Premake5: download from [premake.github.io](https://premake.github.io/download) or build from source as above.
 
 ### Windows
 
-Install [Python 3](https://www.python.org/downloads/) (make sure to check **"Add to PATH"**) and [OpenSSL](https://slproweb.com/products/Win32OpenSSL.html).  
+Install [Python 3](https://www.python.org/downloads/) (make sure to check **"Add to PATH"**).  
 Premake5: download the Windows binary from [premake.github.io](https://premake.github.io/download) and add it to your PATH.
 
 ---

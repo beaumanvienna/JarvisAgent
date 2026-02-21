@@ -43,7 +43,13 @@
 
 namespace fs = std::filesystem;
 
-extern "C" void JarvisRedirectPython(char const* message)
+#ifdef _WIN32
+#define JARVIS_PY_EXPORT extern "C" __declspec(dllexport)
+#else
+#define JARVIS_PY_EXPORT extern "C"
+#endif
+
+JARVIS_PY_EXPORT void JarvisRedirectPython(char const* message)
 {
     if (message == nullptr)
     {
@@ -54,7 +60,7 @@ extern "C" void JarvisRedirectPython(char const* message)
     std::cout << message << std::endl;
 }
 
-extern "C" void JarvisPyStatus(char const* message)
+JARVIS_PY_EXPORT void JarvisPyStatus(char const* message)
 {
     if (message == nullptr)
     {
@@ -145,11 +151,15 @@ namespace AIAssistant
             // -------------------------------------------------------------
             char const* redirectCode = "import sys\n"
                                        "import ctypes\n"
+                                       "def _jarvis_cdll():\n"
+                                       "    if sys.platform == 'win32':\n"
+                                       "        return ctypes.CDLL(sys.executable)\n"
+                                       "    return ctypes.CDLL(None)\n"
+                                       "_jarvis_C = _jarvis_cdll()\n"
                                        "class _JarvisRedirect:\n"
                                        "    def write(self, msg):\n"
                                        "        try:\n"
-                                       "            _C = ctypes.CDLL(None)\n"
-                                       "            _C.JarvisRedirectPython(msg.encode('utf-8'))\n"
+                                       "            _jarvis_C.JarvisRedirectPython(msg.encode('utf-8'))\n"
                                        "        except Exception:\n"
                                        "            pass\n"
                                        "    def flush(self):\n"
