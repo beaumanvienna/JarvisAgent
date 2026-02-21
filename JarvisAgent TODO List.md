@@ -4,10 +4,11 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 1. GitHub CI (Linux, Windows, and MacOS Build)
+## 1. GitHub CI and cross-platform testing
 - ~~Linux, macOS, and Windows workflows are green~~ ✅
-- ~~Fix smoke test failing (TTY / ncurses / config path)~~ ✅ graceful exit when config.json missing
-- Run on actual Windows and macOS operating systems, not just the Github actions workflow
+- ~~Fix smoke test segfault (TTY / ncurses / config path)~~ ✅ graceful exit when config.json missing; Core destructor restores cout/cerr rdbuf
+- Run on actual macOS — testing in progress (miniMac, macOS Tahoe)
+- Run on actual Windows
 
 ---
 
@@ -23,7 +24,7 @@ This list tracks the remaining work for JarvisAgent.
 ---
 
 ## 3. Terminal UI (new)
-- PDCurses on macOS: backend VT is configured, needs to be tested
+- ~~PDCurses on macOS: backend VT is configured, needs to be tested~~ ✅ tested on miniMac (macOS Tahoe) — log + status windows, green theme
 - PDCurses on Windows: backend Wincon is configured, needs to be tested
 
 ---

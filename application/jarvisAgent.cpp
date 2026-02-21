@@ -163,6 +163,8 @@ namespace AIAssistant
         }
         else
         {
+            LOG_APP_INFO("Loaded {} workflow(s) from '{}'", m_WorkflowRegistry->GetWorkflowIds().size(),
+                         workflowsDirectory.string());
             if (!m_WorkflowRegistry->ValidateAll())
             {
                 LOG_APP_WARN("JarvisAgent::InitializeWorkflows: one or more workflows failed validation");

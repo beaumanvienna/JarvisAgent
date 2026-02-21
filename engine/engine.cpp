@@ -25,6 +25,7 @@
 #include "json/configParser.h"
 #include "json/configChecker.h"
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -52,7 +53,7 @@ int engine(int argc, char* argv[])
     configParser.Parse(engineConfig);
     if (!configParser.ConfigParsed())
     {
-        // exit with error = true
+        fprintf(stderr, "Error: failed to parse config.json\nSee log/log.txt for details.\n");
         return EXIT_FAILURE;
     }
 

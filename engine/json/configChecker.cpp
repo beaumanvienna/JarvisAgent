@@ -23,6 +23,8 @@
 #include "json/configChecker.h"
 #include "auxiliary/file.h"
 
+#include <cstdio>
+
 namespace AIAssistant
 {
     bool ConfigChecker::Check(ConfigParser::EngineConfig& engineConfig)
@@ -98,15 +100,19 @@ namespace AIAssistant
             if (!ok1)
             {
                 LOG_CORE_ERROR("config error: queue folder filepath is not a directory '{}'", queueFolderFilepath);
+                fprintf(stderr, "Error: queue folder does not exist: '%s'\n", queueFolderFilepath.c_str());
             }
             if (!ok2)
             {
                 LOG_CORE_ERROR("config error: workflows folder filepath is not a directory '{}'", workflowsFolder);
+                fprintf(stderr, "Error: workflows folder does not exist: '%s'\n", workflowsFolder.c_str());
             }
             if (!ok3)
             {
                 LOG_CORE_ERROR("config error: API interface '{}'", engineConfig.m_ApiIndex);
+                fprintf(stderr, "Error: invalid API interface configuration (index %zu)\n", engineConfig.m_ApiIndex);
             }
+            fprintf(stderr, "See log/log.txt for details.\n");
         }
         else
         {

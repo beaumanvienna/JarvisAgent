@@ -148,6 +148,11 @@ namespace AIAssistant
             return FileCategory::SubFolder;
         }
 
+        if (filename.starts_with("."))
+        {
+            return FileCategory::Ignored;
+        }
+
         if (filePath.stem().string().ends_with(".output"))
         {
             LOG_APP_INFO("Ignoring output file: {}", filePath.string());
