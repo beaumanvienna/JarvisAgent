@@ -38,3 +38,14 @@ test/log.txt
 .DS_Store
 dashboard/ui/vite.config.d.ts
 dashboard/ui/vite.config.js
+.vs
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+vendor/curl/bin
+vendor/curl/bin-int
+vendor/openssl/bin
+vendor/openssl/bin-int
+vendor/pdcursesmod/bin
+vendor/pdcursesmod/bin-int
