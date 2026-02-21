@@ -36,3 +36,5 @@ log/*
 test/log.txt
 *.tsbuildinfo
 .DS_Store
+dashboard/ui/vite.config.d.ts
+dashboard/ui/vite.config.js
