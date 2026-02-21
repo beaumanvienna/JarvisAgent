@@ -35,7 +35,22 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 5. Python Engine parallelization (new)
+## 5. Native Google Gemini reply parser (new)
+- Currently using the OpenAI-compatible legacy endpoint (`generativelanguage.googleapis.com/v1beta/openai/chat/completions`)
+- Implement a dedicated reply parser for the native Gemini API (`generativelanguage.googleapis.com/v1beta/models/...`)
+- This would be a new `InterfaceType` (e.g., `API3` / `GeminiNative`)
+
+---
+
+## 6. README.md update (new)
+- Update "Planned Features" section: Docker is done, remove WIP label
+- Add missing feature highlights: encrypted API keys, per-item filters, task watchdog, dataflow/template engine, dashboard features
+- Update multi-model list to include Google Gemini
+- Fix any outdated information
+
+---
+
+## 7. Python Engine parallelization (new)
 - Add support for multiple independent PythonEngine instances
 - Ensure each interpreter instance owns its own GIL
 - Store PythonEngine instances in std::vector
@@ -47,7 +62,7 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 6. Browser-based terminal prompt (remote control from a web page) (new)
+## 8. Browser-based terminal prompt (remote control from a web page) (new)
 - Use a web terminal emulator like xterm.js on the frontend with the existing WebSocket server side (Crow is already in your stack).
 - In that setup, you don’t need a “C++ prompt library” at all — you need:
   - a command parser/dispatcher in C++

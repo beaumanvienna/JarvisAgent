@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Use system Chrome so Playwright does not need its own Chromium download
-export CHROME_PATH="/usr/bin/google-chrome"
+# Use system Chrome so Playwright does not need its own Chromium download.
+# Auto-detect Chrome location per platform.
+if [ -n "${CHROME_PATH:-}" ]; then
+    : # already set by caller / environment
+elif [ -f "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    export CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [ -f "/usr/bin/google-chrome" ]; then
+    export CHROME_PATH="/usr/bin/google-chrome"
+elif [ -f "/usr/bin/chromium-browser" ]; then
+    export CHROME_PATH="/usr/bin/chromium-browser"
+else
+    echo "[convertGuidePdf.sh] WARNING: Chrome not found, md2pdf may fail" >&2
+fi
 
 echo "[convertGuidePdf.sh debug v3] argv_count=$#"
 arg_index=0

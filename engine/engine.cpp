@@ -33,8 +33,45 @@
 #include <string>
 #include <thread>
 
+static void PrintHelp()
+{
+    std::cout << "JarvisAgent — parallel AI-driven automation engine\n"
+              << "\n"
+              << "JarvisAgent is a C++ backend that monitors a queue folder for input files,\n"
+              << "dispatches AI requests in parallel, runs DAG-based workflows (AI, Python,\n"
+              << "shell, C++), and serves a React dashboard plus a visual workflow editor.\n"
+              << "\n"
+              << "Usage:\n"
+              << "  jarvisAgent          Start the agent (requires config.json in the working directory)\n"
+              << "  jarvisAgent --help   Show this help message and exit\n"
+              << "\n"
+              << "Before starting:\n"
+              << "  - Review and adjust config.json in the working directory\n"
+              << "  - Install dependencies as described in README.md\n"
+              << "  - Provide API keys via keys.json.enc, keys.json, or OPENAI_API_KEY env var\n"
+              << "\n"
+              << "At runtime:\n"
+              << "  - Terminal UI: press 'q' or Ctrl-C to quit\n"
+              << "  - Dashboard:   http://localhost:8080\n"
+              << "  - Workflow Editor: http://localhost:8080/editor\n"
+              << "  - REST API:    see doc/api-endpoints.md\n"
+              << "\n"
+              << "Example:\n"
+              << "  curl -s http://localhost:8080/api/status | python3 -m json.tool\n"
+              << std::endl;
+}
+
 int engine(int argc, char* argv[])
 {
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0)
+        {
+            PrintHelp();
+            return EXIT_SUCCESS;
+        }
+    }
+
     // Check for config.json before initializing the engine
     std::filesystem::path const configFilePathAbsolute = std::filesystem::current_path() / "config.json";
     if (!std::filesystem::exists(configFilePathAbsolute))
