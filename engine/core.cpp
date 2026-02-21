@@ -93,6 +93,16 @@ namespace AIAssistant
         LOG_CORE_INFO("Launch CWD (Absolute) {}", m_LaunchCWDAbsolute.string());
     }
 
+    Core::~Core()
+    {
+        if (m_OriginalCoutBuffer != nullptr)
+        {
+            std::cout.rdbuf(m_OriginalCoutBuffer);
+            std::cerr.rdbuf(m_OriginalCoutBuffer);
+            m_OriginalCoutBuffer = nullptr;
+        }
+    }
+
     void Core::SignalHandler(int signal)
     {
         // IMPORTANT: Signal handlers must only use async-signal-safe operations.

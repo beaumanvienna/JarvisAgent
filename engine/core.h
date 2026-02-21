@@ -42,7 +42,7 @@ namespace AIAssistant
     {
     public:
         Core();
-        ~Core() = default;
+        ~Core();
 
         void Start(ConfigParser::EngineConfig const& engineConfig);
         void Run(std::unique_ptr<AIAssistant::Application>&);
