@@ -118,7 +118,7 @@ namespace AIAssistant
                 }
             }
 
-            if (!EngineCore::FileExists(m_PathToWatch.string()))
+            if (!fs::is_directory(m_PathToWatch))
             {
                 LOG_APP_INFO("folder '{}' no longer exists, requesting shutdown", m_PathToWatch.string());
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
