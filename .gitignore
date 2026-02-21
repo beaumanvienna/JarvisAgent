@@ -35,3 +35,4 @@ queue/*
 log/*
 test/log.txt
 *.tsbuildinfo
+.DS_Store
