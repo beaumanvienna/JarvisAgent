@@ -269,8 +269,19 @@ namespace AIAssistant
             // Do NOT change the process-wide current_path; other threads (for example the file watcher)
             // rely on it. Instead, run the command inside a subshell that changes directory only for
             // the spawned shell process.
+#if defined(_WIN32)
+            // On Windows, _popen() routes through cmd.exe which cannot run .sh scripts
+            // or understand POSIX single-quote quoting. We invoke bash explicitly (available
+            // in MSYS2 / Git Bash environments) and convert paths to forward slashes.
+            std::string genericDir = workingDirectoryPath.generic_string();
+            std::string genericCommand = command;
+            std::replace(genericCommand.begin(), genericCommand.end(), '\\', '/');
+            std::string const commandWithRedirect =
+                "bash -c \"cd " + QuoteForPosixShell(genericDir) + " && " + genericCommand + " 2>&1\"";
+#else
             std::string const commandWithRedirect =
                 "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + " 2>&1";
+#endif
 
             FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
             if (pipe == nullptr)
