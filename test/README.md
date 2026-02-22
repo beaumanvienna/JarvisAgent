@@ -9,13 +9,13 @@ Automated test harness for `.jcwf` workflows. Cleans, runs, polls, and verifies 
 cd /path/to/jarvisAgent && ./bin/Release/jarvisAgent
 
 # 2. Run all configured workflows
-python3 test/run_tests.py --all
+python test/run_tests.py --all
 
 # 3. Or test a single workflow
-python3 test/run_tests.py --workflow make-example
+python test/run_tests.py --workflow make-example
 
 # 4. List available workflows
-python3 test/run_tests.py --list
+python test/run_tests.py --list
 ```
 
 ## What the script does
@@ -51,15 +51,33 @@ Each workflow entry supports:
 The script is designed for a human + AI pair-programming workflow:
 
 1. **You** start JarvisAgent in a terminal (needed for the ncurses TUI).
-2. **You** run `python3 test/run_tests.py --all` in another terminal.
+2. **You** run `python test/run_tests.py --all` in another terminal.
 3. The script pauses after listing workflows — at this point, tell the AI to `tail -f test/log.txt` so it can follow progress.
 4. **You** press Enter to begin.
 5. The AI reads `test/log.txt` and the generated artifacts to analyze results, spot issues, and suggest fixes.
 
 This gives the AI full visibility into test execution and artifact content without needing direct terminal access or stdin interaction. The dashboard at `http://localhost:8080` remains the primary real-time monitor.
 
+## Polarion Mockup Server
+
+Some workflows (e.g. `goKartComplianceCheck`) query a Polarion ALM server. For testing without a real Polarion instance, use the lightweight mockup server:
+
+**Repository:** [github.com/beaumanvienna/polarionMockup](https://github.com/beaumanvienna/polarionMockup)
+
+```bash
+# Clone, build, and run (in a separate terminal)
+git clone https://github.com/beaumanvienna/polarionMockup.git
+cd polarionMockup
+premake5 gmake
+make config=release -j$(nproc)
+./bin/Release/mockup   # listens on http://localhost:18080
+```
+
+The test runner checks `http://localhost:18080/polarion/rest/v1/health` before running any workflow that lists `__polarion_mock__` in its `prerequisites`. If the mockup server is not running, those workflows are **skipped** (not failed). If it is running, the server responds to all JarvisAgent Polarion requests and the test will pass.
+
 ## Dependencies
 
-- Python 3.8+
+- Python 3.8+ (on Linux and macOS the command may be `python3` / `pip3` instead of `python` / `pip`)
 - `requests` (`pip install requests`)
 - JarvisAgent running with the REST API on `localhost:8080` (configurable via `--base-url`)
+- *(optional)* [polarionMockup](https://github.com/beaumanvienna/polarionMockup) for Polarion-dependent workflows

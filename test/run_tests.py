@@ -332,7 +332,7 @@ def main():
     args = parser.parse_args()
 
     # Tee all output to test/log.txt
-    log_file = open(LOG_PATH, "w")
+    log_file = open(LOG_PATH, "w", encoding="utf-8")
     sys.stdout = TeeWriter(sys.__stdout__, log_file)
 
     cfg = load_config()

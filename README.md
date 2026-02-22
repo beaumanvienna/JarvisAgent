@@ -195,17 +195,25 @@ JarvisAgent's shell-based workflows call Python tools (`markitdown`, `md2pdf`). 
 
 **Create and activate the venv** (one-time setup):
 
+Linux / macOS:
 ```bash
-# Linux / macOS
 python3 -m venv .venv
 source .venv/bin/activate
+```
 
-# Windows (PowerShell)
+Windows (PowerShell):
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-**Install the Python dependencies** (inside the active venv):
+Windows (MSYS2 / Git Bash):
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
+```
+
+**Install the Python dependencies** (inside the active venv, same on all platforms):
 
 ```bash
 pip install "markitdown[all]" md2pdf-mermaid playwright
@@ -214,13 +222,20 @@ playwright install chromium
 
 **Example session** — activate the venv and start JarvisAgent:
 
+Linux / macOS:
 ```bash
 $ source .venv/bin/activate
 (.venv) $ which markitdown
 /home/user/dev/jarvisAgent/.venv/bin/markitdown
-(.venv) $ which md2pdf
-/home/user/dev/jarvisAgent/.venv/bin/md2pdf
 (.venv) $ ./bin/Release/jarvisAgent
+```
+
+Windows (MSYS2 / Git Bash):
+```bash
+$ source .venv/Scripts/activate
+(.venv) $ which markitdown
+/home/user/dev/jarvisAgent/.venv/Scripts/markitdown
+(.venv) $ ./bin/x64/Release/jarvisAgent.exe
 ```
 
 > **Note:** Always activate the venv before running JarvisAgent so that `markitdown` and `md2pdf` are on the PATH.

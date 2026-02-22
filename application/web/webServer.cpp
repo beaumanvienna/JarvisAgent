@@ -699,7 +699,8 @@ namespace AIAssistant
         std::filesystem::path const distIndex = std::filesystem::path("dashboard") / "ui" / "dist" / "index.html";
         if (!std::filesystem::exists(distIndex))
         {
-            return crow::response(500, "Dashboard UI build not found. Please run: cd dashboard/ui && npm run build");
+            return crow::response(
+                500, "Dashboard UI build not found. Please run: cd dashboard/ui && npm install && npm run build");
         }
 
         return ServeStaticFile(distIndex);
@@ -725,8 +726,9 @@ namespace AIAssistant
         std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
         if (!std::filesystem::exists(distIndex))
         {
-            return crow::response(500,
-                                  "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm run build");
+            return crow::response(
+                500,
+                "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm install && npm run build");
         }
 
         return ServeStaticFile(distIndex);
