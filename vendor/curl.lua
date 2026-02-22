@@ -52,7 +52,7 @@ project "curl"
     
     filter "system:windows"
         systemversion "latest"
-        defines { "WIN32", "_WINDOWS", "USE_OPENSSL" }
+        defines { "WIN32", "_WINDOWS", "USE_SCHANNEL", "USE_WINDOWS_SSPI" }
 
     filter "system:linux"
         defines
