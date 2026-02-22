@@ -180,6 +180,13 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_HTTPHEADER, headers.Get());
         curl_easy_setopt(m_Curl, CURLOPT_POSTFIELDS, data.c_str());
+
+#if defined(_WIN32)
+        // Tell OpenSSL-backed curl to import CA certificates from the Windows
+        // native certificate store, so HTTPS verification works without a
+        // bundled ca-bundle.crt file.
+        curl_easy_setopt(m_Curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
         curl_easy_setopt(m_Curl, CURLOPT_WRITEFUNCTION, static_cast<CurlWriteCallback>(write_callback));
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
         curl_easy_setopt(m_Curl, CURLOPT_NOPROGRESS, 0L);
