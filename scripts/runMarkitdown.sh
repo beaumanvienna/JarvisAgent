@@ -19,6 +19,9 @@ heartbeat() {
 
 mkdir -p "$(dirname "$output_file")"
 
+# Ensure UTF-8 output on Windows (default cp1252 can't encode all characters).
+export PYTHONIOENCODING=utf-8
+
 echo "[runMarkitdown.sh] Converting '$input_file' -> '$output_file'"
 heartbeat
 markitdown "$input_file" > "$output_file"

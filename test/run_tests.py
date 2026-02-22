@@ -130,6 +130,13 @@ class JarvisAPI:
         r.raise_for_status()
         return r.json()
 
+    def get_registered_workflow_ids(self):
+        """Returns a set of workflow IDs currently registered in JarvisAgent."""
+        r = requests.get(self._url("/api/workflows"), timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        return {w["id"] for w in data.get("workflows", [])}
+
 # ---------------------------------------------------------------------------
 # Prerequisite checks
 # ---------------------------------------------------------------------------
@@ -439,12 +446,22 @@ def main():
     else:
         to_test = run_order
 
+    # Fetch the set of workflow IDs actually registered in JarvisAgent.
+    try:
+        registered_ids = api.get_registered_workflow_ids()
+    except Exception as e:
+        warn(f"Could not fetch registered workflows: {e}")
+        registered_ids = None  # will skip the pre-check
+
     # Prompt to clean all workflows before testing
     print()
     answer = input(f"  {C.YELLOW}Clean all workflow outputs before testing? [y/N]: {C.RESET}").strip().lower()
     if answer in ("y", "yes"):
         info("Cleaning all workflows...")
         for wf_id in to_test:
+            if registered_ids is not None and wf_id not in registered_ids:
+                warn(f"{wf_id}: not registered, skipped clean")
+                continue
             try:
                 status_code, resp = api.clean_workflow(wf_id)
                 if status_code == 200:
@@ -479,6 +496,12 @@ def main():
         wf_config = workflows.get(wf_id)
         if not wf_config:
             warn(f"No config for '{wf_id}', skipping")
+            continue
+
+        if registered_ids is not None and wf_id not in registered_ids:
+            header(f"{wf_id}  —  {wf_config.get('label', '')}")
+            warn(f"workflow '{wf_id}' is not registered in JarvisAgent — SKIPPED")
+            results[wf_id] = "skipped"
             continue
 
         outcome = test_workflow(api, wf_id, wf_config, cfg)

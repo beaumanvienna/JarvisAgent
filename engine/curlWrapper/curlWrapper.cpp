@@ -190,7 +190,7 @@ namespace AIAssistant
             LOG_CORE_INFO("url: {}, data: {}", url, data);
         }
 
-        LOG_CORE_INFO("[curlWrapper build 2026-02-21-v5] sending query {}", ++m_QueryCounter);
+        LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
         CURLcode res;
         {
 #ifdef TRACY_ENABLE

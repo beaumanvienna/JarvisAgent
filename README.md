@@ -189,6 +189,16 @@ Premake5: download the Windows binary from [premake.github.io](https://premake.g
 
 ---
 
+### Windows: Use MSYS2 or Git Bash
+
+On Windows, JarvisAgent's shell-based workflow tasks execute through `bash`. You must start JarvisAgent from an **MSYS2 terminal** or **Git Bash** — not from PowerShell or cmd.exe.
+
+MSYS2 and Git Bash provide the POSIX shell environment (`bash`, `wc`, `dirname`, etc.) that the workflow scripts require. If you launch JarvisAgent from PowerShell or cmd.exe, all shell tasks will fail because `bash` is not on the PATH.
+
+> **Recommendation:** Use MSYS2 if you need to install additional tools via `pacman`. Use Git Bash if you already have [Git for Windows](https://gitforwindows.org/) installed and prefer a lighter setup.
+
+---
+
 ### Python Virtual Environment
 
 JarvisAgent's shell-based workflows call Python tools (`markitdown`, `md2pdf`). These should be installed in a **virtual environment** and activated before starting JarvisAgent.

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Portable Python detection: prefer 'python' (Windows), fall back to 'python3'.
+PYTHON_CMD="python3"
+if command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+elif ! command -v python3 >/dev/null 2>&1; then
+    echo "[convertGuidePdf.sh] ERROR: neither 'python' nor 'python3' found on PATH" >&2
+    exit 127
+fi
+
 # Use system Chrome so Playwright does not need its own Chromium download.
 # Auto-detect Chrome location per platform.
 if [ -n "${CHROME_PATH:-}" ]; then
@@ -11,6 +20,10 @@ elif [ -f "/usr/bin/google-chrome" ]; then
     export CHROME_PATH="/usr/bin/google-chrome"
 elif [ -f "/usr/bin/chromium-browser" ]; then
     export CHROME_PATH="/usr/bin/chromium-browser"
+elif [ -f "C:/Program Files/Google/Chrome/Application/chrome.exe" ]; then
+    export CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe"
+elif [ -f "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe" ]; then
+    export CHROME_PATH="C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"
 else
     echo "[convertGuidePdf.sh] WARNING: Chrome not found, md2pdf may fail" >&2
 fi
@@ -36,14 +49,14 @@ output_pdf_path="$*"
 echo "[convertGuidePdf.sh debug v3] input_md_path=$input_md_path"
 echo "[convertGuidePdf.sh debug v3] output_pdf_path=$output_pdf_path"
 
-input_abs="$(python3 - "$input_md_path" <<'PY'
+input_abs="$($PYTHON_CMD - "$input_md_path" <<'PY'
 import os
 import sys
 print(os.path.abspath(sys.argv[1]))
 PY
 )"
 
-output_abs="$(python3 - "$output_pdf_path" <<'PY'
+output_abs="$($PYTHON_CMD - "$output_pdf_path" <<'PY'
 import os
 import sys
 print(os.path.abspath(sys.argv[1]))
