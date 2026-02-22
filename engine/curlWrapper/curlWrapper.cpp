@@ -176,6 +176,11 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
         curl_easy_setopt(m_Curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(m_Curl, CURLOPT_XFERINFOFUNCTION, static_cast<curl_xferinfo_callback>(progressCallback));
+#if defined(_WIN32)
+        // Use the Windows native certificate store so OpenSSL can verify HTTPS peers
+        // without requiring a separate CA bundle file.
+        curl_easy_setopt(m_Curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
