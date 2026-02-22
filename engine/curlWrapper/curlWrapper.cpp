@@ -27,61 +27,10 @@
 #include "curlWrapper/curlWrapper.h"
 #include "json/replyParser.h"
 
-#if defined(_WIN32)
-#include <cstdlib>
-#include <filesystem>
-#endif
-
 namespace AIAssistant
 {
 
     std::atomic<uint32_t> CurlWrapper::m_QueryCounter{0};
-
-#if defined(_WIN32)
-    // Find a CA bundle on Windows (MSYS2 / Git for Windows / manual install).
-    // Called once; result is cached in a static string.
-    static std::string const& GetWindowsCaBundlePath()
-    {
-        static std::string cachedPath = []() -> std::string
-        {
-            // 1. Environment variables (highest priority)
-            for (char const* envVar : {"CURL_CA_BUNDLE", "SSL_CERT_FILE"})
-            {
-                if (char const* value = std::getenv(envVar))
-                {
-                    if (std::filesystem::exists(value))
-                    {
-                        LOG_CORE_INFO("[curl-ssl] CA bundle from env ${}: '{}'", envVar, value);
-                        return value;
-                    }
-                }
-            }
-
-            // 2. Common MSYS2 / Git-for-Windows / Scoop / Chocolatey paths
-            static char const* const candidates[] = {
-                "C:/msys64/etc/ssl/certs/ca-bundle.crt",
-                "C:/msys64/usr/ssl/certs/ca-bundle.crt",
-                "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt",
-                "C:/msys64/clang64/etc/ssl/certs/ca-bundle.crt",
-                "C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt",
-                "C:/Program Files (x86)/Git/mingw64/etc/ssl/certs/ca-bundle.crt",
-            };
-
-            for (char const* path : candidates)
-            {
-                if (std::filesystem::exists(path))
-                {
-                    LOG_CORE_INFO("[curl-ssl] CA bundle found at: '{}'", path);
-                    return path;
-                }
-            }
-
-            LOG_CORE_WARN("[curl-ssl] no CA bundle found on Windows — HTTPS may fail");
-            return {};
-        }();
-        return cachedPath;
-    }
-#endif
 
     CurlWrapper::CurlWrapper()
     {
@@ -110,14 +59,7 @@ namespace AIAssistant
                     {
                         LOG_CORE_INFO("[curl-ssl] libcurl {} ssl: {}", ver->version,
                                       ver->ssl_version ? ver->ssl_version : "(none)");
-                        LOG_CORE_INFO("[curl-ssl] cainfo: '{}' capath: '{}'", ver->cainfo ? ver->cainfo : "(null)",
-                                      ver->capath ? ver->capath : "(null)");
                     }
-
-#if defined(_WIN32)
-                    // Trigger CA bundle search at startup so the result is logged early.
-                    GetWindowsCaBundlePath();
-#endif
                 }
             }
         }
@@ -242,24 +184,13 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
         curl_easy_setopt(m_Curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(m_Curl, CURLOPT_XFERINFOFUNCTION, static_cast<curl_xferinfo_callback>(progressCallback));
-#if defined(_WIN32)
-        // Use the Windows native certificate store so OpenSSL can verify HTTPS peers.
-        curl_easy_setopt(m_Curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
-
-        // Fallback: explicitly provide a CA bundle if one was found on the system.
-        std::string const& caBundlePath = GetWindowsCaBundlePath();
-        if (!caBundlePath.empty())
-        {
-            curl_easy_setopt(m_Curl, CURLOPT_CAINFO, caBundlePath.c_str());
-        }
-#endif
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
             LOG_CORE_INFO("url: {}, data: {}", url, data);
         }
 
-        LOG_CORE_INFO("[curlWrapper build 2026-02-21-v3] sending query {}", ++m_QueryCounter);
+        LOG_CORE_INFO("[curlWrapper build 2026-02-21-v5] sending query {}", ++m_QueryCounter);
         CURLcode res;
         {
 #ifdef TRACY_ENABLE
@@ -279,7 +210,7 @@ namespace AIAssistant
         }
         else
         {
-            LOG_CORE_ERROR("curl error: {}", curl_easy_strerror(res));
+            LOG_CORE_ERROR("curl error (code {}): {}", static_cast<int>(res), curl_easy_strerror(res));
         }
 
         return res == CURLE_OK;

@@ -1102,14 +1102,17 @@ filter { "action:gmake*", "configurations:Debug"}
 
     filter "configurations:Debug"
         defines { "DEBUG" }
+        runtime "Debug"
         symbols "On"
 
     filter "configurations:Release"
         defines { "NDEBUG" }
+        runtime "Release"
         optimize "Speed"
 
     filter { "configurations:Dist" }
         defines { "NDEBUG" }
+        runtime "Release"
         optimize "Speed"
 
 

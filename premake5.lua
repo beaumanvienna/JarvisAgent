@@ -261,7 +261,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         --
         -- Windows system libs (always).
         --
-        links { "wldap32", "advapi32", "crypt32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "ssl", "crypto" }
+        links { "wldap32", "advapi32", "crypt32", "secur32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "ssl", "crypto" }
 
         --
         -- Robust Python discovery on Windows:
