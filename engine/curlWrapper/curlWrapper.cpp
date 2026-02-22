@@ -22,6 +22,11 @@
 #include <curl/curl.h>
 #include "tracy/Tracy.hpp"
 
+#if defined(_WIN32) && !defined(USE_SCHANNEL)
+#include <openssl/provider.h>
+#include <openssl/err.h>
+#endif
+
 #include "core.h"
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
@@ -60,6 +65,21 @@ namespace AIAssistant
                         LOG_CORE_INFO("[curl-ssl] libcurl {} ssl: {}", ver->version,
                                       ver->ssl_version ? ver->ssl_version : "(none)");
                     }
+
+#if defined(_WIN32) && !defined(USE_SCHANNEL)
+                    // OpenSSL 3.0+ / 4.0 requires the "default" provider for TLS
+                    // algorithms. In a static build the auto-loading may silently
+                    // fail, so we load it explicitly.
+                    if (OSSL_PROVIDER_load(nullptr, "default") == nullptr)
+                    {
+                        unsigned long err = ERR_peek_last_error();
+                        LOG_CORE_WARN("[curl-ssl] OSSL_PROVIDER_load(default) failed: {}", ERR_error_string(err, nullptr));
+                    }
+                    else
+                    {
+                        LOG_CORE_INFO("[curl-ssl] OpenSSL default provider loaded");
+                    }
+#endif
                 }
             }
         }
@@ -197,6 +217,14 @@ namespace AIAssistant
             LOG_CORE_INFO("url: {}, data: {}", url, data);
         }
 
+#if defined(_WIN32)
+        // Verbose diagnostics for the first few queries on Windows.
+        static std::atomic<int> winVerboseCount{0};
+        if (winVerboseCount.fetch_add(1) < 3)
+        {
+            curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);
+        }
+#endif
         LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
         CURLcode res;
         {
