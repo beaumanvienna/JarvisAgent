@@ -3,10 +3,10 @@
 Combine per-chapter AI summary files into a single markdown document.
 
 Usage (standalone):
-    python3 combineSummaries.py <input_glob> <output.md>
+    python combineSummaries.py <input_glob> <output.md>
 
 Example:
-    python3 combineSummaries.py 'queue/bookSummary/03_summarize/PROB_*.output.txt' summaries/book_summary.md
+    python combineSummaries.py 'queue/bookSummary/03_summarize/PROB_*.output.txt' summaries/book_summary.md
 
 Usage (as JCWF python task):
     Called with keyword args: input_glob, output_file

@@ -20,6 +20,8 @@ elif [ -f "/usr/bin/google-chrome" ]; then
     export CHROME_PATH="/usr/bin/google-chrome"
 elif [ -f "/usr/bin/chromium-browser" ]; then
     export CHROME_PATH="/usr/bin/chromium-browser"
+elif [ -f "/usr/bin/chromium" ]; then
+    export CHROME_PATH="/usr/bin/chromium"
 elif [ -f "C:/Program Files/Google/Chrome/Application/chrome.exe" ]; then
     export CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe"
 elif [ -f "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe" ]; then

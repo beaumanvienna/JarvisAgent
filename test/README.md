@@ -77,7 +77,7 @@ The test runner checks `http://localhost:18080/polarion/rest/v1/health` before r
 
 ## Dependencies
 
-- Python 3.8+ (on Linux and macOS the command may be `python3` / `pip3` instead of `python` / `pip`)
+- Python 3.8+ (use `python` inside the venv; on some Linux distros `python3` is needed before activation)
 - `requests` (`pip install requests`)
 - JarvisAgent running with the REST API on `localhost:8080` (configurable via `--base-url`)
 - *(optional)* [polarionMockup](https://github.com/beaumanvienna/polarionMockup) for Polarion-dependent workflows

@@ -3,7 +3,7 @@
 Extract chapter titles from a markdown file and write one chapter per line.
 
 Usage:
-    python3 extractChapters.py <input.md> <output.txt>
+    python extractChapters.py <input.md> <output.txt>
 
 The script looks for patterns like "Chapter N, Title" in the markdown content,
 deduplicates them, and writes each unique chapter title as a line in the output.

@@ -57,7 +57,7 @@ static void PrintHelp()
               << "  - REST API:    see doc/api-endpoints.md\n"
               << "\n"
               << "Example:\n"
-              << "  curl -s http://localhost:8080/api/status | python3 -m json.tool\n"
+              << "  curl -s http://localhost:8080/api/status | python -m json.tool\n"
               << std::endl;
 }
 

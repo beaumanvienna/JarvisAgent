@@ -3,9 +3,9 @@
 JarvisAgent Workflow Test Runner
 
 Usage:
-    python3 test/run_tests.py --workflow make-example   # test one workflow
-    python3 test/run_tests.py --all                     # test all in run_order
-    python3 test/run_tests.py --list                    # list available workflows
+    python test/run_tests.py --workflow make-example   # test one workflow
+    python test/run_tests.py --all                     # test all in run_order
+    python test/run_tests.py --list                    # list available workflows
 
 The script assumes JarvisAgent is already running (start it in a terminal first).
 It uses the REST API to clean, run, poll, and verify each workflow.

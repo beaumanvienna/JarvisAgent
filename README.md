@@ -157,7 +157,7 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 ## Development
 
 JarvisAgent depends on
-* python3 and python3 development headers
+* Python 3 and development headers (on Ubuntu/Debian the packages are called `python3`, `python3-dev`)
 * libz (Linux — linked at build time; vendored on Windows, included in Xcode SDK on macOS)
 * premake5
 * markitdown (document conversion)
@@ -207,7 +207,7 @@ JarvisAgent's shell-based workflows call Python tools (`markitdown`, `md2pdf`). 
 
 Linux / macOS:
 ```bash
-python3 -m venv .venv
+python3 -m venv .venv   # use 'python3' here; after activation, 'python' works everywhere
 source .venv/bin/activate
 ```
 
