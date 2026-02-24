@@ -185,3 +185,36 @@ export async function cancelRun(runId: string): Promise<CancelRunResponse>
   ensureOk(response);
   return (await response.json()) as CancelRunResponse;
 }
+
+export type PauseRunResponse = { ok: boolean; runId: string; paused: boolean };
+
+export async function pauseRun(runId: string): Promise<PauseRunResponse>
+{
+  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/pause`, {
+    method: "POST",
+  });
+  ensureOk(response);
+  return (await response.json()) as PauseRunResponse;
+}
+
+export type ResumeRunResponse = { ok: boolean; runId: string; resumed: boolean };
+
+export async function resumeRun(runId: string): Promise<ResumeRunResponse>
+{
+  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/resume`, {
+    method: "POST",
+  });
+  ensureOk(response);
+  return (await response.json()) as ResumeRunResponse;
+}
+
+export type StopRunResponse = { ok: boolean; runId: string; stopRequested: boolean };
+
+export async function stopRun(runId: string): Promise<StopRunResponse>
+{
+  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}/stop`, {
+    method: "POST",
+  });
+  ensureOk(response);
+  return (await response.json()) as StopRunResponse;
+}

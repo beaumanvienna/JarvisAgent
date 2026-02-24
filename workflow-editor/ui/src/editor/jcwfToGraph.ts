@@ -1,5 +1,5 @@
 import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
-import type { JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import type { JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 
 function displayTitle(task: JcwfTask): { title: string; subtitle?: string }
 {
@@ -162,6 +162,28 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
         labelStyle: { fill: "rgba(180, 140, 255, 0.9)", fontSize: 10 },
       });
     }
+  }
+
+  // Dataflow edges (output → input wiring between tasks)
+  const dataflowEntries = Array.isArray((jcwf as Record<string, unknown>).dataflow)
+    ? ((jcwf as Record<string, unknown>).dataflow as JcwfDataflowEntry[])
+    : [];
+  for (const df of dataflowEntries)
+  {
+    if (!taskIdSet.has(df.from_task) || !taskIdSet.has(df.to_task))
+    {
+      continue;
+    }
+    edges.push({
+      id: `df:${df.from_task}.${df.from_output}->${df.to_task}.${df.to_input}`,
+      source: df.from_task,
+      target: df.to_task,
+      sourceHandle: `out:${df.from_output}`,
+      targetHandle: `in:${df.to_input}`,
+      style: { strokeDasharray: "5 4", stroke: "rgba(100, 210, 180, 0.7)" },
+      label: `${df.from_output} → ${df.to_input}`,
+      labelStyle: { fill: "rgba(100, 210, 180, 0.85)", fontSize: 10 },
+    });
   }
 
   return { nodes, edges };

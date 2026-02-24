@@ -153,6 +153,9 @@ Each finding has: `code`, `message`, `path` (JSON pointer), `taskId`, `tier`.
 | GET | `/api/workflow-runs/last` | Get the last completed run for each workflow. |
 | GET | `/api/workflow-runs/<runId>` | Get detailed status of a specific run (including per-task state). |
 | POST | `/api/workflow-runs/<runId>/cancel` | Request cancellation of an active run. |
+| POST | `/api/workflow-runs/<runId>/pause` | Pause an active run (suspend new task dispatch). |
+| POST | `/api/workflow-runs/<runId>/resume` | Resume a paused run. |
+| POST | `/api/workflow-runs/<runId>/stop` | Graceful stop: finish in-flight tasks, no new dispatch. |
 
 ### POST /api/workflows/\<id\>/run
 
@@ -213,6 +216,27 @@ Returns 409 if the workflow is currently running.
 **Response (202):**
 ```json
 { "ok": true, "cancelRequested": true, "runId": "..." }
+```
+
+### POST /api/workflow-runs/\<runId\>/pause
+Suspends new task dispatch for the run. In-flight tasks continue to completion.
+**Response (202):**
+```json
+{ "ok": true, "paused": true, "runId": "..." }
+```
+
+### POST /api/workflow-runs/\<runId\>/resume
+Resumes a paused run, re-enabling task dispatch.
+**Response (202):**
+```json
+{ "ok": true, "resumed": true, "runId": "..." }
+```
+
+### POST /api/workflow-runs/\<runId\>/stop
+Graceful stop: finishes all in-flight tasks but does not dispatch any new ones. Differs from cancel in that in-flight tasks are allowed to complete normally rather than being interrupted.
+**Response (202):**
+```json
+{ "ok": true, "stopRequested": true, "runId": "..." }
 ```
 
 ---

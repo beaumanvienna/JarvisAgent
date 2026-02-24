@@ -1,5 +1,5 @@
 import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
-import type { JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import type { JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 
 type CycleError = { ok: false; message: string; cycleNodes: string[]; };
 type Ok = { ok: true; jcwf: JcwfFile; };
@@ -129,8 +129,30 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     delete tasks[taskId].depends_on;
   }
 
+  const dataflow: JcwfDataflowEntry[] = [];
+
   for (const edge of graph.edges as EditorTaskEdge[])
   {
+    // Dataflow edges have df: prefix and encode output/input in sourceHandle/targetHandle
+    if (edge.id.startsWith("df:") && edge.sourceHandle && edge.targetHandle)
+    {
+      const fromOutput = edge.sourceHandle.startsWith("out:") ? edge.sourceHandle.slice(4) : edge.sourceHandle;
+      const toInput = edge.targetHandle.startsWith("in:") ? edge.targetHandle.slice(3) : edge.targetHandle;
+      dataflow.push({
+        from_task: edge.source,
+        from_output: fromOutput,
+        to_task: edge.target,
+        to_input: toInput,
+      });
+      continue;
+    }
+
+    // Skip fanout edges (auto-generated from filter → per_item task)
+    if (edge.id.startsWith("fanout:"))
+    {
+      continue;
+    }
+
     const targetTask = tasks[edge.target];
     if (targetTask)
     {
@@ -169,6 +191,7 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     id: workflowId,
     tasks: orderedTasks,
     ...(hasFilters ? { filters } : {}),
+    ...(dataflow.length > 0 ? { dataflow } : {}),
   };
 
   return { ok: true, jcwf };

@@ -109,6 +109,8 @@ namespace AIAssistant
     {
         Pending = 0,
         Running,
+        Paused,
+        Stopping,
         Succeeded,
         Failed,
         Cancelled
@@ -436,6 +438,9 @@ namespace AIAssistant
         // ai_call correlation (required for event-driven async completion)
         int64_t m_ExternalRequestId{0};
         int64_t m_ExternalRequestTimestampNs{0};
+
+        // Timestamp for when the task entered WaitingExternal (used for timeout enforcement).
+        std::chrono::steady_clock::time_point m_WaitingExternalSince{};
 
         // Inactivity watchdog (shared with WRM and REST heartbeat endpoint).
         // Executors kick this on progress (stdout lines, loop iterations, etc.).

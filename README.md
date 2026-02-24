@@ -61,12 +61,16 @@ Each file category serves a specific purpose, and files are identified using 4-l
 
 ## Architecture & Design Overview
 
+- **JC Workflow Files (`.jcwf`)** — JSON-based workflow definitions that describe a DAG of tasks, their dependencies, triggers, filters, and data flow. Each task can be an `ai_call`, `shell` command, `python` script, or `internal` C++ module. Tasks with no mutual dependency run in parallel. The [JC Workflow Specification](doc/JC_Workflow_Specification.md) defines the format, path-resolution rules, and execution model.
+- **Per-item fan-out and filters** — A filter (CSV, text_lines, or Polarion query) produces a list of items. A `per_item` task spawns one AI call per item, all running in parallel. For example, a 60-position stock portfolio CSV yields 60 concurrent dividend-lookup queries, each receiving only its own row as context. This isolation improves accuracy: the AI focuses on a single item rather than parsing a large table, and every response is independently verifiable. A downstream aggregation task then consumes all 60 results via a glob pattern.
+- **Queue binding and environment assembly** — `ai_call` tasks declare inline STNG, TASK, CNTX, and PROB files. Template variables (`{{binding.field}}`) are expanded per filter item. The assembled files are written to disk and picked up by the session manager for dispatch.
+- **REST API and WebSocket** — JarvisAgent exposes a full REST API (`/api/workflows`, `/api/workflows/<id>/run`, `/api/workflows/<id>/clean`, `/api/status`, etc.) for workflow CRUD, run control, and live status. A WebSocket channel pushes real-time task-state updates to the React dashboard and workflow editor. See [doc/api-endpoints.md](doc/api-endpoints.md).
 - **Environment Files** — Files in categories STNG (Settings), CNTX (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.  
 - **Query Files (Requirement Files)** — Each represents a smaller task or requirement that is processed using the shared environment.  
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
 - **File Categorizer & Tracker** — Tracks which files belong to which category, monitors modification status, and provides content retrieval.  
 - **Binary Detection & Conversion** — Detects binary document formats (PDF, DOCX, HTML, etc.) and uses MarkItDown to convert them to Markdown before querying the AI.  
-- **CurlWrapper / REST Interface** — Handles communication with the AI provider’s API (e.g., GPT-4 and GPT-5 models) via HTTP.  
+- **CurlWrapper / REST Interface** — Handles communication with the AI provider's API (e.g., GPT-4 and GPT-5 models) via HTTP.  
 - **Thread Pool / Parallel Processing** — Configured by `maxThreads` in `config.json`; handles multiple query tasks in parallel.  
 - **JarvisAgent Application** — Orchestrates startup, event handling, file watching, categorization, and query dispatching.  
 - **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).  
@@ -327,4 +331,4 @@ Use `premake5 clean` to clean the project from build artifacts.<br>
 <br>
 <br>
 
-GPL-3.0  License © 2025 JC Technolabs
+GPL-3.0  License © 2026 JC Technolabs

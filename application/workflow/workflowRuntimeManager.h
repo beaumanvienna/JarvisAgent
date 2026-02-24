@@ -80,6 +80,11 @@ namespace AIAssistant
         // Returns true if cancellation was requested successfully for an active run.
         bool RequestCancelRun(std::string const& runId);
 
+        // Returns true if the pause/resume/stop was applied to an active run.
+        bool RequestPauseRun(std::string const& runId);
+        bool RequestResumeRun(std::string const& runId);
+        bool RequestStopRun(std::string const& runId);
+
         // Finds a run by run id across active and last-runs snapshots.
         bool TryGetRunById(std::string const& runId, WorkflowRun& outRun) const;
 
@@ -138,6 +143,8 @@ namespace AIAssistant
             std::unordered_map<std::string, std::vector<std::string>> m_PerItemChildren;
 
             bool m_CancelRequested{false};
+            bool m_PauseRequested{false};
+            bool m_StopRequested{false};
         };
 
     private:
@@ -155,6 +162,12 @@ namespace AIAssistant
 
         void DrainAiRequestCompletions();
         bool TryApplyAiCompletion(AiRequestCompletion const& completion);
+
+        // Failed-dependency propagation: skip all tasks that (transitively) depend on a failed task.
+        void SkipDownstreamOfFailed(ActiveRun& activeRun, std::string const& failedTaskId);
+
+        // Safety-net timeout for WaitingExternal tasks (in case AiRequestPool timeout didn't fire).
+        void TimeoutWaitingExternalTasks(ActiveRun& activeRun);
 
         // Per-item fan-out helpers
         FilterDef const* FindFilterDef(WorkflowDefinition const& workflowDef, std::string const& filterId) const;

@@ -121,7 +121,13 @@ namespace AIAssistant
         m_FileWatcher->Start();
 
         m_WebServer = std::make_unique<WebServer>();
-        m_WebServer->Start();
+        if (!m_WebServer->Start())
+        {
+            LOG_APP_CRITICAL("WebServer failed to start (port already in use?). Shutting down.");
+            m_FatalStartupMessage = "[FATAL] Port 8080 is already in use — is another JarvisAgent running? Exiting.";
+            m_IsFinished = true;
+            return;
+        }
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
@@ -250,6 +256,11 @@ namespace AIAssistant
 
     void JarvisAgent::OnUpdate()
     {
+        if (m_IsFinished)
+        {
+            return;
+        }
+
         // Update all session managers (state machines for REQ/STNG/TASK)
         for (auto& sessionManager : m_SessionManagers)
         {
@@ -493,9 +504,18 @@ namespace AIAssistant
         {
             m_WorkflowRuntimeManager->SignalStop();
         }
-        m_PythonEngine->SignalStop();
-        m_FileWatcher->SignalStop();
-        m_WebServer->SignalStop();
+        if (m_PythonEngine != nullptr)
+        {
+            m_PythonEngine->SignalStop();
+        }
+        if (m_FileWatcher != nullptr)
+        {
+            m_FileWatcher->SignalStop();
+        }
+        if (m_WebServer != nullptr)
+        {
+            m_WebServer->SignalStop();
+        }
         LOG_APP_INFO("[shutdown] phase 1 complete — all subsystems signalled");
 
         // ── Phase 2: wait for all subsystems (blocking, but parallel) ──────
@@ -517,14 +537,23 @@ namespace AIAssistant
         }
         LOG_APP_INFO("[shutdown] session managers stopped");
 
-        m_PythonEngine->WaitStop();
-        m_PythonEngine.reset();
+        if (m_PythonEngine != nullptr)
+        {
+            m_PythonEngine->WaitStop();
+            m_PythonEngine.reset();
+        }
         LOG_APP_INFO("[shutdown] PythonEngine stopped");
 
-        m_FileWatcher->WaitStop();
+        if (m_FileWatcher != nullptr)
+        {
+            m_FileWatcher->WaitStop();
+        }
         LOG_APP_INFO("[shutdown] FileWatcher stopped");
 
-        m_WebServer->WaitStop();
+        if (m_WebServer != nullptr)
+        {
+            m_WebServer->WaitStop();
+        }
         LOG_APP_INFO("[shutdown] WebServer stopped");
     }
 

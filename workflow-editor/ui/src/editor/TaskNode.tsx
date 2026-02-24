@@ -46,6 +46,11 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
 
   const runtimeBadge = runtimeBadgeLabel(runtimeState);
 
+  const taskInputs = props.data.task.inputs as Record<string, unknown> | undefined;
+  const taskOutputs = props.data.task.outputs as Record<string, unknown> | undefined;
+  const inputNames: string[] = taskInputs && typeof taskInputs === "object" ? Object.keys(taskInputs) : [];
+  const outputNames: string[] = taskOutputs && typeof taskOutputs === "object" ? Object.keys(taskOutputs) : [];
+
   const errorCount = errors.length;
   const warningCount = warnings.length;
   const infoCount = infos.length;
@@ -116,7 +121,18 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
       }
       title={tooltip}
     >
-      <Handle type="target" position={Position.Left} />
+      <Handle type="target" position={Position.Left} id="dep-target" />
+      {inputNames.map((name, idx) => (
+        <Handle
+          key={`in:${name}`}
+          type="target"
+          position={Position.Left}
+          id={`in:${name}`}
+          style={{ top: `${50 + (idx + 1) * 16}%` }}
+          className="dataflowHandle dataflowHandleInput"
+          title={`input: ${name}`}
+        />
+      ))}
       <div className="taskNodeBody">
         <div className="taskNodeTitle">
           {props.data.title}
@@ -132,8 +148,25 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         {firstError ? <div className="taskNodeErrorText">{firstError}{errorCount > 1 ? ` (+${errorCount - 1})` : ""}</div> : null}
         {!firstError && firstWarning ? <div className="taskNodeWarningText">{firstWarning}{warningCount > 1 ? ` (+${warningCount - 1})` : ""}</div> : null}
         {!firstError && !firstWarning && firstInfo ? <div className="taskNodeInfoText">{firstInfo}{infoCount > 1 ? ` (+${infoCount - 1})` : ""}</div> : null}
+        {(inputNames.length > 0 || outputNames.length > 0) && (
+          <div className="taskNodePorts">
+            {inputNames.length > 0 && <div className="taskNodePortList"><span className="taskNodePortLabel">in:</span> {inputNames.join(", ")}</div>}
+            {outputNames.length > 0 && <div className="taskNodePortList"><span className="taskNodePortLabel">out:</span> {outputNames.join(", ")}</div>}
+          </div>
+        )}
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="source" position={Position.Right} id="dep-source" />
+      {outputNames.map((name, idx) => (
+        <Handle
+          key={`out:${name}`}
+          type="source"
+          position={Position.Right}
+          id={`out:${name}`}
+          style={{ top: `${50 + (idx + 1) * 16}%` }}
+          className="dataflowHandle dataflowHandleOutput"
+          title={`output: ${name}`}
+        />
+      ))}
     </div>
   );
 }

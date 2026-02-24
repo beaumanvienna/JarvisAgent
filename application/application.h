@@ -36,6 +36,9 @@ namespace AIAssistant
 
         virtual bool IsFinished() const = 0;
 
-    private:
+        std::string const& GetFatalStartupMessage() const { return m_FatalStartupMessage; }
+
+    protected:
+        std::string m_FatalStartupMessage;
     };
 } // namespace AIAssistant

@@ -17,18 +17,22 @@ import "reactflow/dist/style.css";
 import TaskNode from "./TaskNode";
 import FilterNode from "./FilterNode";
 import FilterBuilderDialog from "./FilterBuilderDialog";
+import QueueBindingEditor from "./QueueBindingEditor";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
 import type { EditorGraph, EditorFilterNode, EditorFilterNodeData, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
-import type { JcwfFile, JcwfFilter, JcwfFilterSource, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
+import type { JcwfFile, JcwfFilter, JcwfFilterSource, JcwfQueueBinding, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
   cleanWorkflow,
   createWorkflowWithId,
   loadWorkflow,
+  pauseRun,
+  resumeRun,
   runWorkflow,
   saveWorkflow,
+  stopRun,
   validateDraft,
   type WorkflowValidationFinding,
 } from "../api/workflows";
@@ -225,6 +229,12 @@ export default function WorkflowEditorView(props: {
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [manualStartEnabled, setManualStartEnabled] = useState<boolean>(true);
   const [triggers, setTriggers] = useState<JcwfTrigger[]>([]);
+  const [wfLabel, setWfLabel] = useState<string>("");
+  const [wfDoc, setWfDoc] = useState<string>("");
+  const [wfBaseDirectory, setWfBaseDirectory] = useState<string>("");
+  const [wfDefaultTimeoutMs, setWfDefaultTimeoutMs] = useState<string>("");
+  const [wfDefaultAiProvider, setWfDefaultAiProvider] = useState<string>("");
+  const [wfDefaultAiModel, setWfDefaultAiModel] = useState<string>("");
   const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
   const [createModalMode, setCreateModalMode] = useState<"create" | "saveAs">("create");
 
@@ -729,6 +739,14 @@ export default function WorkflowEditorView(props: {
     setLoadedWorkflowId(workflowId);
     setManualStartEnabled(jcwf.manual_start !== false);
     setTriggers(Array.isArray(jcwf.triggers) ? jcwf.triggers : []);
+    setWfLabel(typeof jcwf.label === "string" ? jcwf.label : "");
+    setWfDoc(Array.isArray(jcwf.doc) ? jcwf.doc.join("\n") : (typeof jcwf.doc === "string" ? jcwf.doc : ""));
+    setWfBaseDirectory(typeof jcwf.base_directory === "string" ? (jcwf.base_directory as string) : "");
+    const defaults = (jcwf as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
+    setWfDefaultTimeoutMs(defaults?.timeout_ms !== undefined ? String(defaults.timeout_ms) : "");
+    const ai = defaults?.ai as Record<string, unknown> | undefined;
+    setWfDefaultAiProvider(typeof ai?.provider === "string" ? ai.provider : "");
+    setWfDefaultAiModel(typeof ai?.model === "string" ? ai.model : "");
     setBackendErrors([]);
     setBackendWarnings([]);
     setBackendInfos([]);
@@ -1167,11 +1185,33 @@ export default function WorkflowEditorView(props: {
   }, [selectedEdgeIds, edges, nodes, setEdges, recomputeValidation]);
 
   const onConnect = useCallback((connection: Connection) => {
-    // Create an edge and immediately validate DAG.
-    const nextEdges = addEdge(
-      { ...connection, type: "default" },
-      edges
-    ) as EditorTaskEdge[];
+    const isDataflow = connection.sourceHandle?.startsWith("out:") && connection.targetHandle?.startsWith("in:");
+
+    let nextEdges: EditorTaskEdge[];
+    if (isDataflow)
+    {
+      const fromOutput = connection.sourceHandle!.slice(4);
+      const toInput = connection.targetHandle!.slice(3);
+      const dfEdge: EditorTaskEdge = {
+        id: `df:${connection.source}.${fromOutput}->${connection.target}.${toInput}`,
+        source: connection.source!,
+        target: connection.target!,
+        sourceHandle: connection.sourceHandle,
+        targetHandle: connection.targetHandle,
+        type: "default",
+        style: { strokeDasharray: "5 4", stroke: "rgba(100, 210, 180, 0.7)" },
+        label: `${fromOutput} → ${toInput}`,
+        labelStyle: { fill: "rgba(100, 210, 180, 0.85)", fontSize: 10 },
+      };
+      nextEdges = [...edges, dfEdge] as EditorTaskEdge[];
+    }
+    else
+    {
+      nextEdges = addEdge(
+        { ...connection, type: "default" },
+        edges
+      ) as EditorTaskEdge[];
+    }
 
     const graph: EditorGraph = {
       nodes: nodes as EditorTaskNode[],
@@ -1189,7 +1229,7 @@ export default function WorkflowEditorView(props: {
     }
 
     recomputeValidation({ nodes: graph.nodes, edges: nextEdges });
-    setStatusText("Edge added.");
+    setStatusText(isDataflow ? "Dataflow edge added." : "Edge added.");
     setErrorText(null);
   }, [nodes, edges, recomputeValidation]);
 
@@ -1416,8 +1456,28 @@ export default function WorkflowEditorView(props: {
       delete merged.manual_start;
     }
 
+    if (wfLabel.length > 0) { merged.label = wfLabel; } else { delete merged.label; }
+    const docValue = wfDoc.length > 0 ? (wfDoc.includes("\n") ? wfDoc.split("\n") : wfDoc) : undefined;
+    if (docValue) { merged.doc = docValue; } else { delete merged.doc; }
+    if (wfBaseDirectory.length > 0) { (merged as Record<string, unknown>).base_directory = wfBaseDirectory; } else { delete (merged as Record<string, unknown>).base_directory; }
+
+    const timeoutNum = wfDefaultTimeoutMs.length > 0 ? Number(wfDefaultTimeoutMs) : undefined;
+    if (timeoutNum !== undefined || wfDefaultAiProvider.length > 0 || wfDefaultAiModel.length > 0)
+    {
+      const defs: Record<string, unknown> = { ...((merged as Record<string, unknown>).defaults as Record<string, unknown> ?? {}) };
+      if (timeoutNum !== undefined && !isNaN(timeoutNum)) { defs.timeout_ms = timeoutNum; }
+      if (wfDefaultAiProvider.length > 0 || wfDefaultAiModel.length > 0)
+      {
+        const ai: Record<string, unknown> = { ...(defs.ai as Record<string, unknown> ?? {}) };
+        if (wfDefaultAiProvider.length > 0) { ai.provider = wfDefaultAiProvider; } else { delete ai.provider; }
+        if (wfDefaultAiModel.length > 0) { ai.model = wfDefaultAiModel; } else { delete ai.model; }
+        defs.ai = Object.keys(ai).length > 0 ? ai : undefined;
+      }
+      (merged as Record<string, unknown>).defaults = defs;
+    }
+
     return merged;
-  }, [nodes, edges, loadedWorkflowId, props.workflowId, triggers, manualStartEnabled]);
+  }, [nodes, edges, loadedWorkflowId, props.workflowId, triggers, manualStartEnabled, wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel]);
 
   const notifyPersisted = useCallback((event: WorkflowPersistEvent) => {
     if (props.onWorkflowPersisted)
@@ -1641,7 +1701,7 @@ export default function WorkflowEditorView(props: {
 
     try
     {
-      setStatusText("Cancelling run…");
+      setStatusText("Cancelling run\u2026");
       setErrorText(null);
       const result = await cancelRun(selectedRunId);
       setStatusText(result.ok ? `Cancel requested for ${selectedRunId}.` : "Cancel returned ok=false.");
@@ -1650,6 +1710,57 @@ export default function WorkflowEditorView(props: {
     {
       const message = e instanceof Error ? e.message : String(e);
       setErrorText(`Cancel failed: ${message}`);
+      setStatusText("");
+    }
+  }, [selectedRunId]);
+
+  const onPauseRun = useCallback(async () => {
+    if (!selectedRunId) { return; }
+    try
+    {
+      setStatusText("Pausing run\u2026");
+      setErrorText(null);
+      const result = await pauseRun(selectedRunId);
+      setStatusText(result.ok ? `Paused ${selectedRunId}.` : "Pause returned ok=false.");
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Pause failed: ${message}`);
+      setStatusText("");
+    }
+  }, [selectedRunId]);
+
+  const onResumeRun = useCallback(async () => {
+    if (!selectedRunId) { return; }
+    try
+    {
+      setStatusText("Resuming run\u2026");
+      setErrorText(null);
+      const result = await resumeRun(selectedRunId);
+      setStatusText(result.ok ? `Resumed ${selectedRunId}.` : "Resume returned ok=false.");
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Resume failed: ${message}`);
+      setStatusText("");
+    }
+  }, [selectedRunId]);
+
+  const onStopRun = useCallback(async () => {
+    if (!selectedRunId) { return; }
+    try
+    {
+      setStatusText("Stopping run\u2026");
+      setErrorText(null);
+      const result = await stopRun(selectedRunId);
+      setStatusText(result.ok ? `Stop requested for ${selectedRunId}.` : "Stop returned ok=false.");
+    }
+    catch (e)
+    {
+      const message = e instanceof Error ? e.message : String(e);
+      setErrorText(`Stop failed: ${message}`);
       setStatusText("");
     }
   }, [selectedRunId]);
@@ -1856,6 +1967,34 @@ export default function WorkflowEditorView(props: {
             {isDirty ? <span className="dirtyBadge">unsaved</span> : null}
           </div>
 
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+            <label className="field">
+              <div className="small">label</div>
+              <input className="input" style={{ fontSize: 12, padding: "4px 8px" }} value={wfLabel} onChange={(e) => { setWfLabel(e.target.value); setIsDirty(true); }} placeholder="Workflow label" />
+            </label>
+            <label className="field">
+              <div className="small">doc</div>
+              <textarea className="input" style={{ fontSize: 12, padding: "4px 8px" }} value={wfDoc} onChange={(e) => { setWfDoc(e.target.value); setIsDirty(true); }} placeholder="Workflow description" rows={3} />
+            </label>
+            <label className="field">
+              <div className="small">base_directory</div>
+              <input className="input" style={{ fontSize: 12, padding: "4px 8px" }} value={wfBaseDirectory} onChange={(e) => { setWfBaseDirectory(e.target.value); setIsDirty(true); }} placeholder="(optional)" />
+            </label>
+            <div style={{ fontWeight: 600, fontSize: 11, opacity: 0.7, marginTop: 4 }}>defaults</div>
+            <label className="field">
+              <div className="small">timeout_ms</div>
+              <input className="input" style={{ fontSize: 12, padding: "4px 8px" }} type="number" value={wfDefaultTimeoutMs} onChange={(e) => { setWfDefaultTimeoutMs(e.target.value); setIsDirty(true); }} placeholder="(ms)" />
+            </label>
+            <label className="field">
+              <div className="small">ai.provider</div>
+              <input className="input" style={{ fontSize: 12, padding: "4px 8px" }} value={wfDefaultAiProvider} onChange={(e) => { setWfDefaultAiProvider(e.target.value); setIsDirty(true); }} placeholder="e.g. openai" />
+            </label>
+            <label className="field">
+              <div className="small">ai.model</div>
+              <input className="input" style={{ fontSize: 12, padding: "4px 8px" }} value={wfDefaultAiModel} onChange={(e) => { setWfDefaultAiModel(e.target.value); setIsDirty(true); }} placeholder="e.g. gpt-4.1-mini" />
+            </label>
+          </div>
+
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn" type="button" onClick={undo} disabled={undoStack.length === 0} title="Undo (Ctrl+Z)">
@@ -2051,14 +2190,12 @@ export default function WorkflowEditorView(props: {
             ? (
               <div style={{ marginTop: 10 }}>
                 <div className="small">Selected: <code>{selectedRunId}</code></div>
-                <button
-                  className="btn"
-                  type="button"
-                  onClick={onCancelRun}
-                  style={{ marginTop: 6 }}
-                >
-                  Cancel Run
-                </button>
+                <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                  <button className="btn" type="button" onClick={onStopRun} style={{ color: "#ff8a8a" }}>Stop</button>
+                  <button className="btn" type="button" onClick={onPauseRun}>Pause</button>
+                  <button className="btn" type="button" onClick={onResumeRun}>Resume</button>
+                  <button className="btn" type="button" onClick={onCancelRun} style={{ color: "#ff6060", fontSize: 11 }}>Cancel</button>
+                </div>
               </div>
             )
             : null}
@@ -2213,6 +2350,62 @@ export default function WorkflowEditorView(props: {
                     />
                   </label>
 
+                  {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python") && (
+                    <div className="field">
+                      <div className="small">file_inputs</div>
+                      {(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []).map((fi, idx) => (
+                        <div key={`fi-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <input
+                            className="input"
+                            style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
+                            value={fi}
+                            onChange={(e) => {
+                              const list = [...(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [])];
+                              list[idx] = e.target.value;
+                              updateSelectedTaskField({ file_inputs: list } as Partial<JcwfTask>);
+                            }}
+                          />
+                          <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                            const list = (Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []).filter((_, i) => i !== idx);
+                            updateSelectedTaskField({ file_inputs: list.length > 0 ? list : undefined } as Partial<JcwfTask>);
+                          }}>x</button>
+                        </div>
+                      ))}
+                      <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                        const list = [...(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []), ""];
+                        updateSelectedTaskField({ file_inputs: list } as Partial<JcwfTask>);
+                      }}>+ file_input</button>
+                    </div>
+                  )}
+
+                  {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python") && (
+                    <div className="field">
+                      <div className="small">file_outputs</div>
+                      {(Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : []).map((fo, idx) => (
+                        <div key={`fo-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <input
+                            className="input"
+                            style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
+                            value={fo}
+                            onChange={(e) => {
+                              const list = [...(Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : [])];
+                              list[idx] = e.target.value;
+                              updateSelectedTaskField({ file_outputs: list } as Partial<JcwfTask>);
+                            }}
+                          />
+                          <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                            const list = (Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : []).filter((_, i) => i !== idx);
+                            updateSelectedTaskField({ file_outputs: list.length > 0 ? list : undefined } as Partial<JcwfTask>);
+                          }}>x</button>
+                        </div>
+                      ))}
+                      <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                        const list = [...(Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : []), ""];
+                        updateSelectedTaskField({ file_outputs: list } as Partial<JcwfTask>);
+                      }}>+ file_output</button>
+                    </div>
+                  )}
+
                   <label className="field">
                     <div className="small">doc</div>
                     <textarea
@@ -2244,6 +2437,95 @@ export default function WorkflowEditorView(props: {
                       rows={8}
                     />
                   </label>
+
+                  <label className="field">
+                    <div className="small">timeout_ms</div>
+                    <input
+                      className="input"
+                      type="number"
+                      style={{ fontSize: 12, padding: "4px 8px" }}
+                      value={selectedNode.data.task.timeout_ms !== undefined ? String(selectedNode.data.task.timeout_ms) : ""}
+                      onChange={(e) => {
+                        const val = e.target.value.length > 0 ? Number(e.target.value) : undefined;
+                        updateSelectedTaskField({ timeout_ms: val } as Partial<JcwfTask>);
+                      }}
+                      placeholder="(inherits workflow default)"
+                    />
+                  </label>
+
+                  {selectedNode.data.task.type === "ai_call" && (
+                    <QueueBindingEditor
+                      queueBinding={selectedNode.data.task.queue_binding as JcwfQueueBinding | undefined}
+                      onChange={(binding) => { updateSelectedTaskField({ queue_binding: binding } as Partial<JcwfTask>); }}
+                    />
+                  )}
+
+                  <div className="field">
+                    <div className="small" style={{ fontWeight: 600 }}>inputs</div>
+                    {Object.entries((selectedNode.data.task.inputs as Record<string, Record<string, unknown>> | undefined) ?? {}).map(([name, slot]) => (
+                      <div key={`in-${name}`} style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+                        <input className="input" style={{ fontSize: 11, padding: "3px 6px", width: 80 }} value={name} readOnly title="Input name (edit via rename)" />
+                        <select className="input" style={{ fontSize: 11, padding: "3px 4px", width: 72 }} value={(slot.type as string) ?? "string"} onChange={(e) => {
+                          const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
+                          inputs[name] = { ...inputs[name], type: e.target.value };
+                          updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
+                        }}>
+                          <option value="string">string</option>
+                          <option value="object">object</option>
+                          <option value="number">number</option>
+                        </select>
+                        <label style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 3 }}>
+                          <input type="checkbox" checked={slot.required === true} onChange={(e) => {
+                            const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
+                            inputs[name] = { ...inputs[name], required: e.target.checked || undefined };
+                            updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
+                          }} />req
+                        </label>
+                        <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                          const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
+                          delete inputs[name];
+                          updateSelectedTaskField({ inputs: Object.keys(inputs).length > 0 ? inputs : undefined } as Partial<JcwfTask>);
+                        }}>x</button>
+                      </div>
+                    ))}
+                    <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                      const inputs = { ...((selectedNode.data.task.inputs as Record<string, Record<string, unknown>>) ?? {}) };
+                      let idx = Object.keys(inputs).length + 1;
+                      while (inputs[`input_${idx}`]) { idx++; }
+                      inputs[`input_${idx}`] = { type: "string" };
+                      updateSelectedTaskField({ inputs } as Partial<JcwfTask>);
+                    }}>+ input</button>
+                  </div>
+
+                  <div className="field">
+                    <div className="small" style={{ fontWeight: 600 }}>outputs</div>
+                    {Object.entries((selectedNode.data.task.outputs as Record<string, Record<string, unknown>> | undefined) ?? {}).map(([name, slot]) => (
+                      <div key={`out-${name}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input className="input" style={{ fontSize: 11, padding: "3px 6px", width: 80 }} value={name} readOnly title="Output name (edit via rename)" />
+                        <select className="input" style={{ fontSize: 11, padding: "3px 4px", width: 72 }} value={(slot.type as string) ?? "string"} onChange={(e) => {
+                          const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
+                          outputs[name] = { ...outputs[name], type: e.target.value };
+                          updateSelectedTaskField({ outputs } as Partial<JcwfTask>);
+                        }}>
+                          <option value="string">string</option>
+                          <option value="object">object</option>
+                          <option value="number">number</option>
+                        </select>
+                        <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                          const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
+                          delete outputs[name];
+                          updateSelectedTaskField({ outputs: Object.keys(outputs).length > 0 ? outputs : undefined } as Partial<JcwfTask>);
+                        }}>x</button>
+                      </div>
+                    ))}
+                    <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                      const outputs = { ...((selectedNode.data.task.outputs as Record<string, Record<string, unknown>>) ?? {}) };
+                      let idx = Object.keys(outputs).length + 1;
+                      while (outputs[`output_${idx}`]) { idx++; }
+                      outputs[`output_${idx}`] = { type: "string" };
+                      updateSelectedTaskField({ outputs } as Partial<JcwfTask>);
+                    }}>+ output</button>
+                  </div>
 
                   {selectedNode.data.validationErrors && selectedNode.data.validationErrors.length > 0
                     ? (

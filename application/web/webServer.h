@@ -39,7 +39,7 @@ namespace AIAssistant
         WebServer();
         ~WebServer();
 
-        void Start();
+        bool Start();
         void Stop();
         void SignalStop();
         void WaitStop();
@@ -88,6 +88,9 @@ namespace AIAssistant
         crow::response HandleWorkflowRunsLastGet();
         crow::response HandleWorkflowRunGet(std::string const& runId);
         crow::response HandleWorkflowRunCancelPost(std::string const& runId);
+        crow::response HandleWorkflowRunPausePost(std::string const& runId);
+        crow::response HandleWorkflowRunResumePost(std::string const& runId);
+        crow::response HandleWorkflowRunStopPost(std::string const& runId);
 
         // Integrations: n8n
         crow::response HandleN8nStartPost(crow::request const& req);

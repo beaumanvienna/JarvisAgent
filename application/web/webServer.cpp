@@ -30,6 +30,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
 #include "simdjson/simdjson.h"
 
 #include "core.h"
@@ -354,6 +357,10 @@ namespace AIAssistant
                     return "pending";
                 case WorkflowRunState::Running:
                     return "running";
+                case WorkflowRunState::Paused:
+                    return "paused";
+                case WorkflowRunState::Stopping:
+                    return "stopping";
                 case WorkflowRunState::Succeeded:
                     return "succeeded";
                 case WorkflowRunState::Failed:
@@ -840,6 +847,15 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
             .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunCancelPost(runId); });
+
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/pause")
+            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunPausePost(runId); });
+
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/resume")
+            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunResumePost(runId); });
+
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/stop")
+            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunStopPost(runId); });
 
         // ---- Integrations: n8n ----
         CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
@@ -1745,6 +1761,115 @@ namespace AIAssistant
         return MakeJsonResponse(202, responseJson);
     }
 
+    crow::response WebServer::HandleWorkflowRunPausePost(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return MakeWorkflowJsonError(400, "invalid_run_id", "Run id is empty", "POST /api/workflow-runs/{runId}/pause");
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "POST /api/workflow-runs/{runId}/pause", runId);
+        }
+
+        bool const ok = workflowRuntimeManager->RequestPauseRun(runId);
+        if (!ok)
+        {
+            return MakeWorkflowJsonError(404, "run_not_found",
+                                         "Run not found, not active, or already cancelled/stopped: " + runId,
+                                         "POST /api/workflow-runs/{runId}/pause", runId);
+        }
+
+        BroadcastWorkflowRunsSnapshot();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["paused"] = true;
+        responseJson["runId"] = runId;
+
+        return MakeJsonResponse(202, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowRunResumePost(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return MakeWorkflowJsonError(400, "invalid_run_id", "Run id is empty", "POST /api/workflow-runs/{runId}/resume");
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "POST /api/workflow-runs/{runId}/resume", runId);
+        }
+
+        bool const ok = workflowRuntimeManager->RequestResumeRun(runId);
+        if (!ok)
+        {
+            return MakeWorkflowJsonError(404, "run_not_found", "Run not found, not active, or not paused: " + runId,
+                                         "POST /api/workflow-runs/{runId}/resume", runId);
+        }
+
+        BroadcastWorkflowRunsSnapshot();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["resumed"] = true;
+        responseJson["runId"] = runId;
+
+        return MakeJsonResponse(202, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowRunStopPost(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return MakeWorkflowJsonError(400, "invalid_run_id", "Run id is empty", "POST /api/workflow-runs/{runId}/stop");
+        }
+
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured on web server",
+                                         "POST /api/workflow-runs/{runId}/stop", runId);
+        }
+
+        bool const ok = workflowRuntimeManager->RequestStopRun(runId);
+        if (!ok)
+        {
+            return MakeWorkflowJsonError(404, "run_not_found", "Run not found, not active, or already cancelled: " + runId,
+                                         "POST /api/workflow-runs/{runId}/stop", runId);
+        }
+
+        BroadcastWorkflowRunsSnapshot();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["stopRequested"] = true;
+        responseJson["runId"] = runId;
+
+        return MakeJsonResponse(202, responseJson);
+    }
+
     crow::response WebServer::HandleN8nStartPost(crow::request const& req)
     {
         // Expected body:
@@ -2068,11 +2193,40 @@ namespace AIAssistant
                 });
     }
 
-    void WebServer::Start()
+    bool WebServer::Start()
     {
         if (m_Running)
         {
-            return;
+            return true;
+        }
+
+        // Pre-test port availability to detect a second JA instance.
+        {
+            int const testSocket = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (testSocket < 0)
+            {
+                LOG_APP_CRITICAL("[web] Failed to create test socket — cannot verify port availability");
+                return false;
+            }
+
+            int opt = 1;
+            ::setsockopt(testSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+            struct sockaddr_in addr
+            {
+            };
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = INADDR_ANY;
+            addr.sin_port = htons(8080);
+
+            bool const portAvailable = (::bind(testSocket, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
+            ::close(testSocket);
+
+            if (!portAvailable)
+            {
+                LOG_APP_CRITICAL("[web] Port 8080 is already in use — is another JarvisAgent running? Exiting.");
+                return false;
+            }
         }
 
         m_Running = true;
@@ -2082,6 +2236,8 @@ namespace AIAssistant
                 LOG_APP_INFO("Crow web server started at http://localhost:8080");
                 m_Server.port(8080).multithreaded().signal_clear().run();
             });
+
+        return true;
     }
 
     void WebServer::Stop()

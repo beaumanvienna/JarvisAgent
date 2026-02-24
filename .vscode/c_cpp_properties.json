@@ -2,32 +2,41 @@
     "configurations": [
         {
             "name": "conf1",
-            "includePath":
-            [
-                "application",
-                "engine",
-                "vendor",
-                "vendor/spdlog/include",
-                "vendor/curl/include",
-				"vendor/thread-pool/include",
-				"vendor/tracy/include",
-				"vendor/openssl",
-				"vendor/openssl/include",
-				"vendor/openssl/providers/common/include",
-				"vendor/openssl/providers/implementations/include",
-				"vendor/openssl/providers/fips/include",
-				"vendor/openssl/engines",
-				"vendor/crow/include/crow",
-				"vendor/asio/asio/include",
-                "/usr/include/python3.12/"
+            "compilerPath": "/usr/bin/g++",
+            "includePath": [
+                "${workspaceFolder}/application",
+                "${workspaceFolder}/engine",
+                "${workspaceFolder}/vendor",
+                "${workspaceFolder}/vendor/spdlog/include",
+                "${workspaceFolder}/vendor/curl/include",
+                "${workspaceFolder}/vendor/thread-pool/include",
+                "${workspaceFolder}/vendor/tracy/include",
+                "${workspaceFolder}/vendor/openssl",
+                "${workspaceFolder}/vendor/openssl/include",
+                "${workspaceFolder}/vendor/openssl/providers/common/include",
+                "${workspaceFolder}/vendor/openssl/providers/implementations/include",
+                "${workspaceFolder}/vendor/openssl/providers/fips/include",
+                "${workspaceFolder}/vendor/openssl/engines",
+                "${workspaceFolder}/vendor/crow/include/crow",
+                "${workspaceFolder}/vendor/asio/asio/include",
+                "${workspaceFolder}/vendor/pdcursesmod",
+                "${workspaceFolder}/vendor/date/include",
+                "/usr/include/python3.12/",
+                "/usr/include/c++/13",
+                "/usr/include/x86_64-linux-gnu/c++/13",
+                "/usr/include/c++/13/backward",
+                "/usr/lib/gcc/x86_64-linux-gnu/13/include",
+                "/usr/local/include",
+                "/usr/include/x86_64-linux-gnu",
+                "/usr/include"
             ],
-            "defines": 
-            [
+            "defines": [
                 "ZoneScopedNC(x,y)",
                 "ZoneScopedN(x)",
                 "ZoneTransientN(x, y, z)",
-				"JARVIS_AGENT_VERSION"
-			],
+                "JARVIS_AGENT_VERSION"
+            ],
+            "compileCommands": "${workspaceFolder}/compile_commands.json",
             "cStandard": "c17",
             "cppStandard": "c++20",
             "intelliSenseMode": "linux-gcc-x64"

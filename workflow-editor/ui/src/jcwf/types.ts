@@ -55,6 +55,25 @@ export type JcwfTask = {
   [key: string]: unknown;
 };
 
+export type JcwfDataflowEntry = {
+  from_task: string;
+  from_output: string;
+  to_task: string;
+  to_input: string;
+};
+
+export type JcwfQueueFileEntry = {
+  path: string;
+  content: string;
+};
+
+export type JcwfQueueBinding = {
+  stng_files?: (JcwfQueueFileEntry | string)[];
+  task_files?: (JcwfQueueFileEntry | string)[];
+  cntx_files?: (JcwfQueueFileEntry | string)[];
+  prob_files?: (JcwfQueueFileEntry | string)[];
+};
+
 export type JcwfFile = {
   version: JcwfVersion;
   id: string;

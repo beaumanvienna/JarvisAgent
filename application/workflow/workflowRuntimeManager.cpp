@@ -279,8 +279,42 @@ namespace AIAssistant
             }
         }
 
+        // Clean up WaitingExternal tasks before clearing active runs.
+        // During shutdown, Update() no longer runs, so these would never be resolved.
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+            JarvisAgent* app = App::g_App;
+            AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+
+            for (auto& activeRun : m_ActiveRuns)
+            {
+                for (auto& [taskId, taskState] : activeRun.m_Run.m_TaskStates)
+                {
+                    if (taskState.m_State != TaskInstanceStateKind::WaitingExternal)
+                    {
+                        continue;
+                    }
+
+                    if (requestPool != nullptr)
+                    {
+                        AiRequestHandle requestHandle{};
+                        requestHandle.requestId = taskState.m_ExternalRequestId;
+                        requestHandle.requestTimestampNs = taskState.m_ExternalRequestTimestampNs;
+
+                        if (requestHandle.IsValid())
+                        {
+                            requestPool->Forget(requestHandle);
+                        }
+                    }
+
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastErrorMessage = "shutdown: WaitingExternal task aborted";
+
+                    LOG_APP_INFO("[shutdown] failed WaitingExternal task '{}' in run '{}'", taskId, activeRun.m_Run.m_RunId);
+                }
+            }
+
             m_ActiveRuns.clear();
             m_DeferredAiCompletions.clear();
         }
@@ -497,6 +531,7 @@ namespace AIAssistant
                 else
                 {
                     activeRun.m_Run.m_HasFailed = true;
+                    SkipDownstreamOfFailed(activeRun, completion.m_TaskId);
                 }
             }
             else
@@ -747,6 +782,7 @@ namespace AIAssistant
                         !TryScheduleRetry(stateIterator->second, defIt->second, iterator->first, workflowRun.m_RunId))
                     {
                         workflowRun.m_HasFailed = true;
+                        SkipDownstreamOfFailed(activeRun, iterator->first);
                     }
                 }
                 else
@@ -766,6 +802,12 @@ namespace AIAssistant
                     if (currentState != TaskInstanceStateKind::Succeeded && currentState != TaskInstanceStateKind::Failed)
                     {
                         stateIterator->second = result.m_TaskState;
+
+                        if (result.m_TaskState.m_State == TaskInstanceStateKind::WaitingExternal &&
+                            stateIterator->second.m_WaitingExternalSince == std::chrono::steady_clock::time_point{})
+                        {
+                            stateIterator->second.m_WaitingExternalSince = std::chrono::steady_clock::now();
+                        }
                     }
                 }
 
@@ -795,6 +837,7 @@ namespace AIAssistant
                     else
                     {
                         workflowRun.m_HasFailed = true;
+                        SkipDownstreamOfFailed(activeRun, result.m_TaskId);
                     }
                 }
             }
@@ -866,6 +909,48 @@ namespace AIAssistant
                 workflowRun.m_IsCompleted = true;
                 return;
             }
+        }
+
+        // ---------------------------------------------------------
+        // Pause gate: skip dispatch entirely while paused.
+        // In-flight tasks continue to run and are harvested above.
+        // ---------------------------------------------------------
+        if (activeRun.m_PauseRequested)
+        {
+            return;
+        }
+
+        // ---------------------------------------------------------
+        // Stop gate: let in-flight tasks finish, then complete the run.
+        // No new tasks are dispatched.
+        // ---------------------------------------------------------
+        if (activeRun.m_StopRequested)
+        {
+            if (activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty())
+            {
+                for (auto& taskPair : workflowRun.m_TaskStates)
+                {
+                    TaskInstanceState& taskState = taskPair.second;
+                    if (taskState.m_State == TaskInstanceStateKind::Pending ||
+                        taskState.m_State == TaskInstanceStateKind::Ready)
+                    {
+                        taskState.m_State = TaskInstanceStateKind::Skipped;
+                        if (taskState.m_LastErrorMessage.empty())
+                        {
+                            taskState.m_LastErrorMessage = "stopped";
+                        }
+                    }
+                }
+
+                workflowRun.m_State = workflowRun.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
+                workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                workflowRun.m_IsCompleted = true;
+                LOG_APP_INFO("[workflow] run '{}' stopped (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
+                return;
+            }
+
+            // Still have in-flight tasks — don't dispatch new ones, just return.
+            return;
         }
 
         // ---------------------------------------------------------
@@ -1035,6 +1120,11 @@ namespace AIAssistant
             return;
         }
 
+        // Safety-net: fail WaitingExternal tasks that exceeded their timeout.
+        // This runs every tick, before the deadlock detector, so timed-out tasks
+        // don't mask a real deadlock by keeping hasWaitingExternal == true.
+        TimeoutWaitingExternalTasks(activeRun);
+
         if (!dispatchedAny && activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty())
         {
             bool hasWaitingExternal = false;
@@ -1084,6 +1174,120 @@ namespace AIAssistant
         }
 
         return true;
+    }
+
+    void WorkflowRuntimeManager::SkipDownstreamOfFailed(ActiveRun& activeRun, std::string const& failedTaskId)
+    {
+        WorkflowRun& workflowRun = activeRun.m_Run;
+        WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
+
+        // BFS: collect all tasks that transitively depend on the failed task.
+        std::vector<std::string> queue;
+        queue.push_back(failedTaskId);
+
+        while (!queue.empty())
+        {
+            std::string const current = std::move(queue.back());
+            queue.pop_back();
+
+            // Find every task whose depends_on references `current` (by parent id).
+            for (auto const& [taskId, taskDef] : workflowDefinition.m_Tasks)
+            {
+                for (std::string const& dep : taskDef.m_DependsOn)
+                {
+                    if (dep != ParentTaskId(current))
+                    {
+                        continue;
+                    }
+
+                    // Skip all instances of this task (single-mode: taskId, per-item: taskId#k).
+                    for (auto& [instanceId, taskState] : workflowRun.m_TaskStates)
+                    {
+                        if (ParentTaskId(instanceId) != taskId)
+                        {
+                            continue;
+                        }
+
+                        if (taskState.m_State == TaskInstanceStateKind::Pending ||
+                            taskState.m_State == TaskInstanceStateKind::Ready)
+                        {
+                            taskState.m_State = TaskInstanceStateKind::Skipped;
+                            taskState.m_LastErrorMessage = "skipped: upstream task '" + failedTaskId + "' failed";
+                            taskState.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                            queue.push_back(instanceId);
+
+                            LOG_APP_INFO("[workflow] skipping '{}' in run '{}': upstream '{}' failed", instanceId,
+                                         workflowRun.m_RunId, failedTaskId);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void WorkflowRuntimeManager::TimeoutWaitingExternalTasks(ActiveRun& activeRun)
+    {
+        static constexpr uint64_t kDefaultWaitingExternalTimeoutMs = 300000; // 5 minutes (matches AiRequestPool)
+
+        WorkflowRun& workflowRun = activeRun.m_Run;
+        WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
+        auto const now = std::chrono::steady_clock::now();
+
+        JarvisAgent* app = App::g_App;
+        AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+
+        for (auto& [taskId, taskState] : workflowRun.m_TaskStates)
+        {
+            if (taskState.m_State != TaskInstanceStateKind::WaitingExternal)
+            {
+                continue;
+            }
+
+            if (taskState.m_WaitingExternalSince == std::chrono::steady_clock::time_point{})
+            {
+                continue;
+            }
+
+            // Look up task-level timeout; fall back to default.
+            std::string const parentId = ParentTaskId(taskId);
+            auto defIt = workflowDefinition.m_Tasks.find(parentId);
+            uint64_t const timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
+                                           ? defIt->second.m_TimeoutMs
+                                           : kDefaultWaitingExternalTimeoutMs;
+
+            auto const elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - taskState.m_WaitingExternalSince).count();
+
+            if (static_cast<uint64_t>(elapsed) < timeoutMs)
+            {
+                continue;
+            }
+
+            LOG_APP_WARN("[workflow] WaitingExternal timeout for task '{}' in run '{}' ({}ms elapsed, limit {}ms)", taskId,
+                         workflowRun.m_RunId, elapsed, timeoutMs);
+
+            // Forget the AI request so the pool doesn't keep waiting.
+            if (requestPool != nullptr)
+            {
+                AiRequestHandle requestHandle{};
+                requestHandle.requestId = taskState.m_ExternalRequestId;
+                requestHandle.requestTimestampNs = taskState.m_ExternalRequestTimestampNs;
+
+                if (requestHandle.IsValid())
+                {
+                    requestPool->Forget(requestHandle);
+                }
+            }
+
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "WaitingExternal timed out after " + std::to_string(elapsed) + "ms";
+            taskState.m_CompletedAtIso8601 = GetIso8601NowUTC();
+
+            workflowRun.m_HasFailed = true;
+
+            // Propagate failure to downstream tasks.
+            SkipDownstreamOfFailed(activeRun, taskId);
+        }
     }
 
     WorkflowRuntimeManager::TaskExecutionResult
@@ -1265,6 +1469,88 @@ namespace AIAssistant
             if (activeRun.m_Run.m_RunId == runId)
             {
                 activeRun.m_CancelRequested = true;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool WorkflowRuntimeManager::RequestPauseRun(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return false;
+        }
+
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        for (ActiveRun& activeRun : m_ActiveRuns)
+        {
+            if (activeRun.m_Run.m_RunId == runId)
+            {
+                if (activeRun.m_CancelRequested || activeRun.m_StopRequested)
+                {
+                    return false;
+                }
+                activeRun.m_PauseRequested = true;
+                activeRun.m_Run.m_State = WorkflowRunState::Paused;
+                LOG_APP_INFO("[workflow] pause requested for run '{}'", runId);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool WorkflowRuntimeManager::RequestResumeRun(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return false;
+        }
+
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        for (ActiveRun& activeRun : m_ActiveRuns)
+        {
+            if (activeRun.m_Run.m_RunId == runId)
+            {
+                if (!activeRun.m_PauseRequested)
+                {
+                    return false;
+                }
+                activeRun.m_PauseRequested = false;
+                activeRun.m_Run.m_State = WorkflowRunState::Running;
+                LOG_APP_INFO("[workflow] resume requested for run '{}'", runId);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool WorkflowRuntimeManager::RequestStopRun(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return false;
+        }
+
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        for (ActiveRun& activeRun : m_ActiveRuns)
+        {
+            if (activeRun.m_Run.m_RunId == runId)
+            {
+                if (activeRun.m_CancelRequested)
+                {
+                    return false;
+                }
+                activeRun.m_StopRequested = true;
+                activeRun.m_PauseRequested = false;
+                activeRun.m_Run.m_State = WorkflowRunState::Stopping;
+                LOG_APP_INFO("[workflow] stop requested for run '{}'", runId);
                 return true;
             }
         }

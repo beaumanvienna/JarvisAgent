@@ -209,6 +209,12 @@ int engine(int argc, char* argv[])
     app->OnShutdown();
     engine->Shutdown();
 
+    // Print fatal startup message after curses teardown so it's visible on the terminal.
+    if (!app->GetFatalStartupMessage().empty())
+    {
+        std::cerr << "\n" << app->GetFatalStartupMessage() << "\n" << std::endl;
+    }
+
     // diffuse the watchdog
     {
         std::lock_guard<std::mutex> lock(watchdogMutex);

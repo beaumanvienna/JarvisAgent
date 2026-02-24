@@ -79,6 +79,70 @@ Last reviewed: Feb 2026
 
 ---
 
+## Bug: JA hangs on shutdown when cleaning auto-triggered workflows
+
+**Repro:** Start JA with all 9 test JCWF files in `workflows/`. Before the auto-triggered
+workflows finish, request clean via the Python test runner (`run_tests.py`). JA times out
+on all JCWFs and hangs on shutdown (never exits cleanly).
+
+**Suspected cause:** The clean endpoint returns 409 when a workflow is running, but the
+combination of multiple concurrent auto-triggered runs timing out may deadlock the
+shutdown sequence (two-phase parallel subsystem shutdown + 6s watchdog safety net).
+
+**Root causes found (3) and fixed:**
+
+1. **WaitingExternal tasks never timed out in the runtime manager** — the `AiRequestPool` had its
+   own timeout, but the deadlock detector gave a free pass to any run with `WaitingExternal` tasks,
+   masking the real deadlock.
+   - **Fix:** `TimeoutWaitingExternalTasks()` runs every tick before the deadlock detector.
+     Uses per-task `timeout_ms` (or 5 min default). Stamps `m_WaitingExternalSince` on transition.
+
+2. **Failed tasks didn't propagate to downstream dependents** — `IsTaskReady()` only passes on
+   `Succeeded`/`Skipped`, so when an upstream task failed, all downstream tasks stayed `Pending`
+   forever. If another branch still had a `WaitingExternal` task, the deadlock detector wouldn't fire.
+   - **Fix:** `SkipDownstreamOfFailed()` does a BFS from the failed task and immediately marks all
+     transitive dependents as `Skipped`. Called at all three failure points (task future threw,
+     task execution failed, AI completion failed) plus from `TimeoutWaitingExternalTasks()`.
+
+3. **Shutdown didn't clean up WaitingExternal tasks** — `OnUpdate()` stops running after
+   `m_IsFinished = true`, so `m_CancelRequested` (set by `SignalStop()`) was never processed by
+   `TickActiveRun()`. Orphaned `WaitingExternal` tasks could block `AiRequestPool::Shutdown()`.
+   - **Fix:** `WaitStop()` now iterates all active runs, fails any remaining `WaitingExternal` tasks,
+     and calls `requestPool->Forget()` on their AI request handles before clearing.
+
+**Remaining investigation:**
+- [ ] Check if `CleanWorkflow` or the 409 rejection path leaves the runtime manager in a bad state
+- [ ] Reproduce with logging and confirm the hang is fixed
+
+---
+
+## Run control — pause / resume / stop
+
+Backend support for fine-grained run control. UI buttons and `doc/api-endpoints.md`
+documentation are already in place (buttons disabled until backend is ready).
+
+- [x] ~~Add `RunControlState` enum (`Running`, `Paused`, `Stopping`) to `WorkflowRun` in `workflowTypes.h`~~ — added `Paused` and `Stopping` to `WorkflowRunState` enum
+- [x] ~~Implement `PauseRun(runId)` in `workflowRuntimeManager.cpp`~~ — `RequestPauseRun` sets `m_PauseRequested`, dispatch loop returns early
+- [x] ~~Implement `ResumeRun(runId)`~~ — `RequestResumeRun` clears `m_PauseRequested`, sets state back to `Running`
+- [x] ~~Implement `StopRun(runId)`~~ — `RequestStopRun` sets `m_StopRequested`, in-flight tasks finish, remaining skipped
+- [x] ~~Add three route handlers in `webServer.cpp`~~ — `HandleWorkflowRunPausePost`, `HandleWorkflowRunResumePost`, `HandleWorkflowRunStopPost`
+- [x] ~~Add `pauseRun()`, `resumeRun()`, `stopRun()` API calls in `workflow-editor/ui/src/api/workflows.ts`~~
+- [x] ~~Remove `disabled` from Pause/Resume buttons in `WorkflowEditorView.tsx`~~ — added Stop/Pause/Resume/Cancel button row
+
+---
+
+## E2E testing — padded indices
+
+Staged but uncommitted changes to `FilterEngine::AddPaddedIndices()`. Needs live
+verification before committing.
+
+- [ ] Build project (`make config=release verbose=1 && make config=debug verbose=1`)
+- [ ] Run `aiCarMaintenancePipeline` workflow — verify per_item CSV filter + padded index filenames
+- [ ] Run `portfolioDividendAnalysis` workflow — verify per_item CSV filter + padded index filenames
+- [ ] Commit staged changes after successful E2E
+
+---
+
 ## Notes / follow-ups (when the above is done)
 - [x] ~~Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment)~~:
   - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.
