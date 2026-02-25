@@ -66,7 +66,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **Queue binding and environment assembly** — `ai_call` tasks declare inline STNG, TASK, CNTX, and PROB files. Template variables (`{{binding.field}}`) are expanded per filter item. The assembled files are written to disk and picked up by the session manager for dispatch.
 - **REST API and WebSocket** — JarvisAgent exposes a full REST API (`/api/workflows`, `/api/workflows/<id>/run`, `/api/workflows/<id>/clean`, `/api/status`, etc.) for workflow CRUD, run control, and live status. A WebSocket channel pushes real-time task-state updates to the React dashboard and workflow editor. See [doc/api-endpoints.md](doc/api-endpoints.md).
 - **Environment Files** — Files in categories STNG (Settings), CNTX (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.  
-- **Query Files (Requirement Files)** — Each represents a smaller task or requirement that is processed using the shared environment.  
+- **Query Files aka Requirement Files aka PROB Files** — Each represents a smaller task or requirement that is processed using the shared environment.  
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
 - **File Categorizer & Tracker** — Tracks which files belong to which category, monitors modification status, and provides content retrieval.  
 - **Binary Detection & Conversion** — Detects binary document formats (PDF, DOCX, HTML, etc.) and uses MarkItDown to convert them to Markdown before querying the AI.  
@@ -158,7 +158,7 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 
 ---
 
-## Development
+## Installation
 
 JarvisAgent depends on
 * Python 3 and development headers (on Ubuntu/Debian the packages are called `python3`, `python3-dev`)

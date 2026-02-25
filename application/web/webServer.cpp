@@ -30,9 +30,15 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#endif
 #include "simdjson/simdjson.h"
 
 #include "core.h"
@@ -2202,15 +2208,24 @@ namespace AIAssistant
 
         // Pre-test port availability to detect a second JA instance.
         {
+#if defined(_WIN32)
+            SOCKET const testSocket = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (testSocket == INVALID_SOCKET)
+#else
             int const testSocket = ::socket(AF_INET, SOCK_STREAM, 0);
             if (testSocket < 0)
+#endif
             {
                 LOG_APP_CRITICAL("[web] Failed to create test socket — cannot verify port availability");
                 return false;
             }
 
             int opt = 1;
+#if defined(_WIN32)
+            ::setsockopt(testSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char const*>(&opt), sizeof(opt));
+#else
             ::setsockopt(testSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
 
             struct sockaddr_in addr
             {
@@ -2220,7 +2235,11 @@ namespace AIAssistant
             addr.sin_port = htons(8080);
 
             bool const portAvailable = (::bind(testSocket, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
+#if defined(_WIN32)
+            ::closesocket(testSocket);
+#else
             ::close(testSocket);
+#endif
 
             if (!portAvailable)
             {
