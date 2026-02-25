@@ -582,6 +582,38 @@ namespace AIAssistant
                     taskOut.m_FileOutputs.emplace_back(outputView.begin(), outputView.end());
                 }
             }
+            else if (key == "materialize")
+            {
+                auto objectResult = value.get_object();
+                if (objectResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "task field 'materialize' must be an object";
+                    return false;
+                }
+
+                simdjson::ondemand::object materializeObj = objectResult.value();
+                for (auto materializeField : materializeObj)
+                {
+                    auto fieldKeyResult = materializeField.unescaped_key(false);
+                    if (fieldKeyResult.error() != simdjson::SUCCESS)
+                    {
+                        errorMessage = "task field 'materialize' has invalid key";
+                        return false;
+                    }
+                    std::string_view fieldKey = fieldKeyResult.value();
+
+                    auto fieldValueResult = materializeField.value().get_string(false);
+                    if (fieldValueResult.error() != simdjson::SUCCESS)
+                    {
+                        errorMessage = "task field 'materialize' values must be strings";
+                        return false;
+                    }
+                    std::string_view fieldValue = fieldValueResult.value();
+
+                    taskOut.m_Materialize.emplace_back(std::string(fieldKey.begin(), fieldKey.end()),
+                                                       std::string(fieldValue.begin(), fieldValue.end()));
+                }
+            }
             else if (key == "environment")
             {
                 if (!ParseTaskEnvironment(value, taskOut.m_Environment, errorMessage))

@@ -2084,9 +2084,6 @@ namespace AIAssistant
             .onmessage(
                 [this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
                 {
-                    // Drain queued broadcasts on every incoming message (runs on Crow's I/O thread).
-                    DrainPendingBroadcasts();
-
                     try
                     {
                         simdjson::ondemand::parser parser;
@@ -2095,10 +2092,12 @@ namespace AIAssistant
 
                         std::string type = std::string(doc["type"].get_string().value());
 
-                        // Heartbeat from dashboard — drain only, no response needed.
+                        // Heartbeat from dashboard — no response needed, but must
+                        // NOT return early so DrainPendingBroadcasts() at the end
+                        // still runs.
                         if (type == "ping")
                         {
-                            return;
+                            // fall through to drain
                         }
 
                         if (type == "chat")
@@ -2176,12 +2175,14 @@ namespace AIAssistant
                             }
 
                             {
-                                conn.send_text(msg.dump());
+                                std::lock_guard<std::mutex> lock(m_Mutex);
+                                m_PendingBroadcasts.push_back(msg.dump());
                             }
                         }
                         else
                         {
-                            conn.send_text(R"({"error":"unknown type"})");
+                            std::lock_guard<std::mutex> lock(m_Mutex);
+                            m_PendingBroadcasts.push_back(R"({"error":"unknown type"})");
                         }
                     }
                     catch (const std::exception& e)
@@ -2190,12 +2191,19 @@ namespace AIAssistant
                         error["error"] = e.what();
                         try
                         {
-                            conn.send_text(error.dump());
+                            std::lock_guard<std::mutex> lock(m_Mutex);
+                            m_PendingBroadcasts.push_back(error.dump());
                         }
                         catch (...)
                         {
                         }
                     }
+
+                    // Drain ALL queued broadcasts (including the response above) in a
+                    // single batched send_text call.  Draining at the END of onmessage
+                    // avoids the double-send_text that caused Crow's async-write overlap
+                    // and WebSocket disconnects.
+                    DrainPendingBroadcasts();
                 });
     }
 
@@ -2333,15 +2341,65 @@ namespace AIAssistant
         {
             if (i > 0)
                 batch += ',';
+
+            // Diagnostic: log the first message that contains invalid UTF-8.
+            {
+                bool valid = true;
+                size_t remaining = 0;
+                for (unsigned char ch : pending[i])
+                {
+                    if (remaining > 0)
+                    {
+                        if ((ch & 0xC0) != 0x80)
+                        {
+                            valid = false;
+                            break;
+                        }
+                        --remaining;
+                    }
+                    else if (ch < 0x80)
+                    { /* ASCII */
+                    }
+                    else if ((ch & 0xE0) == 0xC0)
+                    {
+                        remaining = 1;
+                    }
+                    else if ((ch & 0xF0) == 0xE0)
+                    {
+                        remaining = 2;
+                    }
+                    else if ((ch & 0xF8) == 0xF0)
+                    {
+                        remaining = 3;
+                    }
+                    else
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (remaining != 0)
+                    valid = false;
+                if (!valid)
+                {
+                    std::string preview = pending[i].substr(0, 300);
+                    LOG_APP_WARN("[ws] Invalid UTF-8 in pending broadcast #{} (len={}): {}…", i, pending[i].size(), preview);
+                }
+            }
+
             batch += pending[i];
         }
         batch += "]}";
+
+        // RFC 6455 requires valid UTF-8 in text frames.  Sanitize the entire
+        // batch to prevent "Invalid UTF-8 in text frame" disconnects (code 1002).
+        std::string const safeBatch = SanitizeUtf8(batch);
 
         for (auto* client : clients)
         {
             try
             {
-                client->send_text(batch);
+                client->send_text(safeBatch);
             }
             catch (...)
             {

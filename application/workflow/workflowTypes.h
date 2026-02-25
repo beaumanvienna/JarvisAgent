@@ -305,6 +305,10 @@ namespace AIAssistant
         std::vector<std::string> m_FileInputs;  // file paths or templates
         std::vector<std::string> m_FileOutputs; // file paths or templates
 
+        // JCWF: "materialize" — copy file_inputs into working_directory under specific names.
+        // Key: source path template (e.g. "{{input[0]}}"), Value: target filename (e.g. "hello.c").
+        std::vector<std::pair<std::string, std::string>> m_Materialize;
+
         // JCWF: "environment"
         TaskEnvironment m_Environment;
 

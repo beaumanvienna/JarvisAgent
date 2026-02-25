@@ -907,8 +907,25 @@ export default function WorkflowEditorView(props: {
           return;
         }
 
-        const obj = message as Record<string, unknown>;
+        const processOne = (obj: Record<string, unknown>) => {
         const messageType = typeof obj.type === "string" ? obj.type : "";
+
+        // Unwrap batch envelope (server batches all broadcasts into a single frame).
+        if (messageType === "batch")
+        {
+          const msgs = obj.messages;
+          if (Array.isArray(msgs))
+          {
+            for (const sub of msgs)
+            {
+              if (sub && typeof sub === "object" && !Array.isArray(sub))
+              {
+                processOne(sub as Record<string, unknown>);
+              }
+            }
+          }
+          return;
+        }
 
         // Older snapshot shape: { type: "workflowRunsSnapshot", runs: [...] }
         if (messageType === "workflowRunsSnapshot")
@@ -949,21 +966,20 @@ export default function WorkflowEditorView(props: {
 
           if (!targetRunId)
           {
-            setRuntimeTasksById({});
+            // Keep last task states visible after run completes (don't clear).
             return;
           }
 
           const matchingRun = runs.find((r) => (typeof r.runId === "string" ? r.runId : "") === targetRunId);
           if (!matchingRun)
           {
-            setRuntimeTasksById({});
+            // Run left activeRuns (completed/failed) — keep last task states.
             return;
           }
 
           const tasksUnknown = matchingRun.tasks;
           if (!Array.isArray(tasksUnknown))
           {
-            setRuntimeTasksById({});
             return;
           }
 
@@ -1030,7 +1046,7 @@ export default function WorkflowEditorView(props: {
 
           if (!targetRunId)
           {
-            setRuntimeTasksById({});
+            // Keep last task states visible after run completes (don't clear).
             return;
           }
 
@@ -1039,7 +1055,7 @@ export default function WorkflowEditorView(props: {
           );
           if (!matchingRun || !Array.isArray(matchingRun.tasks))
           {
-            setRuntimeTasksById({});
+            // Run left activeRuns (completed/failed) — keep last task states.
             return;
           }
 
@@ -1059,6 +1075,9 @@ export default function WorkflowEditorView(props: {
           setRuntimeTasksById(nextRuntime);
           return;
         }
+      };
+
+        processOne(message as Record<string, unknown>);
       };
     }
 
@@ -1100,11 +1119,28 @@ export default function WorkflowEditorView(props: {
       {
         const finalState = pendingRunLastStateRef.current === "failed" ? "failed" : "completed";
         setLastRunResult({ runId: pendingRunId, state: finalState });
-        const stateLabel = finalState === "failed" ? "✗ Run failed" : "✓ Run completed";
+        const stateLabel = finalState === "failed" ? "\u2717 Run failed" : "\u2713 Run completed";
         setStatusText(`${stateLabel}. runId=${pendingRunId}`);
         setPendingRunId(null);
         pendingRunSeenRef.current = false;
         pendingRunLastStateRef.current = "running";
+
+        // Infer final task states for tasks that completed between polls.
+        // If the run succeeded, all tasks must have succeeded; if failed,
+        // non-terminal tasks were effectively cancelled.
+        const terminalTaskStates: RuntimeTaskState[] = ["success", "failed", "cancelled"];
+        const inferredState: RuntimeTaskState = finalState === "completed" ? "success" : "cancelled";
+        setRuntimeTasksById((prev) => {
+          const next = { ...prev };
+          for (const key of Object.keys(next))
+          {
+            if (!terminalTaskStates.includes(next[key].state))
+            {
+              next[key] = { ...next[key], state: inferredState };
+            }
+          }
+          return next;
+        });
       }
       return;
     }
@@ -1116,10 +1152,25 @@ export default function WorkflowEditorView(props: {
       setPendingRunId(null);
       pendingRunSeenRef.current = false;
 
-      const stateLabel = run.state === "completed" ? "✓ Run completed successfully" :
-                         run.state === "failed" ? "✗ Run failed" :
+      const stateLabel = run.state === "completed" ? "\u2713 Run completed successfully" :
+                         run.state === "failed" ? "\u2717 Run failed" :
                          "Run cancelled";
       setStatusText(`${stateLabel}. runId=${run.runId}`);
+
+      // Infer final task states for tasks that completed between polls.
+      const terminalTaskStates: RuntimeTaskState[] = ["success", "failed", "cancelled"];
+      const inferredState: RuntimeTaskState = run.state === "completed" ? "success" : "cancelled";
+      setRuntimeTasksById((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(next))
+        {
+          if (!terminalTaskStates.includes(next[key].state))
+          {
+            next[key] = { ...next[key], state: inferredState };
+          }
+        }
+        return next;
+      });
     }
   }, [activeRuns, pendingRunId]);
 
@@ -1676,6 +1727,8 @@ export default function WorkflowEditorView(props: {
     {
       setStatusText("Cleaning…");
       setErrorText(null);
+      setRuntimeTasksById({});
+      setLastRunResult(null);
       const result = await cleanWorkflow(workflowId);
       setStatusText(result.ok
         ? `Clean completed for "${workflowId}".`
@@ -2405,6 +2458,52 @@ export default function WorkflowEditorView(props: {
                       }}>+ file_output</button>
                     </div>
                   )}
+
+                  {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "internal") && (() => {
+                    const mat = (selectedNode.data.task.materialize ?? {}) as Record<string, string>;
+                    const entries = Object.entries(mat);
+                    return (
+                      <div className="field">
+                        <div className="small">materialize</div>
+                        {entries.map(([src, tgt], idx) => (
+                          <div key={`mat-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                            <input
+                              className="input"
+                              style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                              value={src}
+                              placeholder="source e.g. {{input[0]}}"
+                              onChange={(e) => {
+                                const newMat: Record<string, string> = {};
+                                entries.forEach(([k, v], i) => { newMat[i === idx ? e.target.value : k] = v; });
+                                updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
+                              }}
+                            />
+                            <span style={{ color: "#888", fontSize: 11 }}>→</span>
+                            <input
+                              className="input"
+                              style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                              value={tgt}
+                              placeholder="target e.g. hello.c"
+                              onChange={(e) => {
+                                const newMat: Record<string, string> = {};
+                                entries.forEach(([k, v], i) => { newMat[k] = i === idx ? e.target.value : v; });
+                                updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
+                              }}
+                            />
+                            <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                              const newMat: Record<string, string> = {};
+                              entries.forEach(([k, v], i) => { if (i !== idx) newMat[k] = v; });
+                              updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
+                            }}>x</button>
+                          </div>
+                        ))}
+                        <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
+                          const newMat: Record<string, string> = { ...mat, "": "" };
+                          updateSelectedTaskField({ materialize: newMat } as Partial<JcwfTask>);
+                        }}>+ materialize</button>
+                      </div>
+                    );
+                  })()}
 
                   <label className="field">
                     <div className="small">doc</div>

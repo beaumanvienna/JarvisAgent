@@ -408,6 +408,7 @@ Each task has:
   "working_directory": "output",
   "file_inputs": ["data/report.xlsx"],
   "file_outputs": ["output/report.summary.txt"],
+  "materialize": { /* see below */ },
   "environment": { /* see 3.3.6 */ },
   "queue_binding": { /* see 3.3.6 */ },
   "params": { /* type-specific */ },
@@ -419,6 +420,70 @@ Each task has:
     "backoff_ms": 1000
   }
 }
+```
+
+**Input materialization (`materialize`):**
+
+When a task consumes upstream outputs, the upstream filenames are determined by the
+producing task (e.g., `PROB_new_1.output.txt` from a queue folder) and cannot be
+controlled by the consuming task.  Tools like `make` expect specific filenames in the
+current directory (e.g., `hello.c`, `Makefile`), and Python scripts may expect specific
+input filenames — creating a mismatch.
+
+To bridge this gap declaratively, any task MAY declare a `materialize` object:
+
+```jsonc
+{
+  "id": "run_make",
+  "type": "shell",
+  "depends_on": ["generate_hello_c", "generate_makefile"],
+  "file_inputs": [
+    "../../../queue/myWorkflow/01_generateCode/PROB_code.output.txt",
+    "../../../queue/myWorkflow/02_generateMakefile/PROB_makefile.output.txt"
+  ],
+  "materialize": {
+    "{{input[0]}}": "hello.c",
+    "{{input[1]}}": "Makefile"
+  },
+  "params": {
+    "command": "scripts/runMake.sh"
+  }
+}
+```
+
+- `materialize` (OPTIONAL, object) — A mapping from source path (typically a
+  `{{input[i]}}` or `{{output[i]}}` template) to a target filename.
+- Applies to **all task types** (`shell`, `python`, `ai_call`, `internal`).
+- Before executing the task, the runtime MUST:
+  1. Expand all `{{...}}` templates in the keys using the standard template engine.
+  2. For each entry, copy the resolved source file into the task's `working_directory`
+     under the specified target filename.
+  3. If the source file does not exist, the task MUST fail with a descriptive error.
+  4. If the target filename contains path separators, create parent directories as needed.
+- The materialized files are **copies**, not symlinks.  The originals are not modified.
+- Materialization happens **after** `file_inputs` existence checks and **before**
+  task execution.
+- The target filenames are relative to the task's `working_directory`.
+- This mechanism mirrors the `cntx_files` materialization that the runtime already
+  performs for `ai_call` tasks (see §3.3.6.5), extending the same concept to all
+  task types as a first-class feature.
+
+With `materialize`, a shell script that wraps `make` becomes trivially simple:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+make
+```
+
+Without `materialize`, the script must handle copying explicitly:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cp "$1" hello.c
+cp "$2" Makefile
+make
 ```
 
 #### 3.3.1 Task Types
@@ -1772,6 +1837,11 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
           "type": "array",
           "items": { "type": "string" }
         },
+        "materialize": {
+          "type": "object",
+          "description": "Map from source path template (e.g. '{{input[0]}}') to target filename. The runtime copies each resolved source into the task working_directory under the target name before execution. Applies to all task types.",
+          "additionalProperties": { "type": "string" }
+        },
         "environment": {
           "type": "object",
           "properties": {
@@ -1811,6 +1881,11 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
         "params": {
           "type": "object",
           "properties": {
+            "command": { "type": "string" },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
             "provider": { "type": "string" },
             "model": { "type": "string" },
             "request_params": { "type": "object" },
