@@ -104,7 +104,6 @@ From the logs and the current architecture, these are the main components that p
    - Registers:
      - Workflow metadata (id, label, etc.).
      - Tasks (nodes in the DAG): `compile_lib1`, `compile_lib2`, `make_static_lib`, `compile_main`, `compile_app`, `make_executable`.
-     - Dataflow edges between tasks (the `dataflow` array in the JCWF).
 
 4. **TriggerEngine**
    - After the workflow is registered and validated, a default **auto trigger** is registered:
@@ -115,7 +114,7 @@ From the logs and the current architecture, these are the main components that p
 
 5. **WorkflowOrchestrator**
    - Receives: “start workflow `make-example` with run id `make-example_...`”.
-   - Resolves the **task graph** (tasks + `depends_on` + `dataflow`):
+   - Resolves the **task graph** (tasks + `depends_on`):
      - Finds tasks with no unmet dependencies and schedules them.
      - Tracks which tasks have completed.
      - When all dependencies of a task are done, it schedules the next dependent task.
@@ -134,12 +133,11 @@ From the logs and the current architecture, these are the main components that p
         - For example, for `compile_lib1`:
           - `file_inputs`: `["lib1.cpp"]` → resolved as `../workflows/lib1.cpp`
           - `file_outputs`: `["lib1.o"]`   → resolved as `../workflows/lib1.o`
-     2. Resolves any **dataflow inputs/outputs** (like `{{input[0]}}`, `{{output[0]}}` in `params.args`).
-     3. Constructs the **final command line** from the JCWF `params`:
+     2. Constructs the **final command line** from the JCWF `params`:
         - `command`: `scripts/compile.sh`
-        - `args`: `["{{input[0]}}", "{{output[0]}}", "-O3"]` → becomes `.../lib1.cpp .../lib1.o -O3`.
-     4. Spawns a **child process** to run the command.
-     5. Collects the exit code and reports success/failure back to the orchestrator.
+        - `args`: `["{{input[0]}}", "{{output[0]}}"]` → becomes `.../lib1.cpp .../lib1.o`.
+     3. Spawns a **child process** to run the command.
+     4. Collects the exit code and reports success/failure back to the orchestrator.
 
 7. **External Scripts + Toolchain**
    - These are the actual shell scripts that do the work.
@@ -203,15 +201,12 @@ Let’s look at `compile_lib1` as a concrete example, step by step.
 "compile_lib1": {
   "id": "compile_lib1",
   "type": "shell",
-  "label": "Compile lib1.cpp to lib1.o",
+  "label": "Compile lib1.o",
   "file_inputs": ["lib1.cpp"],
   "file_outputs": ["lib1.o"],
   "params": {
     "command": "scripts/compile.sh",
-    "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
-  },
-  "outputs": {
-    "object": { "type": "string" }
+    "args": ["{{input[0]}}", "{{output[0]}}"]
   }
 }
 ```
@@ -371,12 +366,7 @@ Requirements:
   - scripts/archive.sh
   - scripts/link.sh
 - Use file_inputs / file_outputs for freshness checks.
-- Use dataflow to wire task outputs into downstream task inputs, as in the working make-example.jcwf pattern:
-  - compile_* tasks expose output slot "object"
-  - archive task exposes output slot "archive"
-- For the archive and link tasks, declare named required inputs (obj1/obj2 and main_obj/app_obj/archive) that are satisfied via dataflow.
-- Include compiler optimization "-O3" for compilation and linking:
-  - Either pass it via params.args (recommended) or document an equivalent mechanism that works with the scripts.
+- Use `depends_on` + `file_inputs` + `file_outputs` for Makefile-style file dependencies (no dataflow needed).
 - Keep paths relative (e.g., lib1.cpp, lib1.o, myapp).
 - Output: valid JSON only.
 
@@ -481,141 +471,85 @@ With freshness checks implemented for JCWF:
 {
   "version": "1.0",
   "id": "make-example",
-  "label": "Makefile-Style Build Workflow",
-  "doc": "Build example: compile sources, archive static lib, link executable using shell tasks.",
+  "label": "Makefile-style compilation test",
+  "doc": "Compiles object files → static lib → final executable.",
+  "manual_start": true,
   "triggers": [
-    {
-      "type": "auto",
-      "id": "auto",
-      "enabled": true,
-      "params": {}
-    }
+    { "type": "auto", "id": "auto", "enabled": true },
+    { "type": "manual", "id": "manual", "enabled": true }
   ],
   "tasks": {
     "compile_lib1": {
       "id": "compile_lib1",
       "type": "shell",
-      "label": "Compile lib1.cpp to lib1.o",
+      "label": "Compile lib1.o",
       "file_inputs": ["lib1.cpp"],
       "file_outputs": ["lib1.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
-      },
-      "outputs": {
-        "object": { "type": "string" }
+        "args": ["{{input[0]}}", "{{output[0]}}"]
       }
     },
     "compile_lib2": {
       "id": "compile_lib2",
       "type": "shell",
-      "label": "Compile lib2.cpp to lib2.o",
+      "label": "Compile lib2.o",
       "file_inputs": ["lib2.cpp"],
       "file_outputs": ["lib2.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
-      },
-      "outputs": {
-        "object": { "type": "string" }
+        "args": ["{{input[0]}}", "{{output[0]}}"]
       }
     },
     "make_static_lib": {
       "id": "make_static_lib",
       "type": "shell",
-      "label": "Archive lib1.o and lib2.o into libmylib.a",
+      "label": "Archive static library",
       "depends_on": ["compile_lib1", "compile_lib2"],
       "file_inputs": ["lib1.o", "lib2.o"],
       "file_outputs": ["libmylib.a"],
       "params": {
         "command": "scripts/archive.sh",
         "args": ["{{input[0]}}", "{{input[1]}}", "{{output[0]}}"]
-      },
-      "inputs": {
-        "obj1": { "type": "string", "required": true },
-        "obj2": { "type": "string", "required": true }
-      },
-      "outputs": {
-        "archive": { "type": "string" }
       }
     },
     "compile_main": {
       "id": "compile_main",
       "type": "shell",
-      "label": "Compile main.cpp to main.o",
+      "label": "Compile main.o",
       "file_inputs": ["main.cpp"],
       "file_outputs": ["main.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
-      },
-      "outputs": {
-        "object": { "type": "string" }
+        "args": ["{{input[0]}}", "{{output[0]}}"]
       }
     },
     "compile_app": {
       "id": "compile_app",
       "type": "shell",
-      "label": "Compile app.cpp to app.o",
+      "label": "Compile app.o",
       "file_inputs": ["app.cpp"],
       "file_outputs": ["app.o"],
       "params": {
         "command": "scripts/compile.sh",
-        "args": ["{{input[0]}}", "{{output[0]}}", "-O3"]
-      },
-      "outputs": {
-        "object": { "type": "string" }
+        "args": ["{{input[0]}}", "{{output[0]}}"]
       }
     },
     "make_executable": {
       "id": "make_executable",
       "type": "shell",
-      "label": "Link main.o, app.o, libmylib.a into myapp",
+      "label": "Link executable myapp",
       "depends_on": ["compile_main", "compile_app", "make_static_lib"],
       "file_inputs": ["main.o", "app.o", "libmylib.a"],
       "file_outputs": ["myapp"],
       "params": {
         "command": "scripts/link.sh",
-        "args": ["{{input[0]}}", "{{input[1]}}", "{{input[2]}}", "{{output[0]}}", "-O3"]
-      },
-      "inputs": {
-        "main_obj": { "type": "string", "required": true },
-        "app_obj": { "type": "string", "required": true },
-        "archive": { "type": "string", "required": true }
+        "args": ["{{input[0]}}", "{{input[1]}}", "{{input[2]}}", "{{output[0]}}"]
       }
     }
   },
-  "dataflow": [
-    {
-      "from_task": "compile_lib1",
-      "from_output": "object",
-      "to_task": "make_static_lib",
-      "to_input": "obj1"
-    },
-    {
-      "from_task": "compile_lib2",
-      "from_output": "object",
-      "to_task": "make_static_lib",
-      "to_input": "obj2"
-    },
-    {
-      "from_task": "make_static_lib",
-      "from_output": "archive",
-      "to_task": "make_executable",
-      "to_input": "archive"
-    },
-    {
-      "from_task": "compile_main",
-      "from_output": "object",
-      "to_task": "make_executable",
-      "to_input": "main_obj"
-    },
-    {
-      "from_task": "compile_app",
-      "from_output": "object",
-      "to_task": "make_executable",
-      "to_input": "app_obj"
-    }
-  ]
+  "defaults": {
+    "timeout_ms": 5000
+  }
 }
 ```

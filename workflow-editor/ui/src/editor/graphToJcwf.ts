@@ -131,6 +131,9 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
 
   const dataflow: JcwfDataflowEntry[] = [];
 
+  // Collect dep entries with file_input handle indices for ordering.
+  const depsByTask = new Map<string, Array<{ source: string; handleIdx: number }>>();
+
   for (const edge of graph.edges as EditorTaskEdge[])
   {
     // Dataflow edges have df: prefix and encode output/input in sourceHandle/targetHandle
@@ -156,25 +159,57 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     const targetTask = tasks[edge.target];
     if (targetTask)
     {
-      if (!Array.isArray(targetTask.depends_on))
+      let list = depsByTask.get(edge.target);
+      if (!list)
       {
-        targetTask.depends_on = [];
+        list = [];
+        depsByTask.set(edge.target, list);
       }
-      // Keep depends_on unique to avoid duplicate edges producing duplicate dependencies.
-      if (!targetTask.depends_on.includes(edge.source))
+
+      // Extract dep handle index for ordering (dephandle-0, dephandle-1, …)
+      const handleIdx = typeof edge.targetHandle === "string" && edge.targetHandle.startsWith("dephandle-")
+        ? parseInt(edge.targetHandle.slice(10), 10)
+        : Infinity; // generic deps sort after indexed deps
+
+      if (!list.find((d) => d.source === edge.source))
       {
-        targetTask.depends_on.push(edge.source);
+        list.push({ source: edge.source, handleIdx });
       }
     }
   }
 
-  // Deterministic depends_on ordering.
+  // Build depends_on arrays, sorted by file_input handle index, then alphabetically.
+  for (const [taskId, deps] of depsByTask)
+  {
+    deps.sort((a, b) => {
+      if (a.handleIdx !== b.handleIdx) return a.handleIdx - b.handleIdx;
+      return a.source.localeCompare(b.source);
+    });
+    tasks[taskId].depends_on = deps.map((d) => d.source);
+  }
+
+  // Ensure every ai_call task has a complete environment (STNG, TASK, CNTX).
+  // If any category is missing or empty, add a file with a single whitespace.
+  const requiredCategories: Array<"stng_files" | "task_files" | "cntx_files"> = ["stng_files", "task_files", "cntx_files"];
   for (const taskId of Object.keys(tasks))
   {
-    const deps = tasks[taskId].depends_on;
-    if (Array.isArray(deps))
+    const task = tasks[taskId];
+    if (task.type !== "ai_call") continue;
+    const qb = (task.queue_binding ?? {}) as Record<string, unknown>;
+    let changed = false;
+    for (const cat of requiredCategories)
     {
-      deps.sort((a, b) => a.localeCompare(b));
+      const entries = qb[cat] as unknown[] | undefined;
+      if (!entries || entries.length === 0)
+      {
+        const prefix = cat.replace("_files", "").toUpperCase();
+        qb[cat] = [{ path: `${prefix}_default.txt`, content: " " }];
+        changed = true;
+      }
+    }
+    if (changed)
+    {
+      task.queue_binding = qb as JcwfTask["queue_binding"];
     }
   }
 

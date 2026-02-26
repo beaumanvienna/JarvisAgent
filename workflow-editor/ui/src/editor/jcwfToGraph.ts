@@ -1,5 +1,6 @@
 import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
 import type { JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import { FILE_INPUT_COLORS } from "./constants";
 
 function displayTitle(task: JcwfTask): { title: string; subtitle?: string }
 {
@@ -21,8 +22,10 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
 {
   const taskEntries = Object.entries(jcwf.tasks ?? {});
   const taskIdSet = new Set<string>(taskEntries.map(([taskId]) => taskId));
-  const cellW = 280;
-  const cellH = 150;
+  const cellW = 320;
+  const VERTICAL_GAP = 30;
+  const BASE_NODE_HEIGHT = 60;
+  const DEP_ROW_HEIGHT = 15;
 
   // Simple layout: assign a "level" per task based on depends_on depth (DAG). If cycles exist,
   // we fall back to a stable insertion order layout.
@@ -92,14 +95,28 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     taskIdsByLevel.set(level, sorted);
   }
 
+  // Estimate node height based on dep handle count
+  function estimateNodeHeight(taskId: string): number
+  {
+    const task = Object.fromEntries(taskEntries)[taskId] as JcwfTask | undefined;
+    if (!task) return BASE_NODE_HEIGHT;
+    const fileInputs = Array.isArray(task.file_inputs) ? task.file_inputs.length : 0;
+    const deps = (depsByTaskId.get(taskId) ?? []).length;
+    const inputHandleCount = Math.max(fileInputs, deps);
+    const fileOutputs = Array.isArray(task.file_outputs) ? task.file_outputs.length : 0;
+    return BASE_NODE_HEIGHT + Math.max(inputHandleCount, fileOutputs) * DEP_ROW_HEIGHT;
+  }
+
   const positionByTaskId = new Map<string, { x: number; y: number }>();
   const sortedLevels = Array.from(taskIdsByLevel.keys()).sort((a, b) => a - b);
   for (const level of sortedLevels)
   {
     const list = taskIdsByLevel.get(level) ?? [];
+    let cumulativeY = 0;
     for (let row = 0; row < list.length; row += 1)
     {
-      positionByTaskId.set(list[row], { x: level * cellW, y: row * cellH });
+      positionByTaskId.set(list[row], { x: level * cellW, y: cumulativeY });
+      cumulativeY += estimateNodeHeight(list[row]) + VERTICAL_GAP;
     }
   }
 
@@ -123,7 +140,7 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     return {
       id: `filter:${filter.id}`,
       type: "filter" as const,
-      position: { x: minX - cellW, y: index * cellH },
+      position: { x: minX - cellW, y: index * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
       data: { filter, title, subtitle },
     };
   });
@@ -135,17 +152,49 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
   {
     const task = taskValue as JcwfTask;
     const deps = Array.isArray(task.depends_on) ? task.depends_on : [];
-    for (const depId of deps)
+
+    for (let depIdx = 0; depIdx < deps.length; depIdx++)
     {
+      const depId = deps[depIdx];
       if (!taskIdSet.has(depId))
       {
         // Ignore invalid dependencies. Backend validation is authoritative.
         continue;
       }
+
+      const color = FILE_INPUT_COLORS[depIdx % FILE_INPUT_COLORS.length];
+
+      // Determine which output handle the edge should leave from on the source task.
+      const sourceTask = Object.fromEntries(taskEntries)[depId] as JcwfTask | undefined;
+      const srcOutputs: string[] = sourceTask && Array.isArray(sourceTask.file_outputs) ? sourceTask.file_outputs as string[] : [];
+      let sourceHandle = "dep-source";
+      if (srcOutputs.length === 1)
+      {
+        sourceHandle = "fileoutput-0";
+      }
+      else if (srcOutputs.length > 1)
+      {
+        // Try to match by filename: target's file_input[depIdx] vs source's file_outputs
+        const targetFileInputs: string[] = Array.isArray(task.file_inputs) ? task.file_inputs as string[] : [];
+        if (depIdx < targetFileInputs.length)
+        {
+          const targetFile = targetFileInputs[depIdx].split("/").pop() ?? "";
+          const matchIdx = srcOutputs.findIndex((o) => (o.split("/").pop() ?? "") === targetFile);
+          sourceHandle = matchIdx >= 0 ? `fileoutput-${matchIdx}` : "fileoutput-0";
+        }
+        else
+        {
+          sourceHandle = "fileoutput-0";
+        }
+      }
+
       edges.push({
-        id: `dep:${depId}->${taskId}`,
+        id: `dep:${depId}->${taskId}:${depIdx}`,
         source: depId,
         target: taskId,
+        sourceHandle,
+        targetHandle: `dephandle-${depIdx}`,
+        style: { stroke: color, strokeWidth: 2 },
       });
     }
 

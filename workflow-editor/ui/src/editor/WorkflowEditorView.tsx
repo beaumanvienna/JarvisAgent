@@ -16,6 +16,7 @@ import "reactflow/dist/style.css";
 
 import TaskNode from "./TaskNode";
 import FilterNode from "./FilterNode";
+import { FILE_INPUT_COLORS } from "./constants";
 import FilterBuilderDialog from "./FilterBuilderDialog";
 import QueueBindingEditor from "./QueueBindingEditor";
 import { jcwfToGraph } from "./jcwfToGraph";
@@ -1219,9 +1220,9 @@ export default function WorkflowEditorView(props: {
 
   const onSelectionChange = useCallback((params: { nodes?: Node[]; edges?: Edge[]; }) => {
     const selected = params.nodes && params.nodes.length > 0 ? params.nodes[0] : null;
-    selectNodeById(selected ? selected.id : null);
+    setSelectedNodeId(selected ? selected.id : null);
     setSelectedEdgeIds(params.edges ? params.edges.map((e) => e.id) : []);
-  }, [selectNodeById]);
+  }, []);
 
   const onDeleteSelectedEdges = useCallback(() => {
     if (selectedEdgeIds.length === 0)
@@ -1258,10 +1259,14 @@ export default function WorkflowEditorView(props: {
     }
     else
     {
-      nextEdges = addEdge(
-        { ...connection, type: "default" },
-        edges
-      ) as EditorTaskEdge[];
+      const isDepHandle = typeof connection.targetHandle === "string" && connection.targetHandle.startsWith("dephandle-");
+      const depHandleIdx = isDepHandle ? parseInt(connection.targetHandle!.slice(10), 10) : -1;
+      const baseConn = { ...connection, type: "default" } as Connection & { type: string; style?: React.CSSProperties };
+      if (isDepHandle && depHandleIdx >= 0)
+      {
+        (baseConn as unknown as { style: React.CSSProperties }).style = { stroke: FILE_INPUT_COLORS[depHandleIdx % FILE_INPUT_COLORS.length], strokeWidth: 2 };
+      }
+      nextEdges = addEdge(baseConn, edges) as EditorTaskEdge[];
     }
 
     const graph: EditorGraph = {
@@ -1285,53 +1290,30 @@ export default function WorkflowEditorView(props: {
   }, [nodes, edges, recomputeValidation]);
 
   const findNonOverlappingPosition = useCallback((
-    startX: number,
-    startY: number,
+    _startX: number,
+    _startY: number,
     existingNodes: EditorTaskNode[]
   ): { x: number; y: number } => {
-    const nodeWidth = 200;
-    const nodeHeight = 100;
-    const padding = 20;
-
-    const isOverlapping = (x: number, y: number): boolean => {
-      for (const node of existingNodes)
-      {
-        const nx = node.position.x;
-        const ny = node.position.y;
-        if (
-          x < nx + nodeWidth + padding &&
-          x + nodeWidth + padding > nx &&
-          y < ny + nodeHeight + padding &&
-          y + nodeHeight + padding > ny
-        )
-        {
-          return true;
-        }
-      }
-      return false;
-    };
-
-    let x = startX;
-    let y = startY;
-    let attempts = 0;
-    const maxAttempts = 50;
-
-    while (isOverlapping(x, y) && attempts < maxAttempts)
+    if (existingNodes.length === 0)
     {
-      // Spiral outward to find a free spot
-      const offset = (Math.floor(attempts / 4) + 1) * (nodeWidth + padding);
-      const direction = attempts % 4;
-      switch (direction)
-      {
-        case 0: x = startX + offset; break;
-        case 1: y = startY + offset; break;
-        case 2: x = startX - offset; break;
-        case 3: y = startY - offset; break;
-      }
-      attempts++;
+      return { x: 50, y: 50 };
     }
 
-    return { x, y };
+    const nodeWidth = 280;
+    const padding = 40;
+
+    // Find bounding box of all existing nodes
+    let maxRight = -Infinity;
+    let minTop = Infinity;
+    for (const node of existingNodes)
+    {
+      const right = node.position.x + nodeWidth;
+      if (right > maxRight) maxRight = right;
+      if (node.position.y < minTop) minTop = node.position.y;
+    }
+
+    // Place new node to the right of the bounding box
+    return { x: maxRight + padding, y: minTop };
   }, []);
 
   const addTaskNode = useCallback((taskType: JcwfTaskType) => {
@@ -1895,11 +1877,22 @@ export default function WorkflowEditorView(props: {
       group.sort((a, b) => a.id.localeCompare(b.id));
     }
 
-    // Position nodes
-    const NODE_WIDTH = 200;
-    const NODE_HEIGHT = 80;
+    // Position nodes with dynamic heights
+    const NODE_WIDTH = 320;
+    const BASE_NODE_HEIGHT = 60;
+    const DEP_ROW_HEIGHT = 15;
     const HORIZONTAL_GAP = 100;
-    const VERTICAL_GAP = 40;
+    const VERTICAL_GAP = 30;
+
+    function estimateNodeHeight(node: EditorTaskNode): number
+    {
+      if (node.type !== "task") return BASE_NODE_HEIGHT;
+      const fileInputs = Array.isArray(node.data.task.file_inputs) ? (node.data.task.file_inputs as string[]).length : 0;
+      const deps = Array.isArray(node.data.task.depends_on) ? (node.data.task.depends_on as string[]).length : 0;
+      const inputHandleCount = Math.max(fileInputs, deps);
+      const fileOutputs = Array.isArray(node.data.task.file_outputs) ? (node.data.task.file_outputs as string[]).length : 0;
+      return BASE_NODE_HEIGHT + Math.max(inputHandleCount, fileOutputs) * DEP_ROW_HEIGHT;
+    }
 
     const layoutedNodes: EditorTaskNode[] = [];
     const sortedLevels = Array.from(nodesByLevel.keys()).sort((a, b) => a - b);
@@ -1908,15 +1901,16 @@ export default function WorkflowEditorView(props: {
     {
       const nodesAtLevel = nodesByLevel.get(level) ?? [];
       const x = level * (NODE_WIDTH + HORIZONTAL_GAP) + 50;
+      let cumulativeY = 50;
 
       for (let i = 0; i < nodesAtLevel.length; i++)
       {
         const node = nodesAtLevel[i];
-        const y = i * (NODE_HEIGHT + VERTICAL_GAP) + 50;
         layoutedNodes.push({
           ...node,
-          position: { x, y },
+          position: { x, y: cumulativeY },
         });
+        cumulativeY += estimateNodeHeight(node) + VERTICAL_GAP;
       }
     }
 
@@ -2394,12 +2388,26 @@ export default function WorkflowEditorView(props: {
                   )}
 
                   <label className="field">
-                    <div className="small">working_directory</div>
+                    <div className="small">
+                      {selectedNode.data.task.type === "ai_call"
+                        ? <>working_directory <span style={{ opacity: 0.5 }}>(optional)</span></>
+                        : "working_directory relative to jcwf"}
+                    </div>
                     <input
                       className="input"
                       value={(selectedNode.data.task.working_directory ?? "") as string}
                       onChange={(e) => { updateSelectedTaskField({ working_directory: e.target.value }); }}
-                      placeholder="(optional)"
+                      placeholder={
+                        selectedNode.data.task.type === "ai_call"
+                          ? (() => {
+                            const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
+                            const aiNodes = (nodes as EditorTaskNode[]).filter((n) => n.data.task.type === "ai_call");
+                            const idx = aiNodes.findIndex((n) => n.id === selectedNode.id);
+                            const num = String(idx >= 0 ? idx + 1 : aiNodes.length + 1).padStart(2, "0");
+                            return `../queue/${wfId}/${num}_${selectedNode.id}`;
+                          })()
+                          : `${loadedWorkflowId ?? props.workflowId ?? "workflowId"}/01_taskName`
+                      }
                     />
                   </label>
 
@@ -2408,6 +2416,11 @@ export default function WorkflowEditorView(props: {
                       <div className="small">file_inputs</div>
                       {(Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : []).map((fi, idx) => (
                         <div key={`fi-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <span style={{
+                            display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                            background: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], flexShrink: 0,
+                          }} title={`Input ${idx + 1}`} />
+                          <span style={{ fontSize: 10, color: FILE_INPUT_COLORS[idx % FILE_INPUT_COLORS.length], fontWeight: 600, flexShrink: 0 }}>{idx + 1}</span>
                           <input
                             className="input"
                             style={{ fontSize: 12, padding: "4px 8px", flex: 1 }}
@@ -2462,22 +2475,55 @@ export default function WorkflowEditorView(props: {
                   {(selectedNode.data.task.type === "shell" || selectedNode.data.task.type === "python" || selectedNode.data.task.type === "internal") && (() => {
                     const mat = (selectedNode.data.task.materialize ?? {}) as Record<string, string>;
                     const entries = Object.entries(mat);
+                    const curFileInputs: string[] = Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [];
                     return (
                       <div className="field">
                         <div className="small">materialize</div>
-                        {entries.map(([src, tgt], idx) => (
+                        {entries.map(([src, tgt], idx) => {
+                          const srcMatch = src.match(/^\{\{input\[(\d+)\]\}\}$/);
+                          const srcIdx = srcMatch ? parseInt(srcMatch[1], 10) : -1;
+                          const dotColor = srcIdx >= 0 ? FILE_INPUT_COLORS[srcIdx % FILE_INPUT_COLORS.length] : "#888";
+                          return (
                           <div key={`mat-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                            <input
-                              className="input"
-                              style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
-                              value={src}
-                              placeholder="source e.g. {{input[0]}}"
-                              onChange={(e) => {
-                                const newMat: Record<string, string> = {};
-                                entries.forEach(([k, v], i) => { newMat[i === idx ? e.target.value : k] = v; });
-                                updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
-                              }}
-                            />
+                            <span style={{
+                              display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                              background: dotColor, flexShrink: 0,
+                            }} />
+                            {curFileInputs.length > 0 ? (
+                              <select
+                                className="input"
+                                style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                                value={src}
+                                onChange={(e) => {
+                                  const newMat: Record<string, string> = {};
+                                  entries.forEach(([k, v], i) => { newMat[i === idx ? e.target.value : k] = v; });
+                                  updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
+                                }}
+                              >
+                                <option value="">— select input —</option>
+                                {curFileInputs.map((fiPath, fiIdx) => {
+                                  const segments = fiPath.split("/");
+                                  const shortName = segments[segments.length - 1] || fiPath;
+                                  return (
+                                    <option key={fiIdx} value={`{{input[${fiIdx}]}}`}>
+                                      Input {fiIdx + 1}: {shortName}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                            ) : (
+                              <input
+                                className="input"
+                                style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                                value={src}
+                                placeholder="source e.g. {{input[0]}}"
+                                onChange={(e) => {
+                                  const newMat: Record<string, string> = {};
+                                  entries.forEach(([k, v], i) => { newMat[i === idx ? e.target.value : k] = v; });
+                                  updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
+                                }}
+                              />
+                            )}
                             <span style={{ color: "#888", fontSize: 11 }}>→</span>
                             <input
                               className="input"
@@ -2496,7 +2542,8 @@ export default function WorkflowEditorView(props: {
                               updateSelectedTaskField({ materialize: Object.keys(newMat).length > 0 ? newMat : undefined } as Partial<JcwfTask>);
                             }}>x</button>
                           </div>
-                        ))}
+                          );
+                        })}
                         <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => {
                           const newMat: Record<string, string> = { ...mat, "": "" };
                           updateSelectedTaskField({ materialize: newMat } as Partial<JcwfTask>);

@@ -16,9 +16,6 @@
       "label": "Compile lib1.o",
       "file_inputs": ["lib1.cpp"],
       "file_outputs": ["lib1.o"],
-      "outputs": {
-        "object": { "type": "string" }
-      },
       "params": {
         "command": "scripts/compile.sh",
         "args": ["{{input[0]}}", "{{output[0]}}"]
@@ -31,9 +28,6 @@
       "label": "Compile lib2.o",
       "file_inputs": ["lib2.cpp"],
       "file_outputs": ["lib2.o"],
-      "outputs": {
-        "object": { "type": "string" }
-      },
       "params": {
         "command": "scripts/compile.sh",
         "args": ["{{input[0]}}", "{{output[0]}}"]
@@ -47,13 +41,6 @@
       "depends_on": ["compile_lib1", "compile_lib2"],
       "file_inputs": ["lib1.o", "lib2.o"],
       "file_outputs": ["libmylib.a"],
-      "inputs": {
-        "obj1": { "type": "string", "required": true },
-        "obj2": { "type": "string", "required": true }
-      },
-      "outputs": {
-        "archive": { "type": "string" }
-      },
       "params": {
         "command": "scripts/archive.sh",
         "args": ["{{input[0]}}", "{{input[1]}}", "{{output[0]}}"]
@@ -66,9 +53,6 @@
       "label": "Compile main.o",
       "file_inputs": ["main.cpp"],
       "file_outputs": ["main.o"],
-      "outputs": {
-        "object": { "type": "string" }
-      },
       "params": {
         "command": "scripts/compile.sh",
         "args": ["{{input[0]}}", "{{output[0]}}"]
@@ -81,9 +65,6 @@
       "label": "Compile app.o",
       "file_inputs": ["app.cpp"],
       "file_outputs": ["app.o"],
-      "outputs": {
-        "object": { "type": "string" }
-      },
       "params": {
         "command": "scripts/compile.sh",
         "args": ["{{input[0]}}", "{{output[0]}}"]
@@ -97,26 +78,12 @@
       "depends_on": ["compile_main", "compile_app", "make_static_lib"],
       "file_inputs": ["main.o", "app.o", "libmylib.a"],
       "file_outputs": ["myapp"],
-      "inputs": {
-        "main_obj": { "type": "string", "required": true },
-        "app_obj": { "type": "string", "required": true },
-        "archive": { "type": "string", "required": true }
-      },
       "params": {
         "command": "scripts/link.sh",
         "args": ["{{input[0]}}", "{{input[1]}}", "{{input[2]}}", "{{output[0]}}"]
       }
     }
   },
-
-  "dataflow": [
-    { "from_task": "compile_lib1", "from_output": "object", "to_task": "make_static_lib", "to_input": "obj1" },
-    { "from_task": "compile_lib2", "from_output": "object", "to_task": "make_static_lib", "to_input": "obj2" },
-
-    { "from_task": "compile_main", "from_output": "object", "to_task": "make_executable", "to_input": "main_obj" },
-    { "from_task": "compile_app", "from_output": "object", "to_task": "make_executable", "to_input": "app_obj" },
-    { "from_task": "make_static_lib", "from_output": "archive", "to_task": "make_executable", "to_input": "archive" }
-  ],
 
   "defaults": {
     "timeout_ms": 5000
