@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
+import React from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorTaskNodeData, RuntimeTaskState } from "./types";
 import { FILE_INPUT_COLORS, FILE_OUTPUT_COLORS } from "./constants";
@@ -96,45 +96,6 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
     return { label, color, isFileInput };
   });
 
-  // Measure actual rendered label positions for precise handle alignment.
-  const nodeRef = useRef<HTMLDivElement>(null);
-  const [labelOffsets, setLabelOffsets] = useState<number[]>([]);
-  const [outputOffsets, setOutputOffsets] = useState<number[]>([]);
-
-  const fileInputsKey = fileInputs.join("|");
-  const depIdsKey = depIds.join("|");
-  const fileOutputsKey = fileOutputs.join("|");
-  const materializeKey = JSON.stringify(materializeMap);
-
-  useLayoutEffect(() => {
-    if (!nodeRef.current) return;
-    // Use requestAnimationFrame to ensure DOM is fully laid out before measuring
-    const raf = requestAnimationFrame(() => {
-      if (!nodeRef.current) return;
-      const nodeRect = nodeRef.current.getBoundingClientRect();
-      if (hasDepHandles) {
-        const labels = nodeRef.current.querySelectorAll(".taskNodeDepLabel");
-        const offsets = Array.from(labels).map((el) => {
-          const rect = el.getBoundingClientRect();
-          return rect.top - nodeRect.top + rect.height / 2;
-        });
-        setLabelOffsets(offsets);
-      } else {
-        setLabelOffsets([]);
-      }
-      if (hasFileOutputs) {
-        const labels = nodeRef.current.querySelectorAll(".taskNodeOutputLabel");
-        const offsets = Array.from(labels).map((el) => {
-          const rect = el.getBoundingClientRect();
-          return rect.top - nodeRect.top + rect.height / 2;
-        });
-        setOutputOffsets(offsets);
-      } else {
-        setOutputOffsets([]);
-      }
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [handleCount, fileOutputsKey, subtitle, props.data.title, hasDepHandles, hasFileOutputs, fileInputsKey, depIdsKey, materializeKey]);
 
   const errorCount = errors.length;
   const warningCount = warnings.length;
@@ -190,7 +151,6 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
 
   return (
     <div
-      ref={nodeRef}
       className={
         "taskNode"
         + (isSelected ? " taskNodeSelected" : "")
@@ -207,30 +167,12 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
       }
       title={tooltip}
     >
-      {hasDepHandles ? (
-        <>
-          <Handle type="target" position={Position.Left} id="dep-target"
-            className="hiddenHandle" />
-          {handleEntries.map((entry, idx) => (
-            <Handle
-              key={`dephandle-${idx}`}
-              type="target"
-              position={Position.Left}
-              id={`dephandle-${idx}`}
-              style={{
-                top: labelOffsets[idx] ?? 0,
-                background: entry.color,
-                borderColor: entry.color,
-                width: 10,
-                height: 10,
-                borderWidth: 2,
-              }}
-              title={`${idx + 1}: ${entry.label}`}
-            />
-          ))}
-        </>
-      ) : (
+      {!hasDepHandles && (
         <Handle type="target" position={Position.Left} id="dep-target" />
+      )}
+      {hasDepHandles && (
+        <Handle type="target" position={Position.Left} id="dep-target"
+          className="hiddenHandle" />
       )}
       {inputNames.map((name, idx) => (
         <Handle
@@ -258,7 +200,21 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         {hasDepHandles && (
           <div className="taskNodeFileInputs">
             {handleEntries.map((entry, idx) => (
-              <div key={idx} className="taskNodeDepLabel">
+              <div key={idx} className="taskNodeDepLabel taskNodeHandleRow">
+                <Handle
+                  type="target"
+                  position={Position.Left}
+                  id={`dephandle-${idx}`}
+                  className="taskNodeInlineHandle"
+                  style={{
+                    background: entry.color,
+                    borderColor: entry.color,
+                    width: 10,
+                    height: 10,
+                    borderWidth: 2,
+                  }}
+                  title={`${idx + 1}: ${entry.label}`}
+                />
                 <span style={{ color: entry.color }}>
                   {idx + 1}: {entry.label}
                 </span>
@@ -272,10 +228,24 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
         {hasFileOutputs && (
           <div className="taskNodeFileOutputs">
             {fileOutputEntries.map((entry, idx) => (
-              <div key={idx} className="taskNodeOutputLabel">
+              <div key={idx} className="taskNodeOutputLabel taskNodeHandleRow">
                 <span style={{ color: entry.color }}>
                   out: {entry.label}
                 </span>
+                <Handle
+                  type="source"
+                  position={Position.Right}
+                  id={`fileoutput-${idx}`}
+                  className="taskNodeInlineHandle taskNodeInlineHandleRight"
+                  style={{
+                    background: entry.color,
+                    borderColor: entry.color,
+                    width: 10,
+                    height: 10,
+                    borderWidth: 2,
+                  }}
+                  title={`Output ${idx + 1}: ${entry.label}`}
+                />
               </div>
             ))}
           </div>
@@ -287,30 +257,12 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
           </div>
         )}
       </div>
-      {hasFileOutputs ? (
-        <>
-          <Handle type="source" position={Position.Right} id="dep-source"
-            className="hiddenHandle" />
-          {fileOutputEntries.map((entry, idx) => (
-            <Handle
-              key={`fileoutput-${idx}`}
-              type="source"
-              position={Position.Right}
-              id={`fileoutput-${idx}`}
-              style={{
-                top: outputOffsets[idx] ?? 0,
-                background: entry.color,
-                borderColor: entry.color,
-                width: 10,
-                height: 10,
-                borderWidth: 2,
-              }}
-              title={`Output ${idx + 1}: ${entry.label}`}
-            />
-          ))}
-        </>
-      ) : (
+      {!hasFileOutputs && (
         <Handle type="source" position={Position.Right} id="dep-source" />
+      )}
+      {hasFileOutputs && (
+        <Handle type="source" position={Position.Right} id="dep-source"
+          className="hiddenHandle" />
       )}
       {outputNames.map((name, idx) => (
         <Handle

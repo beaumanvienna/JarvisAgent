@@ -57,6 +57,32 @@ export function validateGraph(graph: EditorGraph): ValidationResult
       errors.push("working_directory must be a string.");
     }
 
+    // timeout_ms validation
+    const taskTimeout = (task as { timeout_ms?: number }).timeout_ms;
+    if (taskTimeout !== undefined && typeof taskTimeout === "number" && taskTimeout < 0)
+    {
+      errors.push("timeout_ms must not be negative.");
+    }
+
+    // Materialize validation for shell/python tasks
+    const materializeMap = (task as { materialize?: Record<string, string> }).materialize;
+    if (materializeMap && typeof materializeMap === "object")
+    {
+      const entries = Object.entries(materializeMap);
+      for (let i = 0; i < entries.length; i++)
+      {
+        const [src, tgt] = entries[i];
+        if (!src || src.trim().length === 0)
+        {
+          warnings.push(`materialize row ${i + 1}: source is empty.`);
+        }
+        if (!tgt || tgt.trim().length === 0)
+        {
+          warnings.push(`materialize row ${i + 1}: target filename is empty.`);
+        }
+      }
+    }
+
     if (errors.length > 0)
     {
       nodeErrorsById.set(node.id, errors);

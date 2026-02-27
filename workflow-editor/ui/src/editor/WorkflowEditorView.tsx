@@ -28,6 +28,7 @@ import {
   cancelRun,
   cleanWorkflow,
   createWorkflowWithId,
+  fetchRunDetails,
   loadWorkflow,
   pauseRun,
   resumeRun,
@@ -495,8 +496,13 @@ export default function WorkflowEditorView(props: {
   }, [undo, redo]);
 
   const currentSignature = useMemo(() => {
-    return computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
-  }, [nodes, edges]);
+    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
+    const wfFieldsSig = JSON.stringify({
+      wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel,
+      manualStartEnabled, triggers,
+    });
+    return graphSig + "|" + wfFieldsSig;
+  }, [nodes, edges, wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel, manualStartEnabled, triggers]);
 
   const resetToNewDraft = useCallback(() => {
     setNodes([]);
@@ -509,8 +515,13 @@ export default function WorkflowEditorView(props: {
     setBackendInfos([]);
     setErrorText(null);
 
-    const emptySignature = computeGraphSignature([], []);
-    setLastSavedSignature(emptySignature);
+    const emptyGraphSig = computeGraphSignature([], []);
+    const emptyWfFieldsSig = JSON.stringify({
+      wfLabel: "", wfDoc: "", wfBaseDirectory: "",
+      wfDefaultTimeoutMs: "", wfDefaultAiProvider: "", wfDefaultAiModel: "",
+      manualStartEnabled: true, triggers: [],
+    });
+    setLastSavedSignature(emptyGraphSig + "|" + emptyWfFieldsSig);
     setLastSavedNodeSnapshot({});
     setIsDirty(false);
     if (props.onDirtyStateChange)
@@ -717,7 +728,23 @@ export default function WorkflowEditorView(props: {
     const isFromTemplate = workflowId === null;
     if (!isFromTemplate)
     {
-      setLastSavedSignature(computeGraphSignature(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task"), graph.edges));
+      const graphSig = computeGraphSignature(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task"), graph.edges);
+      const loadedLabel = typeof jcwf.label === "string" ? jcwf.label : "";
+      const loadedDoc = Array.isArray(jcwf.doc) ? jcwf.doc.join("\n") : (typeof jcwf.doc === "string" ? jcwf.doc : "");
+      const loadedBaseDir = typeof jcwf.base_directory === "string" ? (jcwf.base_directory as string) : "";
+      const loadedDefaults = (jcwf as Record<string, unknown>).defaults as Record<string, unknown> | undefined;
+      const loadedTimeout = loadedDefaults?.timeout_ms !== undefined ? String(loadedDefaults.timeout_ms) : "";
+      const loadedAi = loadedDefaults?.ai as Record<string, unknown> | undefined;
+      const loadedProvider = typeof loadedAi?.provider === "string" ? loadedAi.provider : "";
+      const loadedModel = typeof loadedAi?.model === "string" ? loadedAi.model : "";
+      const loadedManualStart = jcwf.manual_start !== false;
+      const loadedTriggers = Array.isArray(jcwf.triggers) ? jcwf.triggers : [];
+      const wfFieldsSig = JSON.stringify({
+        wfLabel: loadedLabel, wfDoc: loadedDoc, wfBaseDirectory: loadedBaseDir,
+        wfDefaultTimeoutMs: loadedTimeout, wfDefaultAiProvider: loadedProvider, wfDefaultAiModel: loadedModel,
+        manualStartEnabled: loadedManualStart, triggers: loadedTriggers,
+      });
+      setLastSavedSignature(graphSig + "|" + wfFieldsSig);
       setLastSavedNodeSnapshot(computeNodeSnapshot(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task")));
       setIsDirty(false);
       if (props.onDirtyStateChange)
@@ -1098,82 +1125,109 @@ export default function WorkflowEditorView(props: {
     };
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Detect when a pending run completes
+  // Fetch real final task states from the REST API when a run completes.
+  const fetchFinalRunState = useCallback(async (runId: string) => {
+    try
+    {
+      const detail = await fetchRunDetails(runId);
+      const runState = detail.run.state;
+      const stateLabel = runState === "failed" ? "\u2717 Run failed" :
+                         runState === "succeeded" ? "\u2713 Run completed successfully" :
+                         runState === "cancelled" ? "Run cancelled" :
+                         `Run ${runState}`;
+      setStatusText(`${stateLabel}. runId=${runId}`);
+      setLastRunResult({ runId, state: runState });
+
+      const nextRuntime: RuntimeTaskSnapshotById = {};
+      for (const t of detail.run.tasks)
+      {
+        nextRuntime[t.taskId] = {
+          taskId: t.taskId,
+          runId,
+          state: normalizeRuntimeState(t.state),
+          attemptCount: t.attemptCount,
+          lastErrorMessage: t.error,
+        };
+      }
+      setRuntimeTasksById(nextRuntime);
+    }
+    catch
+    {
+      // Fallback: infer states if API call fails
+      setStatusText(`Run finished. runId=${runId}`);
+      setLastRunResult({ runId, state: "unknown" });
+    }
+    setPendingRunId(null);
+    pendingRunSeenRef.current = false;
+    pendingRunLastStateRef.current = "running";
+  }, []);
+
+  // Poll run status while a run is pending — reliably fetches real task states.
   useEffect(() => {
     if (!pendingRunId)
     {
-      pendingRunSeenRef.current = false;
       return;
     }
 
-    const run = activeRuns.find((r) => r.runId === pendingRunId);
-    if (run)
-    {
-      pendingRunSeenRef.current = true;
-      pendingRunLastStateRef.current = run.state;
-    }
+    const terminalStates = ["completed", "failed", "cancelled", "succeeded"];
+    let cancelled = false;
 
-    if (!run)
-    {
-      // Run not found in active runs - if we saw it before and now it's gone, use last known state
-      if (pendingRunSeenRef.current)
+    const poll = async () => {
+      if (cancelled) return;
+      try
       {
-        const finalState = pendingRunLastStateRef.current === "failed" ? "failed" : "completed";
-        setLastRunResult({ runId: pendingRunId, state: finalState });
-        const stateLabel = finalState === "failed" ? "\u2717 Run failed" : "\u2713 Run completed";
-        setStatusText(`${stateLabel}. runId=${pendingRunId}`);
-        setPendingRunId(null);
-        pendingRunSeenRef.current = false;
-        pendingRunLastStateRef.current = "running";
+        const detail = await fetchRunDetails(pendingRunId);
+        if (cancelled) return;
 
-        // Infer final task states for tasks that completed between polls.
-        // If the run succeeded, all tasks must have succeeded; if failed,
-        // non-terminal tasks were effectively cancelled.
-        const terminalTaskStates: RuntimeTaskState[] = ["success", "failed", "cancelled"];
-        const inferredState: RuntimeTaskState = finalState === "completed" ? "success" : "cancelled";
-        setRuntimeTasksById((prev) => {
-          const next = { ...prev };
-          for (const key of Object.keys(next))
-          {
-            if (!terminalTaskStates.includes(next[key].state))
-            {
-              next[key] = { ...next[key], state: inferredState };
-            }
-          }
-          return next;
-        });
-      }
-      return;
-    }
+        const runState = detail.run.state;
 
-    const terminalStates = ["completed", "failed", "cancelled"];
-    if (terminalStates.includes(run.state))
-    {
-      setLastRunResult({ runId: run.runId, state: run.state });
-      setPendingRunId(null);
-      pendingRunSeenRef.current = false;
-
-      const stateLabel = run.state === "completed" ? "\u2713 Run completed successfully" :
-                         run.state === "failed" ? "\u2717 Run failed" :
-                         "Run cancelled";
-      setStatusText(`${stateLabel}. runId=${run.runId}`);
-
-      // Infer final task states for tasks that completed between polls.
-      const terminalTaskStates: RuntimeTaskState[] = ["success", "failed", "cancelled"];
-      const inferredState: RuntimeTaskState = run.state === "completed" ? "success" : "cancelled";
-      setRuntimeTasksById((prev) => {
-        const next = { ...prev };
-        for (const key of Object.keys(next))
+        // Update task states from the real API data
+        const nextRuntime: RuntimeTaskSnapshotById = {};
+        for (const t of detail.run.tasks)
         {
-          if (!terminalTaskStates.includes(next[key].state))
-          {
-            next[key] = { ...next[key], state: inferredState };
-          }
+          nextRuntime[t.taskId] = {
+            taskId: t.taskId,
+            runId: pendingRunId,
+            state: normalizeRuntimeState(t.state),
+            attemptCount: t.attemptCount,
+            lastErrorMessage: t.error,
+          };
         }
-        return next;
-      });
-    }
-  }, [activeRuns, pendingRunId]);
+        setRuntimeTasksById(nextRuntime);
+
+        if (terminalStates.includes(runState))
+        {
+          const stateLabel = runState === "failed" ? "\u2717 Run failed" :
+                             (runState === "succeeded" || runState === "completed") ? "\u2713 Run completed successfully" :
+                             runState === "cancelled" ? "Run cancelled" :
+                             `Run ${runState}`;
+          setStatusText(`${stateLabel}. runId=${pendingRunId}`);
+          setLastRunResult({ runId: pendingRunId, state: runState });
+          setPendingRunId(null);
+        }
+      }
+      catch
+      {
+        // Ignore transient fetch errors; will retry on next poll
+      }
+    };
+
+    // Initial poll after a short delay (give backend time to register the run)
+    const initialTimer = setTimeout(() => {
+      void poll();
+    }, 1500);
+
+    // Then poll every 2 seconds
+    const interval = setInterval(() => {
+      void poll();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [pendingRunId]);
 
   const selectedNode = useMemo((): EditorTaskNode | null => {
     if (!selectedNodeId)
@@ -1269,8 +1323,91 @@ export default function WorkflowEditorView(props: {
       nextEdges = addEdge(baseConn, edges) as EditorTaskEdge[];
     }
 
+    // Auto-populate file_inputs on target when connecting ai_call → shell/python
+    let updatedNodes = nodes as EditorTaskNode[];
+    if (!isDataflow && connection.source && connection.target)
+    {
+      const sourceNode = updatedNodes.find((n) => n.id === connection.source);
+      const targetNode = updatedNodes.find((n) => n.id === connection.target);
+      if (
+        sourceNode && targetNode &&
+        sourceNode.data.task.type === "ai_call" &&
+        (targetNode.data.task.type === "shell" || targetNode.data.task.type === "python")
+      )
+      {
+        const qb = (sourceNode.data.task.queue_binding ?? {}) as Record<string, unknown>;
+        const probFiles = (qb.prob_files ?? []) as Array<{ path: string; content?: string } | string>;
+        let sourceWd = ((sourceNode.data.task.working_directory ?? "") as string).replace(/\/+$/, "");
+        // If source AI task has no working_directory set, compute the suggested path
+        if (sourceWd.length === 0 && sourceNode.data.task.type === "ai_call")
+        {
+          const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
+          const aiNodes = updatedNodes.filter((n) => n.data.task.type === "ai_call");
+          const aiIdx = aiNodes.findIndex((n) => n.id === sourceNode.id);
+          const num = String(aiIdx >= 0 ? aiIdx + 1 : aiNodes.length + 1).padStart(2, "0");
+          sourceWd = `../queue/${wfId}/${num}_${sourceNode.id}`;
+        }
+        let targetWd = ((targetNode.data.task.working_directory ?? "") as string).replace(/\/+$/, "");
+        // If target shell/python task has no working_directory set, compute a suggested path
+        if (targetWd.length === 0)
+        {
+          const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
+          targetWd = `${wfId}/01_${targetNode.id}`;
+        }
+
+        if (probFiles.length > 0 && sourceWd.length > 0)
+        {
+          // Compute prefix: go up from target WD to workflow base dir
+          const targetDepth = targetWd.length > 0
+            ? targetWd.split("/").filter((s) => s.length > 0 && s !== ".").length
+            : 0;
+          const upPrefix = "../".repeat(targetDepth);
+
+          const newInputPaths: string[] = [];
+          for (const entry of probFiles)
+          {
+            const probPath = typeof entry === "string" ? entry : entry.path;
+            const outputName = probPath.replace(/\.txt$/, ".output.txt");
+            newInputPaths.push(`${upPrefix}${sourceWd}/${outputName}`);
+          }
+
+          const existingInputs: string[] = Array.isArray(targetNode.data.task.file_inputs)
+            ? [...(targetNode.data.task.file_inputs as string[])]
+            : [];
+          // Fill empty slots first, then append remaining
+          const toPlace = newInputPaths.filter((p) => !existingInputs.includes(p));
+          const toAppend: string[] = [];
+          for (const path of toPlace)
+          {
+            const emptyIdx = existingInputs.findIndex((s) => s.trim().length === 0);
+            if (emptyIdx >= 0)
+            {
+              existingInputs[emptyIdx] = path;
+            }
+            else
+            {
+              toAppend.push(path);
+            }
+          }
+          const mergedInputs = [...existingInputs, ...toAppend];
+          const changed = mergedInputs.length !== (Array.isArray(targetNode.data.task.file_inputs) ? (targetNode.data.task.file_inputs as string[]).length : 0)
+            || mergedInputs.some((v, i) => v !== ((targetNode.data.task.file_inputs as string[]) ?? [])[i]);
+
+          if (changed)
+          {
+            updatedNodes = updatedNodes.map((n) => {
+              if (n.id !== targetNode.id) return n;
+              const nextTask = { ...(n.data.task as JcwfTask), file_inputs: mergedInputs };
+              const { title, subtitle } = nodeTitleFromTask(nextTask);
+              return { ...n, data: { ...n.data, task: nextTask, title, subtitle } };
+            });
+          }
+        }
+      }
+    }
+
     const graph: EditorGraph = {
-      nodes: nodes as EditorTaskNode[],
+      nodes: updatedNodes,
       edges: nextEdges,
     };
 
@@ -1280,14 +1417,14 @@ export default function WorkflowEditorView(props: {
       setStatusText("Blocked: edge would create a cycle.");
       setErrorText(null);
       // do not apply the edge
-      recomputeValidation({ nodes: graph.nodes, edges });
+      recomputeValidation({ nodes: updatedNodes, edges });
       return;
     }
 
-    recomputeValidation({ nodes: graph.nodes, edges: nextEdges });
-    setStatusText(isDataflow ? "Dataflow edge added." : "Edge added.");
+    recomputeValidation({ nodes: updatedNodes, edges: nextEdges });
+    setStatusText(isDataflow ? "Dataflow edge added." : `Edge added.${updatedNodes !== nodes ? " file_inputs auto-populated from upstream prob_files." : ""}`);
     setErrorText(null);
-  }, [nodes, edges, recomputeValidation]);
+  }, [nodes, edges, recomputeValidation, loadedWorkflowId, props.workflowId]);
 
   const findNonOverlappingPosition = useCallback((
     _startX: number,
@@ -1428,7 +1565,7 @@ export default function WorkflowEditorView(props: {
       return;
     }
 
-    const nextNodes: EditorTaskNode[] = (nodes as EditorTaskNode[]).map((n) => {
+    let nextNodes: EditorTaskNode[] = (nodes as EditorTaskNode[]).map((n) => {
       if (n.id !== selectedNode.id)
       {
         return n;
@@ -1447,6 +1584,56 @@ export default function WorkflowEditorView(props: {
         },
       };
     });
+
+    // Propagate PROB filename renames to downstream file_inputs
+    if (selectedNode.data.task.type === "ai_call" && patch.queue_binding)
+    {
+      const oldQb = (selectedNode.data.task.queue_binding ?? {}) as Record<string, unknown>;
+      const oldProbs = (oldQb.prob_files ?? []) as Array<{ path: string; content?: string } | string>;
+      const newQb = (patch.queue_binding ?? {}) as Record<string, unknown>;
+      const newProbs = (newQb.prob_files ?? []) as Array<{ path: string; content?: string } | string>;
+
+      const renames: Array<{ oldSuffix: string; newSuffix: string }> = [];
+      for (let i = 0; i < Math.max(oldProbs.length, newProbs.length); i++)
+      {
+        const oldEntry = oldProbs[i];
+        const newEntry = newProbs[i];
+        if (!oldEntry || !newEntry) continue;
+        const oldPath = typeof oldEntry === "string" ? oldEntry : oldEntry.path;
+        const newPath = typeof newEntry === "string" ? newEntry : newEntry.path;
+        if (oldPath !== newPath)
+        {
+          renames.push({
+            oldSuffix: "/" + oldPath.replace(/\.txt$/, ".output.txt"),
+            newSuffix: "/" + newPath.replace(/\.txt$/, ".output.txt"),
+          });
+        }
+      }
+
+      if (renames.length > 0)
+      {
+        nextNodes = nextNodes.map((n) => {
+          if (!Array.isArray(n.data.task.file_inputs)) return n;
+          const fi = n.data.task.file_inputs as string[];
+          let changed = false;
+          const updatedFi = fi.map((f) => {
+            for (const r of renames)
+            {
+              if (f.endsWith(r.oldSuffix))
+              {
+                changed = true;
+                return f.slice(0, f.length - r.oldSuffix.length) + r.newSuffix;
+              }
+            }
+            return f;
+          });
+          if (!changed) return n;
+          const nextTask = { ...(n.data.task as JcwfTask), file_inputs: updatedFi };
+          const { title: t, subtitle: st } = nodeTitleFromTask(nextTask);
+          return { ...n, data: { ...n.data, task: nextTask, title: t, subtitle: st } };
+        });
+      }
+    }
 
     recomputeValidation({ nodes: nextNodes, edges });
   }, [selectedNode, nodes, edges, recomputeValidation]);
@@ -1520,7 +1707,12 @@ export default function WorkflowEditorView(props: {
   }, [props.onWorkflowPersisted]);
 
   const updateSavedBaseline = useCallback(() => {
-    setLastSavedSignature(computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]));
+    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
+    const wfFieldsSig = JSON.stringify({
+      wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel,
+      manualStartEnabled, triggers,
+    });
+    setLastSavedSignature(graphSig + "|" + wfFieldsSig);
     setLastSavedNodeSnapshot(computeNodeSnapshot(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[]));
     setBackendErrors([]);
     setBackendWarnings([]);
@@ -1529,7 +1721,7 @@ export default function WorkflowEditorView(props: {
     {
       props.onDirtyStateChange(false);
     }
-  }, [nodes, edges, props.onDirtyStateChange]);
+  }, [nodes, edges, wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel, manualStartEnabled, triggers, props.onDirtyStateChange]);
 
   const performCreateWorkflow = useCallback(async (newId: string, mode: "create" | "saveAs") => {
     const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
@@ -1618,6 +1810,19 @@ export default function WorkflowEditorView(props: {
     setShowCreateModal(true);
   }, []);
 
+  // Ctrl+S keyboard shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s")
+      {
+        e.preventDefault();
+        void onSave();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onSave]);
+
   const onCreateModalSubmit = useCallback((newId: string) => {
     setShowCreateModal(false);
     void performCreateWorkflow(newId, createModalMode);
@@ -1667,6 +1872,10 @@ export default function WorkflowEditorView(props: {
 
     try
     {
+      // Always save before running to ensure backend has the latest version
+      setStatusText("Saving before run…");
+      await onSave();
+
       setStatusText("Starting workflow…");
       setErrorText(null);
       const result = await runWorkflow(workflowId);
@@ -1690,7 +1899,7 @@ export default function WorkflowEditorView(props: {
       setErrorText(`Run failed: ${message}`);
       setStatusText("");
     }
-  }, [loadedWorkflowId, props.workflowId]);
+  }, [loadedWorkflowId, props.workflowId, onSave]);
 
   const onClean = useCallback(async () => {
     const workflowId = loadedWorkflowId ?? props.workflowId;
@@ -2390,13 +2599,22 @@ export default function WorkflowEditorView(props: {
                   <label className="field">
                     <div className="small">
                       {selectedNode.data.task.type === "ai_call"
-                        ? <>working_directory <span style={{ opacity: 0.5 }}>(optional)</span></>
-                        : "working_directory relative to jcwf"}
+                        ? <>working_directory <span style={{ opacity: 0.5 }}>(optional, tab to accept)</span></>
+                        : <>working_directory relative to jcwf <span style={{ opacity: 0.5 }}>(tab to accept)</span></>}
                     </div>
                     <input
                       className="input"
                       value={(selectedNode.data.task.working_directory ?? "") as string}
                       onChange={(e) => { updateSelectedTaskField({ working_directory: e.target.value }); }}
+                      onKeyDown={(e) => {
+                        const cur = ((selectedNode.data.task.working_directory ?? "") as string).trim();
+                        if (e.key === "Tab" && cur.length === 0)
+                        {
+                          e.preventDefault();
+                          const el = e.currentTarget;
+                          updateSelectedTaskField({ working_directory: el.placeholder });
+                        }
+                      }}
                       placeholder={
                         selectedNode.data.task.type === "ai_call"
                           ? (() => {
@@ -2563,26 +2781,126 @@ export default function WorkflowEditorView(props: {
                     />
                   </label>
 
-                  <label className="field">
-                    <div className="small">params (JSON)</div>
-                    <textarea
-                      className="input codeInput"
-                      value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
-                      onChange={(e) => {
-                        try
-                        {
-                          const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
-                          updateSelectedTaskField({ params: parsed });
-                          setErrorText(null);
-                        }
-                        catch
-                        {
-                          setErrorText("params is not valid JSON.");
-                        }
-                      }}
-                      rows={8}
-                    />
-                  </label>
+                  {selectedNode.data.task.type === "shell" ? (() => {
+                    const shellParams = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const command = (shellParams.command ?? "") as string;
+                    const args: string[] = Array.isArray(shellParams.args) ? shellParams.args as string[] : [];
+                    const curFileInputs: string[] = Array.isArray(selectedNode.data.task.file_inputs) ? selectedNode.data.task.file_inputs as string[] : [];
+                    const curFileOutputs: string[] = Array.isArray(selectedNode.data.task.file_outputs) ? selectedNode.data.task.file_outputs as string[] : [];
+
+                    const updateShellParams = (patch: Record<string, unknown>) => {
+                      const next = { ...shellParams, ...patch };
+                      if (!next.command) delete next.command;
+                      if (Array.isArray(next.args) && (next.args as unknown[]).length === 0) delete next.args;
+                      updateSelectedTaskField({ params: Object.keys(next).length > 0 ? next : undefined } as Partial<JcwfTask>);
+                    };
+
+                    return (
+                      <div className="field">
+                        <div className="small" style={{ fontWeight: 600 }}>params (shell)</div>
+                        <label className="field" style={{ marginTop: 4 }}>
+                          <div className="small">command</div>
+                          <input
+                            className="input"
+                            style={{ fontSize: 12, padding: "4px 8px" }}
+                            value={command}
+                            onChange={(e) => updateShellParams({ command: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Tab" && command.trim().length === 0)
+                              {
+                                e.preventDefault();
+                                updateShellParams({ command: e.currentTarget.placeholder });
+                              }
+                            }}
+                            placeholder="scripts/myScript.sh"
+                          />
+                        </label>
+                        <div style={{ marginTop: 6 }}>
+                          <div className="small">args</div>
+                          {args.map((arg, idx) => {
+                            const isFileRef = arg.startsWith("${input[") || arg.startsWith("${output[");
+                            return (
+                              <div key={`arg-${idx}`} style={{ display: "flex", gap: 4, alignItems: "center", marginTop: 2 }}>
+                                {(curFileInputs.length > 0 || curFileOutputs.length > 0) ? (
+                                  <select
+                                    className="input"
+                                    style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                                    value={isFileRef ? arg : "__literal__"}
+                                    onChange={(e) => {
+                                      const newArgs = [...args];
+                                      newArgs[idx] = e.target.value === "__literal__" ? "" : e.target.value;
+                                      updateShellParams({ args: newArgs });
+                                    }}
+                                  >
+                                    <option value="__literal__">— literal string —</option>
+                                    {curFileInputs.map((_, fiIdx) => {
+                                      const fiSegs = curFileInputs[fiIdx].split("/");
+                                      const fiName = fiSegs[fiSegs.length - 1] || curFileInputs[fiIdx];
+                                      return (
+                                        <option key={`fi-${fiIdx}`} value={`\${input[${fiIdx}]}`}>
+                                          input[{fiIdx}]: {fiName}
+                                        </option>
+                                      );
+                                    })}
+                                    {curFileOutputs.map((_, foIdx) => {
+                                      const foSegs = curFileOutputs[foIdx].split("/");
+                                      const foName = foSegs[foSegs.length - 1] || curFileOutputs[foIdx];
+                                      return (
+                                        <option key={`fo-${foIdx}`} value={`\${output[${foIdx}]}`}>
+                                          output[{foIdx}]: {foName}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                ) : null}
+                                {(!isFileRef || curFileInputs.length === 0 && curFileOutputs.length === 0) && (
+                                  <input
+                                    className="input"
+                                    style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                                    value={arg}
+                                    onChange={(e) => {
+                                      const newArgs = [...args];
+                                      newArgs[idx] = e.target.value;
+                                      updateShellParams({ args: newArgs });
+                                    }}
+                                    placeholder="e.g. --verbose"
+                                  />
+                                )}
+                                <button className="btn" type="button" style={{ padding: "2px 6px", fontSize: 10, color: "#ff8a8a" }} onClick={() => {
+                                  const newArgs = args.filter((_, i) => i !== idx);
+                                  updateShellParams({ args: newArgs });
+                                }}>x</button>
+                              </div>
+                            );
+                          })}
+                          <button className="btn" type="button" style={{ padding: "3px 8px", fontSize: 11, marginTop: 4 }} onClick={() => {
+                            updateShellParams({ args: [...args, ""] });
+                          }}>+ arg</button>
+                        </div>
+                      </div>
+                    );
+                  })() : (
+                    <label className="field">
+                      <div className="small">params (JSON)</div>
+                      <textarea
+                        className="input codeInput"
+                        value={JSON.stringify(selectedNode.data.task.params ?? {}, null, 2)}
+                        onChange={(e) => {
+                          try
+                          {
+                            const parsed = JSON.parse(e.target.value) as Record<string, unknown>;
+                            updateSelectedTaskField({ params: parsed });
+                            setErrorText(null);
+                          }
+                          catch
+                          {
+                            setErrorText("params is not valid JSON.");
+                          }
+                        }}
+                        rows={8}
+                      />
+                    </label>
+                  )}
 
                   <label className="field">
                     <div className="small">timeout_ms</div>
@@ -2592,9 +2910,11 @@ export default function WorkflowEditorView(props: {
                       style={{ fontSize: 12, padding: "4px 8px" }}
                       value={selectedNode.data.task.timeout_ms !== undefined ? String(selectedNode.data.task.timeout_ms) : ""}
                       onChange={(e) => {
-                        const val = e.target.value.length > 0 ? Number(e.target.value) : undefined;
-                        updateSelectedTaskField({ timeout_ms: val } as Partial<JcwfTask>);
+                        const raw = e.target.value;
+                        const val = raw.length > 0 ? Math.max(0, Number(raw)) : undefined;
+                        updateSelectedTaskField({ timeout_ms: (val !== undefined && isNaN(val)) ? undefined : val } as Partial<JcwfTask>);
                       }}
+                      min={0}
                       placeholder="(inherits workflow default)"
                     />
                   </label>

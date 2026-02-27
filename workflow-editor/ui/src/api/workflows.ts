@@ -218,3 +218,31 @@ export async function stopRun(runId: string): Promise<StopRunResponse>
   ensureOk(response);
   return (await response.json()) as StopRunResponse;
 }
+
+export type RunDetailTask = {
+  taskId: string;
+  state: string;
+  attemptCount?: number;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+export type RunDetailResponse = {
+  ok: boolean;
+  run: {
+    runId: string;
+    workflowId: string;
+    state: string;
+    startedAt?: string;
+    completedAt?: string;
+    tasks: RunDetailTask[];
+  };
+};
+
+export async function fetchRunDetails(runId: string): Promise<RunDetailResponse>
+{
+  const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}`);
+  ensureOk(response);
+  return (await response.json()) as RunDetailResponse;
+}
