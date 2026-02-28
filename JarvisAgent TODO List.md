@@ -37,6 +37,7 @@ This list tracks the remaining work for JarvisAgent.
 
 ## 5. Native Google Gemini reply parser (new)
 - Currently using the OpenAI-compatible legacy endpoint (`generativelanguage.googleapis.com/v1beta/openai/chat/completions`)
+- This legacy format works but may lack access to Gemini-specific features (grounding, safety settings, function calling, etc.)
 - Implement a dedicated reply parser for the native Gemini API (`generativelanguage.googleapis.com/v1beta/models/...`)
 - This would be a new `InterfaceType` (e.g., `API3` / `GeminiNative`)
 
@@ -59,18 +60,22 @@ This list tracks the remaining work for JarvisAgent.
 - Expose internal task-queue size for load balancing
 - Dispatch OnEvent() to the PythonEngine with the lowest queued workload
 - Ensure isolated interpreter state per engine
+- **Complexity note:** CPython sub-interpreters + per-interpreter GIL (PEP 684, Python 3.12+) is the cleanest path but has restrictions on C extension modules. Alternative: multiprocessing with IPC.
 
 ---
 
-## 8. Browser-based terminal prompt (remote control from a web page) (new)
-- Use a web terminal emulator like xterm.js on the frontend with the existing WebSocket server side (Crow is already in your stack).
-- In that setup, you don’t need a “C++ prompt library” at all — you need:
-  - a command parser/dispatcher in C++
-  - a completion provider in C++ (your own command registry is usually best)
-  - a tiny WS protocol: `{ "type":"line"|"complete"|"help", ... }`
-- Commands to support (initial):
-  - trigger workflows
-  - check state
-  - get help
+## 8. Browser-based AI chat terminal (new)
+- **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
+  Not just a command prompt, but a conversational AI interface that can:
+  - Answer questions about the system, workflows, and task outputs
+  - Trigger and monitor workflow runs
+  - Inspect task state, logs, and captured output
+  - Suggest fixes for failed tasks
+- **Frontend:** xterm.js terminal emulator on a dedicated page/tab, connected via WebSocket (Crow already in stack)
+- **Backend:**
+  - Chat message router in C++ (WS protocol: `{ "type": "chat" | "command" | "complete", ... }`)
+  - AI provider integration for natural language understanding
+  - Context injection: system state, active runs, task history
+  - Command fallback: direct commands (`/run`, `/status`, `/help`) for non-AI actions
 
 ---

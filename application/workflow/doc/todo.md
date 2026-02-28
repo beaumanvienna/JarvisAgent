@@ -143,6 +143,30 @@ verification before committing.
 
 ---
 
+## Workflow editor — recent features (Feb 2026)
+
+- [x] ~~**Script path validation**~~ — `GET /api/scripts/check?path=...` endpoint validates that shell task command scripts exist and are executable. Frontend caches results and shows inline warnings on shell task nodes. Lexical path normalization rejects `..` traversal.
+- [x] ~~**Shell task stdout/stderr capture**~~ — `ExecuteCommandWithWatchdog` uses 2 separate pipes; `ExecuteCommandWithCapturedOutput` redirects stderr to temp file. Full output written to `stdout.txt`/`stderr.txt` in task working directory. First 1024 chars stored in `TaskInstanceState` and exposed via REST API + WebSocket snapshot. Frontend shows hover tooltip (stderr in red, stdout below) and side panel display.
+
+---
+
+## Workflow editor testing (open)
+
+The manual test plan in `workflow-editor/workflow-editor-test.md` covers 3 test workflows:
+1. **exampleMakefile** — ai_call → shell (make)
+2. **stockAnalyzerTop6** — filter + per_item fan-out → summary
+3. **techTermGlossary** — 3-task ai_call chain
+
+These should be re-run periodically after editor changes to catch regressions.
+Additional test scenarios to cover:
+- [ ] Shell task with stderr output (verify red text in tooltip + side panel)
+- [ ] Shell task with >1024 chars output (verify truncation)
+- [ ] Watchdog timeout path (task with low `timeout_ms` that hangs)
+- [ ] Pause / Resume / Stop controls during a multi-task run
+- [ ] Clean command after a run (verify queue folders are deleted)
+
+---
+
 ## Notes / follow-ups (when the above is done)
 - [x] ~~Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment)~~:
   - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.
