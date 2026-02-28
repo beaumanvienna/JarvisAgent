@@ -912,6 +912,10 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
             .methods("POST"_method)([this](std::string const& name) { return HandleProviderSetDefaultPost(name); });
 
+        // ---- Script check API (Workflow Editor) ----
+        CROW_ROUTE(m_Server, "/api/scripts/check")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
+
         // ---- POST /api/task/<taskId>/heartbeat ----
         CROW_ROUTE(m_Server, "/api/task/<string>/heartbeat")
             .methods("POST"_method)(
@@ -2036,6 +2040,88 @@ namespace AIAssistant
         {
             return MakeWorkflowJsonError(400, "invalid_json", e.what(), "POST /api/integrations/n8n/start");
         }
+    }
+
+    crow::response WebServer::HandleScriptCheckGet(crow::request const& req)
+    {
+        // GET /api/scripts/check?path=scripts/runMake.sh
+        // Returns: { ok, path, exists, executable, error? }
+
+        std::string scriptPath;
+        auto pathParam = req.url_params.get("path");
+        if (pathParam != nullptr)
+        {
+            scriptPath = std::string(pathParam);
+        }
+
+        if (scriptPath.empty())
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "missing_path";
+            responseJson["message"] = "Query parameter 'path' is required.";
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        // Security: enforce "scripts/" prefix (same rule as ShellTaskExecutor::ValidateScriptPath)
+        if (scriptPath.rfind("scripts/", 0) != 0)
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "invalid_path";
+            responseJson["message"] = "Script path must be inside the 'scripts/' directory.";
+            responseJson["path"] = scriptPath;
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        // Allow ".." in raw path (e.g. scripts/helpers/../run.sh) but the
+        // lexically-normalized result must still start with "scripts/" (JCWF spec §3.1.2).
+        std::string const normalizedScriptPath = fs::path(scriptPath).lexically_normal().string();
+        if (normalizedScriptPath.rfind("scripts/", 0) != 0)
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "invalid_path";
+            responseJson["message"] = "Resolved script path escapes the 'scripts/' directory.";
+            responseJson["path"] = scriptPath;
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        // Resolve relative to JarvisAgent launch CWD (same as ShellTaskExecutor)
+        fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
+        if (launchCWD.empty())
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "server_error";
+            responseJson["message"] = "Cannot determine JarvisAgent working directory.";
+            return MakeJsonResponse(500, responseJson);
+        }
+
+        fs::path const absolutePath = (launchCWD / fs::path(scriptPath)).lexically_normal();
+
+        bool const exists = fs::exists(absolutePath);
+        bool executable = false;
+
+        if (exists)
+        {
+            // Check if regular file and has execute permission
+            std::error_code ec;
+            auto const status = fs::status(absolutePath, ec);
+            if (!ec && fs::is_regular_file(status))
+            {
+                auto const perms = status.permissions();
+                executable =
+                    (perms & (fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec)) != fs::perms::none;
+            }
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["path"] = scriptPath;
+        responseJson["exists"] = exists;
+        responseJson["executable"] = executable;
+        return MakeJsonResponse(200, responseJson);
     }
 
     void WebServer::RegisterWebSocket()

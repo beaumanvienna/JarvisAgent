@@ -250,7 +250,7 @@ JarvisAgent MUST NOT change the process current working directory (CWD) at any t
 
 **Exceptions**
 
-- For `shell` tasks, `params.command` MUST start with `scripts/` and MUST be resolved relative to the JarvisAgent Launch Working Directory (not the workflow/task directories).
+- For `shell` tasks, `params.command` MUST start with `scripts/` and MUST be resolved relative to the JarvisAgent Launch Working Directory (not the workflow/task directories). The raw path MAY contain `..` segments (for example `scripts/helpers/../run.sh`), but after lexical normalization the resolved path MUST still begin with `scripts/`. If the normalized path escapes the `scripts/` directory tree, JarvisAgent MUST reject the command. This ensures that shell tasks can only invoke scripts that reside inside the `scripts/` folder or any subfolder thereof.
 
 **Directory creation**
 

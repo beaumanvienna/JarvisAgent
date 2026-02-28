@@ -559,7 +559,15 @@ namespace AIAssistant
     bool ShellTaskExecutor::ValidateScriptPath(std::string const& path) const
     {
         // Enforce "scripts/" prefix to avoid arbitrary command execution.
-        return path.rfind("scripts/", 0) == 0;
+        if (path.rfind("scripts/", 0) != 0)
+        {
+            return false;
+        }
+
+        // The raw path may contain ".." (e.g. scripts/helpers/../run.sh) but
+        // the resolved path must still land inside scripts/ (JCWF spec §3.1.2).
+        std::string const normalized = std::filesystem::path(path).lexically_normal().string();
+        return normalized.rfind("scripts/", 0) == 0;
     }
 
     bool ShellTaskExecutor::IsSafeArgument(std::string const& argument) const
@@ -839,10 +847,12 @@ namespace AIAssistant
 
         if (!ValidateScriptPath(commandPath))
         {
-            LOG_APP_ERROR("ShellTaskExecutor: Script path '{}' rejected for task '{}' (must start with 'scripts/')",
-                          commandPath, taskDefinition.m_Id);
+            LOG_APP_ERROR(
+                "ShellTaskExecutor: Script path '{}' rejected for task '{}' (must be inside the 'scripts/' directory)",
+                commandPath, taskDefinition.m_Id);
             taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "ShellTaskExecutor: Script path rejected (must start with 'scripts/')";
+            taskState.m_LastErrorMessage =
+                "ShellTaskExecutor: Script path rejected (must be inside the 'scripts/' directory)";
             return false;
         }
 

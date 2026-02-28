@@ -143,6 +143,56 @@ Each finding has: `code`, `message`, `path` (JSON pointer), `taskId`, `tier`.
 
 ---
 
+## Scripts — Validation
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/scripts/check?path=<scriptPath>` | Check if a script exists and is executable. |
+
+### GET /api/scripts/check
+
+Used by the Workflow Editor to provide real-time validation warnings for shell tasks.
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `path` | Yes | Script path (must start with `scripts/`). Resolved relative to the JarvisAgent Launch Working Directory. |
+
+**Response (200) — script found:**
+```json
+{ "ok": true, "path": "scripts/runMake.sh", "exists": true, "executable": true }
+```
+
+**Response (200) — script not found:**
+```json
+{ "ok": true, "path": "scripts/nonexistent.sh", "exists": false, "executable": false }
+```
+
+**Response (200) — exists but not executable:**
+```json
+{ "ok": true, "path": "scripts/combineDocumentation.py", "exists": true, "executable": false }
+```
+
+**Response (400) — missing path:**
+```json
+{ "ok": false, "error": "missing_path", "message": "Query parameter 'path' is required." }
+```
+
+**Response (400) — invalid path (not inside `scripts/`):**
+```json
+{ "ok": false, "error": "invalid_path", "message": "Script path must be inside the 'scripts/' directory.", "path": "noprefix.sh" }
+```
+
+**Response (400) — path escapes `scripts/` after resolving `..`:**
+```json
+{ "ok": false, "error": "invalid_path", "message": "Resolved script path escapes the 'scripts/' directory.", "path": "scripts/../workflows/hello" }
+```
+
+Security: the raw path must start with `scripts/` and the lexically-normalized path must remain inside the `scripts/` directory tree. Paths containing `..` are allowed as long as they resolve to a location inside `scripts/` (e.g. `scripts/helpers/../run.sh` → `scripts/run.sh`). See **JC Workflow Specification §3.1.2** (Exceptions) and **§10** (Security Considerations).
+
+---
+
 ## Workflows — Run Control & Monitoring
 
 | Method | Path | Description |

@@ -57,6 +57,43 @@ export function validateGraph(graph: EditorGraph): ValidationResult
       errors.push("working_directory must be a string.");
     }
 
+    // Shell task: command must start with "scripts/" and the resolved path
+    // must remain inside scripts/ after normalizing ".." (JCWF spec §3.1.2).
+    if (task.type === "shell")
+    {
+      const params = (task as { params?: Record<string, unknown> }).params;
+      const command = typeof params?.command === "string" ? params.command : "";
+      if (command.length > 0)
+      {
+        if (!command.startsWith("scripts/"))
+        {
+          errors.push("Shell command must be inside the 'scripts/' directory (JCWF spec §3.1.2).");
+        }
+        else
+        {
+          // Lexically normalize: resolve ".." segments and check the result
+          const parts = command.split("/");
+          const resolved: string[] = [];
+          for (const p of parts)
+          {
+            if (p === ".." && resolved.length > 0 && resolved[resolved.length - 1] !== "..")
+            {
+              resolved.pop();
+            }
+            else if (p !== ".")
+            {
+              resolved.push(p);
+            }
+          }
+          const normalized = resolved.join("/");
+          if (!normalized.startsWith("scripts/"))
+          {
+            errors.push("Resolved script path escapes the 'scripts/' directory (JCWF spec §3.1.2).");
+          }
+        }
+      }
+    }
+
     // timeout_ms validation
     const taskTimeout = (task as { timeout_ms?: number }).timeout_ms;
     if (taskTimeout !== undefined && typeof taskTimeout === "number" && taskTimeout < 0)

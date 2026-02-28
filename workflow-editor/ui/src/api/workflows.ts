@@ -240,6 +240,21 @@ export type RunDetailResponse = {
   };
 };
 
+export type ScriptCheckResponse = {
+  ok: boolean;
+  path: string;
+  exists: boolean;
+  executable: boolean;
+  error?: string;
+  message?: string;
+};
+
+export async function checkScript(scriptPath: string): Promise<ScriptCheckResponse>
+{
+  const response = await fetch(`/api/scripts/check?path=${encodeURIComponent(scriptPath)}`);
+  return (await response.json()) as ScriptCheckResponse;
+}
+
 export async function fetchRunDetails(runId: string): Promise<RunDetailResponse>
 {
   const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}`);

@@ -28,6 +28,7 @@ import {
   cancelRun,
   cleanWorkflow,
   createWorkflowWithId,
+  checkScript,
   fetchRunDetails,
   loadWorkflow,
   pauseRun,
@@ -259,6 +260,17 @@ export default function WorkflowEditorView(props: {
   useEffect(() => {
     runtimeTasksByIdRef.current = runtimeTasksById;
   }, [runtimeTasksById]);
+
+  // Async script existence check cache (command path → check result).
+  const scriptCheckCacheRef = useRef<Record<string, { exists: boolean; executable: boolean }>>({})
+  const [scriptCheckTick, setScriptCheckTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      scriptCheckCacheRef.current = {};
+      setScriptCheckTick((t) => t + 1);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Undo/redo history (two-stack model)
   type HistoryEntry = { nodes: EditorTaskNode[]; edges: EditorTaskEdge[] };
@@ -644,7 +656,29 @@ export default function WorkflowEditorView(props: {
 
       const clientWarnings = validation.nodeWarningsById ? (validation.nodeWarningsById.get(n.id) ?? []) : [];
       const serverWarnings = backendWarningsByTaskId.get(n.id) ?? [];
-      const mergedWarnings = [...clientWarnings, ...serverWarnings];
+      // Script existence warnings from async check cache
+      const scriptWarnings: string[] = [];
+      if (taskNode.data.task?.type === "shell")
+      {
+        const params = (taskNode.data.task.params ?? {}) as Record<string, unknown>;
+        const cmd = typeof params.command === "string" ? params.command : "";
+        if (cmd.length > 0)
+        {
+          const cached = scriptCheckCacheRef.current[cmd];
+          if (cached)
+          {
+            if (!cached.exists)
+            {
+              scriptWarnings.push(`Script '${cmd}' not found.`);
+            }
+            else if (!cached.executable)
+            {
+              scriptWarnings.push(`Script '${cmd}' is not executable (chmod +x).`);
+            }
+          }
+        }
+      }
+      const mergedWarnings = [...clientWarnings, ...serverWarnings, ...scriptWarnings];
 
       const clientInfos = validation.nodeInfosById ? (validation.nodeInfosById.get(n.id) ?? []) : [];
       const serverInfos = backendInfosByTaskId.get(n.id) ?? [];
@@ -673,6 +707,75 @@ export default function WorkflowEditorView(props: {
     setNodes(nextNodes);
     setEdges(graph.edges);
   }, [setNodes, setEdges, backendErrors, backendWarnings, backendInfos, lastSavedNodeSnapshot, props.hideTierDWarnings]);
+
+  // Async script existence check — fires when shell commands change.
+  const shellCommandsFingerprint = useMemo(() => {
+    const commands: string[] = [];
+    for (const node of nodes)
+    {
+      if (node.type !== "task") continue;
+      const taskData = (node as EditorTaskNode).data;
+      if (taskData.task?.type !== "shell") continue;
+      const params = (taskData.task.params ?? {}) as Record<string, unknown>;
+      const cmd = typeof params.command === "string" ? params.command : "";
+      if (cmd.startsWith("scripts/"))
+      {
+        commands.push(`${node.id}:${cmd}`);
+      }
+    }
+    return commands.sort().join("|");
+  }, [nodes]);
+
+  const recomputeValidationRef = useRef(recomputeValidation);
+  useEffect(() => { recomputeValidationRef.current = recomputeValidation; }, [recomputeValidation]);
+
+  useEffect(() => {
+    if (shellCommandsFingerprint.length === 0) return;
+
+    // Parse fingerprint into command list
+    const entries = shellCommandsFingerprint.split("|").map((s) => {
+      const idx = s.indexOf(":");
+      return { nodeId: s.slice(0, idx), command: s.slice(idx + 1) };
+    });
+
+    // Only check commands not already in cache
+    const uncached = [...new Set(entries.map((e) => e.command))].filter(
+      (cmd) => !(cmd in scriptCheckCacheRef.current)
+    );
+    if (uncached.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const results: Record<string, { exists: boolean; executable: boolean }> = {};
+      await Promise.all(
+        uncached.map(async (cmd) => {
+          try
+          {
+            const res = await checkScript(cmd);
+            results[cmd] = { exists: res.exists, executable: res.executable };
+          }
+          catch
+          {
+            // Transient error — leave uncached so it retries next time
+          }
+        })
+      );
+
+      if (cancelled) return;
+
+      // Update cache
+      scriptCheckCacheRef.current = { ...scriptCheckCacheRef.current, ...results };
+
+      // Re-run validation to pick up the new script check results
+      recomputeValidationRef.current({
+        nodes: nodes as EditorTaskNode[],
+        edges: edges as EditorTaskEdge[],
+      });
+    })();
+
+    return () => { cancelled = true; };
+  }, [shellCommandsFingerprint, nodes, edges, scriptCheckTick]);
 
   useEffect(() => {
     setNodes((current) => {

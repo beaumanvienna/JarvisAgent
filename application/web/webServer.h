@@ -110,6 +110,9 @@ namespace AIAssistant
         crow::response HandleAiInterfacesSavePost();
         crow::response HandleConfigReloadPost();
 
+        // Script check API (Workflow Editor)
+        crow::response HandleScriptCheckGet(crow::request const& req);
+
         // Key management API
         crow::response HandleKeysStatusGet();
         crow::response HandleKeysUnlockPost(crow::request const& req);
