@@ -71,6 +71,8 @@ export type RuntimeTaskSnapshot = {
   runId: string;
   attemptCount?: number;
   lastErrorMessage?: string;
+  capturedStdout?: string;
+  capturedStderr?: string;
 };
 
 type RuntimeTaskSnapshotById = Record<string, RuntimeTaskSnapshot>;
@@ -700,6 +702,8 @@ export default function WorkflowEditorView(props: {
           hideTierDWarnings: props.hideTierDWarnings,
           runtimeState: runtimeSnapshot ? runtimeSnapshot.state : undefined,
           runtimeRunId: runtimeSnapshot ? runtimeSnapshot.runId : undefined,
+          capturedStdout: runtimeSnapshot?.capturedStdout,
+          capturedStderr: runtimeSnapshot?.capturedStderr,
         },
       };
     });
@@ -788,8 +792,13 @@ export default function WorkflowEditorView(props: {
         const snapshot = runtimeTasksById[n.id];
         const nextRuntimeState = snapshot ? snapshot.state : undefined;
         const nextRuntimeRunId = snapshot ? snapshot.runId : undefined;
+        const nextStdout = snapshot?.capturedStdout;
+        const nextStderr = snapshot?.capturedStderr;
 
-        if (taskNode.data.runtimeState === nextRuntimeState && taskNode.data.runtimeRunId === nextRuntimeRunId)
+        if (taskNode.data.runtimeState === nextRuntimeState
+          && taskNode.data.runtimeRunId === nextRuntimeRunId
+          && taskNode.data.capturedStdout === nextStdout
+          && taskNode.data.capturedStderr === nextStderr)
         {
           return n;
         }
@@ -801,6 +810,8 @@ export default function WorkflowEditorView(props: {
             ...taskNode.data,
             runtimeState: nextRuntimeState,
             runtimeRunId: nextRuntimeRunId,
+            capturedStdout: nextStdout,
+            capturedStderr: nextStderr,
           },
         };
       });
@@ -1132,6 +1143,8 @@ export default function WorkflowEditorView(props: {
               state: normalizeRuntimeState(rawState),
               attemptCount,
               lastErrorMessage,
+              capturedStdout: typeof t.capturedStdout === "string" ? t.capturedStdout : undefined,
+              capturedStderr: typeof t.capturedStderr === "string" ? t.capturedStderr : undefined,
             };
           }
 
@@ -1201,6 +1214,8 @@ export default function WorkflowEditorView(props: {
               state: normalizeRuntimeState(typeof t.state === "string" ? t.state : ""),
               attemptCount: typeof t.attemptCount === "number" ? t.attemptCount : undefined,
               lastErrorMessage: typeof t.lastErrorMessage === "string" && t.lastErrorMessage.length > 0 ? t.lastErrorMessage : undefined,
+              capturedStdout: typeof t.capturedStdout === "string" ? t.capturedStdout : undefined,
+              capturedStderr: typeof t.capturedStderr === "string" ? t.capturedStderr : undefined,
             };
           }
           setRuntimeTasksById(nextRuntime);
@@ -1250,6 +1265,8 @@ export default function WorkflowEditorView(props: {
           state: normalizeRuntimeState(t.state),
           attemptCount: t.attemptCount,
           lastErrorMessage: t.error,
+          capturedStdout: t.capturedStdout,
+          capturedStderr: t.capturedStderr,
         };
       }
       setRuntimeTasksById(nextRuntime);
@@ -1294,6 +1311,8 @@ export default function WorkflowEditorView(props: {
             state: normalizeRuntimeState(t.state),
             attemptCount: t.attemptCount,
             lastErrorMessage: t.error,
+            capturedStdout: t.capturedStdout,
+            capturedStderr: t.capturedStderr,
           };
         }
         setRuntimeTasksById(nextRuntime);
@@ -3130,6 +3149,12 @@ export default function WorkflowEditorView(props: {
                           : null}
                         {runtimeTasksById[selectedNode.id].lastErrorMessage
                           ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].capturedStderr
+                          ? <pre style={{ marginTop: 6, fontSize: 11, color: "#ff8a8a", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,80,80,0.06)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStderr}</pre>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].capturedStdout
+                          ? <pre style={{ marginTop: 4, fontSize: 11, color: "rgba(220,230,240,0.9)", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,255,255,0.03)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStdout}</pre>
                           : null}
                       </div>
                     )

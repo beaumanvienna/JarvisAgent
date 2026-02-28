@@ -418,6 +418,11 @@ namespace AIAssistant
         // Last error message, if any.
         std::string m_LastErrorMessage;
 
+        // Captured shell task output (first 1024 characters of stdout/stderr).
+        // Written to stdout.txt / stderr.txt in the task working directory (full size).
+        std::string m_CapturedStdout;
+        std::string m_CapturedStderr;
+
         // ISO-8601 timestamps for UI / logging (may be empty if not set).
         std::string m_StartedAtIso8601;
         std::string m_CompletedAtIso8601;

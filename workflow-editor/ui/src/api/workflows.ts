@@ -226,6 +226,8 @@ export type RunDetailTask = {
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  capturedStdout?: string;
+  capturedStderr?: string;
 };
 
 export type RunDetailResponse = {

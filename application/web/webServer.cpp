@@ -1724,6 +1724,15 @@ namespace AIAssistant
                 taskJson["error"] = taskState.m_LastErrorMessage;
             }
 
+            if (!taskState.m_CapturedStdout.empty())
+            {
+                taskJson["capturedStdout"] = taskState.m_CapturedStdout;
+            }
+            if (!taskState.m_CapturedStderr.empty())
+            {
+                taskJson["capturedStderr"] = taskState.m_CapturedStderr;
+            }
+
             tasksJson.push_back(std::move(taskJson));
         }
 
@@ -2246,6 +2255,14 @@ namespace AIAssistant
                                         taskJson["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
                                         taskJson["attemptCount"] = static_cast<int64_t>(taskState.m_AttemptCount);
                                         taskJson["lastErrorMessage"] = SanitizeUtf8(taskState.m_LastErrorMessage);
+                                        if (!taskState.m_CapturedStdout.empty())
+                                        {
+                                            taskJson["capturedStdout"] = SanitizeUtf8(taskState.m_CapturedStdout);
+                                        }
+                                        if (!taskState.m_CapturedStderr.empty())
+                                        {
+                                            taskJson["capturedStderr"] = SanitizeUtf8(taskState.m_CapturedStderr);
+                                        }
                                         tasksJson.push_back(std::move(taskJson));
                                     }
                                     runJson["tasks"] = std::move(tasksJson);

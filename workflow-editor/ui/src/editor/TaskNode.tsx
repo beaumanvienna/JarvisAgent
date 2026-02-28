@@ -41,6 +41,10 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
 
   const isDirty = props.data.isDirty === true;
 
+  const capturedStdout = props.data.capturedStdout ?? "";
+  const capturedStderr = props.data.capturedStderr ?? "";
+  const hasOutput = capturedStdout.length > 0 || capturedStderr.length > 0;
+
   const firstError = errors.length > 0 ? errors[0] : null;
   const firstWarning = warnings.length > 0 ? warnings[0] : null;
   const firstInfo = infos.length > 0 ? infos[0] : null;
@@ -167,6 +171,16 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
       }
       title={tooltip}
     >
+      {hasOutput && (
+        <div className="taskNodeOutputPopup">
+          {capturedStderr.length > 0 && (
+            <pre className="taskNodeOutputStderr">{capturedStderr}</pre>
+          )}
+          {capturedStdout.length > 0 && (
+            <pre className="taskNodeOutputStdout">{capturedStdout}</pre>
+          )}
+        </div>
+      )}
       {!hasDepHandles && (
         <Handle type="target" position={Position.Left} id="dep-target" />
       )}

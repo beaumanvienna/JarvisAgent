@@ -16,6 +16,8 @@ export type EditorTaskNodeData = {
   // Live run monitoring (populated from WebSocket snapshots)
   runtimeState?: RuntimeTaskState;
   runtimeRunId?: string;
+  capturedStdout?: string;
+  capturedStderr?: string;
 };
 
 export type EditorFilterNodeData = {

@@ -36,6 +36,8 @@
 #include <vector>
 #include <mutex>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #if defined(_WIN32)
 #include <process.h>
@@ -258,17 +260,24 @@ namespace AIAssistant
         // (which bypasses TerminalLogStreamBuf / ncurses and can corrupt the UI).
         // ------------------------------------------------------------
         bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId,
-                                              std::filesystem::path const& workingDirectoryPath, int& exitCodeOut)
+                                              std::filesystem::path const& workingDirectoryPath, int& exitCodeOut,
+                                              std::string& stdoutOut, std::string& stderrOut)
         {
             std::scoped_lock<std::mutex> const lock(g_ShellTaskExecutorCurrentPathMutex);
 
             exitCodeOut = -1;
+            stdoutOut.clear();
+            stderrOut.clear();
 
-            // Redirect stderr into stdout so we capture both streams.
+            // Redirect stderr to a temp file so we can capture it separately.
+            // Stdout comes through the pipe for live logging.
             // IMPORTANT:
             // Do NOT change the process-wide current_path; other threads (for example the file watcher)
             // rely on it. Instead, run the command inside a subshell that changes directory only for
             // the spawned shell process.
+            std::filesystem::path const stderrTmpPath = workingDirectoryPath / ".ja_stderr_tmp";
+            std::string const stderrRedirect = " 2>" + QuoteForPosixShell(stderrTmpPath.string());
+
 #if defined(_WIN32)
             // On Windows, _popen() routes through cmd.exe which cannot run .sh scripts
             // or understand POSIX single-quote quoting. We invoke bash explicitly (available
@@ -277,10 +286,10 @@ namespace AIAssistant
             std::string genericCommand = command;
             std::replace(genericCommand.begin(), genericCommand.end(), '\\', '/');
             std::string const commandWithRedirect =
-                "bash -c \"cd " + QuoteForPosixShell(genericDir) + " && " + genericCommand + " 2>&1\"";
+                "bash -c \"cd " + QuoteForPosixShell(genericDir) + " && " + genericCommand + stderrRedirect + "\"";
 #else
             std::string const commandWithRedirect =
-                "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + " 2>&1";
+                "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + stderrRedirect;
 #endif
 
             FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
@@ -296,6 +305,7 @@ namespace AIAssistant
             char buffer[4096];
             while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr)
             {
+                stdoutOut.append(buffer);
                 pending.append(buffer);
 
                 for (;;)
@@ -335,6 +345,41 @@ namespace AIAssistant
             }
 
             exitCodeOut = ClosePipe(pipe);
+
+            // Read stderr from the temp file
+            {
+                std::error_code ec;
+                if (std::filesystem::exists(stderrTmpPath, ec))
+                {
+                    std::ifstream stderrFile(stderrTmpPath, std::ios::binary);
+                    if (stderrFile.is_open())
+                    {
+                        std::ostringstream ss;
+                        ss << stderrFile.rdbuf();
+                        stderrOut = ss.str();
+                    }
+                    std::filesystem::remove(stderrTmpPath, ec);
+
+                    // Log stderr lines
+                    if (!stderrOut.empty())
+                    {
+                        std::istringstream stderrStream(stderrOut);
+                        std::string line;
+                        while (std::getline(stderrStream, line))
+                        {
+                            if (!line.empty() && line.back() == '\r')
+                            {
+                                line.pop_back();
+                            }
+                            if (!line.empty())
+                            {
+                                LOG_APP_INFO("[shell:{}:stderr] {}", taskId, line);
+                            }
+                        }
+                    }
+                }
+            }
+
             return exitCodeOut >= 0;
         }
 #if !defined(_WIN32)
@@ -351,22 +396,37 @@ namespace AIAssistant
         // ------------------------------------------------------------
         bool ExecuteCommandWithWatchdog(std::string const& command, std::string const& taskId,
                                         std::filesystem::path const& workingDirectoryPath, uint64_t inactivityTimeoutMs,
-                                        TaskWatchdog* watchdog, int& exitCodeOut)
+                                        TaskWatchdog* watchdog, int& exitCodeOut, std::string& stdoutOut,
+                                        std::string& stderrOut)
         {
             exitCodeOut = -1;
+            stdoutOut.clear();
+            stderrOut.clear();
 
-            int pipefd[2];
-            if (pipe(pipefd) == -1)
+            int stdoutPipe[2];
+            int stderrPipe[2];
+
+            if (pipe(stdoutPipe) == -1)
             {
-                LOG_APP_ERROR("ShellTaskExecutor: pipe() failed for task '{}'", taskId);
+                LOG_APP_ERROR("ShellTaskExecutor: pipe() failed for task '{}' (stdout)", taskId);
+                return false;
+            }
+
+            if (pipe(stderrPipe) == -1)
+            {
+                close(stdoutPipe[0]);
+                close(stdoutPipe[1]);
+                LOG_APP_ERROR("ShellTaskExecutor: pipe() failed for task '{}' (stderr)", taskId);
                 return false;
             }
 
             pid_t const pid = fork();
             if (pid == -1)
             {
-                close(pipefd[0]);
-                close(pipefd[1]);
+                close(stdoutPipe[0]);
+                close(stdoutPipe[1]);
+                close(stderrPipe[0]);
+                close(stderrPipe[1]);
                 LOG_APP_ERROR("ShellTaskExecutor: fork() failed for task '{}'", taskId);
                 return false;
             }
@@ -376,10 +436,12 @@ namespace AIAssistant
                 // ── Child process ──────────────────────────────────────────
                 setpgid(0, 0); // new process group for clean kill
 
-                close(pipefd[0]); // close read end
-                dup2(pipefd[1], STDOUT_FILENO);
-                dup2(pipefd[1], STDERR_FILENO);
-                close(pipefd[1]);
+                close(stdoutPipe[0]); // close read ends
+                close(stderrPipe[0]);
+                dup2(stdoutPipe[1], STDOUT_FILENO);
+                dup2(stderrPipe[1], STDERR_FILENO);
+                close(stdoutPipe[1]);
+                close(stderrPipe[1]);
 
                 // Set environment variables for heartbeat API
                 setenv("JARVIS_PORT", "8080", 1);
@@ -396,21 +458,25 @@ namespace AIAssistant
             }
 
             // ── Parent process ─────────────────────────────────────────
-            close(pipefd[1]); // close write end
+            close(stdoutPipe[1]); // close write ends
+            close(stderrPipe[1]);
 
-            struct pollfd pfd
-            {
-            };
-            pfd.fd = pipefd[0];
-            pfd.events = POLLIN;
+            struct pollfd pfds[2] = {};
+            pfds[0].fd = stdoutPipe[0];
+            pfds[0].events = POLLIN;
+            pfds[1].fd = stderrPipe[0];
+            pfds[1].events = POLLIN;
 
             // Poll interval: check every 500ms or at the timeout, whichever is smaller.
             int const pollIntervalMs = static_cast<int>(std::min(inactivityTimeoutMs, static_cast<uint64_t>(500)));
 
-            std::string pending;
-            pending.reserve(4096);
+            std::string stdoutPending;
+            std::string stderrPending;
+            stdoutPending.reserve(4096);
+            stderrPending.reserve(4096);
             char buffer[4096];
             bool timedOut = false;
+            int openFds = 2;
 
             // Kick watchdog at start
             if (watchdog)
@@ -418,9 +484,51 @@ namespace AIAssistant
                 watchdog->Kick();
             }
 
-            for (;;)
+            // Helper: drain a pipe fd into an accumulator and a pending-line buffer.
+            auto drainPipe = [&buffer](int fd, std::string& accumulator, std::string& pending)
             {
-                int const ret = poll(&pfd, 1, pollIntervalMs);
+                for (;;)
+                {
+                    ssize_t const n = read(fd, buffer, sizeof(buffer) - 1);
+                    if (n <= 0)
+                    {
+                        break;
+                    }
+                    buffer[n] = '\0';
+                    accumulator.append(buffer, static_cast<size_t>(n));
+                    pending.append(buffer, static_cast<size_t>(n));
+                }
+            };
+
+            // Helper: flush complete lines from a pending buffer and log them.
+            auto flushLines = [&taskId](std::string& pending, char const* logTag)
+            {
+                for (;;)
+                {
+                    size_t const newlineIndex = pending.find('\n');
+                    if (newlineIndex == std::string::npos)
+                    {
+                        break;
+                    }
+
+                    std::string line = pending.substr(0, newlineIndex);
+                    pending.erase(0, newlineIndex + 1);
+
+                    if (!line.empty() && line.back() == '\r')
+                    {
+                        line.pop_back();
+                    }
+
+                    if (!line.empty())
+                    {
+                        LOG_APP_INFO("[shell:{}{}] {}", taskId, logTag, line);
+                    }
+                }
+            };
+
+            while (openFds > 0)
+            {
+                int const ret = poll(pfds, 2, pollIntervalMs);
 
                 if (ret < 0)
                 {
@@ -433,7 +541,7 @@ namespace AIAssistant
 
                 if (ret == 0)
                 {
-                    // No stdout activity this interval — check watchdog
+                    // No activity this interval — check watchdog
                     if (watchdog)
                     {
                         int64_t const inactiveMs = watchdog->ElapsedSinceLastKickMs();
@@ -448,79 +556,82 @@ namespace AIAssistant
                     continue;
                 }
 
-                // Data available
-                if (pfd.revents & POLLIN)
+                bool anyActivity = false;
+
+                // ── stdout ──
+                if (pfds[0].fd >= 0 && (pfds[0].revents & POLLIN))
                 {
-                    ssize_t const n = read(pipefd[0], buffer, sizeof(buffer) - 1);
-                    if (n <= 0)
+                    ssize_t const n = read(stdoutPipe[0], buffer, sizeof(buffer) - 1);
+                    if (n > 0)
                     {
-                        break; // EOF or error
-                    }
-
-                    // Stdout activity = implicit heartbeat
-                    if (watchdog)
-                    {
-                        watchdog->Kick();
-                    }
-
-                    buffer[n] = '\0';
-                    pending.append(buffer, static_cast<size_t>(n));
-
-                    // Process complete lines
-                    for (;;)
-                    {
-                        size_t const newlineIndex = pending.find('\n');
-                        if (newlineIndex == std::string::npos)
-                        {
-                            break;
-                        }
-
-                        std::string line = pending.substr(0, newlineIndex);
-                        pending.erase(0, newlineIndex + 1);
-
-                        if (!line.empty() && line.back() == '\r')
-                        {
-                            line.pop_back();
-                        }
-
-                        if (!line.empty())
-                        {
-                            LOG_APP_INFO("[shell:{}] {}", taskId, line);
-                        }
-                    }
-                }
-
-                if (pfd.revents & (POLLHUP | POLLERR))
-                {
-                    // Drain remaining data
-                    for (;;)
-                    {
-                        ssize_t const n = read(pipefd[0], buffer, sizeof(buffer) - 1);
-                        if (n <= 0)
-                        {
-                            break;
-                        }
+                        anyActivity = true;
                         buffer[n] = '\0';
-                        pending.append(buffer, static_cast<size_t>(n));
+                        stdoutOut.append(buffer, static_cast<size_t>(n));
+                        stdoutPending.append(buffer, static_cast<size_t>(n));
+                        flushLines(stdoutPending, "");
                     }
-                    break;
+                }
+                if (pfds[0].fd >= 0 && (pfds[0].revents & (POLLHUP | POLLERR)))
+                {
+                    drainPipe(stdoutPipe[0], stdoutOut, stdoutPending);
+                    flushLines(stdoutPending, "");
+                    pfds[0].fd = -1;
+                    openFds--;
+                }
+
+                // ── stderr ──
+                if (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN))
+                {
+                    ssize_t const n = read(stderrPipe[0], buffer, sizeof(buffer) - 1);
+                    if (n > 0)
+                    {
+                        anyActivity = true;
+                        buffer[n] = '\0';
+                        stderrOut.append(buffer, static_cast<size_t>(n));
+                        stderrPending.append(buffer, static_cast<size_t>(n));
+                        flushLines(stderrPending, ":stderr");
+                    }
+                }
+                if (pfds[1].fd >= 0 && (pfds[1].revents & (POLLHUP | POLLERR)))
+                {
+                    drainPipe(stderrPipe[0], stderrOut, stderrPending);
+                    flushLines(stderrPending, ":stderr");
+                    pfds[1].fd = -1;
+                    openFds--;
+                }
+
+                if (anyActivity && watchdog)
+                {
+                    watchdog->Kick();
                 }
             }
 
-            // Flush any remaining partial line
-            if (!pending.empty())
+            // Flush any remaining partial lines
+            if (!stdoutPending.empty())
             {
-                if (pending.back() == '\r')
+                if (stdoutPending.back() == '\r')
                 {
-                    pending.pop_back();
+                    stdoutPending.pop_back();
                 }
-                if (!pending.empty())
+                if (!stdoutPending.empty())
                 {
-                    LOG_APP_INFO("[shell:{}] {}", taskId, pending);
+                    LOG_APP_INFO("[shell:{}] {}", taskId, stdoutPending);
+                }
+            }
+            if (!stderrPending.empty())
+            {
+                if (stderrPending.back() == '\r')
+                {
+                    stderrPending.pop_back();
+                }
+                if (!stderrPending.empty())
+                {
+                    LOG_APP_INFO("[shell:{}:stderr] {}", taskId, stderrPending);
                 }
             }
 
-            close(pipefd[0]);
+            close(stdoutPipe[0]);
+            close(stderrPipe[0]);
 
             if (timedOut)
             {
@@ -1032,6 +1143,8 @@ namespace AIAssistant
 
         int exitCode = -1;
         bool executed = false;
+        std::string capturedStdout;
+        std::string capturedStderr;
 
 #if !defined(_WIN32)
         // Use fork/exec/poll watchdog when timeout is configured (inactivity-based).
@@ -1039,14 +1152,52 @@ namespace AIAssistant
         {
             LOG_APP_INFO("[shell] Task '{}' inactivity watchdog: {}ms", taskDefinition.m_Id, taskDefinition.m_TimeoutMs);
             executed = ExecuteCommandWithWatchdog(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath,
-                                                  taskDefinition.m_TimeoutMs, taskState.m_Watchdog.get(), exitCode);
+                                                  taskDefinition.m_TimeoutMs, taskState.m_Watchdog.get(), exitCode,
+                                                  capturedStdout, capturedStderr);
         }
         else
 #endif
         {
-            executed =
-                ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode);
+            executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode,
+                                                        capturedStdout, capturedStderr);
         }
+
+        // Write stdout.txt and stderr.txt to the task working directory (full size).
+        {
+            std::error_code ec;
+            if (!capturedStdout.empty())
+            {
+                std::ofstream stdoutFile(taskWorkingDirectoryPathAbsolute / "stdout.txt",
+                                         std::ios::binary | std::ios::trunc);
+                if (stdoutFile.is_open())
+                {
+                    stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
+                }
+            }
+            else
+            {
+                std::filesystem::remove(taskWorkingDirectoryPathAbsolute / "stdout.txt", ec);
+            }
+
+            if (!capturedStderr.empty())
+            {
+                std::ofstream stderrFile(taskWorkingDirectoryPathAbsolute / "stderr.txt",
+                                         std::ios::binary | std::ios::trunc);
+                if (stderrFile.is_open())
+                {
+                    stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
+                }
+            }
+            else
+            {
+                std::filesystem::remove(taskWorkingDirectoryPathAbsolute / "stderr.txt", ec);
+            }
+        }
+
+        // Store first 1024 characters for the frontend tooltip.
+        static constexpr size_t kMaxCaptureChars = 1024;
+        taskState.m_CapturedStdout = capturedStdout.substr(0, std::min(capturedStdout.size(), kMaxCaptureChars));
+        taskState.m_CapturedStderr = capturedStderr.substr(0, std::min(capturedStderr.size(), kMaxCaptureChars));
 
         LOG_APP_INFO("[paths debug] debug reason=shellTaskCompleted taskId='{}' taskType='shell' exitCode='{}' "
                      "taskWorkingDirectoryAbsolute='{}' command='{}'",
