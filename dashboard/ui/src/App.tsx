@@ -1,12 +1,20 @@
+import { useState } from "react";
 import "./App.css";
 import StatusBar from "./components/StatusBar";
 import WorkflowsPanel from "./components/WorkflowsPanel";
 import SessionManagersPanel from "./components/SessionManagersPanel";
+import LogViewerPanel from "./components/LogViewerPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { usePolling } from "./hooks/usePolling";
 import { shutdown } from "./api";
 
+type Tab = "dashboard" | "log";
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("tab") === "log" ? "log" : "dashboard";
+  });
   const ws = useWebSocket();
   const { workflows, refresh } = usePolling(5000);
 
@@ -29,16 +37,22 @@ export default function App() {
         totalCompleted={ws.totalCompleted}
         totalFailed={ws.totalFailed}
         onQuit={handleQuit}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
       />
-      <main className="main-content">
-        <WorkflowsPanel
-          workflows={workflows}
-          runs={ws.runs}
-          lastRuns={ws.lastRuns}
-          onRefresh={refresh}
-        />
-        <SessionManagersPanel sessions={ws.sessions} />
-      </main>
+      {activeTab === "dashboard" ? (
+        <main className="main-content">
+          <WorkflowsPanel
+            workflows={workflows}
+            runs={ws.runs}
+            lastRuns={ws.lastRuns}
+            onRefresh={refresh}
+          />
+          <SessionManagersPanel sessions={ws.sessions} />
+        </main>
+      ) : (
+        <LogViewerPanel />
+      )}
     </>
   );
 }

@@ -454,6 +454,79 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 ---
 
+## Log Viewer
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/log` | Fetch log lines (tail or delta mode). |
+| GET | `/api/log/analyze-last-run` | Log-based analysis of a workflow run. |
+
+### GET /api/log
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `tail` | No | Return the last N lines of `log/log.txt` (default 5000, max 200000). |
+| `offset` | No | Return only lines appended since byte offset N (delta mode). |
+
+Provide either `tail` or `offset`, not both. If `offset` is given, only new lines since that byte position are returned.
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "lines": ["line1", "line2"],
+  "byteOffset": 123456,
+  "totalSize": 123456
+}
+```
+
+### GET /api/log/analyze-last-run
+
+Scans `log/log.txt` for `[workflow] run '...' started/completed/failed/cancelled/stopped` markers and collects warning/error/critical lines between them.
+
+**Query parameters:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `index` | No | `0` | Run index. `0` = most recent run, `1` = second-to-last, etc. Wraps around at the first run in the log. |
+
+**Response (200) — run found:**
+```json
+{
+  "ok": true,
+  "found": true,
+  "runIndex": 0,
+  "totalRuns": 9,
+  "runId": "exampleMakefile4_1772302776",
+  "workflowId": "exampleMakefile4",
+  "state": "completed",
+  "startedAt": "2026-02-28 10:19:36.328",
+  "completedAt": "2026-02-28 10:19:39.215",
+  "startLine": 950,
+  "endLine": 9610,
+  "issueCount": 0,
+  "issues": []
+}
+```
+
+**Response (200) — no runs in log:**
+```json
+{ "ok": true, "found": false, "totalRuns": 0, "message": "No workflow run start found in log." }
+```
+
+| Field | Description |
+|-------|-------------|
+| `runIndex` | 0-based index of the returned run (0 = newest). |
+| `totalRuns` | Total number of run-start markers found in the log. Used by the frontend for cycling. |
+| `startLine` | 1-indexed line number of the `[workflow] run started` marker. |
+| `endLine` | 1-indexed line number of the completion marker, or `-1` if the run is still active. |
+| `issues` | Array of `{ line, severity, text }` objects for warning/error/critical lines between start and end. |
+| `issueCount` | Length of the `issues` array. |
+
+---
+
 ## Shutdown
 
 | Method | Path | Description |

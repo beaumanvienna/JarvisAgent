@@ -660,6 +660,12 @@ namespace AIAssistant
                             m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
                     }
 
+                    // Safety net: ensure completedAt is always set (some paths missed it).
+                    if (m_ActiveRuns[index].m_Run.m_CompletedAtIso8601.empty())
+                    {
+                        m_ActiveRuns[index].m_Run.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                    }
+
                     m_LastRuns[m_ActiveRuns[index].m_Run.m_WorkflowId] = m_ActiveRuns[index].m_Run;
 
                     if (m_ActiveRuns[index].m_Run.m_HasFailed)
@@ -723,6 +729,8 @@ namespace AIAssistant
             activeRun.m_Run.m_State = WorkflowRunState::Running;
             activeRun.m_Run.m_StartedAtIso8601 = GetIso8601NowUTC();
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
+
+            LOG_APP_INFO("[workflow] run '{}' started (workflow '{}')", runId, pendingRun.m_WorkflowId);
 
             {
                 std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -907,6 +915,7 @@ namespace AIAssistant
                 workflowRun.m_State = WorkflowRunState::Cancelled;
                 workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
                 workflowRun.m_IsCompleted = true;
+                LOG_APP_INFO("[workflow] run '{}' cancelled (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
                 return;
             }
         }
@@ -960,6 +969,8 @@ namespace AIAssistant
         {
             workflowRun.m_HasFailed = true;
             workflowRun.m_IsCompleted = true;
+            LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}') -- core unavailable", workflowRun.m_RunId,
+                          workflowRun.m_WorkflowId);
             return;
         }
 
@@ -1155,8 +1166,8 @@ namespace AIAssistant
             // Retry-pending tasks are also legitimately waiting (for their backoff timer).
             if (!hasWaitingExternal && !hasRetryPending && hasPendingOrReady)
             {
-                LOG_APP_CRITICAL("[WorkflowRuntimeManager] deadlock/cycle detected in workflow '{}' (run id '{}')",
-                                 workflowRun.m_WorkflowId, workflowRun.m_RunId);
+                LOG_APP_CRITICAL("[workflow] run '{}' failed (workflow '{}') -- deadlock/cycle detected",
+                                 workflowRun.m_RunId, workflowRun.m_WorkflowId);
                 workflowRun.m_HasFailed = true;
                 workflowRun.m_IsCompleted = true;
             }

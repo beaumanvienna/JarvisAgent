@@ -1,5 +1,7 @@
 import type { RunSnapshot, SessionStatus } from "../types";
 
+type Tab = "dashboard" | "log";
+
 interface Props {
   connected: boolean;
   runs: RunSnapshot[];
@@ -8,6 +10,8 @@ interface Props {
   totalCompleted: number;
   totalFailed: number;
   onQuit: () => void;
+  activeTab: Tab;
+  onTabChange: (tab: Tab) => void;
 }
 
 function Led({ color, label }: { color: string; label: string }) {
@@ -33,6 +37,8 @@ export default function StatusBar({
   totalCompleted,
   totalFailed,
   onQuit,
+  activeTab,
+  onTabChange,
 }: Props) {
   const anyInflight = Array.from(sessions.values()).some(
     (s) => s.inflight > 0
@@ -72,6 +78,20 @@ export default function StatusBar({
         </div>
       </div>
       <div className="status-bar-right">
+        <div className="tab-bar">
+          <button
+            className={`tab-btn ${activeTab === "dashboard" ? "tab-btn-active" : ""}`}
+            onClick={() => onTabChange("dashboard")}
+          >
+            Dashboard
+          </button>
+          <button
+            className={`tab-btn ${activeTab === "log" ? "tab-btn-active" : ""}`}
+            onClick={() => onTabChange("log")}
+          >
+            Log
+          </button>
+        </div>
         <a href="/editor" className="btn btn-editor">
           Workflow Editor
         </a>

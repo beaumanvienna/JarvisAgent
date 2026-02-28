@@ -458,9 +458,25 @@ namespace AIAssistant
             std::string const stem = filePath.stem().string();
             if (stem.ends_with(".output"))
             {
-                if (m_AiRequestPool->OnOutputFileCreated(filePath.string()))
+                // Guard against stale .output files from previous runs: if the file
+                // was last written before this JA session started, ignore it.
+                bool staleOutputFile = false;
                 {
-                    LOG_APP_INFO("AiRequestPool: path-based completion matched '{}'", filePath.string());
+                    std::error_code ec;
+                    auto const lwt = std::filesystem::last_write_time(filePath, ec);
+                    if (!ec && ToSystemClock(lwt) < m_StartupTime)
+                    {
+                        staleOutputFile = true;
+                        LOG_APP_INFO("Ignoring stale .output file (pre-startup): '{}'", filePath.string());
+                    }
+                }
+
+                if (!staleOutputFile)
+                {
+                    if (m_AiRequestPool->OnOutputFileCreated(filePath.string()))
+                    {
+                        LOG_APP_INFO("AiRequestPool: path-based completion matched '{}'", filePath.string());
+                    }
                 }
             }
         }

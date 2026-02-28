@@ -2,6 +2,8 @@
 
 Last reviewed: Feb 2026
 
+**Build command:** `make config=release && make config=debug`
+
 ---
 
 ## Go-live blockers (highest priority)
@@ -164,6 +166,33 @@ Additional test scenarios to cover:
 - [ ] Watchdog timeout path (task with low `timeout_ms` that hangs)
 - [ ] Pause / Resume / Stop controls during a multi-task run
 - [ ] Clean command after a run (verify queue folders are deleted)
+
+---
+
+## Bug: exampleMakefile4 dependency code uses stale inputs
+
+**Repro:** Run `exampleMakefile4` with queue outputs still present from a previous run.
+The shell task (`run command make`) materializes the old `PROB_hello.output.txt` before
+the AI task for the current run has finished writing its new output. As a result, `make`
+compiles the stale `hello.cpp` instead of the freshly generated one.
+
+**Timeline observed (2026-02-28):**
+- 10:56:43 — workflow run started, `ai_call` + `ai_call_2` dispatched
+- 10:56:45 — shell task copied stale `PROB_hello.output.txt` → `hello.cpp` (old content)
+- 10:56:45 — `make` compiled successfully (stale code, no syntax error)
+- 10:56:46 — AI wrote new `PROB_hello.output.txt` with deliberate syntax error (too late)
+
+**Root cause found:** The path-based AI completion routing in `jarvisAgent.cpp` `OnEvent()`
+(line ~456) had **no stale file guard**. When an ai_call task registered its expected output
+path in `m_PendingByOutputPath`, the existing stale `PROB_hello.output.txt` from a prior
+run could trigger a file event that `OnOutputFileCreated` matched — reading the **old
+content** and marking the ai_call as `Succeeded` before the real AI response arrived.
+The PROB-based completion path (for `PROB_<id>_<ts>` naming) already had a stale guard
+(`fileTimestamp < startupTimestamp`), but the path-based path did not.
+
+**Fix (applied):** Added `last_write_time` < `m_StartupTime` check to the path-based
+completion block in `jarvisAgent.cpp`, matching the pattern already used by
+`suppressTriggerEvent`. Stale `.output` files are now logged and ignored.
 
 ---
 

@@ -67,3 +67,34 @@ export interface LastRunsResponse {
 }
 
 export type WsMessage = WorkflowRunsSnapshot | SessionStatus | PythonStatus;
+
+export interface LogResponse {
+  ok: boolean;
+  lines: string[];
+  byteOffset: number;
+  totalSize: number;
+  error?: string;
+}
+
+export interface AnalyzeIssue {
+  line: number;
+  severity: string;
+  text: string;
+}
+
+export interface AnalyzeLastRunResponse {
+  ok: boolean;
+  found: boolean;
+  message?: string;
+  runIndex?: number;
+  totalRuns?: number;
+  runId?: string;
+  workflowId?: string;
+  state?: string;
+  startedAt?: string;
+  completedAt?: string;
+  startLine?: number;
+  endLine?: number;
+  issues?: AnalyzeIssue[];
+  issueCount?: number;
+}

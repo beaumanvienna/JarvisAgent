@@ -916,6 +916,13 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/scripts/check")
             .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
 
+        // ---- Log viewer API ----
+        CROW_ROUTE(m_Server, "/api/log")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleLogGet(req); });
+
+        CROW_ROUTE(m_Server, "/api/log/analyze-last-run")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleLogAnalyzeLastRunGet(req); });
+
         // ---- POST /api/task/<taskId>/heartbeat ----
         CROW_ROUTE(m_Server, "/api/task/<string>/heartbeat")
             .methods("POST"_method)(
@@ -2131,6 +2138,364 @@ namespace AIAssistant
         responseJson["exists"] = exists;
         responseJson["executable"] = executable;
         return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleLogGet(crow::request const& req)
+    {
+        // GET /api/log?tail=N        — return last N lines (initial load)
+        // GET /api/log?offset=N      — return lines appended since byte offset N (delta polling)
+        // Returns: { ok, lines[], byteOffset, totalSize }
+
+        int tailLines = 5000;
+        auto const tailParam = req.url_params.get("tail");
+        if (tailParam != nullptr)
+        {
+            tailLines = std::clamp(std::atoi(tailParam), 1, 200000);
+        }
+
+        int64_t fromOffset = -1;
+        auto const offsetParam = req.url_params.get("offset");
+        if (offsetParam != nullptr)
+        {
+            fromOffset = std::atoll(offsetParam);
+        }
+
+        std::string const logPath = "log/log.txt";
+        std::ifstream file(logPath, std::ios::binary | std::ios::ate);
+        if (!file.is_open())
+        {
+            crow::json::wvalue resp;
+            resp["ok"] = false;
+            resp["error"] = "Log file not found";
+            return MakeJsonResponse(404, resp);
+        }
+
+        int64_t const fileSize = static_cast<int64_t>(file.tellg());
+
+        // --- Delta mode: read from offset to end ---
+        if (fromOffset >= 0)
+        {
+            if (fromOffset >= fileSize)
+            {
+                // No new data (or file was truncated/rotated).
+                crow::json::wvalue resp;
+                resp["ok"] = true;
+                resp["lines"] = crow::json::wvalue::list();
+                resp["byteOffset"] = fileSize;
+                resp["totalSize"] = fileSize;
+                return MakeJsonResponse(200, resp);
+            }
+
+            int64_t const deltaSize = fileSize - fromOffset;
+            file.seekg(fromOffset);
+            std::string content(static_cast<size_t>(deltaSize), '\0');
+            file.read(content.data(), deltaSize);
+
+            crow::json::wvalue::list linesJson;
+            size_t start = 0;
+            for (size_t i = 0; i < content.size(); ++i)
+            {
+                if (content[i] == '\n')
+                {
+                    size_t end = (i > 0 && content[i - 1] == '\r') ? i - 1 : i;
+                    linesJson.push_back(content.substr(start, end - start));
+                    start = i + 1;
+                }
+            }
+            // Trailing partial line (no final newline yet)
+            if (start < content.size())
+            {
+                linesJson.push_back(content.substr(start));
+            }
+
+            crow::json::wvalue resp;
+            resp["ok"] = true;
+            resp["lines"] = std::move(linesJson);
+            resp["byteOffset"] = fileSize;
+            resp["totalSize"] = fileSize;
+            return MakeJsonResponse(200, resp);
+        }
+
+        // --- Tail mode: read last N lines ---
+        static constexpr int64_t kChunkSize = 65536;
+        std::string accumulated;
+        int64_t readPos = fileSize;
+        int newlineCount = 0;
+
+        while (readPos > 0 && newlineCount <= tailLines)
+        {
+            int64_t const chunkStart = std::max(int64_t(0), readPos - kChunkSize);
+            int64_t const chunkLen = readPos - chunkStart;
+
+            file.seekg(chunkStart);
+            std::string chunk(static_cast<size_t>(chunkLen), '\0');
+            file.read(chunk.data(), chunkLen);
+
+            for (char c : chunk)
+            {
+                if (c == '\n')
+                    ++newlineCount;
+            }
+
+            accumulated = chunk + accumulated;
+            readPos = chunkStart;
+        }
+
+        // Split into lines, take last tailLines
+        std::vector<std::string> allLines;
+        {
+            size_t start = 0;
+            for (size_t i = 0; i < accumulated.size(); ++i)
+            {
+                if (accumulated[i] == '\n')
+                {
+                    size_t end = (i > 0 && accumulated[i - 1] == '\r') ? i - 1 : i;
+                    allLines.push_back(accumulated.substr(start, end - start));
+                    start = i + 1;
+                }
+            }
+            if (start < accumulated.size())
+            {
+                allLines.push_back(accumulated.substr(start));
+            }
+        }
+
+        size_t const startIdx =
+            allLines.size() > static_cast<size_t>(tailLines) ? allLines.size() - static_cast<size_t>(tailLines) : 0;
+
+        crow::json::wvalue::list linesJson;
+        for (size_t i = startIdx; i < allLines.size(); ++i)
+        {
+            linesJson.push_back(std::move(allLines[i]));
+        }
+
+        crow::json::wvalue resp;
+        resp["ok"] = true;
+        resp["lines"] = std::move(linesJson);
+        resp["byteOffset"] = fileSize;
+        resp["totalSize"] = fileSize;
+        return MakeJsonResponse(200, resp);
+    }
+
+    crow::response WebServer::HandleLogAnalyzeLastRunGet(crow::request const& req)
+    {
+        // GET /api/log/analyze-last-run?index=N
+        // Log-based analysis.  index=0 (default) is the most recent run,
+        // index=1 is the second-to-last, etc.  Returns runIndex + totalRuns
+        // so the frontend can cycle through all runs.
+
+        int requestedIndex = 0;
+        {
+            auto const* idxParam = req.url_params.get("index");
+            if (idxParam != nullptr)
+            {
+                try
+                {
+                    requestedIndex = std::stoi(idxParam);
+                }
+                catch (...)
+                {
+                    requestedIndex = 0;
+                }
+                if (requestedIndex < 0)
+                    requestedIndex = 0;
+            }
+        }
+
+        std::ifstream logFile("log/log.txt", std::ios::binary);
+        if (!logFile.is_open())
+        {
+            crow::json::wvalue resp;
+            resp["ok"] = false;
+            resp["error"] = "Log file not found";
+            return MakeJsonResponse(404, resp);
+        }
+
+        std::vector<std::string> lines;
+        {
+            std::string line;
+            while (std::getline(logFile, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                    line.pop_back();
+                lines.push_back(std::move(line));
+            }
+        }
+
+        // Collect ALL "[workflow] run '...' started (workflow '...')" markers
+        // so we know totalRuns and can index into them.
+        static std::string const kRunMarker = "[workflow] run '";
+        static std::string const kStartedToken = "' started (workflow '";
+
+        struct RunStartMarker
+        {
+            int lineIdx;
+            std::string runId;
+            std::string workflowId;
+        };
+        std::vector<RunStartMarker> runStarts;
+
+        for (int i = 0; i < static_cast<int>(lines.size()); ++i)
+        {
+            auto const& line = lines[static_cast<size_t>(i)];
+            auto const markerPos = line.find(kRunMarker);
+            if (markerPos == std::string::npos)
+                continue;
+
+            auto const runIdStart = markerPos + kRunMarker.size();
+            auto const startedPos = line.find(kStartedToken, runIdStart);
+            if (startedPos == std::string::npos)
+                continue;
+
+            RunStartMarker marker;
+            marker.lineIdx = i;
+            marker.runId = line.substr(runIdStart, startedPos - runIdStart);
+
+            auto const wfIdStart = startedPos + kStartedToken.size();
+            auto const wfIdEnd = line.find("')", wfIdStart);
+            if (wfIdEnd != std::string::npos)
+            {
+                marker.workflowId = line.substr(wfIdStart, wfIdEnd - wfIdStart);
+            }
+            runStarts.push_back(std::move(marker));
+        }
+
+        int const totalRuns = static_cast<int>(runStarts.size());
+
+        if (totalRuns == 0)
+        {
+            crow::json::wvalue resp;
+            resp["ok"] = true;
+            resp["found"] = false;
+            resp["totalRuns"] = 0;
+            resp["message"] = "No workflow run start found in log.";
+            return MakeJsonResponse(200, resp);
+        }
+
+        // Wrap index around so cycling is seamless.
+        int const runIndex = requestedIndex % totalRuns;
+
+        // runStarts is ordered oldest-first; we want index 0 = newest.
+        auto const& selected = runStarts[static_cast<size_t>(totalRuns - 1 - runIndex)];
+        int const startLineIdx = selected.lineIdx;
+        std::string const& runId = selected.runId;
+        std::string const& workflowId = selected.workflowId;
+
+        // Find the matching completion line (same run ID) after the start line.
+        std::string const completedMarker = kRunMarker + runId + "' completed";
+        std::string const failedMarker = kRunMarker + runId + "' failed";
+        std::string const cancelledMarker = kRunMarker + runId + "' cancelled";
+        std::string const stoppedMarker = kRunMarker + runId + "' stopped";
+
+        int endLineIdx = -1;
+        std::string state = "running";
+
+        for (size_t i = static_cast<size_t>(startLineIdx) + 1; i < lines.size(); ++i)
+        {
+            auto const& line = lines[i];
+            if (line.find(completedMarker) != std::string::npos)
+            {
+                endLineIdx = static_cast<int>(i);
+                state = "completed";
+                break;
+            }
+            if (line.find(failedMarker) != std::string::npos)
+            {
+                endLineIdx = static_cast<int>(i);
+                state = "failed";
+                break;
+            }
+            if (line.find(cancelledMarker) != std::string::npos)
+            {
+                endLineIdx = static_cast<int>(i);
+                state = "cancelled";
+                break;
+            }
+            if (line.find(stoppedMarker) != std::string::npos)
+            {
+                endLineIdx = static_cast<int>(i);
+                state = "stopped";
+                break;
+            }
+        }
+
+        int const searchEnd = endLineIdx >= 0 ? endLineIdx : static_cast<int>(lines.size());
+
+        // Extract timestamp from a log line:  "[YYYY-MM-DD HH:MM:SS.mmm] ..."
+        auto extractTimestamp = [](std::string const& line) -> std::string
+        {
+            if (line.size() > 25 && line[0] == '[')
+            {
+                auto const endBracket = line.find(']');
+                if (endBracket != std::string::npos)
+                    return line.substr(1, endBracket - 1);
+            }
+            return "";
+        };
+
+        std::string const startedAt = extractTimestamp(lines[static_cast<size_t>(startLineIdx)]);
+        std::string const completedAt = endLineIdx >= 0 ? extractTimestamp(lines[static_cast<size_t>(endLineIdx)]) : "";
+
+        // Collect issue lines between start and end.
+        // Match by log-level tags: [error], [critical], [warning], [warn]
+        // Also match [workflow] lines containing "failed" or "skipping" (task-level events).
+        // Only include lines that mention this run's runId or workflowId to avoid
+        // false positives from concurrent workflow runs.
+        crow::json::wvalue::list issuesJson;
+        int issueCount = 0;
+
+        for (int i = startLineIdx; i < searchEnd; ++i)
+        {
+            auto const& line = lines[static_cast<size_t>(i)];
+
+            // Skip lines that don't belong to this run (concurrent runs are interleaved).
+            if (line.find(runId) == std::string::npos && line.find(workflowId) == std::string::npos)
+                continue;
+
+            std::string severity;
+
+            if (line.find("] [error]") != std::string::npos || line.find("] [critical]") != std::string::npos)
+            {
+                severity = "error";
+            }
+            else if (line.find("] [warning]") != std::string::npos || line.find("] [warn]") != std::string::npos)
+            {
+                severity = "warning";
+            }
+            else if (line.find("[workflow]") != std::string::npos &&
+                     (line.find("failed") != std::string::npos || line.find("skipping") != std::string::npos))
+            {
+                severity = "error";
+            }
+            else
+            {
+                continue;
+            }
+
+            crow::json::wvalue issueJson;
+            issueJson["line"] = i + 1; // 1-indexed for display
+            issueJson["severity"] = severity;
+            issueJson["text"] = SanitizeUtf8(line);
+            issuesJson.push_back(std::move(issueJson));
+            ++issueCount;
+        }
+
+        crow::json::wvalue resp;
+        resp["ok"] = true;
+        resp["found"] = true;
+        resp["runIndex"] = runIndex;
+        resp["totalRuns"] = totalRuns;
+        resp["runId"] = runId;
+        resp["workflowId"] = workflowId;
+        resp["state"] = state;
+        resp["startedAt"] = startedAt;
+        resp["completedAt"] = completedAt;
+        resp["startLine"] = startLineIdx + 1; // 1-indexed
+        resp["endLine"] = endLineIdx >= 0 ? endLineIdx + 1 : -1;
+        resp["issues"] = std::move(issuesJson);
+        resp["issueCount"] = issueCount;
+
+        return MakeJsonResponse(200, resp);
     }
 
     void WebServer::RegisterWebSocket()

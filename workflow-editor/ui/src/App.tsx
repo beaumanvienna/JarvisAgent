@@ -234,6 +234,14 @@ export default function App(): JSX.Element
 
           <a
             className="btn"
+            href="/?tab=log"
+            style={{ textDecoration: "none" }}
+          >
+            Log
+          </a>
+
+          <a
+            className="btn"
             href="/"
             style={{ textDecoration: "none" }}
           >
