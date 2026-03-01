@@ -16,8 +16,12 @@ sha256sums=('SKIP')
 
 pkgver() {
     cd "$srcdir/JarvisAgent"
-    git describe --long --tags 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./g' \
-        || printf "0.1.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    local _tag
+    if _tag=$(git describe --long --tags 2>/dev/null); then
+        echo "$_tag" | sed 's/^v//;s/-/.r/;s/-/./g'
+    else
+        printf "0.1.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    fi
 }
 
 prepare() {
