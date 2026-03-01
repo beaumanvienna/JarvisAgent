@@ -74,7 +74,17 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 9. Browser-based AI chat terminal (new)
+## 9. Workflow editor improvements + AI assistance (new)
+- ~2 weeks of remaining work on the workflow editor UI
+- **AI → JCWF:** User describes a workflow in natural language (prompt), AI generates a valid `.jcwf` file
+- **JCWF → AI:** User loads an existing `.jcwf` file, AI generates a human-readable summary/documentation of what it does
+- Integration point: workflow editor UI sends prompt to backend, backend calls AI provider, returns structured JCWF JSON
+- Validation: generated JCWF should pass `workflowValidator` before being offered to the user
+- UX: "Generate from prompt" button and "Explain this workflow" button in the editor
+
+---
+
+## 10. Browser-based AI chat terminal (new)
 - **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
   Not just a command prompt, but a conversational AI interface that can:
   - Answer questions about the system, workflows, and task outputs
