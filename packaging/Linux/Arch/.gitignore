@@ -1,0 +1,7 @@
+# makepkg build artifacts
+src/
+pkg/
+JarvisAgent/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.log

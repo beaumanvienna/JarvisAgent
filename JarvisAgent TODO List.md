@@ -64,7 +64,17 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 8. Browser-based AI chat terminal (new)
+## 8. Multi-user support for system-wide installs (new)
+- When installed system-wide via deb/rpm/Arch (`/opt/jarvisagent/`), `queue/` and `workflows/` are owned by root
+- Non-root users cannot write to these directories without `sudo`
+- Investigate per-user data directories (e.g. `~/.local/share/jarvisagent/`) like the Flatpak/AppImage approach
+- Or use a shared group (`jarvisagent`) with appropriate permissions
+- The launcher script and config.json should support user-level overrides for `queue folder` and `workflows folder`
+- `md2pdf` (from the Python venv at `/opt/jarvisagent/.venv`) is not on PATH by default — the launcher or shell scripts need to activate the venv or add it to PATH so workflows like `vehicleTroubleshootingGuide` can find it
+
+---
+
+## 9. Browser-based AI chat terminal (new)
 - **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
   Not just a command prompt, but a conversational AI interface that can:
   - Answer questions about the system, workflows, and task outputs
