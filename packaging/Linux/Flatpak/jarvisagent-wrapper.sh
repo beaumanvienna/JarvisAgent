@@ -1,0 +1,65 @@
+#!/bin/bash
+# jarvisagent-wrapper.sh — Flatpak entry point for JarvisAgent.
+#
+# Sets up a working directory at ~/.local/share/jarvisagent/ with symlinks
+# to read-only assets inside the Flatpak and real directories for writable
+# data (queue/, log/, workflows/).
+
+set -euo pipefail
+
+SHARE="/app/share/jarvisagent"
+DATA_DIR="${JARVISAGENT_DATA:-$HOME/.local/share/jarvisagent}"
+
+# ---- First-run setup ----
+if [[ ! -d "$DATA_DIR" ]]; then
+    echo "==> First run: creating working directory at $DATA_DIR"
+    mkdir -p "$DATA_DIR"
+fi
+
+# Symlink read-only assets from Flatpak into the working directory.
+for asset in bin dashboard workflow-editor scripts doc; do
+    rm -f "$DATA_DIR/$asset"
+    ln -sf "$SHARE/$asset" "$DATA_DIR/$asset"
+done
+
+# Create writable directories if they don't exist
+mkdir -p "$DATA_DIR/queue"
+mkdir -p "$DATA_DIR/log"
+mkdir -p "$DATA_DIR/workflows"
+
+# Copy example workflows on first run (jcwf + loose input files + symlink)
+if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
+    cp -a "$SHARE/example-workflows/"* "$DATA_DIR/workflows/" 2>/dev/null || true
+    echo "==> Copied example workflows to $DATA_DIR/workflows/"
+fi
+
+# Copy example config on first run
+if [[ ! -f "$DATA_DIR/config.json" ]]; then
+    cp "$SHARE/config.json.example" "$DATA_DIR/config.json"
+    echo "==> Created $DATA_DIR/config.json from example — please edit it"
+    echo "    (set API keys, adjust queue/workflow paths if needed)"
+fi
+
+# ---- Python venv (first-run) ----
+if [[ ! -d "$DATA_DIR/.venv" ]]; then
+    echo "==> Creating Python virtual environment at $DATA_DIR/.venv ..."
+    python3 -m venv "$DATA_DIR/.venv" 2>/dev/null || {
+        echo "WARNING: Could not create Python venv"
+        echo "         Shell tasks using markitdown/md2pdf will not work until fixed."
+    }
+
+    if [[ -d "$DATA_DIR/.venv" ]]; then
+        echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
+        "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
+        "$DATA_DIR/.venv/bin/playwright" install chromium 2>/dev/null || true
+    fi
+fi
+
+# Activate venv if present
+if [[ -f "$DATA_DIR/.venv/bin/activate" ]]; then
+    source "$DATA_DIR/.venv/bin/activate"
+fi
+
+# ---- Launch ----
+cd "$DATA_DIR"
+exec "$DATA_DIR/bin/jarvisAgent" "$@"

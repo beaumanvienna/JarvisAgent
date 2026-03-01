@@ -1,0 +1,113 @@
+{
+    "version": "1.0",
+    "id": "exampleMakefile4",
+    "tasks": {
+        "ai_call": {
+            "id": "ai_call",
+            "type": "ai_call",
+            "label": "generate hello.cpp",
+            "params": {},
+            "working_directory": "../queue/exampleMakefile4/01_ai_call",
+            "queue_binding": {
+                "stng_files": [
+                    {
+                        "path": "STNG_new_1.txt",
+                        "content": "Be precise. Output only raw C++ code. No markdown fences, no explanations. The output will be used directly by a C++ compiler."
+                    }
+                ],
+                "task_files": [
+                    {
+                        "path": "TASK_new_1.txt",
+                        "content": "Generate one file: hello.cpp \u2014 a minimal C++ program that prints \"Hello from JarvisAgent!\" five time on a new line using iostream. "
+                    }
+                ],
+                "cntx_files": [
+                    {
+                        "path": "CNTX_new_1.txt",
+                        "content": "For C++ code, use Allman brace style."
+                    }
+                ],
+                "prob_files": [
+                    {
+                        "path": "PROB_hello.txt",
+                        "content": "Please generate hello.cpp"
+                    }
+                ]
+            }
+        },
+        "ai_call_2": {
+            "id": "ai_call_2",
+            "type": "ai_call",
+            "label": "generate Makefile",
+            "params": {},
+            "working_directory": "../queue/exampleMakefile4/02_ai_call_2",
+            "queue_binding": {
+                "stng_files": [
+                    {
+                        "path": "STNG_new_1.txt",
+                        "content": "Output only a raw Makefile. No markdown fences, no explanations."
+                    }
+                ],
+                "task_files": [
+                    {
+                        "path": "TASK_new_1.txt",
+                        "content": "Generate the requested Makefile."
+                    }
+                ],
+                "cntx_files": [
+                    {
+                        "path": "CNTX_new_1.txt",
+                        "content": "This is for a simple C++ project. Use proper Makefile syntax with TABS."
+                    }
+                ],
+                "prob_files": [
+                    {
+                        "path": "PROB_Makefile.txt",
+                        "content": "Write a Makefile that compiles hello.cpp into an executable called \"hello\". Use g++."
+                    }
+                ]
+            }
+        },
+        "shell": {
+            "id": "shell",
+            "type": "shell",
+            "label": "run command make",
+            "params": {
+                "command": "scripts/runMake.sh"
+            },
+            "working_directory": "exampleMakefile4/01_runMake",
+            "file_inputs": [
+                "../../../queue/exampleMakefile4/01_ai_call/PROB_hello.output.txt",
+                "../../../queue/exampleMakefile4/02_ai_call_2/PROB_Makefile.output.txt"
+            ],
+            "materialize": {
+                "{{input[0]}}": "hello.cpp",
+                "{{input[1]}}": "Makefile"
+            },
+            "depends_on": [
+                "ai_call",
+                "ai_call_2"
+            ]
+        },
+        "shell_2": {
+            "id": "shell_2",
+            "type": "shell",
+            "label": "run hello",
+            "params": {
+                "command": "scripts/run.sh",
+                "args": [
+                    "exampleMakefile4/01_runMake/hello"
+                ]
+            },
+            "working_directory": "exampleMakefile4/02_runHello",
+            "depends_on": [
+                "shell"
+            ]
+        }
+    },
+    "label": "example Makefile 4",
+    "doc": "AI creates C++ code. another ai call creates Makefile",
+    "defaults": {
+        "timeout_ms": 30000
+    }
+}

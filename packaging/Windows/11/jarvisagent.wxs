@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 manifest for JarvisAgent MSI installer.
+
+  Build prerequisites:
+    - WiX Toolset v4: dotnet tool install --global wix
+    - Or WiX v3: install from https://wixtoolset.org/
+
+  Build:
+    wix build -o build\JarvisAgent-x64.msi jarvisagent.wxs
+
+  Note: This manifest references a pre-assembled staging directory.
+        Run build-zip.ps1 first to create the package tree, then
+        point the HarvestDirectory at build\JarvisAgent-x64\.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package
+        Name="JarvisAgent"
+        Manufacturer="JC Technolabs"
+        Version="0.1.0.0"
+        UpgradeCode="E8A3F1B2-7C4D-4E5A-9B6F-1A2B3C4D5E6F"
+        Scope="perMachine">
+
+        <MajorUpgrade
+            DowngradeErrorMessage="A newer version of JarvisAgent is already installed." />
+
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Install directory -->
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="INSTALLFOLDER" Name="JarvisAgent">
+
+                <!-- Binary -->
+                <Directory Id="BinDir" Name="bin">
+                    <Component Id="MainBinary" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+                        <File Source="build\JarvisAgent-x64\bin\jarvisAgent.exe" KeyPath="yes" />
+                    </Component>
+                </Directory>
+
+                <!-- Launcher batch file -->
+                <Component Id="LauncherBat" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+                    <File Source="build\JarvisAgent-x64\jarvisagent.bat" KeyPath="yes" />
+                </Component>
+
+                <!-- Setup-venv helper -->
+                <Component Id="SetupVenv" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+                    <File Source="build\JarvisAgent-x64\setup-venv.bat" KeyPath="yes" />
+                </Component>
+
+                <!-- Example config -->
+                <Component Id="ExampleConfig" Guid="D4E5F6A7-B8C9-0123-DEF0-1234567890AB">
+                    <File Source="build\JarvisAgent-x64\config.json.example" KeyPath="yes" />
+                </Component>
+
+                <!-- Empty writable directories -->
+                <Directory Id="QueueDir" Name="queue">
+                    <Component Id="QueueFolder" Guid="E5F6A7B8-C9D0-1234-EF01-234567890ABC">
+                        <CreateFolder />
+                    </Component>
+                </Directory>
+
+                <Directory Id="LogDir" Name="log">
+                    <Component Id="LogFolder" Guid="F6A7B8C9-D0E1-2345-F012-34567890ABCD">
+                        <CreateFolder />
+                    </Component>
+                </Directory>
+            </Directory>
+        </StandardDirectory>
+
+        <!-- PATH environment variable entry -->
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="ENVFOLDER" Name="JarvisAgent">
+                <Component Id="PathEntry" Guid="A7B8C9D0-E1F2-3456-0123-4567890ABCDE">
+                    <Environment Id="PATH"
+                                 Name="PATH"
+                                 Value="[INSTALLFOLDER]"
+                                 Permanent="no"
+                                 Part="last"
+                                 Action="set"
+                                 System="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Feature tree -->
+        <Feature Id="Complete" Title="JarvisAgent" Level="1">
+            <ComponentRef Id="MainBinary" />
+            <ComponentRef Id="LauncherBat" />
+            <ComponentRef Id="SetupVenv" />
+            <ComponentRef Id="ExampleConfig" />
+            <ComponentRef Id="QueueFolder" />
+            <ComponentRef Id="LogFolder" />
+            <ComponentRef Id="PathEntry" />
+            <!-- Dashboard, workflow-editor, scripts, workflows, doc
+                 are harvested from the staging directory below. -->
+            <ComponentGroupRef Id="DashboardFiles" />
+            <ComponentGroupRef Id="WorkflowEditorFiles" />
+            <ComponentGroupRef Id="ScriptFiles" />
+            <ComponentGroupRef Id="WorkflowFiles" />
+            <ComponentGroupRef Id="DocFiles" />
+        </Feature>
+    </Package>
+
+    <!--
+      Harvested component groups — generate these with:
+        heat dir "build\JarvisAgent-x64\dashboard" -cg DashboardFiles -dr INSTALLFOLDER -srd -ag -sfrag -var var.DashboardSource -o dashboard.wxs
+        heat dir "build\JarvisAgent-x64\workflow-editor" -cg WorkflowEditorFiles -dr INSTALLFOLDER -srd -ag -sfrag -var var.WorkflowEditorSource -o workflow-editor.wxs
+        heat dir "build\JarvisAgent-x64\scripts" -cg ScriptFiles -dr INSTALLFOLDER -srd -ag -sfrag -var var.ScriptsSource -o scripts.wxs
+        heat dir "build\JarvisAgent-x64\workflows" -cg WorkflowFiles -dr INSTALLFOLDER -srd -ag -sfrag -var var.WorkflowsSource -o workflows.wxs
+        heat dir "build\JarvisAgent-x64\doc" -cg DocFiles -dr INSTALLFOLDER -srd -ag -sfrag -var var.DocSource -o doc.wxs
+
+      Then include the generated .wxs files in the build command.
+    -->
+</Wix>

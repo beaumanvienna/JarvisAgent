@@ -1,0 +1,222 @@
+#!/bin/bash
+# build-dmg.sh — Build a .dmg installer for JarvisAgent on macOS.
+#
+# Usage:
+#   cd packaging/macOS/Tahoe
+#   ./build-dmg.sh [--dry-run]
+#
+# Prerequisites:
+#   - Xcode Command Line Tools: xcode-select --install
+#   - Homebrew: brew install premake node python@3
+#
+# Options:
+#   --dry-run   Assemble the .app bundle using existing build artifacts
+#               (skips C++ and React builds).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+BUILD_DIR="$SCRIPT_DIR/build"
+APP_NAME="JarvisAgent"
+APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
+DMG_NAME="${APP_NAME}.dmg"
+
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=true
+    echo "==> DRY RUN: skipping C++ and React builds, using existing artifacts"
+fi
+
+# ---- Clean previous build ----
+rm -rf "$BUILD_DIR"
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources/share"
+
+# ---- Build from source (unless dry-run) ----
+if [[ "$DRY_RUN" == false ]]; then
+    echo "==> Generating Makefiles ..."
+    cd "$REPO_ROOT"
+    premake5 gmake
+
+    CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    echo "==> Building C++ release binary ($CORES cores) ..."
+    make -j"$CORES" config=release
+
+    echo "==> Building React dashboard ..."
+    cd "$REPO_ROOT/dashboard/ui"
+    npm install
+    npm run build
+
+    echo "==> Building React workflow editor ..."
+    cd "$REPO_ROOT/workflow-editor/ui"
+    npm install
+    npm run build
+fi
+
+# ---- Assemble .app bundle ----
+echo "==> Assembling ${APP_NAME}.app ..."
+
+SHARE="$APP_BUNDLE/Contents/Resources/share"
+
+# Binary
+if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
+    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$SHARE/jarvisAgent"
+    chmod 755 "$SHARE/jarvisAgent"
+else
+    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
+fi
+
+# React UIs
+if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
+    mkdir -p "$SHARE/dashboard/ui"
+    cp -r "$REPO_ROOT/dashboard/ui/dist" "$SHARE/dashboard/ui/dist"
+fi
+
+if [[ -d "$REPO_ROOT/workflow-editor/ui/dist" ]]; then
+    mkdir -p "$SHARE/workflow-editor/ui"
+    cp -r "$REPO_ROOT/workflow-editor/ui/dist" "$SHARE/workflow-editor/ui/dist"
+fi
+
+# Scripts (excluding __pycache__)
+cp -r "$REPO_ROOT/scripts" "$SHARE/scripts"
+find "$SHARE/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+chmod +x "$SHARE/scripts/"*.sh
+
+# Example workflows (curated list — no subdirs, no build artifacts)
+mkdir -p "$SHARE/example-workflows"
+for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+            make-example portfolioDividendAnalysis \
+            vehicleTroubleshootingGuide; do
+    cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SHARE/example-workflows/" 2>/dev/null || true
+done
+# Loose input files needed by the example workflows
+for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
+         message_engine_question.txt message_tire_question.txt \
+         message_unclear_question.txt port62pos.csv; do
+    cp "$REPO_ROOT/example/workflows/$f" "$SHARE/example-workflows/" 2>/dev/null || true
+done
+# Symlink used by aiCarMaintenancePipeline
+ln -sf message_engine_question.txt "$SHARE/example-workflows/message.txt"
+
+# Example config
+cp "$REPO_ROOT/config.json" "$SHARE/config.json.example"
+
+# Documentation
+mkdir -p "$SHARE/doc"
+cp "$REPO_ROOT/README.md" "$SHARE/doc/README.md"
+cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SHARE/doc/JC_Workflow_Specification.md" 2>/dev/null || true
+
+# ---- Launcher script (Contents/MacOS/JarvisAgent) ----
+cat > "$APP_BUNDLE/Contents/MacOS/JarvisAgent" <<'LAUNCHER'
+#!/bin/bash
+# JarvisAgent.app launcher — sets up working directory in ~/Library/Application Support/JarvisAgent
+
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SHARE="$APP_DIR/Resources/share"
+DATA_DIR="${JARVISAGENT_DATA:-$HOME/Library/Application Support/JarvisAgent}"
+
+# First-run setup
+if [[ ! -d "$DATA_DIR" ]]; then
+    echo "==> First run: creating working directory at $DATA_DIR"
+    mkdir -p "$DATA_DIR"
+fi
+
+# Symlink read-only assets
+for asset in dashboard workflow-editor scripts doc; do
+    rm -f "$DATA_DIR/$asset"
+    ln -sf "$SHARE/$asset" "$DATA_DIR/$asset"
+done
+
+# Binary symlink
+mkdir -p "$DATA_DIR/bin"
+rm -f "$DATA_DIR/bin/jarvisAgent"
+ln -sf "$SHARE/jarvisAgent" "$DATA_DIR/bin/jarvisAgent"
+
+# Writable directories
+mkdir -p "$DATA_DIR/queue"
+mkdir -p "$DATA_DIR/log"
+mkdir -p "$DATA_DIR/workflows"
+
+# Copy example workflows on first run
+if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
+    cp "$SHARE/example-workflows/"*.jcwf "$DATA_DIR/workflows/" 2>/dev/null || true
+fi
+
+# Copy example config on first run
+if [[ ! -f "$DATA_DIR/config.json" ]]; then
+    cp "$SHARE/config.json.example" "$DATA_DIR/config.json"
+    echo "==> Created $DATA_DIR/config.json from example — please edit it"
+fi
+
+# Python venv (first-run)
+if [[ ! -d "$DATA_DIR/.venv" ]]; then
+    echo "==> Creating Python virtual environment ..."
+    python3 -m venv "$DATA_DIR/.venv" 2>/dev/null || true
+    if [[ -d "$DATA_DIR/.venv" ]]; then
+        "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
+        "$DATA_DIR/.venv/bin/playwright" install chromium 2>/dev/null || true
+    fi
+fi
+
+# Activate venv
+if [[ -f "$DATA_DIR/.venv/bin/activate" ]]; then
+    source "$DATA_DIR/.venv/bin/activate"
+fi
+
+cd "$DATA_DIR"
+exec "$DATA_DIR/bin/jarvisAgent" "$@"
+LAUNCHER
+chmod 755 "$APP_BUNDLE/Contents/MacOS/JarvisAgent"
+
+# ---- Info.plist ----
+cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>JarvisAgent</string>
+    <key>CFBundleDisplayName</key>
+    <string>JarvisAgent</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jctechnolabs.JarvisAgent</string>
+    <key>CFBundleVersion</key>
+    <string>0.1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleExecutable</key>
+    <string>JarvisAgent</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+# ---- Create .dmg ----
+echo "==> Creating .dmg ..."
+if command -v hdiutil &>/dev/null; then
+    hdiutil create -volname "$APP_NAME" \
+        -srcfolder "$APP_BUNDLE" \
+        -ov -format UDZO \
+        "$BUILD_DIR/$DMG_NAME"
+
+    echo ""
+    echo "==> DMG created: $BUILD_DIR/$DMG_NAME"
+    echo "    Size: $(du -h "$BUILD_DIR/$DMG_NAME" | cut -f1)"
+    echo ""
+    echo "    Install: open the .dmg and drag JarvisAgent.app to /Applications"
+    echo "    Run:     open /Applications/JarvisAgent.app (or from Terminal)"
+    echo "    Data:    ~/Library/Application Support/JarvisAgent/"
+else
+    echo "==> hdiutil not available (not on macOS)."
+    echo "    .app bundle assembled at: $APP_BUNDLE"
+    echo "    Transfer to macOS and run: hdiutil create -volname JarvisAgent -srcfolder JarvisAgent.app -ov -format UDZO JarvisAgent.dmg"
+fi

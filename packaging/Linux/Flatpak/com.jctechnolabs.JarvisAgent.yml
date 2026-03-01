@@ -1,0 +1,96 @@
+app-id: com.jctechnolabs.JarvisAgent
+runtime: org.freedesktop.Sdk
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node20
+
+command: jarvisagent-wrapper
+
+finish-args:
+  # Network access for AI API calls
+  - --share=network
+  # Filesystem access for queue/, workflows/, log/, config
+  - --filesystem=home
+  # X11/Wayland for potential future GUI
+  - --socket=x11
+  - --socket=wayland
+  # Terminal access
+  - --device=dri
+
+modules:
+  # ---- premake5 (build tool, not shipped) ----
+  - name: premake5
+    buildsystem: simple
+    build-commands:
+      - make -f Bootstrap.mak linux PLATFORM=x64
+      - install -Dm755 bin/release/premake5 /app/bin/premake5
+    sources:
+      - type: git
+        url: https://github.com/premake/premake-core.git
+        tag: v5.0.0-beta8
+
+  # ---- JarvisAgent ----
+  - name: jarvisagent
+    buildsystem: simple
+    build-options:
+      env:
+        PATH: /app/bin:/usr/lib/sdk/node20/bin:/usr/bin:/bin
+    build-commands:
+      # Diagnostics — verify Python headers exist in SDK (stderr so flatpak-builder shows it)
+      - sh -c 'python3 --version >&2; python3-config --includes >&2 || echo "python3-config MISSING" >&2; ls /usr/include/python3*/Python.h >&2 2>&1 || echo "Python.h NOT FOUND in SDK" >&2'
+
+      # Clean host-generated Makefiles (type:dir copies local build artifacts)
+      - rm -f Makefile *.make
+
+      # Generate Makefiles fresh inside the sandbox
+      - premake5 gmake
+
+      # Build C++ release binary (add Python include path explicitly for SDK)
+      - sh -c 'export CPLUS_INCLUDE_PATH="$(python3 -c "import sysconfig; print(sysconfig.get_path(\"include\"))")"; echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >&2; make -j${FLATPAK_BUILDER_N_JOBS} config=release'
+
+      # Build React dashboard
+      - cd dashboard/ui && npm install && npm run build
+
+      # Build React workflow editor
+      - cd workflow-editor/ui && npm install && npm run build
+
+      # ---- Install ----
+      # Binary
+      - install -Dm755 bin/Release/jarvisAgent /app/share/jarvisagent/bin/jarvisAgent
+
+      # React UIs
+      - mkdir -p /app/share/jarvisagent/dashboard/ui
+      - cp -r dashboard/ui/dist /app/share/jarvisagent/dashboard/ui/dist
+      - mkdir -p /app/share/jarvisagent/workflow-editor/ui
+      - cp -r workflow-editor/ui/dist /app/share/jarvisagent/workflow-editor/ui/dist
+
+      # Scripts (excluding __pycache__)
+      - cp -r scripts /app/share/jarvisagent/scripts
+      - find /app/share/jarvisagent/scripts -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      - chmod +x /app/share/jarvisagent/scripts/*.sh
+
+      # Example workflows (curated list — no subdirs, no build artifacts)
+      - mkdir -p /app/share/jarvisagent/example-workflows
+      - for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 make-example portfolioDividendAnalysis vehicleTroubleshootingGuide; do cp example/workflows/${jcwf}.jcwf /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
+      - for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h message_engine_question.txt message_tire_question.txt message_unclear_question.txt port62pos.csv; do cp example/workflows/$f /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
+      - ln -sf message_engine_question.txt /app/share/jarvisagent/example-workflows/message.txt
+
+      # Example config
+      - cp config.json /app/share/jarvisagent/config.json.example
+
+      # Documentation
+      - mkdir -p /app/share/jarvisagent/doc
+      - cp README.md /app/share/jarvisagent/doc/README.md
+      - cp doc/JC_Workflow_Specification.md /app/share/jarvisagent/doc/JC_Workflow_Specification.md 2>/dev/null || true
+
+      # Wrapper script
+      - install -Dm755 packaging/Linux/Flatpak/jarvisagent-wrapper.sh /app/bin/jarvisagent-wrapper
+
+      # Desktop file and icon
+      - install -Dm644 packaging/Linux/Flatpak/com.jctechnolabs.JarvisAgent.desktop /app/share/applications/com.jctechnolabs.JarvisAgent.desktop
+
+    sources:
+      # For testing: use local source tree (switch to git source for release)
+      - type: dir
+        path: /home/beaumanvienna/dev/jarvisAgent

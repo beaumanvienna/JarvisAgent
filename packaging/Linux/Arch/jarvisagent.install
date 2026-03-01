@@ -1,0 +1,33 @@
+post_install() {
+    echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
+    python -m venv /opt/jarvisagent/.venv
+
+    echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
+    /opt/jarvisagent/.venv/bin/pip install --quiet "markitdown[all]" md2pdf-mermaid playwright
+
+    echo "==> Installing Playwright Chromium ..."
+    /opt/jarvisagent/.venv/bin/playwright install chromium
+
+    echo ""
+    echo "==> JarvisAgent installed to /opt/jarvisagent/"
+    echo ""
+    echo "    To get started:"
+    echo "      1. sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
+    echo "      2. Edit config.json (set API keys, queue/workflow paths)"
+    echo "      3. Run: jarvisagent"
+    echo ""
+    echo "    The Python venv is at /opt/jarvisagent/.venv"
+    echo "    Activate it before running if shell tasks need markitdown/md2pdf:"
+    echo "      source /opt/jarvisagent/.venv/bin/activate"
+    echo ""
+}
+
+post_upgrade() {
+    post_install
+}
+
+post_remove() {
+    echo "==> Removing Python virtual environment ..."
+    rm -rf /opt/jarvisagent/.venv
+    echo "==> You may want to remove /opt/jarvisagent/ manually if custom data remains."
+}

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=JarvisAgent
+Comment=Parallel AI-driven automation with C++ backend and React frontend
+Exec=jarvisagent-wrapper
+Icon=com.jctechnolabs.JarvisAgent
+Categories=Development;Utility;
+Terminal=true

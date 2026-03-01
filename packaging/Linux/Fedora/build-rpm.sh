@@ -1,0 +1,182 @@
+#!/bin/bash
+# build-rpm.sh — Build an .rpm package for JarvisAgent from the current source tree.
+#
+# Usage:
+#   cd packaging/Linux/Fedora
+#   ./build-rpm.sh [--dry-run]
+#
+# Prerequisites (Fedora):
+#   sudo dnf install -y gcc gcc-c++ make python3 python3-devel python3-pip \
+#       ncurses-devel zlib-devel nodejs npm rpm-build
+#   premake5 must be on PATH (build from source or download binary)
+#
+# Options:
+#   --dry-run   Assemble the package tree and create the RPM using existing
+#               build artifacts (skips C++ and React builds).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PKG_NAME="jarvisagent"
+PKG_VERSION="0.1"
+PKG_RELEASE="1"
+PKG_ARCH="x86_64"
+RPM_NAME="${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}.${PKG_ARCH}"
+BUILD_DIR="$SCRIPT_DIR/build"
+STAGING="$BUILD_DIR/staging"
+
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=true
+    echo "==> DRY RUN: skipping C++ and React builds, using existing artifacts"
+fi
+
+# ---- Clean previous build ----
+rm -rf "$BUILD_DIR"
+mkdir -p "$STAGING/opt/jarvisagent/bin"
+mkdir -p "$STAGING/opt/jarvisagent/dashboard/ui"
+mkdir -p "$STAGING/opt/jarvisagent/workflow-editor/ui"
+mkdir -p "$STAGING/opt/jarvisagent/doc"
+mkdir -p "$STAGING/opt/jarvisagent/queue"
+mkdir -p "$STAGING/opt/jarvisagent/log"
+mkdir -p "$STAGING/opt/jarvisagent/workflows"
+mkdir -p "$STAGING/usr/bin"
+
+# ---- Build from source (unless dry-run) ----
+if [[ "$DRY_RUN" == false ]]; then
+    echo "==> Generating Makefiles ..."
+    cd "$REPO_ROOT"
+    premake5 gmake
+
+    echo "==> Building C++ release binary ..."
+    make -j"$(nproc)" config=release
+
+    echo "==> Building React dashboard ..."
+    cd "$REPO_ROOT/dashboard/ui"
+    npm install
+    npm run build
+
+    echo "==> Building React workflow editor ..."
+    cd "$REPO_ROOT/workflow-editor/ui"
+    npm install
+    npm run build
+fi
+
+# ---- Assemble package tree ----
+echo "==> Assembling package tree ..."
+
+# Binary
+if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
+    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$STAGING/opt/jarvisagent/bin/jarvisAgent"
+    chmod 755 "$STAGING/opt/jarvisagent/bin/jarvisAgent"
+else
+    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
+fi
+
+# React UIs
+if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
+    cp -r "$REPO_ROOT/dashboard/ui/dist" "$STAGING/opt/jarvisagent/dashboard/ui/dist"
+else
+    echo "WARNING: dashboard/ui/dist not found (expected in dry-run)"
+fi
+
+if [[ -d "$REPO_ROOT/workflow-editor/ui/dist" ]]; then
+    cp -r "$REPO_ROOT/workflow-editor/ui/dist" "$STAGING/opt/jarvisagent/workflow-editor/ui/dist"
+else
+    echo "WARNING: workflow-editor/ui/dist not found (expected in dry-run)"
+fi
+
+# Scripts (excluding __pycache__)
+cp -r "$REPO_ROOT/scripts" "$STAGING/opt/jarvisagent/scripts"
+find "$STAGING/opt/jarvisagent/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+chmod +x "$STAGING/opt/jarvisagent/scripts/"*.sh
+
+# Example workflows (curated list — no subdirs, no build artifacts)
+for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+            make-example portfolioDividendAnalysis \
+            vehicleTroubleshootingGuide; do
+    cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
+done
+# Loose input files needed by the example workflows
+for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
+         message_engine_question.txt message_tire_question.txt \
+         message_unclear_question.txt port62pos.csv; do
+    cp "$REPO_ROOT/example/workflows/$f" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
+done
+# Symlink used by aiCarMaintenancePipeline
+ln -sf message_engine_question.txt "$STAGING/opt/jarvisagent/workflows/message.txt"
+
+# Example config
+cp "$REPO_ROOT/config.json" "$STAGING/opt/jarvisagent/config.json.example"
+
+# Documentation
+cp "$REPO_ROOT/README.md" "$STAGING/opt/jarvisagent/doc/README.md"
+cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$STAGING/opt/jarvisagent/doc/JC_Workflow_Specification.md" 2>/dev/null || true
+
+# Launcher script
+cat > "$STAGING/usr/bin/jarvisagent" <<'LAUNCHER'
+#!/usr/bin/env bash
+cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
+if [[ ! -f config.json ]]; then
+    echo "No config.json found in /opt/jarvisagent/"
+    echo "Copy the example and edit it:"
+    echo "  sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
+    exit 1
+fi
+exec ./bin/jarvisAgent "$@"
+LAUNCHER
+chmod 755 "$STAGING/usr/bin/jarvisagent"
+
+# ---- Build RPM using rpmbuild (if available) or fpm ----
+if command -v rpmbuild &>/dev/null; then
+    echo "==> Building RPM with rpmbuild ..."
+
+    RPMBUILD_DIR="$BUILD_DIR/rpmbuild"
+    mkdir -p "$RPMBUILD_DIR"/{SPECS,RPMS,BUILD,BUILDROOT,SOURCES}
+
+    cp "$SCRIPT_DIR/jarvisagent.spec" "$RPMBUILD_DIR/SPECS/"
+
+    # Copy staging tree into BUILDROOT as if it were installed
+    BUILDROOT="$RPMBUILD_DIR/BUILDROOT/${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}.${PKG_ARCH}"
+    mkdir -p "$BUILDROOT"
+    cp -a "$STAGING"/* "$BUILDROOT/"
+
+    rpmbuild --define "_topdir $RPMBUILD_DIR" \
+             --define "_rpmdir $BUILD_DIR" \
+             --buildroot "$BUILDROOT" \
+             --noclean \
+             --nocheck \
+             -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \
+             --nodeps \
+             --noprep \
+             --nobuild \
+        || echo "WARNING: rpmbuild failed — this is expected on non-Fedora systems"
+elif command -v fpm &>/dev/null; then
+    echo "==> Building RPM with fpm ..."
+    cd "$BUILD_DIR"
+    fpm -s dir -t rpm \
+        -n "$PKG_NAME" \
+        -v "$PKG_VERSION" \
+        --iteration "$PKG_RELEASE" \
+        -a "$PKG_ARCH" \
+        --description "Parallel AI-driven automation with C++ backend and React frontend" \
+        --url "https://github.com/beaumanvienna/JarvisAgent" \
+        --license "GPL-3.0-only" \
+        --depends python3 --depends bash --depends ncurses-libs --depends zlib \
+        --after-install "$SCRIPT_DIR/postinst.sh" \
+        --after-remove "$SCRIPT_DIR/postrm.sh" \
+        -C "$STAGING" \
+        .
+else
+    echo "==> Neither rpmbuild nor fpm found."
+    echo "    On Fedora:  sudo dnf install rpm-build"
+    echo "    Universal:  gem install fpm"
+    echo ""
+    echo "    Package tree assembled in: $STAGING"
+    echo "    You can inspect it or transfer to a Fedora system to build."
+fi
+
+echo ""
+echo "==> Done. Build output in: $BUILD_DIR"
+ls -lh "$BUILD_DIR"/*.rpm 2>/dev/null || echo "    (no .rpm file — see notes above)"

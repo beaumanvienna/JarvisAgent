@@ -1,0 +1,13 @@
+Package: jarvisagent
+Version: 0.1-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: python3 (>= 3.10), python3-pip, python3-venv, libncurses6, zlib1g, bash
+Maintainer: JC Technolabs <https://github.com/beaumanvienna>
+Homepage: https://github.com/beaumanvienna/JarvisAgent
+Description: Parallel AI-driven automation with C++ backend and React frontend
+ JarvisAgent is a C++ backend / React frontend application for parallel
+ AI-driven automation. It dispatches many concurrent AI requests for bulk
+ processing workloads, supports visual DAG workflow editing, and ships with
+ an ncurses terminal UI and a browser-based React dashboard.
