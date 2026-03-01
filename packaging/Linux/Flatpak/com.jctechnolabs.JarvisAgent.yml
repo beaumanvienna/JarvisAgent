@@ -37,17 +37,11 @@ modules:
       env:
         PATH: /app/bin:/usr/lib/sdk/node20/bin:/usr/bin:/bin
     build-commands:
-      # Diagnostics — verify Python headers exist in SDK (stderr so flatpak-builder shows it)
-      - sh -c 'python3 --version >&2; python3-config --includes >&2 || echo "python3-config MISSING" >&2; ls /usr/include/python3*/Python.h >&2 2>&1 || echo "Python.h NOT FOUND in SDK" >&2'
-
-      # Clean host-generated Makefiles (type:dir copies local build artifacts)
-      - rm -f Makefile *.make
-
-      # Generate Makefiles fresh inside the sandbox
+      # Generate Makefiles
       - premake5 gmake
 
-      # Build C++ release binary (add Python include path explicitly for SDK)
-      - sh -c 'export CPLUS_INCLUDE_PATH="$(python3 -c "import sysconfig; print(sysconfig.get_path(\"include\"))")"; echo "CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH" >&2; make -j${FLATPAK_BUILDER_N_JOBS} config=release'
+      # Build C++ release binary (CPLUS_INCLUDE_PATH needed for Python.h in SDK)
+      - sh -c 'export CPLUS_INCLUDE_PATH="$(python3 -c "import sysconfig; print(sysconfig.get_path(\"include\"))")"; make -j${FLATPAK_BUILDER_N_JOBS} config=release'
 
       # Build React dashboard
       - cd dashboard/ui && npm install && npm run build
@@ -91,6 +85,6 @@ modules:
       - install -Dm644 packaging/Linux/Flatpak/com.jctechnolabs.JarvisAgent.desktop /app/share/applications/com.jctechnolabs.JarvisAgent.desktop
 
     sources:
-      # For testing: use local source tree (switch to git source for release)
-      - type: dir
-        path: /home/beaumanvienna/dev/jarvisAgent
+      - type: git
+        url: https://github.com/beaumanvienna/JarvisAgent.git
+        branch: main
