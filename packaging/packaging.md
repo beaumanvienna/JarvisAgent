@@ -2,6 +2,33 @@
 
 Last updated: 2026-03-01
 
+JarvisAgent is a cross-platform C++ application with React frontends. All central
+C++ libraries are vendored under `vendor/` so that every platform builds against the
+exact same revision — no system-package roulette. Minor platform-specific exceptions
+apply (e.g. Schannel instead of OpenSSL on Windows). The build system is
+**premake5** (not CMake); on Windows we generate Visual Studio 2022 solutions, on
+Linux and macOS we generate GNU Makefiles. MSYS2 with GCC or Clang could be tested
+by a volunteer if somebody has the time. The React/npm toolchain is inherently
+cross-platform and identical everywhere.
+
+```
+Packaging Targets
+├── Linux
+│   ├── Arch / Manjaro        PKGBUILD  →  .pkg.tar.zst
+│   ├── Ubuntu 24.04          build-deb.sh  →  .deb
+│   ├── Fedora / Rocky        build-rpm.sh  →  .rpm
+│   ├── AppImage              build-appimage.sh  →  .AppImage
+│   └── Flatpak               build-flatpak.sh  →  .flatpak
+├── macOS Tahoe
+│   ├── Homebrew              jarvisagent.rb
+│   └── DMG                   build-dmg.sh  →  .dmg
+├── Windows 11
+│   ├── Portable ZIP          build-zip.ps1  →  .zip
+│   └── MSI Installer         build-msi.ps1  →  .msi
+└── Docker (all platforms)
+    └── OCI image             docker-publish.yml  →  ghcr.io
+```
+
 ---
 
 ## Packaging Decisions
@@ -270,7 +297,7 @@ rm -rf ~/.local/share/jarvisagent/   # remove data directory
 **Prerequisites:**
 ```bash
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.node18//24.08
+flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.node20//24.08
 ```
 
 **Build:**

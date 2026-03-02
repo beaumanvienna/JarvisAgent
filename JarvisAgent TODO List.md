@@ -1,6 +1,10 @@
 # JarvisAgent TODO List
 
-This list tracks the remaining work for JarvisAgent.
+This list tracks **general project TODOs and high-level features** for JarvisAgent.
+
+See also:
+- `application/workflow/doc/todo.md` — C++ backend TODOs (workflow engine, runtime manager, task executors)
+- `workflow-editor/todo.md` — Frontend TODOs (React workflow editor UI)
 
 ---
 
@@ -84,7 +88,49 @@ This list tracks the remaining work for JarvisAgent.
 
 ---
 
-## 10. Browser-based AI chat terminal (new)
+## 10. Webhook trigger type (future)
+- Currently, external systems can already trigger workflows via `POST /api/workflows/<id>/run` and `POST /api/integrations/n8n/start`
+- A dedicated `"type": "webhook"` trigger would add:
+  - Per-workflow webhook secrets (HMAC signature verification)
+  - Cleaner URLs like `/api/webhook/<workflowId>`
+  - Declarative intent in the JCWF ("this workflow is designed to be called externally")
+- Not a blocker — existing REST API covers the functionality; this is a polish/security item for v0.9+
+
+---
+
+## 11. Error branching / conditional edges (new)
+- Currently workflow runs are atomic — if a task fails, the run fails
+- Add `"on_error"` field to task definitions in JCWF, e.g. `"on_error": "task_fallback"`
+- Support success edges and failure edges in the DAG:
+  - `"depends_on"` = success edge (existing)
+  - `"on_error"` / `"depends_on_failure"` = failure edge (new)
+- Enables powerful patterns:
+  - **Retry with different model** — fallback task uses a different AI provider
+  - **Fallback provider** — switch from OpenAI to Gemini on failure
+  - **Notification task** — Slack/email alert on failure
+  - **Auto-debug task** — AI analyzes the error output and suggests fixes
+- This is a major maturity jump for the workflow engine
+- Requires changes to: `WorkflowRuntimeManager` (task dispatch logic), `workflowJsonParser` (parse `on_error`), `workflowValidator` (validate error edges), `workflowTypes.h` (new edge type), JC Workflow Specification (new section)
+
+---
+
+## 12. Built-in retries with backoff (new)
+- Instead of users scripting retries in shell or AI tasks, provide infrastructure-level robustness
+- Add per-task retry configuration in JCWF:
+  ```json
+  "retry": {
+    "max_attempts": 3,
+    "backoff_ms": 2000
+  }
+  ```
+- The workflow runtime manager handles retries transparently — no changes needed in task scripts
+- Backoff strategy: fixed or exponential (e.g. 2s → 4s → 8s)
+- Interacts with error branching (#11): retries are exhausted before `on_error` edge fires
+- Requires changes to: `WorkflowRuntimeManager` (retry loop + backoff timer), `workflowJsonParser` (parse `retry` block), `workflowValidator` (validate retry params), `workflowTypes.h` (retry config struct), `TaskInstanceState` (attempt counter already exists)
+
+---
+
+## 13. Browser-based AI chat terminal (new)
 - **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
   Not just a command prompt, but a conversational AI interface that can:
   - Answer questions about the system, workflows, and task outputs
@@ -99,3 +145,15 @@ This list tracks the remaining work for JarvisAgent.
   - Command fallback: direct commands (`/run`, `/status`, `/help`) for non-AI actions
 
 ---
+
+
+## 14. Headless server mode (new)
+- **CLI startup otions**
+  - start command: jarvisAgent --headless --port 8080
+  - update docs regarding all CLI options (also --version, --help)
+
+## 15. Headless server mode (new)
+- **manpage**
+  - create man page
+
+
