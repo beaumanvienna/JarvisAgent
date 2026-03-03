@@ -137,14 +137,14 @@ if command -v rpmbuild &>/dev/null; then
 
     cp "$SCRIPT_DIR/jarvisagent.spec" "$RPMBUILD_DIR/SPECS/"
 
-    # Copy staging tree into BUILDROOT as if it were installed
-    BUILDROOT="$RPMBUILD_DIR/BUILDROOT/${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}.${PKG_ARCH}"
+    # Copy staging tree into BUILDROOT at the path rpmbuild expects.
+    # RPM 4.19+ computes its own BUILDROOT; the --buildroot flag is ignored.
+    DIST=$(rpm --eval '%{?dist}')
+    BUILDROOT="$RPMBUILD_DIR/BUILDROOT/${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}${DIST}.${PKG_ARCH}"
     mkdir -p "$BUILDROOT"
     cp -a "$STAGING"/* "$BUILDROOT/"
 
     rpmbuild --define "_topdir $RPMBUILD_DIR" \
-             --define "_rpmdir $BUILD_DIR" \
-             --buildroot "$BUILDROOT" \
              --noclean \
              --nocheck \
              -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \
@@ -152,6 +152,9 @@ if command -v rpmbuild &>/dev/null; then
              --noprep \
              --nobuild \
         || echo "WARNING: rpmbuild failed — this is expected on non-Fedora systems"
+
+    # Copy resulting RPM(s) to the top-level build directory
+    find "$RPMBUILD_DIR/RPMS" -name '*.rpm' -exec cp {} "$BUILD_DIR/" \;
 elif command -v fpm &>/dev/null; then
     echo "==> Building RPM with fpm ..."
     cd "$BUILD_DIR"
@@ -179,4 +182,4 @@ fi
 
 echo ""
 echo "==> Done. Build output in: $BUILD_DIR"
-ls -lh "$BUILD_DIR"/*.rpm 2>/dev/null || echo "    (no .rpm file — see notes above)"
+find "$BUILD_DIR" -maxdepth 1 -name '*.rpm' -exec ls -lh {} + 2>/dev/null || echo "    (no .rpm file — see notes above)"
