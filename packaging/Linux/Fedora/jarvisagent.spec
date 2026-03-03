@@ -34,6 +34,10 @@ npm run build
 cd ../..
 
 %install
+# When build-rpm.sh pre-populates BUILDROOT, skip the install phase.
+if [ -f %{buildroot}/opt/jarvisagent/bin/jarvisAgent ]; then
+    echo "==> BUILDROOT already populated (build-rpm.sh) — skipping %%install"
+else
 rm -rf %{buildroot}
 
 %define _instdir %{buildroot}/opt/jarvisagent
@@ -93,6 +97,7 @@ if [[ ! -f config.json ]]; then
 fi
 exec ./bin/jarvisAgent "$@"
 EOF
+fi
 
 %post
 echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
