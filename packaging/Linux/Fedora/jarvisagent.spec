@@ -10,6 +10,8 @@ BuildRequires:  gcc-c++ make premake nodejs npm
 BuildRequires:  python3-devel python3-pip zlib-devel ncurses-devel
 Requires:       python3 python3-pip ncurses-libs zlib bash
 
+%global debug_package %{nil}
+
 %description
 JarvisAgent is a C++ backend / React frontend application for parallel
 AI-driven automation. It dispatches many concurrent AI requests for bulk
@@ -130,5 +132,5 @@ fi
 /usr/bin/jarvisagent
 
 %changelog
-* Sat Mar 01 2026 JC Technolabs <https://github.com/beaumanvienna> - 0.1-1
+* Sun Mar 01 2026 JC Technolabs <https://github.com/beaumanvienna> - 0.1-1
 - Initial RPM package
