@@ -74,6 +74,7 @@ namespace AIAssistant
         void Clear();
 
         static void GlobalCleanup();
+        static std::string const& GetCaBundlePath();
 
     private:
         bool m_Initialized{false};

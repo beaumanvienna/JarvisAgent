@@ -32,6 +32,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "curlWrapper/curlWrapper.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 
@@ -245,6 +246,13 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        // Cross-distro CA bundle (same probe as CurlWrapper)
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
 
         struct curl_slist* headers = nullptr;
         std::string const authHeader = "Authorization: Bearer " + bearerToken;

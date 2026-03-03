@@ -19,6 +19,8 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <filesystem>
+
 #include <curl/curl.h>
 #include "tracy/Tracy.hpp"
 
@@ -79,6 +81,13 @@ namespace AIAssistant
             LOG_CORE_INFO("thread {} got a good curl", oss.str());
         }
 
+        // Set CA bundle path for cross-distro compatibility (Ubuntu vs Fedora vs openSUSE etc.)
+        auto const& caBundle = GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(m_Curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
         m_Initialized = true;
     }
 
@@ -96,6 +105,48 @@ namespace AIAssistant
         {
             curl_slist_free_all(m_List);
         }
+    }
+
+    std::string const& CurlWrapper::GetCaBundlePath()
+    {
+        static std::string cachedPath = []() -> std::string
+        {
+            // Honour environment overrides first
+            if (char const* env = std::getenv("CURL_CA_BUNDLE"))
+            {
+                if (std::filesystem::exists(env))
+                {
+                    return env;
+                }
+            }
+            if (char const* env = std::getenv("SSL_CERT_FILE"))
+            {
+                if (std::filesystem::exists(env))
+                {
+                    return env;
+                }
+            }
+
+            // Probe well-known paths across Linux distros and macOS
+            static constexpr char const* candidates[] = {
+                "/etc/ssl/certs/ca-certificates.crt", // Debian / Ubuntu
+                "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora / RHEL / Rocky
+                "/etc/ssl/ca-bundle.pem",             // openSUSE
+                "/etc/ssl/cert.pem",                  // Alpine / macOS
+            };
+
+            for (auto const* path : candidates)
+            {
+                if (std::filesystem::exists(path))
+                {
+                    return path;
+                }
+            }
+
+            return {}; // empty → let libcurl use its compiled-in default
+        }();
+
+        return cachedPath;
     }
 
     void CurlWrapper::GlobalCleanup()
