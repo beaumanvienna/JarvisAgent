@@ -137,6 +137,9 @@ if command -v rpmbuild &>/dev/null; then
 
     cp "$SCRIPT_DIR/jarvisagent.spec" "$RPMBUILD_DIR/SPECS/"
 
+    # Create dummy source dir so %build's "cd JarvisAgent" succeeds (from %setup -n)
+    mkdir -p "$RPMBUILD_DIR/BUILD/JarvisAgent"
+
     # Copy staging tree into BUILDROOT at the path rpmbuild expects.
     # RPM 4.19+ computes its own BUILDROOT; the --buildroot flag is ignored.
     DIST=$(rpm --eval '%{?dist}')
