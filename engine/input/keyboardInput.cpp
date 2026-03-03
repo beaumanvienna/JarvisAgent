@@ -25,7 +25,6 @@
 #include "event/events.h"
 #include <iostream>
 #ifndef _WIN32
-#include <termios.h>
 #include <unistd.h>
 #else
 #include <conio.h>
@@ -68,12 +67,8 @@ void KeyboardInput::Listen()
         return;
     }
 
-    // set terminal to raw mode (non-canonical, no echo)
-    termios oldt{}, newt{};
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    // Terminal is already in cbreak/noecho mode (set by TerminalManager via ncurses).
+    // TerminalManager::Shutdown() restores the original termios on exit.
 #endif
 
     LOG_CORE_INFO("Keyboard input active. Press 'q' to quit.");
@@ -125,8 +120,4 @@ void KeyboardInput::Listen()
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 #endif
     }
-
-#ifndef _WIN32
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-#endif
 }

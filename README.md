@@ -178,6 +178,27 @@ sudo apt install -y python3 python3-pip python3-dev python3-venv zlib1g-dev
 
 Premake5: `git clone https://github.com/premake/premake-core`, build it with `./Bootstrap.sh`, copy the executable to `/usr/bin`.
 
+### Linux (Fedora / RHEL / Rocky Linux)
+
+```bash
+sudo dnf install -y gcc-c++ make python3 python3-devel python3-pip zlib-devel nodejs npm
+```
+
+On RHEL / Rocky Linux you may need EPEL for additional packages:
+```bash
+sudo dnf install -y epel-release
+sudo dnf makecache
+```
+
+Premake5 is not in the Fedora/EPEL repos — build from source:
+```bash
+git clone https://github.com/premake/premake-core
+cd premake-core
+sudo dnf install -y libuuid-devel   # required by Bootstrap.sh
+./Bootstrap.sh
+sudo cp bin/release/premake5 /usr/bin/
+```
+
 ### macOS
 
 ```bash

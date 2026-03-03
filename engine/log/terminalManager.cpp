@@ -30,6 +30,7 @@
 #include <io.h>
 #include <stdio.h>
 #else
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -55,6 +56,12 @@ namespace AIAssistant
         StatusHeightCallback m_StatusHeightCallback;
 
         bool m_Initialized{false};
+#ifndef _WIN32
+        struct termios m_OriginalTermios
+        {
+        };
+        bool m_TermiosSaved{false};
+#endif
 
         void ApplyTheme()
         {
@@ -365,6 +372,15 @@ namespace AIAssistant
 
         std::setlocale(LC_ALL, "");
 
+#ifndef _WIN32
+        // Save original terminal attributes before ncurses takes over.
+        // PDCursesMod's endwin() does not always restore them on every terminal.
+        if (tcgetattr(STDIN_FILENO, &m_Impl->m_OriginalTermios) == 0)
+        {
+            m_Impl->m_TermiosSaved = true;
+        }
+#endif
+
         initscr();
         curs_set(0); // disable cursor
         cbreak();
@@ -433,6 +449,16 @@ namespace AIAssistant
 
         RAW_STDERR("[TM] endwin\n");
         endwin();
+
+#ifndef _WIN32
+        // Restore original terminal attributes as a safety net.
+        // PDCursesMod's VT backend may leave the terminal in noecho/cbreak mode.
+        if (m_Impl->m_TermiosSaved)
+        {
+            tcsetattr(STDIN_FILENO, TCSANOW, &m_Impl->m_OriginalTermios);
+            m_Impl->m_TermiosSaved = false;
+        }
+#endif
         RAW_STDERR("[TM] done\n");
 #undef RAW_STDERR
 
