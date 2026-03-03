@@ -150,7 +150,6 @@ if command -v rpmbuild &>/dev/null; then
              -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \
              --nodeps \
              --noprep \
-             --nobuild \
         || echo "WARNING: rpmbuild failed — this is expected on non-Fedora systems"
 
     # Copy resulting RPM(s) to the top-level build directory

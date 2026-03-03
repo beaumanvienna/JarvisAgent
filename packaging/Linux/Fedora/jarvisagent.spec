@@ -19,9 +19,16 @@ processing workloads, supports visual DAG workflow editing, and ships with
 an ncurses terminal UI and a browser-based React dashboard.
 
 %prep
+# Guard for dry-run: build-rpm.sh pre-populates BUILDROOT and skips
+# %prep/%build via rpmbuild --noprep.  When source tarball is available
+# this runs normally.
 %setup -q -n JarvisAgent
 
 %build
+# Guard for dry-run: skip if no source tree
+if [ ! -f premake5.lua ]; then
+    echo "==> No source tree — skipping %%build (dry-run)"
+else
 premake5 gmake
 make -j%{?_smp_mflags} config=release
 
@@ -34,6 +41,7 @@ cd workflow-editor/ui
 npm install
 npm run build
 cd ../..
+fi
 
 %install
 # When build-rpm.sh pre-populates BUILDROOT, skip the install phase.
