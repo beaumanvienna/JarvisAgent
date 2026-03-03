@@ -147,7 +147,10 @@ if command -v rpmbuild &>/dev/null; then
     mkdir -p "$BUILDROOT"
     cp -a "$STAGING"/* "$BUILDROOT/"
 
+    # Override install preamble: RPM 4.19+ wipes BUILDROOT before %install.
+    # Replace with a plain mkdir so our pre-populated tree survives.
     rpmbuild --define "_topdir $RPMBUILD_DIR" \
+             --define '__spec_install_pre mkdir -p %{buildroot}' \
              --noclean \
              --nocheck \
              -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \
