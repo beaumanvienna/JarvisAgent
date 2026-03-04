@@ -137,20 +137,53 @@ if command -v rpmbuild &>/dev/null; then
 
     cp "$SCRIPT_DIR/jarvisagent.spec" "$RPMBUILD_DIR/SPECS/"
 
-    # Create dummy source dir so %build's "cd JarvisAgent" succeeds (from %setup -n)
-    mkdir -p "$RPMBUILD_DIR/BUILD/JarvisAgent"
+    # Populate BUILD/JarvisAgent with repo-layout files that %install expects.
+    # rpmbuild 4.19+ always wipes BUILDROOT before %install, so we cannot
+    # pre-populate it.  Instead we place files where the spec's %install
+    # section can find them (same layout as the repo after a build).
+    SRCDIR="$RPMBUILD_DIR/BUILD/JarvisAgent"
+    mkdir -p "$SRCDIR"
 
-    # Copy staging tree into BUILDROOT at the path rpmbuild expects.
-    # RPM 4.19+ computes its own BUILDROOT; the --buildroot flag is ignored.
-    DIST=$(rpm --eval '%{?dist}')
-    BUILDROOT="$RPMBUILD_DIR/BUILDROOT/${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}${DIST}.${PKG_ARCH}"
-    mkdir -p "$BUILDROOT"
-    cp -a "$STAGING"/* "$BUILDROOT/"
+    # Binary
+    mkdir -p "$SRCDIR/bin/Release"
+    if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
+        cp "$REPO_ROOT/bin/Release/jarvisAgent" "$SRCDIR/bin/Release/jarvisAgent"
+    fi
 
-    # Override install preamble: RPM 4.19+ wipes BUILDROOT before %install.
-    # Replace with a plain mkdir so our pre-populated tree survives.
+    # React UIs
+    if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
+        mkdir -p "$SRCDIR/dashboard/ui"
+        cp -r "$REPO_ROOT/dashboard/ui/dist" "$SRCDIR/dashboard/ui/dist"
+    fi
+    if [[ -d "$REPO_ROOT/workflow-editor/ui/dist" ]]; then
+        mkdir -p "$SRCDIR/workflow-editor/ui"
+        cp -r "$REPO_ROOT/workflow-editor/ui/dist" "$SRCDIR/workflow-editor/ui/dist"
+    fi
+
+    # Scripts
+    cp -r "$REPO_ROOT/scripts" "$SRCDIR/scripts"
+    find "$SRCDIR/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+    # Example workflows + loose input files
+    mkdir -p "$SRCDIR/example/workflows"
+    for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+                make-example portfolioDividendAnalysis \
+                vehicleTroubleshootingGuide; do
+        cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SRCDIR/example/workflows/" 2>/dev/null || true
+    done
+    for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
+             message_engine_question.txt message_tire_question.txt \
+             message_unclear_question.txt port62pos.csv; do
+        cp "$REPO_ROOT/example/workflows/$f" "$SRCDIR/example/workflows/" 2>/dev/null || true
+    done
+
+    # Config + docs
+    cp "$REPO_ROOT/config.json" "$SRCDIR/config.json"
+    cp "$REPO_ROOT/README.md" "$SRCDIR/README.md"
+    mkdir -p "$SRCDIR/doc"
+    cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SRCDIR/doc/" 2>/dev/null || true
+
     rpmbuild --define "_topdir $RPMBUILD_DIR" \
-             --define '__spec_install_pre mkdir -p %{buildroot}' \
              --noclean \
              --nocheck \
              -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \

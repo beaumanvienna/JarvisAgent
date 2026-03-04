@@ -19,9 +19,8 @@ processing workloads, supports visual DAG workflow editing, and ships with
 an ncurses terminal UI and a browser-based React dashboard.
 
 %prep
-# Guard for dry-run: build-rpm.sh pre-populates BUILDROOT and skips
-# %prep/%build via rpmbuild --noprep.  When source tarball is available
-# this runs normally.
+# build-rpm.sh populates BUILD/JarvisAgent and skips %prep via --noprep.
+# When building from a source tarball, this runs normally.
 %setup -q -n JarvisAgent
 
 %build
@@ -44,10 +43,6 @@ cd ../..
 fi
 
 %install
-# When build-rpm.sh pre-populates BUILDROOT, skip the install phase.
-if [ -f %{buildroot}/opt/jarvisagent/bin/jarvisAgent ]; then
-    echo "==> BUILDROOT already populated (build-rpm.sh) — skipping %%install"
-else
 rm -rf %{buildroot}
 
 %define _instdir %{buildroot}/opt/jarvisagent
@@ -107,7 +102,6 @@ if [[ ! -f config.json ]]; then
 fi
 exec ./bin/jarvisAgent "$@"
 EOF
-fi
 
 %post
 echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
