@@ -24,9 +24,10 @@ an ncurses terminal UI and a browser-based React dashboard.
 %setup -q -n JarvisAgent
 
 %build
-# Guard for dry-run: skip if no source tree
+# build-rpm.sh pre-builds and uses --noprep, so premake5.lua may not be here.
+# When building from a source tarball, it will be present and %build runs normally.
 if [ ! -f premake5.lua ]; then
-    echo "==> No source tree — skipping %%build (dry-run)"
+    echo "==> Pre-built tree detected — skipping %%build (build-rpm.sh already compiled)"
 else
 premake5 gmake
 make -j%{?_smp_mflags} config=release

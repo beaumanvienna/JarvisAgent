@@ -53,6 +53,16 @@ static void PrintHelp()
               << "  - Install dependencies as described in README.md\n"
               << "  - Provide API keys via keys.json.enc, keys.json, or OPENAI_API_KEY env var\n"
               << "\n"
+              << "Python virtual environment:\n"
+              << "  Packaged installs create a .venv/ in the working directory.\n"
+              << "  JarvisAgent activates it automatically for workflow tasks.\n"
+              << "  For manual use of markitdown, md2pdf, or playwright:\n"
+#ifdef _WIN32
+              << "    .venv\\Scripts\\activate\n"
+#else
+              << "    source .venv/bin/activate\n"
+#endif
+              << "\n"
               << "At runtime:\n"
               << "  - Terminal UI: press 'q' or Ctrl-C to quit\n"
               << "  - Dashboard:   http://localhost:8080\n"

@@ -19,8 +19,11 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot  = (Resolve-Path "$ScriptDir\..\..\..").Path
+$PkgVersion = (Select-String -Path "$RepoRoot\premake5.lua" -Pattern 'JARVIS_AGENT_VERSION' |
+    ForEach-Object { $_.Line -replace '.*\\"([^"]*)\\".*','$1' } | Select-Object -First 1)
+if (-not $PkgVersion) { Write-Host "ERROR: could not extract version from premake5.lua"; exit 1 }
 $BuildDir  = "$ScriptDir\build"
-$PkgName   = "JarvisAgent-x64"
+$PkgName   = "JarvisAgent-${PkgVersion}-x64"
 $StageDir  = "$BuildDir\$PkgName"
 
 if ($DryRun) {

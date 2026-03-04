@@ -19,7 +19,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 PKG_NAME="jarvisagent"
-PKG_VERSION="0.1"
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
+if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from premake5.lua"; exit 1; fi
 PKG_RELEASE="1"
 PKG_ARCH="amd64"
 DEB_NAME="${PKG_NAME}_${PKG_VERSION}-${PKG_RELEASE}_${PKG_ARCH}"
@@ -119,6 +120,7 @@ cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$INST/doc/JC_Workflow_Specific
 
 # DEBIAN control files
 cp "$SCRIPT_DIR/DEBIAN/control" "$BUILD_DIR/DEBIAN/control"
+sed -i "s/^Version:.*/Version: ${PKG_VERSION}-${PKG_RELEASE}/" "$BUILD_DIR/DEBIAN/control"
 cp "$SCRIPT_DIR/DEBIAN/postinst" "$BUILD_DIR/DEBIAN/postinst"
 cp "$SCRIPT_DIR/DEBIAN/postrm" "$BUILD_DIR/DEBIAN/postrm"
 chmod 755 "$BUILD_DIR/DEBIAN/postinst"

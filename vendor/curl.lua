@@ -4,16 +4,34 @@
 ----------------------------------------------------
 -- Select correct curl_config.h per host OS (gmake only)
 ----------------------------------------------------
+-- Copy curl_config only when content differs, to avoid a timestamp
+-- change that would force make to recompile every curl .c file.
+local function copyIfDifferent(src, dst)
+    local fsrc = io.open(src, "rb")
+    if not fsrc then return end
+    local srcData = fsrc:read("*a")
+    fsrc:close()
+
+    local fdst = io.open(dst, "rb")
+    if fdst then
+        local dstData = fdst:read("*a")
+        fdst:close()
+        if srcData == dstData then return end  -- already up to date
+    end
+
+    os.copyfile(src, dst)
+end
+
 if _ACTION and _ACTION:match("^gmake") then
     if os.ishost("linux") then
         print(">>> curl: using Linux curl_config")
-        os.copyfile(
+        copyIfDifferent(
             "curl/lib/curl_config_Linux.h",
             "curl/lib/curl_config.h"
         )
     elseif os.ishost("macosx") then
         print(">>> curl: using macOS curl_config")
-        os.copyfile(
+        copyIfDifferent(
             "curl/lib/curl_config_macOS.h",
             "curl/lib/curl_config.h"
         )

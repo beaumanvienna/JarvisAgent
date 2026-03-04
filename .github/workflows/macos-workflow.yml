@@ -61,3 +61,18 @@ jobs:
       - name: Smoke test (Debug)
         run: |
           ./bin/Debug/jarvisAgent --help || true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Package DMG
+        run: packaging/macOS/Tahoe/build-dmg.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-macOS-dmg
+          path: packaging/macOS/Tahoe/build/*.dmg
+          if-no-files-found: warn

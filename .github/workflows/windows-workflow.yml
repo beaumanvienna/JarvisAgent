@@ -114,3 +114,20 @@ jobs:
           
           # Force the step to be green regardless of what happened above
           exit 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          packaging\Windows\11\build-zip.ps1
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-Windows-zip
+          path: packaging/Windows/11/build/*.zip
+          if-no-files-found: warn

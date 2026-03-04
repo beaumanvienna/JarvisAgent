@@ -17,6 +17,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
+if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from premake5.lua"; exit 1; fi
 BUILD_DIR="$SCRIPT_DIR/build"
 APP_NAME="JarvisAgent"
 APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
@@ -108,6 +110,10 @@ mkdir -p "$SHARE/doc"
 cp "$REPO_ROOT/README.md" "$SHARE/doc/README.md"
 cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SHARE/doc/JC_Workflow_Specification.md" 2>/dev/null || true
 
+# Patch Homebrew formula with current version
+cp "$SCRIPT_DIR/jarvisagent.rb" "$BUILD_DIR/jarvisagent.rb"
+sed -i '' "s/^  version \".*\"/  version \"$PKG_VERSION\"/" "$BUILD_DIR/jarvisagent.rb"
+
 # ---- Launcher script (Contents/MacOS/JarvisAgent) ----
 cat > "$APP_BUNDLE/Contents/MacOS/JarvisAgent" <<'LAUNCHER'
 #!/bin/bash
@@ -185,9 +191,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>com.jctechnolabs.JarvisAgent</string>
     <key>CFBundleVersion</key>
-    <string>0.1</string>
+    <string>${PKG_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>${PKG_VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>JarvisAgent</string>
     <key>CFBundlePackageType</key>

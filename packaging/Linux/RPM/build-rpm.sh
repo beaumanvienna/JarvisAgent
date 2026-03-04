@@ -19,7 +19,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PKG_NAME="jarvisagent"
-PKG_VERSION="0.1"
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
+if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from premake5.lua"; exit 1; fi
 PKG_RELEASE="1"
 PKG_ARCH="x86_64"
 RPM_NAME="${PKG_NAME}-${PKG_VERSION}-${PKG_RELEASE}.${PKG_ARCH}"
@@ -139,6 +140,7 @@ if command -v rpmbuild &>/dev/null; then
     mkdir -p "$RPMBUILD_DIR"/{SPECS,RPMS,BUILD,BUILDROOT,SOURCES}
 
     cp "$SCRIPT_DIR/jarvisagent.spec" "$RPMBUILD_DIR/SPECS/"
+    sed -i "s/^Version:.*/Version:        $PKG_VERSION/" "$RPMBUILD_DIR/SPECS/jarvisagent.spec"
 
     # Populate BUILD/JarvisAgent with repo-layout files that %install expects.
     # rpmbuild 4.19+ always wipes BUILDROOT before %install, so we cannot

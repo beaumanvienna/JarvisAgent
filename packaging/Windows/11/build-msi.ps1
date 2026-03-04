@@ -16,15 +16,25 @@
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$RepoRoot  = (Resolve-Path "$ScriptDir\..\..\..").Path
+$PkgVersion = (Select-String -Path "$RepoRoot\premake5.lua" -Pattern 'JARVIS_AGENT_VERSION' |
+    ForEach-Object { $_.Line -replace '.*\\"([^"]*)\\".*','$1' } | Select-Object -First 1)
+if (-not $PkgVersion) { Write-Host "ERROR: could not extract version from premake5.lua"; exit 1 }
 $BuildDir  = "$ScriptDir\build"
-$StageDir  = "$BuildDir\JarvisAgent-x64"
-$MsiOutput = "$BuildDir\JarvisAgent-x64.msi"
+$StageDir  = "$BuildDir\JarvisAgent-${PkgVersion}-x64"
+$MsiOutput = "$BuildDir\JarvisAgent-${PkgVersion}-x64.msi"
 
 if (-not (Test-Path $StageDir)) {
     Write-Host "ERROR: Staging directory not found at $StageDir"
     Write-Host "       Run build-zip.ps1 first to create the package tree."
     exit 1
 }
+
+# ---- Inject version into WiX source ----
+$WxsSource = "$ScriptDir\jarvisagent.wxs"
+$WxsBuild  = "$BuildDir\jarvisagent.wxs"
+Copy-Item $WxsSource $WxsBuild
+(Get-Content $WxsBuild) -replace 'Version="0\.1\.0\.0"', "Version=`"$PkgVersion.0.0`"" | Set-Content $WxsBuild
 
 # ---- Check for WiX ----
 $wixV4 = Get-Command "wix" -ErrorAction SilentlyContinue
@@ -43,7 +53,7 @@ if ($wixV4) {
     Write-Host "==> Building MSI ..."
     wix build `
         -o $MsiOutput `
-        "$ScriptDir\jarvisagent.wxs" `
+        "$WxsBuild" `
         "$BuildDir\dashboard.wxs" `
         "$BuildDir\workflow-editor.wxs" `
         "$BuildDir\scripts.wxs" `
@@ -62,7 +72,7 @@ if ($wixV4) {
 
     Write-Host "==> Compiling .wxs files ..."
     $wxsFiles = @(
-        "$ScriptDir\jarvisagent.wxs",
+        "$WxsBuild",
         "$BuildDir\dashboard.wxs",
         "$BuildDir\workflow-editor.wxs",
         "$BuildDir\scripts.wxs",
@@ -83,7 +93,7 @@ if ($wixV4) {
     Write-Host "  Or WiX v3:      https://wixtoolset.org/"
     Write-Host ""
     Write-Host "  The staging directory is ready at: $StageDir"
-    Write-Host "  You can also use the portable .zip: $BuildDir\JarvisAgent-x64.zip"
+    Write-Host "  You can also use the portable .zip from build-zip.ps1"
     exit 1
 }
 
