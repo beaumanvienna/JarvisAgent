@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     python3 \
     python3-dev \
-    libssl-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -46,7 +45,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     pipx \
-    libssl3t64 \
     zlib1g \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*

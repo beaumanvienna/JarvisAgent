@@ -7,8 +7,8 @@ URL:            https://github.com/beaumanvienna/JarvisAgent
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc-c++ make premake nodejs npm
-BuildRequires:  python3-devel python3-pip zlib-devel ncurses-devel
-Requires:       python3 python3-pip ncurses-libs zlib bash
+BuildRequires:  python3-devel python3-pip zlib-devel
+Requires:       python3 python3-pip zlib bash
 
 %global debug_package %{nil}
 

@@ -71,7 +71,6 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 | premake5 | Generates Makefiles from `premake5.lua` |
 | Python 3 + dev headers | Embedded Python support |
 | zlib (dev) | Compression (linked at build time) |
-| ncurses (dev) | Terminal UI |
 | Node.js + npm | React UI builds |
 
 ### Runtime Dependencies
@@ -79,7 +78,6 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 | Dependency | Purpose |
 |------------|---------|
 | Python 3 | Python task execution, markitdown, md2pdf |
-| ncurses | Terminal UI |
 | zlib | Compression |
 | bash | Shell task execution |
 | Chromium (headless) | playwright for md2pdf-mermaid |
@@ -108,7 +106,6 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 |-----------|-------------|
 | base toolchain | `base-devel` (meta-package) |
 | Python 3 + headers | `python` |
-| ncurses | `ncurses` |
 | zlib | `zlib` |
 | premake5 | AUR: `premake` |
 | Node.js + npm | `nodejs` `npm` |
@@ -117,7 +114,6 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 | Runtime dep | Arch package |
 |-------------|-------------|
 | Python 3 | `python` |
-| ncurses | `ncurses` |
 | zlib | `zlib` |
 | bash | `bash` (part of `base`) |
 | pip | `python-pip` |
@@ -162,7 +158,6 @@ sudo pacman -R jarvisagent-git
 |-----------|---------------|
 | Toolchain | `build-essential` |
 | Python 3 + headers | `python3` `python3-dev` `python3-pip` `python3-venv` |
-| ncurses | `libncurses-dev` `libncurses6` `libncursesw6` |
 | zlib | `zlib1g-dev` |
 | SSL (vendored) | — |
 | premake5 | Not in repos — download or build from source |
@@ -171,7 +166,6 @@ sudo pacman -R jarvisagent-git
 | Runtime dep | Ubuntu package |
 |-------------|---------------|
 | Python 3 | `python3` `python3-pip` `python3-venv` |
-| ncurses | `libncurses6` |
 | zlib | `zlib1g` |
 | bash | `bash` |
 
@@ -204,7 +198,6 @@ sudo apt remove jarvisagent
 |-----------|---------------|
 | Toolchain | `gcc` `gcc-c++` `make` |
 | Python 3 + headers | `python3` `python3-devel` `python3-pip` |
-| ncurses | `ncurses-devel` |
 | zlib | `zlib-devel` |
 | premake5 | Not in repos — download or build from source |
 | Node.js + npm | `nodejs` `npm` |
@@ -212,7 +205,6 @@ sudo apt remove jarvisagent
 | Runtime dep | RPM package |
 |-------------|---------------|
 | Python 3 | `python3` `python3-pip` |
-| ncurses | `ncurses-libs` |
 | zlib | `zlib` |
 | bash | `bash` |
 

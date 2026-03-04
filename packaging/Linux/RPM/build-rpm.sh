@@ -7,7 +7,7 @@
 #
 # Prerequisites (Fedora/RHEL/Rocky):
 #   sudo dnf install -y gcc gcc-c++ make python3 python3-devel python3-pip \
-#       ncurses-devel zlib-devel nodejs npm rpm-build
+#       zlib-devel nodejs npm rpm-build
 #   premake5 must be on PATH (build from source or download binary)
 #
 # Options:
@@ -209,7 +209,7 @@ elif command -v fpm &>/dev/null; then
         --description "Parallel AI-driven automation with C++ backend and React frontend" \
         --url "https://github.com/beaumanvienna/JarvisAgent" \
         --license "GPL-3.0-only" \
-        --depends python3 --depends bash --depends ncurses-libs --depends zlib \
+        --depends python3 --depends bash --depends zlib \
         --after-install "$SCRIPT_DIR/postinst.sh" \
         --after-remove "$SCRIPT_DIR/postrm.sh" \
         -C "$STAGING" \
