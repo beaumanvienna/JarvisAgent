@@ -90,6 +90,7 @@ class Jarvisagent < Formula
     venv = prefix/".venv"
     unless venv.exist?
       system "python3", "-m", "venv", venv.to_s
+      system venv/"bin/pip", "install", "--quiet", "--upgrade", "pip"
       system venv/"bin/pip", "install", "--quiet", "markitdown[all]", "md2pdf-mermaid", "playwright"
       system venv/"bin/playwright", "install", "chromium"
     end

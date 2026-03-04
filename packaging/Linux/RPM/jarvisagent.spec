@@ -110,6 +110,7 @@ EOF
 %post
 echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
 python3 -m venv /opt/jarvisagent/.venv
+/opt/jarvisagent/.venv/bin/pip install --quiet --upgrade pip
 
 echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
 /opt/jarvisagent/.venv/bin/pip install --quiet "markitdown[all]" md2pdf-mermaid playwright

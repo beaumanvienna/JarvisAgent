@@ -50,6 +50,7 @@ if [[ ! -d "$DATA_DIR/.venv" ]]; then
     }
 
     if [[ -d "$DATA_DIR/.venv" ]]; then
+        "$DATA_DIR/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
         echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
         "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
         "$DATA_DIR/.venv/bin/playwright" install chromium 2>/dev/null || true
