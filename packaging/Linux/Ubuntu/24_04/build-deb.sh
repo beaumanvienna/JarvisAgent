@@ -136,6 +136,10 @@ cat > "$BUILD_DIR/usr/bin/jarvisagent" <<'LAUNCHER'
 
 cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
 
+case "${1:-}" in
+    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
+esac
+
 if [[ ! -f config.json ]]; then
     echo "No config.json found in /opt/jarvisagent/"
     echo "Copy the example and edit it:"

@@ -33,17 +33,20 @@
 #include <string>
 #include <thread>
 
+static void PrintVersion() { std::cout << "jarvisAgent version " << JARVIS_AGENT_VERSION << std::endl; }
+
 static void PrintHelp()
 {
-    std::cout << "JarvisAgent — parallel AI-driven automation engine\n"
-              << "\n"
+    PrintVersion();
+    std::cout << "\n"
               << "JarvisAgent is a C++ backend that monitors a queue folder for input files,\n"
               << "dispatches AI requests in parallel, runs DAG-based workflows (AI, Python,\n"
               << "shell, C++), and serves a React dashboard plus a visual workflow editor.\n"
               << "\n"
               << "Usage:\n"
-              << "  jarvisAgent          Start the agent (requires config.json in the working directory)\n"
-              << "  jarvisAgent --help   Show this help message and exit\n"
+              << "  jarvisAgent              Start the agent (requires config.json in the working directory)\n"
+              << "  jarvisAgent --help       Show this help message and exit\n"
+              << "  jarvisAgent --version    Show version and exit\n"
               << "\n"
               << "Before starting:\n"
               << "  - Review and adjust config.json in the working directory\n"
@@ -63,13 +66,43 @@ static void PrintHelp()
 
 int engine(int argc, char* argv[])
 {
+    // Process CLI flags before anything else (clang-style: --help/--version
+    // take priority and cause immediate exit, unknown options are rejected).
+    bool wantsHelp = false;
+    bool wantsVersion = false;
+    std::string unknownOption;
+
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0)
         {
-            PrintHelp();
-            return EXIT_SUCCESS;
+            wantsHelp = true;
         }
+        else if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0)
+        {
+            wantsVersion = true;
+        }
+        else if (argv[i][0] == '-' && unknownOption.empty())
+        {
+            unknownOption = argv[i];
+        }
+    }
+
+    if (wantsHelp)
+    {
+        PrintHelp();
+        return EXIT_SUCCESS;
+    }
+    if (wantsVersion)
+    {
+        PrintVersion();
+        return EXIT_SUCCESS;
+    }
+    if (!unknownOption.empty())
+    {
+        std::cerr << "jarvisAgent: unknown option '" << unknownOption << "'\n"
+                  << "Try 'jarvisAgent --help' for more information." << std::endl;
+        return EXIT_FAILURE;
     }
 
     // Check for config.json before initializing the engine

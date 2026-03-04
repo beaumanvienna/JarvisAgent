@@ -136,6 +136,11 @@ REM Requires bash on PATH (Git Bash or MSYS2) for shell tasks.
 
 cd /d "%~dp0"
 
+if "%~1"=="--help" ( bin\jarvisAgent.exe %* & exit /b )
+if "%~1"=="-h" ( bin\jarvisAgent.exe %* & exit /b )
+if "%~1"=="--version" ( bin\jarvisAgent.exe %* & exit /b )
+if "%~1"=="-v" ( bin\jarvisAgent.exe %* & exit /b )
+
 if not exist config.json (
     echo No config.json found in %~dp0
     echo Copy the example and edit it:

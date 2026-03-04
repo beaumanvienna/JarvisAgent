@@ -94,6 +94,9 @@ install -m644 doc/JC_Workflow_Specification.md %{_instdir}/doc/JC_Workflow_Speci
 install -Dm755 /dev/stdin %{buildroot}/usr/bin/jarvisagent <<'EOF'
 #!/usr/bin/env bash
 cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
+case "${1:-}" in
+    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
+esac
 if [[ ! -f config.json ]]; then
     echo "No config.json found in /opt/jarvisagent/"
     echo "Copy the example and edit it:"

@@ -2,10 +2,10 @@
 # build-rpm.sh — Build an .rpm package for JarvisAgent from the current source tree.
 #
 # Usage:
-#   cd packaging/Linux/Fedora
+#   cd packaging/Linux/RPM
 #   ./build-rpm.sh [--dry-run]
 #
-# Prerequisites (Fedora):
+# Prerequisites (Fedora/RHEL/Rocky):
 #   sudo dnf install -y gcc gcc-c++ make python3 python3-devel python3-pip \
 #       ncurses-devel zlib-devel nodejs npm rpm-build
 #   premake5 must be on PATH (build from source or download binary)
@@ -118,6 +118,9 @@ cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$STAGING/opt/jarvisagent/doc/J
 cat > "$STAGING/usr/bin/jarvisagent" <<'LAUNCHER'
 #!/usr/bin/env bash
 cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
+case "${1:-}" in
+    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
+esac
 if [[ ! -f config.json ]]; then
     echo "No config.json found in /opt/jarvisagent/"
     echo "Copy the example and edit it:"
@@ -189,7 +192,7 @@ if command -v rpmbuild &>/dev/null; then
              -bb "$RPMBUILD_DIR/SPECS/jarvisagent.spec" \
              --nodeps \
              --noprep \
-        || echo "WARNING: rpmbuild failed — this is expected on non-Fedora systems"
+        || echo "WARNING: rpmbuild failed — this is expected on non-RPM systems"
 
     # Copy resulting RPM(s) to the top-level build directory
     find "$RPMBUILD_DIR/RPMS" -name '*.rpm' -exec cp {} "$BUILD_DIR/" \;
@@ -211,11 +214,11 @@ elif command -v fpm &>/dev/null; then
         .
 else
     echo "==> Neither rpmbuild nor fpm found."
-    echo "    On Fedora:  sudo dnf install rpm-build"
+    echo "    On Fedora/RHEL:  sudo dnf install rpm-build"
     echo "    Universal:  gem install fpm"
     echo ""
     echo "    Package tree assembled in: $STAGING"
-    echo "    You can inspect it or transfer to a Fedora system to build."
+    echo "    You can inspect it or transfer to an RPM-based system to build."
 fi
 
 echo ""

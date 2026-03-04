@@ -16,7 +16,7 @@ Packaging Targets
 ├── Linux
 │   ├── Arch / Manjaro        PKGBUILD  →  .pkg.tar.zst
 │   ├── Ubuntu 24.04          build-deb.sh  →  .deb
-│   ├── Fedora / Rocky        build-rpm.sh  →  .rpm
+│   ├── RPM (Fedora/RHEL/Rocky) build-rpm.sh  →  .rpm
 │   ├── AppImage              build-appimage.sh  →  .AppImage
 │   └── Flatpak               build-flatpak.sh  →  .flatpak
 ├── macOS Tahoe
@@ -192,15 +192,15 @@ sudo apt remove jarvisagent
 
 ---
 
-### Fedora
+### RPM (Fedora / RHEL / Rocky / CentOS)
 
 **Format:** `.rpm` (via `rpmbuild` / `fpm`)
-**Directory:** `packaging/Linux/Fedora/`
+**Directory:** `packaging/Linux/RPM/`
 **Status:** Spec file + build script created
 
 **Package names (Fedora):**
 
-| Build dep | Fedora package |
+| Build dep | RPM package |
 |-----------|---------------|
 | Toolchain | `gcc` `gcc-c++` `make` |
 | Python 3 + headers | `python3` `python3-devel` `python3-pip` |
@@ -209,7 +209,7 @@ sudo apt remove jarvisagent
 | premake5 | Not in repos — download or build from source |
 | Node.js + npm | `nodejs` `npm` |
 
-| Runtime dep | Fedora package |
+| Runtime dep | RPM package |
 |-------------|---------------|
 | Python 3 | `python3` `python3-pip` |
 | ncurses | `ncurses-libs` |
@@ -217,13 +217,13 @@ sudo apt remove jarvisagent
 | bash | `bash` |
 
 **Files:**
-- `jarvisagent.spec` — RPM spec file (for `rpmbuild` on Fedora)
+- `jarvisagent.spec` — RPM spec file (for `rpmbuild`)
 - `build-rpm.sh` — build script (supports `rpmbuild` and `fpm` fallback, `--dry-run` option)
 - `postinst.sh` / `postrm.sh` — post-install/remove hooks (for `fpm`)
 
-**Build & install (on Fedora):**
+**Build & install (Fedora/RHEL/Rocky):**
 ```bash
-# From packaging/Linux/Fedora/
+# From packaging/Linux/RPM/
 chmod +x build-rpm.sh
 ./build-rpm.sh
 sudo dnf install build/jarvisagent-0.1-1.x86_64.rpm
@@ -462,7 +462,7 @@ docker rmi ghcr.io/beaumanvienna/jarvisagent:latest
 1. **Arch** (Manjaro) — current dev machine, test immediately
 2. **Ubuntu 24.04** — most common Linux desktop/server, CI already validates
 3. **AppImage** — universal Linux, no root required
-4. **Fedora** — RPM ecosystem coverage
+4. **RPM** — Fedora/RHEL/Rocky/CentOS ecosystem coverage
 5. **Flatpak** — sandboxed distribution
 6. **macOS Tahoe** — Homebrew tap + .dmg
 7. **Windows 11** — MSI/MSIX installer

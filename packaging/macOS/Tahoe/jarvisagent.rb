@@ -72,6 +72,9 @@ class Jarvisagent < Formula
       #!/bin/bash
       JADIR="#{prefix}"
       cd "$JADIR" || { echo "Error: $JADIR not found"; exit 1; }
+      case "${1:-}" in
+          --help|-h|--version|-v) exec "#{prefix}/bin/jarvisAgent" "$@" ;;
+      esac
       if [[ ! -f config.json ]]; then
           echo "No config.json found in $JADIR/"
           echo "Copy the example and edit it:"

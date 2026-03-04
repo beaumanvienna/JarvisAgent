@@ -20,6 +20,7 @@ export default function LogViewerPanel() {
   const [analyzeIssueIdx, setAnalyzeIssueIdx] = useState(-1);
   const [analyzeRunIndex, setAnalyzeRunIndex] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -60,10 +61,16 @@ export default function LogViewerPanel() {
       try {
         const data = await fetchLog({ tail: INITIAL_TAIL });
         if (cancelled) return;
+        if (!data.ok) {
+          setErrorMsg(data.error || "Log file not available");
+          setLoading(false);
+          return;
+        }
         setLines(data.lines);
         setByteOffset(data.byteOffset);
         setLoading(false);
       } catch {
+        setErrorMsg("Could not connect to log API");
         setLoading(false);
       }
     })();
@@ -317,11 +324,11 @@ export default function LogViewerPanel() {
               <span className="log-analyze-title">Run Analysis</span>
               {analyzeData?.found && (analyzeData.totalRuns ?? 0) > 1 && (
                 <span className="log-analyze-run-nav">
-                  <button className="log-nav-btn" onClick={() => navigateRun(1)} title="Older run">◀</button>
+                  <button className="log-nav-btn" onClick={() => navigateRun(-1)} title="Newer run">◀</button>
                   <span className="log-search-count">
                     {(analyzeData.runIndex ?? 0) + 1}/{analyzeData.totalRuns}
                   </span>
-                  <button className="log-nav-btn" onClick={() => navigateRun(-1)} title="Newer run">▶</button>
+                  <button className="log-nav-btn" onClick={() => navigateRun(1)} title="Older run">▶</button>
                 </span>
               )}
               <button className="log-nav-btn" onClick={() => setShowAnalyze(false)}>✕</button>
@@ -414,6 +421,14 @@ export default function LogViewerPanel() {
       >
         {loading ? (
           <div className="log-loading">Loading log...</div>
+        ) : errorMsg ? (
+          <div className="log-loading" style={{ color: "#f87171", padding: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 16, marginBottom: 8 }}>{errorMsg}</div>
+            <div style={{ color: "#9ca3af", fontSize: 13 }}>
+              The log file (log/log.txt) may not exist yet. Start a workflow or check that
+              JarvisAgent has write access to its log directory.
+            </div>
+          </div>
         ) : (
           <div style={{ position: "relative", height: totalHeight, minHeight: "100%" }}>
             {visibleLines}
