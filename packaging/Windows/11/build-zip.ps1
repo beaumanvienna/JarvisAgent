@@ -163,6 +163,7 @@ REM Run this once after extracting the zip.
 
 echo ==> Creating Python virtual environment in .venv ...
 python -m venv .venv
+.venv\Scripts\pip install --quiet --upgrade pip
 
 echo ==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ...
 .venv\Scripts\pip install --quiet "markitdown[all]" md2pdf-mermaid playwright
