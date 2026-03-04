@@ -124,7 +124,8 @@ echo ""
 echo "    To get started:"
 echo "      1. sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
 echo "      2. Edit config.json (set API keys, queue/workflow paths)"
-echo "      3. Run: jarvisagent"
+echo "      3. source /opt/jarvisagent/.venv/bin/activate"
+echo "      4. Run: jarvisagent"
 echo ""
 
 %postun
