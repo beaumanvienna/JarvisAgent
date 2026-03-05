@@ -1,0 +1,67 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+DESTDIR  = debian/jarvisagent
+INSTDIR  = $(DESTDIR)/opt/jarvisagent
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	premake5 gmake
+
+override_dh_auto_build:
+	$(MAKE) -j$$(nproc) config=release
+
+override_dh_auto_install:
+	# Binary
+	install -dm755 $(INSTDIR)/bin
+	install -Dm755 bin/Release/jarvisAgent $(INSTDIR)/bin/jarvisAgent
+
+	# Pre-built React UIs (included in source tarball — no npm on Launchpad)
+	install -dm755 $(INSTDIR)/dashboard/ui
+	cp -r dashboard/ui/dist $(INSTDIR)/dashboard/ui/dist
+	install -dm755 $(INSTDIR)/workflow-editor/ui
+	cp -r workflow-editor/ui/dist $(INSTDIR)/workflow-editor/ui/dist
+
+	# Scripts
+	cp -r scripts $(INSTDIR)/scripts
+	find $(INSTDIR)/scripts -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	chmod +x $(INSTDIR)/scripts/*.sh
+
+	# Example workflows
+	install -dm755 $(INSTDIR)/workflows
+	for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+	            make-example portfolioDividendAnalysis \
+	            vehicleTroubleshootingGuide; do \
+	    cp example/workflows/$${jcwf}.jcwf $(INSTDIR)/workflows/ 2>/dev/null || true; \
+	done
+	for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
+	         message_engine_question.txt message_tire_question.txt \
+	         message_unclear_question.txt port62pos.csv; do \
+	    cp example/workflows/$$f $(INSTDIR)/workflows/ 2>/dev/null || true; \
+	done
+	ln -sf message_engine_question.txt $(INSTDIR)/workflows/message.txt
+
+	# Config example
+	install -m644 config.json $(INSTDIR)/config.json.example
+
+	# Documentation
+	install -dm755 $(INSTDIR)/doc
+	install -m644 README.md $(INSTDIR)/doc/README.md
+	install -m644 doc/JC_Workflow_Specification.md $(INSTDIR)/doc/JC_Workflow_Specification.md 2>/dev/null || true
+
+	# Runtime directories
+	install -dm755 $(INSTDIR)/queue
+	install -dm755 $(INSTDIR)/log
+
+	# Launcher script
+	install -dm755 $(DESTDIR)/usr/bin
+	install -Dm755 debian/jarvisagent.wrapper $(DESTDIR)/usr/bin/jarvisagent
+
+override_dh_auto_test:
+	# Skip tests
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym || dh_strip

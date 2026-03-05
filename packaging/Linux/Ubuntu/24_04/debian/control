@@ -1,0 +1,15 @@
+Source: jarvisagent
+Section: utils
+Priority: optional
+Maintainer: JC <beaumanvienna@gmail.com>
+Build-Depends: debhelper-compat (= 13), gcc, g++, make, premake5, zlib1g-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/beaumanvienna/JarvisAgent
+
+Package: jarvisagent
+Architecture: amd64
+Depends: python3 (>= 3.10), python3-pip, python3-venv, zlib1g, bash, ${shlibs:Depends}, ${misc:Depends}
+Description: Parallel AI-driven automation with C++ backend and React frontend
+ JarvisAgent dispatches concurrent AI requests for bulk processing,
+ supports visual DAG workflow editing, and provides a terminal UI
+ and browser-based React dashboard.

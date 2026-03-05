@@ -1,0 +1,9 @@
+jarvisagent (0.75) noble; urgency=medium
+
+  * Initial release for Launchpad PPA
+  * C++ backend with vendored OpenSSL and pdcursesmod
+  * React dashboard and workflow editor (pre-built)
+  * Python automation scripts
+  * Example JCWF workflows
+
+ -- JC <beaumanvienna@gmail.com>  Wed, 05 Mar 2026 04:00:00 +0000
