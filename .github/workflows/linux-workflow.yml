@@ -148,3 +148,145 @@ jobs:
           name: JarvisAgent-AppImage
           path: packaging/Linux/AppImage/build/*.AppImage
           if-no-files-found: warn
+
+  package-rpm:
+    runs-on: ubuntu-latest
+    container: rockylinux:9
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            gcc gcc-c++ make git wget tar \
+            python3 python3-devel python3-pip \
+            zlib-devel nodejs npm rpm-build
+
+      - name: Install Premake5
+        run: |
+          cd /tmp
+          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz
+          tar -xzf premake-5.0.0-beta2-linux.tar.gz
+          mv premake5 /usr/local/bin/
+          chmod +x /usr/local/bin/premake5
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build RPM package
+        run: |
+          cd packaging/Linux/RPM
+          bash build-rpm.sh
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-rpm
+          path: packaging/Linux/RPM/build/*.rpm
+          if-no-files-found: warn
+
+  package-arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel python python-pip zlib nodejs npm git wget
+
+      - name: Install Premake5
+        run: |
+          cd /tmp
+          wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz
+          tar -xzf premake-5.0.0-beta2-linux.tar.gz
+          mv premake5 /usr/local/bin/
+          chmod +x /usr/local/bin/premake5
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare Arch build environment
+        run: |
+          # makepkg refuses to run as root — create a build user
+          useradd -m builduser
+
+          # Extract version from premake5.lua
+          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\\"\(.*\)\\".*$/\1/')
+
+          # Create source tarball (with submodules, without .git metadata)
+          BUILD_DIR="/home/builduser/build"
+          mkdir -p "$BUILD_DIR"
+          tar czf "$BUILD_DIR/JarvisAgent-src.tar.gz" \
+            --transform 's,^\.,JarvisAgent,' \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            -C "$GITHUB_WORKSPACE" .
+
+          # Copy and patch PKGBUILD for CI
+          cp packaging/Linux/Arch/PKGBUILD "$BUILD_DIR/"
+          cp packaging/Linux/Arch/jarvisagent.install "$BUILD_DIR/"
+          cd "$BUILD_DIR"
+
+          # Use local tarball instead of git clone
+          sed -i "s|source=.*|source=('JarvisAgent-src.tar.gz')|" PKGBUILD
+          sed -i "s|sha256sums=.*|sha256sums=('SKIP')|" PKGBUILD
+
+          # Replace pkgver() with static version (no .git available)
+          sed -i "/^pkgver()/,/^}/c\\pkgver() { echo \"${PKG_VERSION}\"; }" PKGBUILD
+
+          # Remove git submodule from prepare() (already included in tarball)
+          sed -i '/git submodule/d' PKGBUILD
+
+          chown -R builduser:builduser "$BUILD_DIR"
+
+      - name: Build Arch package
+        run: |
+          su builduser -c "cd /home/builduser/build && makepkg -s --noconfirm --skipchecksums"
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-arch
+          path: /home/builduser/build/*.pkg.tar.zst
+          if-no-files-found: warn
+
+  package-flatpak:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Flatpak
+        run: |
+          sudo apt update
+          sudo apt install -y flatpak flatpak-builder
+
+      - name: Install Flatpak SDKs
+        run: |
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 org.freedesktop.Platform//24.08
+          sudo flatpak install -y flathub org.freedesktop.Sdk.Extension.node20//24.08
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Patch manifest for local source
+        run: |
+          cd packaging/Linux/Flatpak
+          sed -i 's|type: git|type: dir|' com.jctechnolabs.JarvisAgent.yml
+          sed -i 's|url: https://github.com/beaumanvienna/JarvisAgent.git|path: ../../..|' com.jctechnolabs.JarvisAgent.yml
+          sed -i '/branch: main/d' com.jctechnolabs.JarvisAgent.yml
+
+      - name: Build Flatpak
+        run: bash packaging/Linux/Flatpak/build-flatpak.sh
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-flatpak
+          path: packaging/Linux/Flatpak/build/*.flatpak
+          if-no-files-found: warn

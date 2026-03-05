@@ -131,3 +131,21 @@ jobs:
           name: JarvisAgent-Windows-zip
           path: packaging/Windows/11/build/*.zip
           if-no-files-found: warn
+
+      - name: Install WiX v4
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          wix extension add -g WixToolset.Heat.wixext
+
+      - name: Package MSI
+        shell: pwsh
+        run: |
+          packaging\Windows\11\build-msi.ps1
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-Windows-msi
+          path: packaging/Windows/11/build/*.msi
+          if-no-files-found: warn

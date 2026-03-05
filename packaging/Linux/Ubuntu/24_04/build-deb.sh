@@ -173,4 +173,4 @@ echo "==> Package info:"
 dpkg-deb --info "$DEB_PATH"
 echo ""
 echo "==> Package contents (first 40 entries):"
-dpkg-deb --contents "$DEB_PATH" | head -40
+dpkg-deb --contents "$DEB_PATH" | head -40 || true

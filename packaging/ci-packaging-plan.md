@@ -226,7 +226,7 @@ source. Since Launchpad builds run in a clean chroot with no network access
   Source: jarvisagent
   Section: utils
   Priority: optional
-  Maintainer: JC Technolabs <beaumanvienna@users.noreply.github.com>
+  Maintainer: JC Technolabs <beaumanvienna@gmail.com>
   Build-Depends: debhelper-compat (= 13), gcc, g++, make,
    python3, python3-dev, zlib1g-dev, nodejs, npm, premake5
   Standards-Version: 4.6.2

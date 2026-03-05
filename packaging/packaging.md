@@ -148,9 +148,9 @@ sudo pacman -R jarvisagent-git
 
 ### Ubuntu 24.04
 
-**Format:** `.deb` (via `dpkg-deb` or `debhelper`)
+**Format:** `.deb` (binary via `dpkg-deb`, source via `debuild` for Launchpad)
 **Directory:** `packaging/Linux/Ubuntu/24_04/`
-**Status:** Not started
+**Status:** Binary .deb built in CI; source package for Launchpad planned
 
 **Package names (Ubuntu/Debian):**
 
@@ -160,7 +160,7 @@ sudo pacman -R jarvisagent-git
 | Python 3 + headers | `python3` `python3-dev` `python3-pip` `python3-venv` |
 | zlib | `zlib1g-dev` |
 | SSL (vendored) | — |
-| premake5 | Not in repos — download or build from source |
+| premake5 | `ppa:beauman/marley` (v5.0.16.2) |
 | Node.js + npm | `nodejs` `npm` |
 
 | Runtime dep | Ubuntu package |
@@ -171,18 +171,125 @@ sudo pacman -R jarvisagent-git
 
 **Notes:**
 - GitHub CI (`linux-workflow.yml`) already validates this dep set on `ubuntu-latest`.
-- premake5 is not in official repos — download binary or build from source.
+- premake5 is available from the PPA `ppa:beauman/marley`.
 
-**Install (planned):**
+**Install (binary .deb):**
 ```bash
-sudo dpkg -i jarvisagent_0.1-1_amd64.deb
+sudo dpkg -i jarvisagent_0.75-1_amd64.deb
 sudo apt install -f   # resolve dependencies
+```
+
+**Install (from PPA — once source package is published):**
+```bash
+sudo add-apt-repository ppa:beauman/marley
+sudo apt update
+sudo apt install jarvisagent
 ```
 
 **Uninstall:**
 ```bash
 sudo apt remove jarvisagent
 ```
+
+---
+
+### Launchpad Source Package (PPA)
+
+**PPA:** `ppa:beauman/marley` — `sudo add-apt-repository ppa:beauman/marley`
+**Target series:** Noble (24.04), Jammy (22.04), and others as needed
+**premake5:** Already published in the same PPA (v5.0.16.2)
+
+Launchpad builds `.deb` packages from **source packages** on its own build farm.
+We upload only the source — Launchpad compiles and publishes the binary `.deb`.
+
+#### Prerequisites
+
+```bash
+sudo apt install devscripts debhelper dh-make dput gpg
+```
+
+You need a GPG key registered with your Launchpad account for signing.
+
+#### Directory structure
+
+The source package uses a `debian/` directory (lowercase, not `DEBIAN/`) with
+debhelper build rules:
+
+```
+packaging/Linux/Ubuntu/24_04/debian/
+├── changelog          # version, target series, maintainer
+├── compat             # debhelper compat level
+├── control            # source + binary package metadata
+├── copyright          # DEP-5 machine-readable copyright
+├── install            # list of files to install
+├── postinst           # post-install hook (venv setup)
+├── postrm             # post-remove hook (cleanup)
+├── rules              # makefile — the actual build recipe
+└── source/
+    └── format         # "3.0 (native)"
+```
+
+#### Building the source package
+
+```bash
+# 1. Create the source tarball
+cd /path/to/JarvisAgent
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\\"\(.*\)\\".*$/\1/')
+
+# 2. Create orig tarball (exclude .git, node_modules, build artifacts)
+tar czf ../jarvisagent_${PKG_VERSION}.orig.tar.gz \
+    --exclude='.git' \
+    --exclude='node_modules' \
+    --exclude='bin' \
+    --exclude='bin-int' \
+    --transform "s,^\.,jarvisagent-${PKG_VERSION}," \
+    .
+
+# 3. Build the source package (signed with your GPG key)
+debuild -S -sa
+
+# This produces in the parent directory:
+#   jarvisagent_<version>.dsc
+#   jarvisagent_<version>.orig.tar.gz
+#   jarvisagent_<version>.debian.tar.xz
+#   jarvisagent_<version>_source.changes
+```
+
+#### Uploading to Launchpad
+
+```bash
+# Upload to PPA (uses the .changes file produced by debuild)
+dput ppa:beauman/marley ../jarvisagent_${PKG_VERSION}_source.changes
+```
+
+After upload, Launchpad will:
+1. Accept the source package (check GPG signature)
+2. Queue a build for each target architecture (amd64, etc.)
+3. Publish the binary `.deb` in the PPA once the build succeeds
+
+Monitor build status at: https://launchpad.net/~beauman/+archive/ubuntu/marley/+packages
+
+#### Targeting multiple Ubuntu series
+
+To publish for multiple series (e.g. Noble + Jammy), rebuild the source package
+with a different `debian/changelog` entry for each series:
+
+```bash
+# Edit debian/changelog — change "noble" to "jammy", bump version suffix
+dch -i -D jammy "Backport to Jammy"
+debuild -S -sd          # -sd = don't include orig tarball (already uploaded)
+dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
+```
+
+#### Key points
+
+- `debian/control` lists `premake5` in `Build-Depends` — Launchpad pulls it
+  from the same PPA (`ppa:beauman/marley`) during the build.
+- Launchpad builds run in a **clean chroot** with no network access after
+  source download, so all build dependencies must be declared.
+- The `debian/rules` file handles: `premake5 gmake`, `make config=release`,
+  `npm install && npm run build` for both React UIs, and installation of all
+  package contents to `/opt/jarvisagent/`.
 
 ---
 
