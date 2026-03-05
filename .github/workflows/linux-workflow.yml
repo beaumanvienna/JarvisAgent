@@ -273,12 +273,21 @@ jobs:
         run: |
           sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           sudo flatpak install -y flathub org.freedesktop.Sdk//24.08 org.freedesktop.Platform//24.08
-          sudo flatpak install -y flathub org.freedesktop.Sdk.Extension.node20//24.08
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Pre-build React UIs
+        run: |
+          cd dashboard/ui && npm install && npm run build && cd ../..
+          cd workflow-editor/ui && npm install && npm run build
 
       - name: Patch manifest for local source
         run: |
@@ -288,6 +297,10 @@ jobs:
           sed -i '/branch: main/d' com.jctechnolabs.JarvisAgent.yml
           # Change type: git → type: dir only on the line before path: ../../..
           sed -i '/type: git/{N;/path: \.\.\//s/type: git/type: dir/}' com.jctechnolabs.JarvisAgent.yml
+          # Remove npm build commands (UIs are pre-built on the runner)
+          sed -i '/npm install && npm run build/d' com.jctechnolabs.JarvisAgent.yml
+          # Remove node20 SDK extension (no longer needed)
+          sed -i '/node20/d' com.jctechnolabs.JarvisAgent.yml
 
       - name: Build Flatpak
         run: bash packaging/Linux/Flatpak/build-flatpak.sh
