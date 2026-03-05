@@ -63,3 +63,88 @@ jobs:
       - name: Smoke test (Debug)
         run: |
           ./bin/Debug/jarvisAgent --help || true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build React dashboard
+        run: |
+          cd dashboard/ui
+          npm install
+          npm run build
+
+      - name: Build React workflow editor
+        run: |
+          cd workflow-editor/ui
+          npm install
+          npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build-outputs
+          path: |
+            bin/Release/jarvisAgent
+            dashboard/ui/dist/
+            workflow-editor/ui/dist/
+
+  package-deb:
+    needs: build-linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build-outputs
+          path: .
+
+      - name: Build DEB package
+        run: bash packaging/Linux/Ubuntu/24_04/build-deb.sh --dry-run
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-deb
+          path: packaging/Linux/Ubuntu/24_04/build/*.deb
+          if-no-files-found: warn
+
+  package-appimage:
+    needs: build-linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build-outputs
+          path: .
+
+      - name: Install appimagetool
+        run: |
+          wget -q -O appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          mkdir -p "$HOME/bin"
+          mv appimagetool "$HOME/bin/"
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: bash packaging/Linux/AppImage/build-appimage.sh --dry-run
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-AppImage
+          path: packaging/Linux/AppImage/build/*.AppImage
+          if-no-files-found: warn
