@@ -132,7 +132,7 @@ jobs:
           path: packaging/Windows/11/build/*.zip
           if-no-files-found: warn
 
-      - name: Install WiX v4
+      - name: Install WiX latest
         shell: pwsh
         run: |
           # PS 7.4+ treats non-zero native exit codes as terminating errors
@@ -141,7 +141,7 @@ jobs:
           # Persist dotnet tools directory for this and subsequent steps
           "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -FilePath $env:GITHUB_PATH
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
-          wix extension add -g WixToolset.Heat.wixext
+          wix extension add -g WixToolset.Heat
 
       - name: Package MSI
         shell: pwsh
