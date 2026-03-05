@@ -135,7 +135,11 @@ jobs:
       - name: Install WiX v4
         shell: pwsh
         run: |
+          # PS 7.4+ treats non-zero native exit codes as terminating errors
+          $PSNativeCommandUseErrorActionPreference = $false
           dotnet tool update --global wix
+          # Persist dotnet tools directory for this and subsequent steps
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -FilePath $env:GITHUB_PATH
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           wix extension add -g WixToolset.Heat.wixext
 
