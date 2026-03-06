@@ -34,7 +34,8 @@ if (-not (Test-Path $StageDir)) {
 $WxsSource = "$ScriptDir\jarvisagent.wxs"
 $WxsBuild  = "$BuildDir\jarvisagent.wxs"
 Copy-Item $WxsSource $WxsBuild
-(Get-Content $WxsBuild) -replace 'Version="0\.1\.0\.0"', "Version=`"$PkgVersion.0.0`"" | Set-Content $WxsBuild
+(Get-Content $WxsBuild) -replace 'Version="0\.1\.0\.0"', "Version=`"$PkgVersion.0.0`"" `
+    -replace 'JarvisAgent-x64', "JarvisAgent-${PkgVersion}-x64" | Set-Content $WxsBuild
 
 # ---- Check for WiX ----
 $wixV4 = Get-Command "wix" -ErrorAction SilentlyContinue
