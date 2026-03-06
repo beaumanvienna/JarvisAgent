@@ -144,7 +144,7 @@ jobs:
           "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           wix --version
-          wix extension add -g WixToolset.Heat.wixext/6.0.2
+          wix extension add -g WixToolset.Heat.wixext
 
       - name: Package MSI
         shell: pwsh
