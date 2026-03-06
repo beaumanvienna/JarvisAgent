@@ -242,7 +242,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
 
     filter "system:windows"
         systemversion "latest"
-        buildoptions { "/utf-8", "/bigobj" }
+        buildoptions { "/utf-8", "/bigobj", "/MP" }
 
         -- Tell libcurl headers that we're linking against the static library.
         defines { "CURL_STATICLIB", "NOMINMAX" }

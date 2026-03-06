@@ -45,11 +45,11 @@ if ($wixV4) {
     Write-Host "==> Using WiX v4"
 
     Write-Host "==> Harvesting component groups ..."
-    wix heat dir "$StageDir\dashboard" -cg DashboardFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\dashboard.wxs"
-    wix heat dir "$StageDir\workflow-editor" -cg WorkflowEditorFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\workflow-editor.wxs"
-    wix heat dir "$StageDir\scripts" -cg ScriptFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\scripts.wxs"
-    wix heat dir "$StageDir\workflows" -cg WorkflowFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\workflows.wxs"
-    wix heat dir "$StageDir\doc" -cg DocFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\doc.wxs"
+    wix heat dir "$StageDir\dashboard" -cg DashboardFiles -dr DashboardDir -srd -ag -sfrag -o "$BuildDir\dashboard.wxs"
+    wix heat dir "$StageDir\workflow-editor" -cg WorkflowEditorFiles -dr WorkflowEditorDir -srd -ag -sfrag -o "$BuildDir\workflow-editor.wxs"
+    wix heat dir "$StageDir\scripts" -cg ScriptFiles -dr ScriptsDir -srd -ag -sfrag -o "$BuildDir\scripts.wxs"
+    wix heat dir "$StageDir\workflows" -cg WorkflowFiles -dr WorkflowsDir -srd -ag -sfrag -o "$BuildDir\workflows.wxs"
+    wix heat dir "$StageDir\doc" -cg DocFiles -dr DocDir -srd -ag -sfrag -o "$BuildDir\doc.wxs"
 
     Write-Host "==> Building MSI ..."
     wix build `
@@ -65,11 +65,11 @@ if ($wixV4) {
     Write-Host "==> Using WiX v3"
 
     Write-Host "==> Harvesting component groups ..."
-    heat dir "$StageDir\dashboard" -cg DashboardFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\dashboard.wxs"
-    heat dir "$StageDir\workflow-editor" -cg WorkflowEditorFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\workflow-editor.wxs"
-    heat dir "$StageDir\scripts" -cg ScriptFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\scripts.wxs"
-    heat dir "$StageDir\workflows" -cg WorkflowFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\workflows.wxs"
-    heat dir "$StageDir\doc" -cg DocFiles -dr INSTALLFOLDER -srd -ag -sfrag -o "$BuildDir\doc.wxs"
+    heat dir "$StageDir\dashboard" -cg DashboardFiles -dr DashboardDir -srd -ag -sfrag -o "$BuildDir\dashboard.wxs"
+    heat dir "$StageDir\workflow-editor" -cg WorkflowEditorFiles -dr WorkflowEditorDir -srd -ag -sfrag -o "$BuildDir\workflow-editor.wxs"
+    heat dir "$StageDir\scripts" -cg ScriptFiles -dr ScriptsDir -srd -ag -sfrag -o "$BuildDir\scripts.wxs"
+    heat dir "$StageDir\workflows" -cg WorkflowFiles -dr WorkflowsDir -srd -ag -sfrag -o "$BuildDir\workflows.wxs"
+    heat dir "$StageDir\doc" -cg DocFiles -dr DocDir -srd -ag -sfrag -o "$BuildDir\doc.wxs"
 
     Write-Host "==> Compiling .wxs files ..."
     $wxsFiles = @(

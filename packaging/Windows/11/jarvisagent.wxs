@@ -66,6 +66,13 @@
                         </Component>
                     </Directory>
 
+                    <!-- Harvested subdirectories (heat.exe targets) -->
+                    <Directory Id="DashboardDir" Name="dashboard" />
+                    <Directory Id="WorkflowEditorDir" Name="workflow-editor" />
+                    <Directory Id="ScriptsDir" Name="scripts" />
+                    <Directory Id="WorkflowsDir" Name="workflows" />
+                    <Directory Id="DocDir" Name="doc" />
+
                     <!-- PATH environment variable entry -->
                     <Component Id="PathEntry" Guid="A7B8C9D0-E1F2-3456-0123-4567890ABCDE">
                         <Environment Id="PATH"
