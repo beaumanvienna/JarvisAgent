@@ -132,19 +132,18 @@ jobs:
           path: packaging/Windows/11/build/*.zip
           if-no-files-found: warn
 
-      - name: Setup .NET for WiX
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Install WiX v4
+      - name: Install WiX v3
         shell: pwsh
         run: |
-          dotnet tool install --global wix --version 6.0.2
-          "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
-          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
-          wix --version
-          wix extension add -g WixToolset.Heat.wixext
+          $wixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip"
+          $wixZip = "$env:TEMP\wix-binaries.zip"
+          $wixDir = "C:\tools\wix311"
+          Write-Host "Downloading WiX Toolset v3.11.2 ..."
+          Invoke-WebRequest -Uri $wixUrl -OutFile $wixZip -UseBasicParsing
+          Expand-Archive -Path $wixZip -DestinationPath $wixDir -Force
+          "$wixDir" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          $env:PATH = "$wixDir;$env:PATH"
+          Write-Host "WiX installed: $(& heat.exe 2>&1 | Select-Object -First 1)"
 
       - name: Package MSI
         shell: pwsh
