@@ -153,12 +153,13 @@ else
     exit 0
 fi
 
+chmod +x "$OUTPUT"
+
 echo ""
 echo "==> AppImage created: $OUTPUT"
 echo "    Size: $(du -h "$OUTPUT" | cut -f1)"
 echo ""
 echo "    Run it:"
-echo "      chmod +x $OUTPUT"
 echo "      ./$OUTPUT"
 echo ""
 echo "    Data directory: ~/.local/share/jarvisagent/"

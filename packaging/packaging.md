@@ -323,7 +323,6 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 **Build & install (Fedora/RHEL/Rocky):**
 ```bash
 # From packaging/Linux/RPM/
-chmod +x build-rpm.sh
 ./build-rpm.sh
 sudo dnf install build/jarvisagent-0.1-1.x86_64.rpm
 ```
@@ -356,13 +355,11 @@ sudo dnf remove jarvisagent
 **Build:**
 ```bash
 # From packaging/Linux/AppImage/
-chmod +x build-appimage.sh
 ./build-appimage.sh
 ```
 
 **Install & run:**
 ```bash
-chmod +x build/JarvisAgent-x86_64.AppImage
 ./build/JarvisAgent-x86_64.AppImage
 ```
 
@@ -402,7 +399,6 @@ flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension
 **Build:**
 ```bash
 # From packaging/Linux/Flatpak/
-chmod +x build-flatpak.sh
 ./build-flatpak.sh
 ```
 
@@ -462,7 +458,6 @@ brew install jarvisagent
 **.dmg build & install:**
 ```bash
 # From packaging/macOS/Tahoe/
-chmod +x build-dmg.sh
 ./build-dmg.sh
 # Open .dmg, drag JarvisAgent.app to /Applications
 ```
