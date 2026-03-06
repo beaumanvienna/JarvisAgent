@@ -65,24 +65,19 @@ if ($wixV4) {
     Write-Host "==> Using WiX v3"
 
     Write-Host "==> Harvesting component groups ..."
-    heat dir "$StageDir\dashboard" -cg DashboardFiles -dr DashboardDir -srd -ag -sfrag -o "$BuildDir\dashboard.wxs"
-    heat dir "$StageDir\workflow-editor" -cg WorkflowEditorFiles -dr WorkflowEditorDir -srd -ag -sfrag -o "$BuildDir\workflow-editor.wxs"
-    heat dir "$StageDir\scripts" -cg ScriptFiles -dr ScriptsDir -srd -ag -sfrag -o "$BuildDir\scripts.wxs"
-    heat dir "$StageDir\workflows" -cg WorkflowFiles -dr WorkflowsDir -srd -ag -sfrag -o "$BuildDir\workflows.wxs"
-    heat dir "$StageDir\doc" -cg DocFiles -dr DocDir -srd -ag -sfrag -o "$BuildDir\doc.wxs"
+    heat dir "$StageDir\dashboard"        -cg DashboardFiles       -dr DashboardDir       -srd -ag -sfrag -var var.DashboardSource       -o "$BuildDir\dashboard.wxs"
+    heat dir "$StageDir\workflow-editor"  -cg WorkflowEditorFiles  -dr WorkflowEditorDir  -srd -ag -sfrag -var var.WorkflowEditorSource  -o "$BuildDir\workflow-editor.wxs"
+    heat dir "$StageDir\scripts"          -cg ScriptFiles          -dr ScriptsDir          -srd -ag -sfrag -var var.ScriptsSource          -o "$BuildDir\scripts.wxs"
+    heat dir "$StageDir\workflows"        -cg WorkflowFiles        -dr WorkflowsDir        -srd -ag -sfrag -var var.WorkflowsSource        -o "$BuildDir\workflows.wxs"
+    heat dir "$StageDir\doc"              -cg DocFiles             -dr DocDir              -srd -ag -sfrag -var var.DocSource              -o "$BuildDir\doc.wxs"
 
     Write-Host "==> Compiling .wxs files ..."
-    $wxsFiles = @(
-        "$WxsBuild",
-        "$BuildDir\dashboard.wxs",
-        "$BuildDir\workflow-editor.wxs",
-        "$BuildDir\scripts.wxs",
-        "$BuildDir\workflows.wxs",
-        "$BuildDir\doc.wxs"
-    )
-    foreach ($wxs in $wxsFiles) {
-        candle -arch x64 -o "$BuildDir\$(Split-Path -LeafBase $wxs).wixobj" $wxs
-    }
+    candle -arch x64 -o "$BuildDir\jarvisagent.wixobj"      "$WxsBuild"
+    candle -arch x64 "-dvar.DashboardSource=$StageDir\dashboard"             -o "$BuildDir\dashboard.wixobj"       "$BuildDir\dashboard.wxs"
+    candle -arch x64 "-dvar.WorkflowEditorSource=$StageDir\workflow-editor"  -o "$BuildDir\workflow-editor.wixobj"  "$BuildDir\workflow-editor.wxs"
+    candle -arch x64 "-dvar.ScriptsSource=$StageDir\scripts"                 -o "$BuildDir\scripts.wixobj"          "$BuildDir\scripts.wxs"
+    candle -arch x64 "-dvar.WorkflowsSource=$StageDir\workflows"             -o "$BuildDir\workflows.wixobj"        "$BuildDir\workflows.wxs"
+    candle -arch x64 "-dvar.DocSource=$StageDir\doc"                         -o "$BuildDir\doc.wixobj"              "$BuildDir\doc.wxs"
 
     Write-Host "==> Linking MSI ..."
     $wixobjs = Get-ChildItem "$BuildDir\*.wixobj" | ForEach-Object { $_.FullName }
