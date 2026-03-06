@@ -75,6 +75,7 @@
 
                     <!-- PATH environment variable entry -->
                     <Component Id="PathEntry" Guid="A7B8C9D0-E1F2-3456-0123-4567890ABCDE">
+                        <CreateFolder />
                         <Environment Id="PATH"
                                      Name="PATH"
                                      Value="[INSTALLFOLDER]"
