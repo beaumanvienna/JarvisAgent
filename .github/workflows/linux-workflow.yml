@@ -8,15 +8,28 @@ on:
     branches:
       - "**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Extract version
+        id: version
+        run: |
+          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\\"\(.*\)\\".*$/\1/')
+          echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
+          echo "Package version: $PKG_VERSION"
 
       - name: Install system dependencies
         run: |
@@ -110,7 +123,7 @@ jobs:
       - name: Upload DEB artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JarvisAgent-deb
+          name: JarvisAgent-${{ needs.build-linux.outputs.version }}-deb
           path: packaging/Linux/Ubuntu/24_04/build/*.deb
           if-no-files-found: warn
 
@@ -145,11 +158,12 @@ jobs:
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JarvisAgent-AppImage
+          name: JarvisAgent-${{ needs.build-linux.outputs.version }}-AppImage
           path: packaging/Linux/AppImage/build/*.AppImage
           if-no-files-found: warn
 
   package-rpm:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     container: rockylinux:9
 
@@ -190,6 +204,7 @@ jobs:
           if-no-files-found: warn
 
   package-arch:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     container: archlinux:latest
 
@@ -261,6 +276,7 @@ jobs:
           if-no-files-found: warn
 
   package-flatpak:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:

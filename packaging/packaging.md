@@ -1,6 +1,6 @@
 # JarvisAgent — Packaging Plan
 
-Last updated: 2026-03-01
+Last updated: 2026-03-06
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
 C++ libraries are vendored under `vendor/` so that every platform builds against the
@@ -509,7 +509,7 @@ rm -rf ~/Library/Application\ Support/JarvisAgent/
 **Files:**
 - `build-zip.ps1` — builds from source + creates portable `.zip` (`-DryRun` option)
 - `build-msi.ps1` — creates MSI from staged directory (requires WiX, run after build-zip)
-- `jarvisagent.wxs` — WiX v4 manifest for MSI installer
+- `jarvisagent.wxs` — WiX v3 manifest for MSI installer
 
 **Portable .zip build & install:**
 ```powershell
@@ -524,9 +524,15 @@ rm -rf ~/Library/Application\ Support/JarvisAgent/
 **MSI build & install:**
 ```powershell
 .\build-zip.ps1          # stage the package tree first
-.\build-msi.ps1          # build the MSI
-# Double-click build\JarvisAgent-x64.msi
+.\build-msi.ps1          # build the MSI (requires WiX v3 on PATH)
+# Double-click build\JarvisAgent-<version>-x64.msi
 ```
+
+**MSI install location:**
+- Installs to `C:\Program Files\JarvisAgent\`
+- Binary at `C:\Program Files\JarvisAgent\bin\jarvisAgent.exe`
+- The installer adds `C:\Program Files\JarvisAgent\` to the system PATH
+- After install: copy `config.json.example` → `config.json`, edit API keys, run `setup-venv.bat` (one-time), then launch via `jarvisagent.bat`
 
 **Uninstall:**
 ```
@@ -553,6 +559,24 @@ docker run -it --rm -p 8080:8080 ghcr.io/beaumanvienna/jarvisagent:latest
 ```bash
 docker rmi ghcr.io/beaumanvienna/jarvisagent:latest
 ```
+
+---
+
+## CI Artifacts
+
+All packages are built automatically by GitHub Actions on every push.
+Download artifacts from the Actions tab on GitHub.
+
+| Artifact | Format | CI Workflow / Job |
+|----------|--------|-------------------|
+| `JarvisAgent-deb` | `.deb` | linux-workflow / package-deb |
+| `JarvisAgent-AppImage` | `.AppImage` | linux-workflow / package-appimage |
+| `JarvisAgent-rpm` | `.rpm` | linux-workflow / package-rpm |
+| `JarvisAgent-arch` | `.pkg.tar.zst` | linux-workflow / package-arch |
+| `JarvisAgent-flatpak` | `.flatpak` | linux-workflow / package-flatpak |
+| `JarvisAgent-macOS-dmg` | `.dmg` | macos-workflow / build-macos |
+| `JarvisAgent-Windows-zip` | `.zip` | windows-workflow / build-windows |
+| `JarvisAgent-Windows-msi` | `.msi` | windows-workflow / build-windows |
 
 ---
 

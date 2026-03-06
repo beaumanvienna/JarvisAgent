@@ -8,6 +8,10 @@ on:
     branches:
       - "**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -50,6 +54,14 @@ jobs:
         uses: abel0b/setup-premake@v2
         with:
           version: "5.0.0-beta2"
+
+      - name: Extract version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path premake5.lua -Pattern 'JARVIS_AGENT_VERSION').Line -replace '.*\\"(.*)\\".*','$1'
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Package version: $v"
 
       - name: Generate Visual Studio solution
         shell: pwsh
@@ -128,7 +140,7 @@ jobs:
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JarvisAgent-Windows-zip
+          name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-zip
           path: packaging/Windows/11/build/*.zip
           if-no-files-found: warn
 
@@ -153,6 +165,6 @@ jobs:
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JarvisAgent-Windows-msi
+          name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-msi
           path: packaging/Windows/11/build/*.msi
           if-no-files-found: warn

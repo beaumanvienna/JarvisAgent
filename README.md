@@ -158,7 +158,31 @@ Please enable **clang-format** in your IDE. The coding style is **Allman**, and 
 
 ---
 
-## Installation
+## Pre-built Packages
+
+Pre-built packages for all platforms are available as GitHub Actions artifacts.
+Go to the [Actions](https://github.com/beaumanvienna/JarvisAgent/actions) tab and download from the latest successful run:
+
+| Platform | Format | Artifact |
+|----------|--------|----------|
+| Ubuntu / Debian | `.deb` | `JarvisAgent-deb` |
+| Fedora / RHEL / Rocky | `.rpm` | `JarvisAgent-rpm` |
+| Arch / Manjaro | `.pkg.tar.zst` | `JarvisAgent-arch` |
+| Any Linux | `.AppImage` | `JarvisAgent-AppImage` |
+| Any Linux (sandboxed) | `.flatpak` | `JarvisAgent-flatpak` |
+| macOS | `.dmg` | `JarvisAgent-macOS-dmg` |
+| Windows (portable) | `.zip` | `JarvisAgent-Windows-zip` |
+| Windows (installer) | `.msi` | `JarvisAgent-Windows-msi` |
+| Docker | OCI image | `ghcr.io/beaumanvienna/jarvisagent:latest` |
+
+**Linux packages** install to `/opt/jarvisagent/` with a launcher at `/usr/bin/jarvisagent`.
+**Windows MSI** installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
+
+See [packaging/packaging.md](packaging/packaging.md) for build scripts and detailed instructions.
+
+---
+
+## Building from Source
 
 JarvisAgent depends on
 * Python 3 and development headers (on Ubuntu/Debian the packages are called `python3`, `python3-dev`)
