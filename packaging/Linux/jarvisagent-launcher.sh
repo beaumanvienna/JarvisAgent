@@ -76,9 +76,18 @@ for asset in bin dashboard workflow-editor scripts doc; do
             # Path is a symlink or does not exist — safe to (re)create
             ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
         else
-            # Path is a real file or directory — do not override
-            echo "WARNING: $USER_HOME/$asset already exists and is not a symlink — skipping."
-            echo "         Expected a symlink to $INSTALL_DIR/$asset."
+            # Path is a real file or directory — ask before replacing
+            echo ""
+            echo "WARNING: $USER_HOME/$asset already exists and is not a symlink."
+            echo "         The launcher needs a symlink to $INSTALL_DIR/$asset."
+            read -rp "         Rename to ${asset}.bak and create symlink? [y/N] " answer
+            if [[ "$answer" =~ ^[Yy]$ ]]; then
+                mv "$USER_HOME/$asset" "$USER_HOME/${asset}.bak"
+                ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
+                echo "         Renamed to ${asset}.bak, symlink created."
+            else
+                echo "         Skipped. JarvisAgent may not work correctly."
+            fi
         fi
     fi
 done
