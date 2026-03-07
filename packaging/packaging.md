@@ -1,6 +1,6 @@
 # JarvisAgent — Packaging Plan
 
-Last updated: 2026-03-06
+Last updated: 2026-03-07
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
 C++ libraries are vendored under `vendor/` so that every platform builds against the
@@ -36,9 +36,10 @@ Packaging Targets
 - **Build from source:** Packages compile C++ and build React UIs from source (fully transparent open-source).
 - **Package contents:** Release binary (`bin/Release/jarvisAgent`), React UI dist/ folders, scripts, example workflows, example config. No debug binaries or source code.
 - **premake5:** Assumed already installed (like make, g++, or the package manager itself). Listed as `makedepends` but not bundled.
-- **Python venv:** Created in post-install hook with `markitdown`, `md2pdf-mermaid`, and `playwright`.
-- **Install location:** `/opt/jarvisagent/` (self-contained, CWD-relative binary). Launcher script in `/usr/bin/jarvisagent`.
-- **Runtime model:** JarvisAgent resolves `config.json`, `dashboard/ui/dist/`, `workflow-editor/ui/dist/`, `scripts/`, `queue/`, `workflows/` relative to CWD. The launcher script cd's to `/opt/jarvisagent/`.
+- **Python venv:** Created per-user by the launcher on first run (in `~/JarvisAgent/.venv`).
+- **Install location:** `/opt/jarvisagent/` (read-only system assets). Launcher script in `/usr/bin/jarvisagent`.
+- **Runtime model:** The launcher creates a per-user working directory (`~/JarvisAgent` by default) with symlinks to read-only assets in `/opt/jarvisagent/` and writable directories for user data. JarvisAgent resolves `config.json`, `dashboard/ui/dist/`, `workflow-editor/ui/dist/`, `scripts/`, `queue/`, `workflows/` relative to CWD.
+- **Shared launcher:** `packaging/Linux/jarvisagent-launcher.sh` is shared across DEB, RPM, and Arch packages. Supports `--home DIR` (custom working directory), `--no-browser` (skip browser launch), and `JARVISAGENT_HOME` env var.
 
 ---
 
@@ -120,11 +121,13 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 
 **Files:**
 - `PKGBUILD` — package build script
-- `jarvisagent.install` — post-install hook (creates venv, installs pip tools + playwright)
+- `jarvisagent.install` — post-install/remove hooks (prints launcher instructions)
+- `prerequisites.sh` — installs all build + runtime dependencies
 
 **Build & install:**
 ```bash
 # From packaging/Linux/Arch/
+sudo ./prerequisites.sh   # one-time: install deps
 makepkg -si
 
 # Or via AUR helper (yay, paru, etc.):
@@ -133,10 +136,9 @@ yay -S jarvisagent-git
 
 **After install:**
 ```bash
-sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json
-# Edit config.json (API keys, queue/workflow paths)
-source /opt/jarvisagent/.venv/bin/activate
-jarvisagent
+jarvisagent                          # creates ~/JarvisAgent, sets up venv, opens browser
+jarvisagent --home /path/to/dir      # custom working directory
+jarvisagent --no-browser             # skip browser launch
 ```
 
 **Uninstall:**
@@ -173,7 +175,23 @@ sudo pacman -R jarvisagent-git
 - GitHub CI (`linux-workflow.yml`) already validates this dep set on `ubuntu-latest`.
 - premake5 is available from the PPA `ppa:beauman/marley`.
 
-**Install (binary .deb):**
+**Files:**
+- `build-deb.sh` — build script (`--dry-run` option)
+- `DEBIAN/control` — package metadata
+- `DEBIAN/postinst` / `DEBIAN/postrm` — post-install/remove hooks (prints launcher instructions)
+- `prerequisites.sh` — installs all build + runtime dependencies
+
+**Build & install:**
+```bash
+# From packaging/Linux/Ubuntu/24_04/
+sudo ./prerequisites.sh   # one-time: install deps
+./build-deb.sh
+sudo dpkg -i build/jarvisagent_0.75-1_amd64.deb
+sudo apt install -f   # resolve dependencies
+jarvisagent            # creates ~/JarvisAgent, sets up venv, opens browser
+```
+
+**Install (binary .deb, pre-built):**
 ```bash
 sudo dpkg -i jarvisagent_0.75-1_amd64.deb
 sudo apt install -f   # resolve dependencies
@@ -319,12 +337,15 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 - `jarvisagent.spec` — RPM spec file (for `rpmbuild`)
 - `build-rpm.sh` — build script (supports `rpmbuild` and `fpm` fallback, `--dry-run` option)
 - `postinst.sh` / `postrm.sh` — post-install/remove hooks (for `fpm`)
+- `prerequisites.sh` — installs all build + runtime dependencies (handles Rocky 9 vs 10+ Node.js differences)
 
 **Build & install (Fedora/RHEL/Rocky):**
 ```bash
 # From packaging/Linux/RPM/
+sudo ./prerequisites.sh   # one-time: install deps
 ./build-rpm.sh
-sudo dnf install build/jarvisagent-0.1-1.x86_64.rpm
+sudo dnf install build/jarvisagent-0.75-1.el10.x86_64.rpm
+jarvisagent               # creates ~/JarvisAgent, sets up venv, opens browser
 ```
 
 **Uninstall:**
@@ -446,13 +467,16 @@ flatpak uninstall com.jctechnolabs.JarvisAgent
 - GitHub CI (`macos-workflow.yml`) validates macOS builds.
 
 **Files:**
-- `jarvisagent.rb` — Homebrew formula (builds from source, creates venv in post_install)
+- `jarvisagent.rb` — Homebrew formula (builds from source, user-space launcher)
 - `build-dmg.sh` — .dmg build script (`--dry-run` option, creates .app bundle + Info.plist)
 
 **Homebrew install:**
 ```bash
 brew tap beaumanvienna/jarvisagent
 brew install jarvisagent
+jarvisagent                          # creates ~/JarvisAgent, sets up venv, opens browser
+jarvisagent --home /path/to/dir      # custom working directory
+jarvisagent --no-browser             # skip browser launch
 ```
 
 **.dmg build & install:**
@@ -460,6 +484,7 @@ brew install jarvisagent
 # From packaging/macOS/Tahoe/
 ./build-dmg.sh
 # Open .dmg, drag JarvisAgent.app to /Applications
+# Launch: open /Applications/JarvisAgent.app (or from Terminal)
 ```
 
 **Uninstall:**
@@ -469,12 +494,12 @@ brew uninstall jarvisagent
 
 # .dmg
 rm -rf /Applications/JarvisAgent.app
-rm -rf ~/Library/Application\ Support/JarvisAgent/
+
+# User data (both Homebrew and .dmg)
+rm -rf ~/JarvisAgent/
 ```
 
-**Data directory:**
-- Homebrew: `$(brew --prefix)/Cellar/jarvisagent/0.1/`
-- .dmg: `~/Library/Application Support/JarvisAgent/`
+**Data directory:** `~/JarvisAgent/` (config, queue, log, workflows, .venv)
 
 ---
 

@@ -67,48 +67,93 @@ class Jarvisagent < Formula
     doc.install "README.md"
     doc.install "doc/JC_Workflow_Specification.md" if File.exist?("doc/JC_Workflow_Specification.md")
 
-    # Launcher script
+    # Launcher script (user-space: creates ~/JarvisAgent with symlinks)
     (bin/"jarvisagent").write <<~EOS
       #!/bin/bash
-      JADIR="#{prefix}"
-      cd "$JADIR" || { echo "Error: $JADIR not found"; exit 1; }
-      case "${1:-}" in
-          --help|-h|--version|-v) exec "#{prefix}/bin/jarvisAgent" "$@" ;;
-      esac
-      if [[ ! -f config.json ]]; then
-          echo "No config.json found in $JADIR/"
-          echo "Copy the example and edit it:"
-          echo "  cp #{prefix}/config.json.example #{prefix}/config.json"
-          exit 1
-      fi
-      exec "#{prefix}/bin/jarvisAgent" "$@"
-    EOS
-  end
+      set -euo pipefail
 
-  def post_install
-    # Create Python venv
-    venv = prefix/".venv"
-    unless venv.exist?
-      system "python3", "-m", "venv", venv.to_s
-      system venv/"bin/pip", "install", "--quiet", "--upgrade", "pip"
-      system venv/"bin/pip", "install", "--quiet", "markitdown[all]", "md2pdf-mermaid", "playwright"
-      system venv/"bin/playwright", "install", "chromium"
-    end
+      INSTALL_DIR="#{prefix}"
+      OPEN_BROWSER=true
+      USER_HOME=""
+
+      PASSTHROUGH_ARGS=()
+      while [[ $# -gt 0 ]]; do
+          case "$1" in
+              --home)
+                  [[ -z "${2:-}" ]] && echo "Error: --home requires a directory argument" && exit 1
+                  USER_HOME="$2"; shift 2 ;;
+              --no-browser) OPEN_BROWSER=false; shift ;;
+              --help|-h|--version|-v) exec "$INSTALL_DIR/bin/jarvisAgent" "$1" ;;
+              *) PASSTHROUGH_ARGS+=("$1"); shift ;;
+          esac
+      done
+
+      [[ -z "$USER_HOME" ]] && USER_HOME="${JARVISAGENT_HOME:-$HOME/JarvisAgent}"
+
+      [[ ! -d "$USER_HOME" ]] && echo "==> First run: creating working directory at $USER_HOME" && mkdir -p "$USER_HOME"
+
+      for asset in dashboard workflow-editor scripts doc; do
+          if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
+              ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
+          fi
+      done
+
+      mkdir -p "$USER_HOME/bin"
+      if [[ -L "$USER_HOME/bin/jarvisAgent" ]] || [[ ! -e "$USER_HOME/bin/jarvisAgent" ]]; then
+          ln -sfn "$INSTALL_DIR/bin/jarvisAgent" "$USER_HOME/bin/jarvisAgent"
+      fi
+
+      mkdir -p "$USER_HOME/queue" "$USER_HOME/log" "$USER_HOME/workflows"
+
+      if [[ -d "$INSTALL_DIR/workflows" ]] && [[ -z "$(ls -A "$USER_HOME/workflows" 2>/dev/null)" ]]; then
+          cp -a "$INSTALL_DIR/workflows/"* "$USER_HOME/workflows/" 2>/dev/null || true
+          echo "==> Copied example workflows to $USER_HOME/workflows/"
+      fi
+
+      if [[ ! -f "$USER_HOME/config.json" ]] && [[ -f "$INSTALL_DIR/config.json.example" ]]; then
+          cp "$INSTALL_DIR/config.json.example" "$USER_HOME/config.json"
+          echo "==> Created $USER_HOME/config.json from example"
+          echo "    Please edit it to set your API keys."
+      fi
+
+      if [[ ! -d "$USER_HOME/.venv" ]]; then
+          echo "==> Creating Python virtual environment at $USER_HOME/.venv ..."
+          python3 -m venv "$USER_HOME/.venv" 2>/dev/null || true
+          if [[ -d "$USER_HOME/.venv" ]]; then
+              "$USER_HOME/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+              echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
+              "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
+              "$USER_HOME/.venv/bin/playwright" install chromium 2>/dev/null || true
+          fi
+      fi
+
+      [[ -f "$USER_HOME/.venv/bin/activate" ]] && source "$USER_HOME/.venv/bin/activate"
+
+      if [[ "$OPEN_BROWSER" == true ]]; then
+          (sleep 2 && open "http://localhost:8080" 2>/dev/null) &
+      fi
+
+      echo "==> Starting JarvisAgent in $USER_HOME"
+      echo "    Dashboard: http://localhost:8080"
+      echo "    Editor:    http://localhost:8080/editor"
+      echo ""
+      cd "$USER_HOME"
+      exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"
+    EOS
   end
 
   def caveats
     <<~EOS
-      JarvisAgent is installed at:
-        #{prefix}
+      To get started, run:  jarvisagent
 
-      To get started:
-        1. cp #{prefix}/config.json.example #{prefix}/config.json
-        2. Edit config.json (set API keys, queue/workflow paths)
-        3. Activate the Python venv: source #{prefix}/.venv/bin/activate
-        4. Run: jarvisagent
+      On first launch, the launcher will:
+        - Create ~/JarvisAgent with your working data
+        - Set up a Python virtual environment
+        - Copy example config and workflows
+        - Open the dashboard in your browser
 
-      The Python venv with markitdown/md2pdf/playwright is at:
-        #{prefix}/.venv
+      Custom working directory:  jarvisagent --home /path/to/dir
+      Skip browser:              jarvisagent --no-browser
     EOS
   end
 

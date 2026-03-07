@@ -176,6 +176,10 @@ Go to the [Actions](https://github.com/beaumanvienna/JarvisAgent/actions) tab an
 | Docker | OCI image | `ghcr.io/beaumanvienna/jarvisagent:latest` |
 
 **Linux packages** install to `/opt/jarvisagent/` with a launcher at `/usr/bin/jarvisagent`.
+On first run, the launcher creates a per-user working directory at `~/JarvisAgent` with config,
+workflows, and a Python virtual environment. Options: `--home DIR` (custom path),
+`--no-browser` (skip opening dashboard).
+
 **Windows MSI** installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
 
 See [packaging/packaging.md](packaging/packaging.md) for build scripts and detailed instructions.

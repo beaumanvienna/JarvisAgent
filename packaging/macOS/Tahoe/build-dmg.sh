@@ -117,65 +117,120 @@ sed -i '' "s/^  version \".*\"/  version \"$PKG_VERSION\"/" "$BUILD_DIR/jarvisag
 # ---- Launcher script (Contents/MacOS/JarvisAgent) ----
 cat > "$APP_BUNDLE/Contents/MacOS/JarvisAgent" <<'LAUNCHER'
 #!/bin/bash
-# JarvisAgent.app launcher — sets up working directory in ~/Library/Application Support/JarvisAgent
+# JarvisAgent.app launcher — user-space setup for macOS .app bundle.
+# Creates a per-user working directory with symlinks to read-only assets
+# inside the .app bundle and writable directories for user data.
 
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SHARE="$APP_DIR/Resources/share"
-DATA_DIR="${JARVISAGENT_DATA:-$HOME/Library/Application Support/JarvisAgent}"
+OPEN_BROWSER=true
+USER_HOME=""
 
-# First-run setup
-if [[ ! -d "$DATA_DIR" ]]; then
-    echo "==> First run: creating working directory at $DATA_DIR"
-    mkdir -p "$DATA_DIR"
+# ---- Parse launcher-specific arguments ----
+PASSTHROUGH_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --home)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --home requires a directory argument"
+                exit 1
+            fi
+            USER_HOME="$2"
+            shift 2
+            ;;
+        --no-browser)
+            OPEN_BROWSER=false
+            shift
+            ;;
+        --help|-h|--version|-v)
+            exec "$SHARE/jarvisAgent" "$1"
+            ;;
+        *)
+            PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# ---- Determine working directory ----
+if [[ -z "$USER_HOME" ]]; then
+    USER_HOME="${JARVISAGENT_HOME:-$HOME/JarvisAgent}"
 fi
 
-# Symlink read-only assets
+# ---- First-run setup ----
+if [[ ! -d "$USER_HOME" ]]; then
+    echo "==> First run: creating working directory at $USER_HOME"
+    mkdir -p "$USER_HOME"
+fi
+
+# Symlink read-only assets (ln -sfn: atomic, no rm needed)
 for asset in dashboard workflow-editor scripts doc; do
-    rm -f "$DATA_DIR/$asset"
-    ln -sf "$SHARE/$asset" "$DATA_DIR/$asset"
+    if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
+        ln -sfn "$SHARE/$asset" "$USER_HOME/$asset"
+    fi
 done
 
 # Binary symlink
-mkdir -p "$DATA_DIR/bin"
-rm -f "$DATA_DIR/bin/jarvisAgent"
-ln -sf "$SHARE/jarvisAgent" "$DATA_DIR/bin/jarvisAgent"
+mkdir -p "$USER_HOME/bin"
+if [[ -L "$USER_HOME/bin/jarvisAgent" ]] || [[ ! -e "$USER_HOME/bin/jarvisAgent" ]]; then
+    ln -sfn "$SHARE/jarvisAgent" "$USER_HOME/bin/jarvisAgent"
+fi
 
 # Writable directories
-mkdir -p "$DATA_DIR/queue"
-mkdir -p "$DATA_DIR/log"
-mkdir -p "$DATA_DIR/workflows"
+mkdir -p "$USER_HOME/queue"
+mkdir -p "$USER_HOME/log"
+mkdir -p "$USER_HOME/workflows"
 
-# Copy example workflows on first run
-if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
-    cp "$SHARE/example-workflows/"*.jcwf "$DATA_DIR/workflows/" 2>/dev/null || true
+# Copy example workflows on first run (only if workflows dir is empty)
+if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$USER_HOME/workflows" 2>/dev/null)" ]]; then
+    cp -a "$SHARE/example-workflows/"* "$USER_HOME/workflows/" 2>/dev/null || true
+    echo "==> Copied example workflows to $USER_HOME/workflows/"
 fi
 
 # Copy example config on first run
-if [[ ! -f "$DATA_DIR/config.json" ]]; then
-    cp "$SHARE/config.json.example" "$DATA_DIR/config.json"
-    echo "==> Created $DATA_DIR/config.json from example — please edit it"
-fi
-
-# Python venv (first-run)
-if [[ ! -d "$DATA_DIR/.venv" ]]; then
-    echo "==> Creating Python virtual environment ..."
-    python3 -m venv "$DATA_DIR/.venv" 2>/dev/null || true
-    if [[ -d "$DATA_DIR/.venv" ]]; then
-        "$DATA_DIR/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-        "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
-        "$DATA_DIR/.venv/bin/playwright" install chromium 2>/dev/null || true
+if [[ ! -f "$USER_HOME/config.json" ]]; then
+    if [[ -f "$SHARE/config.json.example" ]]; then
+        cp "$SHARE/config.json.example" "$USER_HOME/config.json"
+        echo "==> Created $USER_HOME/config.json from example"
+        echo "    Please edit it to set your API keys."
     fi
 fi
 
-# Activate venv
-if [[ -f "$DATA_DIR/.venv/bin/activate" ]]; then
-    source "$DATA_DIR/.venv/bin/activate"
+# ---- Python venv (first-run) ----
+if [[ ! -d "$USER_HOME/.venv" ]]; then
+    echo "==> Creating Python virtual environment at $USER_HOME/.venv ..."
+    python3 -m venv "$USER_HOME/.venv" 2>/dev/null || {
+        echo "WARNING: Could not create Python venv"
+        echo "         Shell tasks using markitdown/md2pdf will not work until fixed."
+    }
+
+    if [[ -d "$USER_HOME/.venv" ]]; then
+        "$USER_HOME/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+        echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
+        "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
+        "$USER_HOME/.venv/bin/playwright" install chromium 2>/dev/null || true
+    fi
 fi
 
-cd "$DATA_DIR"
-exec "$DATA_DIR/bin/jarvisAgent" "$@"
+# Activate venv if present
+if [[ -f "$USER_HOME/.venv/bin/activate" ]]; then
+    source "$USER_HOME/.venv/bin/activate"
+fi
+
+# ---- Open dashboard in default browser ----
+if [[ "$OPEN_BROWSER" == true ]]; then
+    (sleep 2 && open "http://localhost:8080" 2>/dev/null) &
+fi
+
+# ---- Launch ----
+echo "==> Starting JarvisAgent in $USER_HOME"
+echo "    Dashboard: http://localhost:8080"
+echo "    Editor:    http://localhost:8080/editor"
+echo ""
+cd "$USER_HOME"
+exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"
 LAUNCHER
 chmod 755 "$APP_BUNDLE/Contents/MacOS/JarvisAgent"
 
