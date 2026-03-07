@@ -90,7 +90,9 @@ fi
 for ui_dist in dashboard/ui/dist workflow-editor/ui/dist; do
     installed="$INSTALL_DIR/$ui_dist"
     local_dir="$USER_HOME/$ui_dist"
-    if [[ -d "$installed" && -d "$local_dir" && ! -L "$local_dir" ]]; then
+    top_dir="$USER_HOME/${ui_dist%%/*}"
+    # Only prompt if the top-level dir is a real directory (not a symlink)
+    if [[ -d "$top_dir" && ! -L "$top_dir" && -d "$installed" && -d "$local_dir" && ! -L "$local_dir" ]]; then
         read -rp "==> $ui_dist already exists. Use installed version? [y/N] " answer
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             mv "$local_dir" "${local_dir}.bak"
