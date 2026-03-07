@@ -28,6 +28,43 @@ struct curl_slist;
 
 namespace AIAssistant
 {
+    // Unified error code scheme for AI query results:
+    //   0        = success
+    //   1-99     = CURLcode (libcurl transport errors, used as-is)
+    //   100-599  = HTTP status codes (RFC 9110)
+    //   1000+    = custom AI provider / pre-flight errors
+    namespace QueryErrorCode
+    {
+        constexpr int Success = 0;
+
+        // Pre-flight / internal errors (1000+)
+        constexpr int NoApiKey = 1000;
+        constexpr int InvalidQueryData = 1001;
+        constexpr int CurlNotInitialized = 1002;
+        constexpr int ParserError = 1003;
+        constexpr int EmptyResponse = 1004;
+        constexpr int ExceptionThrown = 1005;
+
+        // AI provider errors (1100+) — reserved for future use
+        constexpr int QuotaExceeded = 1100;
+        constexpr int ContextWindowExceeded = 1101;
+        constexpr int ContentPolicyViolation = 1102;
+        constexpr int ModelNotFound = 1103;
+
+        // Returns a human-readable label for the error code.
+        std::string Describe(int code);
+    } // namespace QueryErrorCode
+
+    struct QueryResult
+    {
+        bool m_Ok{false};
+        int m_ErrorCode{0};         // 0=success, 1-99=CURLcode, 100-599=HTTP, 1000+=custom
+        std::string m_ErrorMessage; // human-readable description
+
+        static QueryResult Ok() { return {true, 0, {}}; }
+        static QueryResult Fail(int code, std::string message) { return {false, code, std::move(message)}; }
+    };
+
     class CurlWrapper
     {
     public:
@@ -69,7 +106,7 @@ namespace AIAssistant
         CurlWrapper& operator=(CurlWrapper&&) noexcept = default;
 
         bool IsInitialized() const;
-        bool Query(QueryData const& queryData);
+        QueryResult Query(QueryData const& queryData);
         std::string& GetBuffer();
         void Clear();
 

@@ -29,24 +29,49 @@ export default function SessionManagersPanel({ sessions }: Props) {
             <th>Outputs</th>
             <th>In Flight</th>
             <th>Completed</th>
+            <th>Failed</th>
           </tr>
         </thead>
         <tbody>
-          {entries.map((s) => (
-            <tr key={s.name}>
-              <td className="mono">{s.name}</td>
-              <td>{s.state}</td>
-              <td className="num">{s.outputs}</td>
-              <td className="num">
-                {s.inflight > 0 ? (
-                  <span className="state-running">{s.inflight}</span>
-                ) : (
-                  "0"
-                )}
-              </td>
-              <td className="num">{s.completed}</td>
-            </tr>
-          ))}
+          {entries.map((s) => {
+            const isFailed = s.state === "Failed";
+            const errorTooltip =
+              isFailed && s.last_error_code
+                ? `Error ${s.last_error_code}: ${s.last_error_message ?? "unknown"}`
+                : undefined;
+            return (
+              <tr key={s.name}>
+                <td className="mono">{s.name}</td>
+                <td>
+                  {isFailed ? (
+                    <span className="state-failed" title={errorTooltip}>
+                      {s.state}
+                    </span>
+                  ) : (
+                    s.state
+                  )}
+                </td>
+                <td className="num">{s.outputs}</td>
+                <td className="num">
+                  {s.inflight > 0 ? (
+                    <span className="state-running">{s.inflight}</span>
+                  ) : (
+                    "0"
+                  )}
+                </td>
+                <td className="num">{s.completed}</td>
+                <td className="num">
+                  {s.failed > 0 ? (
+                    <span className="state-failed" title={errorTooltip}>
+                      {s.failed}
+                    </span>
+                  ) : (
+                    "0"
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </section>

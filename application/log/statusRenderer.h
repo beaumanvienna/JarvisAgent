@@ -40,6 +40,9 @@ namespace AIAssistant
             size_t outputs{0};
             size_t inflight{0};
             size_t completed{0};
+            size_t failed{0};
+            int lastErrorCode{0};
+            std::string lastErrorMessage;
 
             size_t spinnerIndex{0};
             std::chrono::steady_clock::time_point lastSpinnerUpdate{std::chrono::steady_clock::now()};
@@ -49,7 +52,7 @@ namespace AIAssistant
         StatusRenderer() = default;
 
         void UpdateSession(std::string const& name, std::string_view state, size_t outputs, size_t inflight,
-                           size_t completed);
+                           size_t completed, size_t failed, int lastErrorCode, std::string const& lastErrorMessage);
 
         void Start();
         void Stop();

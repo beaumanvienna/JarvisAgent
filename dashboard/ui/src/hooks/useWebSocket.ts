@@ -72,6 +72,9 @@ export function useWebSocket() {
             outputs: msg.outputs,
             inflight: msg.inflight,
             completed: msg.completed,
+            failed: msg.failed ?? 0,
+            last_error_code: msg.last_error_code,
+            last_error_message: msg.last_error_message,
           });
           return { ...prev, sessions: next };
         });

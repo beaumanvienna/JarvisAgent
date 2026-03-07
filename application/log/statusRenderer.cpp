@@ -76,7 +76,8 @@ namespace AIAssistant
     }
 
     void StatusRenderer::UpdateSession(std::string const& name, std::string_view state, size_t outputs, size_t inflight,
-                                       size_t completed)
+                                       size_t completed, size_t failed, int lastErrorCode,
+                                       std::string const& lastErrorMessage)
     {
         std::lock_guard<std::mutex> guard(m_Mutex);
 
@@ -86,6 +87,9 @@ namespace AIAssistant
         sessionStatus.outputs = outputs;
         sessionStatus.inflight = inflight;
         sessionStatus.completed = completed;
+        sessionStatus.failed = failed;
+        sessionStatus.lastErrorCode = lastErrorCode;
+        sessionStatus.lastErrorMessage = lastErrorMessage;
     }
 
     size_t StatusRenderer::GetSessionCount()
@@ -143,8 +147,13 @@ namespace AIAssistant
 
             std::ostringstream textStream;
             textStream << "[" << name << "] " << "STATE: " << sessionStatus.state << " | Outputs: " << sessionStatus.outputs
-                       << " | In flight: " << sessionStatus.inflight << " | Completed: " << sessionStatus.completed << " "
-                       << spinnerGlyph;
+                       << " | In flight: " << sessionStatus.inflight << " | Completed: " << sessionStatus.completed;
+            if (sessionStatus.failed > 0)
+            {
+                textStream << " | Failed: " << sessionStatus.failed << " | Error " << sessionStatus.lastErrorCode << ": "
+                           << sessionStatus.lastErrorMessage;
+            }
+            textStream << " " << spinnerGlyph;
 
             std::string lineText = textStream.str();
             SafeTruncateUtf8(lineText, maxColumns);

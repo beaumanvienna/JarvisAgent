@@ -1,7 +1,15 @@
-![Linux Build (GCC)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/linux-workflow.yml/badge.svg)
-![Windows Build (MSVC)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/windows-workflow.yml/badge.svg)
-![macOS Build (Clang)](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/macos-workflow.yml/badge.svg)
-![🐳Docker Image](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/docker-publish.yml/badge.svg)
+![🐧Linux](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/linux-workflow.yml/badge.svg)
+![🪟Windows](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/windows-workflow.yml/badge.svg)
+![🍎macOS](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/macos-workflow.yml/badge.svg)
+![🐳Docker](https://github.com/beaumanvienna/JarvisAgent/actions/workflows/docker-publish.yml/badge.svg)
+<br>
+![DEB](https://img.shields.io/badge/📦_DEB-Ubuntu-E95420)
+![RPM](https://img.shields.io/badge/📦_RPM-Fedora-51A2DA)
+![Arch](https://img.shields.io/badge/📦_PKGBUILD-Arch-1793D1)
+![AppImage](https://img.shields.io/badge/📦_AppImage-portable-333)
+![Flatpak](https://img.shields.io/badge/📦_Flatpak-sandboxed-4A86CF)
+![MSI](https://img.shields.io/badge/📦_MSI-Windows-0078D4)
+![DMG](https://img.shields.io/badge/📦_DMG-macOS-999)
 
 # JarvisAgent
 

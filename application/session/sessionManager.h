@@ -25,6 +25,7 @@
 #include <optional>
 
 #include "engine.h"
+#include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/curlManager.h"
 #include "file/trackedFile.h"
 #include "file/fileCategorizer.h"
@@ -45,6 +46,7 @@ namespace AIAssistant
                 SendingQueries,
                 AllQueriesSent,
                 AllResponsesReceived,
+                Failed,
                 NumStates
             };
 
@@ -52,7 +54,8 @@ namespace AIAssistant
                 "CompilingEnvironment", //
                 "SendingQueries",       //
                 "AllQueriesSent",       //
-                "AllResponsesReceived"  //
+                "AllResponsesReceived", //
+                "Failed"                //
             };
 
             struct StateInfo
@@ -62,6 +65,7 @@ namespace AIAssistant
                 bool m_QueriesChanged{false};
                 bool m_AllQueriesSent{false};
                 bool m_AllResponsesReceived{false};
+                bool m_HasFailures{false};
             };
 
             void OnUpdate(StateInfo& stateInfo);
@@ -85,8 +89,11 @@ namespace AIAssistant
         std::string const& GetName() const { return m_Name; }
         size_t GetInflightCount() const { return m_QueryFutures.size(); }
         size_t GetCompletedCount() const { return m_CompletedQueriesThisRun; }
+        size_t GetFailedCount() const { return m_FailedQueriesThisRun; }
         size_t GetOutputsCount() { return m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(); }
         std::string_view GetStateName() const { return StateMachine::StateNames[m_StateMachine.GetState()]; }
+        int GetLastErrorCode() const { return m_LastErrorCode; }
+        std::string const& GetLastErrorMessage() const { return m_LastErrorMessage; }
 
     private:
         void DispatchQuery(TrackedFile& requirementFile);
@@ -135,7 +142,7 @@ namespace AIAssistant
         std::string m_Tasks;
 
         // handles to queries
-        std::vector<std::future<bool>> m_QueryFutures;
+        std::vector<std::future<QueryResult>> m_QueryFutures;
 
         std::string m_Url;
         std::string m_Model;
@@ -145,5 +152,8 @@ namespace AIAssistant
 
         std::unique_ptr<ReplyParser> m_ReplyParser;
         size_t m_CompletedQueriesThisRun{0};
+        size_t m_FailedQueriesThisRun{0};
+        int m_LastErrorCode{0};
+        std::string m_LastErrorMessage;
     };
 } // namespace AIAssistant

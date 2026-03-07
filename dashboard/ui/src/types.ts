@@ -46,6 +46,9 @@ export interface SessionStatus {
   outputs: number;
   inflight: number;
   completed: number;
+  failed: number;
+  last_error_code?: number;
+  last_error_message?: string;
 }
 
 export interface PythonStatus {

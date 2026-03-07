@@ -194,11 +194,91 @@ namespace AIAssistant
         return !urlEmpty && !dataEmpty && !keyEmpty;
     }
 
-    bool CurlWrapper::Query(QueryData const& queryData)
+    std::string QueryErrorCode::Describe(int code)
     {
-        if ((!m_Initialized) || (!queryData.IsValid()))
+        if (code == Success)
         {
-            return false;
+            return "Success";
+        }
+
+        // CURLcode range (1-99)
+        if (code >= 1 && code <= 99)
+        {
+            return std::string("curl: ") + curl_easy_strerror(static_cast<CURLcode>(code));
+        }
+
+        // HTTP status code range (100-599)
+        if (code >= 100 && code <= 599)
+        {
+            switch (code)
+            {
+                case 200:
+                    return "200 OK";
+                case 400:
+                    return "400 Bad Request";
+                case 401:
+                    return "401 Unauthorized";
+                case 403:
+                    return "403 Forbidden";
+                case 404:
+                    return "404 Not Found";
+                case 429:
+                    return "429 Too Many Requests";
+                case 500:
+                    return "500 Internal Server Error";
+                case 502:
+                    return "502 Bad Gateway";
+                case 503:
+                    return "503 Service Unavailable";
+                default:
+                    return "HTTP " + std::to_string(code);
+            }
+        }
+
+        // Custom codes (1000+)
+        switch (code)
+        {
+            case NoApiKey:
+                return "No API key configured";
+            case InvalidQueryData:
+                return "Invalid query data";
+            case CurlNotInitialized:
+                return "curl not initialized";
+            case ParserError:
+                return "Response parser error";
+            case EmptyResponse:
+                return "Empty response from AI";
+            case ExceptionThrown:
+                return "Internal exception";
+            case QuotaExceeded:
+                return "Quota exceeded";
+            case ContextWindowExceeded:
+                return "Context window exceeded";
+            case ContentPolicyViolation:
+                return "Content policy violation";
+            case ModelNotFound:
+                return "Model not found";
+            default:
+                return "Unknown error " + std::to_string(code);
+        }
+    }
+
+    QueryResult CurlWrapper::Query(QueryData const& queryData)
+    {
+        if (!m_Initialized)
+        {
+            return QueryResult::Fail(QueryErrorCode::CurlNotInitialized, "curl not initialized");
+        }
+
+        if (queryData.m_ApiKey.empty())
+        {
+            LOG_CORE_CRITICAL("CurlWrapper::Query: API key empty");
+            return QueryResult::Fail(QueryErrorCode::NoApiKey, "No API key configured");
+        }
+
+        if (!queryData.IsValid())
+        {
+            return QueryResult::Fail(QueryErrorCode::InvalidQueryData, "Invalid query data (empty URL or payload)");
         }
 
         CurlSlist headers;
@@ -251,19 +331,34 @@ namespace AIAssistant
             res = curl_easy_perform(m_Curl);
         }
 
-        if (res == CURLE_OK)
+        if (res != CURLE_OK)
         {
-            LOG_CORE_INFO("Response:\n{}", m_ReadBuffer);
-        }
-        else if (res == CURLE_ABORTED_BY_CALLBACK)
-        {
-            LOG_CORE_INFO("[shutdown] curl request aborted (query {})", m_QueryCounter.load());
-        }
-        else
-        {
-            LOG_CORE_ERROR("curl error (code {}): {}", static_cast<int>(res), curl_easy_strerror(res));
+            int const curlCode = static_cast<int>(res);
+            std::string msg = curl_easy_strerror(res);
+            if (res == CURLE_ABORTED_BY_CALLBACK)
+            {
+                LOG_CORE_INFO("[shutdown] curl request aborted (query {})", m_QueryCounter.load());
+            }
+            else
+            {
+                LOG_CORE_ERROR("curl error (code {}): {}", curlCode, msg);
+            }
+            return QueryResult::Fail(curlCode, std::move(msg));
         }
 
-        return res == CURLE_OK;
+        // curl succeeded — check HTTP status code
+        long httpCode = 0;
+        curl_easy_getinfo(m_Curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        LOG_CORE_INFO("Response (HTTP {}): {}", httpCode, m_ReadBuffer);
+
+        if (httpCode >= 400)
+        {
+            std::string msg = QueryErrorCode::Describe(static_cast<int>(httpCode));
+            LOG_CORE_ERROR("HTTP error {} for query {}", httpCode, m_QueryCounter.load());
+            return QueryResult::Fail(static_cast<int>(httpCode), std::move(msg));
+        }
+
+        return QueryResult::Ok();
     }
 } // namespace AIAssistant

@@ -66,7 +66,8 @@ namespace AIAssistant
                 .m_EnvironmentComplete = m_Environment.GetEnvironmentComplete(), //
                 .m_QueriesChanged = queriesChanged,                              //
                 .m_AllQueriesSent = allQueriesSent,                              //
-                .m_AllResponsesReceived = (m_QueryFutures.size() == 0)           // idle when no futures are outstanding
+                .m_AllResponsesReceived = (m_QueryFutures.size() == 0),          // idle when no futures are outstanding
+                .m_HasFailures = (m_FailedQueriesThisRun > 0)                    //
             };
             m_StateMachine.OnUpdate(stateInfo);
         }
@@ -109,7 +110,8 @@ namespace AIAssistant
                 StatusRenderer& statusRenderer = jarvisAgent->GetStatusRenderer();
                 statusRenderer.UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
                                              m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
-                                             m_QueryFutures.size(), m_CompletedQueriesThisRun);
+                                             m_QueryFutures.size(), m_CompletedQueriesThisRun, m_FailedQueriesThisRun,
+                                             m_LastErrorCode, m_LastErrorMessage);
             }
         }
 
@@ -122,6 +124,12 @@ namespace AIAssistant
             msg["outputs"] = m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size();
             msg["inflight"] = m_QueryFutures.size();
             msg["completed"] = m_CompletedQueriesThisRun;
+            msg["failed"] = m_FailedQueriesThisRun;
+            if (m_LastErrorCode != 0)
+            {
+                msg["last_error_code"] = m_LastErrorCode;
+                msg["last_error_message"] = m_LastErrorMessage;
+            }
             webServer.BroadcastJSON(msg.dump());
         }
     }
@@ -216,7 +224,11 @@ namespace AIAssistant
         m_QueryFutures.clear();
     }
 
-    bool SessionManager::IsIdle() const { return m_StateMachine.GetState() == StateMachine::State::AllResponsesReceived; }
+    bool SessionManager::IsIdle() const
+    {
+        auto const state = m_StateMachine.GetState();
+        return state == StateMachine::State::AllResponsesReceived || state == StateMachine::State::Failed;
+    }
 
     void SessionManager::DispatchQuery(TrackedFile& requirementFile)
     {
@@ -279,37 +291,39 @@ namespace AIAssistant
 
         auto& threadpool = Core::g_Core->GetThreadPool();
         std::string inputFilename = requirementFile.GetPath().string();
-        auto query = [this, queryData, inputFilename]() -> bool
+        auto query = [this, queryData, inputFilename]() -> QueryResult
         {
             try
             {
                 auto& curl = CurlManager::GetThreadCurl();
                 curl.Clear();
 
-                bool ok = curl.Query(queryData);
+                QueryResult curlResult = curl.Query(queryData);
 
                 // Always create a parser, even if curl failed (empty buffer)
                 auto interfaceType = Core::g_Core->GetInterfaceType();
-                m_ReplyParser = ReplyParser::Create(interfaceType, ok ? curl.GetBuffer() : "");
+                m_ReplyParser = ReplyParser::Create(interfaceType, curlResult.m_Ok ? curl.GetBuffer() : "");
 
-                // If curl itself failed → safe exit
-                if (!ok)
+                if (!curlResult.m_Ok)
                 {
-                    LOG_APP_ERROR("Curl network error while processing: {}", inputFilename);
-                    return false;
+                    LOG_APP_ERROR("Query failed for '{}' (error {}): {}", inputFilename, curlResult.m_ErrorCode,
+                                  curlResult.m_ErrorMessage);
+                    return curlResult;
                 }
 
                 // Parser error?
                 if (m_ReplyParser->HasError())
                 {
-                    return false;
+                    return QueryResult::Fail(QueryErrorCode::ParserError,
+                                             "Response parser error for '" + inputFilename + "'");
                 }
 
                 size_t hasContent = m_ReplyParser->HasContent();
                 if (hasContent == 0)
                 {
                     LOG_APP_WARN("No content returned for '{}'", inputFilename);
-                    return false;
+                    return QueryResult::Fail(QueryErrorCode::EmptyResponse,
+                                             "Empty response from AI for '" + inputFilename + "'");
                 }
 
                 // Write all returned content blocks
@@ -325,12 +339,12 @@ namespace AIAssistant
                     FileWriter::Get().WriteWithHeader(outputPath, contentText, m_Model);
                 }
 
-                return true;
+                return QueryResult::Ok();
             }
             catch (const std::exception& e)
             {
                 LOG_APP_ERROR("Exception in query thread for '{}': {}", inputFilename, e.what());
-                return false;
+                return QueryResult::Fail(QueryErrorCode::ExceptionThrown, e.what());
             }
         };
 
@@ -414,11 +428,20 @@ namespace AIAssistant
                 {
                     if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
                     {
-                        bool curleOk = future.get();
-                        ++m_CompletedQueriesThisRun;
-                        // report bad curl to engine
-                        if (!curleOk)
+                        QueryResult result = future.get();
+                        if (result.m_Ok)
                         {
+                            ++m_CompletedQueriesThisRun;
+                        }
+                        else
+                        {
+                            ++m_FailedQueriesThisRun;
+                            m_LastErrorCode = result.m_ErrorCode;
+                            m_LastErrorMessage = result.m_ErrorMessage;
+
+                            LOG_APP_ERROR("[{}] query failed (error {}): {}", m_Name, result.m_ErrorCode,
+                                          result.m_ErrorMessage);
+
                             auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
                             Core::g_Core->PushEvent(appErrorEvent);
                         }
@@ -709,11 +732,23 @@ namespace AIAssistant
             {
                 if (stateInfo.m_AllResponsesReceived)
                 {
-                    m_State = State::AllResponsesReceived;
+                    m_State = stateInfo.m_HasFailures ? State::Failed : State::AllResponsesReceived;
                 }
                 break;
             }
             case State::AllResponsesReceived:
+            {
+                if (stateInfo.m_EnvironmentChanged)
+                {
+                    m_State = State::CompilingEnvironment;
+                }
+                else if (stateInfo.m_QueriesChanged)
+                {
+                    m_State = State::SendingQueries;
+                }
+                break;
+            }
+            case State::Failed:
             {
                 if (stateInfo.m_EnvironmentChanged)
                 {
