@@ -91,48 +91,30 @@ install -dm755 %{_instdir}/doc
 install -m644 README.md %{_instdir}/doc/README.md
 install -m644 doc/JC_Workflow_Specification.md %{_instdir}/doc/JC_Workflow_Specification.md 2>/dev/null || true
 
-# Launcher script
-install -Dm755 /dev/stdin %{buildroot}/usr/bin/jarvisagent <<'EOF'
-#!/usr/bin/env bash
-cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
-case "${1:-}" in
-    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
-esac
-if [[ ! -f config.json ]]; then
-    echo "No config.json found in /opt/jarvisagent/"
-    echo "Copy the example and edit it:"
-    echo "  sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
-    exit 1
-fi
-exec ./bin/jarvisAgent "$@"
-EOF
+# Launcher script (shared across deb/rpm/arch)
+install -Dm755 jarvisagent-launcher.sh %{buildroot}/usr/bin/jarvisagent
 
 %post
-echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
-python3 -m venv /opt/jarvisagent/.venv
-/opt/jarvisagent/.venv/bin/pip install --quiet --upgrade pip
-
-echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-/opt/jarvisagent/.venv/bin/pip install --quiet "markitdown[all]" md2pdf-mermaid playwright
-
-echo "==> Installing Playwright Chromium ..."
-/opt/jarvisagent/.venv/bin/playwright install chromium
-
 echo ""
 echo "==> JarvisAgent installed to /opt/jarvisagent/"
 echo ""
-echo "    To get started:"
-echo "      1. sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
-echo "      2. Edit config.json (set API keys, queue/workflow paths)"
-echo "      3. source /opt/jarvisagent/.venv/bin/activate"
-echo "      4. Run: jarvisagent"
+echo "    To get started, run:  jarvisagent"
+echo ""
+echo "    On first launch, the launcher will:"
+echo "      - Create ~/JarvisAgent with your working data"
+echo "      - Set up a Python virtual environment"
+echo "      - Copy example config and workflows"
+echo "      - Open the dashboard in your browser"
+echo ""
+echo "    Custom working directory:  jarvisagent --home /path/to/dir"
+echo "    Skip browser:              jarvisagent --no-browser"
 echo ""
 
 %postun
 if [ "$1" = 0 ]; then
-    echo "==> Removing Python virtual environment ..."
-    rm -rf /opt/jarvisagent/.venv
-    echo "==> You may want to remove /opt/jarvisagent/ manually if custom data remains."
+    echo "==> JarvisAgent uninstalled from /opt/jarvisagent/"
+    echo "    User data in ~/JarvisAgent (or custom --home) was NOT removed."
+    echo "    To clean up user data: rm -rf ~/JarvisAgent"
 fi
 
 %files

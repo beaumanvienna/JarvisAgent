@@ -71,9 +71,23 @@ See also:
 ## 8. Multi-user support for system-wide installs (new)
 - When installed system-wide via deb/rpm/Arch (`/opt/jarvisagent/`), `queue/` and `workflows/` are owned by root
 - Non-root users cannot write to these directories without `sudo`
-- Investigate per-user data directories (e.g. `~/.local/share/jarvisagent/`) like the Flatpak/AppImage approach
-- Or use a shared group (`jarvisagent`) with appropriate permissions
-- The launcher script and config.json should support user-level overrides for `queue folder` and `workflows folder`
+
+**Proposed solution: user-space launcher script**
+
+A wrapper script (installed to `/usr/bin/jarvisagent` on Linux, available on PATH via MSI on Windows) that:
+1. Creates a per-user working directory on first run:
+   - **Linux/macOS:** `~/JarvisAgent` (default), overridable via CLI argument or env var
+   - **Windows:** `%USERPROFILE%\JarvisAgent` (default)
+2. Copies/symlinks the required folder structure from the install location (`/opt/jarvisagent/` or `C:\Program Files\JarvisAgent\`):
+   - Read-only assets (binary, dashboard, workflow-editor, doc, scripts) → **symlink** to install dir
+   - Writable user data (queue, workflows, log, config.json) → **copy templates** or **create empty dirs**
+3. Activates the Python venv (so `markitdown`, `md2pdf` are on PATH)
+4. Starts jarvisAgent in the terminal (CWD = user directory)
+5. Opens the dashboard (`http://localhost:8080`) in the default browser
+
+This is already how AppImage and Flatpak work (via `AppRun` / `jarvisagent-wrapper.sh`).
+The same pattern should be adopted for deb/rpm/Arch/MSI installs.
+
 - `md2pdf` (from the Python venv at `/opt/jarvisagent/.venv`) is not on PATH by default — the launcher or shell scripts need to activate the venv or add it to PATH so workflows like `vehicleTroubleshootingGuide` can find it
 
 ---
@@ -152,8 +166,17 @@ See also:
   - start command: jarvisAgent --headless --port 8080
   - update docs regarding all CLI options (also --version, --help)
 
-## 15. Headless server mode (new)
-- **manpage**
-  - create man page
+## 15. Man page (new)
+- Create man page for jarvisAgent
 
+---
+
+## 16. Packaging testing (new)
+- [ ] **macOS:** Test DMG install + uninstall on real hardware, verify instructions in packaging.md
+- [ ] **Windows:** Test MSI install + uninstall, verify PATH entry works, test setup-venv.bat
+- [ ] **Linux (deb):** Test install as non-root user workflow (blocked on #8 — launcher script)
+- [ ] **Linux (deb/Launchpad):** Build and upload source package to PPA, verify Launchpad builds it
+- [ ] **Linux (rpm):** Test install on Fedora/Rocky, verify post-install hooks
+- [ ] **Linux (Arch):** Test PKGBUILD install on Manjaro
+- [ ] **All platforms:** Evaluate user-friendliness of first-run experience (config.json setup, venv, starting the app)
 

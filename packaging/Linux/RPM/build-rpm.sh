@@ -115,22 +115,8 @@ cp "$REPO_ROOT/config.json" "$STAGING/opt/jarvisagent/config.json.example"
 cp "$REPO_ROOT/README.md" "$STAGING/opt/jarvisagent/doc/README.md"
 cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$STAGING/opt/jarvisagent/doc/JC_Workflow_Specification.md" 2>/dev/null || true
 
-# Launcher script
-cat > "$STAGING/usr/bin/jarvisagent" <<'LAUNCHER'
-#!/usr/bin/env bash
-cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
-case "${1:-}" in
-    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
-esac
-if [[ ! -f config.json ]]; then
-    echo "No config.json found in /opt/jarvisagent/"
-    echo "Copy the example and edit it:"
-    echo "  sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
-    exit 1
-fi
-exec ./bin/jarvisAgent "$@"
-LAUNCHER
-chmod 755 "$STAGING/usr/bin/jarvisagent"
+# Launcher script (shared across deb/rpm/arch)
+install -m755 "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$STAGING/usr/bin/jarvisagent"
 
 # ---- Build RPM using rpmbuild (if available) or fpm ----
 if command -v rpmbuild &>/dev/null; then
@@ -187,6 +173,9 @@ if command -v rpmbuild &>/dev/null; then
     cp "$REPO_ROOT/README.md" "$SRCDIR/README.md"
     mkdir -p "$SRCDIR/doc"
     cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SRCDIR/doc/" 2>/dev/null || true
+
+    # Launcher script (shared across deb/rpm/arch)
+    cp "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$SRCDIR/jarvisagent-launcher.sh"
 
     rpmbuild --define "_topdir $RPMBUILD_DIR" \
              --noclean \

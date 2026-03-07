@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
 
-echo "==> Removing Python virtual environment ..."
-rm -rf /opt/jarvisagent/.venv
-echo "==> You may want to remove /opt/jarvisagent/ manually if custom data remains."
+echo "==> JarvisAgent uninstalled from /opt/jarvisagent/"
+echo "    User data in ~/JarvisAgent (or custom --home) was NOT removed."
+echo "    To clean up user data: rm -rf ~/JarvisAgent"
