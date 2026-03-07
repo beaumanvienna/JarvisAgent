@@ -15,10 +15,22 @@ dnf install -y \
     rpm-build \
     bash xdg-utils
 
-echo "==> Enabling Node.js 20 module ..."
-dnf module reset -y nodejs
-dnf module enable -y nodejs:20
-dnf install -y nodejs npm
+echo "==> Installing Node.js ..."
+if dnf module list nodejs &>/dev/null 2>&1; then
+    # RHEL/Rocky 9 — use module stream
+    dnf module reset -y nodejs
+    dnf module enable -y nodejs:20
+    dnf install -y nodejs npm
+else
+    # RHEL/Rocky 10+ — modularity removed, install from AppStream or NodeSource
+    if dnf install -y nodejs npm 2>/dev/null; then
+        echo "    Node.js installed from default repos"
+    else
+        echo "    Node.js not in repos — installing from NodeSource ..."
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+        dnf install -y nodejs
+    fi
+fi
 
 echo "==> Installing Premake5 ..."
 if ! command -v premake5 &>/dev/null; then
