@@ -70,24 +70,32 @@ fi
 
 # Symlink read-only assets (re-created every launch to pick up package updates)
 # Uses ln -sfn to atomically replace existing symlinks without rm.
+# If a real directory already exists (e.g. git clone), skip it — content is there.
 for asset in bin dashboard workflow-editor scripts doc; do
     if [[ -d "$INSTALL_DIR/$asset" ]]; then
         if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
-            # Path is a symlink or does not exist — safe to (re)create
             ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
-        else
-            # Path is a real file or directory — ask before replacing
-            echo ""
-            echo "WARNING: $USER_HOME/$asset already exists and is not a symlink."
-            echo "         The launcher needs a symlink to $INSTALL_DIR/$asset."
-            read -rp "         Rename to ${asset}.bak and create symlink? [y/N] " answer
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                mv "$USER_HOME/$asset" "$USER_HOME/${asset}.bak"
-                ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
-                echo "         Renamed to ${asset}.bak, symlink created."
-            else
-                echo "         Skipped. JarvisAgent may not work correctly."
-            fi
+        fi
+    fi
+done
+
+# Ensure bin/jarvisAgent is reachable even if bin/ is a real directory
+# (e.g. git clone has bin/Release/ but no bin/jarvisAgent)
+if [[ -d "$USER_HOME/bin" && ! -L "$USER_HOME/bin" && ! -e "$USER_HOME/bin/jarvisAgent" ]]; then
+    ln -sfn "$INSTALL_DIR/bin/jarvisAgent" "$USER_HOME/bin/jarvisAgent"
+fi
+
+# If dashboard/workflow-editor dist/ folders are real directories, offer to
+# replace them with symlinks to the installed (packaged) versions.
+for ui_dist in dashboard/ui/dist workflow-editor/ui/dist; do
+    installed="$INSTALL_DIR/$ui_dist"
+    local_dir="$USER_HOME/$ui_dist"
+    if [[ -d "$installed" && -d "$local_dir" && ! -L "$local_dir" ]]; then
+        read -rp "==> $ui_dist already exists. Use installed version? [y/N] " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            mv "$local_dir" "${local_dir}.bak"
+            ln -sfn "$installed" "$local_dir"
+            echo "    Renamed to $(basename "$ui_dist").bak, using installed version."
         fi
     fi
 done
