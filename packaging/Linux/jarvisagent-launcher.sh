@@ -69,10 +69,17 @@ if [[ ! -d "$USER_HOME" ]]; then
 fi
 
 # Symlink read-only assets (re-created every launch to pick up package updates)
+# Uses ln -sfn to atomically replace existing symlinks without rm.
 for asset in bin dashboard workflow-editor scripts doc; do
     if [[ -d "$INSTALL_DIR/$asset" ]]; then
-        rm -f "$USER_HOME/$asset"
-        ln -sf "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
+        if [[ -L "$USER_HOME/$asset" ]] || [[ ! -e "$USER_HOME/$asset" ]]; then
+            # Path is a symlink or does not exist — safe to (re)create
+            ln -sfn "$INSTALL_DIR/$asset" "$USER_HOME/$asset"
+        else
+            # Path is a real file or directory — do not override
+            echo "WARNING: $USER_HOME/$asset already exists and is not a symlink — skipping."
+            echo "         Expected a symlink to $INSTALL_DIR/$asset."
+        fi
     fi
 done
 
