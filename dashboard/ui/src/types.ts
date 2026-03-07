@@ -13,6 +13,7 @@ export interface WorkflowEntry {
   label?: string;
   path?: string;
   manual_start?: boolean;
+  has_ai_call?: boolean;
 }
 
 export interface WorkflowsListResponse {
@@ -80,6 +81,13 @@ export interface AnalyzeIssue {
   line: number;
   severity: string;
   text: string;
+}
+
+export interface KeysStatusResponse {
+  ok: boolean;
+  status: string;
+  message: string;
+  has_providers: boolean;
 }
 
 export interface AnalyzeLastRunResponse {

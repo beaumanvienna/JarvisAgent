@@ -398,6 +398,14 @@ namespace AIAssistant
         // JCWF: "defaults" – raw JSON kept for serialization; parsed fields in m_Defaults.
         std::string m_DefaultsJson;
         WorkflowDefaults m_Defaults;
+
+        // Computed at load time: true if any task in the workflow is an ai_call.
+        bool m_HasAiCallTasks{false};
+
+        // Computed at load time: the resolved provider name for each ai_call task.
+        // Empty string means "system default provider".  Checked at enqueue time
+        // to verify that every required provider is present in the registry.
+        std::vector<std::string> m_RequiredAiProviders;
     };
 
     // ---------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { runWorkflow } from "../api";
 
 interface Props {
   workflows: WorkflowEntry[];
+  hasProviders: boolean;
   runs: RunSnapshot[];
   lastRuns: LastRunInfo[];
   onRefresh: () => void;
@@ -38,7 +39,7 @@ function stateClass(state: string): string {
   }
 }
 
-export default function WorkflowsPanel({ workflows, runs, lastRuns, onRefresh }: Props) {
+export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh }: Props) {
   const runsByWorkflow = new Map<string, RunSnapshot>();
   for (const run of runs) {
     runsByWorkflow.set(run.workflowId, run);
@@ -61,6 +62,14 @@ export default function WorkflowsPanel({ workflows, runs, lastRuns, onRefresh }:
   return (
     <section className="panel">
       <h2>Workflows</h2>
+      {!hasProviders && workflows.some((wf) => wf.has_ai_call) && (
+        <div className="no-keys-banner">
+          No AI providers configured — workflows with ai_call tasks have been
+          skipped. Set <code>OPENAI_API_KEY</code> or{" "}
+          <code>JARVIS_MASTER_PASSWORD</code>, or add providers in the Settings
+          UI in the workflow editor, then reload workflows.
+        </div>
+      )}
       {workflows.length === 0 ? (
         <p className="muted">No workflows loaded.</p>
       ) : (
@@ -80,9 +89,17 @@ export default function WorkflowsPanel({ workflows, runs, lastRuns, onRefresh }:
               const lastRun = lastRunByWorkflow.get(wf.id);
               const displayState = activeRun?.state ?? lastRun?.state ?? null;
               const isRunning = displayState === "running" || displayState === "pending" || displayState === "queued";
+              const missingKeys = !hasProviders && !!wf.has_ai_call;
               return (
-                <tr key={wf.id}>
-                  <td className="mono">{wf.id}</td>
+                <tr key={wf.id} className={missingKeys ? "row-no-keys" : ""}>
+                  <td className="mono">
+                    {wf.id}
+                    {missingKeys && (
+                      <span className="hazard-icon" title="AI provider keys not configured — cannot run this workflow">
+                        &#9888;
+                      </span>
+                    )}
+                  </td>
                   <td>{wf.label || "\u2014"}</td>
                   <td>
                     {displayState ? (
@@ -105,7 +122,8 @@ export default function WorkflowsPanel({ workflows, runs, lastRuns, onRefresh }:
                       <button
                         className="btn btn-small btn-run"
                         onClick={() => handleRun(wf.id)}
-                        disabled={isRunning}
+                        disabled={isRunning || missingKeys}
+                        title={missingKeys ? "AI provider keys not configured" : undefined}
                       >
                         Run
                       </button>

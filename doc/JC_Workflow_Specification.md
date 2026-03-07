@@ -755,6 +755,12 @@ The orchestrator or UI MAY expose a “clean” action that simply runs this tas
 3. **System-level** default provider — if neither task nor workflow specifies a provider, use the system default from the provider registry.
 4. If no provider can be resolved, the task MUST fail with a clear error before dispatch.
 
+**Provider prerequisite check:**
+
+Before a workflow run is enqueued (whether by trigger activation, manual start, or API call), the runtime MUST verify that every `ai_call` task in the workflow has its required provider available in the provider registry. The check uses the same resolution order above (task-level → workflow-level → system default). If **any** required provider is missing, the workflow run MUST be blocked with a log warning, and the trigger or start request is silently dropped. This prevents workflows from starting, partially executing non-AI tasks, and then failing on the first `ai_call`.
+
+The dashboard SHOULD indicate which workflows are blocked due to missing providers (e.g., a hazard icon and disabled Run button) and display a banner explaining how to configure providers.
+
 **Model override:**
 
 - If `params.model` is specified on the task, it overrides the provider's `default_model`.
@@ -1455,6 +1461,7 @@ This section describes how JarvisAgent should execute JCWF workflows across the 
 2. Validate JSON structure, triggers, and the `depends_on` DAG (no cycles).  
 3. Register workflows and triggers with the JarvisAgent core.  
 4. On trigger activation (cron, file, structure, manual):  
+   - **Provider prerequisite check:** verify that every `ai_call` task's required provider exists in the provider registry (see 3.3.7). If any provider is missing, block the run with a log warning.  
    - Create a workflow run instance with its own ID and context.  
    - Resolve ready tasks:  
      - All `depends_on` tasks succeeded (or were skipped as up to date), and  

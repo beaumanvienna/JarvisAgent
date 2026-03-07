@@ -160,6 +160,10 @@ namespace AIAssistant
 
         std::string GenerateRunId(WorkflowDefinition const& workflowDefinition) const;
 
+        // Returns true if all AI provider prerequisites are satisfied for this workflow.
+        // If the workflow has no ai_call tasks, returns true unconditionally.
+        bool CheckAiProviderPrerequisites(WorkflowDefinition const& workflowDefinition) const;
+
         void DrainAiRequestCompletions();
         bool TryApplyAiCompletion(AiRequestCompletion const& completion);
 

@@ -168,6 +168,36 @@ body {
   font-size: 0.8rem;
 }
 
+.no-keys-banner {
+  background: #2a1a00;
+  border: 1px solid #6b4f00;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+  color: #eab308;
+  line-height: 1.5;
+}
+
+.no-keys-banner code {
+  background: #1a1a1a;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  color: #c8d6c0;
+}
+
+.row-no-keys {
+  opacity: 0.55;
+}
+
+.hazard-icon {
+  margin-left: 6px;
+  color: #eab308;
+  cursor: help;
+  font-size: 0.85rem;
+}
+
 /* ---- Data Tables ---- */
 .data-table {
   width: 100%;

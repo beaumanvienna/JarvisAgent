@@ -1084,6 +1084,7 @@ namespace AIAssistant
                 }
 
                 workflowEntry["manual_start"] = workflowDefinition->m_ManualStart;
+                workflowEntry["has_ai_call"] = workflowDefinition->m_HasAiCallTasks;
             }
 
             workflowsList.emplace_back(std::move(workflowEntry));

@@ -77,6 +77,118 @@ namespace AIAssistant
 
             return false;
         }
+
+        // -----------------------------------------------------------------
+        // AI provider availability helpers
+        // -----------------------------------------------------------------
+
+        bool WorkflowHasAiCallTasks(WorkflowDefinition const& workflow)
+        {
+            for (auto const& [taskId, task] : workflow.m_Tasks)
+            {
+                if (task.m_Type == TaskType::AiCall)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Extract a string field from a raw JSON object (best-effort, single field).
+        std::optional<std::string> TryExtractJsonString(std::string const& json, std::string const& fieldName)
+        {
+            if (json.empty())
+            {
+                return std::nullopt;
+            }
+
+            try
+            {
+                simdjson::ondemand::parser parser;
+                simdjson::padded_string padded(json);
+                simdjson::ondemand::document doc = parser.iterate(padded);
+                simdjson::ondemand::object root = doc.get_object().value();
+
+                std::string_view sv;
+                if (root[fieldName].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    return std::string(sv);
+                }
+            }
+            catch (...)
+            {
+            }
+
+            return std::nullopt;
+        }
+
+        // Extract defaults.ai.provider from the workflow's raw defaults JSON.
+        std::optional<std::string> TryExtractDefaultAiProvider(std::string const& defaultsJson)
+        {
+            if (defaultsJson.empty())
+            {
+                return std::nullopt;
+            }
+
+            try
+            {
+                simdjson::ondemand::parser parser;
+                simdjson::padded_string padded(defaultsJson);
+                simdjson::ondemand::document doc = parser.iterate(padded);
+                simdjson::ondemand::object root = doc.get_object().value();
+
+                simdjson::ondemand::object aiObj;
+                if (root["ai"].get_object().get(aiObj) == simdjson::SUCCESS)
+                {
+                    std::string_view sv;
+                    if (aiObj["provider"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        return std::string(sv);
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+
+            return std::nullopt;
+        }
+
+        // Resolve which provider name an ai_call task will use.
+        // Resolution order: task params.provider → defaults.ai.provider → "" (system default).
+        std::string ResolveAiCallProviderName(TaskDef const& task, std::string const& defaultsJson)
+        {
+            // 1. Task-level params.provider
+            auto taskProvider = TryExtractJsonString(task.m_ParamsJson, "provider");
+            if (taskProvider.has_value() && !taskProvider->empty())
+            {
+                std::string const& raw = *taskProvider;
+
+                // If it contains a {{defaults.*}} template, resolve from the defaults JSON.
+                if (raw.find("{{defaults.") != std::string::npos)
+                {
+                    auto defaultProvider = TryExtractDefaultAiProvider(defaultsJson);
+                    if (defaultProvider.has_value() && !defaultProvider->empty())
+                    {
+                        return *defaultProvider;
+                    }
+                    // Template couldn't be resolved — fall through to system default.
+                    return {};
+                }
+
+                return raw;
+            }
+
+            // 2. Workflow-level defaults.ai.provider
+            auto defaultProvider = TryExtractDefaultAiProvider(defaultsJson);
+            if (defaultProvider.has_value() && !defaultProvider->empty())
+            {
+                return *defaultProvider;
+            }
+
+            // 3. System default — return empty to signal "use system default".
+            return {};
+        }
     } // namespace
 
     void WorkflowRegistry::Clear() { m_Workflows.clear(); }
@@ -245,6 +357,38 @@ namespace AIAssistant
                          workflowFilePathAbsolute.string());
             return false;
         }
+
+        // -----------------------------------------------------------------
+        // Tag workflows that contain ai_call tasks and precompute the
+        // list of required AI provider names (for runtime prerequisite
+        // checks before a workflow run is enqueued).
+        // -----------------------------------------------------------------
+        workflowDefinition.m_HasAiCallTasks = WorkflowHasAiCallTasks(workflowDefinition);
+
+        if (workflowDefinition.m_HasAiCallTasks)
+        {
+            for (auto const& [taskId, task] : workflowDefinition.m_Tasks)
+            {
+                if (task.m_Type != TaskType::AiCall)
+                {
+                    continue;
+                }
+
+                std::string const providerName = ResolveAiCallProviderName(task, workflowDefinition.m_DefaultsJson);
+                workflowDefinition.m_RequiredAiProviders.push_back(providerName);
+            }
+
+            if (Core::g_Core != nullptr)
+            {
+                auto const& keyManager = Core::g_Core->GetKeyManager();
+                if (!keyManager.HasProviders())
+                {
+                    LOG_APP_WARN("Workflow '{}' contains ai_call tasks but no AI providers are configured",
+                                 workflowDefinition.m_Id);
+                }
+            }
+        }
+
         auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
         if (!inserted)
         {

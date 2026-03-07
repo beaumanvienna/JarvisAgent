@@ -1,4 +1,4 @@
-import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse } from "./types";
+import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse } from "./types";
 
 const BASE = window.location.origin;
 
@@ -39,6 +39,11 @@ export async function fetchLog(opts: { tail?: number; offset?: number }): Promis
     params.set("tail", String(opts.tail));
   }
   const res = await fetch(`${BASE}/api/log?${params.toString()}`);
+  return res.json();
+}
+
+export async function fetchKeysStatus(): Promise<KeysStatusResponse> {
+  const res = await fetch(`${BASE}/api/settings/keys/status`);
   return res.json();
 }
 

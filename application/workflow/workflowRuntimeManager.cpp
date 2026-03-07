@@ -369,6 +369,10 @@ namespace AIAssistant
             std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
             if (workflowDefinition.has_value())
             {
+                if (!CheckAiProviderPrerequisites(workflowDefinition.value()))
+                {
+                    return std::string();
+                }
                 runId = GenerateRunId(workflowDefinition.value());
             }
         }
@@ -401,6 +405,16 @@ namespace AIAssistant
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             workflowRegistry = m_WorkflowRegistry;
+        }
+
+        // Provider prerequisite check (must happen before enqueue).
+        if (workflowRegistry != nullptr)
+        {
+            std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
+            if (workflowDefinition.has_value() && !CheckAiProviderPrerequisites(workflowDefinition.value()))
+            {
+                return std::string();
+            }
         }
 
         std::string resolvedRunId = runId;
@@ -1448,6 +1462,57 @@ namespace AIAssistant
         runId += std::to_string(static_cast<long long>(nowTimeT));
 
         return runId;
+    }
+
+    bool WorkflowRuntimeManager::CheckAiProviderPrerequisites(WorkflowDefinition const& workflowDefinition) const
+    {
+        if (!workflowDefinition.m_HasAiCallTasks)
+        {
+            return true;
+        }
+
+        if (Core::g_Core == nullptr)
+        {
+            return true;
+        }
+
+        auto const& keyManager = Core::g_Core->GetKeyManager();
+
+        if (!keyManager.HasProviders())
+        {
+            LOG_APP_WARN("Blocked workflow run '{}': contains ai_call tasks but no AI providers "
+                         "are configured. Set OPENAI_API_KEY or JARVIS_MASTER_PASSWORD, or "
+                         "configure providers via the Settings UI, then reload workflows.",
+                         workflowDefinition.m_Id);
+            return false;
+        }
+
+        // Check each required provider individually.
+        for (std::string const& providerName : workflowDefinition.m_RequiredAiProviders)
+        {
+            if (providerName.empty())
+            {
+                if (keyManager.GetDefaultProvider() == nullptr)
+                {
+                    LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires system default "
+                                 "provider, but no default provider is configured",
+                                 workflowDefinition.m_Id);
+                    return false;
+                }
+            }
+            else
+            {
+                if (keyManager.GetProvider(providerName) == nullptr)
+                {
+                    LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires provider '{}' "
+                                 "which is not configured",
+                                 workflowDefinition.m_Id, providerName);
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     bool WorkflowRuntimeManager::TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const

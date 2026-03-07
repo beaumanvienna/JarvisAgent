@@ -16,7 +16,7 @@ export default function App() {
     return params.get("tab") === "log" ? "log" : "dashboard";
   });
   const ws = useWebSocket();
-  const { workflows, refresh } = usePolling(5000);
+  const { workflows, hasProviders, refresh } = usePolling(5000);
 
   const handleQuit = async () => {
     if (!window.confirm("Shut down JarvisAgent?")) return;
@@ -44,6 +44,7 @@ export default function App() {
         <main className="main-content">
           <WorkflowsPanel
             workflows={workflows}
+            hasProviders={hasProviders}
             runs={ws.runs}
             lastRuns={ws.lastRuns}
             onRefresh={refresh}
