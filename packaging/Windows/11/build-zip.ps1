@@ -131,51 +131,161 @@ if (Test-Path "$RepoRoot\doc\JC_Workflow_Specification.md") {
     Copy-Item "$RepoRoot\doc\JC_Workflow_Specification.md" "$StageDir\doc\JC_Workflow_Specification.md"
 }
 
-# Launcher batch file
+# Launcher batch file (user-space: creates %USERPROFILE%\JarvisAgent with junctions)
 $launcherContent = @'
 @echo off
-REM JarvisAgent launcher for Windows
-REM Requires bash on PATH (Git Bash or MSYS2) for shell tasks.
+setlocal enabledelayedexpansion
+REM jarvisagent.bat — User-space launcher for JarvisAgent on Windows.
+REM Creates a per-user working directory with junctions to read-only assets.
+REM Junctions (mklink /J) do not require admin on Windows 10+.
+REM
+REM Usage:
+REM   jarvisagent                          default: %USERPROFILE%\JarvisAgent
+REM   jarvisagent --home C:\path\to\dir    custom working directory
+REM   set JARVISAGENT_HOME=C:\path & jarvisagent   via environment variable
+REM   jarvisagent --no-browser             skip opening dashboard in browser
 
-cd /d "%~dp0"
+set "INSTALL_DIR=%~dp0"
+if "!INSTALL_DIR:~-1!"=="\" set "INSTALL_DIR=!INSTALL_DIR:~0,-1!"
+set "OPEN_BROWSER=1"
+set "USER_HOME="
 
-if "%~1"=="--help" ( bin\jarvisAgent.exe %* & exit /b )
-if "%~1"=="-h" ( bin\jarvisAgent.exe %* & exit /b )
-if "%~1"=="--version" ( bin\jarvisAgent.exe %* & exit /b )
-if "%~1"=="-v" ( bin\jarvisAgent.exe %* & exit /b )
+REM ---- Parse arguments ----
+:parse
+if "%~1"=="" goto :main
+if /i "%~1"=="--home" (
+    set "USER_HOME=%~2"
+    shift
+    shift
+    goto :parse
+)
+if /i "%~1"=="--no-browser" (
+    set "OPEN_BROWSER=0"
+    shift
+    goto :parse
+)
+if /i "%~1"=="--help" goto :passthrough
+if /i "%~1"=="-h" goto :passthrough
+if /i "%~1"=="--version" goto :passthrough
+if /i "%~1"=="-v" goto :passthrough
+shift
+goto :parse
 
-if not exist config.json (
-    echo No config.json found in %~dp0
-    echo Copy the example and edit it:
-    echo   copy config.json.example config.json
+:passthrough
+"!INSTALL_DIR!\bin\jarvisAgent.exe" %*
+exit /b
+
+:main
+if "!USER_HOME!"=="" (
+    if defined JARVISAGENT_HOME (
+        set "USER_HOME=!JARVISAGENT_HOME!"
+    ) else (
+        set "USER_HOME=%USERPROFILE%\JarvisAgent"
+    )
+)
+
+REM ---- Verify install directory ----
+if not exist "!INSTALL_DIR!\bin\jarvisAgent.exe" (
+    echo ERROR: !INSTALL_DIR!\bin\jarvisAgent.exe not found.
     exit /b 1
 )
 
-bin\jarvisAgent.exe %*
+REM ---- First-run setup ----
+if not exist "!USER_HOME!" (
+    echo ==^> First run: creating working directory at !USER_HOME!
+    mkdir "!USER_HOME!"
+)
+
+REM Junction read-only assets (skip if already exists)
+for %%A in (dashboard workflow-editor scripts doc) do (
+    if not exist "!USER_HOME!\%%A" (
+        if exist "!INSTALL_DIR!\%%A" (
+            mklink /J "!USER_HOME!\%%A" "!INSTALL_DIR!\%%A" >nul 2>&1
+        )
+    )
+)
+
+REM Writable directories
+if not exist "!USER_HOME!\queue" mkdir "!USER_HOME!\queue"
+if not exist "!USER_HOME!\log" mkdir "!USER_HOME!\log"
+if not exist "!USER_HOME!\workflows" mkdir "!USER_HOME!\workflows"
+
+REM Copy example workflows on first run (only if workflows dir is empty)
+if exist "!INSTALL_DIR!\workflows" (
+    dir /b "!USER_HOME!\workflows\*" >nul 2>&1
+    if errorlevel 1 (
+        xcopy /s /q /y "!INSTALL_DIR!\workflows\*" "!USER_HOME!\workflows\" >nul 2>&1
+        echo ==^> Copied example workflows to !USER_HOME!\workflows\
+    )
+)
+
+REM Copy example config on first run
+if not exist "!USER_HOME!\config.json" (
+    if exist "!INSTALL_DIR!\config.json.example" (
+        copy "!INSTALL_DIR!\config.json.example" "!USER_HOME!\config.json" >nul
+        echo ==^> Created !USER_HOME!\config.json from example
+        echo     Please edit it to set your API keys.
+    )
+)
+
+REM ---- Python venv (first-run) ----
+if not exist "!USER_HOME!\.venv" (
+    echo ==^> Creating Python virtual environment at !USER_HOME!\.venv ...
+    python -m venv "!USER_HOME!\.venv" 2>nul
+    if exist "!USER_HOME!\.venv\Scripts\pip.exe" (
+        "!USER_HOME!\.venv\Scripts\pip" install --quiet --upgrade pip 2>nul
+        echo ==^> Installing Python tools (markitdown, md2pdf-mermaid, playwright^) ...
+        "!USER_HOME!\.venv\Scripts\pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>nul
+        "!USER_HOME!\.venv\Scripts\playwright" install chromium 2>nul
+    ) else (
+        echo WARNING: Could not create Python venv (python may not be on PATH^)
+        echo          Shell tasks using markitdown/md2pdf will not work until fixed.
+    )
+)
+
+REM Activate venv if present
+if exist "!USER_HOME!\.venv\Scripts\activate.bat" (
+    call "!USER_HOME!\.venv\Scripts\activate.bat"
+)
+
+REM ---- Open dashboard in default browser ----
+if "!OPEN_BROWSER!"=="1" (
+    start "" "http://localhost:8080" 2>nul
+)
+
+REM ---- Launch ----
+echo ==^> Starting JarvisAgent in !USER_HOME!
+echo     Dashboard: http://localhost:8080
+echo     Editor:    http://localhost:8080/editor
+echo.
+cd /d "!USER_HOME!"
+"!INSTALL_DIR!\bin\jarvisAgent.exe"
 '@
 Set-Content -Path "$StageDir\jarvisagent.bat" -Value $launcherContent -Encoding ASCII
 
-# Setup-venv helper script
+# Setup-venv helper script (standalone, for manual venv recreation)
 $venvContent = @'
 @echo off
-REM Creates a Python virtual environment and installs tools.
-REM Run this once after extracting the zip.
+setlocal enabledelayedexpansion
+REM Creates a Python virtual environment in %USERPROFILE%\JarvisAgent\.venv
+REM Normally the launcher handles this automatically on first run.
+REM Use this script to recreate or repair the venv.
 
-echo ==> Creating Python virtual environment in .venv ...
-python -m venv .venv
-.venv\Scripts\pip install --quiet --upgrade pip
+set "TARGET=%USERPROFILE%\JarvisAgent"
+if not "%~1"=="" set "TARGET=%~1"
+
+echo ==> Creating Python virtual environment in !TARGET!\.venv ...
+python -m venv "!TARGET!\.venv"
+"!TARGET!\.venv\Scripts\pip" install --quiet --upgrade pip
 
 echo ==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ...
-.venv\Scripts\pip install --quiet "markitdown[all]" md2pdf-mermaid playwright
+"!TARGET!\.venv\Scripts\pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright
 
 echo ==> Installing Playwright Chromium ...
-.venv\Scripts\playwright install chromium
+"!TARGET!\.venv\Scripts\playwright" install chromium
 
 echo.
-echo ==> Python venv created at .venv\
-echo     Activate before running JarvisAgent:
-echo       .venv\Scripts\activate
-echo       jarvisagent.bat
+echo ==> Python venv created at !TARGET!\.venv\
 echo.
 pause
 '@
@@ -193,7 +303,14 @@ Write-Host ("    Size: {0:N1} MB" -f $zipSize)
 Write-Host ""
 Write-Host "    Extract and run:"
 Write-Host "      1. Unzip $PkgName.zip"
-Write-Host "      2. copy config.json.example config.json"
-Write-Host "      3. Edit config.json (set API keys)"
-Write-Host "      4. Run setup-venv.bat (one-time)"
-Write-Host "      5. Run jarvisagent.bat"
+Write-Host "      2. Run jarvisagent.bat"
+Write-Host ""
+Write-Host "    On first launch, the launcher will:"
+Write-Host "      - Create %USERPROFILE%\JarvisAgent with your working data"
+Write-Host "      - Set up a Python virtual environment"
+Write-Host "      - Copy example config and workflows"
+Write-Host "      - Open the dashboard in your browser"
+Write-Host ""
+Write-Host "    Options:"
+Write-Host "      jarvisagent --home C:\path\to\dir   custom working directory"
+Write-Host "      jarvisagent --no-browser             skip browser launch"

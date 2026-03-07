@@ -144,6 +144,7 @@ jarvisagent --no-browser             # skip browser launch
 **Uninstall:**
 ```bash
 sudo pacman -R jarvisagent-git
+rm -rf ~/JarvisAgent/   # remove user data
 ```
 
 ---
@@ -207,6 +208,7 @@ sudo apt install jarvisagent
 **Uninstall:**
 ```bash
 sudo apt remove jarvisagent
+rm -rf ~/JarvisAgent/   # remove user data
 ```
 
 ---
@@ -351,6 +353,7 @@ jarvisagent               # creates ~/JarvisAgent, sets up venv, opens browser
 **Uninstall:**
 ```bash
 sudo dnf remove jarvisagent
+rm -rf ~/JarvisAgent/   # remove user data
 ```
 
 ---
@@ -432,6 +435,7 @@ flatpak run com.jctechnolabs.JarvisAgent
 **Uninstall:**
 ```bash
 flatpak uninstall com.jctechnolabs.JarvisAgent
+rm -rf ~/.local/share/jarvisagent/   # remove user data
 ```
 
 **Data directory:** `~/.local/share/jarvisagent/` (config, queue, log, workflows)
@@ -530,14 +534,14 @@ rm -rf ~/JarvisAgent/
 - `build-zip.ps1` — builds from source + creates portable `.zip` (`-DryRun` option)
 - `build-msi.ps1` — creates MSI from staged directory (requires WiX, run after build-zip)
 - `jarvisagent.wxs` — WiX v3 manifest for MSI installer
+- `jarvisagent.bat` — user-space launcher (junctions for read-only assets, venv setup, browser launch)
+- `setup-venv.bat` — standalone venv creation helper (for manual repair)
 
 **Portable .zip build & install:**
 ```powershell
 # From packaging\Windows\11\
 .\build-zip.ps1
 # Extract build\JarvisAgent-x64.zip
-# copy config.json.example config.json
-# Run setup-venv.bat (one-time)
 # Run jarvisagent.bat
 ```
 
@@ -546,19 +550,32 @@ rm -rf ~/JarvisAgent/
 .\build-zip.ps1          # stage the package tree first
 .\build-msi.ps1          # build the MSI (requires WiX v3 on PATH)
 # Double-click build\JarvisAgent-<version>-x64.msi
+# Run: jarvisagent
+```
+
+**After install (both MSI and portable):**
+```
+jarvisagent                             # creates %USERPROFILE%\JarvisAgent, venv, opens browser
+jarvisagent --home C:\path\to\dir       # custom working directory
+jarvisagent --no-browser                # skip browser launch
 ```
 
 **MSI install location:**
-- Installs to `C:\Program Files\JarvisAgent\`
-- Binary at `C:\Program Files\JarvisAgent\bin\jarvisAgent.exe`
+- Read-only assets at `C:\Program Files\JarvisAgent\`
 - The installer adds `C:\Program Files\JarvisAgent\` to the system PATH
-- After install: copy `config.json.example` → `config.json`, edit API keys, run `setup-venv.bat` (one-time), then launch via `jarvisagent.bat`
+- User working directory at `%USERPROFILE%\JarvisAgent\` (created on first run)
+- Uses directory junctions (`mklink /J`, no admin required) for read-only assets
 
 **Uninstall:**
 ```
-# MSI: Settings → Apps → JarvisAgent → Uninstall
+# MSI: Go to the Windows Settings → Apps → JarvisAgent → Uninstall
+#   or: msiexec /x JarvisAgent-<version>-x64.msi
 # Portable: delete the extracted folder
+# User data (both MSI and portable):
+rmdir /s /q %USERPROFILE%\JarvisAgent
 ```
+
+**Data directory:** `%USERPROFILE%\JarvisAgent\` (config, queue, log, workflows, .venv)
 
 ---
 
