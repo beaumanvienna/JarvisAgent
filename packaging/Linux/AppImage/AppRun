@@ -17,10 +17,12 @@ if [[ ! -d "$DATA_DIR" ]]; then
 fi
 
 # Symlink read-only assets from AppImage into the working directory.
-# Re-create symlinks every launch to pick up AppImage updates.
+# Uses ln -sfn to atomically replace existing symlinks without rm.
+# If a real directory already exists, skip it — content is there.
 for asset in bin dashboard workflow-editor scripts doc; do
-    rm -f "$DATA_DIR/$asset"
-    ln -sf "$APPDIR/usr/share/jarvisagent/$asset" "$DATA_DIR/$asset"
+    if [[ -L "$DATA_DIR/$asset" ]] || [[ ! -e "$DATA_DIR/$asset" ]]; then
+        ln -sfn "$APPDIR/usr/share/jarvisagent/$asset" "$DATA_DIR/$asset"
+    fi
 done
 
 # Create writable directories if they don't exist
