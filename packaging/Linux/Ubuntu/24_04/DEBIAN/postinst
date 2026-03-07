@@ -1,22 +1,17 @@
 #!/bin/bash
 set -e
 
-echo "==> Creating Python virtual environment in /opt/jarvisagent/.venv ..."
-python3 -m venv /opt/jarvisagent/.venv
-/opt/jarvisagent/.venv/bin/pip install --quiet --upgrade pip
-
-echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-/opt/jarvisagent/.venv/bin/pip install --quiet "markitdown[all]" md2pdf-mermaid playwright
-
-echo "==> Installing Playwright Chromium ..."
-/opt/jarvisagent/.venv/bin/playwright install chromium
-
 echo ""
 echo "==> JarvisAgent installed to /opt/jarvisagent/"
 echo ""
-echo "    To get started:"
-echo "      1. sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
-echo "      2. Edit config.json (set API keys, queue/workflow paths)"
-echo "      3. source /opt/jarvisagent/.venv/bin/activate"
-echo "      4. Run: jarvisagent"
+echo "    To get started, run:  jarvisagent"
+echo ""
+echo "    On first launch, the launcher will:"
+echo "      - Create ~/JarvisAgent with your working data"
+echo "      - Set up a Python virtual environment"
+echo "      - Copy example config and workflows"
+echo "      - Open the dashboard in your browser"
+echo ""
+echo "    Custom working directory:  jarvisagent --home /path/to/dir"
+echo "    Skip browser:              jarvisagent --no-browser"
 echo ""

@@ -126,32 +126,8 @@ cp "$SCRIPT_DIR/DEBIAN/postrm" "$BUILD_DIR/DEBIAN/postrm"
 chmod 755 "$BUILD_DIR/DEBIAN/postinst"
 chmod 755 "$BUILD_DIR/DEBIAN/postrm"
 
-# Launcher script
-cat > "$BUILD_DIR/usr/bin/jarvisagent" <<'LAUNCHER'
-#!/usr/bin/env bash
-# JarvisAgent launcher — runs from /opt/jarvisagent where the binary
-# expects dashboard/ui/dist/, workflow-editor/ui/dist/, scripts/, etc.
-#
-# config.json must exist in /opt/jarvisagent/.
-# Edit "queue folder" and "workflows folder" in config.json to use
-# absolute paths if you want data stored elsewhere.
-
-cd /opt/jarvisagent || { echo "Error: /opt/jarvisagent not found"; exit 1; }
-
-case "${1:-}" in
-    --help|-h|--version|-v) exec ./bin/jarvisAgent "$@" ;;
-esac
-
-if [[ ! -f config.json ]]; then
-    echo "No config.json found in /opt/jarvisagent/"
-    echo "Copy the example and edit it:"
-    echo "  sudo cp /opt/jarvisagent/config.json.example /opt/jarvisagent/config.json"
-    exit 1
-fi
-
-exec ./bin/jarvisAgent "$@"
-LAUNCHER
-chmod 755 "$BUILD_DIR/usr/bin/jarvisagent"
+# Launcher script (shared across deb/rpm/arch)
+install -m755 "$SCRIPT_DIR/../../jarvisagent-launcher.sh" "$BUILD_DIR/usr/bin/jarvisagent"
 
 # ---- Build .deb ----
 echo "==> Building .deb package ..."
