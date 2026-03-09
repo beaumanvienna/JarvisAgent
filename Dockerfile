@@ -76,30 +76,29 @@ ENV CHROME_PATH="/usr/bin/google-chrome"
 
 RUN useradd -m -u 1001 -s /bin/bash appuser
 
-WORKDIR /app
+# ---- Read-only image assets in /opt/jarvisagent/ ----
+# These survive the volume mount at /app. The entrypoint creates symlinks
+# from /app back to these so the binary finds them relative to CWD.
 
-# Binary from builder
-COPY --from=builder /app/bin/Release/jarvisAgent /app/jarvisAgent
+# Binary
+COPY --from=builder /app/bin/Release/jarvisAgent /opt/jarvisagent/jarvisAgent
 
 # React UIs
-COPY --from=dashboard-builder /ui/dist /app/dashboard/ui/dist
-COPY --from=editor-builder /ui/dist /app/workflow-editor/ui/dist
+COPY --from=dashboard-builder /ui/dist /opt/jarvisagent/dashboard/ui/dist
+COPY --from=editor-builder /ui/dist /opt/jarvisagent/workflow-editor/ui/dist
 
-# Scripts (read-only, always from the image)
-COPY scripts /app/scripts
+# Scripts
+COPY scripts /opt/jarvisagent/scripts
 
-# ---- Image defaults for first-run seeding (mirrors jarvisagent-launcher.sh) ----
-# These are copied into the volume on first run by docker-entrypoint.sh.
-RUN mkdir -p /app/.image-defaults/workflows
-
-# Curated example workflows (same set as DEB/RPM/Arch packages — see PKGBUILD)
+# Curated example workflows for first-run seeding (same set as DEB/RPM/Arch — see PKGBUILD)
+RUN mkdir -p /opt/jarvisagent/.image-defaults/workflows
 COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/aiZipDemo.jcwf \
      example/workflows/exampleMakefile4.jcwf \
      example/workflows/make-example.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
-     /app/.image-defaults/workflows/
+     /opt/jarvisagent/.image-defaults/workflows/
 COPY example/workflows/app.cpp \
      example/workflows/lib1.cpp \
      example/workflows/lib2.cpp \
@@ -109,21 +108,22 @@ COPY example/workflows/app.cpp \
      example/workflows/message_tire_question.txt \
      example/workflows/message_unclear_question.txt \
      example/workflows/port62pos.csv \
-     /app/.image-defaults/workflows/
-RUN ln -sf message_engine_question.txt /app/.image-defaults/workflows/message.txt
+     /opt/jarvisagent/.image-defaults/workflows/
+RUN ln -sf message_engine_question.txt /opt/jarvisagent/.image-defaults/workflows/message.txt
 
-# Default config
-COPY config.json /app/.image-defaults/config.json
-
-# Also keep scripts in image-defaults so entrypoint can symlink them
-RUN cp -a /app/scripts /app/.image-defaults/scripts
+# Default config for first-run seeding
+COPY config.json /opt/jarvisagent/.image-defaults/config.json
 
 # Entrypoint script
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+COPY docker-entrypoint.sh /opt/jarvisagent/docker-entrypoint.sh
+RUN chmod +x /opt/jarvisagent/docker-entrypoint.sh
 
-# Create default writable directories and fix ownership
-RUN mkdir -p /app/queue /app/workflows /app/log && chown -R appuser:appuser /app
+# Fix ownership
+RUN chown -R appuser:appuser /opt/jarvisagent
+
+# /app is the data directory (volume mount point)
+WORKDIR /app
+RUN mkdir -p /app && chown appuser:appuser /app
 
 USER appuser
 
@@ -132,4 +132,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')" || exit 1
 
-ENTRYPOINT ["./docker-entrypoint.sh"]
+ENTRYPOINT ["/opt/jarvisagent/docker-entrypoint.sh"]

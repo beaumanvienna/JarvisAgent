@@ -104,33 +104,49 @@ docker run -it --rm \
 ```
 
 **How it works:** `~/JarvisAgent` is a directory on the **host machine** (the
-user's computer). Docker mounts it into the container so that the container
-process reads/writes to the host filesystem. The container itself has no direct
-access to `~/` — it only sees `/app`, which happens to be backed by the host
+user's computer). Docker mounts it into the container at `/app` so that the
+container process reads/writes to the host filesystem. The container itself has
+no direct access to `~/` — it only sees `/app`, which is backed by the host
 directory.
 
-**Folder layout inside `~/JarvisAgent` (same as native installs):**
+**Container layout — read-only assets vs. user data:**
+
+Read-only image assets (binary, React UIs, scripts) live in `/opt/jarvisagent/`
+inside the container. They are **not** affected by the volume mount. The
+entrypoint script creates symlinks from `/app` into `/opt/jarvisagent/` so the
+binary finds everything relative to its CWD (`/app`).
 
 ```
-~/JarvisAgent/           ← host directory, mounted as /app in the container
-  ├── workflows/         ← .jcwf files (user-created and examples)
-  ├── queue/             ← AI call inputs & outputs
-  ├── scripts/           ← shell/Python scripts (read-only from image)
-  ├── config.json        ← runtime config (persisted across restarts)
-  ├── keys.json.enc      ← encrypted API keys (persisted across restarts)
-  └── log/               ← log files
+/opt/jarvisagent/                ← read-only image assets (survive volume mount)
+  ├── jarvisAgent                ← binary
+  ├── docker-entrypoint.sh       ← entrypoint script
+  ├── dashboard/ui/dist/         ← dashboard React build
+  ├── workflow-editor/ui/dist/   ← editor React build
+  ├── scripts/                   ← shell/Python scripts
+  └── .image-defaults/           ← example workflows + config for first-run seeding
+
+/app/                            ← WORKDIR, volume mount point (~/JarvisAgent on host)
+  ├── workflows/                 ← .jcwf files (user-created and seeded examples)
+  ├── queue/                     ← AI call inputs & outputs
+  ├── config.json                ← runtime config (persisted)
+  ├── keys.json.enc              ← encrypted API keys (persisted)
+  ├── log/                       ← log files
+  ├── dashboard → /opt/...       ← symlink (created by entrypoint)
+  ├── workflow-editor → /opt/... ← symlink (created by entrypoint)
+  └── scripts → /opt/...         ← symlink (created by entrypoint)
 ```
 
 **First-run seeding (mirrors `jarvisagent-launcher.sh` behavior):**
 
-The Docker entrypoint script checks on startup:
-1. If `workflows/` is empty or does not exist → copy the curated example
-   workflows from the image into the mounted volume.
-2. If `config.json` does not exist → copy `config.json.example` from the image.
-3. If `scripts/` does not exist → symlink to the image's read-only scripts.
-4. Create `queue/` and `log/` if missing.
+The Docker entrypoint script (`docker-entrypoint.sh`) runs on every start:
+1. Creates symlinks: `dashboard`, `workflow-editor`, `scripts` → `/opt/jarvisagent/...`
+2. If `workflows/` is empty or does not exist → copies the curated example
+   workflows from the image defaults into the mounted volume.
+3. If `config.json` does not exist → copies the default config from the image.
+4. Creates `queue/` and `log/` if missing.
 
 Subsequent runs leave user files untouched — only seed missing assets.
+Symlinks are re-created every start (cheap and idempotent).
 
 This is the same logic that `packaging/Linux/jarvisagent-launcher.sh` uses
 for native DEB/RPM/Arch installs (copy examples on first run, skip if directory
