@@ -74,8 +74,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/root/.local/bin:$PATH"
 ENV CHROME_PATH="/usr/bin/google-chrome"
 
-RUN useradd -m -u 1001 -s /bin/bash appuser
-
 # ---- Read-only image assets in /opt/jarvisagent/ ----
 # These survive the volume mount at /app. The entrypoint creates symlinks
 # from /app back to these so the binary finds them relative to CWD.
@@ -118,14 +116,8 @@ COPY config.json /opt/jarvisagent/.image-defaults/config.json
 COPY docker-entrypoint.sh /opt/jarvisagent/docker-entrypoint.sh
 RUN chmod +x /opt/jarvisagent/docker-entrypoint.sh
 
-# Fix ownership
-RUN chown -R appuser:appuser /opt/jarvisagent
-
 # /app is the data directory (volume mount point)
 WORKDIR /app
-RUN mkdir -p /app && chown appuser:appuser /app
-
-USER appuser
 
 EXPOSE 8080
 
