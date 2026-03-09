@@ -11,7 +11,7 @@
 ![MSI](https://img.shields.io/badge/📦_MSI-Windows-0078D4)
 ![DMG](https://img.shields.io/badge/📦_DMG-macOS-999)
 
-# JarvisAgent
+# JarvisAgent (j9t)
 
 <br>
 
@@ -189,6 +189,22 @@ workflows, and a Python virtual environment. Options: `--home DIR` (custom path)
 `--no-browser` (skip opening dashboard).
 
 **Windows MSI** installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
+
+**Docker:**
+
+```bash
+docker pull ghcr.io/beaumanvienna/jarvisagent:latest
+
+docker run -it --rm \
+  -p 8080:8080 \
+  -v ~/JarvisAgent:/app \
+  ghcr.io/beaumanvienna/jarvisagent:latest
+```
+
+- Dashboard: http://localhost:8080
+- Workflow Editor: http://localhost:8080/editor
+- The `-v` flag mounts `~/JarvisAgent` on the host so workflows, AI keys, and outputs persist across container restarts.
+- To configure AI providers, open the Workflow Editor → AI Keys page.
 
 See [packaging/packaging.md](packaging/packaging.md) for build scripts and detailed instructions.
 

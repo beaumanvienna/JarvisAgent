@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 import StatusBar from "./components/StatusBar";
 import WorkflowsPanel from "./components/WorkflowsPanel";
 import SessionManagersPanel from "./components/SessionManagersPanel";
 import LogViewerPanel from "./components/LogViewerPanel";
+import MasterPasswordDialog from "./components/MasterPasswordDialog";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { usePolling } from "./hooks/usePolling";
-import { shutdown } from "./api";
+import { shutdown, fetchKeysStatus } from "./api";
 
 type Tab = "dashboard" | "log";
 
@@ -17,6 +18,27 @@ export default function App() {
   });
   const ws = useWebSocket();
   const { workflows, hasProviders, refresh } = usePolling(5000);
+
+  const [keysPromptReason, setKeysPromptReason] = useState<
+    "no_password" | "wrong_password" | null
+  >(null);
+
+  useEffect(() => {
+    fetchKeysStatus()
+      .then((data) => {
+        if (data.status === "no_password" || data.status === "wrong_password") {
+          setKeysPromptReason(data.status);
+        }
+      })
+      .catch(() => {
+        // server not ready yet — ignore
+      });
+  }, []);
+
+  const handleKeysUnlocked = () => {
+    setKeysPromptReason(null);
+    refresh();
+  };
 
   const handleQuit = async () => {
     if (!window.confirm("Shut down JarvisAgent?")) return;
@@ -29,6 +51,12 @@ export default function App() {
 
   return (
     <>
+      {keysPromptReason && (
+        <MasterPasswordDialog
+          reason={keysPromptReason}
+          onUnlocked={handleKeysUnlocked}
+        />
+      )}
       <StatusBar
         connected={ws.connected}
         runs={ws.runs}

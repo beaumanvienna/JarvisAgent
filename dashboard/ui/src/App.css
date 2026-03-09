@@ -608,3 +608,100 @@ body {
   margin-left: auto;
   margin-right: 8px;
 }
+
+/* ---- Master Password Dialog ---- */
+.mpd-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.mpd-dialog {
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 8px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.mpd-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #222;
+}
+
+.mpd-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #44a01c;
+}
+
+.mpd-body {
+  padding: 16px 20px;
+}
+
+.mpd-description {
+  margin: 0 0 14px 0;
+  font-size: 0.8rem;
+  color: #8a8a8a;
+  line-height: 1.5;
+}
+
+.mpd-input-wrap {
+  position: relative;
+}
+
+.mpd-input {
+  width: 100%;
+  padding: 8px 36px 8px 12px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #0a0a0a;
+  color: #c8d6c0;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.mpd-input:focus {
+  border-color: #44a01c;
+}
+
+.mpd-eye-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #666;
+  font-size: 16px;
+  padding: 0;
+  line-height: 1;
+}
+
+.mpd-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #2a1010;
+  border: 1px solid #4a1a1a;
+  color: #ef4444;
+  font-size: 0.78rem;
+}
+
+.mpd-footer {
+  padding: 12px 20px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid #222;
+}

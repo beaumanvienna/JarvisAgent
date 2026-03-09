@@ -1,4 +1,4 @@
-import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse } from "./types";
+import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse, KeysUnlockResponse } from "./types";
 
 const BASE = window.location.origin;
 
@@ -44,6 +44,15 @@ export async function fetchLog(opts: { tail?: number; offset?: number }): Promis
 
 export async function fetchKeysStatus(): Promise<KeysStatusResponse> {
   const res = await fetch(`${BASE}/api/settings/keys/status`);
+  return res.json();
+}
+
+export async function unlockKeys(masterPassword: string): Promise<KeysUnlockResponse> {
+  const res = await fetch(`${BASE}/api/settings/keys/unlock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ master_password: masterPassword }),
+  });
   return res.json();
 }
 

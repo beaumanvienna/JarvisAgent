@@ -93,6 +93,13 @@ export interface KeysStatusResponse {
   has_providers: boolean;
 }
 
+export interface KeysUnlockResponse {
+  ok: boolean;
+  status?: string;
+  message?: string;
+  error?: string;
+}
+
 export interface AnalyzeLastRunResponse {
   ok: boolean;
   found: boolean;
