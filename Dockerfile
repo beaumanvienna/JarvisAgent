@@ -63,16 +63,10 @@ RUN pipx install "markitdown[all]"
 # md2pdf-mermaid for markdown-to-PDF conversion
 RUN pipx install md2pdf-mermaid
 
-# Google Chrome for Playwright (used by md2pdf-mermaid)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg && \
-    wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
-    apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
-    rm -rf /var/lib/apt/lists/*
+# Install Playwright's Chromium browser + system dependencies for md2pdf-mermaid's PDF rendering
+RUN /root/.local/share/pipx/venvs/md2pdf-mermaid/bin/playwright install --with-deps chromium
 
 ENV PATH="/root/.local/bin:$PATH"
-ENV CHROME_PATH="/usr/bin/google-chrome"
 
 # ---- Read-only image assets in /opt/jarvisagent/ ----
 # These survive the volume mount at /app. The entrypoint creates symlinks
@@ -92,7 +86,6 @@ COPY scripts /opt/jarvisagent/scripts
 RUN mkdir -p /opt/jarvisagent/.image-defaults/workflows
 COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/aiZipDemo.jcwf \
-     example/workflows/exampleMakefile4.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/

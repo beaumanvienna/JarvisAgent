@@ -7,8 +7,31 @@
 
 set -euo pipefail
 
+# ---- Pre-flight: check Docker is available ----
+if ! command -v docker &>/dev/null; then
+    echo "ERROR: 'docker' not found. Please install Docker first:"
+    echo "  https://docs.docker.com/engine/install/"
+    exit 1
+fi
+
+if ! docker info &>/dev/null; then
+    echo "Cannot connect to the Docker daemon."
+    echo ""
+    if ! groups | grep -qw docker; then
+        echo "Your user is not in the 'docker' group. Adding now (requires sudo)..."
+        sudo usermod -aG docker "$USER"
+        echo ""
+        echo "==> Group added. Activating and retrying..."
+        exec sg docker -c "$0 $*"
+    else
+        echo "ERROR: Docker daemon is not running. Please start Docker first."
+        exit 1
+    fi
+fi
+
 IMAGE="ghcr.io/beaumanvienna/jarvisagent:latest"
 DATA_DIR="${1:-$HOME/JarvisAgent}"
+[[ $# -gt 0 ]] && shift
 
 echo "==> Data directory: $DATA_DIR"
 mkdir -p "$DATA_DIR"

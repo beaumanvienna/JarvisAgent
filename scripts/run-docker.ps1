@@ -9,6 +9,24 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ---- Pre-flight: check Docker is available ----
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: 'docker' not found. Please install Docker Desktop first:"
+    Write-Host "  https://docs.docker.com/desktop/install/windows-install/"
+    exit 1
+}
+
+try {
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Docker not reachable" }
+} catch {
+    Write-Host "ERROR: Cannot connect to the Docker daemon."
+    Write-Host ""
+    Write-Host "  Make sure Docker Desktop is running."
+    exit 1
+}
+
 $Image = "ghcr.io/beaumanvienna/jarvisagent:latest"
 
 Write-Host "==> Data directory: $DataDir"
