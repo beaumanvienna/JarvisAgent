@@ -173,14 +173,14 @@ Go to the [Actions](https://github.com/beaumanvienna/JarvisAgent/actions) tab an
 
 | Platform | Format | Artifact |
 |----------|--------|----------|
-| Ubuntu / Debian | `.deb` | `JarvisAgent-deb` |
-| Fedora / RHEL / Rocky | `.rpm` | `JarvisAgent-rpm` |
-| Arch / Manjaro | `.pkg.tar.zst` | `JarvisAgent-arch` |
-| Any Linux | `.AppImage` | `JarvisAgent-AppImage` |
-| Any Linux (sandboxed) | `.flatpak` | `JarvisAgent-flatpak` |
-| macOS | `.dmg` | `JarvisAgent-macOS-dmg` |
-| Windows (portable) | `.zip` | `JarvisAgent-Windows-zip` |
-| Windows (installer) | `.msi` | `JarvisAgent-Windows-msi` |
+| Ubuntu / Debian | `.deb` | `JarvisAgent-<version>-deb` |
+| Fedora / RHEL / Rocky | `.rpm` | `JarvisAgent-<version>-rpm` |
+| Arch / Manjaro | `.pkg.tar.zst` | `JarvisAgent-<version>-arch` |
+| Any Linux | `.AppImage` | `JarvisAgent-<version>-AppImage` |
+| Any Linux (sandboxed) | `.flatpak` | `JarvisAgent-<version>-flatpak` |
+| macOS | `.dmg` | `JarvisAgent-<version>-macOS-dmg` |
+| Windows (portable) | `.zip` | `JarvisAgent-<version>-Windows-zip` |
+| Windows (installer) | `.msi` | `JarvisAgent-<version>-Windows-msi` |
 | Docker | OCI image | `ghcr.io/beaumanvienna/jarvisagent:latest` |
 
 **DEB** (Ubuntu / Debian / Zorin / Linux Mint / Pop!_OS):
@@ -252,7 +252,36 @@ flatpak uninstall --user com.jctechnolabs.JarvisAgent
 # and remove user data in ~/JarvisAgent   
 ```
 
-**Windows MSI** installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
+**macOS DMG:**
+
+Open the `.dmg`, drag `JarvisAgent.app` to `/Applications`, then launch:
+```bash
+open /Applications/JarvisAgent.app
+```
+
+On first run, the launcher creates `~/JarvisAgent` with config, workflows, and a Python venv.
+
+To uninstall:
+```bash
+rm -rf /Applications/JarvisAgent.app
+# and remove user data in ~/JarvisAgent
+```
+
+**Windows MSI:**
+
+Double-click the `.msi` installer. After installation, run from any terminal:
+```
+jarvisagent
+```
+
+Installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
+On first run, the launcher creates `%USERPROFILE%\JarvisAgent` with config, workflows, and a Python venv.
+
+To uninstall: Windows Settings → Apps → JarvisAgent → Uninstall.
+
+**Windows ZIP** (portable):
+
+Extract the `.zip` and run `jarvisagent.bat` from the extracted folder.
 
 **Docker:**
 

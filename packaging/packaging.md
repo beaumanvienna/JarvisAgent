@@ -1,6 +1,6 @@
 # JarvisAgent — Packaging Plan
 
-Last updated: 2026-03-07
+Last updated: 2026-03-10
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
 C++ libraries are vendored under `vendor/` so that every platform builds against the
@@ -384,6 +384,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 
 **Install & run:**
 ```bash
+chmod +x build/JarvisAgent-x86_64.AppImage
 ./build/JarvisAgent-x86_64.AppImage
 ```
 
@@ -428,13 +429,13 @@ flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension
 
 **Install & run:**
 ```bash
-flatpak install build/JarvisAgent.flatpak
+flatpak install --user build/JarvisAgent.flatpak
 flatpak run com.jctechnolabs.JarvisAgent
 ```
 
 **Uninstall:**
 ```bash
-flatpak uninstall com.jctechnolabs.JarvisAgent
+flatpak uninstall --user com.jctechnolabs.JarvisAgent
 rm -rf ~/JarvisAgent   # remove user data
 ```
 
@@ -586,15 +587,39 @@ rmdir /s /q %USERPROFILE%\JarvisAgent
 
 The Docker image is already built and pushed to `ghcr.io` on every push to main/master/develop. This is the simplest cross-platform deployment — users with Docker can pull and run without any local build.
 
-**Install:**
+**Install & run:**
+```bash
+# Using the helper script (recommended)
+./scripts/run-docker.sh              # Linux / macOS / Git Bash
+./scripts/run-docker.sh /custom/path # custom data directory
+```
+
+```powershell
+# Windows PowerShell
+.\scripts\run-docker.ps1
+.\scripts\run-docker.ps1 -DataDir C:\path   # custom data directory
+```
+
+Or manually:
 ```bash
 docker pull ghcr.io/beaumanvienna/jarvisagent:latest
-docker run -it --rm -p 8080:8080 ghcr.io/beaumanvienna/jarvisagent:latest
+mkdir -p ~/JarvisAgent
+docker run -it --rm \
+  -p 8080:8080 \
+  -v ~/JarvisAgent:/app \
+  ghcr.io/beaumanvienna/jarvisagent:latest
 ```
+
+- Dashboard: http://localhost:8080
+- Workflow Editor: http://localhost:8080/editor
+- The `-v` flag mounts `~/JarvisAgent` on the host so workflows, AI keys, and outputs persist across container restarts.
+
+**Data directory:** `~/JarvisAgent` (mounted at `/app` inside the container)
 
 **Remove:**
 ```bash
 docker rmi ghcr.io/beaumanvienna/jarvisagent:latest
+rm -rf ~/JarvisAgent   # remove user data
 ```
 
 ---
@@ -606,14 +631,14 @@ Download artifacts from the Actions tab on GitHub.
 
 | Artifact | Format | CI Workflow / Job |
 |----------|--------|-------------------|
-| `JarvisAgent-deb` | `.deb` | linux-workflow / package-deb |
-| `JarvisAgent-AppImage` | `.AppImage` | linux-workflow / package-appimage |
-| `JarvisAgent-rpm` | `.rpm` | linux-workflow / package-rpm |
-| `JarvisAgent-arch` | `.pkg.tar.zst` | linux-workflow / package-arch |
-| `JarvisAgent-flatpak` | `.flatpak` | linux-workflow / package-flatpak |
-| `JarvisAgent-macOS-dmg` | `.dmg` | macos-workflow / build-macos |
-| `JarvisAgent-Windows-zip` | `.zip` | windows-workflow / build-windows |
-| `JarvisAgent-Windows-msi` | `.msi` | windows-workflow / build-windows |
+| `JarvisAgent-<version>-deb` | `.deb` | linux-workflow / package-deb |
+| `JarvisAgent-<version>-AppImage` | `.AppImage` | linux-workflow / package-appimage |
+| `JarvisAgent-<version>-rpm` | `.rpm` | linux-workflow / package-rpm |
+| `JarvisAgent-<version>-arch` | `.pkg.tar.zst` | linux-workflow / package-arch |
+| `JarvisAgent-<version>-flatpak` | `.flatpak` | linux-workflow / package-flatpak |
+| `JarvisAgent-<version>-macOS-dmg` | `.dmg` | macos-workflow / build-macos |
+| `JarvisAgent-<version>-Windows-zip` | `.zip` | windows-workflow / build-windows |
+| `JarvisAgent-<version>-Windows-msi` | `.msi` | windows-workflow / build-windows |
 
 ---
 
