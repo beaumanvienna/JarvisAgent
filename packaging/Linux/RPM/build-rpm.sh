@@ -177,6 +177,9 @@ if command -v rpmbuild &>/dev/null; then
     # Launcher script (shared across deb/rpm/arch)
     cp "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$SRCDIR/jarvisagent-launcher.sh"
 
+    # rpmbuild validates Source0 exists even with --noprep; create a placeholder
+    touch "$RPMBUILD_DIR/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz"
+
     rpmbuild --define "_topdir $RPMBUILD_DIR" \
              --noclean \
              --nocheck \

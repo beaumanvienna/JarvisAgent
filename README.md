@@ -183,10 +183,58 @@ Go to the [Actions](https://github.com/beaumanvienna/JarvisAgent/actions) tab an
 | Windows (installer) | `.msi` | `JarvisAgent-Windows-msi` |
 | Docker | OCI image | `ghcr.io/beaumanvienna/jarvisagent:latest` |
 
-**Linux packages** install to `/opt/jarvisagent/` with a launcher at `/usr/bin/jarvisagent`.
+**DEB** (Ubuntu / Debian / Zorin / Linux Mint / Pop!_OS):
+
+```bash
+sudo dpkg -i jarvisagent_0.75_amd64.deb
+jarvisagent
+```
+
+To uninstall:
+```bash
+sudo dpkg -r jarvisagent
+```
+
+**RPM** (Fedora / RHEL / Rocky / CentOS):
+
+```bash
+sudo dnf install ./jarvisagent-0.75-1.x86_64.rpm
+jarvisagent
+```
+
+To uninstall:
+```bash
+sudo dnf remove jarvisagent
+```
+
+**Arch** (Arch / Manjaro):
+
+```bash
+sudo pacman -U jarvisagent-0.75-1-x86_64.pkg.tar.zst
+jarvisagent
+```
+
+To uninstall:
+```bash
+sudo pacman -R jarvisagent
+```
+
+> **Note:** Version numbers in the commands above are examples — replace with the version you downloaded.
+
+All Linux packages install to `/opt/jarvisagent/` with a launcher at `/usr/bin/jarvisagent`.
 On first run, the launcher creates a per-user working directory at `~/JarvisAgent` with config,
 workflows, and a Python virtual environment. Options: `--home DIR` (custom path),
 `--no-browser` (skip opening dashboard).
+
+**AppImage:**
+
+```bash
+chmod +x JarvisAgent-x86_64.AppImage
+./JarvisAgent-x86_64.AppImage
+```
+
+On first run, the wrapper creates a working directory at `~/JarvisAgent`
+with example workflows, a default `config.json`, and a Python virtual environment.
 
 **Flatpak:**
 

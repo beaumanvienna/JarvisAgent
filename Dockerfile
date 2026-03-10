@@ -93,6 +93,7 @@ COPY scripts /opt/jarvisagent/scripts
 RUN mkdir -p /opt/jarvisagent/.image-defaults/workflows
 COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/aiZipDemo.jcwf \
+     example/workflows/make-example.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/
@@ -100,6 +101,11 @@ COPY example/workflows/message_engine_question.txt \
      example/workflows/message_tire_question.txt \
      example/workflows/message_unclear_question.txt \
      example/workflows/port62pos.csv \
+     example/workflows/app.cpp \
+     example/workflows/lib1.cpp \
+     example/workflows/lib2.cpp \
+     example/workflows/main.cpp \
+     example/workflows/mylib.h \
      /opt/jarvisagent/.image-defaults/workflows/
 RUN ln -sf message_engine_question.txt /opt/jarvisagent/.image-defaults/workflows/message.txt
 

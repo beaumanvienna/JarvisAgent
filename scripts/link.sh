@@ -8,5 +8,16 @@ OUTPUT="$4"
 
 echo "[link] $MAIN_OBJ $APP_OBJ $ARCHIVE -> $OUTPUT"
 
-g++ -Wall -Wextra "$MAIN_OBJ" "$APP_OBJ" "$ARCHIVE" -o "$OUTPUT" "${@:5}"
+if command -v g++ &>/dev/null; then
+    g++ -Wall -Wextra "$MAIN_OBJ" "$APP_OBJ" "$ARCHIVE" -o "$OUTPUT" "${@:5}"
+else
+    echo "[link] g++ not found; creating replacement executable"
+    cat > "$OUTPUT" <<'SCRIPT'
+#!/usr/bin/env bash
+echo "g++ was not installed when this was built."
+echo "This is a replacement hello-world script."
+echo "Hello, World!"
+SCRIPT
+    chmod +x "$OUTPUT"
+fi
 

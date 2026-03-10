@@ -48,40 +48,8 @@ namespace AIAssistant
     protected:
         int sync() override
         {
-            if (!m_Buffer.empty())
-            {
-                std::string clean = StripAnsi(m_Buffer);
-
-                // ------------------------------------------------------
-                // Prevent empty or whitespace-only lines from being logged
-                // ------------------------------------------------------
-                if (!clean.empty())
-                {
-                    if (m_TerminalManager != nullptr)
-                    {
-                        m_TerminalManager->EnqueueLogLine(clean);
-                    }
-
-                    if (m_FileLogger && m_FileLogger->is_open())
-                    {
-                        std::lock_guard<std::mutex> lock(m_FileMutex);
-                        (*m_FileLogger) << clean << "\n";
-                        m_FileLogger->flush();
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> lock(m_CallbackMutex);
-                        if (m_LogBroadcastCallback)
-                        {
-                            m_LogBroadcastCallback(clean);
-                        }
-                    }
-                }
-
-                m_Buffer.clear();
-            }
-
-            return 0;
+            std::lock_guard<std::mutex> lock(m_BufferMutex);
+            return syncLocked();
         }
 
         int overflow(int character) override
@@ -89,11 +57,12 @@ namespace AIAssistant
             if (character == traits_type::eof())
                 return traits_type::not_eof(character);
 
+            std::lock_guard<std::mutex> lock(m_BufferMutex);
             char c = static_cast<char>(character);
 
             if (c == '\n')
             {
-                sync();
+                syncLocked();
             }
             else
             {
@@ -105,15 +74,22 @@ namespace AIAssistant
 
         std::streamsize xsputn(char const* data, std::streamsize count) override
         {
-            m_Buffer.append(data, data + count);
-
-            // Flush only if newline present
-            if (!m_Buffer.empty() && m_Buffer.back() == '\n')
+            std::lock_guard<std::mutex> lock(m_BufferMutex);
+            char const* start = data;
+            char const* end = data + count;
+            for (char const* p = start; p < end; ++p)
             {
-                m_Buffer.pop_back();
-                sync();
+                if (*p == '\n')
+                {
+                    m_Buffer.append(start, p);
+                    syncLocked();
+                    start = p + 1;
+                }
             }
-
+            if (start < end)
+            {
+                m_Buffer.append(start, end);
+            }
             return count;
         }
 
@@ -148,8 +124,44 @@ namespace AIAssistant
         }
 
     private:
+        int syncLocked()
+        {
+            if (!m_Buffer.empty())
+            {
+                std::string clean = StripAnsi(m_Buffer);
+                m_Buffer.clear();
+
+                if (!clean.empty())
+                {
+                    if (m_TerminalManager != nullptr)
+                    {
+                        m_TerminalManager->EnqueueLogLine(clean);
+                    }
+
+                    if (m_FileLogger && m_FileLogger->is_open())
+                    {
+                        std::lock_guard<std::mutex> lock(m_FileMutex);
+                        (*m_FileLogger) << clean << "\n";
+                        m_FileLogger->flush();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(m_CallbackMutex);
+                        if (m_LogBroadcastCallback)
+                        {
+                            m_LogBroadcastCallback(clean);
+                        }
+                    }
+                }
+            }
+
+            return 0;
+        }
+
+    private:
         TerminalManager* m_TerminalManager;
         std::string m_Buffer;
+        std::mutex m_BufferMutex;
 
         std::shared_ptr<std::ofstream> m_FileLogger;
         std::mutex m_FileMutex;
