@@ -193,8 +193,21 @@ workflows, and a Python virtual environment. Options: `--home DIR` (custom path)
 **Docker:**
 
 ```bash
+./scripts/run-docker.sh              # Linux / macOS / Git Bash
+./scripts/run-docker.sh /custom/path # custom data directory
+```
+
+```powershell
+.\scripts\run-docker.ps1                    # Windows PowerShell
+.\scripts\run-docker.ps1 -DataDir C:\path   # custom data directory
+```
+
+Or manually:
+
+```bash
 docker pull ghcr.io/beaumanvienna/jarvisagent:latest
 
+mkdir -p ~/JarvisAgent
 docker run -it --rm \
   -p 8080:8080 \
   -v ~/JarvisAgent:/app \

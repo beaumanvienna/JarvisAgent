@@ -36,6 +36,15 @@ fi
 # Ensure writable directories exist
 mkdir -p /app/queue /app/log
 
+# ---- Fix ownership to match host user ----
+# If the user pre-created ~/JarvisAgent (recommended), /app is owned by their
+# UID. Chown all seeded files to match so the host user can manage them.
+MOUNT_UID=$(stat -c '%u' /app)
+MOUNT_GID=$(stat -c '%g' /app)
+if [ "$MOUNT_UID" != "0" ]; then
+    chown -R "$MOUNT_UID:$MOUNT_GID" /app/workflows /app/config.json /app/queue /app/log 2>/dev/null || true
+fi
+
 # ---- Launch ----
 echo "==> Starting JarvisAgent"
 echo "    Dashboard: http://localhost:8080"
