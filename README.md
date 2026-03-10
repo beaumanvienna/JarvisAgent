@@ -188,6 +188,22 @@ On first run, the launcher creates a per-user working directory at `~/JarvisAgen
 workflows, and a Python virtual environment. Options: `--home DIR` (custom path),
 `--no-browser` (skip opening dashboard).
 
+**Flatpak:**
+
+```bash
+flatpak install --user JarvisAgent.flatpak
+flatpak run com.jctechnolabs.JarvisAgent
+```
+
+On first run, the wrapper creates a working directory at `~/JarvisAgent`
+with example workflows, a default `config.json`, and a Python virtual environment.
+
+To uninstall:
+```bash
+flatpak uninstall --user com.jctechnolabs.JarvisAgent
+# and remove user data in ~/JarvisAgent   
+```
+
 **Windows MSI** installs to `C:\Program Files\JarvisAgent\` and adds it to the system PATH.
 
 **Docker:**

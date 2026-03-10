@@ -1,14 +1,14 @@
 #!/bin/bash
 # jarvisagent-wrapper.sh — Flatpak entry point for JarvisAgent.
 #
-# Sets up a working directory at ~/.local/share/jarvisagent/ with symlinks
+# Sets up a working directory at ~/JarvisAgent with symlinks
 # to read-only assets inside the Flatpak and real directories for writable
 # data (queue/, log/, workflows/).
 
 set -euo pipefail
 
 SHARE="/app/share/jarvisagent"
-DATA_DIR="${JARVISAGENT_DATA:-$HOME/.local/share/jarvisagent}"
+DATA_DIR="${JARVISAGENT_DATA:-$HOME/JarvisAgent}"
 
 # ---- First-run setup ----
 if [[ ! -d "$DATA_DIR" ]]; then

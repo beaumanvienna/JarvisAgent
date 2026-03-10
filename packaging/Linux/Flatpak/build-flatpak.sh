@@ -11,7 +11,7 @@
 #   sudo pacman -S flatpak flatpak-builder          # Arch/Manjaro
 #
 #   flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-#   flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.node18//24.08
+#   flatpak install flathub org.freedesktop.Sdk//24.08 org.freedesktop.Sdk.Extension.node20//24.08
 
 set -euo pipefail
 
@@ -51,4 +51,4 @@ echo ""
 echo "    Uninstall:"
 echo "      flatpak uninstall com.jctechnolabs.JarvisAgent"
 echo ""
-echo "    Data directory: ~/.local/share/jarvisagent/"
+echo "    Data directory: ~/JarvisAgent/"

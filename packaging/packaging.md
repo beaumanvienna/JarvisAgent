@@ -367,7 +367,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 **Approach:**
 - Bundle the release binary, React UI dist/ assets, and scripts into an AppDir.
 - Use `linuxdeploy` (preferred, bundles shared libs) or `appimagetool` to generate the AppImage.
-- On first launch, `AppRun` creates `~/.local/share/jarvisagent/` with symlinks to read-only assets and real directories for writable data (`queue/`, `log/`, `workflows/`).
+- On first launch, `AppRun` creates `~/JarvisAgent` with symlinks to read-only assets and real directories for writable data (`queue/`, `log/`, `workflows/`).
 - Python venv is created on first run in the user's data directory.
 - Override data dir with `JARVISAGENT_DATA=/path/to/dir`.
 
@@ -390,7 +390,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 **Remove:**
 ```bash
 rm JarvisAgent-x86_64.AppImage
-rm -rf ~/.local/share/jarvisagent/   # remove data directory
+rm -rf ~/JarvisAgent   # remove data directory
 ```
 
 ---
@@ -404,7 +404,7 @@ rm -rf ~/.local/share/jarvisagent/   # remove data directory
 **Approach:**
 - Flatpak manifest (`com.jctechnolabs.JarvisAgent.yml`) based on `org.freedesktop.Sdk//24.08`.
 - Builds premake5 from source inside the Flatpak build, then builds JarvisAgent C++ + React UIs.
-- Wrapper script creates `~/.local/share/jarvisagent/` with symlinks to read-only assets and writable dirs.
+- Wrapper script creates `~/JarvisAgent` with symlinks to read-only assets and writable dirs.
 - Python venv created on first run in user data directory.
 - `--share=network` for AI API calls, `--filesystem=home` for queue/workflows/log.
 
@@ -435,10 +435,10 @@ flatpak run com.jctechnolabs.JarvisAgent
 **Uninstall:**
 ```bash
 flatpak uninstall com.jctechnolabs.JarvisAgent
-rm -rf ~/.local/share/jarvisagent/   # remove user data
+rm -rf ~/JarvisAgent   # remove user data
 ```
 
-**Data directory:** `~/.local/share/jarvisagent/` (config, queue, log, workflows)
+**Data directory:** `~/JarvisAgent` (config, queue, log, workflows)
 
 ---
 

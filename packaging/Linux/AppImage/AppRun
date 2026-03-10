@@ -1,14 +1,14 @@
 #!/bin/bash
 # AppRun — Entry point for the JarvisAgent AppImage.
 #
-# Creates a working directory at ~/.local/share/jarvisagent/ with symlinks
+# Creates a working directory at ~/JarvisAgent with symlinks
 # to read-only assets inside the AppImage and real directories for writable
 # data (queue/, log/, workflows/).
 
 set -euo pipefail
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
-DATA_DIR="${JARVISAGENT_DATA:-$HOME/.local/share/jarvisagent}"
+DATA_DIR="${JARVISAGENT_DATA:-$HOME/JarvisAgent}"
 
 # ---- First-run setup ----
 if [[ ! -d "$DATA_DIR" ]]; then
