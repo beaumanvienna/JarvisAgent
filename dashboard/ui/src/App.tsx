@@ -80,7 +80,7 @@ export default function App() {
           <SessionManagersPanel sessions={ws.sessions} />
         </main>
       ) : (
-        <LogViewerPanel />
+        <LogViewerPanel registerLogCallback={ws.registerLogCallback} />
       )}
     </>
   );

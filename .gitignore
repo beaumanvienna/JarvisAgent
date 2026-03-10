@@ -49,3 +49,4 @@ vendor/openssl/bin
 vendor/openssl/bin-int
 vendor/pdcursesmod/bin
 vendor/pdcursesmod/bin-int
+.venv

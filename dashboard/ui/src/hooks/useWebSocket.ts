@@ -24,6 +24,11 @@ export function useWebSocket() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
+  const logCallbackRef = useRef<((lines: string[]) => void) | null>(null);
+
+  const registerLogCallback = useCallback((cb: ((lines: string[]) => void) | null) => {
+    logCallbackRef.current = cb;
+  }, []);
 
   const connect = useCallback(() => {
     if (wsRef.current) return;
@@ -87,6 +92,8 @@ export function useWebSocket() {
         }));
       } else if (msg.type === "python-status") {
         setState((prev) => ({ ...prev, pythonRunning: msg.running }));
+      } else if (msg.type === "log") {
+        logCallbackRef.current?.(msg.lines ?? []);
       }
     };
 
@@ -112,5 +119,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return state;
+  return { ...state, registerLogCallback };
 }

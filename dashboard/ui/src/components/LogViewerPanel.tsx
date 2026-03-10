@@ -5,10 +5,13 @@ import type { AnalyzeLastRunResponse } from "../types";
 const LINE_HEIGHT = 18;
 const OVERSCAN = 40;
 const MAX_LINES = 100_000;
-const POLL_INTERVAL_MS = 500;
 const INITIAL_TAIL = 10_000;
 
-export default function LogViewerPanel() {
+interface LogViewerPanelProps {
+  registerLogCallback: (cb: ((lines: string[]) => void) | null) => void;
+}
+
+export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [byteOffset, setByteOffset] = useState<number>(0);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -77,25 +80,17 @@ export default function LogViewerPanel() {
     return () => { cancelled = true; };
   }, []);
 
-  // Delta polling
+  // Live log streaming via WebSocket
   useEffect(() => {
     if (loading) return;
-    const id = setInterval(async () => {
-      try {
-        const data = await fetchLog({ offset: offsetRef.current });
-        if (data.lines.length === 0) return;
-        offsetRef.current = data.byteOffset;
-        setByteOffset(data.byteOffset);
-        setLines((prev) => {
-          const next = [...prev, ...data.lines];
-          return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
-        });
-      } catch {
-        // ignore transient errors
-      }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [loading]);
+    registerLogCallback((newLines: string[]) => {
+      setLines((prev) => {
+        const next = [...prev, ...newLines];
+        return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+      });
+    });
+    return () => registerLogCallback(null);
+  }, [loading, registerLogCallback]);
 
   // Search: compute match indices when searchTerm or lines change
   useEffect(() => {

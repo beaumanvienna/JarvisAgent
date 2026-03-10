@@ -57,6 +57,7 @@ namespace AIAssistant
         std::filesystem::path const& GetConfigFilePath() const { return m_ConfigFilePath; }
         ThreadPool& GetThreadPool();
         TerminalManager* GetTerminalManager();
+        TerminalLogStreamBuf* GetTerminalLogStreamBuf() { return m_TerminalBuf.get(); }
         KeyManager& GetKeyManager() { return m_KeyManager; }
         KeyManager const& GetKeyManager() const { return m_KeyManager; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };

@@ -129,6 +129,13 @@ namespace AIAssistant
             return;
         }
 
+        // Stream log lines to dashboard via WebSocket instead of 500ms REST polling
+        {
+            WebServer* ws = m_WebServer.get();
+            Core::g_Core->GetTerminalLogStreamBuf()->SetLogBroadcastCallback(
+                [ws](std::string const& line) { ws->EnqueueLogLine(line); });
+        }
+
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
         { // initialize Python

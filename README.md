@@ -325,21 +325,27 @@ pip install "markitdown[all]" md2pdf-mermaid playwright
 playwright install chromium
 ```
 
-**Example session** — activate the venv and start JarvisAgent:
+**Quick start** — use the launcher script (creates the venv automatically on first run):
+
+Linux / macOS:
+```bash
+./jarvisagent.sh
+```
+
+The script creates `.venv`, installs all Python dependencies, and launches the release binary.  
+On subsequent runs it simply activates the existing venv and starts JarvisAgent.
+
+**Manual session** — if you prefer to manage the venv yourself:
 
 Linux / macOS:
 ```bash
 $ source .venv/bin/activate
-(.venv) $ which markitdown
-/home/user/dev/jarvisAgent/.venv/bin/markitdown
 (.venv) $ ./bin/Release/jarvisAgent
 ```
 
 Windows (MSYS2 / Git Bash):
 ```bash
 $ source .venv/Scripts/activate
-(.venv) $ which markitdown
-/home/user/dev/jarvisAgent/.venv/Scripts/markitdown
 (.venv) $ ./bin/x64/Release/jarvisAgent.exe
 ```
 
@@ -411,7 +417,10 @@ If you created a Makefile, build the project with<br>
 `export MAKEFLAGS=-j8` or however many CPU cores you want to use<br>
 `make config=release verbose=1 && make config=debug verbose=1`<br>
 <br>
-Run the executable with<br>
+Run with the launcher script (handles venv automatically):<br>
+`./jarvisagent.sh`<br>
+<br>
+Or run the executable directly (requires an active venv):<br>
 `./bin/Release/jarvisAgent` or `./bin/Debug/jarvisAgent`<br>
 <br>
 To update the source code, use<br>

@@ -57,6 +57,9 @@ namespace AIAssistant
         void BroadcastJSON(const std::string& jsonString);
         void BroadcastPythonStatus(bool pythonRunning);
 
+        // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
+        void EnqueueLogLine(std::string const& line);
+
         // Drain queued broadcasts to connected WS clients.
         // Must be called periodically from the main thread (JarvisAgent::OnUpdate).
         void DrainPendingBroadcasts();
@@ -138,6 +141,9 @@ namespace AIAssistant
         std::unordered_set<crow::websocket::connection*> m_Clients;
 
         std::vector<std::string> m_PendingBroadcasts;
+
+        std::mutex m_LogMutex; // separate from m_Mutex to avoid deadlock when logging inside m_Mutex scope
+        std::vector<std::string> m_PendingLogLines;
 
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;

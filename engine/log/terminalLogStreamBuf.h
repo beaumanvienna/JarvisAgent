@@ -22,6 +22,7 @@
 #pragma once
 
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <streambuf>
 #include <string>
@@ -36,6 +37,12 @@ namespace AIAssistant
         TerminalLogStreamBuf(TerminalManager* terminalManager, std::shared_ptr<std::ofstream> fileLogger)
             : m_TerminalManager(terminalManager), m_FileLogger(std::move(fileLogger))
         {
+        }
+
+        void SetLogBroadcastCallback(std::function<void(std::string const&)> callback)
+        {
+            std::lock_guard<std::mutex> lock(m_CallbackMutex);
+            m_LogBroadcastCallback = std::move(callback);
         }
 
     protected:
@@ -60,6 +67,14 @@ namespace AIAssistant
                         std::lock_guard<std::mutex> lock(m_FileMutex);
                         (*m_FileLogger) << clean << "\n";
                         m_FileLogger->flush();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(m_CallbackMutex);
+                        if (m_LogBroadcastCallback)
+                        {
+                            m_LogBroadcastCallback(clean);
+                        }
                     }
                 }
 
@@ -138,5 +153,8 @@ namespace AIAssistant
 
         std::shared_ptr<std::ofstream> m_FileLogger;
         std::mutex m_FileMutex;
+
+        std::function<void(std::string const&)> m_LogBroadcastCallback;
+        std::mutex m_CallbackMutex;
     };
 } // namespace AIAssistant

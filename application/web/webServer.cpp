@@ -2791,12 +2791,69 @@ namespace AIAssistant
         m_PendingBroadcasts.push_back(jsonString);
     }
 
+    void WebServer::EnqueueLogLine(std::string const& line)
+    {
+        std::lock_guard<std::mutex> lock(m_LogMutex);
+        m_PendingLogLines.push_back(line);
+    }
+
     void WebServer::DrainPendingBroadcasts()
     {
         std::vector<std::string> pending;
+        std::vector<std::string> logLines;
         std::unordered_set<crow::websocket::connection*> clients;
+
+        // Drain log lines under m_LogMutex first (separate lock to avoid deadlock
+        // when logging happens inside a m_Mutex scope).
+        {
+            std::lock_guard<std::mutex> lock(m_LogMutex);
+            if (!m_PendingLogLines.empty())
+                logLines.swap(m_PendingLogLines);
+        }
+
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
+
+            // Flush buffered log lines into a single broadcast message
+            if (!logLines.empty())
+            {
+                // Build {"type":"log","lines":[...]} JSON manually for speed
+                std::string logMsg = R"({"type":"log","lines":[)";
+                for (size_t i = 0; i < logLines.size(); ++i)
+                {
+                    if (i > 0)
+                        logMsg += ',';
+                    // JSON-escape the line
+                    logMsg += '"';
+                    for (char c : logLines[i])
+                    {
+                        switch (c)
+                        {
+                            case '"': logMsg += "\\\""; break;
+                            case '\\': logMsg += "\\\\"; break;
+                            case '\n': logMsg += "\\n"; break;
+                            case '\r': logMsg += "\\r"; break;
+                            case '\t': logMsg += "\\t"; break;
+                            default:
+                                if (static_cast<unsigned char>(c) < 0x20)
+                                {
+                                    char buf[8];
+                                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                                    logMsg += buf;
+                                }
+                                else
+                                {
+                                    logMsg += c;
+                                }
+                                break;
+                        }
+                    }
+                    logMsg += '"';
+                }
+                logMsg += "]}";
+                m_PendingBroadcasts.push_back(std::move(logMsg));
+            }
+
             if (m_PendingBroadcasts.empty())
                 return;
             pending.swap(m_PendingBroadcasts);

@@ -472,6 +472,8 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 Provide either `tail` or `offset`, not both. If `offset` is given, only new lines since that byte position are returned.
 
+> **Note:** The dashboard Log Viewer uses `tail` mode for the initial backfill, then receives live updates via the WebSocket `log` message (see below). The `offset` delta-polling mode is retained for backward compatibility and external tools.
+
 **Response (200):**
 ```json
 {
@@ -559,4 +561,5 @@ A persistent WebSocket connection for real-time communication.
 | `queued` | Acknowledgement of a chat message with `id` and `file` path. |
 | `workflow-runs-snapshot` | Full snapshot of active runs with per-task states. Sent on request and after run/cancel actions. |
 | `python-status` | Broadcast when Python engine status changes (`{ "running": true/false }`). |
+| `log` | Live log lines streamed from the server. `{ "type": "log", "lines": ["...", ...] }`. Replaces 500ms REST polling for the Log Viewer page. |
 | *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on next `onmessage`. |
