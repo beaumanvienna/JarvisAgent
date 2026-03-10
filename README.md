@@ -217,7 +217,12 @@ docker run -it --rm \
 - Dashboard: http://localhost:8080
 - Workflow Editor: http://localhost:8080/editor
 - The `-v` flag mounts `~/JarvisAgent` on the host so workflows, AI keys, and outputs persist across container restarts.
-- To configure AI providers, open the Workflow Editor → AI Keys page.
+
+**Setting up AI providers** (first run):
+
+1. Open the Workflow Editor at http://localhost:8080/editor
+2. Go to **AI Keys** → **+ Add Key** — enter a name (e.g. `openai`) and paste your API key, then click **Create**. Click **Save Encrypted** to persist the key.
+3. Go to **AI Manager** — select your key from the **Key** dropdown for each provider interface, then click **Save to config.json**.
 
 See [packaging/packaging.md](packaging/packaging.md) for build scripts and detailed instructions.
 

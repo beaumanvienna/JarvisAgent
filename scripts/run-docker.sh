@@ -17,16 +17,17 @@ fi
 if ! docker info &>/dev/null; then
     echo "Cannot connect to the Docker daemon."
     echo ""
-    if ! groups | grep -qw docker; then
+    if ! id -nG "$USER" | grep -qw docker; then
         echo "Your user is not in the 'docker' group. Adding now (requires sudo)..."
         sudo usermod -aG docker "$USER"
-        echo ""
-        echo "==> Group added. Activating and retrying..."
-        exec sg docker -c "$0 $*"
-    else
-        echo "ERROR: Docker daemon is not running. Please start Docker first."
-        exit 1
     fi
+    # Group may exist but not be active in this shell — re-exec under it
+    if id -nG "$USER" | grep -qw docker; then
+        echo "==> Activating docker group..."
+        exec sg docker -c "$0 $*"
+    fi
+    echo "ERROR: Docker daemon is not running. Please start Docker first."
+    exit 1
 fi
 
 IMAGE="ghcr.io/beaumanvienna/jarvisagent:latest"

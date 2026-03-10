@@ -53,9 +53,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     pipx \
+    gosu \
     zlib1g \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install pipx tools into a shared location accessible by any UID (gosu drops to host user)
+ENV PIPX_HOME=/opt/pipx
+ENV PIPX_BIN_DIR=/opt/pipx/bin
 
 # markitdown for PDF-to-markdown conversion
 RUN pipx install "markitdown[all]"
@@ -64,9 +69,11 @@ RUN pipx install "markitdown[all]"
 RUN pipx install md2pdf-mermaid
 
 # Install Playwright's Chromium browser + system dependencies for md2pdf-mermaid's PDF rendering
-RUN /root/.local/share/pipx/venvs/md2pdf-mermaid/bin/playwright install --with-deps chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN /opt/pipx/venvs/md2pdf-mermaid/bin/playwright install --with-deps chromium
+RUN chmod -R a+rX /opt/pipx /opt/playwright-browsers
 
-ENV PATH="/root/.local/bin:$PATH"
+ENV PATH="/opt/pipx/bin:$PATH"
 
 # ---- Read-only image assets in /opt/jarvisagent/ ----
 # These survive the volume mount at /app. The entrypoint creates symlinks
