@@ -171,7 +171,28 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 16. Packaging testing (new)
+## 16. Landing page for new users (new)
+- Create a welcoming landing page / website for JarvisAgent
+- Should explain what JarvisAgent is, key features, screenshots, and download links
+- Target audience: first-time visitors who discover the project
+
+---
+
+## 17. Self-hosted Docker registry (new)
+- Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
+- Benefits: custom domain, no GitHub dependency, potential for private images
+- Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
+
+---
+
+## 18. Promotion video (new)
+- Create a demo / promotion video showcasing JarvisAgent
+- Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
+- Target: GitHub README embed, YouTube, social media
+
+---
+
+## 19. Packaging testing (new)
 - [ ] **macOS:** Test DMG install + uninstall on real hardware, verify instructions in packaging.md
 - [ ] **Windows:** Test MSI install + uninstall, verify PATH entry works, test setup-venv.bat
 - [ ] **Linux (deb):** Test install as non-root user workflow (blocked on #8 — launcher script)
