@@ -16,10 +16,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
+if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from premake5.lua"; exit 1; fi
 MANIFEST="$SCRIPT_DIR/com.jctechnolabs.JarvisAgent.yml"
 BUILD_DIR="$SCRIPT_DIR/build"
 REPO_DIR="$SCRIPT_DIR/build/repo"
-BUNDLE="$SCRIPT_DIR/build/JarvisAgent.flatpak"
+BUNDLE="$SCRIPT_DIR/build/JarvisAgent-${PKG_VERSION}.flatpak"
 
 # ---- Clean previous build ----
 rm -rf "$BUILD_DIR"

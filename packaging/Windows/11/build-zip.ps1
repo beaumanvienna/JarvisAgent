@@ -96,7 +96,7 @@ Get-ChildItem -Path "$StageDir\scripts" -Recurse -Directory -Filter "__pycache__
 # Example workflows (curated list — no subdirs, no build artifacts)
 New-Item -ItemType Directory -Force -Path "$StageDir\workflows" | Out-Null
 $jcwfFiles = @(
-    "aiCarMaintenancePipeline", "aiZipDemo", "exampleMakefile4",
+    "aiCarMaintenancePipeline", "aiZipDemo",
     "make-example", "portfolioDividendAnalysis",
     "vehicleTroubleshootingGuide"
 )

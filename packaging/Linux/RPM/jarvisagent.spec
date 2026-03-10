@@ -65,7 +65,7 @@ chmod +x %{_instdir}/scripts/*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
 install -dm755 %{_instdir}/workflows
-for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis \
             vehicleTroubleshootingGuide; do
     install -m644 "example/workflows/${jcwf}.jcwf" %{_instdir}/workflows/

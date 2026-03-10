@@ -19,8 +19,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
+if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from premake5.lua"; exit 1; fi
 APPDIR="$SCRIPT_DIR/build/JarvisAgent.AppDir"
-OUTPUT="$SCRIPT_DIR/build/JarvisAgent-x86_64.AppImage"
+OUTPUT="$SCRIPT_DIR/build/JarvisAgent-${PKG_VERSION}-x86_64.AppImage"
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -88,7 +90,7 @@ chmod +x "$SHARE/scripts/"*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
 mkdir -p "$SHARE/example-workflows"
-for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis \
             vehicleTroubleshootingGuide; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SHARE/example-workflows/" 2>/dev/null || true

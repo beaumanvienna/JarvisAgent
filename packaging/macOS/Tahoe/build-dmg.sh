@@ -22,7 +22,7 @@ if [[ -z "$PKG_VERSION" ]]; then echo "ERROR: could not extract version from pre
 BUILD_DIR="$SCRIPT_DIR/build"
 APP_NAME="JarvisAgent"
 APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
-DMG_NAME="${APP_NAME}.dmg"
+DMG_NAME="${APP_NAME}-${PKG_VERSION}.dmg"
 
 DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
@@ -88,7 +88,7 @@ chmod +x "$SHARE/scripts/"*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
 mkdir -p "$SHARE/example-workflows"
-for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis \
             vehicleTroubleshootingGuide; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SHARE/example-workflows/" 2>/dev/null || true

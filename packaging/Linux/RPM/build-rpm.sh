@@ -94,7 +94,7 @@ find "$STAGING/opt/jarvisagent/scripts" -type d -name __pycache__ -exec rm -rf {
 chmod +x "$STAGING/opt/jarvisagent/scripts/"*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
-for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis \
             vehicleTroubleshootingGuide; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
@@ -157,7 +157,7 @@ if command -v rpmbuild &>/dev/null; then
 
     # Example workflows + loose input files
     mkdir -p "$SRCDIR/example/workflows"
-    for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+    for jcwf in aiCarMaintenancePipeline aiZipDemo \
                 make-example portfolioDividendAnalysis \
                 vehicleTroubleshootingGuide; do
         cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SRCDIR/example/workflows/" 2>/dev/null || true

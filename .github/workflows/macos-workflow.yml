@@ -81,6 +81,14 @@ jobs:
       - name: Package DMG
         run: packaging/macOS/Tahoe/build-dmg.sh
 
+      - name: Smoke test DMG
+        run: |
+          DMG=$(ls packaging/macOS/Tahoe/build/*.dmg | head -1)
+          echo "Mounting $DMG"
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/JarvisAgent
+          /Volumes/JarvisAgent/JarvisAgent.app/Contents/MacOS/jarvisAgent --help || true
+          hdiutil detach /Volumes/JarvisAgent
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:

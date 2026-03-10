@@ -97,7 +97,7 @@ chmod +x "$INST/scripts/"*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
 mkdir -p "$INST/workflows"
-for jcwf in aiCarMaintenancePipeline aiZipDemo exampleMakefile4 \
+for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis \
             vehicleTroubleshootingGuide; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$INST/workflows/" 2>/dev/null || true

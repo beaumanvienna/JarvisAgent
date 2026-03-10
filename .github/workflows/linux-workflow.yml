@@ -194,7 +194,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\"\(.*\)\".*$/\1/')
+          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\\"\(.*\)\\".*$/\1/')
           echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
 
       - name: Build RPM package
@@ -236,7 +236,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\"\(.*\)\".*$/\1/')
+          PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' premake5.lua | sed 's/.*\\"\(.*\)\\".*$/\1/')
           echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
 
       - name: Prepare Arch build environment

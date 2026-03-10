@@ -43,7 +43,7 @@ class Jarvisagent < Formula
     # Example workflows (curated list — no subdirs, no build artifacts)
     (prefix/"workflows").mkpath
     %w[
-      aiCarMaintenancePipeline aiZipDemo exampleMakefile4
+      aiCarMaintenancePipeline aiZipDemo
       make-example portfolioDividendAnalysis
       vehicleTroubleshootingGuide
     ].each { |w| (prefix/"workflows").install "example/workflows/#{w}.jcwf" }
