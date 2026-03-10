@@ -35,12 +35,28 @@ if (-not (Test-Path $DataDir)) {
 }
 
 Write-Host "==> Pulling $Image"
-docker pull $Image
+docker pull $Image 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    $cached = docker image inspect $Image 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "WARNING: Pull failed (no internet?). Using cached image."
+    } else {
+        Write-Host "ERROR: Pull failed and no cached image found. Check your internet connection."
+        exit 1
+    }
+}
 
 Write-Host "==> Starting JarvisAgent"
 Write-Host "    Dashboard: http://localhost:8080"
 Write-Host "    Editor:    http://localhost:8080/editor"
 Write-Host ""
+
+# Check if port 8080 is already in use
+$portCheck = netstat -ano 2>$null | Select-String ":8080\s"
+if ($portCheck) {
+    Write-Host "ERROR: Port 8080 is already in use. Stop the other process first."
+    exit 1
+}
 
 docker run -it --rm `
     -p 8080:8080 `
