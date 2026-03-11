@@ -329,7 +329,7 @@ See [packaging/packaging.md](packaging/packaging.md) for build scripts and detai
 
 The full user manual is available as:
 - **Man page** (Linux/macOS): `man jarvisagent` (installed with DEB, RPM, Arch, Homebrew packages)
-- **HTML** (all platforms): [doc/jarvisagent.html](doc/jarvisagent.html)
+- **Online / all platforms**: [doc/jarvisagent.md](doc/jarvisagent.md)
 
 It covers CLI options, `config.json` fields, environment variables, AI key setup, workflow concepts, and the workflow editor.
 

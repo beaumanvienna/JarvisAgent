@@ -127,10 +127,6 @@
     React dashboard for remote monitoring, and a visual workflow editor. It compiles and runs on
     Linux, macOS, and Windows.</p>
 
-  <p>When no TTY is detected (e.g. inside a Docker container without <code>-it</code>), JarvisAgent
-    automatically runs in headless mode: the ncurses TUI and keyboard input are disabled, but the
-    web server, REST API, and WebSocket interface remain fully functional.</p>
-
   <h2 id="options">OPTIONS</h2>
   <dl>
     <dt><code>--help</code>, <code>-h</code></dt>
@@ -356,7 +352,8 @@
   <ul>
     <li><strong>Live streaming</strong> &mdash; new log lines arrive in real time via WebSocket.</li>
     <li><strong>Auto-scroll</strong> &mdash; follows the latest output; toggles between <strong>Follow</strong> and
-      <strong>Paused</strong> mode. Click the button or scroll up to pause, click again to resume.</li>
+      <strong>Paused</strong> mode. Click the button or scroll up to pause, click again to resume.
+    </li>
     <li><strong>Search</strong> &mdash; press <kbd>/</kbd> or <kbd>Ctrl+F</kbd> to search. Navigate matches with
       <kbd>Enter</kbd> (next) / <kbd>Shift+Enter</kbd> (previous). Match count and position are shown in the toolbar.
     </li>

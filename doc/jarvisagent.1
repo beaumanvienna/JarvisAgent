@@ -32,12 +32,6 @@ The application ships with an ncurses terminal UI for local or SSH sessions,
 a browser\-based React dashboard for remote monitoring, and a visual workflow
 editor.
 It compiles and runs on Linux, macOS, and Windows.
-.PP
-When no TTY is detected (e.g. inside a Docker container without
-.BR \-it ),
-JarvisAgent automatically runs in headless mode: the ncurses TUI and keyboard
-input are disabled, but the web server, REST API, and WebSocket interface
-remain fully functional.
 .
 .SH OPTIONS
 .TP
