@@ -132,7 +132,12 @@ Each entry is an object with the following fields:
 (string) The model name (e.g. \fIgpt\-4o\fR, \fIgemini\-2.5\-flash\fR).
 .TP
 .B API
-(string) The reply parser type: \fBAPI1\fR (OpenAI\-compatible) or \fBAPI2\fR.
+(string) The reply parser type.
+\fBAPI1\fR \(em OpenAI\-compatible chat completions (OpenAI, Google Gemini via
+OpenAI\-compat endpoint, Ollama, any /v1/chat/completions provider).
+\fBAPI2\fR \(em OpenAI Responses API (GPT\-5 and later models).
+\fBAPI3\fR \(em Google Gemini native API (uses \fIx\-goog\-api\-key\fR header
+and \fI/models/{model}:generateContent\fR URL scheme).
 .TP
 .B name
 (string) Human\-readable name for this interface.
@@ -197,14 +202,17 @@ in the working directory.
 In the workflow editor, navigate to the \fBAI Manager\fR page.
 .IP 2.
 Configure one or more AI interfaces: set the API endpoint URL, model name,
-parser type (API1 for OpenAI\-compatible, API2 for native), and select which
-key provider to use.
+parser type, and select which key provider to use.
+Use \fBAPI1\fR for OpenAI and compatible providers,
+\fBAPI2\fR for OpenAI Responses API (GPT\-5+),
+or \fBAPI3\fR for Google Gemini native.
 .IP 3.
 Set the default interface index or override per\-task in workflow definitions.
 .PP
-Supported providers include OpenAI, Google Gemini (via the OpenAI\-compatible
-endpoint), Anthropic, and any provider offering an OpenAI\-compatible chat
-completions API.
+Supported providers include OpenAI (API1), Google Gemini (API1 via
+OpenAI\-compat endpoint, or API3 for the native endpoint), Anthropic (API1),
+Ollama and any provider offering an OpenAI\-compatible chat completions API
+(API1).  The OpenAI Responses API (GPT\-5+) uses API2.
 .
 .SH WORKFLOWS
 JarvisAgent uses

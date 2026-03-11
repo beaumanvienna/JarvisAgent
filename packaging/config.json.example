@@ -20,7 +20,7 @@
         },
         {
             "name": "api.openai.com/gpt-5-nano/API2",
-            "description": "Ultra-fast and extremely low-cost model. Ideal for large document batches, chunked PDF processing, and high-volume workloads.  Use API index 1.",
+            "description": "Ultra-fast and extremely low-cost model. Ideal for large document batches, chunked PDF processing, and high-volume workloads. Use API index 1.",
             "url": "https://api.openai.com/v1/responses",
             "model": "gpt-5-nano",
             "API": "API2",
@@ -28,7 +28,7 @@
         },
         {
             "name": "api.openai.com/gpt-4.1-mini/API1",
-            "description": "Lightweight, inexpensive model. Suitable for quick rewrites, smaller tasks, and general utility work.  Use API index 2.",
+            "description": "Lightweight, inexpensive model. Suitable for quick rewrites, smaller tasks, and general utility work. Use API index 2.",
             "url": "https://api.openai.com/v1/chat/completions",
             "model": "gpt-4.1-mini",
             "API": "API1",
@@ -36,7 +36,7 @@
         },
         {
             "name": "api.openai.com/gpt-4.1-mini/API2",
-            "description": "Same model as gpt-4.1-mini, but via the Responses API for faster throughput when processing sequential chunks.  Use API index 3.",
+            "description": "Same model as gpt-4.1-mini, but via the Responses API for faster throughput when processing sequential chunks. Use API index 3.",
             "url": "https://api.openai.com/v1/responses",
             "model": "gpt-4.1-mini",
             "API": "API2",
@@ -60,6 +60,6 @@
         }
     ],
 
-    "API index": 5,
+    "API index": 0,
     "max file size in kB": 24
 }

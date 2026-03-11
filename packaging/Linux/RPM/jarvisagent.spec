@@ -80,7 +80,7 @@ done
 ln -sf message_engine_question.txt %{_instdir}/workflows/message.txt
 
 # Example config
-install -m644 config.json %{_instdir}/config.json.example
+install -m644 packaging/config.json.example %{_instdir}/config.json.example
 
 # Runtime directories
 install -dm755 %{_instdir}/queue

@@ -148,6 +148,7 @@ namespace AIAssistant
         std::string m_Model;
         std::string m_ApiType;
         std::string m_ApiKey;
+        std::string m_KeyName; // key_name from interface config (for lazy re-resolve)
         std::optional<double> m_Temperature;
 
         std::unique_ptr<ReplyParser> m_ReplyParser;

@@ -92,7 +92,10 @@ The following fields are recognized:
 - **`"API interfaces"`** — (array) List of AI provider configurations. Each entry is an object with:
   - **`"url"`** — (string, **required**) The API endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).
   - **`"model"`** — (string) The model name (e.g. `gpt-4o`, `gemini-2.5-flash`).
-  - **`"API"`** — (string) The reply parser type: `API1` (OpenAI-compatible) or `API2`.
+  - **`"API"`** — (string) The reply parser type:
+    - `API1` — OpenAI-compatible chat completions (OpenAI, Google Gemini via OpenAI-compat endpoint, Ollama, any `/v1/chat/completions` provider).
+    - `API2` — OpenAI Responses API (GPT-5 and later models).
+    - `API3` — Google Gemini native API (uses `x-goog-api-key` header and `/models/{model}:generateContent` URL scheme).
   - **`"name"`** — (string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.
   - **`"description"`** — (string) Optional description of this interface.
   - **`"key_name"`** — (string) Name of the API key provider to use from the encrypted keys file (e.g. "openai", "google", "anthropic").
@@ -123,11 +126,12 @@ To use AI-powered workflows, you need at least one API key configured.
 ### Setting up AI models
 
 1. In the workflow editor, navigate to the **AI Manager** page.
-2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type (API1 for OpenAI-compatible, API2 for native), and select which key provider to use.
+2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), or `API3` for Google Gemini native.
 3. Set the default interface index or override per-task in workflow definitions.
 
-Supported providers include OpenAI, Google Gemini (via the OpenAI-compatible endpoint),
-Anthropic, and any provider offering an OpenAI-compatible chat completions API.
+Supported providers include OpenAI (API1), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native endpoint),
+Anthropic (API1), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
+The OpenAI Responses API (GPT-5+) uses API2.
 
 ## WORKFLOWS
 

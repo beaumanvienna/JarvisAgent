@@ -109,7 +109,7 @@ done
 ln -sf message_engine_question.txt "$STAGING/opt/jarvisagent/workflows/message.txt"
 
 # Example config
-cp "$REPO_ROOT/config.json" "$STAGING/opt/jarvisagent/config.json.example"
+cp "$REPO_ROOT/packaging/config.json.example" "$STAGING/opt/jarvisagent/config.json.example"
 
 # Documentation
 cp "$REPO_ROOT/README.md" "$STAGING/opt/jarvisagent/doc/README.md"
@@ -174,7 +174,7 @@ if command -v rpmbuild &>/dev/null; then
     done
 
     # Config + docs
-    cp "$REPO_ROOT/config.json" "$SRCDIR/config.json"
+    cp "$REPO_ROOT/packaging/config.json.example" "$SRCDIR/config.json"
     cp "$REPO_ROOT/README.md" "$SRCDIR/README.md"
     mkdir -p "$SRCDIR/doc"
     cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SRCDIR/doc/" 2>/dev/null || true

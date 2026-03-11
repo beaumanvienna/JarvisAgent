@@ -352,6 +352,7 @@ export default function AiManagerView(): JSX.Element
             >
               <option value="API1">API1 (OpenAI-compatible)</option>
               <option value="API2">API2 (Anthropic-style)</option>
+              <option value="API3">API3 (Gemini native)</option>
             </select>
           </div>
 

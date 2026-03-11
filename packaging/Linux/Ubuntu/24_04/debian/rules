@@ -45,7 +45,7 @@ override_dh_auto_install:
 	ln -sf message_engine_question.txt $(INSTDIR)/workflows/message.txt
 
 	# Config example
-	install -m644 config.json $(INSTDIR)/config.json.example
+	install -m644 packaging/config.json.example $(INSTDIR)/config.json.example
 
 	# Documentation
 	install -dm755 $(INSTDIR)/doc

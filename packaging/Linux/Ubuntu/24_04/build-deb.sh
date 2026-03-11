@@ -112,7 +112,7 @@ done
 ln -sf message_engine_question.txt "$INST/workflows/message.txt"
 
 # Example config
-cp "$REPO_ROOT/config.json" "$INST/config.json.example"
+cp "$REPO_ROOT/packaging/config.json.example" "$INST/config.json.example"
 
 # Documentation
 cp "$REPO_ROOT/README.md" "$INST/doc/README.md"

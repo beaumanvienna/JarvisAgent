@@ -2,7 +2,7 @@
 
 ## Overview
 The JSON subsystem provides:
-- Structured parsing of OpenAI‑style responses (API1 and API2).
+- Structured parsing of OpenAI‑style responses (API1 and API2) and Google Gemini native responses (API3).
 - A recursive object/array walker (`JsonObjectParser`).
 - A version‑agnostic reply dispatcher (`ReplyParser`).
 
@@ -51,6 +51,7 @@ Abstract interface for all response formats.
 Selects the correct parser implementation:
 - `ReplyParserAPI1`
 - `ReplyParserAPI2`
+- `ReplyParserAPI3`
 
 ---
 
@@ -125,10 +126,58 @@ If `"error"` exists:
 
 ---
 
+## ReplyParserAPI3  
+(Used for Google Gemini native API responses)
+
+### Expected JSON Format
+```
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [ { "text": "..." } ],
+        "role": "model"
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": <int>,
+    "candidatesTokenCount": <int>,
+    "totalTokenCount": <int>
+  },
+  "modelVersion": "..."
+}
+```
+
+### What It Extracts
+- `candidates[n].content.parts[n].text`
+- `candidates[n].content.role`
+- `candidates[n].finishReason`
+- `usageMetadata` (prompt, candidates, total token counts)
+- `modelVersion`
+
+### Error Handling
+If `"error"` exists:
+- Parses `code` (int), `message`, `status`.
+- Marks reply discarded.
+
+### Content Extraction
+`GetContent(index)` returns the text from the first non‑empty part of the corresponding candidate.
+
+### Request Format
+The Gemini native API differs from OpenAI:
+- **Auth header:** `x-goog-api-key: <key>` (not `Authorization: Bearer`).
+- **URL:** Model name is embedded in the URL: `{base}/models/{model}:generateContent`.
+- **Body:** `{"contents": [{"parts": [{"text": "..."}], "role": "user"}]}`.
+- **Temperature** goes inside a `generationConfig` object.
+
+---
+
 ## High‑Level Flow
 
 1. **Raw JSON arrives from Python/OpenAI.**
-2. **ReplyParser::Create()** picks API1 or API2.
+2. **ReplyParser::Create()** picks API1, API2, or API3.
 3. Parser converts raw JSON → `simdjson::padded_string`.
 4. Walks top‑level fields:
    - Known fields → extracted normally.
@@ -146,6 +195,7 @@ If `"error"` exists:
 Every JSON field is printed to the terminal log:
 - API1: `LOG_APP_INFO("key: {}", value)`
 - API2: similar structured logs
+- API3: similar structured logs (Gemini field names)
 - Unknown fields delegated to `JsonObjectParser` for recursive inspection.
 
 Output text is also printed to stdout (matching current engine behavior).
@@ -162,7 +212,7 @@ The JSON subsystem guarantees:
 ---
 
 ## Integration Notes
-- Both API parsers share a common base class.
+- All three API parsers share a common base class.
 - Selection is controlled by engine configuration.
 - Parser does not interpret semantics—only structures.
 
@@ -173,4 +223,5 @@ The JSON subsystem guarantees:
 - `json/replyParser.h/.cpp`
 - `json/replyParserAPI1.h/.cpp`
 - `json/replyParserAPI2.h/.cpp`
+- `json/replyParserAPI3.h/.cpp`
 

@@ -68,11 +68,18 @@ namespace AIAssistant
     class CurlWrapper
     {
     public:
+        enum class AuthStyle
+        {
+            Bearer = 0, // Authorization: Bearer <key> (OpenAI, Anthropic, etc.)
+            XGoogApiKey // x-goog-api-key: <key> (Google Gemini native)
+        };
+
         struct QueryData
         {
             std::string m_Url;
             std::string m_Data;
             std::string m_ApiKey;
+            AuthStyle m_AuthStyle{AuthStyle::Bearer};
             bool IsValid() const;
         };
 

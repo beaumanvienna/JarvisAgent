@@ -39,11 +39,14 @@ See also:
 
 ---
 
-## 5. Native Google Gemini reply parser (new)
-- Currently using the OpenAI-compatible legacy endpoint (`generativelanguage.googleapis.com/v1beta/openai/chat/completions`)
-- This legacy format works but may lack access to Gemini-specific features (grounding, safety settings, function calling, etc.)
-- Implement a dedicated reply parser for the native Gemini API (`generativelanguage.googleapis.com/v1beta/models/...`)
-- This would be a new `InterfaceType` (e.g., `API3` / `GeminiNative`)
+## ~~5. Native Google Gemini reply parser~~ ✅
+- ~~Implement a dedicated reply parser for the native Gemini API~~ ✅ `ReplyParserAPI3` (`replyParserAPI3.h/.cpp`)
+- New `InterfaceType::API3` added to `configParser.h`, recognized in `configParser.cpp` and `webServer.cpp`
+- `CurlWrapper::AuthStyle::XGoogApiKey` — sends `x-goog-api-key:` header instead of `Authorization: Bearer`
+- `SessionManager::DispatchQuery()` builds Gemini-native request body and constructs URL with model: `{base}/models/{model}:generateContent`
+- Frontend dropdown in `AiManagerView.tsx` includes "API3 (Gemini native)" option
+- Config: set `"API": "API3"`, URL to `https://generativelanguage.googleapis.com/v1beta`, model to e.g. `gemini-2.5-flash`
+- `json.md` documentation updated
 
 ---
 
@@ -194,6 +197,12 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 - Create a demo / promotion video showcasing JarvisAgent
 - Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
 - Target: GitHub README embed, YouTube, social media
+
+---
+
+## 20. Launchpad PPA (new)
+- Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley
+- Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`
 
 ---
 

@@ -282,7 +282,16 @@ namespace AIAssistant
         }
 
         CurlSlist headers;
-        headers.Append("Authorization: Bearer " + queryData.m_ApiKey);
+        switch (queryData.m_AuthStyle)
+        {
+            case AuthStyle::XGoogApiKey:
+                headers.Append("x-goog-api-key: " + queryData.m_ApiKey);
+                break;
+            case AuthStyle::Bearer:
+            default:
+                headers.Append("Authorization: Bearer " + queryData.m_ApiKey);
+                break;
+        }
         headers.Append("Content-Type: application/json");
 
         auto& url = queryData.m_Url;

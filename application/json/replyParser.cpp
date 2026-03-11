@@ -23,6 +23,7 @@
 #include "json/replyParser.h"
 #include "json/replyParserAPI1.h"
 #include "json/replyParserAPI2.h"
+#include "json/replyParserAPI3.h"
 
 namespace AIAssistant
 {
@@ -46,6 +47,11 @@ namespace AIAssistant
             case ConfigParser::EngineConfig::InterfaceType::API2:
             {
                 replyParser = std::make_unique<ReplyParserAPI2>(jsonString);
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API3:
+            {
+                replyParser = std::make_unique<ReplyParserAPI3>(jsonString);
                 break;
             }
             default:

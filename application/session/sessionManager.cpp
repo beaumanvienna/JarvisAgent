@@ -41,13 +41,30 @@ namespace AIAssistant
 
         m_Url = api.m_Url;
         m_Model = api.m_Model;
-        m_ApiType = (api.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
-
-        // Resolve API key from KeyManager default provider
-        auto const* defaultProvider = Core::g_Core->GetKeyManager().GetDefaultProvider();
-        if (defaultProvider)
+        switch (api.m_InterfaceType)
         {
-            m_ApiKey = defaultProvider->m_ApiKey;
+            case ConfigParser::EngineConfig::InterfaceType::API2:
+                m_ApiType = "API2";
+                break;
+            case ConfigParser::EngineConfig::InterfaceType::API3:
+                m_ApiType = "API3";
+                break;
+            case ConfigParser::EngineConfig::InterfaceType::API1:
+            default:
+                m_ApiType = "API1";
+                break;
+        }
+
+        // Store key_name for lazy re-resolve (in case provider is added after startup)
+        m_KeyName = api.m_KeyName;
+
+        // Resolve API key: prefer key_name from interface config, fall back to default provider
+        auto const* provider = m_KeyName.empty()
+                                   ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                   : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
+        if (provider)
+        {
+            m_ApiKey = provider->m_ApiKey;
         }
     }
 
@@ -232,6 +249,21 @@ namespace AIAssistant
 
     void SessionManager::DispatchQuery(TrackedFile& requirementFile)
     {
+        // Lazy re-resolve: if API key is still empty, try again from KeyManager
+        // (covers the case where the user adds a key via the UI after startup)
+        if (m_ApiKey.empty())
+        {
+            auto const* provider = m_KeyName.empty()
+                                       ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                       : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
+            if (provider && !provider->m_ApiKey.empty())
+            {
+                m_ApiKey = provider->m_ApiKey;
+                LOG_APP_INFO("SessionManager '{}': late-resolved API key from provider '{}'", m_Name,
+                             m_KeyName.empty() ? "(default)" : m_KeyName);
+            }
+        }
+
         // R"(...)" introduces a raw string literal in C++
         // 👉 No escape sequences (\n, \", \\, etc.) are interpreted.
         // 👉 Everything between the parentheses is taken literally — including newlines, backslashes, and quotes.
@@ -264,6 +296,19 @@ namespace AIAssistant
             return json;
         };
 
+        // Gemini native: model goes in the URL, not the body.
+        // Body format: {"contents":[{"parts":[{"text":"..."}],"role":"user"}]}
+        auto makeRequestDataAPI3 = [](std::string const& message, std::optional<double> temperature) -> std::string
+        {
+            std::string json = R"({"contents": [{"parts": [{"text": ")" + message + R"("}], "role": "user"}])";
+            if (temperature.has_value())
+            {
+                json += R"(, "generationConfig": {"temperature": )" + std::to_string(temperature.value()) + "}";
+            }
+            json += "}";
+            return json;
+        };
+
         // retrieve prompt data from queue
         std::string message = m_Environment.GetEnvironmentAndResetDirtyFlag();
 
@@ -274,7 +319,18 @@ namespace AIAssistant
 
         bool store{false};
         std::string requestData;
-        if (m_ApiType == "API2")
+        std::string queryUrl = m_Url;
+        CurlWrapper::AuthStyle authStyle = CurlWrapper::AuthStyle::Bearer;
+
+        if (m_ApiType == "API3")
+        {
+            requestData = makeRequestDataAPI3(sanitizedMessage, m_Temperature);
+            // Gemini native: model is part of the URL
+            // e.g. https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+            queryUrl = m_Url + "/models/" + m_Model + ":generateContent";
+            authStyle = CurlWrapper::AuthStyle::XGoogApiKey;
+        }
+        else if (m_ApiType == "API2")
         {
             requestData = makeRequestDataAPI2(m_Model, sanitizedMessage, store ? "true" : "false", m_Temperature);
         }
@@ -284,9 +340,10 @@ namespace AIAssistant
         }
 
         CurlWrapper::QueryData queryData = {
-            .m_Url = m_Url,        //
-            .m_Data = requestData, //
-            .m_ApiKey = m_ApiKey   //
+            .m_Url = queryUrl,       //
+            .m_Data = requestData,   //
+            .m_ApiKey = m_ApiKey,    //
+            .m_AuthStyle = authStyle //
         };
 
         auto& threadpool = Core::g_Core->GetThreadPool();

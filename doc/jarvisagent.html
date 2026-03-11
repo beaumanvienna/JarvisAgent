@@ -217,7 +217,13 @@
         <dd>(string) The model name (e.g. <code>gpt-4o</code>, <code>gemini-2.5-flash</code>).</dd>
 
         <dt><code>"API"</code></dt>
-        <dd>(string) The reply parser type: <code>API1</code> (OpenAI-compatible) or <code>API2</code>.</dd>
+        <dd>(string) The reply parser type:<br>
+          <code>API1</code> &mdash; OpenAI-compatible chat completions (OpenAI, Google Gemini via OpenAI-compat
+          endpoint, Ollama, any <code>/v1/chat/completions</code> provider).<br>
+          <code>API2</code> &mdash; OpenAI Responses API (GPT-5 and later models).<br>
+          <code>API3</code> &mdash; Google Gemini native API (uses <code>x-goog-api-key</code> header and
+          <code>/models/{model}:generateContent</code> URL scheme).
+        </dd>
 
         <dt><code>"name"</code></dt>
         <dd>(string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.</dd>
@@ -268,13 +274,19 @@
   <h3>Setting up AI models</h3>
   <ol>
     <li>In the workflow editor, navigate to the <strong>AI Manager</strong> page.</li>
-    <li>Configure one or more AI interfaces: set the API endpoint URL, model name, parser type
-      (API1 for OpenAI-compatible, API2 for native), and select which key provider to use.</li>
+    <li>Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key
+      provider to use.
+      Use <code>API1</code> for OpenAI and compatible providers,
+      <code>API2</code> for OpenAI Responses API (GPT-5+),
+      or <code>API3</code> for Google Gemini native.
+    </li>
     <li>Set the default interface index or override per-task in workflow definitions.</li>
   </ol>
 
-  <p>Supported providers include OpenAI, Google Gemini (via the OpenAI-compatible endpoint),
-    Anthropic, and any provider offering an OpenAI-compatible chat completions API.</p>
+  <p>Supported providers include OpenAI (API1), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native
+    endpoint),
+    Anthropic (API1), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
+    The OpenAI Responses API (GPT-5+) uses API2.</p>
 
   <h2 id="workflows">WORKFLOWS</h2>
   <p>JarvisAgent uses <strong>JC Workflow</strong> definition files (<code>.jcwf</code>) to describe

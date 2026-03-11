@@ -87,7 +87,14 @@ jarvisAgent/
             "endpoint": "https://api.anthropic.com/v1/messages",
             "api_key": "sk-ant-...",
             "default_model": "claude-sonnet-4-20250514",
-            "api_type": "API2"
+            "api_type": "API1"
+        },
+        "google_gemini": {
+            "display_name": "Google Gemini (native)",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "AIza...",
+            "default_model": "gemini-2.5-flash",
+            "api_type": "API3"
         },
         "local_ollama": {
             "display_name": "Local Ollama",
@@ -109,7 +116,7 @@ jarvisAgent/
 | `endpoint`       | string | Full URL to the chat completions endpoint.               |
 | `api_key`        | string | API key (empty string for local/keyless endpoints).      |
 | `default_model`  | string | Model string sent in the request body.                   |
-| `api_type`       | string | `"API1"` or `"API2"` — selects the request/reply parser. |
+| `api_type`       | string | `"API1"`, `"API2"`, or `"API3"` — selects the request/reply parser. API1 = OpenAI-compatible, API2 = OpenAI Responses API (GPT-5+), API3 = Google Gemini native. |
 
 ---
 

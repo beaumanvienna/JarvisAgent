@@ -419,7 +419,7 @@ Manage AI provider configurations (name, endpoint, API key, model, type).
 ### POST /api/settings/providers
 **Request body:**
 ```json
-{ "name": "anthropic", "display_name": "Anthropic", "endpoint": "https://...", "api_key": "sk-...", "default_model": "claude-3", "api_type": "API2" }
+{ "name": "anthropic", "display_name": "Anthropic", "endpoint": "https://...", "api_key": "sk-...", "default_model": "claude-3", "api_type": "API1" }
 ```
 `name` is required. Returns 409 if the provider already exists.
 

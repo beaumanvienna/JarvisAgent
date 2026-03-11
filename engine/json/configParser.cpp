@@ -322,6 +322,10 @@ namespace AIAssistant
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API2;
                     }
+                    else if (api == "API3")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API3;
+                    }
                     else
                     {
                         CORE_HARD_STOP("invalid API in config.json");
@@ -341,6 +345,9 @@ namespace AIAssistant
                         break;
                     case EngineConfig::InterfaceType::API2:
                         apiTypeStr = "API2";
+                        break;
+                    case EngineConfig::InterfaceType::API3:
+                        apiTypeStr = "API3";
                         break;
                     default:
                         break;

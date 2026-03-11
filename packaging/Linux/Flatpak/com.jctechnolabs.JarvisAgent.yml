@@ -71,7 +71,7 @@ modules:
       - ln -sf message_engine_question.txt /app/share/jarvisagent/example-workflows/message.txt
 
       # Example config
-      - cp config.json /app/share/jarvisagent/config.json.example
+      - cp packaging/config.json.example /app/share/jarvisagent/config.json.example
 
       # Documentation
       - mkdir -p /app/share/jarvisagent/doc

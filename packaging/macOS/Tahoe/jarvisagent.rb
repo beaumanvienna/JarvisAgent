@@ -57,7 +57,7 @@ class Jarvisagent < Formula
     ln_sf "message_engine_question.txt", prefix/"workflows/message.txt"
 
     # Example config
-    prefix.install "config.json" => "config.json.example"
+    prefix.install "packaging/config.json.example" => "config.json.example"
 
     # Runtime directories
     (prefix/"queue").mkpath

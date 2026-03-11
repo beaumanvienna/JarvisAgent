@@ -42,6 +42,7 @@ namespace AIAssistant
             {
                 API1 = 0,
                 API2,
+                API3,
                 NumAPIs,
                 InvalidAPI
             };

@@ -3000,7 +3000,9 @@ namespace AIAssistant
             item["description"] = iface.m_Description;
             item["url"] = iface.m_Url;
             item["model"] = iface.m_Model;
-            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API1) ? "API1" : "API2";
+            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
+                                   ? "API3"
+                                   : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
             item["key_name"] = iface.m_KeyName;
             items.push_back(std::move(item));
         }
@@ -3079,7 +3081,9 @@ namespace AIAssistant
                 ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
                 : name;
 
-        if (apiTypeStr == "API2")
+        if (apiTypeStr == "API3")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
+        else if (apiTypeStr == "API2")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
@@ -3162,7 +3166,9 @@ namespace AIAssistant
                     if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
                     {
                         std::string apiTypeStr(sv);
-                        if (apiTypeStr == "API2")
+                        if (apiTypeStr == "API3")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
+                        else if (apiTypeStr == "API2")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
                         else
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
@@ -3256,8 +3262,9 @@ namespace AIAssistant
         for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
         {
             auto const& iface = config.m_ApiInterfaces[i];
-            std::string apiStr =
-                (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
+            std::string apiStr = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
+                                     ? "API3"
+                                     : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
 
             newArray += "        {\n";
             newArray += "            \"name\": \"" + iface.m_Name + "\",\n";

@@ -118,7 +118,7 @@ foreach ($f in $looseFiles) {
 Copy-Item "$RepoRoot\example\workflows\message_engine_question.txt" "$StageDir\workflows\message.txt"
 
 # Example config
-Copy-Item "$RepoRoot\config.json" "$StageDir\config.json.example"
+Copy-Item "$RepoRoot\packaging\config.json.example" "$StageDir\config.json.example"
 
 # Runtime directories
 New-Item -ItemType Directory -Force -Path "$StageDir\queue" | Out-Null

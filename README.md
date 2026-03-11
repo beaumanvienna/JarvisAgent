@@ -155,7 +155,7 @@ queue/
 ## Planned Features
 
 - [x] Docker deployment & CI/CD — 3-stage build, pushed to GHCR ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
-- [ ] Native Google Gemini reply parser (currently using OpenAI-compatible legacy endpoint)  
+- [x] Native Google Gemini reply parser (API3 — `x-goog-api-key` auth, `/models/{model}:generateContent` URL scheme)  
 - [ ] n8n workflow integration ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
 - [ ] Enable HTTP/2 for improved network performance  
 

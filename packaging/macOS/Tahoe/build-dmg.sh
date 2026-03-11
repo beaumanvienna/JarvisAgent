@@ -103,7 +103,7 @@ done
 ln -sf message_engine_question.txt "$SHARE/example-workflows/message.txt"
 
 # Example config
-cp "$REPO_ROOT/config.json" "$SHARE/config.json.example"
+cp "$REPO_ROOT/packaging/config.json.example" "$SHARE/config.json.example"
 
 # Documentation
 mkdir -p "$SHARE/doc"
