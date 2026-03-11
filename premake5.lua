@@ -28,7 +28,7 @@ project "jarvisAgent"
 
     defines
     {
-        "JARVIS_AGENT_VERSION=\"0.75\"",
+        "JARVIS_AGENT_VERSION=\"0.8\"",
         "CROW_ENFORCE_WS_SPEC",
         "PDC_WIDE"
     }

@@ -118,6 +118,11 @@ cp "$REPO_ROOT/config.json" "$INST/config.json.example"
 cp "$REPO_ROOT/README.md" "$INST/doc/README.md"
 cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$INST/doc/JC_Workflow_Specification.md" 2>/dev/null || true
 
+# Man page
+mkdir -p "$BUILD_DIR/usr/share/man/man1"
+cp "$REPO_ROOT/doc/jarvisagent.1" "$BUILD_DIR/usr/share/man/man1/jarvisagent.1"
+gzip -9 "$BUILD_DIR/usr/share/man/man1/jarvisagent.1"
+
 # DEBIAN control files
 cp "$SCRIPT_DIR/DEBIAN/control" "$BUILD_DIR/DEBIAN/control"
 sed -i "s/^Version:.*/Version: ${PKG_VERSION}-${PKG_RELEASE}/" "$BUILD_DIR/DEBIAN/control"

@@ -13,6 +13,8 @@
 
 # JarvisAgent (j9t)
 
+**Current version: 0.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
+
 <br>
 
 JarvisAgent is a **C++ backend / React frontend** application for parallel AI-driven automation.  <br>
@@ -286,8 +288,10 @@ Extract the `.zip` and run `jarvisagent.bat` from the extracted folder.
 **Docker:**
 
 ```bash
-./scripts/run-docker.sh              # Linux / macOS / Git Bash
-./scripts/run-docker.sh /custom/path # custom data directory
+./scripts/run-docker.sh                    # interactive with TUI
+./scripts/run-docker.sh --headless         # headless (no TUI, web only)
+./scripts/run-docker.sh /custom/path       # custom data directory
+./scripts/run-docker.sh --headless /path   # headless + custom data dir
 ```
 
 ```powershell
@@ -318,6 +322,16 @@ docker run -it --rm \
 3. Go to **AI Manager** — select your key from the **Key** dropdown for each provider interface, then click **Save to config.json**.
 
 See [packaging/packaging.md](packaging/packaging.md) for build scripts and detailed instructions.
+
+---
+
+## User Manual
+
+The full user manual is available as:
+- **Man page** (Linux/macOS): `man jarvisagent` (installed with DEB, RPM, Arch, Homebrew packages)
+- **HTML** (all platforms): [doc/jarvisagent.html](doc/jarvisagent.html)
+
+It covers CLI options, `config.json` fields, environment variables, AI key setup, workflow concepts, and the workflow editor.
 
 ---
 

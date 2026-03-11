@@ -115,6 +115,11 @@ cp "$REPO_ROOT/config.json" "$STAGING/opt/jarvisagent/config.json.example"
 cp "$REPO_ROOT/README.md" "$STAGING/opt/jarvisagent/doc/README.md"
 cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$STAGING/opt/jarvisagent/doc/JC_Workflow_Specification.md" 2>/dev/null || true
 
+# Man page
+mkdir -p "$STAGING/usr/share/man/man1"
+cp "$REPO_ROOT/doc/jarvisagent.1" "$STAGING/usr/share/man/man1/jarvisagent.1"
+gzip -9 "$STAGING/usr/share/man/man1/jarvisagent.1"
+
 # Launcher script (shared across deb/rpm/arch)
 install -m755 "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$STAGING/usr/bin/jarvisagent"
 

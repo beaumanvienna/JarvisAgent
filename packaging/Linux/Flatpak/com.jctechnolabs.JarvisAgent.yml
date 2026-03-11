@@ -77,6 +77,7 @@ modules:
       - mkdir -p /app/share/jarvisagent/doc
       - cp README.md /app/share/jarvisagent/doc/README.md
       - cp doc/JC_Workflow_Specification.md /app/share/jarvisagent/doc/JC_Workflow_Specification.md 2>/dev/null || true
+      - cp doc/jarvisagent.1 /app/share/jarvisagent/doc/jarvisagent.1 2>/dev/null || true
 
       # Wrapper script
       - install -Dm755 packaging/Linux/Flatpak/jarvisagent-wrapper.sh /app/bin/jarvisagent-wrapper

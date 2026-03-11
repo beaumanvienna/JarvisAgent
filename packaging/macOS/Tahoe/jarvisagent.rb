@@ -67,6 +67,9 @@ class Jarvisagent < Formula
     doc.install "README.md"
     doc.install "doc/JC_Workflow_Specification.md" if File.exist?("doc/JC_Workflow_Specification.md")
 
+    # Man page
+    man1.install "doc/jarvisagent.1"
+
     # Launcher script (user-space: creates ~/JarvisAgent with symlinks)
     (bin/"jarvisagent").write <<~EOS
       #!/bin/bash

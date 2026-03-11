@@ -91,6 +91,10 @@ install -dm755 %{_instdir}/doc
 install -m644 README.md %{_instdir}/doc/README.md
 install -m644 doc/JC_Workflow_Specification.md %{_instdir}/doc/JC_Workflow_Specification.md 2>/dev/null || true
 
+# Man page
+install -Dm644 doc/jarvisagent.1 %{buildroot}/usr/share/man/man1/jarvisagent.1
+gzip -9 %{buildroot}/usr/share/man/man1/jarvisagent.1
+
 # Launcher script (shared across deb/rpm/arch)
 install -Dm755 jarvisagent-launcher.sh %{buildroot}/usr/bin/jarvisagent
 
@@ -120,6 +124,7 @@ fi
 %files
 /opt/jarvisagent/
 /usr/bin/jarvisagent
+/usr/share/man/man1/jarvisagent.1.gz
 
 %changelog
 * Sun Mar 01 2026 JC Technolabs <https://github.com/beaumanvienna> - 0.1-1

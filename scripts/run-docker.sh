@@ -2,8 +2,10 @@
 # run-docker.sh — Pull and run JarvisAgent via Docker.
 #
 # Usage:
-#   ./scripts/run-docker.sh          # uses ~/JarvisAgent as data directory
-#   ./scripts/run-docker.sh /path    # uses custom data directory
+#   ./scripts/run-docker.sh                    # interactive with TUI
+#   ./scripts/run-docker.sh --headless         # headless (no TUI, web only)
+#   ./scripts/run-docker.sh /path              # custom data directory
+#   ./scripts/run-docker.sh --headless /path   # headless + custom data dir
 
 set -euo pipefail
 
@@ -33,7 +35,14 @@ if ! docker info &>/dev/null; then
 fi
 
 IMAGE="ghcr.io/beaumanvienna/jarvisagent:latest"
+HEADLESS=false
+
 DATA_DIR="${1:-$HOME/JarvisAgent}"
+if [[ "${1:-}" == "--headless" ]]; then
+    HEADLESS=true
+    shift
+    DATA_DIR="${1:-$HOME/JarvisAgent}"
+fi
 [[ $# -gt 0 ]] && shift
 
 echo "==> Data directory: $DATA_DIR"
@@ -60,7 +69,15 @@ if command -v ss &>/dev/null && ss -tlnp 2>/dev/null | grep -q ':8080 '; then
     exit 1
 fi
 
-exec docker run -it --rm \
-  -p 8080:8080 \
-  -v "$DATA_DIR:/app" \
-  "$IMAGE" "$@"
+if $HEADLESS; then
+    echo "    Mode: headless (no TUI)"
+    exec docker run --rm \
+      -p 8080:8080 \
+      -v "$DATA_DIR:/app" \
+      "$IMAGE" "$@"
+else
+    exec docker run -it --rm \
+      -p 8080:8080 \
+      -v "$DATA_DIR:/app" \
+      "$IMAGE" "$@"
+fi

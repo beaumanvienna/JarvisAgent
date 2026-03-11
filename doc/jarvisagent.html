@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>jarvisagent(1) — JarvisAgent User Manual</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      max-width: 50em;
+      margin: 2em auto;
+      padding: 0 1em;
+      line-height: 1.6;
+      color: #222;
+    }
+
+    h1 {
+      border-bottom: 2px solid #333;
+      padding-bottom: 0.3em;
+    }
+
+    h2 {
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 0.2em;
+      margin-top: 2em;
+    }
+
+    h3 {
+      margin-top: 1.5em;
+    }
+
+    code {
+      background: #f4f4f4;
+      padding: 0.15em 0.4em;
+      border-radius: 3px;
+      font-size: 0.95em;
+    }
+
+    pre {
+      background: #f4f4f4;
+      padding: 1em;
+      border-radius: 5px;
+      overflow-x: auto;
+    }
+
+    dt {
+      font-weight: bold;
+      margin-top: 0.8em;
+    }
+
+    dd {
+      margin-left: 2em;
+      margin-bottom: 0.5em;
+    }
+
+    .section-nav {
+      background: #f9f9f9;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 1em;
+      margin-bottom: 2em;
+    }
+
+    .section-nav a {
+      text-decoration: none;
+      color: #0366d6;
+    }
+
+    .section-nav a:hover {
+      text-decoration: underline;
+    }
+
+    .footer {
+      margin-top: 3em;
+      border-top: 1px solid #ccc;
+      padding-top: 1em;
+      font-size: 0.9em;
+      color: #666;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>jarvisagent(1) &mdash; JarvisAgent User Manual</h1>
+  <p><strong>Version 0.8</strong> &mdash; March 2026</p>
+
+  <div class="section-nav">
+    <strong>Contents:</strong>
+    <a href="#name">Name</a> &middot;
+    <a href="#synopsis">Synopsis</a> &middot;
+    <a href="#description">Description</a> &middot;
+    <a href="#options">Options</a> &middot;
+    <a href="#installation">Installation</a> &middot;
+    <a href="#configuration">Configuration</a> &middot;
+    <a href="#environment">Environment</a> &middot;
+    <a href="#ai-setup">AI Setup</a> &middot;
+    <a href="#workflows">Workflows</a> &middot;
+    <a href="#workflow-editor">Workflow Editor</a> &middot;
+    <a href="#dashboard">Dashboard</a> &middot;
+    <a href="#files">Files</a> &middot;
+    <a href="#see-also">See Also</a>
+  </div>
+
+  <h2 id="name">NAME</h2>
+  <p><strong>jarvisAgent</strong> &mdash; parallel AI-driven automation engine with visual workflow editor</p>
+
+  <h2 id="synopsis">SYNOPSIS</h2>
+  <pre>jarvisAgent [--help] [--version]</pre>
+
+  <h2 id="description">DESCRIPTION</h2>
+  <p>JarvisAgent is a C++ backend / React frontend application for parallel AI-driven automation.
+    Its engine core dispatches many concurrent AI requests in parallel &mdash; think requirements analysis
+    across hundreds of items, stock-portfolio deep-research across every position, or chapter-by-chapter
+    processing of entire PDF books.</p>
+
+  <p>Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to Markdown via
+    Microsoft MarkItDown &mdash; and chunked when too large &mdash; before being sent to the AI. JarvisAgent
+    is file-oriented by design: all inputs, outputs, and intermediate results live on disk, making it
+    a natural fit for engineering environments with large file landscapes.</p>
+
+  <p>Workflows let you chain serial and parallel tasks &mdash; AI calls, Python scripts, shell commands,
+    or native C++ &mdash; in a visual graph editor with various trigger types (manual, cron, file_watch).</p>
+
+  <p>The application ships with an ncurses terminal UI for local or SSH sessions, a browser-based
+    React dashboard for remote monitoring, and a visual workflow editor. It compiles and runs on
+    Linux, macOS, and Windows.</p>
+
+  <p>When no TTY is detected (e.g. inside a Docker container without <code>-it</code>), JarvisAgent
+    automatically runs in headless mode: the ncurses TUI and keyboard input are disabled, but the
+    web server, REST API, and WebSocket interface remain fully functional.</p>
+
+  <h2 id="options">OPTIONS</h2>
+  <dl>
+    <dt><code>--help</code>, <code>-h</code></dt>
+    <dd>Show a help message and exit.</dd>
+
+    <dt><code>--version</code>, <code>-v</code></dt>
+    <dd>Print the version number and exit.</dd>
+  </dl>
+  <p>Unknown options cause an error message and a non-zero exit code.</p>
+
+  <h2 id="installation">INSTALLATION</h2>
+  <p>JarvisAgent is available as pre-built packages for all major platforms:</p>
+  <table>
+    <tr>
+      <td><strong>Linux</strong></td>
+      <td>DEB, RPM, Arch (PKGBUILD), Flatpak, AppImage</td>
+    </tr>
+    <tr>
+      <td><strong>macOS</strong></td>
+      <td>DMG, Homebrew formula</td>
+    </tr>
+    <tr>
+      <td><strong>Windows</strong></td>
+      <td>MSI installer, portable ZIP</td>
+    </tr>
+    <tr>
+      <td><strong>Docker</strong></td>
+      <td><code>ghcr.io/beaumanvienna/jarvisagent</code></td>
+    </tr>
+  </table>
+  <p>For building from source and detailed install/uninstall instructions for each package format,
+    see the project <strong>README.md</strong> and <strong>packaging/packaging.md</strong>.</p>
+  <p>GitHub repository: <a
+      href="https://github.com/beaumanvienna/JarvisAgent">https://github.com/beaumanvienna/JarvisAgent</a></p>
+
+  <h2 id="configuration">CONFIGURATION</h2>
+  <p>JarvisAgent reads <code>config.json</code> from the current working directory at startup.
+    If the file is missing, the application prints an error and exits.</p>
+
+  <p>The following fields are recognized:</p>
+  <dl>
+    <dt><code>"file format identifier"</code></dt>
+    <dd>(number) Internal format version for the config file.</dd>
+
+    <dt><code>"description"</code></dt>
+    <dd>(string) A human-readable description of this configuration.</dd>
+
+    <dt><code>"author"</code></dt>
+    <dd>(string) Author or owner of this configuration.</dd>
+
+    <dt><code>"queue folder"</code></dt>
+    <dd>(string, <strong>required</strong>) Relative or absolute path to the queue directory.
+      JarvisAgent monitors this folder for incoming files that trigger AI requests.</dd>
+
+    <dt><code>"workflows folder"</code></dt>
+    <dd>(string) Relative or absolute path to the directory containing <code>.jcwf</code>
+      workflow definition files. Defaults to <code>workflows/</code>.</dd>
+
+    <dt><code>"max threads"</code></dt>
+    <dd>(number) Maximum number of concurrent AI request threads.</dd>
+
+    <dt><code>"engine sleep time in run loop in ms"</code></dt>
+    <dd>(number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness.</dd>
+
+    <dt><code>"max file size in kB"</code></dt>
+    <dd>(number) Maximum input file size in kilobytes. Files larger than this are chunked before
+      being sent to the AI. Default: 20.</dd>
+
+    <dt><code>"verbose"</code></dt>
+    <dd>(boolean) Enable verbose logging output.</dd>
+
+    <dt><code>"keys_file"</code></dt>
+    <dd>(string) Path to the encrypted API keys file. Default: <code>keys.json.enc</code>.</dd>
+
+    <dt><code>"API index"</code></dt>
+    <dd>(number) Zero-based index of the default AI interface to use from the
+      <code>"API interfaces"</code> array.
+    </dd>
+
+    <dt><code>"API interfaces"</code></dt>
+    <dd>(array) List of AI provider configurations. Each entry is an object with the following fields:
+      <dl>
+        <dt><code>"url"</code></dt>
+        <dd>(string, <strong>required</strong>) The API endpoint URL
+          (e.g. <code>https://api.openai.com/v1/chat/completions</code>).</dd>
+
+        <dt><code>"model"</code></dt>
+        <dd>(string) The model name (e.g. <code>gpt-4o</code>, <code>gemini-2.5-flash</code>).</dd>
+
+        <dt><code>"API"</code></dt>
+        <dd>(string) The reply parser type: <code>API1</code> (OpenAI-compatible) or <code>API2</code>.</dd>
+
+        <dt><code>"name"</code></dt>
+        <dd>(string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.</dd>
+
+        <dt><code>"description"</code></dt>
+        <dd>(string) Optional description of this interface.</dd>
+
+        <dt><code>"key_name"</code></dt>
+        <dd>(string) Name of the API key provider to use from the encrypted keys file
+          (e.g. "openai", "google", "anthropic").</dd>
+      </dl>
+    </dd>
+  </dl>
+
+  <h2 id="environment">ENVIRONMENT</h2>
+  <dl>
+    <dt><code>JARVIS_MASTER_PASSWORD</code></dt>
+    <dd>Master password for decrypting the encrypted API keys file (<code>keys.json.enc</code>).
+      When this variable is set, JarvisAgent decrypts the keys file automatically at startup without
+      prompting. This is especially useful for Docker containers and CI environments. The master
+      password is never stored on disk.</dd>
+
+    <dt><code>OPENAI_API_KEY</code></dt>
+    <dd>Backward-compatible fallback. If no encrypted keys file is found and this variable is set,
+      JarvisAgent creates a single "openai" provider entry using the key value. This is a convenience
+      for simple single-provider setups.</dd>
+  </dl>
+
+  <p><strong>API key priority order:</strong></p>
+  <ol>
+    <li>Encrypted keys file (<code>keys.json.enc</code>) decrypted with <code>JARVIS_MASTER_PASSWORD</code>.</li>
+    <li>Plaintext keys file (<code>keys.json</code>) &mdash; development fallback only.</li>
+    <li><code>OPENAI_API_KEY</code> environment variable.</li>
+  </ol>
+
+  <h2 id="ai-setup">AI SETUP</h2>
+  <p>To use AI-powered workflows, you need at least one API key configured.</p>
+
+  <h3>Setting up API keys</h3>
+  <ol>
+    <li>Open the workflow editor at <code>http://localhost:8080/editor</code>.</li>
+    <li>Navigate to the <strong>Settings</strong> page (gear icon) and select <strong>AI Keys</strong>.</li>
+    <li>Add a provider name (e.g. "openai", "google", "anthropic") and paste the corresponding API key.</li>
+    <li>Click <strong>Save Encrypted</strong>. You will be prompted for a master password.
+      This encrypts all keys into <code>keys.json.enc</code> in the working directory.</li>
+  </ol>
+
+  <h3>Setting up AI models</h3>
+  <ol>
+    <li>In the workflow editor, navigate to the <strong>AI Manager</strong> page.</li>
+    <li>Configure one or more AI interfaces: set the API endpoint URL, model name, parser type
+      (API1 for OpenAI-compatible, API2 for native), and select which key provider to use.</li>
+    <li>Set the default interface index or override per-task in workflow definitions.</li>
+  </ol>
+
+  <p>Supported providers include OpenAI, Google Gemini (via the OpenAI-compatible endpoint),
+    Anthropic, and any provider offering an OpenAI-compatible chat completions API.</p>
+
+  <h2 id="workflows">WORKFLOWS</h2>
+  <p>JarvisAgent uses <strong>JC Workflow</strong> definition files (<code>.jcwf</code>) to describe
+    automation pipelines as directed acyclic graphs (DAGs).</p>
+
+  <p>A workflow consists of:</p>
+  <ul>
+    <li><strong>Tasks</strong> &mdash; individual units of work: AI calls, shell commands, Python scripts,
+      or internal actions. Tasks can run in parallel when their dependencies allow it.</li>
+    <li><strong>Edges</strong> &mdash; dependency and dataflow connections between tasks. A task only runs
+      after all its upstream dependencies have completed.</li>
+    <li><strong>Triggers</strong> &mdash; how a workflow is started: manually, on a cron schedule, or when
+      a file appears in a watched directory.</li>
+    <li><strong>Filters</strong> &mdash; per-item expansion from CSV files, text line lists, or queries.
+      A single task definition can fan out into many parallel instances.</li>
+  </ul>
+
+  <h3>Task types</h3>
+  <dl>
+    <dt><code>ai_call</code></dt>
+    <dd>Send a prompt (with optional file attachments) to an AI provider and capture the response.</dd>
+
+    <dt><code>shell</code></dt>
+    <dd>Run a shell command or script. Stdout and stderr are captured.</dd>
+
+    <dt><code>python</code></dt>
+    <dd>Call a Python function with structured inputs/outputs.</dd>
+
+    <dt><code>internal</code></dt>
+    <dd>Built-in actions (e.g. file operations).</dd>
+  </dl>
+
+  <p>For the full specification including JSON schema, dataflow mapping, template syntax, filter
+    types, and per-item expansion, see: <strong>doc/JC_Workflow_Specification.md</strong></p>
+
+  <h2 id="workflow-editor">WORKFLOW EDITOR</h2>
+  <p>The visual workflow editor is a React application served by JarvisAgent at:</p>
+  <pre>http://localhost:8080/editor</pre>
+
+  <p>Key features:</p>
+  <ul>
+    <li><strong>Visual DAG editor</strong> &mdash; drag-and-drop nodes, draw dependency and dataflow edges between
+      tasks.</li>
+    <li><strong>Task inspector</strong> &mdash; configure task type, parameters, file inputs/outputs, working directory,
+      timeout, and per-task AI interface override.</li>
+    <li><strong>Workflow CRUD</strong> &mdash; open, save, validate, run, and clean workflows.</li>
+    <li><strong>Live run monitoring</strong> &mdash; task state badges update in real time via WebSocket (running,
+      succeeded, failed, skipped).</li>
+    <li><strong>Run controls</strong> &mdash; start, stop, pause, and resume workflow runs.</li>
+    <li><strong>Template browser</strong> &mdash; start from pre-built workflow templates.</li>
+    <li><strong>Validation</strong> &mdash; the backend validates the workflow structure and reports issues with
+      severity tiers directly on the canvas.</li>
+    <li><strong>Filter builder</strong> &mdash; configure CSV, text_lines, or query filters for per-item fan-out.</li>
+    <li><strong>Log viewer</strong> &mdash; virtual-scrolling log display with search and run analysis (see <a
+        href="#dashboard">Dashboard</a> below for details).</li>
+  </ul>
+
+  <h2 id="dashboard">DASHBOARD</h2>
+  <p>The React dashboard is served at:</p>
+  <pre>http://localhost:8080</pre>
+  <p>It has two tabs: a <strong>Dashboard</strong> overview and a <strong>Log Viewer</strong>.</p>
+
+  <h3>Dashboard tab</h3>
+  <ul>
+    <li><strong>Status bar</strong> &mdash; live WebSocket connection indicator, active workflow runs, AI session count,
+      completed/failed counters, and a quit button.</li>
+    <li><strong>Workflows panel</strong> &mdash; lists all registered workflows with controls to run or clean each
+      workflow.</li>
+    <li><strong>Session managers panel</strong> &mdash; shows active AI request sessions with real-time status updates.
+    </li>
+  </ul>
+
+  <h3>Log Viewer tab</h3>
+  <p>A full-screen, virtual-scrolling log display (up to 100,000 lines).</p>
+  <ul>
+    <li><strong>Live streaming</strong> &mdash; new log lines arrive in real time via WebSocket.</li>
+    <li><strong>Auto-scroll</strong> &mdash; follows the latest output; toggles between <strong>Follow</strong> and
+      <strong>Paused</strong> mode. Click the button or scroll up to pause, click again to resume.</li>
+    <li><strong>Search</strong> &mdash; press <kbd>/</kbd> or <kbd>Ctrl+F</kbd> to search. Navigate matches with
+      <kbd>Enter</kbd> (next) / <kbd>Shift+Enter</kbd> (previous). Match count and position are shown in the toolbar.
+    </li>
+    <li><strong>Color-coded log levels</strong> &mdash; lines containing <code>[error]</code> are displayed in <strong
+        style="color:#ef4444">red</strong>; lines containing <code>[warning]</code> or <code>[warn]</code> are displayed
+      in <strong style="color:#eab308">yellow</strong>.</li>
+    <li><strong>Run Analyzer</strong> &mdash; press <kbd>1</kbd> or click the <strong>Analyze</strong> button. An
+      overlay panel appears showing:
+      <ul>
+        <li>Workflow ID, run ID, state, start/end timestamps.</li>
+        <li>Clickable log-region links (start line &mdash; end line) to jump directly to the run's output.</li>
+        <li><strong>&laquo; / &raquo;</strong> arrows to cycle through previous runs (newest first).</li>
+        <li><strong>Issues list</strong> &mdash; all warnings and errors within the run, color-coded by severity (red
+          for errors, yellow for warnings).</li>
+        <li><strong>&uarr; / &darr;</strong> arrows to step through issues one by one; clicking an issue jumps to its
+          log line.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2 id="files">FILES</h2>
+  <dl>
+    <dt><code>config.json</code></dt>
+    <dd>Main configuration file (must exist in the working directory).</dd>
+
+    <dt><code>keys.json.enc</code></dt>
+    <dd>Encrypted API keys (AES-256, master-password protected).</dd>
+
+    <dt><code>keys.json</code></dt>
+    <dd>Plaintext API keys (development fallback, gitignored).</dd>
+
+    <dt><code>workflows/</code></dt>
+    <dd>Directory containing <code>.jcwf</code> workflow definition files.</dd>
+
+    <dt><code>queue/</code></dt>
+    <dd>Monitored directory for incoming files.</dd>
+
+    <dt><code>log/log.txt</code></dt>
+    <dd>Application log file.</dd>
+
+    <dt><code>.venv/</code></dt>
+    <dd>Python virtual environment (auto-created by launcher scripts). Contains markitdown, md2pdf-mermaid, and
+      playwright.</dd>
+  </dl>
+
+  <h2 id="see-also">SEE ALSO</h2>
+  <dl>
+    <dt>Project README</dt>
+    <dd><code>README.md</code></dd>
+
+    <dt>Packaging and installation</dt>
+    <dd><code>packaging/packaging.md</code></dd>
+
+    <dt>JC Workflow Specification</dt>
+    <dd><code>doc/JC_Workflow_Specification.md</code></dd>
+
+    <dt>REST API reference</dt>
+    <dd><code>doc/api-endpoints.md</code></dd>
+
+    <dt>Key management internals</dt>
+    <dd><code>engine/keys.md</code></dd>
+  </dl>
+
+  <div class="footer">
+    <p>JarvisAgent is developed by JC Technolabs &mdash;
+      <a href="https://github.com/beaumanvienna/JarvisAgent">GitHub</a>
+    </p>
+  </div>
+
+</body>
+
+</html>

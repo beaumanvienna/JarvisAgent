@@ -1,0 +1,398 @@
+.\" jarvisagent(1) — JarvisAgent user manual
+.\" Generated for JarvisAgent 0.8
+.TH JARVISAGENT 1 "March 2026" "JarvisAgent 0.8" "User Commands"
+.
+.SH NAME
+jarvisAgent \- parallel AI\-driven automation engine with visual workflow editor
+.
+.SH SYNOPSIS
+.B jarvisAgent
+.RB [ \-\-help ]
+.RB [ \-\-version ]
+.
+.SH DESCRIPTION
+JarvisAgent is a C++ backend / React frontend application for parallel
+AI\-driven automation.
+Its engine core dispatches many concurrent AI requests in parallel \(em think
+requirements analysis across hundreds of items, stock\-portfolio deep\-research
+across every position, or chapter\-by\-chapter processing of entire PDF books.
+.PP
+Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to
+Markdown via Microsoft MarkItDown \(em and chunked when too large \(em before
+being sent to the AI.
+JarvisAgent is file\-oriented by design: all inputs, outputs, and intermediate
+results live on disk, making it a natural fit for engineering environments with
+large file landscapes.
+.PP
+Workflows let you chain serial and parallel tasks \(em AI calls, Python scripts,
+shell commands, or native C++ \(em in a visual graph editor with various trigger
+types (manual, cron, file_watch).
+.PP
+The application ships with an ncurses terminal UI for local or SSH sessions,
+a browser\-based React dashboard for remote monitoring, and a visual workflow
+editor.
+It compiles and runs on Linux, macOS, and Windows.
+.PP
+When no TTY is detected (e.g. inside a Docker container without
+.BR \-it ),
+JarvisAgent automatically runs in headless mode: the ncurses TUI and keyboard
+input are disabled, but the web server, REST API, and WebSocket interface
+remain fully functional.
+.
+.SH OPTIONS
+.TP
+.BR \-\-help ", " \-h
+Show a help message and exit.
+.TP
+.BR \-\-version ", " \-v
+Print the version number and exit.
+.PP
+Unknown options cause an error message and a non\-zero exit code.
+.
+.SH INSTALLATION
+JarvisAgent is available as pre\-built packages for all major platforms:
+.PP
+.nf
+\fBLinux:\fR    DEB, RPM, Arch (PKGBUILD), Flatpak, AppImage
+\fBmacOS:\fR   DMG, Homebrew formula
+\fBWindows:\fR MSI installer, portable ZIP
+\fBDocker:\fR  ghcr.io/beaumanvienna/jarvisagent
+.fi
+.PP
+For building from source and detailed install/uninstall instructions for each
+package format, see the project
+.B README.md
+and
+.BR packaging/packaging.md .
+.PP
+The GitHub repository is:
+.UR https://github.com/beaumanvienna/JarvisAgent
+.UE
+.
+.SH CONFIGURATION
+JarvisAgent reads
+.B config.json
+from the current working directory at startup.
+If the file is missing, the application prints an error and exits.
+.PP
+The following fields are recognized:
+.TP
+.B "file format identifier"
+(number) Internal format version for the config file.
+.TP
+.B "description"
+(string) A human\-readable description of this configuration.
+.TP
+.B "author"
+(string) Author or owner of this configuration.
+.TP
+.B "queue folder"
+(string, \fBrequired\fR) Relative or absolute path to the queue directory.
+JarvisAgent monitors this folder for incoming files that trigger AI requests.
+.TP
+.B "workflows folder"
+(string) Relative or absolute path to the directory containing
+.B .jcwf
+workflow definition files.
+Defaults to
+.IR workflows/ .
+.TP
+.B "max threads"
+(number) Maximum number of concurrent AI request threads.
+.TP
+.B "engine sleep time in run loop in ms"
+(number) Main loop sleep duration in milliseconds.
+Controls CPU usage vs. responsiveness.
+.TP
+.B "max file size in kB"
+(number) Maximum input file size in kilobytes.
+Files larger than this are chunked before being sent to the AI.
+Default: 20.
+.TP
+.B "verbose"
+(boolean) Enable verbose logging output.
+.TP
+.B "keys_file"
+(string) Path to the encrypted API keys file.
+Default:
+.IR keys.json.enc .
+See
+.B ENVIRONMENT
+below.
+.TP
+.B "API index"
+(number) Zero\-based index of the default AI interface to use from the
+.B "API interfaces"
+array.
+.TP
+.B "API interfaces"
+(array) List of AI provider configurations.
+Each entry is an object with the following fields:
+.RS
+.TP
+.B url
+(string, \fBrequired\fR) The API endpoint URL
+(e.g. \fIhttps://api.openai.com/v1/chat/completions\fR).
+.TP
+.B model
+(string) The model name (e.g. \fIgpt\-4o\fR, \fIgemini\-2.5\-flash\fR).
+.TP
+.B API
+(string) The reply parser type: \fBAPI1\fR (OpenAI\-compatible) or \fBAPI2\fR.
+.TP
+.B name
+(string) Human\-readable name for this interface.
+Auto\-generated from URL domain + model if omitted.
+.TP
+.B description
+(string) Optional description of this interface.
+.TP
+.B key_name
+(string) Name of the API key provider to use from the encrypted keys file
+(e.g. "openai", "google", "anthropic").
+.RE
+.
+.SH ENVIRONMENT
+.TP
+.B JARVIS_MASTER_PASSWORD
+Master password for decrypting the encrypted API keys file
+.RB ( keys.json.enc ).
+When this variable is set, JarvisAgent decrypts the keys file automatically
+at startup without prompting.
+This is especially useful for Docker containers and CI environments.
+The master password is never stored on disk.
+.TP
+.B OPENAI_API_KEY
+Backward\-compatible fallback.
+If no encrypted keys file is found and this variable is set, JarvisAgent
+creates a single "openai" provider entry using the key value.
+This is a convenience for simple single\-provider setups.
+.PP
+API key priority order:
+.IP 1. 4
+Encrypted keys file
+.RB ( keys.json.enc )
+decrypted with
+.BR JARVIS_MASTER_PASSWORD .
+.IP 2.
+Plaintext keys file
+.RB ( keys.json )
+\(em development fallback only.
+.IP 3.
+.B OPENAI_API_KEY
+environment variable.
+.
+.SH AI SETUP
+To use AI\-powered workflows, you need at least one API key configured.
+.SS Setting up API keys
+.IP 1. 4
+Open the workflow editor at \fIhttp://localhost:8080/editor\fR.
+.IP 2.
+Navigate to the \fBSettings\fR page (gear icon) and select \fBAI Keys\fR.
+.IP 3.
+Add a provider name (e.g. "openai", "google", "anthropic") and paste the
+corresponding API key.
+.IP 4.
+Click \fBSave Encrypted\fR.
+You will be prompted for a master password.
+This encrypts all keys into
+.B keys.json.enc
+in the working directory.
+.SS Setting up AI models
+.IP 1. 4
+In the workflow editor, navigate to the \fBAI Manager\fR page.
+.IP 2.
+Configure one or more AI interfaces: set the API endpoint URL, model name,
+parser type (API1 for OpenAI\-compatible, API2 for native), and select which
+key provider to use.
+.IP 3.
+Set the default interface index or override per\-task in workflow definitions.
+.PP
+Supported providers include OpenAI, Google Gemini (via the OpenAI\-compatible
+endpoint), Anthropic, and any provider offering an OpenAI\-compatible chat
+completions API.
+.
+.SH WORKFLOWS
+JarvisAgent uses
+.B JC Workflow
+definition files
+.RB ( .jcwf )
+to describe automation pipelines as directed acyclic graphs (DAGs).
+.PP
+A workflow consists of:
+.IP \(bu 3
+\fBTasks\fR \(em individual units of work: AI calls, shell commands, Python
+scripts, or internal actions.
+Tasks can run in parallel when their dependencies allow it.
+.IP \(bu
+\fBEdges\fR \(em dependency and dataflow connections between tasks.
+A task only runs after all its upstream dependencies have completed.
+.IP \(bu
+\fBTriggers\fR \(em how a workflow is started: manually, on a cron schedule,
+or when a file appears in a watched directory.
+.IP \(bu
+\fBFilters\fR \(em per\-item expansion from CSV files, text line lists, or
+queries.
+A single task definition can fan out into many parallel instances.
+.PP
+Task types:
+.TP
+.B ai_call
+Send a prompt (with optional file attachments) to an AI provider and capture
+the response.
+.TP
+.B shell
+Run a shell command or script.
+Stdout and stderr are captured.
+.TP
+.B python
+Call a Python function with structured inputs/outputs.
+.TP
+.B internal
+Built\-in actions (e.g. file operations).
+.PP
+For the full specification including JSON schema, dataflow mapping, template
+syntax, filter types, and per\-item expansion, see:
+.PP
+.RS
+.B doc/JC_Workflow_Specification.md
+.RE
+.
+.SH WORKFLOW EDITOR
+The visual workflow editor is a React application served by JarvisAgent at:
+.PP
+.RS
+\fIhttp://localhost:8080/editor\fR
+.RE
+.PP
+Key features:
+.IP \(bu 3
+\fBVisual DAG editor\fR \(em drag\-and\-drop nodes, draw dependency and
+dataflow edges between tasks.
+.IP \(bu
+\fBTask inspector\fR \(em configure task type, parameters, file inputs/outputs,
+working directory, timeout, and per\-task AI interface override.
+.IP \(bu
+\fBWorkflow CRUD\fR \(em open, save, validate, run, and clean workflows.
+.IP \(bu
+\fBLive run monitoring\fR \(em task state badges update in real time via
+WebSocket (running, succeeded, failed, skipped).
+.IP \(bu
+\fBRun controls\fR \(em start, stop, pause, and resume workflow runs.
+.IP \(bu
+\fBTemplate browser\fR \(em start from pre\-built workflow templates.
+.IP \(bu
+\fBValidation\fR \(em the backend validates the workflow structure and
+reports issues with severity tiers directly on the canvas.
+.IP \(bu
+\fBFilter builder\fR \(em configure CSV, text_lines, or query filters
+for per\-item fan\-out.
+.IP \(bu
+\fBLog viewer\fR \(em virtual\-scrolling log display with search and
+run analysis (see
+.B DASHBOARD
+below for details).
+.
+.SH DASHBOARD
+The React dashboard is served at:
+.PP
+.RS
+\fIhttp://localhost:8080\fR
+.RE
+.PP
+It has two tabs: a \fBDashboard\fR overview and a \fBLog Viewer\fR.
+.SS Dashboard tab
+.IP \(bu 3
+\fBStatus bar\fR \(em live WebSocket connection indicator, active workflow
+runs, AI session count, completed/failed counters, and a quit button.
+.IP \(bu
+\fBWorkflows panel\fR \(em lists all registered workflows with controls to
+run or clean each workflow.
+.IP \(bu
+\fBSession managers panel\fR \(em shows active AI request sessions with
+real\-time status updates.
+.SS Log Viewer tab
+A full\-screen, virtual\-scrolling log display (up to 100\,000 lines).
+.IP \(bu 3
+\fBLive streaming\fR \(em new log lines arrive in real time via WebSocket.
+.IP \(bu
+\fBAuto\-scroll\fR \(em follows the latest output; toggles between
+\fBFollow\fR and \fBPaused\fR mode.
+Click the button or scroll up to pause, click again to resume.
+.IP \(bu
+\fBSearch\fR \(em press \fB/\fR or \fBCtrl+F\fR to search.
+Navigate matches with \fBEnter\fR (next) / \fBShift+Enter\fR (previous).
+Match count and position are shown in the toolbar.
+.IP \(bu
+\fBColor\-coded log levels\fR \(em lines containing \fC[error]\fR are
+displayed in \fBred\fR; lines containing \fC[warning]\fR or \fC[warn]\fR
+are displayed in \fByellow\fR.
+.IP \(bu
+\fBRun Analyzer\fR \(em press \fB1\fR or click the \fBAnalyze\fR button.
+An overlay panel appears showing:
+.RS
+.IP \(en 3
+Workflow ID, run ID, state, start/end timestamps.
+.IP \(en
+Clickable log\-region links (start line \(em end line) to jump directly
+to the run\(aqs output.
+.IP \(en
+\fB\(la\fR / \fB\(ra\fR arrows to cycle through previous runs
+(newest first).
+.IP \(en
+\fBIssues list\fR \(em all warnings and errors within the run, color\-coded
+by severity (red for errors, yellow for warnings).
+.IP \(en
+\fB\(ua\fR / \fB\(da\fR arrows to step through issues one by one; clicking
+an issue jumps to its log line.
+.RE
+.
+.SH FILES
+.TP
+.B config.json
+Main configuration file (must exist in the working directory).
+.TP
+.B keys.json.enc
+Encrypted API keys (AES\-256, master\-password protected).
+.TP
+.B keys.json
+Plaintext API keys (development fallback, gitignored).
+.TP
+.B workflows/
+Directory containing
+.B .jcwf
+workflow definition files.
+.TP
+.B queue/
+Monitored directory for incoming files.
+.TP
+.B log/log.txt
+Application log file.
+.TP
+.B .venv/
+Python virtual environment (auto\-created by launcher scripts).
+Contains markitdown, md2pdf\-mermaid, and playwright.
+.
+.SH SEE ALSO
+.TP
+Project README:
+.B README.md
+.TP
+Packaging and installation:
+.B packaging/packaging.md
+.TP
+JC Workflow Specification:
+.B doc/JC_Workflow_Specification.md
+.TP
+REST API reference:
+.B doc/api\-endpoints.md
+.TP
+Key management internals:
+.B engine/keys.md
+.
+.SH AUTHORS
+JC Technolabs.
+.br
+.UR https://github.com/beaumanvienna/JarvisAgent
+GitHub repository
+.UE

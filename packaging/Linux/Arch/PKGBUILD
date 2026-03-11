@@ -99,6 +99,10 @@ package() {
     install -m644 README.md "$_instdir/doc/README.md"
     install -m644 doc/JC_Workflow_Specification.md "$_instdir/doc/JC_Workflow_Specification.md" 2>/dev/null || true
 
+    # ---- Man page ----
+    install -Dm644 doc/jarvisagent.1 "$pkgdir/usr/share/man/man1/jarvisagent.1"
+    gzip -9 "$pkgdir/usr/share/man/man1/jarvisagent.1"
+
     # ---- Launcher script (shared across deb/rpm/arch) ----
     install -Dm755 "$srcdir/JarvisAgent/packaging/Linux/jarvisagent-launcher.sh" "$pkgdir/usr/bin/jarvisagent"
 }

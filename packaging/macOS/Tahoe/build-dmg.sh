@@ -109,6 +109,7 @@ cp "$REPO_ROOT/config.json" "$SHARE/config.json.example"
 mkdir -p "$SHARE/doc"
 cp "$REPO_ROOT/README.md" "$SHARE/doc/README.md"
 cp "$REPO_ROOT/doc/JC_Workflow_Specification.md" "$SHARE/doc/JC_Workflow_Specification.md" 2>/dev/null || true
+cp "$REPO_ROOT/doc/jarvisagent.1" "$SHARE/doc/jarvisagent.1" 2>/dev/null || true
 
 # Patch Homebrew formula with current version
 cp "$SCRIPT_DIR/jarvisagent.rb" "$BUILD_DIR/jarvisagent.rb"
