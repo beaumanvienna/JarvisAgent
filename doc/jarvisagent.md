@@ -212,11 +212,11 @@ A full-screen, virtual-scrolling log display (up to 100,000 lines).
 
 ## SEE ALSO
 
-- **Project README** — `README.md`
-- **Packaging and installation** — `packaging/packaging.md`
-- **JC Workflow Specification** — `doc/JC_Workflow_Specification.md`
-- **REST API reference** — `doc/api-endpoints.md`
-- **Key management internals** — `engine/keys.md`
+- **Project README** — [README.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/README.md)
+- **Packaging and installation** — [packaging/packaging.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/packaging/packaging.md)
+- **JC Workflow Specification** — [doc/JC_Workflow_Specification.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md)
+- **REST API reference** — [doc/api-endpoints.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md)
+- **Key management internals** — [engine/keys.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md)
 
 ---
 
