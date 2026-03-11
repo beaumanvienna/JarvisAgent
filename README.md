@@ -80,7 +80,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
 - **File Categorizer & Tracker** — Tracks which files belong to which category, monitors modification status, and provides content retrieval.  
 - **Binary Detection & Conversion** — Detects binary document formats (PDF, DOCX, HTML, etc.) and uses MarkItDown to convert them to Markdown before querying the AI.  
-- **CurlWrapper / REST Interface** — Handles communication with the AI provider's API (e.g., GPT-4 and GPT-5 models) via HTTP.  
+- **CurlWrapper / REST Interface** — Handles communication with AI provider APIs (OpenAI GPT-4/GPT-5, Google Gemini) via HTTP, supporting both Bearer and `x-goog-api-key` authentication.  
 - **Thread Pool / Parallel Processing** — Configured by `maxThreads` in `config.json`; handles multiple query tasks in parallel.  
 - **JarvisAgent Application** — Orchestrates startup, event handling, file watching, categorization, and query dispatching.  
 - **Core Engine** — Provides globally shared components (thread pool, event queue, logger, config, etc.).  
@@ -107,13 +107,16 @@ Any detected file modification automatically triggers selective reprocessing:
 ## Design Highlights
 
 - **Massively parallel AI engine** — Thread pool dispatches hundreds of concurrent AI requests for bulk processing workloads.  
-- **Multi-model support** — Compatible with **GPT-4**, **GPT-4.1-mini**, and **GPT-5** through configurable API endpoints.  
+- **Multi-model support** — Compatible with **GPT-4**, **GPT-4.1-mini**, **GPT-5**, and **Google Gemini** (both OpenAI-compatible and native API) through configurable API endpoints.  
 - **Visual workflow editor** — React-based graph UI for building DAG workflows with drag-and-drop nodes, auto-layout, and live run status.  
 - **Flexible task types** — Workflow tasks can be AI calls, Python scripts, shell commands, or native C++ — mixed freely in serial and parallel.  
 - **Cron & trigger scheduling** — Cron triggers with IANA timezone support, file-watch triggers, manual triggers, and auto-start triggers.  
 - **Office document conversion** — PDF, DOCX, XLSX, PPTX, and HTML are converted to Markdown via Microsoft MarkItDown before AI processing.  
 - **Smart dependency tracking** — Re-evaluates files only when inputs or environment have changed, preventing unnecessary re-queries.  
 - **Dual UI** — ncurses terminal UI for headless/SSH operation, plus a browser-based React dashboard for remote monitoring.  
+- **Encrypted API key management** — AES-256-GCM encrypted key store with master password, per-provider key names, and runtime key resolution via `key_name` in config.json interfaces.  
+- **Per-item fan-out** — CSV, text_lines, and Polarion filters produce item lists; `per_item` tasks spawn one AI call per item, all running in parallel.  
+- **Task watchdog** — Inactivity-based timeout with heartbeat support for long-running shell and Python tasks.  
 - **Event-driven architecture** — Loosely coupled, non-blocking design with thread-safe event queue.  
 - **Cross-platform** — Compiles and runs on **Linux** (GCC), **macOS** (Clang), and **Windows** (MSVC).  
 

@@ -33,7 +33,7 @@ See also:
 
 ---
 
-## 4. Workflow system
+## ~~4. Workflow system~~ ✅
 - ~~Manual trigger via browser-based terminal prompt~~ — dropped; workflow editor UI covers trigger/run/status
 - ~~Workflows for individual lines from spreadsheets~~ — done: `csv` and `text_lines` per-item filters + `portfolioDividendAnalysis` and `goKartComplianceCheck` demo workflows
 
@@ -44,21 +44,16 @@ See also:
 - New `InterfaceType::API3` added to `configParser.h`, recognized in `configParser.cpp` and `webServer.cpp`
 - `CurlWrapper::AuthStyle::XGoogApiKey` — sends `x-goog-api-key:` header instead of `Authorization: Bearer`
 - `SessionManager::DispatchQuery()` builds Gemini-native request body and constructs URL with model: `{base}/models/{model}:generateContent`
+- `SessionManager` resolves API key via `key_name` from interface config (not just default provider); lazy re-resolve at dispatch time for keys added after startup
 - Frontend dropdown in `AiManagerView.tsx` includes "API3 (Gemini native)" option
-- Config: set `"API": "API3"`, URL to `https://generativelanguage.googleapis.com/v1beta`, model to e.g. `gemini-2.5-flash`
-- `json.md` documentation updated
+- Config: set `"API": "API3"`, URL to `https://generativelanguage.googleapis.com/v1beta`, model to e.g. `gemini-2.5-flash-lite`
+- Tracked `packaging/config.json.example` with all 6 interfaces (including both Gemini entries); all 11 packaging scripts updated to use it instead of gitignored `config.json`
+- Documentation updated: `json.md`, `jarvisagent.1`, `jarvisagent.html`, `jarvisagent.md`, `keys.md`, `api-endpoints.md`, `README.md`
+- E2E tested: `exampleMakefile4` completed successfully twice via Gemini native API3 (`gemini-2.5-flash-lite`)
 
 ---
 
-## 6. README.md update (new)
-- Update "Planned Features" section: Docker is done, remove WIP label
-- Add missing feature highlights: encrypted API keys, per-item filters, task watchdog, dataflow/template engine, dashboard features
-- Update multi-model list to include Google Gemini
-- Fix any outdated information
-
----
-
-## 7. Python Engine parallelization (new)
+## 6. Python Engine parallelization (new)
 - Add support for multiple independent PythonEngine instances
 - Ensure each interpreter instance owns its own GIL
 - Store PythonEngine instances in std::vector
@@ -71,7 +66,7 @@ See also:
 
 ---
 
-## 8. Multi-user support for system-wide installs (new)
+## 7. Multi-user support for system-wide installs (new)
 - When installed system-wide via deb/rpm/Arch (`/opt/jarvisagent/`), `queue/` and `workflows/` are owned by root
 - Non-root users cannot write to these directories without `sudo`
 
@@ -95,7 +90,7 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 9. Workflow editor improvements + AI assistance (new)
+## 8. Workflow editor improvements + AI assistance (new)
 - ~2 weeks of remaining work on the workflow editor UI
 - **AI → JCWF:** User describes a workflow in natural language (prompt), AI generates a valid `.jcwf` file
 - **JCWF → AI:** User loads an existing `.jcwf` file, AI generates a human-readable summary/documentation of what it does
@@ -105,7 +100,7 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 10. Webhook trigger type (future)
+## 9. Webhook trigger type (future)
 - Currently, external systems can already trigger workflows via `POST /api/workflows/<id>/run` and `POST /api/integrations/n8n/start`
 - A dedicated `"type": "webhook"` trigger would add:
   - Per-workflow webhook secrets (HMAC signature verification)
@@ -115,7 +110,7 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 11. Error branching / conditional edges (new)
+## 10. Error branching / conditional edges (new)
 - Currently workflow runs are atomic — if a task fails, the run fails
 - Add `"on_error"` field to task definitions in JCWF, e.g. `"on_error": "task_fallback"`
 - Support success edges and failure edges in the DAG:
@@ -131,7 +126,7 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 12. Built-in retries with backoff (new)
+## 11. Built-in retries with backoff (new)
 - Instead of users scripting retries in shell or AI tasks, provide infrastructure-level robustness
 - Add per-task retry configuration in JCWF:
   ```json
@@ -142,12 +137,12 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
   ```
 - The workflow runtime manager handles retries transparently — no changes needed in task scripts
 - Backoff strategy: fixed or exponential (e.g. 2s → 4s → 8s)
-- Interacts with error branching (#11): retries are exhausted before `on_error` edge fires
+- Interacts with error branching (#10): retries are exhausted before `on_error` edge fires
 - Requires changes to: `WorkflowRuntimeManager` (retry loop + backoff timer), `workflowJsonParser` (parse `retry` block), `workflowValidator` (validate retry params), `workflowTypes.h` (retry config struct), `TaskInstanceState` (attempt counter already exists)
 
 ---
 
-## 13. Browser-based AI chat terminal (new)
+## 12. Browser-based AI chat terminal (new)
 - **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
   Not just a command prompt, but a conversational AI interface that can:
   - Answer questions about the system, workflows, and task outputs
@@ -164,13 +159,13 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 ---
 
 
-## ~~14. Headless server mode~~ ✅
+## ~~13. Headless server mode~~ ✅
 - Headless mode works via automatic TTY detection (`isatty()` in `keyboardInput.cpp` and `terminalManager.cpp`)
 - Docker without `-it` runs headless out-of-the-box — verified with `/api/status`
 - Added `--headless` flag to `scripts/run-docker.sh` (omits `-it`), documented in README.md
 - Explicit `--headless` CLI flag for the binary itself deferred (auto-detection covers all current use cases)
 
-## ~~15. Man page~~ ✅
+## ~~14. Man page~~ ✅
 - Created `doc/jarvisagent.1` (troff) — covers intro, CLI, config.json fields, env vars, AI setup, JCWF summary, workflow editor
 - Created `doc/jarvisagent.html` — standalone HTML version for Windows and online viewing
 - Installed as system man page in DEB, RPM, Arch, Homebrew packages (`/usr/share/man/man1/jarvisagent.1.gz`)
@@ -179,28 +174,28 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 16. Landing page for new users (new)
+## 15. Landing page for new users (new)
 - Create a welcoming landing page / website for JarvisAgent
 - Should explain what JarvisAgent is, key features, screenshots, and download links
 - Target audience: first-time visitors who discover the project
 
 ---
 
-## 17. Self-hosted Docker registry (new)
+## 16. Self-hosted Docker registry (new)
 - Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
 - Benefits: custom domain, no GitHub dependency, potential for private images
 - Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
 
 ---
 
-## 18. Promotion video (new)
+## 17. Promotion video (new)
 - Create a demo / promotion video showcasing JarvisAgent
 - Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
 - Target: GitHub README embed, YouTube, social media
 
 ---
 
-## 20. Launchpad PPA (new)
+## 18. Launchpad PPA (new)
 - Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley
 - Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`
 
