@@ -170,7 +170,8 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          dnf install -y --allowerasing \
+          dnf update -y python3
+          dnf install -y --allowerasing --nobest \
             gcc gcc-c++ make git wget tar \
             python3 python3-devel python3-pip \
             zlib-devel rpm-build
