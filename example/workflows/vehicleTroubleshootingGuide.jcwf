@@ -7,7 +7,7 @@
   "defaults": {
     "timeout_ms": 30000,
     "ai": {
-      "provider": "openai",
+      "provider": "api.openai.com/gpt-4.1-mini/API1",
       "model": "gpt-4.1-mini"
     }
   },

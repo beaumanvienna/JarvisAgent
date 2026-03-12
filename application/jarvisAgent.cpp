@@ -21,6 +21,11 @@
 
 #include <filesystem>
 #include <system_error>
+#ifndef _WIN32
+#include <unistd.h> // write, STDERR_FILENO (raw shutdown diagnostics)
+#else
+#include <io.h>     // _write, _fileno
+#endif
 
 #include "engine.h"
 #include "jarvisAgent.h"
@@ -263,7 +268,7 @@ namespace AIAssistant
 
     void JarvisAgent::OnUpdate()
     {
-        if (m_IsFinished)
+        if (m_IsFinished || Core::g_Core->IsQuitRequested())
         {
             return;
         }
@@ -300,6 +305,9 @@ namespace AIAssistant
                 m_WebServer->BroadcastWorkflowRunsLastSnapshot();
             }
         }
+
+        // Flush queued WebSocket broadcasts to connected clients.
+        m_WebServer->DrainPendingBroadcasts();
 
         // Termination logic
         CheckIfFinished();
@@ -512,29 +520,43 @@ namespace AIAssistant
 
     void JarvisAgent::OnShutdown()
     {
+        // --- Raw diagnostics: bypass spdlog to catch hangs inside OnShutdown ---
+#ifndef _WIN32
+#define RAW_ONSHUTDOWN(literal) do { [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); } while (0)
+#else
+#define RAW_ONSHUTDOWN(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
+#endif
+
+        RAW_ONSHUTDOWN("[OnShutdown] entered\n");
         LOG_APP_INFO("leaving JarvisAgent");
 
         // ── Phase 1: signal all subsystems (non-blocking) ──────────────────
+        RAW_ONSHUTDOWN("[OnShutdown] SignalShutdown...\n");
         Core::g_Core->SignalShutdown(); // sets global flag + ThreadPool::RequestStop()
 
+        RAW_ONSHUTDOWN("[OnShutdown] AiRequestPool::Shutdown...\n");
         if (m_AiRequestPool != nullptr)
         {
             m_AiRequestPool->Shutdown();
         }
 
         LOG_APP_INFO("[shutdown] phase 1: signalling all subsystems...");
+        RAW_ONSHUTDOWN("[OnShutdown] WRM::SignalStop...\n");
         if (m_WorkflowRuntimeManager != nullptr)
         {
             m_WorkflowRuntimeManager->SignalStop();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine::SignalStop...\n");
         if (m_PythonEngine != nullptr)
         {
             m_PythonEngine->SignalStop();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::SignalStop...\n");
         if (m_FileWatcher != nullptr)
         {
             m_FileWatcher->SignalStop();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] WebServer::SignalStop...\n");
         if (m_WebServer != nullptr)
         {
             m_WebServer->SignalStop();
@@ -544,40 +566,53 @@ namespace AIAssistant
         // ── Phase 2: wait for all subsystems (blocking, but parallel) ──────
         LOG_APP_INFO("[shutdown] phase 2: waiting for subsystems...");
 
+        RAW_ONSHUTDOWN("[OnShutdown] WRM::WaitStop...\n");
         if (m_WorkflowRuntimeManager != nullptr)
         {
             m_WorkflowRuntimeManager->WaitStop();
             m_WorkflowRuntimeManager.reset();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] WRM stopped\n");
         LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
 
         m_AiRequestPool.reset();
         App::g_App = nullptr;
 
+        RAW_ONSHUTDOWN("[OnShutdown] session managers...\n");
         for (auto& sessionManager : m_SessionManagers)
         {
             sessionManager.second->OnShutdown();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] session managers stopped\n");
         LOG_APP_INFO("[shutdown] session managers stopped");
 
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine::WaitStop...\n");
         if (m_PythonEngine != nullptr)
         {
             m_PythonEngine->WaitStop();
             m_PythonEngine.reset();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine stopped\n");
         LOG_APP_INFO("[shutdown] PythonEngine stopped");
 
+        RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::WaitStop...\n");
         if (m_FileWatcher != nullptr)
         {
             m_FileWatcher->WaitStop();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] FileWatcher stopped\n");
         LOG_APP_INFO("[shutdown] FileWatcher stopped");
 
+        RAW_ONSHUTDOWN("[OnShutdown] WebServer::WaitStop...\n");
         if (m_WebServer != nullptr)
         {
             m_WebServer->WaitStop();
         }
+        RAW_ONSHUTDOWN("[OnShutdown] WebServer stopped\n");
         LOG_APP_INFO("[shutdown] WebServer stopped");
+
+        RAW_ONSHUTDOWN("[OnShutdown] done\n");
+#undef RAW_ONSHUTDOWN
     }
 
     //--------------------------------------------------------------------

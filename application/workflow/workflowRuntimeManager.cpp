@@ -1488,6 +1488,9 @@ namespace AIAssistant
         }
 
         // Check each required provider individually.
+        // The providerName may be an interface name (e.g. "api.openai.com/gpt-4.1-mini/API1")
+        // or a legacy key name (e.g. "openai").  Resolve interface name → key_name first.
+        auto const& interfaces = Core::g_Core->GetConfig().m_ApiInterfaces;
         for (std::string const& providerName : workflowDefinition.m_RequiredAiProviders)
         {
             if (providerName.empty())
@@ -1502,11 +1505,28 @@ namespace AIAssistant
             }
             else
             {
-                if (keyManager.GetProvider(providerName) == nullptr)
+                // Try interface name → key_name resolution first.
+                std::string keyName;
+                for (auto const& iface : interfaces)
+                {
+                    if (iface.m_Name == providerName)
+                    {
+                        keyName = iface.m_KeyName;
+                        break;
+                    }
+                }
+
+                // Fall back: treat providerName as a key name directly (legacy JCWFs).
+                if (keyName.empty())
+                {
+                    keyName = providerName;
+                }
+
+                if (keyManager.GetProvider(keyName) == nullptr)
                 {
                     LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires provider '{}' "
-                                 "which is not configured",
-                                 workflowDefinition.m_Id, providerName);
+                                 "(key '{}') which is not configured",
+                                 workflowDefinition.m_Id, providerName, keyName);
                     return false;
                 }
             }

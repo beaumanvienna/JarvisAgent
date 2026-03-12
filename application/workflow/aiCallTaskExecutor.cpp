@@ -1053,28 +1053,69 @@ namespace AIAssistant
                                      taskIdForBinding, taskWorkingDirectoryPath.string());
                     }
 
-                    auto const* provCfg = Core::g_Core->GetKeyManager().GetProvider(providerOpt.value());
+                    // The JCWF "provider" field is an interface name from config.json
+                    // (e.g. "api.openai.com/gpt-4.1-mini/API1"). Look it up by name to get
+                    // URL, model, API type, and key_name. The PROV file stores the key_name
+                    // as "provider" so the SessionManager can resolve the API key.
+                    std::string resolvedUrl;
+                    std::string resolvedApiType;
+                    std::string effectiveModel;
+                    std::string keyNameForProv; // key_name from interface → goes into PROV "provider"
+                    {
+                        auto const& interfaces = Core::g_Core->GetConfig().m_ApiInterfaces;
+
+                        // Primary lookup: match by interface name.
+                        for (auto const& iface : interfaces)
+                        {
+                            if (iface.m_Name == providerOpt.value())
+                            {
+                                resolvedUrl = iface.m_Url;
+                                effectiveModel = modelOpt.value_or(iface.m_Model);
+                                keyNameForProv = iface.m_KeyName;
+                                switch (iface.m_InterfaceType)
+                                {
+                                    case ConfigParser::EngineConfig::InterfaceType::API1:
+                                        resolvedApiType = "API1";
+                                        break;
+                                    case ConfigParser::EngineConfig::InterfaceType::API2:
+                                        resolvedApiType = "API2";
+                                        break;
+                                    case ConfigParser::EngineConfig::InterfaceType::API3:
+                                        resolvedApiType = "API3";
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                break;
+                            }
+                        }
+
+                        if (resolvedUrl.empty())
+                        {
+                            LOG_APP_WARN("[ai_call] PROV: provider '{}' does not match any "
+                                         "interface name in config.json for task '{}'",
+                                         providerOpt.value(), taskIdForBinding);
+                        }
+                    }
 
                     std::string sidecarJson = "{";
-                    sidecarJson += "\"provider\":\"" + providerOpt.value() + "\"";
+                    // Store key_name (not interface name) so SessionManager can resolve the API key.
+                    std::string const& provForSidecar = keyNameForProv.empty() ? providerOpt.value() : keyNameForProv;
+                    sidecarJson += "\"provider\":\"" + provForSidecar + "\"";
 
-                    if (provCfg && !provCfg->m_Endpoint.empty())
+                    if (!resolvedUrl.empty())
                     {
-                        sidecarJson += ",\"url\":\"" + provCfg->m_Endpoint + "\"";
+                        sidecarJson += ",\"url\":\"" + resolvedUrl + "\"";
                     }
 
-                    if (provCfg && !provCfg->m_ApiType.empty())
+                    if (!resolvedApiType.empty())
                     {
-                        sidecarJson += ",\"api_type\":\"" + provCfg->m_ApiType + "\"";
+                        sidecarJson += ",\"api_type\":\"" + resolvedApiType + "\"";
                     }
 
-                    if (modelOpt.has_value())
+                    if (!effectiveModel.empty())
                     {
-                        sidecarJson += ",\"model\":\"" + modelOpt.value() + "\"";
-                    }
-                    else if (provCfg && !provCfg->m_DefaultModel.empty())
-                    {
-                        sidecarJson += ",\"model\":\"" + provCfg->m_DefaultModel + "\"";
+                        sidecarJson += ",\"model\":\"" + effectiveModel + "\"";
                     }
 
                     if (temperatureOpt.has_value())

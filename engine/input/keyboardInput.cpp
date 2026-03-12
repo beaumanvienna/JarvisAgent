@@ -90,6 +90,7 @@ void KeyboardInput::Listen()
             if (ch == 'q' || ch == 'Q')
             {
                 LOG_CORE_INFO("Keyboard input: Quit requested");
+                Core::g_Core->RequestQuit();
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                 Core::g_Core->PushEvent(event);
                 break;
@@ -107,6 +108,7 @@ void KeyboardInput::Listen()
             if (ch == 'q' || ch == 'Q')
             {
                 LOG_CORE_INFO("Keyboard: Quit requested");
+                Core::g_Core->RequestQuit();
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                 Core::g_Core->PushEvent(event);
                 break;

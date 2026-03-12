@@ -956,6 +956,7 @@ namespace AIAssistant
             .methods("POST"_method)(
                 []()
                 {
+                    Core::g_Core->RequestQuit();
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                     Core::g_Core->PushEvent(event);
 
@@ -1033,10 +1034,15 @@ namespace AIAssistant
         status["session_managers_with_inflight"] = static_cast<int64_t>(app ? app->GetSessionManagersWithInflight() : 0);
         status["session_managers_inflight_total"] = static_cast<int64_t>(app ? app->GetSessionManagerInflightTotal() : 0);
 
-        // WebSocket clients
+        // WebSocket clients and accumulation stats
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             status["websocket_clients"] = static_cast<int64_t>(m_Clients.size());
+            status["websocket_total_connects"] = static_cast<int64_t>(m_WsTotalConnects);
+            status["websocket_total_disconnects"] = static_cast<int64_t>(m_WsTotalDisconnects);
+            status["websocket_peak_clients"] = static_cast<int64_t>(m_WsPeakClients);
+            status["websocket_peak_pending_broadcasts"] = static_cast<int64_t>(m_WsPeakPendingBroadcasts);
+            status["websocket_pending_broadcasts"] = static_cast<int64_t>(m_PendingBroadcasts.size());
         }
 
         return MakeJsonResponse(200, status);
@@ -2508,6 +2514,11 @@ namespace AIAssistant
                     {
                         std::lock_guard<std::mutex> lock(m_Mutex);
                         m_Clients.insert(&conn);
+                        ++m_WsTotalConnects;
+                        if (m_Clients.size() > m_WsPeakClients)
+                        {
+                            m_WsPeakClients = m_Clients.size();
+                        }
 
                         // Queue current session manager states for the new client.
                         // Cannot call conn.send_text() from onopen (CROW_ENFORCE_WS_SPEC).
@@ -2529,7 +2540,8 @@ namespace AIAssistant
                                 });
                         }
                     }
-                    LOG_APP_INFO("WebSocket client connected");
+                    LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})",
+                                 m_Clients.size(), m_WsTotalConnects, m_WsPeakClients);
 
                     // Queue current workflow run snapshots.
                     BroadcastWorkflowRunsSnapshot();
@@ -2540,7 +2552,9 @@ namespace AIAssistant
                 {
                     std::lock_guard<std::mutex> lock(m_Mutex);
                     m_Clients.erase(&conn);
-                    LOG_APP_INFO("WebSocket client disconnected ({}, code {})", reason, code);
+                    ++m_WsTotalDisconnects;
+                    LOG_APP_INFO("WebSocket client disconnected ({}, code {}) (remaining: {}, lifetime disconnects: {})",
+                                 reason, code, m_Clients.size(), m_WsTotalDisconnects);
                 })
             .onmessage(
                 [this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
@@ -2755,25 +2769,38 @@ namespace AIAssistant
         // Crow's I/O loop won't exit while connections are open.
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
+            LOG_APP_INFO("[shutdown] WebSocket stats: totalConnects={}, totalDisconnects={}, "
+                         "peakClients={}, peakPendingBroadcasts={}, currentClients={}, "
+                         "pendingBroadcasts={}",
+                         m_WsTotalConnects, m_WsTotalDisconnects, m_WsPeakClients,
+                         m_WsPeakPendingBroadcasts, m_Clients.size(), m_PendingBroadcasts.size());
+            LOG_APP_INFO("[shutdown] WebSocket: force-closing {} client(s)...", m_Clients.size());
+            size_t closed = 0;
             for (auto* client : m_Clients)
             {
                 try
                 {
                     client->close("server shutting down");
+                    ++closed;
                 }
                 catch (...)
                 {
+                    LOG_APP_WARN("[shutdown] WebSocket: exception closing client");
                 }
             }
+            LOG_APP_INFO("[shutdown] WebSocket: sent close to {} client(s)", closed);
         }
 
+        LOG_APP_INFO("[shutdown] WebSocket: calling m_Server.stop()...");
         m_Server.stop();
+        LOG_APP_INFO("[shutdown] WebSocket: m_Server.stop() returned");
     }
 
     void WebServer::WaitStop()
     {
         if (m_ServerThread.joinable())
         {
+            LOG_APP_INFO("[shutdown] WebSocket: joining server thread...");
             m_ServerThread.join();
             LOG_APP_INFO("Crow web server stopped");
         }
@@ -2783,12 +2810,20 @@ namespace AIAssistant
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonMessage);
+        if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
+        {
+            m_WsPeakPendingBroadcasts = m_PendingBroadcasts.size();
+        }
     }
 
     void WebServer::BroadcastJSON(std::string const& jsonString)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonString);
+        if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
+        {
+            m_WsPeakPendingBroadcasts = m_PendingBroadcasts.size();
+        }
     }
 
     void WebServer::EnqueueLogLine(std::string const& line)

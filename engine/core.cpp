@@ -130,6 +130,7 @@ namespace AIAssistant
         if (s_ShutdownRequested.exchange(false, std::memory_order_relaxed))
         {
             LOG_CORE_INFO("Received signal SIGINT, exiting");
+            g_Core->RequestQuit();
             auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
             g_Core->PushEvent(event);
         }
@@ -178,12 +179,7 @@ namespace AIAssistant
         // run loop
         do
         {
-            {
-                ZoneScopedN("application->OnUpdate");
-                app->OnUpdate();
-            }
-
-            { // event handling
+            { // event handling (before OnUpdate so quit/SIGINT is processed promptly)
 #ifdef TRACY_ENABLE
                 const auto green = 0x00ff00;
                 ZoneScopedNC("event handling", green);
@@ -214,6 +210,11 @@ namespace AIAssistant
                         app->OnEvent(eventPtr);
                     }
                 }
+            }
+
+            {
+                ZoneScopedN("application->OnUpdate");
+                app->OnUpdate();
             }
 
             if (m_TerminalManager)
@@ -274,10 +275,20 @@ namespace AIAssistant
         }
         LOG_CORE_INFO("[shutdown +{}ms] TerminalManager stopped", elapsed());
 
+        // --- Raw diagnostics: bypass spdlog/streambuf to catch post-log hangs ---
+#ifndef _WIN32
+#define RAW_SHUTDOWN(literal) do { [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); } while (0)
+#else
+#define RAW_SHUTDOWN(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
+#endif
+
+        RAW_SHUTDOWN("[shutdown] flushing cout...\n");
         // Ensure all pending log output is flushed ---
         std::cout << std::flush;
+        RAW_SHUTDOWN("[shutdown] flushing cerr...\n");
         std::cerr << std::flush;
 
+        RAW_SHUTDOWN("[shutdown] restoring rdbuf...\n");
         if (m_OriginalCoutBuffer != nullptr)
         {
             std::cout.rdbuf(m_OriginalCoutBuffer);
@@ -285,12 +296,17 @@ namespace AIAssistant
             m_OriginalCoutBuffer = nullptr;
         }
 
+        RAW_SHUTDOWN("[shutdown] resetting TerminalBuf...\n");
         m_TerminalBuf.reset();
 
+        RAW_SHUTDOWN("[shutdown] closing log file...\n");
         if (m_LogFile && m_LogFile->is_open())
         {
             m_LogFile->close();
         }
+
+        RAW_SHUTDOWN("[shutdown] Core::Shutdown() done\n");
+#undef RAW_SHUTDOWN
 
 #ifndef NDEBUG
         std::cout << "shutdown complete" << std::endl;

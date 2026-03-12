@@ -249,8 +249,18 @@ int engine(int argc, char* argv[])
         });
     watchdog.detach();
 
+    // Raw diagnostics — before OnShutdown, so we can see if we even get here.
+#ifndef _WIN32
+#define RAW_ENGINE(literal) do { [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); } while (0)
+#else
+#define RAW_ENGINE(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
+#endif
+
+    RAW_ENGINE("[engine] entering app->OnShutdown()...\n");
     app->OnShutdown();
+    RAW_ENGINE("[engine] app->OnShutdown() done\n");
     engine->Shutdown();
+    RAW_ENGINE("[engine] engine->Shutdown() done\n");
 
     // Print fatal startup message after curses teardown so it's visible on the terminal.
     if (!app->GetFatalStartupMessage().empty())
@@ -258,12 +268,15 @@ int engine(int argc, char* argv[])
         std::cerr << "\n" << app->GetFatalStartupMessage() << "\n" << std::endl;
     }
 
+    RAW_ENGINE("[engine] diffusing watchdog\n");
     // diffuse the watchdog
     {
         std::lock_guard<std::mutex> lock(watchdogMutex);
         watchdogDiffused = true;
     }
     watchdogCV.notify_one();
+    RAW_ENGINE("[engine] done\n");
+#undef RAW_ENGINE
 
     return EXIT_SUCCESS;
 }

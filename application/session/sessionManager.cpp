@@ -357,8 +357,14 @@ namespace AIAssistant
 
                 QueryResult curlResult = curl.Query(queryData);
 
-                // Always create a parser, even if curl failed (empty buffer)
-                auto interfaceType = Core::g_Core->GetInterfaceType();
+                // Always create a parser, even if curl failed (empty buffer).
+                // Use the per-session api type (may be overridden by PROV file)
+                // rather than the global default.
+                auto interfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
+                if (m_ApiType == "API2")
+                    interfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+                else if (m_ApiType == "API3")
+                    interfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
                 m_ReplyParser = ReplyParser::Create(interfaceType, curlResult.m_Ok ? curl.GetBuffer() : "");
 
                 if (!curlResult.m_Ok)

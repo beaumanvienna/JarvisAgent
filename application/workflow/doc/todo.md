@@ -113,8 +113,13 @@ shutdown sequence (two-phase parallel subsystem shutdown + 6s watchdog safety ne
      and calls `requestPool->Forget()` on their AI request handles before clearing.
 
 **Remaining investigation:**
-- [ ] Check if `CleanWorkflow` or the 409 rejection path leaves the runtime manager in a bad state
-- [ ] Reproduce with logging and confirm the hang is fixed
+- [x] ~~Check if `CleanWorkflow` or the 409 rejection path leaves the runtime manager in a bad state~~
+  — Verified 2026-03-12: the 409 path is read-only (mutex-guarded scan of `m_ActiveRuns`), no state mutation.
+- [x] ~~Reproduce with logging and confirm the hang is fixed~~
+  — Verified 2026-03-12: started JA with 9 JCWFs, pressed `q` ~1s after start while all workflows
+  were running. Shutdown completed in ~1.56s total (68ms after phase-1 signal). WaitStop() failed
+  76 WaitingExternal tasks across 5 runs, curl abort callback killed all in-flight requests.
+  No watchdog timer needed, no deadlock, clean exit.
 
 ---
 
@@ -196,6 +201,54 @@ The PROB-based completion path (for `PROB_<id>_<ts>` naming) already had a stale
 **Fix (applied):** Added `last_write_time` < `m_StartupTime` check to the path-based
 completion block in `jarvisAgent.cpp`, matching the pattern already used by
 `suppressTriggerEvent`. Stale `.output` files are now logged and ignored.
+
+---
+
+## Bug: PROV file regression after API3 integration ✅
+
+**Repro:** `vehicleTroubleshootingGuide` workflow configured for OpenAI generates `PROV_provider.json`
+with Google's API URL after the Gemini API3 integration. All AI tasks fail with HTTP 404.
+
+**Root causes found (3) and fixed (2026-03-12):**
+
+1. **PROV URL/api_type resolved from stale ProviderConfig** — `aiCallTaskExecutor.cpp` used
+   `KeyManager::GetProvider()` which stores a single endpoint per provider name, ambiguous when
+   multiple interfaces share the same key. Fixed: look up config.json interface by **name** (the
+   unique identifier). JCWF `provider` field now uses interface names (e.g.
+   `"api.openai.com/gpt-4.1-mini/API1"`). PROV file stores `key_name` as `"provider"` for
+   SessionManager API key resolution.
+
+2. **ReplyParser type mismatch** — `sessionManager.cpp` used `Core::g_Core->GetInterfaceType()`
+   (global default API2) instead of the per-session `m_ApiType` (API1 from PROV file). Fixed: use
+   `m_ApiType` to select the correct parser.
+
+3. **Prerequisite check blocked auto-triggers** — `CheckAiProviderPrerequisites` in
+   `workflowRuntimeManager.cpp` called `keyManager.GetProvider("api.openai.com/gpt-4.1-mini/API1")`
+   which doesn't exist as a key name. Fixed: resolve interface name → `key_name` before KeyManager
+   lookup. Falls back to treating `providerName` as a key name for legacy JCWFs.
+
+**Files changed:** `aiCallTaskExecutor.cpp`, `sessionManager.cpp`, `workflowRuntimeManager.cpp`,
+5 JCWFs in `example/workflows/`.
+
+**Verified:** All 7 workflows succeeded (dashboard: 7 succeeded, 0 failed), including full
+PDF generation pipeline for `vehicleTroubleshootingGuide`.
+
+---
+
+## Shutdown hang — intermittent, under investigation
+
+The 6-second watchdog hang still reproduces intermittently (observed 2026-03-12 after ~5 clean
+shutdowns). Zero raw diagnostics were printed, suggesting the hang occurs **before** `OnShutdown()`
+or very early inside it. Browser CPU spike after the crash suggests possible WebSocket issue
+(reconnect loop when server crashes without sending close frames).
+
+**Diagnostics added (2026-03-12):**
+- [x] Raw `stderr` diagnostic before/after `app->OnShutdown()` in `engine.cpp`
+- [x] Raw `stderr` diagnostic at every step inside `JarvisAgent::OnShutdown()` in `jarvisAgent.cpp`
+- [x] WebSocket connect/disconnect count logging in `webServer.cpp`
+- [x] WebSocket forced close + `m_Server.stop()` + thread join logging in `webServer.cpp`
+
+Waiting for next reproduction to identify the exact subsystem that hangs.
 
 ---
 

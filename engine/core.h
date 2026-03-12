@@ -49,6 +49,8 @@ namespace AIAssistant
         void Shutdown();
         void SignalShutdown();
         [[nodiscard]] bool IsShuttingDown() const { return m_ShuttingDown.load(); }
+        void RequestQuit() { m_QuitRequested.store(true, std::memory_order_relaxed); }
+        [[nodiscard]] bool IsQuitRequested() const { return m_QuitRequested.load(std::memory_order_relaxed); }
         bool Verbose() const;
         ConfigParser::EngineConfig const& GetConfig() const;
         ConfigParser::EngineConfig& GetMutableConfig() { return m_EngineConfig; }
@@ -82,6 +84,7 @@ namespace AIAssistant
         // file watcher and keyboard input need threads (web server uses its own thread)
         static constexpr size_t THREADS_REQUIRED_BY_APP = 2;
         std::atomic<bool> m_ShuttingDown{false};
+        std::atomic<bool> m_QuitRequested{false};
         ThreadPool m_ThreadPool;
         EventQueue m_EventQueue;
 

@@ -140,6 +140,12 @@ namespace AIAssistant
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
 
+        // WebSocket accumulation statistics (all guarded by m_Mutex)
+        size_t m_WsTotalConnects{0};
+        size_t m_WsTotalDisconnects{0};
+        size_t m_WsPeakClients{0};
+        size_t m_WsPeakPendingBroadcasts{0};
+
         std::vector<std::string> m_PendingBroadcasts;
 
         std::mutex m_LogMutex; // separate from m_Mutex to avoid deadlock when logging inside m_Mutex scope
