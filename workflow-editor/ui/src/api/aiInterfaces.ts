@@ -10,6 +10,7 @@ export type AiInterface = {
 export type AiInterfacesListResponse = {
   ok: boolean;
   api_index: number;
+  dirty: boolean;
   interfaces: AiInterface[];
 };
 

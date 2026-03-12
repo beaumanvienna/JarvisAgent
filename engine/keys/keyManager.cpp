@@ -62,6 +62,7 @@ namespace AIAssistant
             return false;
         }
 
+        m_Dirty = false;
         LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }
@@ -91,6 +92,7 @@ namespace AIAssistant
         file.write(reinterpret_cast<char const*>(blob.data()), static_cast<std::streamsize>(blob.size()));
         file.close();
 
+        m_Dirty = false;
         LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }
@@ -121,6 +123,7 @@ namespace AIAssistant
             return false;
         }
 
+        m_Dirty = false;
         LOG_CORE_INFO("KeyManager::LoadPlaintext: loaded {} provider(s) from '{}'", m_Providers.size(),
                       keysFilePath.string());
         return true;
@@ -144,6 +147,7 @@ namespace AIAssistant
         file << json;
         file.close();
 
+        m_Dirty = false;
         LOG_CORE_INFO("KeyManager::SavePlaintext: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }
@@ -170,6 +174,7 @@ namespace AIAssistant
         m_Providers["openai"] = std::move(config);
         m_DefaultProviderName = "openai";
 
+        m_Dirty = false;
         LOG_CORE_INFO("KeyManager::LoadFromEnvironment: created 'openai' provider from OPENAI_API_KEY env var");
         return true;
     }
@@ -259,6 +264,7 @@ namespace AIAssistant
             return false;
         }
         m_Providers[name] = std::move(config);
+        m_Dirty = true;
 
         // If this is the first provider, make it the default
         if (m_Providers.size() == 1)
@@ -278,6 +284,7 @@ namespace AIAssistant
             return false;
         }
         it->second = std::move(config);
+        m_Dirty = true;
         return true;
     }
 
@@ -291,6 +298,7 @@ namespace AIAssistant
             return false;
         }
         m_Providers.erase(it);
+        m_Dirty = true;
 
         // If we removed the default, pick a new one (or clear it)
         if (m_DefaultProviderName == name)

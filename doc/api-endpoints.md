@@ -336,11 +336,16 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 {
   "ok": true,
   "api_index": 0,
+  "dirty": false,
   "interfaces": [
     { "name": "...", "description": "...", "url": "...", "model": "...", "api_type": "API1", "key_name": "..." }
   ]
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `dirty` | `true` when the in-memory interfaces differ from the on-disk `config.json`. Set by create/update/delete, cleared by save and reload. Used by the editor to show an unsaved-changes badge. |
 
 ### POST /api/settings/ai-interfaces
 **Request body:**
@@ -409,12 +414,17 @@ Manage AI provider configurations (name, endpoint, API key, model, type).
 ```json
 {
   "ok": true,
+  "dirty": false,
   "default_provider": "openai",
   "providers": [
     { "name": "openai", "display_name": "OpenAI", "endpoint": "https://...", "default_model": "gpt-4", "api_type": "API1", "has_key": true }
   ]
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `dirty` | `true` when the in-memory providers differ from the encrypted keys file on disk. Set by create/update/delete, cleared by save and load/unlock. Used by the editor to show an unsaved-changes badge. |
 
 ### POST /api/settings/providers
 **Request body:**

@@ -9,6 +9,7 @@ export type ProviderEntry = {
 
 export type ProvidersListResponse = {
   ok: boolean;
+  dirty: boolean;
   default_provider: string;
   providers: ProviderEntry[];
 };

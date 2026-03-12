@@ -49,6 +49,8 @@ export default function App(): JSX.Element
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [keysStatus, setKeysStatus] = useState<KeysStatusResponse | null>(null);
   const [masterPassword, setMasterPassword] = useState<string | null>(null);
+  const [aiManagerDirty, setAiManagerDirty] = useState<boolean>(false);
+  const [keysDirty, setKeysDirty] = useState<boolean>(false);
 
   // Check master password / keys status on mount
   useEffect(() => {
@@ -161,12 +163,12 @@ export default function App(): JSX.Element
 
     if (route === "ai-manager")
     {
-      return <AiManagerView />;
+      return <AiManagerView onDirtyStateChange={setAiManagerDirty} />;
     }
 
     if (route === "settings")
     {
-      return <ProvidersSettingsView appMasterPassword={masterPassword} />;
+      return <ProvidersSettingsView appMasterPassword={masterPassword} onDirtyStateChange={setKeysDirty} />;
     }
 
     return (
@@ -221,7 +223,7 @@ export default function App(): JSX.Element
             onClick={() => { navigate("ai-manager"); }}
             type="button"
           >
-            AI Manager
+            AI Manager{aiManagerDirty ? "*" : ""}
           </button>
 
           <button
@@ -229,7 +231,7 @@ export default function App(): JSX.Element
             onClick={() => { navigate("settings"); }}
             type="button"
           >
-            AI Keys
+            AI Keys{keysDirty ? "*" : ""}
           </button>
 
           <a

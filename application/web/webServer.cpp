@@ -2991,6 +2991,7 @@ namespace AIAssistant
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["api_index"] = config.m_ApiIndex;
+        responseJson["dirty"] = config.m_InterfacesDirty;
 
         std::vector<crow::json::wvalue> items;
         for (auto const& iface : config.m_ApiInterfaces)
@@ -3102,6 +3103,7 @@ namespace AIAssistant
         }
 
         config.m_ApiInterfaces.push_back(std::move(newIface));
+        config.m_InterfacesDirty = true;
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -3190,6 +3192,8 @@ namespace AIAssistant
             }
         }
 
+        config.m_InterfacesDirty = true;
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["name"] = target->m_Name;
@@ -3214,6 +3218,7 @@ namespace AIAssistant
         }
 
         config.m_ApiInterfaces.erase(it);
+        config.m_InterfacesDirty = true;
 
         // Fix API index if it now exceeds bounds
         if (!config.m_ApiInterfaces.empty() && config.m_ApiIndex >= config.m_ApiInterfaces.size())
@@ -3370,6 +3375,8 @@ namespace AIAssistant
 
         LOG_CORE_INFO("WebServer: saved {} AI interfaces to '{}'", config.m_ApiInterfaces.size(), configPath.string());
 
+        Core::g_Core->GetMutableConfig().m_InterfacesDirty = false;
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["path"] = configPath.string();
@@ -3406,6 +3413,7 @@ namespace AIAssistant
         auto& config = Core::g_Core->GetMutableConfig();
         config.m_ApiInterfaces = std::move(newConfig.m_ApiInterfaces);
         config.m_ApiIndex = newConfig.m_ApiIndex;
+        config.m_InterfacesDirty = false;
 
         LOG_CORE_INFO("WebServer: reloaded config.json — {} AI interfaces", config.m_ApiInterfaces.size());
 
@@ -3515,6 +3523,7 @@ namespace AIAssistant
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
+        responseJson["dirty"] = keyManager.IsDirty();
         responseJson["default_provider"] = keyManager.GetDefaultProviderName();
 
         std::vector<std::string> names = keyManager.GetProviderNames();

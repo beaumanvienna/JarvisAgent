@@ -71,6 +71,7 @@ namespace AIAssistant
             size_t m_MaxFileSizekB{20};
             std::string m_KeysFilePath{"keys.json.enc"};
             bool m_ConfigValid{false};
+            bool m_InterfacesDirty{false};
 
             bool IsValid() const { return m_ConfigValid; }
         };

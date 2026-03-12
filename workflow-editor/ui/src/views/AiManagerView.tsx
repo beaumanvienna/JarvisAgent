@@ -49,7 +49,11 @@ function fromEntry(entry: AiInterface): EditingInterface
   };
 }
 
-export default function AiManagerView(): JSX.Element
+type AiManagerViewProps = {
+  onDirtyStateChange?: (dirty: boolean) => void;
+};
+
+export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps): JSX.Element
 {
   const [interfaces, setInterfaces] = useState<AiInterface[]>([]);
   const [apiIndex, setApiIndex] = useState<number>(0);
@@ -71,6 +75,8 @@ export default function AiManagerView(): JSX.Element
       setInterfaces(ifaceResult.interfaces);
       setApiIndex(ifaceResult.api_index);
       setKeys(keyResult.providers);
+      setDirty(ifaceResult.dirty);
+      onDirtyStateChange?.(ifaceResult.dirty);
     }
     catch (err: unknown)
     {
@@ -80,7 +86,7 @@ export default function AiManagerView(): JSX.Element
     {
       setLoading(false);
     }
-  }, []);
+  }, [onDirtyStateChange]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -94,7 +100,6 @@ export default function AiManagerView(): JSX.Element
     {
       setStatusMessage(`Deleted "${name}"`);
       setErrorMessage("");
-      setDirty(true);
       if (editing && editing.originalName === name)
       {
         setEditing(null);
@@ -134,7 +139,6 @@ export default function AiManagerView(): JSX.Element
         setStatusMessage(`Created "${result.name ?? editing.name}"`);
         setErrorMessage("");
         setEditing(null);
-        setDirty(true);
         await refresh();
       }
       else
@@ -157,7 +161,6 @@ export default function AiManagerView(): JSX.Element
         setStatusMessage(`Updated "${result.name ?? editing.name}"`);
         setErrorMessage("");
         setEditing(null);
-        setDirty(true);
         await refresh();
       }
       else
@@ -174,14 +177,14 @@ export default function AiManagerView(): JSX.Element
     if (result.ok)
     {
       setStatusMessage(`Saved to ${result.path ?? "config.json"}`);
-      setDirty(false);
+      await refresh();
     }
     else
     {
       setErrorMessage(result.message ?? "Save failed");
       setStatusMessage("");
     }
-  }, []);
+  }, [refresh]);
 
   const handleReloadConfig = useCallback(async () => {
     setStatusMessage("Reloading config.json...");
@@ -190,7 +193,6 @@ export default function AiManagerView(): JSX.Element
     if (result.ok)
     {
       setStatusMessage(`Reloaded — ${result.interface_count ?? 0} interfaces`);
-      setDirty(false);
       await refresh();
     }
     else
@@ -222,7 +224,7 @@ export default function AiManagerView(): JSX.Element
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>AI Interfaces</h2>
+        <h2 style={{ margin: 0 }}>AI Interfaces{dirty ? " *" : ""}</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyInterface())}>
             + Add Interface
@@ -303,7 +305,6 @@ export default function AiManagerView(): JSX.Element
                     onChange={async (e) => {
                       const newKeyName = e.target.value;
                       await updateAiInterface(iface.name, { key_name: newKeyName });
-                      setDirty(true);
                       await refresh();
                     }}
                   >

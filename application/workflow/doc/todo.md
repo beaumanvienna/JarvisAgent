@@ -135,13 +135,16 @@ documentation are already in place (buttons disabled until backend is ready).
 
 ## E2E testing — padded indices
 
-Staged but uncommitted changes to `FilterEngine::AddPaddedIndices()`. Needs live
-verification before committing.
+~~Staged but uncommitted changes to `FilterEngine::AddPaddedIndices()`. Needs live
+verification before committing.~~
 
-- [ ] Build project (`make config=release verbose=1 && make config=debug verbose=1`)
-- [ ] Run `aiCarMaintenancePipeline` workflow — verify per_item CSV filter + padded index filenames
-- [ ] Run `portfolioDividendAnalysis` workflow — verify per_item CSV filter + padded index filenames
-- [ ] Commit staged changes after successful E2E
+- [x] ~~Build project (`make config=release verbose=1 && make config=debug verbose=1`)~~
+- [x] ~~Run `aiCarMaintenancePipeline` workflow — verify per_item CSV filter + padded index filenames~~
+- [x] ~~Run `portfolioDividendAnalysis` workflow — verify per_item CSV filter + padded index filenames~~
+- [x] ~~Commit staged changes after successful E2E~~
+
+Verified 2026-03-11: `portfolioDividendAnalysis` output files use 3-digit zero-padded
+row numbers (e.g. `PROB_BNDX_002.txt`, `PROB_BAC_007.txt`, `PROB_BA_053.txt`).
 
 ---
 

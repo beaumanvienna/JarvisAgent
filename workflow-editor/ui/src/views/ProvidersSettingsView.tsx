@@ -21,9 +21,10 @@ function emptyKey(): EditingKey
 
 type ProvidersSettingsViewProps = {
   appMasterPassword: string | null;
+  onDirtyStateChange?: (dirty: boolean) => void;
 };
 
-export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSettingsViewProps): JSX.Element
+export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateChange }: ProvidersSettingsViewProps): JSX.Element
 {
   const [providers, setProviders] = useState<ProviderEntry[]>([]);
   const [editing, setEditing] = useState<EditingKey | null>(null);
@@ -35,6 +36,7 @@ export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSe
   const [showMasterPasswordPrompt, setShowMasterPasswordPrompt] = useState(false);
   const [masterPasswordInput, setMasterPasswordInput] = useState("");
   const [showMasterPwVisible, setShowMasterPwVisible] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   const refresh = useCallback(async () => {
     try
@@ -42,6 +44,8 @@ export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSe
       setLoading(true);
       const provResult = await listProviders();
       setProviders(provResult.providers);
+      setDirty(provResult.dirty);
+      onDirtyStateChange?.(provResult.dirty);
     }
     catch (err: unknown)
     {
@@ -51,7 +55,7 @@ export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSe
     {
       setLoading(false);
     }
-  }, []);
+  }, [onDirtyStateChange]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -145,6 +149,7 @@ export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSe
       setLocalMasterPassword(pw);
       setShowMasterPasswordPrompt(false);
       setStatusMessage(`Saved to ${result.path ?? "keys.json.enc"}`);
+      await refresh();
     }
     else if (result.error === "wrong_password")
     {
@@ -195,7 +200,7 @@ export default function ProvidersSettingsView({ appMasterPassword }: ProvidersSe
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>AI Keys</h2>
+        <h2 style={{ margin: 0 }}>AI Keys{dirty ? " *" : ""}</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyKey())}>
             + Add Key

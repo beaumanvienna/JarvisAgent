@@ -80,6 +80,9 @@ namespace AIAssistant
         // Store the keys file path so Unlock() can use it at runtime
         void SetKeysFilePath(std::filesystem::path const& path) { m_KeysFilePath = path; }
 
+        // Dirty flag: true when in-memory state differs from on-disk state
+        bool IsDirty() const { return m_Dirty; }
+
         // Provider registry access (thread-safe, read-locked)
         ProviderConfig const* GetProvider(std::string const& name) const;
         ProviderConfig const* GetDefaultProvider() const;
@@ -106,5 +109,6 @@ namespace AIAssistant
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};
         std::filesystem::path m_KeysFilePath;
+        bool m_Dirty{false};
     };
 } // namespace AIAssistant
