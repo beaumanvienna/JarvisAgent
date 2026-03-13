@@ -18,6 +18,7 @@ export type EditorTaskNodeData = {
   runtimeRunId?: string;
   capturedStdout?: string;
   capturedStderr?: string;
+  isRunPaused?: boolean;
 };
 
 export type EditorFilterNodeData = {

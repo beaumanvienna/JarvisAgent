@@ -3,7 +3,7 @@ import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorTaskNodeData, RuntimeTaskState } from "./types";
 import { FILE_INPUT_COLORS, FILE_OUTPUT_COLORS } from "./constants";
 
-function runtimeBadgeLabel(runtimeState: RuntimeTaskState | undefined): { label: string; className: string } | null
+function runtimeBadgeLabel(runtimeState: RuntimeTaskState | undefined, isRunPaused?: boolean): { label: string; className: string } | null
 {
   if (!runtimeState)
   {
@@ -13,7 +13,9 @@ function runtimeBadgeLabel(runtimeState: RuntimeTaskState | undefined): { label:
   switch (runtimeState)
   {
     case "queued":
-      return { label: "Q", className: "taskNodeBadgeQueued" };
+      return isRunPaused
+        ? { label: "❚❚", className: "taskNodeBadgePaused" }
+        : { label: "Q", className: "taskNodeBadgeQueued" };
     case "running":
       return { label: "R", className: "taskNodeBadgeRunning" };
     case "success":
@@ -49,7 +51,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const firstWarning = warnings.length > 0 ? warnings[0] : null;
   const firstInfo = infos.length > 0 ? infos[0] : null;
 
-  const runtimeBadge = runtimeBadgeLabel(runtimeState);
+  const runtimeBadge = runtimeBadgeLabel(runtimeState, props.data.isRunPaused);
 
   const taskInputs = props.data.task.inputs as Record<string, unknown> | undefined;
   const taskOutputs = props.data.task.outputs as Record<string, unknown> | undefined;

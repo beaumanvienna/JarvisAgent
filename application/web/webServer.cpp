@@ -373,6 +373,8 @@ namespace AIAssistant
                     return "failed";
                 case WorkflowRunState::Cancelled:
                     return "cancelled";
+                case WorkflowRunState::Stopped:
+                    return "stopped";
                 default:
                     return "unknown";
             }

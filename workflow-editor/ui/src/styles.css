@@ -398,6 +398,12 @@ select.input option {
   background: rgba(255, 200, 120, 0.14);
 }
 
+.taskNodeBadgePaused {
+  border-color: rgba(255, 200, 60, 0.6);
+  background: rgba(255, 200, 60, 0.18);
+  color: #ffc83c;
+}
+
 .taskNodeBadgeUnknown {
   border-color: rgba(160, 160, 170, 0.35);
   background: rgba(160, 160, 170, 0.10);
@@ -610,18 +616,21 @@ select.input option {
   position: absolute;
   top: 100%;
   left: 0;
-  margin-top: 6px;
+  padding-top: 6px;
   min-width: 280px;
   max-width: 480px;
-  max-height: 260px;
-  overflow: auto;
+  max-height: 300px;
+  overflow-y: auto;
+  z-index: 1000;
+  pointer-events: auto;
+}
+
+.taskNodeOutputPopup>pre {
   background: rgba(20, 22, 28, 0.97);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
   padding: 8px 10px;
-  z-index: 1000;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  pointer-events: none;
 }
 
 .taskNode:hover .taskNodeOutputPopup {

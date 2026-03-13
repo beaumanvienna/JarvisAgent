@@ -169,11 +169,11 @@ The manual test plan in `workflow-editor/workflow-editor-test.md` covers 3 test 
 
 These should be re-run periodically after editor changes to catch regressions.
 Additional test scenarios to cover:
-- [ ] Shell task with stderr output (verify red text in tooltip + side panel)
-- [ ] Shell task with >1024 chars output (verify truncation)
-- [ ] Watchdog timeout path (task with low `timeout_ms` that hangs)
-- [ ] Pause / Resume / Stop controls during a multi-task run
-- [ ] Clean command after a run (verify queue folders are deleted)
+- [x] ~~Shell task with stderr output (verify red text in tooltip + side panel)~~ — Verified 2026-03-12: `exampleMakefile4` with deliberate syntax error. Failed shell task shows red node glow, red "F" badge, hover tooltip with compiler errors in red. Downstream "run hello" correctly skipped.
+- [x] ~~Shell task with >1024 chars output (verify truncation)~~ — Verified 2026-03-12: `truncationTest` workflow with 50-line stdout/stderr. Stdout cuts at exactly byte 1024 (line 12 "jumps ov"). Also fixed tooltip UX: `pointer-events: auto` + padding bridge so popup is scrollable and stays visible on mouse-over.
+- [x] ~~Watchdog timeout path (task with low `timeout_ms` that hangs)~~ — Verified 2026-03-12: `watchdogTimeoutTest` workflow with `sleep 3600` script and `timeout_ms: 5000`. Task killed after exactly 5s, run analyzer shows "Task timed out (inactivity > 5000ms)". Stdout captured: "Starting... will hang now."
+- [x] ~~Pause / Resume / Stop controls during a multi-task run~~ — Verified 2026-03-12: `pauseResumeStopTest` workflow (3×10s chained shell tasks). Pause shows ❚❚ badges + PAUSED banner + ▶ Resume button. Stop during step 1 → "■ Run stopped", steps 2&3 skipped. Also fixed: stale "R" badge (fetch final state on run exit), `WorkflowRunState::Stopped` terminal state, normal completion path preserving Stopping state, auto-trigger prevention via explicit triggers array.
+- [x] ~~Clean command after a run (verify queue folders are deleted)~~ — Verified 2026-03-12: `DELETE /api/workflows/exampleMakefile4/clean` returned `{"ok": true}`, `queue/exampleMakefile4/` and all task subdirectories fully removed.
 
 ---
 
@@ -235,20 +235,25 @@ PDF generation pipeline for `vehicleTroubleshootingGuide`.
 
 ---
 
-## Shutdown hang — intermittent, under investigation
+## Shutdown hang — RESOLVED (2026-03-12)
 
-The 6-second watchdog hang still reproduces intermittently (observed 2026-03-12 after ~5 clean
-shutdowns). Zero raw diagnostics were printed, suggesting the hang occurs **before** `OnShutdown()`
-or very early inside it. Browser CPU spike after the crash suggests possible WebSocket issue
-(reconnect loop when server crashes without sending close frames).
+**Root cause:** `DrainPendingBroadcasts()` was only called from the WebSocket `onmessage` handler
+(triggered by browser pings), never from `JarvisAgent::OnUpdate()`. The broadcast queue grew
+unbounded — **33,152 peak messages in 4 minutes** of normal operation. At shutdown, Crow's I/O loop
+had to process/discard thousands of pending async writes, causing the ~5s delay that triggered the
+watchdog.
 
-**Diagnostics added (2026-03-12):**
+**Fix:** Added `m_WebServer->DrainPendingBroadcasts()` to `JarvisAgent::OnUpdate()` (`jarvisAgent.cpp`).
+Queue now stays at 0, peak limited to ~162 (startup burst only). Confirmed with 2.5-hour soak test —
+zero queue growth, shutdown is instant.
+
+**Diagnostics retained:**
 - [x] Raw `stderr` diagnostic before/after `app->OnShutdown()` in `engine.cpp`
 - [x] Raw `stderr` diagnostic at every step inside `JarvisAgent::OnShutdown()` in `jarvisAgent.cpp`
-- [x] WebSocket connect/disconnect count logging in `webServer.cpp`
+- [x] WebSocket accumulation stats (`totalConnects`, `totalDisconnects`, `peakClients`,
+  `peakPendingBroadcasts`) in `webServer.h`, logged at shutdown + connect/disconnect
+- [x] WebSocket stats exposed via `GET /api/status` for live monitoring
 - [x] WebSocket forced close + `m_Server.stop()` + thread join logging in `webServer.cpp`
-
-Waiting for next reproduction to identify the exact subsystem that hangs.
 
 ---
 

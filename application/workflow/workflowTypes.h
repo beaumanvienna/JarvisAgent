@@ -113,7 +113,8 @@ namespace AIAssistant
         Stopping,
         Succeeded,
         Failed,
-        Cancelled
+        Cancelled,
+        Stopped
     };
 
     // ---------------------------------------------------------------------

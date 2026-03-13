@@ -124,14 +124,7 @@ function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[])
     nodes: nodes
       .map((n) => ({
         id: n.id,
-        task: {
-          id: n.data.task.id,
-          type: n.data.task.type,
-          label: n.data.task.label,
-          doc: n.data.task.doc,
-          working_directory: n.data.task.working_directory,
-          params: n.data.task.params,
-        },
+        task: n.data.task,
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     edges: edges
@@ -152,17 +145,7 @@ function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[])
 
 function computeTaskSignature(task: JcwfTask): string
 {
-  // Keep stable key ordering for deterministic comparisons.
-  const signatureObject = {
-    id: task.id,
-    type: task.type,
-    label: task.label,
-    doc: task.doc,
-    working_directory: task.working_directory,
-    params: task.params,
-  };
-
-  return JSON.stringify(signatureObject);
+  return JSON.stringify(task);
 }
 
 function computeNodeSnapshot(nodes: EditorTaskNode[]): NodeSnapshot
@@ -257,6 +240,7 @@ export default function WorkflowEditorView(props: {
   const [lastRunResult, setLastRunResult] = useState<{ runId: string; state: string } | null>(null);
   const pendingRunSeenRef = useRef<boolean>(false);
   const pendingRunLastStateRef = useRef<string>("running");
+  const prevActiveRunIdsRef = useRef<Set<string>>(new Set());
 
   const runtimeTasksByIdRef = useRef<RuntimeTaskSnapshotById>({});
   useEffect(() => {
@@ -782,6 +766,10 @@ export default function WorkflowEditorView(props: {
   }, [shellCommandsFingerprint, nodes, edges, scriptCheckTick]);
 
   useEffect(() => {
+    const runPaused = selectedRunId
+      ? activeRuns.some((r) => r.runId === selectedRunId && r.state === "paused")
+      : false;
+
     setNodes((current) => {
       let changed = false;
       const next = current.map((n) => {
@@ -798,7 +786,8 @@ export default function WorkflowEditorView(props: {
         if (taskNode.data.runtimeState === nextRuntimeState
           && taskNode.data.runtimeRunId === nextRuntimeRunId
           && taskNode.data.capturedStdout === nextStdout
-          && taskNode.data.capturedStderr === nextStderr)
+          && taskNode.data.capturedStderr === nextStderr
+          && taskNode.data.isRunPaused === runPaused)
         {
           return n;
         }
@@ -812,13 +801,14 @@ export default function WorkflowEditorView(props: {
             runtimeRunId: nextRuntimeRunId,
             capturedStdout: nextStdout,
             capturedStderr: nextStderr,
+            isRunPaused: runPaused,
           },
         };
       });
 
       return changed ? next : current;
     });
-  }, [runtimeTasksById, setNodes]);
+  }, [runtimeTasksById, setNodes, activeRuns, selectedRunId]);
 
   // Update nodes when hideTierDWarnings setting changes
   useEffect(() => {
@@ -1251,6 +1241,7 @@ export default function WorkflowEditorView(props: {
       const runState = detail.run.state;
       const stateLabel = runState === "failed" ? "\u2717 Run failed" :
                          runState === "succeeded" ? "\u2713 Run completed successfully" :
+                         runState === "stopped" ? "\u25a0 Run stopped" :
                          runState === "cancelled" ? "Run cancelled" :
                          `Run ${runState}`;
       setStatusText(`${stateLabel}. runId=${runId}`);
@@ -1282,6 +1273,20 @@ export default function WorkflowEditorView(props: {
     pendingRunLastStateRef.current = "running";
   }, []);
 
+  // When the selected run disappears from activeRuns (completed/failed/cancelled),
+  // fetch final task states from the REST API so badges update correctly.
+  useEffect(() => {
+    const currentIds = new Set(activeRuns.map((r) => r.runId));
+    const prevIds = prevActiveRunIdsRef.current;
+    prevActiveRunIdsRef.current = currentIds;
+
+    if (selectedRunId && prevIds.has(selectedRunId) && !currentIds.has(selectedRunId))
+    {
+      // Selected run just left the active list — fetch final state
+      void fetchFinalRunState(selectedRunId);
+    }
+  }, [activeRuns, selectedRunId, fetchFinalRunState]);
+
   // Poll run status while a run is pending — reliably fetches real task states.
   useEffect(() => {
     if (!pendingRunId)
@@ -1289,7 +1294,7 @@ export default function WorkflowEditorView(props: {
       return;
     }
 
-    const terminalStates = ["completed", "failed", "cancelled", "succeeded"];
+    const terminalStates = ["completed", "failed", "cancelled", "succeeded", "stopped"];
     let cancelled = false;
 
     const poll = async () => {
@@ -1321,6 +1326,7 @@ export default function WorkflowEditorView(props: {
         {
           const stateLabel = runState === "failed" ? "\u2717 Run failed" :
                              (runState === "succeeded" || runState === "completed") ? "\u2713 Run completed successfully" :
+                             runState === "stopped" ? "\u25a0 Run stopped" :
                              runState === "cancelled" ? "Run cancelled" :
                              `Run ${runState}`;
           setStatusText(`${stateLabel}. runId=${pendingRunId}`);
@@ -2565,17 +2571,32 @@ export default function WorkflowEditorView(props: {
             )}
 
           {selectedRunId && activeRuns.some((r) => r.runId === selectedRunId)
-            ? (
-              <div style={{ marginTop: 10 }}>
-                <div className="small">Selected: <code>{selectedRunId}</code></div>
-                <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                  <button className="btn" type="button" onClick={onStopRun} style={{ color: "#ff8a8a" }}>Stop</button>
-                  <button className="btn" type="button" onClick={onPauseRun}>Pause</button>
-                  <button className="btn" type="button" onClick={onResumeRun}>Resume</button>
-                  <button className="btn" type="button" onClick={onCancelRun} style={{ color: "#ff6060", fontSize: 11 }}>Cancel</button>
+            ? (() => {
+              const selectedRun = activeRuns.find((r) => r.runId === selectedRunId);
+              const runState = selectedRun?.state ?? "";
+              const isPaused = runState === "paused";
+              const isRunning = runState === "running";
+              return (
+                <div style={{ marginTop: 10 }}>
+                  <div className="small">Selected: <code>{selectedRunId}</code></div>
+                  {isPaused && (
+                    <div style={{ marginTop: 6, padding: "4px 8px", background: "rgba(255, 200, 60, 0.15)", border: "1px solid rgba(255, 200, 60, 0.4)", borderRadius: 4, color: "#ffc83c", fontWeight: 700, fontSize: 12, textAlign: "center" }}>
+                      ❚❚ PAUSED
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                    {isPaused && (
+                      <button className="btn" type="button" onClick={onResumeRun} style={{ color: "#5fdd5f", fontWeight: 700 }} title="Resume run">&#9654; Resume</button>
+                    )}
+                    {isRunning && (
+                      <button className="btn" type="button" onClick={onPauseRun} style={{ fontWeight: 700 }} title="Pause after current task finishes">&#10074;&#10074; Pause</button>
+                    )}
+                    <button className="btn" type="button" onClick={onStopRun} style={{ color: "#ff8a8a" }} title="Stop after current task finishes">&#9632; Stop</button>
+                    <button className="btn" type="button" onClick={onCancelRun} style={{ color: "#ff6060", fontSize: 11 }} title="Cancel and kill immediately">Cancel</button>
+                  </div>
                 </div>
-              </div>
-            )
+              );
+            })()
             : null}
         </div>
 

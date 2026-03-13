@@ -668,7 +668,17 @@ namespace AIAssistant
                     std::scoped_lock<std::mutex> const lock(m_Mutex);
 
                     // Finalise the overall run state (was left at Pending/Running by TickActiveRun).
-                    if (m_ActiveRuns[index].m_Run.m_State != WorkflowRunState::Cancelled)
+                    if (m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Cancelled)
+                    {
+                        // Keep Cancelled as-is.
+                    }
+                    else if (m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Stopping ||
+                             m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Stopped)
+                    {
+                        m_ActiveRuns[index].m_Run.m_State =
+                            m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Stopped;
+                    }
+                    else
                     {
                         m_ActiveRuns[index].m_Run.m_State =
                             m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
@@ -965,7 +975,7 @@ namespace AIAssistant
                     }
                 }
 
-                workflowRun.m_State = workflowRun.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
+                workflowRun.m_State = workflowRun.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Stopped;
                 workflowRun.m_CompletedAtIso8601 = GetIso8601NowUTC();
                 workflowRun.m_IsCompleted = true;
                 LOG_APP_INFO("[workflow] run '{}' stopped (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);

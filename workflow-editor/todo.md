@@ -1,6 +1,6 @@
 # Workflow Editor — TODO & Reference
 
-Last reviewed: 2026-02-28
+Last reviewed: 2026-03-12
 
 ---
 
@@ -25,8 +25,9 @@ Last reviewed: 2026-02-28
 - [x] ~~inputs/outputs slot editor (name, type, required)~~
 - [x] ~~Per-task timeout_ms editor~~
 - [x] ~~Runtime visualization (running=yellow+pulse, failed=bold red+glow, skipped=green dimmed)~~
-- [x] ~~Stop/Pause/Resume buttons (Stop functional, Pause/Resume disabled pending backend)~~
-- [x] ~~Shell task stdout/stderr capture (hover tooltip + side panel, stderr in red)~~
+- [x] ~~Stop/Pause/Resume buttons~~ — fully functional with iconic controls (▶ ❚❚ ■), PAUSED banner, ❚❚ badges on queued nodes, `WorkflowRunState::Stopped` terminal state
+- [x] ~~Shell task stdout/stderr capture (hover tooltip + side panel, stderr in red)~~ — tooltip is scrollable and persistent on mouse-over
+- [x] ~~Dirty indicator~~ — `computeGraphSignature` serializes entire task object; all field changes trigger asterisk
 - [x] ~~Script path validation (`GET /api/scripts/check`, inline warnings)~~
 - [x] ~~Dashboard Log Viewer (virtual scroll, delta polling, search, analyze run panel)~~
 - [x] ~~Log analyze: multi-run cycling (◀/▶), issue filtering by runId/workflowId~~
@@ -34,11 +35,6 @@ Last reviewed: 2026-02-28
 ---
 
 ## Remaining Work
-
-### Backend (C++)
-- [ ] Implement `POST /api/workflow-runs/<runId>/pause`
-- [ ] Implement `POST /api/workflow-runs/<runId>/resume`
-- [ ] Then remove `disabled` from Pause/Resume buttons in editor
 
 ### Editor UI
 - [ ] Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files
