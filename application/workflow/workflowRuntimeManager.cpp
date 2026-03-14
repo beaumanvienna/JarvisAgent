@@ -44,7 +44,6 @@ namespace AIAssistant
 {
     namespace
     {
-
         std::string GetIso8601NowUTC()
         {
             auto const now = std::chrono::system_clock::now();
@@ -207,6 +206,195 @@ namespace AIAssistant
         }
 
     } // namespace
+
+    void WorkflowRuntimeManager::InitializeControlflowRuntime(ActiveRun& activeRun)
+    {
+        WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
+
+        activeRun.m_ActivatedTasks.clear();
+        activeRun.m_TasksWithIncomingControlflow.clear();
+        activeRun.m_HandledFailureTasks.clear();
+        activeRun.m_FiredBranches.clear();
+        activeRun.m_BranchDrivingTask.clear();
+        activeRun.m_BranchNormalTargets.clear();
+        activeRun.m_BranchOnErrorTargets.clear();
+
+        if (workflowDefinition.m_ControlNodes.empty() || workflowDefinition.m_ControlflowEdges.empty())
+        {
+            for (auto const& [taskId, _task] : workflowDefinition.m_Tasks)
+            {
+                activeRun.m_ActivatedTasks.insert(taskId);
+            }
+            return;
+        }
+
+        std::unordered_set<std::string> branchIds;
+        branchIds.reserve(workflowDefinition.m_ControlNodes.size());
+        for (auto const& cn : workflowDefinition.m_ControlNodes)
+        {
+            if (cn.m_Type == ControlNodeType::Branch && !cn.m_Id.empty())
+            {
+                branchIds.insert(cn.m_Id);
+            }
+        }
+
+        for (auto const& edge : workflowDefinition.m_ControlflowEdges)
+        {
+            if (edge.m_From.empty() || edge.m_To.empty())
+            {
+                continue;
+            }
+
+            bool const fromIsBranch = (branchIds.find(edge.m_From) != branchIds.end());
+            bool const toIsBranch = (branchIds.find(edge.m_To) != branchIds.end());
+
+            if (edge.m_Kind == ControlflowKind::ErrorSignal)
+            {
+                if (toIsBranch && !fromIsBranch)
+                {
+                    activeRun.m_BranchDrivingTask[edge.m_To] = edge.m_From;
+                    auto defIt = workflowDefinition.m_Tasks.find(edge.m_From);
+                    if (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_ExposeErrorSignal)
+                    {
+                        activeRun.m_HandledFailureTasks.insert(edge.m_From);
+                    }
+                }
+                continue;
+            }
+
+            if (edge.m_Kind == ControlflowKind::Normal)
+            {
+                if (toIsBranch && !fromIsBranch)
+                {
+                    if (activeRun.m_BranchDrivingTask.find(edge.m_To) == activeRun.m_BranchDrivingTask.end())
+                    {
+                        activeRun.m_BranchDrivingTask[edge.m_To] = edge.m_From;
+                    }
+                    continue;
+                }
+
+                if (fromIsBranch && !toIsBranch)
+                {
+                    activeRun.m_BranchNormalTargets[edge.m_From].push_back(edge.m_To);
+                    activeRun.m_TasksWithIncomingControlflow.insert(edge.m_To);
+                }
+                continue;
+            }
+
+            if (edge.m_Kind == ControlflowKind::OnError)
+            {
+                if (fromIsBranch && !toIsBranch)
+                {
+                    activeRun.m_BranchOnErrorTargets[edge.m_From].push_back(edge.m_To);
+                    activeRun.m_TasksWithIncomingControlflow.insert(edge.m_To);
+                }
+                continue;
+            }
+        }
+
+        for (auto const& [taskId, _task] : workflowDefinition.m_Tasks)
+        {
+            if (activeRun.m_TasksWithIncomingControlflow.find(taskId) == activeRun.m_TasksWithIncomingControlflow.end())
+            {
+                activeRun.m_ActivatedTasks.insert(taskId);
+            }
+        }
+    }
+
+    void WorkflowRuntimeManager::SkipAllInstancesOfTask(WorkflowRun& workflowRun, std::string const& taskId,
+                                                        std::string const& message)
+    {
+        for (auto& [instanceId, taskState] : workflowRun.m_TaskStates)
+        {
+            if (ParentTaskId(instanceId) != taskId)
+            {
+                continue;
+            }
+
+            if (taskState.m_State == TaskInstanceStateKind::Pending || taskState.m_State == TaskInstanceStateKind::Ready)
+            {
+                taskState.m_State = TaskInstanceStateKind::Skipped;
+                taskState.m_LastErrorMessage = message;
+                taskState.m_CompletedAtIso8601 = GetIso8601NowUTC();
+            }
+        }
+    }
+
+    void WorkflowRuntimeManager::FireBranchIfReady(ActiveRun& activeRun, std::string const& completedInstanceId,
+                                                   TaskInstanceStateKind const completedState)
+    {
+        WorkflowRun& workflowRun = activeRun.m_Run;
+
+        std::string const drivingParentId = ParentTaskId(completedInstanceId);
+
+        LOG_APP_INFO("[controlflow debug] FireBranchIfReady: completedInstanceId='{}' drivingParentId='{}' "
+                     "completedState={} branchDrivingTaskCount={}",
+                     completedInstanceId, drivingParentId, static_cast<int>(completedState),
+                     activeRun.m_BranchDrivingTask.size());
+        for (auto const& [bid, dtid] : activeRun.m_BranchDrivingTask)
+        {
+            LOG_APP_INFO("[controlflow debug]   branch='{}' drivingTask='{}'", bid, dtid);
+        }
+
+        for (auto const& [branchId, drivingTaskId] : activeRun.m_BranchDrivingTask)
+        {
+            if (drivingTaskId != drivingParentId)
+            {
+                continue;
+            }
+
+            if (activeRun.m_FiredBranches.find(branchId) != activeRun.m_FiredBranches.end())
+            {
+                continue;
+            }
+
+            activeRun.m_FiredBranches.insert(branchId);
+
+            bool const tookError = (completedState == TaskInstanceStateKind::Failed);
+            std::vector<std::string> const& selectedTargets =
+                tookError ? activeRun.m_BranchOnErrorTargets[branchId] : activeRun.m_BranchNormalTargets[branchId];
+            std::vector<std::string> const& unselectedTargets =
+                tookError ? activeRun.m_BranchNormalTargets[branchId] : activeRun.m_BranchOnErrorTargets[branchId];
+
+            LOG_APP_INFO("[controlflow debug] firing branch '{}': tookError={} selectedCount={} unselectedCount={}",
+                         branchId, tookError, selectedTargets.size(), unselectedTargets.size());
+
+            for (std::string const& targetTaskId : selectedTargets)
+            {
+                if (!targetTaskId.empty())
+                {
+                    activeRun.m_ActivatedTasks.insert(targetTaskId);
+
+                    // If a prior branch already skipped this task (e.g. shell_2 was on branch_1's
+                    // normal path but is also on branch_2's normal path), reset it to Pending
+                    // so the dispatch loop can pick it up.
+                    for (auto& [instanceId, taskState] : workflowRun.m_TaskStates)
+                    {
+                        if (ParentTaskId(instanceId) == targetTaskId &&
+                            taskState.m_State == TaskInstanceStateKind::Skipped)
+                        {
+                            taskState.m_State = TaskInstanceStateKind::Pending;
+                            taskState.m_LastErrorMessage.clear();
+                            taskState.m_CompletedAtIso8601.clear();
+                            LOG_APP_INFO("[controlflow debug]   re-enabled previously-skipped task '{}'", instanceId);
+                        }
+                    }
+
+                    LOG_APP_INFO("[controlflow debug]   activated task '{}'", targetTaskId);
+                }
+            }
+
+            for (std::string const& targetTaskId : unselectedTargets)
+            {
+                if (targetTaskId.empty())
+                {
+                    continue;
+                }
+                SkipAllInstancesOfTask(workflowRun, targetTaskId,
+                                       "skipped: branch '" + branchId + "' took other path");
+            }
+        }
+    }
 
     WorkflowRuntimeManager::~WorkflowRuntimeManager() { Stop(); }
 
@@ -754,6 +942,8 @@ namespace AIAssistant
             activeRun.m_Run.m_StartedAtIso8601 = GetIso8601NowUTC();
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
 
+            InitializeControlflowRuntime(activeRun);
+
             LOG_APP_INFO("[workflow] run '{}' started (workflow '{}')", runId, pendingRun.m_WorkflowId);
 
             {
@@ -813,8 +1003,15 @@ namespace AIAssistant
                     if (defIt == workflowDefinition.m_Tasks.end() ||
                         !TryScheduleRetry(stateIterator->second, defIt->second, iterator->first, workflowRun.m_RunId))
                     {
-                        workflowRun.m_HasFailed = true;
-                        SkipDownstreamOfFailed(activeRun, iterator->first);
+                        std::string const handledParentId = ParentTaskId(iterator->first);
+                        bool const handled =
+                            (activeRun.m_HandledFailureTasks.find(handledParentId) != activeRun.m_HandledFailureTasks.end());
+                        if (!handled)
+                        {
+                            workflowRun.m_HasFailed = true;
+                            SkipDownstreamOfFailed(activeRun, iterator->first);
+                        }
+                        FireBranchIfReady(activeRun, iterator->first, TaskInstanceStateKind::Failed);
                     }
                 }
                 else
@@ -865,12 +1062,32 @@ namespace AIAssistant
                         TryScheduleRetry(stateIterator->second, defIt->second, result.m_TaskId, workflowRun.m_RunId))
                     {
                         // Retry scheduled — do not fail the run.
+                        LOG_APP_INFO("[controlflow debug] task '{}' retry scheduled", result.m_TaskId);
                     }
                     else
                     {
-                        workflowRun.m_HasFailed = true;
-                        SkipDownstreamOfFailed(activeRun, result.m_TaskId);
+                        std::string const handledParentId = ParentTaskId(result.m_TaskId);
+                        bool const handled =
+                            (activeRun.m_HandledFailureTasks.find(handledParentId) != activeRun.m_HandledFailureTasks.end());
+                        LOG_APP_INFO("[controlflow debug] task '{}' failed, parentId='{}' handled={} "
+                                     "handledFailureTasksCount={} branchDrivingTaskCount={}",
+                                     result.m_TaskId, handledParentId, handled,
+                                     activeRun.m_HandledFailureTasks.size(),
+                                     activeRun.m_BranchDrivingTask.size());
+                        if (!handled)
+                        {
+                            workflowRun.m_HasFailed = true;
+                            SkipDownstreamOfFailed(activeRun, result.m_TaskId);
+                        }
+                        FireBranchIfReady(activeRun, result.m_TaskId, TaskInstanceStateKind::Failed);
                     }
+                }
+                else
+                {
+                    // Successful completion may fire a branch's normal path.
+                    FireBranchIfReady(activeRun, result.m_TaskId, stateIterator != workflowRun.m_TaskStates.end()
+                                                           ? stateIterator->second.m_State
+                                                           : TaskInstanceStateKind::Succeeded);
                 }
             }
 
@@ -1034,6 +1251,19 @@ namespace AIAssistant
 
             TaskDef const& taskDefinition = defIterator->second;
 
+            // Controlflow gate: tasks with incoming controlflow only run if activated by a branch.
+            // Child instances are managed by the parent and bypass this gate.
+            if (!isChild)
+            {
+                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) != activeRun.m_TasksWithIncomingControlflow.end())
+                {
+                    if (activeRun.m_ActivatedTasks.find(parentId) == activeRun.m_ActivatedTasks.end())
+                    {
+                        continue;
+                    }
+                }
+            }
+
             // Child instances skip DAG readiness (parent manages them)
             if (!isChild && !IsTaskReady(workflowRun, taskDefinition))
             {
@@ -1052,8 +1282,11 @@ namespace AIAssistant
                 continue;
             }
 
-            // Freshness check + skip (not for child instances — already handled during fan-out)
-            if (!isChild)
+            // Freshness check + skip (not for child instances — already handled during fan-out).
+            // Tasks gated by controlflow bypass freshness: the branch decision is authoritative.
+            bool const isControlflowGated =
+                (activeRun.m_TasksWithIncomingControlflow.find(parentId) != activeRun.m_TasksWithIncomingControlflow.end());
+            if (!isChild && !isControlflowGated)
             {
                 TaskFreshnessChecker freshnessChecker;
                 TaskFreshnessChecker::ResolvedPaths resolvedPaths;
@@ -1138,11 +1371,71 @@ namespace AIAssistant
             dispatchedAny = true;
         }
 
+        // If no work is in-flight, mark non-activated controlflow-gated tasks as skipped so the run can terminate.
+        // WaitingExternal tasks (e.g. ai_call awaiting AI response) are still active but not tracked in
+        // m_RunningTasks, so we must also check for them before pruning controlflow-gated tasks.
+        auto anyWaitingExternal = [&]()
+        {
+            for (auto const& [id, ts] : workflowRun.m_TaskStates)
+            {
+                if (ts.m_State == TaskInstanceStateKind::WaitingExternal)
+                    return true;
+            }
+            return false;
+        };
+        if (activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty() && !anyWaitingExternal())
+        {
+            for (auto& [instanceId, taskState] : workflowRun.m_TaskStates)
+            {
+                if (taskState.m_State != TaskInstanceStateKind::Pending && taskState.m_State != TaskInstanceStateKind::Ready)
+                {
+                    continue;
+                }
+
+                std::string const parentId = ParentTaskId(instanceId);
+                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) == activeRun.m_TasksWithIncomingControlflow.end())
+                {
+                    continue;
+                }
+
+                if (activeRun.m_ActivatedTasks.find(parentId) != activeRun.m_ActivatedTasks.end())
+                {
+                    continue;
+                }
+
+                taskState.m_State = TaskInstanceStateKind::Skipped;
+                if (taskState.m_LastErrorMessage.empty())
+                {
+                    taskState.m_LastErrorMessage = "skipped: controlflow not activated";
+                }
+                taskState.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                dispatchedAny = true;
+            }
+        }
+
         // ---------------------------------------------------------
         // 3) Completion / deadlock detection
         // ---------------------------------------------------------
         if (IsRunTerminal(activeRun))
         {
+            // Rule A: terminal failure is based on the presence of unhandled failed tasks.
+            bool hasUnhandledFailures = false;
+            for (auto const& [instanceId, taskState] : workflowRun.m_TaskStates)
+            {
+                if (taskState.m_State != TaskInstanceStateKind::Failed)
+                {
+                    continue;
+                }
+
+                std::string const parentId = ParentTaskId(instanceId);
+                if (activeRun.m_HandledFailureTasks.find(parentId) == activeRun.m_HandledFailureTasks.end())
+                {
+                    hasUnhandledFailures = true;
+                    break;
+                }
+            }
+            workflowRun.m_HasFailed = hasUnhandledFailures;
+
             if (workflowRun.m_HasFailed)
             {
                 LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
@@ -1250,7 +1543,6 @@ namespace AIAssistant
                             taskState.m_LastErrorMessage = "skipped: upstream task '" + failedTaskId + "' failed";
                             taskState.m_CompletedAtIso8601 = GetIso8601NowUTC();
                             queue.push_back(instanceId);
-
                             LOG_APP_INFO("[workflow] skipping '{}' in run '{}': upstream '{}' failed", instanceId,
                                          workflowRun.m_RunId, failedTaskId);
                         }
@@ -1814,8 +2106,11 @@ namespace AIAssistant
         // ---------------------------------------------------------------
         // 2) Delete declared file_outputs and working directories per task
         // ---------------------------------------------------------------
-        // Collect working directories to try cleaning up (empty dirs only).
+        // Collect working directories for recursive cleanup.
         std::vector<fs::path> workingDirsToClean;
+
+        LOG_APP_INFO("[clean] workflowBasePath='{}' taskCount={}", workflowBasePath.string(),
+                     workflowDef.m_Tasks.size());
 
         for (auto const& [taskId, taskDef] : workflowDef.m_Tasks)
         {
@@ -1825,6 +2120,8 @@ namespace AIAssistant
             {
                 taskWorkDir =
                     TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBasePath, taskDef.m_WorkingDirectory);
+                LOG_APP_INFO("[clean] task '{}' workingDirectory='{}' resolved='{}'", taskId,
+                             taskDef.m_WorkingDirectory, taskWorkDir.string());
             }
 
             // Delete declared file_outputs.
@@ -1936,8 +2233,10 @@ namespace AIAssistant
         }
 
         // ---------------------------------------------------------------
-        // 3) Clean up empty working directories (deepest first)
+        // 3) Clean up working directories (deepest first, recursive)
         // ---------------------------------------------------------------
+        // Working directories contain entirely generated content (materialized
+        // inputs, stdout/stderr captures, etc.), so remove them recursively.
         // Sort by path length descending so child dirs are removed before parents.
         std::sort(workingDirsToClean.begin(), workingDirsToClean.end(),
                   [](fs::path const& a, fs::path const& b) { return a.string().size() > b.string().size(); });
@@ -1949,13 +2248,37 @@ namespace AIAssistant
                 continue;
             }
 
-            if (fs::is_empty(dirPath))
+            std::error_code ec;
+            auto const removed = fs::remove_all(dirPath, ec);
+            if (ec)
+            {
+                errors.push_back("failed to remove working directory '" + dirPath.string() + "': " + ec.message());
+            }
+            else
+            {
+                ++dirsDeleted;
+                filesDeleted += (removed > 1) ? (removed - 1) : 0;
+                LOG_APP_INFO("[clean] removed working directory '{}' ({} entries)", dirPath.string(), removed);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // 4) Remove workflows/<workflowId>/ directory if now empty
+        // ---------------------------------------------------------------
+        {
+            fs::path const workflowOutputDir = workflowBasePath / workflowId;
+            if (fs::exists(workflowOutputDir) && fs::is_directory(workflowOutputDir) && fs::is_empty(workflowOutputDir))
             {
                 std::error_code ec;
-                if (fs::remove(dirPath, ec))
+                if (fs::remove(workflowOutputDir, ec))
                 {
                     ++dirsDeleted;
-                    LOG_APP_INFO("[clean] removed empty directory '{}'", dirPath.string());
+                    LOG_APP_INFO("[clean] removed empty workflow directory '{}'", workflowOutputDir.string());
+                }
+                else if (ec)
+                {
+                    errors.push_back("failed to remove workflow directory '" + workflowOutputDir.string() +
+                                     "': " + ec.message());
                 }
             }
         }

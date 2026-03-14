@@ -24,6 +24,7 @@
 #include <future>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -142,6 +143,20 @@ namespace AIAssistant
             // Per-item fan-out: parent taskId → child instance IDs (e.g. "taskA" → ["taskA#0", "taskA#1"])
             std::unordered_map<std::string, std::vector<std::string>> m_PerItemChildren;
 
+            // Controlflow runtime (branching)
+            std::unordered_set<std::string> m_ActivatedTasks; // task IDs eligible to run (controlflow-gated)
+            std::unordered_set<std::string> m_TasksWithIncomingControlflow;
+            std::unordered_set<std::string> m_HandledFailureTasks; // tasks whose failure is handled by a branch
+
+            std::unordered_set<std::string> m_FiredBranches;
+
+            // branchId -> driving taskId
+            std::unordered_map<std::string, std::string> m_BranchDrivingTask;
+            // branchId -> tasks activated on normal output
+            std::unordered_map<std::string, std::vector<std::string>> m_BranchNormalTargets;
+            // branchId -> tasks activated on error output
+            std::unordered_map<std::string, std::vector<std::string>> m_BranchOnErrorTargets;
+
             bool m_CancelRequested{false};
             bool m_PauseRequested{false};
             bool m_StopRequested{false};
@@ -151,6 +166,12 @@ namespace AIAssistant
         void StartPendingRuns(std::vector<PendingRun>&& pendingRuns);
 
         void TickActiveRun(ActiveRun& activeRun);
+
+        // Controlflow (branching)
+        void InitializeControlflowRuntime(ActiveRun& activeRun);
+        void FireBranchIfReady(ActiveRun& activeRun, std::string const& completedInstanceId,
+                               TaskInstanceStateKind completedState);
+        void SkipAllInstancesOfTask(WorkflowRun& workflowRun, std::string const& taskId, std::string const& message);
 
         bool IsRunTerminal(ActiveRun const& activeRun) const;
 

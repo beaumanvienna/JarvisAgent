@@ -211,3 +211,12 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 - [x] **Linux (AppImage):** CI builds, versioned filename
 - [x] **All platforms:** First-run experience verified (venv auto-creation, config.json, example workflows)
 
+
+
+## 20. AI test button (new)
+- Add a test button in AI manager of workflow-ediotr react app
+- button should send "say hello world, in Python" or something similar
+- visually confirm if the AI is online or not (red/green LED after test before test LED is in off state)
+
+---
+

@@ -1,5 +1,6 @@
-import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
-import type { JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import type { CSSProperties } from "react";
+import type { EditorControlNode, EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
+import type { JcwfControlNode, JcwfControlflowEdge, JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 import { FILE_INPUT_COLORS } from "./constants";
 
 function displayTitle(task: JcwfTask): { title: string; subtitle?: string }
@@ -132,6 +133,59 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     };
   });
 
+  // Control nodes (branch) — compute level from controlflow predecessors.
+  const controlNodesRaw = Array.isArray((jcwf as Record<string, unknown>).control_nodes)
+    ? ((jcwf as Record<string, unknown>).control_nodes as JcwfControlNode[])
+    : [];
+
+  const controlflowForLayout = Array.isArray((jcwf as Record<string, unknown>).controlflow)
+    ? ((jcwf as Record<string, unknown>).controlflow as JcwfControlflowEdge[])
+    : [];
+
+  // For each control node, find the max level of its predecessor tasks (from controlflow edges)
+  // and place the control node one level after that.  For output targets of the branch,
+  // collect the max y of predecessor rows at the computed level for vertical stacking.
+  const controlNodeLevels = new Map<string, number>();
+  for (const cn of controlNodesRaw)
+  {
+    let maxPredLevel = 0;
+    for (const cf of controlflowForLayout)
+    {
+      if (cf.to === cn.id && levels.has(cf.from))
+      {
+        maxPredLevel = Math.max(maxPredLevel, (levels.get(cf.from) ?? 0) + 1);
+      }
+    }
+    controlNodeLevels.set(cn.id, maxPredLevel);
+  }
+
+  // Track how many items are already in each level column for vertical stacking
+  const levelRowCount = new Map<number, number>();
+  for (const [, list] of taskIdsByLevel)
+  {
+    for (const tid of list)
+    {
+      const lv = levels.get(tid) ?? 0;
+      levelRowCount.set(lv, (levelRowCount.get(lv) ?? 0) + 1);
+    }
+  }
+
+  const controlNodes: EditorControlNode[] = controlNodesRaw.map((cn) => {
+    const cnLevel = controlNodeLevels.get(cn.id) ?? 0;
+    const row = levelRowCount.get(cnLevel) ?? 0;
+    levelRowCount.set(cnLevel, row + 1);
+    return {
+      id: cn.id,
+      type: "branch" as const,
+      position: { x: cnLevel * cellW, y: row * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
+      data: {
+        controlNode: cn,
+        title: cn.label && cn.label.length > 0 ? cn.label : cn.id,
+        subtitle: cn.type,
+      },
+    };
+  });
+
   // Filter nodes — placed to the left of the leftmost task column
   const filters = Array.isArray(jcwf.filters) ? jcwf.filters : [];
   const filterNodes: EditorFilterNode[] = filters.map((filter, index) => {
@@ -145,9 +199,48 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     };
   });
 
-  const nodes: EditorNode[] = [...filterNodes, ...taskNodes];
+  const nodes: EditorNode[] = [...filterNodes, ...taskNodes, ...controlNodes];
 
   const edges: EditorTaskEdge[] = [];
+
+  // Controlflow edges (branching)
+  const nodeIdSet = new Set<string>(nodes.map((n) => n.id));
+  const controlflowEntries = Array.isArray((jcwf as Record<string, unknown>).controlflow)
+    ? ((jcwf as Record<string, unknown>).controlflow as JcwfControlflowEdge[])
+    : [];
+  for (const cf of controlflowEntries)
+  {
+    if (!nodeIdSet.has(cf.from) || !nodeIdSet.has(cf.to))
+    {
+      continue;
+    }
+
+    const sourceHandle = cf.from_port;
+    const targetHandle = cf.to_port;
+
+    const style: CSSProperties = cf.kind === "error_signal"
+      ? { strokeDasharray: "2 3", stroke: "rgba(255,120,120,0.85)", strokeWidth: 2 }
+      : cf.kind === "on_error"
+        ? { strokeDasharray: "6 4", stroke: "rgba(255,120,120,0.85)", strokeWidth: 2 }
+        : { strokeDasharray: "6 4", stroke: "rgba(255,200,140,0.9)", strokeWidth: 2 };
+
+    const label = cf.kind === "error_signal" ? "error" : (cf.kind === "on_error" ? "on_error" : "normal");
+
+    edges.push({
+      id: `cf:${cf.from}->${cf.to}:${cf.kind}`,
+      source: cf.from,
+      target: cf.to,
+      sourceHandle,
+      targetHandle,
+      style,
+      label,
+      labelStyle: { fill: "rgba(255,220,180,0.95)", fontSize: 10, fontWeight: 600 },
+      labelBgStyle: { fill: "rgba(30,35,45,0.92)", stroke: "rgba(255,180,80,0.3)", strokeWidth: 1 },
+      labelBgPadding: [4, 6] as [number, number],
+      labelBgBorderRadius: 4,
+    });
+  }
+
   for (const [taskId, taskValue] of taskEntries)
   {
     const task = taskValue as JcwfTask;

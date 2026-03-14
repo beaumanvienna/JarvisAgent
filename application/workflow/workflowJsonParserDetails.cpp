@@ -129,6 +129,243 @@ namespace AIAssistant
     }
 
     // ---------------------------------------------------------------------
+    // Control-flow graph extensions (branching)
+    // ---------------------------------------------------------------------
+
+    namespace
+    {
+        ControlNodeType StringToControlNodeType(std::string const& typeString)
+        {
+            if (typeString == "branch")
+            {
+                return ControlNodeType::Branch;
+            }
+            return ControlNodeType::Unknown;
+        }
+
+        ControlflowKind StringToControlflowKind(std::string const& kindString)
+        {
+            if (kindString == "normal")
+            {
+                return ControlflowKind::Normal;
+            }
+            if (kindString == "error_signal")
+            {
+                return ControlflowKind::ErrorSignal;
+            }
+            if (kindString == "on_error")
+            {
+                return ControlflowKind::OnError;
+            }
+            return ControlflowKind::Unknown;
+        }
+    } // namespace
+
+    bool WorkflowJsonParser::ParseControlNodes(simdjson::ondemand::value& jsonValue,
+                                               std::vector<ControlNodeDef>& controlNodesOut,
+                                               std::string& errorMessage) const
+    {
+        controlNodesOut.clear();
+
+        if (!RequireArray(jsonValue, "control_nodes", errorMessage))
+        {
+            return false;
+        }
+
+        auto arrayResult = jsonValue.get_array();
+        if (arrayResult.error() != simdjson::SUCCESS)
+        {
+            errorMessage = "failed to read 'control_nodes' array: ";
+            errorMessage += simdjson::error_message(arrayResult.error());
+            return false;
+        }
+
+        simdjson::ondemand::array nodeArray = arrayResult.value();
+        for (simdjson::ondemand::value entryValue : nodeArray)
+        {
+            auto objectResult = entryValue.get_object();
+            if (objectResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "control_nodes entry must be an object: ";
+                errorMessage += simdjson::error_message(objectResult.error());
+                return false;
+            }
+
+            simdjson::ondemand::object obj = objectResult.value();
+
+            ControlNodeDef node;
+            bool hasId = false;
+            bool hasType = false;
+
+            for (auto field : obj)
+            {
+                auto keyResult = field.unescaped_key();
+                if (keyResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "failed to read control_nodes field key: ";
+                    errorMessage += simdjson::error_message(keyResult.error());
+                    return false;
+                }
+
+                std::string_view keyView = keyResult.value();
+                std::string key(keyView.begin(), keyView.end());
+                simdjson::ondemand::value value = field.value();
+
+                if (key == "id")
+                {
+                    if (!ElementToString(value, node.m_Id))
+                    {
+                        errorMessage = "control_nodes field 'id' must be string";
+                        return false;
+                    }
+                    hasId = true;
+                }
+                else if (key == "type")
+                {
+                    std::string typeString;
+                    if (!ElementToString(value, typeString))
+                    {
+                        errorMessage = "control_nodes field 'type' must be string";
+                        return false;
+                    }
+                    node.m_Type = StringToControlNodeType(typeString);
+                    hasType = true;
+                }
+                else if (key == "label")
+                {
+                    ElementToString(value, node.m_Label);
+                }
+                else
+                {
+                    LOG_CORE_WARN("Unknown field in control_nodes: {}", key);
+                }
+            }
+
+            if (!hasId)
+            {
+                errorMessage = "control_nodes entry missing required field: id";
+                return false;
+            }
+
+            if (!hasType)
+            {
+                errorMessage = "control_nodes entry missing required field: type";
+                return false;
+            }
+
+            controlNodesOut.push_back(std::move(node));
+        }
+
+        return true;
+    }
+
+    bool WorkflowJsonParser::ParseControlflow(simdjson::ondemand::value& jsonValue,
+                                              std::vector<ControlflowEdgeDef>& controlflowOut,
+                                              std::string& errorMessage) const
+    {
+        controlflowOut.clear();
+
+        if (!RequireArray(jsonValue, "controlflow", errorMessage))
+        {
+            return false;
+        }
+
+        auto arrayResult = jsonValue.get_array();
+        if (arrayResult.error() != simdjson::SUCCESS)
+        {
+            errorMessage = "failed to read 'controlflow' array: ";
+            errorMessage += simdjson::error_message(arrayResult.error());
+            return false;
+        }
+
+        simdjson::ondemand::array edgeArray = arrayResult.value();
+        for (simdjson::ondemand::value entryValue : edgeArray)
+        {
+            auto objectResult = entryValue.get_object();
+            if (objectResult.error() != simdjson::SUCCESS)
+            {
+                errorMessage = "controlflow entry must be an object: ";
+                errorMessage += simdjson::error_message(objectResult.error());
+                return false;
+            }
+
+            simdjson::ondemand::object obj = objectResult.value();
+
+            ControlflowEdgeDef edge;
+            bool hasFrom = false;
+            bool hasTo = false;
+            bool hasKind = false;
+
+            for (auto field : obj)
+            {
+                auto keyResult = field.unescaped_key();
+                if (keyResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "failed to read controlflow field key: ";
+                    errorMessage += simdjson::error_message(keyResult.error());
+                    return false;
+                }
+
+                std::string_view keyView = keyResult.value();
+                std::string key(keyView.begin(), keyView.end());
+                simdjson::ondemand::value value = field.value();
+
+                if (key == "from")
+                {
+                    if (!ElementToString(value, edge.m_From))
+                    {
+                        errorMessage = "controlflow field 'from' must be string";
+                        return false;
+                    }
+                    hasFrom = true;
+                }
+                else if (key == "to")
+                {
+                    if (!ElementToString(value, edge.m_To))
+                    {
+                        errorMessage = "controlflow field 'to' must be string";
+                        return false;
+                    }
+                    hasTo = true;
+                }
+                else if (key == "kind")
+                {
+                    std::string kindString;
+                    if (!ElementToString(value, kindString))
+                    {
+                        errorMessage = "controlflow field 'kind' must be string";
+                        return false;
+                    }
+                    edge.m_Kind = StringToControlflowKind(kindString);
+                    hasKind = true;
+                }
+                else if (key == "from_port")
+                {
+                    ElementToString(value, edge.m_FromPort);
+                }
+                else if (key == "to_port")
+                {
+                    ElementToString(value, edge.m_ToPort);
+                }
+                else
+                {
+                    LOG_CORE_WARN("Unknown field in controlflow: {}", key);
+                }
+            }
+
+            if (!hasFrom || !hasTo || !hasKind)
+            {
+                errorMessage = "controlflow entry missing required fields (from, to, kind)";
+                return false;
+            }
+
+            controlflowOut.push_back(std::move(edge));
+        }
+
+        return true;
+    }
+
+    // ---------------------------------------------------------------------
     // Tasks
     // ---------------------------------------------------------------------
 

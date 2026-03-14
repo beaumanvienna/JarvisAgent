@@ -1,5 +1,5 @@
-import type { EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
-import type { JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
+import type { EditorControlNode, EditorGraph, EditorFilterNode, EditorTaskEdge, EditorTaskNode, EditorNode } from "./types";
+import type { JcwfControlNode, JcwfControlflowEdge, JcwfControlflowKind, JcwfDataflowEntry, JcwfFile, JcwfFilter, JcwfTask } from "../jcwf/types";
 
 type CycleError = { ok: false; message: string; cycleNodes: string[]; };
 type Ok = { ok: true; jcwf: JcwfFile; };
@@ -14,6 +14,12 @@ function buildAdjacency(graph: EditorGraph): Map<string, string[]>
 
   for (const edge of graph.edges)
   {
+    // Ignore dataflow edges (slot wiring) and filter fanout edges in orchestration cycle detection.
+    if (edge.id.startsWith("df:") || edge.id.startsWith("fanout:"))
+    {
+      continue;
+    }
+
     // source -> target
     const list = adjacency.get(edge.source);
     if (list)
@@ -105,9 +111,10 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     return { ok: false, message: "Cycle detected. Export aborted.", cycleNodes };
   }
 
-  // Separate task nodes and filter nodes
+  // Separate task nodes, filter nodes, and control nodes
   const taskNodes = (graph.nodes as EditorNode[]).filter((n): n is EditorTaskNode => n.type === "task");
   const filterNodes = (graph.nodes as EditorNode[]).filter((n): n is EditorFilterNode => n.type === "filter");
+  const controlNodes = (graph.nodes as EditorNode[]).filter((n): n is EditorControlNode => n.type === "branch");
 
   const tasks: Record<string, JcwfTask> = {};
   const sortedNodes = [...taskNodes].sort((a, b) => a.id.localeCompare(b.id));
@@ -123,6 +130,11 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     .map((n) => ({ ...n.data.filter }))
     .sort((a, b) => a.id.localeCompare(b.id));
 
+  // Collect control_nodes sorted by id
+  const control_nodes: JcwfControlNode[] = controlNodes
+    .map((n) => ({ ...(n.data.controlNode as JcwfControlNode), id: n.id }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+
   // compute depends_on from edges
   for (const taskId of Object.keys(tasks))
   {
@@ -130,6 +142,7 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
   }
 
   const dataflow: JcwfDataflowEntry[] = [];
+  const controlflow: JcwfControlflowEdge[] = [];
 
   // Collect dep entries with file_input handle indices for ordering.
   const depsByTask = new Map<string, Array<{ source: string; handleIdx: number }>>();
@@ -152,6 +165,32 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
 
     // Skip fanout edges (auto-generated from filter → per_item task)
     if (edge.id.startsWith("fanout:"))
+    {
+      continue;
+    }
+
+    // Controlflow edges (branching) are persisted separately.
+    if (edge.id.startsWith("cf:") && edge.sourceHandle && edge.targetHandle)
+    {
+      const kind: JcwfControlflowKind =
+        edge.sourceHandle === "cf-out-error" ? "on_error"
+          : edge.sourceHandle === "cf-out-normal" ? "normal"
+            : edge.sourceHandle === "error-signal" ? "error_signal"
+              : edge.targetHandle === "cf-in-error" ? "error_signal"
+                : "normal";
+
+      controlflow.push({
+        from: edge.source,
+        to: edge.target,
+        kind,
+        from_port: edge.sourceHandle,
+        to_port: edge.targetHandle,
+      });
+      continue;
+    }
+
+    // Only dep:* edges participate in depends_on.
+    if (!edge.id.startsWith("dep:"))
     {
       continue;
     }
@@ -219,14 +258,16 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     orderedTasks[taskId] = tasks[taskId];
   }
 
-  const hasFilters = filters.length > 0;
+  const needsV11 = filters.length > 0 || control_nodes.length > 0 || controlflow.length > 0;
 
   const jcwf: JcwfFile = {
-    version: hasFilters ? "1.1" : "1.0",
+    version: needsV11 ? "1.1" : "1.0",
     id: workflowId,
     tasks: orderedTasks,
-    ...(hasFilters ? { filters } : {}),
+    ...(filters.length > 0 ? { filters } : {}),
     ...(dataflow.length > 0 ? { dataflow } : {}),
+    ...(control_nodes.length > 0 ? { control_nodes } : {}),
+    ...(controlflow.length > 0 ? { controlflow } : {}),
   };
 
   return { ok: true, jcwf };

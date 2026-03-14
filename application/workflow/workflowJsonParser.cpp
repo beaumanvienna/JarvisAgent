@@ -536,6 +536,17 @@ namespace AIAssistant
                     taskOut.m_DependsOn.emplace_back(dependencyView.begin(), dependencyView.end());
                 }
             }
+            else if (key == "expose_error_signal")
+            {
+                auto boolResult = value.get_bool();
+                if (boolResult.error() != simdjson::SUCCESS)
+                {
+                    errorMessage = "task field 'expose_error_signal' must be boolean";
+                    return false;
+                }
+
+                taskOut.m_ExposeErrorSignal = boolResult.value();
+            }
             else if (key == "file_inputs")
             {
                 auto arrayResult = value.get_array();
@@ -1030,6 +1041,20 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "control_nodes")
+            {
+                if (!ParseControlNodes(value, outputDefinition.m_ControlNodes, errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (key == "controlflow")
+            {
+                if (!ParseControlflow(value, outputDefinition.m_ControlflowEdges, errorMessage))
+                {
+                    return false;
+                }
+            }
             else if (key == "defaults")
             {
                 if (!ExtractRawJson(value, outputDefinition.m_DefaultsJson))
@@ -1138,11 +1163,12 @@ namespace AIAssistant
 
         LOG_APP_INFO("[paths debug] debug reason=parseWorkflowRoot workflowId={} workflowBaseDirectoryRelative={} "
                      "workflowBaseDirectoryIsRelative={} triggersCount={} tasksCount={} dataflowsCount={} "
-                     "filtersCount={}",
+                     "filtersCount={} controlNodesCount={} controlflowCount={}",
                      outputDefinition.m_Id, outputDefinition.m_WorkflowBaseDirectory,
                      IsRelativePathString(outputDefinition.m_WorkflowBaseDirectory), outputDefinition.m_Triggers.size(),
                      outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size(),
-                     outputDefinition.m_Filters.size());
+                     outputDefinition.m_Filters.size(), outputDefinition.m_ControlNodes.size(),
+                     outputDefinition.m_ControlflowEdges.size());
 
         return true;
     }

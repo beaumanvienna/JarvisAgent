@@ -49,10 +49,33 @@ export type JcwfTask = {
 
   depends_on?: string[];
 
+  expose_error_signal?: boolean;
+
   params?: Record<string, unknown>;
 
   // editor must preserve extra fields for round-trips
   [key: string]: unknown;
+};
+
+export type JcwfControlNodeType = "branch";
+
+export type JcwfControlNode = {
+  id: string;
+  type: JcwfControlNodeType;
+  label?: string;
+
+  // editor must preserve extra fields for round-trips
+  [key: string]: unknown;
+};
+
+export type JcwfControlflowKind = "normal" | "error_signal" | "on_error";
+
+export type JcwfControlflowEdge = {
+  from: string;
+  to: string;
+  kind: JcwfControlflowKind;
+  from_port: string;
+  to_port: string;
 };
 
 export type JcwfDataflowEntry = {
@@ -87,6 +110,9 @@ export type JcwfFile = {
   tasks: Record<string, JcwfTask>;
 
   filters?: JcwfFilter[];
+
+  control_nodes?: JcwfControlNode[];
+  controlflow?: JcwfControlflowEdge[];
 
   [key: string]: unknown;
 };

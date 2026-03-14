@@ -16,14 +16,15 @@ import "reactflow/dist/style.css";
 
 import TaskNode from "./TaskNode";
 import FilterNode from "./FilterNode";
+import BranchNode from "./BranchNode";
 import { FILE_INPUT_COLORS } from "./constants";
 import FilterBuilderDialog from "./FilterBuilderDialog";
 import QueueBindingEditor from "./QueueBindingEditor";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
 import { validateGraph } from "./validation";
-import type { EditorGraph, EditorFilterNode, EditorFilterNodeData, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
-import type { JcwfFile, JcwfFilter, JcwfFilterSource, JcwfQueueBinding, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
+import type { EditorControlNode, EditorControlNodeData, EditorFilterNode, EditorFilterNodeData, EditorGraph, EditorNode, EditorTaskEdge, EditorTaskNode, EditorTaskNodeData, RuntimeTaskState } from "./types";
+import type { JcwfControlNode, JcwfFile, JcwfFilter, JcwfFilterSource, JcwfQueueBinding, JcwfTask, JcwfTaskMode, JcwfTaskType, JcwfTrigger } from "../jcwf/types";
 import {
   cancelRun,
   cleanWorkflow,
@@ -42,7 +43,7 @@ import {
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
 
-const nodeTypes = { task: TaskNode, filter: FilterNode };
+const nodeTypes = { task: TaskNode, filter: FilterNode, branch: BranchNode };
 
 export type WorkflowPersistEvent = {
   kind: "save" | "create" | "saveAs";
@@ -118,13 +119,19 @@ function normalizeRuntimeState(stateText: unknown): RuntimeTaskState
   return "unknown";
 }
 
-function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[]): string
+function computeGraphSignature(nodes: EditorTaskNode[], edges: EditorTaskEdge[], controlNodes?: EditorControlNode[]): string
 {
   const signatureObject = {
     nodes: nodes
       .map((n) => ({
         id: n.id,
         task: n.data.task,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    controlNodes: (controlNodes ?? [])
+      .map((n) => ({
+        id: n.id,
+        controlNode: n.data.controlNode,
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     edges: edges
@@ -266,7 +273,7 @@ export default function WorkflowEditorView(props: {
 
   const initialGraph: EditorGraph = useMemo(() => ({ nodes: [], edges: [] }), []);
 
-  type AnyNodeData = EditorTaskNodeData | EditorFilterNodeData;
+  type AnyNodeData = EditorTaskNodeData | EditorFilterNodeData | EditorControlNodeData;
   const [nodes, setNodes] = useNodesState<AnyNodeData>(
     initialGraph.nodes as Node<AnyNodeData>[]
   );
@@ -494,7 +501,7 @@ export default function WorkflowEditorView(props: {
   }, [undo, redo]);
 
   const currentSignature = useMemo(() => {
-    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
+    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[], nodes.filter((n): n is EditorControlNode => n.type === "branch") as EditorControlNode[]);
     const wfFieldsSig = JSON.stringify({
       wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel,
       manualStartEnabled, triggers,
@@ -629,8 +636,8 @@ export default function WorkflowEditorView(props: {
     }
 
     const nextNodes = graph.nodes.map((n) => {
-      // Filter nodes pass through without validation decorations
-      if (n.type === "filter")
+      // Filter and branch nodes pass through without validation decorations
+      if (n.type === "filter" || n.type === "branch")
       {
         return n;
       }
@@ -773,8 +780,8 @@ export default function WorkflowEditorView(props: {
     setNodes((current) => {
       let changed = false;
       const next = current.map((n) => {
-        // Filter nodes have no runtime state
-        if (n.type === "filter") { return n; }
+        // Filter and branch nodes have no runtime state
+        if (n.type === "filter" || n.type === "branch") { return n; }
 
         const taskNode = n as Node<EditorTaskNodeData>;
         const snapshot = runtimeTasksById[n.id];
@@ -814,7 +821,7 @@ export default function WorkflowEditorView(props: {
   useEffect(() => {
     setNodes((current) => {
       return current.map((n) => {
-        if (n.type === "filter") { return n; }
+        if (n.type === "filter" || n.type === "branch") { return n; }
         const taskNode = n as Node<EditorTaskNodeData>;
         if (taskNode.data.hideTierDWarnings === props.hideTierDWarnings)
         {
@@ -832,7 +839,7 @@ export default function WorkflowEditorView(props: {
     const isFromTemplate = workflowId === null;
     if (!isFromTemplate)
     {
-      const graphSig = computeGraphSignature(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task"), graph.edges);
+      const graphSig = computeGraphSignature(graph.nodes.filter((n): n is EditorTaskNode => n.type === "task"), graph.edges, graph.nodes.filter((n): n is EditorControlNode => n.type === "branch"));
       const loadedLabel = typeof jcwf.label === "string" ? jcwf.label : "";
       const loadedDoc = Array.isArray(jcwf.doc) ? jcwf.doc.join("\n") : (typeof jcwf.doc === "string" ? jcwf.doc : "");
       const loadedBaseDir = typeof jcwf.base_directory === "string" ? (jcwf.base_directory as string) : "";
@@ -1375,6 +1382,15 @@ export default function WorkflowEditorView(props: {
     return (found as EditorFilterNode | undefined) ?? null;
   }, [nodes, selectedNodeId]);
 
+  const selectedControlNode = useMemo((): EditorControlNode | null => {
+    if (!selectedNodeId)
+    {
+      return null;
+    }
+    const found = nodes.find((n) => n.id === selectedNodeId && n.type === "branch");
+    return (found as EditorControlNode | undefined) ?? null;
+  }, [nodes, selectedNodeId]);
+
   const [aiInterfaces, setAiInterfaces] = useState<AiInterface[]>([]);
   useEffect(() => {
     listAiInterfaces().then((res) => {
@@ -1420,6 +1436,12 @@ export default function WorkflowEditorView(props: {
 
   const onConnect = useCallback((connection: Connection) => {
     const isDataflow = connection.sourceHandle?.startsWith("out:") && connection.targetHandle?.startsWith("in:");
+    const isControlflow =
+      connection.sourceHandle === "error-signal"
+      || connection.sourceHandle === "cf-out-normal"
+      || connection.sourceHandle === "cf-out-error"
+      || connection.targetHandle === "cf-in-normal"
+      || connection.targetHandle === "cf-in-error";
 
     let nextEdges: EditorTaskEdge[];
     if (isDataflow)
@@ -1439,6 +1461,36 @@ export default function WorkflowEditorView(props: {
       };
       nextEdges = [...edges, dfEdge] as EditorTaskEdge[];
     }
+    else if (isControlflow)
+    {
+      const kind = connection.sourceHandle === "error-signal" || connection.targetHandle === "cf-in-error"
+        ? "error_signal"
+        : connection.sourceHandle === "cf-out-error"
+          ? "on_error"
+          : "normal";
+
+      const style = kind === "error_signal"
+        ? { strokeDasharray: "2 3", stroke: "rgba(255,120,120,0.85)", strokeWidth: 2 }
+        : kind === "on_error"
+          ? { strokeDasharray: "6 4", stroke: "rgba(255,120,120,0.85)", strokeWidth: 2 }
+          : { strokeDasharray: "6 4", stroke: "rgba(255,200,140,0.9)", strokeWidth: 2 };
+
+      const label = kind === "error_signal" ? "error" : (kind === "on_error" ? "on_error" : "normal");
+
+      const cfEdge: EditorTaskEdge = {
+        id: `cf:${connection.source}->${connection.target}:${kind}`,
+        source: connection.source!,
+        target: connection.target!,
+        sourceHandle: connection.sourceHandle,
+        targetHandle: connection.targetHandle,
+        type: "default",
+        style,
+        label,
+        labelStyle: { fill: "rgba(255,220,180,0.85)", fontSize: 10 },
+      };
+
+      nextEdges = [...edges, cfEdge] as EditorTaskEdge[];
+    }
     else
     {
       const isDepHandle = typeof connection.targetHandle === "string" && connection.targetHandle.startsWith("dephandle-");
@@ -1455,8 +1507,8 @@ export default function WorkflowEditorView(props: {
     let updatedNodes = nodes as EditorTaskNode[];
     if (!isDataflow && connection.source && connection.target)
     {
-      const sourceNode = updatedNodes.find((n) => n.id === connection.source);
-      const targetNode = updatedNodes.find((n) => n.id === connection.target);
+      const sourceNode = updatedNodes.find((n) => n.id === connection.source && n.type === "task");
+      const targetNode = updatedNodes.find((n) => n.id === connection.target && n.type === "task");
       if (
         sourceNode && targetNode &&
         sourceNode.data.task.type === "ai_call" &&
@@ -1470,7 +1522,7 @@ export default function WorkflowEditorView(props: {
         if (sourceWd.length === 0 && sourceNode.data.task.type === "ai_call")
         {
           const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
-          const aiNodes = updatedNodes.filter((n) => n.data.task.type === "ai_call");
+          const aiNodes = updatedNodes.filter((n) => n.type === "task" && n.data.task.type === "ai_call");
           const aiIdx = aiNodes.findIndex((n) => n.id === sourceNode.id);
           const num = String(aiIdx >= 0 ? aiIdx + 1 : aiNodes.length + 1).padStart(2, "0");
           sourceWd = `../queue/${wfId}/${num}_${sourceNode.id}`;
@@ -1610,6 +1662,43 @@ export default function WorkflowEditorView(props: {
     recomputeValidation(graph);
     setSelectedNodeId(newId);
     setStatusText(`Added node '${newId}'.`);
+    setErrorText(null);
+  }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
+
+  const addBranchNode = useCallback(() => {
+    const existingIds = new Set<string>(nodes.map((n) => n.id));
+    let id = "branch_1";
+    let counter = 1;
+    while (existingIds.has(id))
+    {
+      counter += 1;
+      id = `branch_${counter}`;
+    }
+
+    const controlNode: JcwfControlNode = { id, type: "branch", label: "branch" };
+
+    const viewportCenter = reactFlowInstance ? reactFlowInstance.project({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+    }) : { x: 0, y: 0 };
+
+    const position = findNonOverlappingPosition(
+      viewportCenter.x,
+      viewportCenter.y,
+      nodes as EditorTaskNode[]
+    );
+
+    const newNode: EditorControlNode = {
+      id,
+      type: "branch",
+      position,
+      data: { controlNode, title: controlNode.label ?? controlNode.id, subtitle: "branch" },
+    };
+
+    const graph: EditorGraph = { nodes: [...nodes, newNode] as EditorNode[], edges };
+    recomputeValidation(graph);
+    setSelectedNodeId(newNode.id);
+    setStatusText(`Added branch '${id}'.`);
     setErrorText(null);
   }, [nodes, edges, reactFlowInstance, recomputeValidation, findNonOverlappingPosition]);
 
@@ -1766,6 +1855,32 @@ export default function WorkflowEditorView(props: {
     recomputeValidation({ nodes: nextNodes, edges });
   }, [selectedNode, nodes, edges, recomputeValidation]);
 
+  const updateSelectedControlNodeField = useCallback((patch: Partial<JcwfControlNode>) => {
+    if (!selectedControlNode)
+    {
+      return;
+    }
+
+    const nextNodes = (nodes as EditorNode[]).map((n) => {
+      if (n.id !== selectedControlNode.id || n.type !== "branch")
+      {
+        return n;
+      }
+      const cn = n as EditorControlNode;
+      const nextCn: JcwfControlNode = { ...(cn.data.controlNode), ...patch };
+      return {
+        ...cn,
+        data: {
+          ...cn.data,
+          controlNode: nextCn,
+          title: nextCn.label && nextCn.label.length > 0 ? nextCn.label : nextCn.id,
+        },
+      };
+    });
+
+    recomputeValidation({ nodes: nextNodes as EditorNode[], edges });
+  }, [selectedControlNode, nodes, edges, recomputeValidation]);
+
   const exportJcwfObject = useCallback((): JcwfFile | null => {
     const workflowId = loadedWorkflowId ?? props.workflowId ?? "workflow";
     const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
@@ -1835,7 +1950,7 @@ export default function WorkflowEditorView(props: {
   }, [props.onWorkflowPersisted]);
 
   const updateSavedBaseline = useCallback(() => {
-    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[]);
+    const graphSig = computeGraphSignature(nodes.filter((n): n is EditorTaskNode => n.type === "task") as EditorTaskNode[], edges as EditorTaskEdge[], nodes.filter((n): n is EditorControlNode => n.type === "branch") as EditorControlNode[]);
     const wfFieldsSig = JSON.stringify({
       wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel,
       manualStartEnabled, triggers,
@@ -2149,24 +2264,30 @@ export default function WorkflowEditorView(props: {
   }, [exportJcwfObject]);
 
   const onAutoLayout = useCallback(() => {
-    const currentNodes = nodes as EditorTaskNode[];
+    const allNodes = nodes as EditorNode[];
     const currentEdges = edges as EditorTaskEdge[];
 
-    if (currentNodes.length === 0)
+    // Separate layoutable nodes (task + branch) from filter nodes (kept in own column)
+    const layoutableNodes = allNodes.filter((n) => n.type === "task" || n.type === "branch");
+    const filterNodes = allNodes.filter((n) => n.type === "filter");
+
+    if (layoutableNodes.length === 0 && filterNodes.length === 0)
     {
       return;
     }
 
-    // Build dependency map: nodeId -> set of nodes it depends on
+    // Build dependency map: nodeId -> set of nodes it depends on (from all edge types)
     const dependsOn = new Map<string, Set<string>>();
-    for (const node of currentNodes)
+    for (const node of layoutableNodes)
     {
       dependsOn.set(node.id, new Set());
     }
     for (const edge of currentEdges)
     {
+      // Skip filter fanout edges for layout dependencies
+      if (edge.id.startsWith("fanout:")) continue;
       const deps = dependsOn.get(edge.target);
-      if (deps)
+      if (deps && dependsOn.has(edge.source))
       {
         deps.add(edge.source);
       }
@@ -2195,21 +2316,21 @@ export default function WorkflowEditorView(props: {
       return level;
     };
 
-    for (const node of currentNodes)
+    for (const node of layoutableNodes)
     {
       computeLevel(node.id, new Set());
     }
 
-    // Group nodes by level, sorted alphabetically within each level (matches jcwfToGraph)
-    const nodesByLevel = new Map<number, EditorTaskNode[]>();
-    for (const node of currentNodes)
+    // Group nodes by level, sorted alphabetically within each level
+    const nodesByLevel = new Map<number, EditorNode[]>();
+    for (const node of layoutableNodes)
     {
       const level = levels.get(node.id) ?? 0;
       const group = nodesByLevel.get(level) ?? [];
       group.push(node);
       nodesByLevel.set(level, group);
     }
-    for (const [level, group] of nodesByLevel.entries())
+    for (const [, group] of nodesByLevel.entries())
     {
       group.sort((a, b) => a.id.localeCompare(b.id));
     }
@@ -2221,17 +2342,18 @@ export default function WorkflowEditorView(props: {
     const HORIZONTAL_GAP = 100;
     const VERTICAL_GAP = 30;
 
-    function estimateNodeHeight(node: EditorTaskNode): number
+    function estimateNodeHeight(node: EditorNode): number
     {
       if (node.type !== "task") return BASE_NODE_HEIGHT;
-      const fileInputs = Array.isArray(node.data.task.file_inputs) ? (node.data.task.file_inputs as string[]).length : 0;
-      const deps = Array.isArray(node.data.task.depends_on) ? (node.data.task.depends_on as string[]).length : 0;
+      const taskData = (node as EditorTaskNode).data;
+      const fileInputs = Array.isArray(taskData.task.file_inputs) ? (taskData.task.file_inputs as string[]).length : 0;
+      const deps = Array.isArray(taskData.task.depends_on) ? (taskData.task.depends_on as string[]).length : 0;
       const inputHandleCount = Math.max(fileInputs, deps);
-      const fileOutputs = Array.isArray(node.data.task.file_outputs) ? (node.data.task.file_outputs as string[]).length : 0;
+      const fileOutputs = Array.isArray(taskData.task.file_outputs) ? (taskData.task.file_outputs as string[]).length : 0;
       return BASE_NODE_HEIGHT + Math.max(inputHandleCount, fileOutputs) * DEP_ROW_HEIGHT;
     }
 
-    const layoutedNodes: EditorTaskNode[] = [];
+    const layoutedNodes: EditorNode[] = [];
     const sortedLevels = Array.from(nodesByLevel.keys()).sort((a, b) => a - b);
 
     for (const level of sortedLevels)
@@ -2251,6 +2373,17 @@ export default function WorkflowEditorView(props: {
       }
     }
 
+    // Position filter nodes to the left of the leftmost task column
+    const minLevel = sortedLevels.length > 0 ? sortedLevels[0] : 0;
+    const filterX = minLevel * (NODE_WIDTH + HORIZONTAL_GAP) + 50 - NODE_WIDTH - HORIZONTAL_GAP;
+    for (let i = 0; i < filterNodes.length; i++)
+    {
+      layoutedNodes.push({
+        ...filterNodes[i],
+        position: { x: filterX, y: 50 + i * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
+      });
+    }
+
     const graph: EditorGraph = { nodes: layoutedNodes, edges: currentEdges };
     recomputeValidation(graph);
     setStatusText("Auto-layout applied.");
@@ -2266,6 +2399,7 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={() => { addTaskNode("python"); }}>+ Python</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("shell"); }}>+ Shell</button>
             <button className="btn" type="button" onClick={() => { addTaskNode("internal"); }}>+ Internal</button>
+            <button className="btn" type="button" style={{ borderColor: "rgba(255,180,80,0.35)", color: "rgba(255,200,140,0.95)" }} onClick={addBranchNode}>+ Branch</button>
             <hr style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.08)", margin: "4px 0" }} />
             <button className="btn" type="button" style={{ borderColor: "rgba(180,140,255,0.35)", color: "rgba(200,170,255,0.95)" }} onClick={addFilterNode}>+ Filter</button>
           </div>
@@ -2670,11 +2804,55 @@ export default function WorkflowEditorView(props: {
                 </button>
               </div>
             )
+            : selectedControlNode
+              ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="small" style={{ color: "rgba(255,200,140,0.95)" }}>control node: <code>{selectedControlNode.id}</code></div>
+                  <div className="small">Type: <code>{selectedControlNode.data.controlNode.type}</code></div>
+
+                  <label className="field">
+                    <div className="small">Label</div>
+                    <input
+                      className="input"
+                      value={(selectedControlNode.data.controlNode.label ?? "") as string}
+                      onChange={(e) => { updateSelectedControlNodeField({ label: e.target.value }); }}
+                    />
+                  </label>
+
+                  <div className="small" style={{ opacity: 0.6, fontSize: 11 }}>
+                    Handles: cf-in-normal, cf-in-error (left) · cf-out-normal, cf-out-error (right)
+                  </div>
+
+                  <button
+                    className="btn"
+                    type="button"
+                    style={{ borderColor: "rgba(255,100,100,0.4)", color: "#ff8a8a", fontSize: 12, marginTop: 6 }}
+                    onClick={() => {
+                      const nextNodes = (nodes as EditorNode[]).filter((n) => n.id !== selectedControlNode.id);
+                      const nextEdges = edges.filter((e) => e.source !== selectedControlNode.id && e.target !== selectedControlNode.id);
+                      setEdges(nextEdges as EditorTaskEdge[]);
+                      setSelectedNodeId(null);
+                      recomputeValidation({ nodes: nextNodes as EditorNode[], edges: nextEdges as EditorTaskEdge[] });
+                    }}
+                  >
+                    Delete branch node
+                  </button>
+                </div>
+              )
             : !selectedNode
               ? <div className="muted">Select a node to edit its properties.</div>
               : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   <div className="small">taskId: <code>{selectedNode.id}</code></div>
+
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedNode.data.task.expose_error_signal === true}
+                      onChange={(e) => { updateSelectedTaskField({ expose_error_signal: e.target.checked || undefined } as Partial<JcwfTask>); }}
+                    />
+                    Expose error signal output
+                  </label>
 
                   <label className="field">
                     <div className="small">Label</div>
@@ -2762,7 +2940,7 @@ export default function WorkflowEditorView(props: {
                         selectedNode.data.task.type === "ai_call"
                           ? (() => {
                             const wfId = loadedWorkflowId ?? props.workflowId ?? "workflowId";
-                            const aiNodes = (nodes as EditorTaskNode[]).filter((n) => n.data.task.type === "ai_call");
+                            const aiNodes = (nodes.filter((n) => n.type === "task") as EditorTaskNode[]).filter((n) => n.data.task.type === "ai_call");
                             const idx = aiNodes.findIndex((n) => n.id === selectedNode.id);
                             const num = String(idx >= 0 ? idx + 1 : aiNodes.length + 1).padStart(2, "0");
                             return `../queue/${wfId}/${num}_${selectedNode.id}`;

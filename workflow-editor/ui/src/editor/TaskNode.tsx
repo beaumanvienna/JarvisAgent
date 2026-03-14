@@ -62,6 +62,8 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const depIds: string[] = Array.isArray(props.data.task.depends_on) ? props.data.task.depends_on as string[] : [];
   const materializeMap = (props.data.task.materialize ?? {}) as Record<string, string>;
 
+  const exposeErrorSignal = props.data.task.expose_error_signal === true;
+
   const fileOutputs: string[] = Array.isArray(props.data.task.file_outputs) ? props.data.task.file_outputs as string[] : [];
   const hasFileOutputs = fileOutputs.length > 0;
 
@@ -279,6 +281,15 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
       {hasFileOutputs && (
         <Handle type="source" position={Position.Right} id="dep-source"
           className="hiddenHandle" />
+      )}
+      {exposeErrorSignal && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          id="error-signal"
+          title="error signal"
+          style={{ top: "85%", background: "rgba(255,120,120,0.9)", borderColor: "rgba(255,120,120,0.9)" }}
+        />
       )}
       {outputNames.map((name, idx) => (
         <Handle

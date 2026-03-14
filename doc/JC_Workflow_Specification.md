@@ -63,6 +63,11 @@ This specification focuses on:
     - [3.7.5 Source Kind: polarion_query](#375-source-kind-polarion_query)
     - [3.7.6 Filter Manifest](#376-filter-manifest)
     - [3.7.7 Filter Builder (Frontend)](#377-filter-builder-frontend)
+  - [3.8 Control Nodes & Controlflow *(new in v1.1)*](#38-control-nodes--controlflow-new-in-v11)
+    - [3.8.1 Control Nodes](#381-control-nodes)
+    - [3.8.2 Controlflow Edges](#382-controlflow-edges)
+    - [3.8.3 Task Field: expose_error_signal](#383-task-field-expose_error_signal)
+    - [3.8.4 Runtime Semantics (Rule A)](#384-runtime-semantics-rule-a)
 - [4. Execution Model](#4-execution-model)
   - [4.1 High-Level Flow](#41-high-level-flow)
   - [4.2 C++ Side: Core Orchestrator](#42-c-side-core-orchestrator)
@@ -72,7 +77,7 @@ This specification focuses on:
 - [5. Managing Dependencies](#5-managing-dependencies)
   - [5.1 Readiness Rule](#51-readiness-rule)
   - [5.2 Parallel Execution](#52-parallel-execution)
-  - [5.3 Failure Propagation](#53-failure-propagation)
+  - [5.3 Failure Propagation (Rule A)](#53-failure-propagation-rule-a)
 - [6. Handling Triggers](#6-handling-triggers)
   - [6.1 Time-Based (Cron)](#61-time-based-cron)
   - [6.2 File-Based](#62-file-based)
@@ -175,6 +180,8 @@ The root object has the following top-level fields:
   "filters": [ /* see 3.7 */ ],
   "tasks": { /* see 3.3 */ },
   "dataflow": [ /* see 3.5 */ ],
+  "control_nodes": [ /* see 3.8 */ ],
+  "controlflow": [ /* see 3.8 */ ],
   "defaults": { /* see 3.6 */ }
 }
 ```
@@ -215,6 +222,12 @@ The root object has the following top-level fields:
 
 - `filters` (OPTIONAL, array) *(new in v1.1)*  
   - Declares filter nodes for per_item task expansion. See 3.7.
+
+- `control_nodes` (OPTIONAL, array) *(new in v1.1)*  
+  - Declares control-flow graph nodes (e.g., branch nodes). See 3.8.
+
+- `controlflow` (OPTIONAL, array) *(new in v1.1)*  
+  - Declares control-flow edges between tasks and control nodes. See 3.8.
 
 - `defaults` (OPTIONAL, object)  
   - Default settings for tasks, retries, timeouts, etc. See 3.6.
@@ -1451,6 +1464,131 @@ The workflow editor provides a visual **filter builder dialog** for constructing
 
 ---
 
+### 3.8 Control Nodes & Controlflow *(new in v1.1)*
+
+JCWF supports **control-flow graph extensions** that allow workflows to express conditional execution paths — for example, routing to a recovery task when a build step fails, while still allowing the overall workflow run to succeed.
+
+Control flow is declared via two root-level arrays: `control_nodes` (graph nodes that are not tasks) and `controlflow` (directed edges between tasks and control nodes).
+
+#### 3.8.1 Control Nodes
+
+```jsonc
+"control_nodes": [
+  {
+    "id": "branch_1",
+    "type": "branch",
+    "label": "error recovery branch"
+  }
+]
+```
+
+Each control node has:
+
+- `id` (REQUIRED, string) — Unique identifier. MUST NOT collide with any task id.
+- `type` (REQUIRED, string) — The control node type. Currently defined types:
+  - `"branch"` — A two-output conditional node that routes execution based on whether the driving task succeeded or failed. One output activates the **normal** (success) path; the other activates the **on_error** (failure) path.
+- `label` (OPTIONAL, string) — Human-friendly label for UI display.
+
+Control nodes are **not tasks**; they have no `working_directory`, no `params`, and produce no artifacts. They exist purely to direct control flow.
+
+**Future types** (reserved, not yet implemented): `merge`, `switch`, `guard`.
+
+#### 3.8.2 Controlflow Edges
+
+```jsonc
+"controlflow": [
+  { "from": "shell",     "to": "branch_1",    "kind": "normal",       "from_port": "dep-source",    "to_port": "cf-in-normal" },
+  { "from": "shell",     "to": "branch_1",    "kind": "error_signal", "from_port": "error-signal",  "to_port": "cf-in-error"  },
+  { "from": "branch_1",  "to": "shell_2",     "kind": "normal",       "from_port": "cf-out-normal", "to_port": "dep-target"   },
+  { "from": "branch_1",  "to": "ai_call_fix", "kind": "on_error",     "from_port": "cf-out-error",  "to_port": "dep-target"   }
+]
+```
+
+Each controlflow edge has:
+
+- `from` (REQUIRED, string) — Source node id (task or control node).
+- `to` (REQUIRED, string) — Target node id (task or control node).
+- `kind` (REQUIRED, string) — The edge semantics. Defined kinds:
+  - `"normal"` — Carries the success/completion signal. Used for: task → branch (success input), branch → task (success output).
+  - `"error_signal"` — Carries the failure signal from a task to a branch node. The source task MUST have `expose_error_signal: true`.
+  - `"on_error"` — Branch output that activates when the driving task **failed**. Connects branch → downstream task(s) on the error recovery path.
+- `from_port` (OPTIONAL, string) — Port identifier on the source node (used by the visual editor for handle placement).
+- `to_port` (OPTIONAL, string) — Port identifier on the target node.
+
+**Validation rules:**
+
+- Every `from` and `to` MUST reference a valid task id or control node id.
+- Controlflow edges participate in DAG cycle detection alongside `depends_on` edges.
+- A branch node SHOULD have exactly one driving input (either a `normal` or `error_signal` edge from a task).
+- A branch node MAY have zero or more `normal` output edges and zero or more `on_error` output edges.
+
+**Interaction with `depends_on`:**
+
+Controlflow edges are **independent** of `depends_on`. A task gated by controlflow (i.e., a task that is the target of a controlflow edge from a branch node) will not run until the branch activates it, regardless of `depends_on` readiness. Tasks with **no** incoming controlflow edges follow the standard `depends_on` readiness rules.
+
+#### 3.8.3 Task Field: `expose_error_signal`
+
+```jsonc
+{
+  "id": "shell",
+  "type": "shell",
+  "expose_error_signal": true,
+  ...
+}
+```
+
+- `expose_error_signal` (OPTIONAL, boolean, default: `false`)
+  - When `true`, the task emits a failure signal that can be consumed by a branch node via an `error_signal` controlflow edge.
+  - This flag tells the runtime that the task's failure is **potentially handled** by downstream branching logic and SHOULD NOT automatically fail the entire workflow run (see Rule A in §3.8.4).
+  - The task's visual state still shows as **Failed** (red) in the UI — the flag does not mask the failure, it only affects run-level failure propagation.
+
+#### 3.8.4 Runtime Semantics (Rule A)
+
+**Rule A (Handled vs. Unhandled Failures):**
+
+> A workflow run fails **only** if it contains at least one task in `Failed` state whose failure is **unhandled**.
+
+A task's failure is considered **handled** if:
+1. The task has `expose_error_signal: true`, AND
+2. There exists an `error_signal` controlflow edge from that task to a branch node.
+
+When a handled task fails:
+- The branch node **fires** and activates its `on_error` output targets.
+- The branch's `normal` output targets are marked `Skipped`.
+- Downstream tasks that depend on the failed task via `depends_on` are still skipped (standard propagation).
+- The failed task remains in `Failed` state (visible as red in the UI).
+- The run does **not** set `m_HasFailed` for this task.
+
+When a handled task **succeeds**:
+- The branch node fires and activates its `normal` output targets.
+- The branch's `on_error` output targets are marked `Skipped`.
+
+**Controlflow gating:**
+
+Tasks that are the target of controlflow edges from a branch node are **gated**: they remain in `Pending` state until the branch activates them. If the branch takes the other path, gated tasks are marked `Skipped` with a descriptive message.
+
+If no work is in-flight and gated tasks remain non-activated, the runtime marks them `Skipped` to allow the run to reach a terminal state.
+
+**Example: two-branch recovery pattern**
+
+```
+ai_call (generate broken hello.cpp)
+ai_call_2 (generate Makefile)
+    ↓ depends_on
+shell (make) [expose_error_signal: true]
+    ↓ normal + error_signal
+branch_1
+    ├─ normal → shell_2 (run hello)
+    └─ on_error → ai_call_fix (fix code) → shell_retry (retry make)
+                                                ↓ normal
+                                            branch_2
+                                                └─ normal → shell_2 (run hello)
+```
+
+See `example/workflows/exampleMakefile5.jcwf` for a complete working example.
+
+---
+
 ## 4. Execution Model
 
 This section describes how JarvisAgent should execute JCWF workflows across the C++ core, Python engine, and the web UI.
@@ -1627,12 +1765,18 @@ Tasks with no `depends_on` and no missing required inputs MAY start immediately 
 
 If multiple tasks become ready at the same time and do not depend on each other (no path between them in the `depends_on` DAG), the orchestrator SHOULD run them in parallel, subject to resource limits (thread pool size, number of Python engines).
 
-### 5.3 Failure Propagation
+### 5.3 Failure Propagation (Rule A)
 
 If a task fails (after all retries):
 
-- Tasks that depend on it MUST NOT run, unless a future version introduces an explicit `allow_failed_prereqs: true` override.  
-- The workflow run status SHOULD be marked as `Failed`, unless the failure is confined to optional branches (implementation-defined policy).
+- Tasks that depend on it via `depends_on` MUST NOT run (they are marked `Skipped`).
+- **Rule A:** The workflow run status is determined by whether any **unhandled** failures remain at run termination.
+  - A failure is **handled** if the task has `expose_error_signal: true` AND an `error_signal` controlflow edge routes it to a branch node (see §3.8.4).
+  - If all failed tasks are handled, the run completes as `Succeeded`.
+  - If any failed task is unhandled, the run completes as `Failed`.
+- The failed task's visual state remains `Failed` (red) in the UI regardless of whether the failure is handled — Rule A only affects the **run-level** outcome.
+
+See §3.8.4 for the full runtime semantics of controlflow gating and branch activation.
 
 ---
 
@@ -1768,6 +1912,14 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
     "filters": {
       "type": "array",
       "items": { "$ref": "#/$defs/filter" }
+    },
+    "control_nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/control_node" }
+    },
+    "controlflow": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/controlflow_edge" }
     },
     "defaults": {
       "type": "object",
@@ -1923,6 +2075,7 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
             }
           }
         },
+        "expose_error_signal": { "type": "boolean", "default": false },
         "timeout_ms": { "type": "integer" },
         "retries": {
           "type": "object",
@@ -1957,6 +2110,34 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
         "to_task": { "type": "string" },
         "to_input": { "type": "string" },
         "mapping": { "type": "object" }
+      }
+    },
+
+    "control_node": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["branch"]
+        },
+        "label": { "type": "string" }
+      }
+    },
+
+    "controlflow_edge": {
+      "type": "object",
+      "required": ["from", "to", "kind"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["normal", "error_signal", "on_error"]
+        },
+        "from_port": { "type": "string" },
+        "to_port": { "type": "string" }
       }
     },
 

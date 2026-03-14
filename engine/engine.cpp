@@ -241,7 +241,7 @@ int engine(int argc, char* argv[])
         [&]()
         {
             std::unique_lock<std::mutex> lock(watchdogMutex);
-            if (!watchdogCV.wait_for(lock, std::chrono::seconds(6), [&] { return watchdogDiffused; }))
+            if (!watchdogCV.wait_for(lock, 3s, [&] { return watchdogDiffused; }))
             {
                 std::cerr << "[shutdown watchdog] timeout expired — forcing exit" << std::endl;
                 _exit(EXIT_FAILURE);

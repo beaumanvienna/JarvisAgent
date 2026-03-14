@@ -331,6 +331,9 @@ namespace AIAssistant
 
         // JCWF v1.1: "filter" — references a filter ID for per_item expansion.
         std::string m_Filter;
+
+        // JCWF: "expose_error_signal" (optional)
+        bool m_ExposeErrorSignal{false};
     };
 
     // Compatibility alias for code that used TaskDefinition naming today
@@ -344,6 +347,50 @@ namespace AIAssistant
     {
         uint64_t m_TimeoutMs{0};
         RetryPolicy m_RetryPolicy;
+    };
+
+    // ---------------------------------------------------------------------
+    // Control-flow graph extensions (branching)
+    // ---------------------------------------------------------------------
+
+    enum class ControlNodeType
+    {
+        Branch = 0,
+        Unknown
+    };
+
+    struct ControlNodeDef
+    {
+        // JCWF: "id"
+        std::string m_Id;
+
+        // JCWF: "type" (currently only "branch")
+        ControlNodeType m_Type{ControlNodeType::Unknown};
+
+        // JCWF: "label" (optional)
+        std::string m_Label;
+    };
+
+    enum class ControlflowKind
+    {
+        Normal = 0,
+        ErrorSignal,
+        OnError,
+        Unknown
+    };
+
+    struct ControlflowEdgeDef
+    {
+        // JCWF: "from", "to"
+        std::string m_From;
+        std::string m_To;
+
+        // JCWF: "kind" (normal | error_signal | on_error)
+        ControlflowKind m_Kind{ControlflowKind::Unknown};
+
+        // JCWF: "from_port", "to_port" (opaque strings used by the editor)
+        std::string m_FromPort;
+        std::string m_ToPort;
     };
 
     // ---------------------------------------------------------------------
@@ -395,6 +442,12 @@ namespace AIAssistant
 
         // JCWF v1.1: "filters" — filter definitions for per_item expansion.
         std::vector<FilterDef> m_Filters;
+
+        // JCWF: "control_nodes" — orchestration-only nodes (e.g. branch)
+        std::vector<ControlNodeDef> m_ControlNodes;
+
+        // JCWF: "controlflow" — conditional edges between tasks/control nodes
+        std::vector<ControlflowEdgeDef> m_ControlflowEdges;
 
         // JCWF: "defaults" – raw JSON kept for serialization; parsed fields in m_Defaults.
         std::string m_DefaultsJson;

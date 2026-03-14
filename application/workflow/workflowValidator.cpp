@@ -497,6 +497,37 @@ namespace AIAssistant
         std::unordered_set<std::string> taskIds;
         taskIds.reserve(workflow.m_Tasks.size());
 
+        std::unordered_set<std::string> controlNodeIds;
+        controlNodeIds.reserve(workflow.m_ControlNodes.size());
+
+        for (auto const& node : workflow.m_ControlNodes)
+        {
+            if (node.m_Id.empty())
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, "missing_control_node_id",
+                         "Control node id is empty", "$.control_nodes");
+                continue;
+            }
+
+            if (!IsValidId(node.m_Id))
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, "invalid_control_node_id",
+                         "Control node id contains invalid characters", "$.control_nodes." + node.m_Id);
+            }
+
+            if (!controlNodeIds.insert(node.m_Id).second)
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A, "duplicate_control_node_id",
+                         "Duplicate control node id: " + node.m_Id, "$.control_nodes." + node.m_Id);
+            }
+
+            if (node.m_Type == ControlNodeType::Unknown)
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, "unknown_control_node_type",
+                         "Control node has unknown type", "$.control_nodes." + node.m_Id + ".type");
+            }
+        }
+
         for (auto const& [taskKey, task] : workflow.m_Tasks)
         {
             std::string const& taskId = taskKey;
@@ -549,9 +580,23 @@ namespace AIAssistant
             ValidateTaskParams(issues, workflow, taskId, task);
         }
 
-        // Depends_on existence + adjacency for DAG validation
+        // Depends_on existence + adjacency for DAG validation (includes controlflow)
         std::unordered_map<std::string, std::vector<std::string>> adjacency;
-        adjacency.reserve(workflow.m_Tasks.size());
+        adjacency.reserve(workflow.m_Tasks.size() + workflow.m_ControlNodes.size());
+
+        auto const nodeExists = [&](std::string const& id) -> bool {
+            return (workflow.m_Tasks.find(id) != workflow.m_Tasks.end()) || (controlNodeIds.find(id) != controlNodeIds.end());
+        };
+
+        // Seed adjacency with all nodes so disconnected nodes participate in cycle detection.
+        for (auto const& [taskId, _task] : workflow.m_Tasks)
+        {
+            adjacency[taskId];
+        }
+        for (auto const& cnId : controlNodeIds)
+        {
+            adjacency[cnId];
+        }
 
         for (auto const& [taskId, task] : workflow.m_Tasks)
         {
@@ -580,6 +625,44 @@ namespace AIAssistant
                 // Edge direction: task depends on dep => dep -> task in adjacency for cycle detection
                 adjacency[depId].push_back(taskId);
             }
+        }
+
+        // Validate controlflow edges + add them to adjacency for cycle detection.
+        for (size_t i = 0; i < workflow.m_ControlflowEdges.size(); ++i)
+        {
+            ControlflowEdgeDef const& edge = workflow.m_ControlflowEdges[i];
+            std::string const path = "$.controlflow[" + std::to_string(i) + "]";
+
+            if (edge.m_From.empty() || edge.m_To.empty())
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A, "controlflow_missing_endpoints",
+                         "controlflow edge missing 'from' or 'to'", path);
+                continue;
+            }
+
+            if (!nodeExists(edge.m_From))
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A, "controlflow_from_missing",
+                         "controlflow edge references unknown from node id: " + edge.m_From, path);
+                continue;
+            }
+
+            if (!nodeExists(edge.m_To))
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A, "controlflow_to_missing",
+                         "controlflow edge references unknown to node id: " + edge.m_To, path);
+                continue;
+            }
+
+            if (edge.m_Kind == ControlflowKind::Unknown)
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A, "controlflow_kind_unknown",
+                         "controlflow edge has unknown kind", path + ".kind");
+                continue;
+            }
+
+            // Add to adjacency for cycle detection.
+            adjacency[edge.m_From].push_back(edge.m_To);
         }
 
         std::vector<std::string> cycleNodes;

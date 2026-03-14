@@ -86,6 +86,13 @@ namespace AIAssistant
         bool ParseFilterSource(simdjson::ondemand::object& jsonObject, FilterSource& sourceOut,
                                std::string& errorMessage) const;
 
+        // Control-flow graph extensions (branching)
+        bool ParseControlNodes(simdjson::ondemand::value& jsonValue, std::vector<ControlNodeDef>& controlNodesOut,
+                               std::string& errorMessage) const;
+
+        bool ParseControlflow(simdjson::ondemand::value& jsonValue, std::vector<ControlflowEdgeDef>& controlflowOut,
+                              std::string& errorMessage) const;
+
         // Utility helpers
         bool ExtractRawJson(simdjson::ondemand::value& element, std::string& rawJsonOut) const;
 

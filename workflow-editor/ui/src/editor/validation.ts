@@ -18,7 +18,7 @@ export function validateGraph(graph: EditorGraph): ValidationResult
   for (const node of graph.nodes)
   {
     // Filter nodes are not validated here
-    if (node.type === "filter")
+    if (node.type === "filter" || node.type === "branch")
     {
       continue;
     }
