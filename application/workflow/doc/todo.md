@@ -45,6 +45,9 @@ Last reviewed: Feb 2026
 - [x] ~~Implement **retries/backoff** from `RetryPolicy`~~ — `TryScheduleRetry` in `workflowRuntimeManager.cpp`: linear backoff (`m_BackoffMs * attempt`), `m_RetryAfterTime` respected by dispatch loop, deadlock detector accounts for retry-pending tasks.
 - [x] ~~Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime~~ — inactivity watchdog: `TaskWatchdog` atomic struct, shell executor uses `fork()/exec()/poll()` with stdout as implicit heartbeat + process group kill on timeout; REST `POST /api/task/<id>/heartbeat` for explicit heartbeats; python/internal get post-execution inactivity check. Spec §3.3.3 updated, bookSummaryPipeline demo added.
 
+### Error branching / controlflow
+- [x] ~~Implement **error branching** with Branch nodes and `expose_error_signal`~~ — `control_nodes` array + `controlflow` edges parsed in `workflowJsonParser.cpp`, validated in `workflowValidator.cpp` (DAG constraint includes controlflow edges). Runtime: `FireBranchIfReady` in `workflowRuntimeManager.cpp` activates selected path and skips unselected path. Re-activation of previously-skipped tasks handled (Skipped→Pending reset). Rule A: handled failures don't fail the run. Verified with `exampleMakefile5`: ai_call generates code with deliberate error → shell fails → branch_1 error path → ai_call_fix → shell_retry succeeds → branch_2 → shell_2 runs hello.
+
 ---
 
 ## Executor completeness

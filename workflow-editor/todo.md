@@ -49,6 +49,12 @@ Last reviewed: 2026-03-12
 - [x] ~~Runtime feasibility preflight (script existence check)~~
 - [x] ~~Validation API returns severity/tier/code/path/taskId per issue~~
 
+### Error branching / controlflow (runtime + editor)
+- [x] ~~Branch node type + error-signal edges in JCWF schema~~ — `control_nodes` array with `"type": "branch"`, `controlflow` edges with `"kind": "normal"/"error_signal"/"on_error"`
+- [x] ~~`expose_error_signal` per-task field~~ — parsed, validated, surfaced in editor inspector
+- [x] ~~Runtime branch firing + Rule A (handled failures)~~ — `FireBranchIfReady`, re-activation of previously-skipped tasks, handled failures don't fail the run
+- [x] ~~`exampleMakefile5` error recovery workflow~~ — verified end-to-end: shell fails → AI fix → retry → run hello
+
 ### Future (n8n integration)
 - [ ] `POST /api/integrations/n8n/start` endpoint with callback URL
 - [ ] n8n → JCWF converter
