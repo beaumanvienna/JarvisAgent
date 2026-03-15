@@ -37,6 +37,9 @@ Last reviewed: 2026-03-12
 ## Remaining Work
 
 ### Editor UI
+- [ ] Box select: left-click drag on empty canvas area opens a selection rectangle to select
+      multiple nodes at once (for group move/delete). Note: Ctrl+click already works for
+      multi-select; this adds the more intuitive drag-box alternative.
 - [ ] Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files
 - [ ] Drag-to-reorder in queue_binding entries (stretch goal)
 
@@ -54,6 +57,13 @@ Last reviewed: 2026-03-12
 - [x] ~~`expose_error_signal` per-task field~~ — parsed, validated, surfaced in editor inspector
 - [x] ~~Runtime branch firing + Rule A (handled failures)~~ — `FireBranchIfReady`, re-activation of previously-skipped tasks, handled failures don't fail the run
 - [x] ~~`exampleMakefile5` error recovery workflow~~ — verified end-to-end: shell fails → AI fix → retry → run hello
+
+### WebSocket Push (replace polling)
+- [ ] Replace the editor's 500ms `workflow-runs-request` polling with true server-push broadcasts.
+      Currently the Crow backend only drains pending broadcasts inside `onmessage` (i.e. when
+      the client sends a message).  A Crow IO-thread timer or an `io_service::post()` wake-up
+      would let the server push updates immediately without waiting for the next client message.
+      This would reduce latency for AI progress, run-state changes, and log streaming.
 
 ### Future (n8n integration)
 - [ ] `POST /api/integrations/n8n/start` endpoint with callback URL

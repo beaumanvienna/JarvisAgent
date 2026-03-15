@@ -42,6 +42,7 @@ import {
 } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
+import AiPromptArea from "./AiPromptArea";
 
 const nodeTypes = { task: TaskNode, filter: FilterNode, branch: BranchNode };
 
@@ -898,6 +899,53 @@ export default function WorkflowEditorView(props: {
   useEffect(() => {
     loadFromJcwfRef.current = loadFromJcwf;
   }, [loadFromJcwf]);
+
+  const getCurrentJcwf = useCallback((): JcwfFile | null => {
+    const workflowId = loadedWorkflowId ?? props.workflowId ?? "workflow";
+    const graph: EditorGraph = { nodes: nodes as EditorTaskNode[], edges };
+    const result = graphToJcwf(graph, workflowId);
+    if (!result.ok)
+    {
+      return null;
+    }
+    const merged: JcwfFile = {
+      ...(loadedJcwfRef.current ?? {}),
+      ...result.jcwf,
+    };
+    if (wfLabel.length > 0) { merged.label = wfLabel; }
+    const docValue = wfDoc.length > 0 ? (wfDoc.includes("\n") ? wfDoc.split("\n") : wfDoc) : undefined;
+    if (docValue) { merged.doc = docValue; }
+    if (triggers.length > 0) { merged.triggers = triggers; }
+    if (!manualStartEnabled) { merged.manual_start = false; }
+    const timeoutNum = wfDefaultTimeoutMs.length > 0 ? Number(wfDefaultTimeoutMs) : undefined;
+    if (timeoutNum !== undefined || wfDefaultAiProvider.length > 0 || wfDefaultAiModel.length > 0)
+    {
+      const defs: Record<string, unknown> = { ...((merged as Record<string, unknown>).defaults as Record<string, unknown> ?? {}) };
+      if (timeoutNum !== undefined && !isNaN(timeoutNum)) { defs.timeout_ms = timeoutNum; }
+      if (wfDefaultAiProvider.length > 0 || wfDefaultAiModel.length > 0)
+      {
+        const ai: Record<string, unknown> = { ...(defs.ai as Record<string, unknown> ?? {}) };
+        if (wfDefaultAiProvider.length > 0) { ai.provider = wfDefaultAiProvider; }
+        if (wfDefaultAiModel.length > 0) { ai.model = wfDefaultAiModel; }
+        defs.ai = Object.keys(ai).length > 0 ? ai : undefined;
+      }
+      (merged as Record<string, unknown>).defaults = defs;
+    }
+    return merged;
+  }, [nodes, edges, loadedWorkflowId, props.workflowId, wfLabel, wfDoc, wfBaseDirectory, wfDefaultTimeoutMs, wfDefaultAiProvider, wfDefaultAiModel, manualStartEnabled, triggers]);
+
+  const onAutoLayoutRef = useRef<(() => void) | null>(null);
+
+  const onJcwfGenerated = useCallback((jcwf: JcwfFile) => {
+    loadFromJcwf(null, jcwf);
+    setStatusText("Loaded AI-generated workflow. Review and Save.");
+    // Auto-layout arranges nodes by dependency topology, then fitView centers the result.
+    // Deferred so React has time to render the new nodes.
+    setTimeout(() => {
+      onAutoLayoutRef.current?.();
+      reactFlowInstance?.fitView({ padding: 0.15 });
+    }, 80);
+  }, [loadFromJcwf, reactFlowInstance]);
 
   const resetToNewDraftRef = useRef(resetToNewDraft);
   useEffect(() => {
@@ -2388,6 +2436,7 @@ export default function WorkflowEditorView(props: {
     recomputeValidation(graph);
     setStatusText("Auto-layout applied.");
   }, [nodes, edges, recomputeValidation]);
+  onAutoLayoutRef.current = onAutoLayout;
 
   return (
     <div className="editorShell">
@@ -2752,27 +2801,35 @@ export default function WorkflowEditorView(props: {
         </div>
       </aside>
 
-      <div style={{ position: "relative" }}>
-        <ReactFlow
-          key={`rf-${props.hideTierDWarnings ? "hide" : "show"}`}
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onNodeDragStart={onNodeDragStart}
-          onNodeDragStop={onNodeDragStop}
-          onEdgesChange={onEdgesChangeWithUndo}
-          onConnect={onConnect}
-          onSelectionChange={onSelectionChange}
-          deleteKeyCode={["Backspace", "Delete"]}
-          minZoom={MIN_ZOOM}
-          onInit={(instance) => { setReactFlowInstance(instance); instance.fitView(); }}
-          onMoveEnd={(_event, viewport) => { setCurrentZoom(viewport.zoom); }}
-        >
-          <Background />
-          <Controls />
-          <MiniMap />
-        </ReactFlow>
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+        <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
+          <ReactFlow
+            key={`rf-${props.hideTierDWarnings ? "hide" : "show"}`}
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onNodeDragStart={onNodeDragStart}
+            onNodeDragStop={onNodeDragStop}
+            onEdgesChange={onEdgesChangeWithUndo}
+            onConnect={onConnect}
+            onSelectionChange={onSelectionChange}
+            deleteKeyCode={["Backspace", "Delete"]}
+            minZoom={MIN_ZOOM}
+            onInit={(instance) => { setReactFlowInstance(instance); instance.fitView(); }}
+            onMoveEnd={(_event, viewport) => { setCurrentZoom(viewport.zoom); }}
+          >
+            <Background />
+            <Controls />
+            <MiniMap />
+          </ReactFlow>
+        </div>
+        <AiPromptArea
+          getCurrentJcwf={getCurrentJcwf}
+          onJcwfGenerated={onJcwfGenerated}
+          webSocketRef={webSocketRef}
+          isWebSocketConnected={isWebSocketConnected}
+        />
       </div>
 
       <aside className="inspector">

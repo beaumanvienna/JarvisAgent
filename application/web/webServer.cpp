@@ -410,6 +410,13 @@ namespace AIAssistant
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
+
+        m_AiJcwfService.SetBroadcastFn(
+            [this](std::string const& jsonString)
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                m_PendingBroadcasts.push_back(jsonString);
+            });
     }
 
     WebServer::~WebServer() { Stop(); }
@@ -2664,6 +2671,24 @@ namespace AIAssistant
                                 m_PendingBroadcasts.push_back(msg.dump());
                             }
                         }
+                        else if (type == "ai-explain-jcwf")
+                        {
+                            std::string jcwfJson = std::string(doc["jcwf"].get_string().value());
+                            m_AiJcwfService.ExplainAsync(jcwfJson);
+                        }
+
+                        else if (type == "ai-generate-jcwf")
+                        {
+                            std::string prompt = std::string(doc["prompt"].get_string().value());
+                            std::string currentJcwf;
+                            auto currentResult = doc["currentJcwf"].get_string();
+                            if (currentResult.error() == simdjson::SUCCESS)
+                            {
+                                currentJcwf = std::string(currentResult.value());
+                            }
+                            m_AiJcwfService.GenerateAsync(prompt, currentJcwf);
+                        }
+
                         else
                         {
                             std::lock_guard<std::mutex> lock(m_Mutex);
@@ -2766,6 +2791,9 @@ namespace AIAssistant
         }
 
         m_Running = false;
+
+        // Shut down the AI JCWF service so background threads are joined.
+        m_AiJcwfService.Shutdown();
 
         // Force-close all WebSocket connections before stopping.
         // Crow's I/O loop won't exit while connections are open.

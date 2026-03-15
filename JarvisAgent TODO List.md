@@ -220,3 +220,17 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
+## 21. Settings dialog for workflow editor + JCWF assistant provider config
+- Add a settings dialog in the workflow editor for `config.json` fields that are
+  **not** already covered by the AI Manager page (e.g. queue paths, misc. options).
+- Add a setting to select which **API interface index** the JCWF generation assistant
+  uses (currently it inherits the default provider from `config.json`).
+  - This will write a PROV file for the `_ai_jcwf_service` queue so `SessionManager`
+    picks up the override (the PROV plumbing in `AiJcwfService` was removed for now
+    because it wasn't needed — it will need to be re-added).
+  - An advanced model (e.g. Claude Opus Thinking) may be required for complex JCWF
+    generation, so letting the user choose a different provider than the default is
+    important.
+
+---
+

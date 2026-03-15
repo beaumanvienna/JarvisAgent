@@ -306,8 +306,10 @@ namespace AIAssistant
             }
         }
 
-        // Flush queued WebSocket broadcasts to connected clients.
-        m_WebServer->DrainPendingBroadcasts();
+        // NOTE: WebSocket broadcasts are drained inside Crow's onmessage handler
+        // (triggered by the editor's 500ms poll).  Calling DrainPendingBroadcasts()
+        // here on the main thread caused silent message loss because Crow's
+        // send_text overlapped with the IO-thread drain (see webServer.cpp:2712).
 
         // Termination logic
         CheckIfFinished();

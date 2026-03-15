@@ -22,6 +22,7 @@
 #pragma once
 #include "crow.h"
 #include "auxiliary/threadPool.h"
+#include "web/aiJcwfService.h"
 #include <atomic>
 #include <filesystem>
 #include <mutex>
@@ -153,5 +154,7 @@ namespace AIAssistant
 
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
+
+        AiJcwfService m_AiJcwfService;
     };
 } // namespace AIAssistant

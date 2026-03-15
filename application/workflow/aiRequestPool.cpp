@@ -584,6 +584,9 @@ namespace AIAssistant
             auto const iterator = m_PendingRequests.find(requestKey);
             if (iterator == m_PendingRequests.end())
             {
+                LOG_APP_WARN("[AiRequestPool] OnProbFileEvent: no pending entry for requestId={} timestampNs={} "
+                             "(map size={}, file='{}')",
+                             requestKey.requestId, requestKey.requestTimestampNs, m_PendingRequests.size(), fullFilePath);
                 return false;
             }
 

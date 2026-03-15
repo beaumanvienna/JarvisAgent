@@ -734,3 +734,105 @@ select.input option {
 .btnPrimary:hover {
   background: rgba(100, 160, 255, 0.35);
 }
+
+/* AI Prompt Area */
+.aiPromptArea {
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+  max-height: 260px;
+}
+
+.aiPromptAreaCollapsed {
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.20);
+  padding: 4px 14px;
+  display: flex;
+  align-items: center;
+}
+
+.aiPromptHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.aiPromptTitle {
+  font-weight: 700;
+  font-size: 13px;
+  color: rgba(180, 210, 255, 0.95);
+}
+
+.aiPromptHeaderRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aiPromptDisconnected {
+  font-size: 11px;
+  color: rgba(255, 100, 100, 0.8);
+}
+
+.aiPromptToggle {
+  font-size: 11px !important;
+  padding: 2px 8px !important;
+  min-width: unset !important;
+}
+
+.aiPromptTextarea {
+  resize: vertical;
+  min-height: 48px;
+  max-height: 160px;
+  font-size: 13px !important;
+  line-height: 1.5;
+}
+
+.aiPromptButtons {
+  display: flex;
+  gap: 8px;
+}
+
+.aiPromptBtn {
+  flex: 1;
+  font-size: 12px !important;
+  padding: 6px 12px !important;
+}
+
+.aiPromptBtnPrimary {
+  background: rgba(100, 180, 255, 0.20);
+  border-color: rgba(100, 180, 255, 0.45);
+  color: rgba(160, 210, 255, 0.95);
+}
+
+.aiPromptBtnPrimary:hover:not(:disabled) {
+  background: rgba(100, 180, 255, 0.30);
+}
+
+.aiPromptProgress {
+  font-size: 12px;
+  color: rgba(180, 210, 255, 0.80);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.aiPromptStage {
+  font-weight: 700;
+  color: rgba(180, 210, 255, 0.95);
+  white-space: nowrap;
+}
+
+.aiPromptError {
+  font-size: 12px;
+  color: rgba(255, 120, 100, 0.90);
+}
+
+.aiPromptInfo {
+  font-size: 12px;
+  color: rgba(255, 200, 100, 0.85);
+}

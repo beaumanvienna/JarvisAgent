@@ -5,6 +5,11 @@ License: GPL-3.0
 
 ---
 
+> **IMPORTANT — Condensed Guide Sync:**  A condensed version of this specification
+> lives at `doc/jcwf_generation_guide.md` and is used as AI context for the JCWF
+> generation assistant.  Any change to this specification **MUST** be reflected in the
+> condensed guide so the AI always works from an up-to-date reference.
+
 ## Abstract
 
 This document specifies the **JC Workflow File Format™ (JCWF)** and the corresponding execution model for **JarvisAgent**.  
