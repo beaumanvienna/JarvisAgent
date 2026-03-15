@@ -580,6 +580,19 @@ namespace AIAssistant
             ValidateTaskParams(issues, workflow, taskId, task);
         }
 
+        // Cross-check: task ids must not collide with control_node ids (JC spec §3.8.1).
+        for (auto const& id : taskIds)
+        {
+            if (controlNodeIds.count(id))
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A,
+                         "task_control_node_id_collision",
+                         "Task id collides with control_node id: " + id +
+                             " — control nodes must not appear in the tasks map",
+                         "$.tasks." + id, id);
+            }
+        }
+
         // Depends_on existence + adjacency for DAG validation (includes controlflow)
         std::unordered_map<std::string, std::vector<std::string>> adjacency;
         adjacency.reserve(workflow.m_Tasks.size() + workflow.m_ControlNodes.size());

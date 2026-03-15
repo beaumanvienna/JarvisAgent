@@ -412,44 +412,114 @@ namespace AIAssistant
             {
                 std::string const workflowId = WF_ID_EXPLAIN;
                 std::string const runId = GenerateRunId(workflowId);
+                int const seq = m_NextRequestSeq.fetch_add(1);
+                std::string const seqStr = std::to_string(seq);
 
                 LOG_APP_INFO("[workflow] run '{}' started (workflow '{}')", runId, workflowId);
 
+                // ----------------------------------------------------------
+                // Stage 1: High-level explanation
+                // ----------------------------------------------------------
                 Broadcast(R"({"type":"ai-explain-progress","message":"Generating explanation..."})");
 
-                std::string const stng =
-                    "You are a workflow documentation expert. Explain workflows clearly and concisely in structured English. "
-                    "Focus on what the workflow does, the task pipeline, dependencies, data flow, and any error handling.";
+                std::string const stng1 =
+                    "Be succinct. No embellishments. No preamble. No closing remarks. "
+                    "Output ONLY the structured explanation — nothing else.";
 
-                std::string const task = "Describe what this JCWF workflow does in plain English. "
-                                         "Structure your explanation with: 1) Overview, 2) Tasks and their roles, "
-                                         "3) Dependencies and data flow, 4) Error handling (if any). "
-                                         "Keep it concise but complete.";
+                std::string const task1 =
+                    "Produce a brief, structured explanation of this JCWF workflow.\n"
+                    "Use these sections ONLY:\n"
+                    "1) Overview (2-3 sentences max)\n"
+                    "2) Tasks — for each task you MUST state: id, type, working_directory, "
+                    "queue_binding content (exact STNG/TASK/CNTX/PROB text), file_inputs, "
+                    "materialize mappings, expose_error_signal value, depends_on list.\n"
+                    "3) Dependencies and controlflow — MUST list every controlflow edge "
+                    "(from, to, kind, from_port, to_port). MUST list every depends_on.\n"
+                    "4) Error handling — MUST state which tasks expose error signals and how branches route.\n"
+                    "Rules:\n"
+                    "- MUST reproduce every queue_binding file content verbatim — do NOT truncate.\n"
+                    "- MUST reproduce every file_inputs path verbatim.\n"
+                    "- MUST reproduce every materialize mapping verbatim.\n"
+                    "- MUST note shared working directories.\n"
+                    "- Use SHORT sentences. No filler. No commentary. No examples.";
 
-                std::string const cntx = "--- JCWF Workflow JSON ---\n" + jcwfText;
+                std::string const cntx1 = "--- JCWF Workflow JSON ---\n" + jcwfText;
+                std::string const prob1 = "Explain this JCWF workflow. Be brief.";
 
-                std::string const prob = "Explain this JCWF workflow.";
+                LOG_APP_INFO("[workflow] task 'explain_stage1' executing in run '{}' (workflow '{}')", runId, workflowId);
 
-                int const seq = m_NextRequestSeq.fetch_add(1);
-                std::string const subfolder = "explain_" + std::to_string(seq);
+                std::string stage1Response;
+                std::string stage1Error;
+                bool const stage1Ok =
+                    RunSingleAiCall("explain_" + seqStr + "_stage1", stng1, task1, cntx1, prob1, stage1Response, stage1Error);
 
-                LOG_APP_INFO("[workflow] task 'explain' executing in run '{}' (workflow '{}')", runId, workflowId);
-
-                std::string responseText;
-                std::string errorMessage;
-                bool const ok = RunSingleAiCall(subfolder, stng, task, cntx, prob, responseText, errorMessage);
-
-                if (ok)
+                if (!stage1Ok)
                 {
-                    LOG_APP_INFO("[workflow] task 'explain' completed in run '{}' (workflow '{}')", runId, workflowId);
-                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(responseText) + R"("})");
+                    LOG_APP_WARN("[workflow] task 'explain_stage1' failed in run '{}': {}", runId, stage1Error);
+                    Broadcast(R"({"type":"ai-explain-result","ok":false,"error":")" + JsonEscape(stage1Error) + R"("})");
+                    LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
+                    return;
+                }
+                LOG_APP_INFO("[workflow] task 'explain_stage1' completed in run '{}' (workflow '{}')", runId, workflowId);
+
+                if (m_ShuttingDown.load())
+                {
+                    Broadcast(R"({"type":"ai-explain-result","ok":false,"error":"Service is shutting down"})");
+                    return;
+                }
+
+                // ----------------------------------------------------------
+                // Stage 2: Review / refine / enrich with spec awareness
+                // ----------------------------------------------------------
+                Broadcast(R"({"type":"ai-explain-progress","message":"Reviewing and enriching explanation..."})");
+
+                std::string const generationGuide = LoadGenerationGuide();
+
+                std::string const stng2 =
+                    "Be succinct. No embellishments. No preamble. No closing remarks. "
+                    "Output ONLY the corrected explanation — nothing else.";
+
+                std::string const task2 =
+                    "Review the explanation against the JCWF JSON and the JCWF specification.\n"
+                    "Rules:\n"
+                    "- MUST fix any inaccuracy.\n"
+                    "- MUST verify every queue_binding content string matches the JSON verbatim.\n"
+                    "- MUST verify every file_inputs path matches the JSON verbatim.\n"
+                    "- MUST verify every materialize mapping matches the JSON verbatim.\n"
+                    "- MUST verify every controlflow edge (from, to, kind, ports) matches the JSON.\n"
+                    "- MUST verify expose_error_signal values match the JSON.\n"
+                    "- MUST verify shared vs unique working directories.\n"
+                    "- MUST verify depends_on lists match the JSON.\n"
+                    "- MUST keep same structure: Overview, Tasks, Dependencies, Error handling.\n"
+                    "- MUST keep output brief — short sentences, no filler, no commentary.\n"
+                    "- The result MUST be precise enough to recreate the JCWF from the explanation alone.";
+
+                std::string const cntx2 = "--- JCWF Workflow JSON ---\n" + jcwfText +
+                                          "\n\n--- JCWF Specification (condensed) ---\n" + generationGuide +
+                                          "\n\n--- Explanation to review and enrich ---\n" + stage1Response;
+
+                std::string const prob2 = "Review and correct this explanation. Keep it brief.";
+
+                LOG_APP_INFO("[workflow] task 'explain_stage2' executing in run '{}' (workflow '{}')", runId, workflowId);
+
+                std::string stage2Response;
+                std::string stage2Error;
+                bool const stage2Ok =
+                    RunSingleAiCall("explain_" + seqStr + "_stage2", stng2, task2, cntx2, prob2, stage2Response, stage2Error);
+
+                if (stage2Ok)
+                {
+                    LOG_APP_INFO("[workflow] task 'explain_stage2' completed in run '{}' (workflow '{}')", runId, workflowId);
+                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage2Response) + R"("})");
                     LOG_APP_INFO("[workflow] run '{}' completed (workflow '{}')", runId, workflowId);
                 }
                 else
                 {
-                    LOG_APP_WARN("[workflow] task 'explain' failed in run '{}': {}", runId, errorMessage);
-                    Broadcast(R"({"type":"ai-explain-result","ok":false,"error":")" + JsonEscape(errorMessage) + R"("})");
-                    LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
+                    // Stage 2 failed — fall back to Stage 1 result (still useful).
+                    LOG_APP_WARN("[workflow] task 'explain_stage2' failed in run '{}': {} — returning stage 1 result",
+                                 runId, stage2Error);
+                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage1Response) + R"("})");
+                    LOG_APP_INFO("[workflow] run '{}' completed with stage 1 fallback (workflow '{}')", runId, workflowId);
                 }
             });
     }
@@ -519,19 +589,27 @@ namespace AIAssistant
                 LOG_APP_INFO("[workflow] task 'decompose' executing in run '{}' (workflow '{}')", runId, workflowId);
 
                 std::string const decomposeStng =
-                    "You are a workflow architect. Break down the user's request into a structured specification "
-                    "for a JCWF workflow. Identify the tasks, their types (shell, ai_call, python, internal), "
-                    "dependencies between tasks, any error handling needed, and data flow.";
+                    "Be succinct. No embellishments. No preamble. No closing remarks. "
+                    "Output ONLY the structured task breakdown — nothing else.";
 
                 std::string decomposeTask =
-                    "Analyze the user's request and produce a structured task breakdown. For each task, specify:\n"
-                    "- Task ID (short slug)\n"
-                    "- Task type (shell, ai_call, python, internal)\n"
-                    "- What it does\n"
-                    "- Dependencies (which tasks must complete first)\n"
-                    "- Whether it needs error handling (expose_error_signal + branch)\n"
-                    "- For ai_call: what STNG/TASK/CNTX/PROB content should be\n"
-                    "- For shell: what command/script to run\n";
+                    "Produce a structured task breakdown from the user's request.\n"
+                    "For each task you MUST specify:\n"
+                    "- task_id (short slug)\n"
+                    "- type (shell | ai_call | python | internal)\n"
+                    "- label\n"
+                    "- working_directory (ai_call: '../queue/<wfId>/<NN>_<taskId>', shell: '<wfId>/<NN>_<taskId>')\n"
+                    "- depends_on list\n"
+                    "- expose_error_signal (true/false)\n"
+                    "- For ai_call: exact STNG, TASK, CNTX, PROB file content\n"
+                    "- For shell: command (MUST start with 'scripts/'), args, file_inputs paths, materialize mappings\n"
+                    "- If error handling needed: which branch node, which controlflow edges (from, to, kind, ports)\n"
+                    "Rules:\n"
+                    "- Every ai_call STNG content MUST include 'No markdown fences, no explanations.' "
+                    "because AI output is consumed directly by compilers/tools, not humans.\n"
+                    "- Branch nodes MUST appear ONLY in control_nodes, NOT in tasks.\n"
+                    "- Every controlflow edge MUST specify from, to, kind, from_port, to_port.\n"
+                    "- Use MUST and SHALL for hard constraints. Leave no ambiguity.\n";
 
                 if (!currentJcwf.empty())
                 {
@@ -567,20 +645,25 @@ namespace AIAssistant
                 LOG_APP_INFO("[workflow] task 'generate' executing in run '{}' (workflow '{}')", runId, workflowId);
 
                 std::string const generateStng =
-                    "You are a JCWF code generator. Output ONLY valid JSON — no markdown fences, no explanations, "
-                    "no comments. The output must parse as a complete JCWF file.";
+                    "Output ONLY valid JSON. No markdown fences. No explanations. No comments. "
+                    "The output MUST parse as a complete JCWF file.";
 
                 std::string const generateTask =
-                    "Generate a complete, valid JCWF JSON file based on the task breakdown below. "
-                    "Follow the JCWF specification exactly. Key rules:\n"
-                    "- Every task's 'id' field must match its key in the 'tasks' map\n"
-                    "- ai_call working_directory: '../queue/<workflowId>/<NN>_<taskId>'\n"
-                    "- shell working_directory: '<workflowId>/<NN>_<taskId>'\n"
-                    "- shell command must start with 'scripts/'\n"
-                    "- Use version '1.1' if using control_nodes or controlflow\n"
-                    "- depends_on must form a DAG (no cycles)\n"
-                    "- expose_error_signal + controlflow edges for error branches\n"
-                    "- Include all required controlflow port names (dep-source, error-signal, cf-in-normal, etc.)\n"
+                    "Generate a complete JCWF JSON file from the task breakdown below.\n"
+                    "MUST rules:\n"
+                    "- Every task 'id' field MUST match its key in the 'tasks' map.\n"
+                    "- ai_call working_directory MUST be '../queue/<workflowId>/<NN>_<taskId>'.\n"
+                    "- shell working_directory MUST be '<workflowId>/<NN>_<taskId>'.\n"
+                    "- shell command MUST start with 'scripts/'.\n"
+                    "- version MUST be '1.1' if using control_nodes or controlflow.\n"
+                    "- depends_on MUST form a DAG (no cycles).\n"
+                    "- Branch nodes MUST appear ONLY in control_nodes, NEVER in tasks.\n"
+                    "- expose_error_signal + controlflow edges for error branches.\n"
+                    "- Every controlflow edge MUST have from, to, kind, from_port, to_port.\n"
+                    "- Port names: dep-source, error-signal, cf-in-normal, cf-in-error, "
+                    "cf-out-normal, cf-out-error, dep-target.\n"
+                    "- Every ai_call stng_files content MUST include 'No markdown fences, no explanations.' "
+                    "because AI output is consumed directly by compilers/tools.\n"
                     "Output ONLY the JSON. Nothing else.";
 
                 std::string generateCntx = "--- Task Breakdown ---\n" + decomposition +
@@ -591,7 +674,7 @@ namespace AIAssistant
                     generateCntx += "\n\n--- Current JCWF (modify this) ---\n" + currentJcwf;
                 }
 
-                std::string const generateProb = "Generate the JCWF JSON now.";
+                std::string const generateProb = "Generate the JCWF JSON.";
 
                 std::string generatedJcwf;
                 std::string generateError;
@@ -695,8 +778,9 @@ namespace AIAssistant
                     LOG_APP_INFO("[workflow] task '{}' executing in run '{}' (workflow '{}')", fixTaskId, runId, workflowId);
 
                     std::string const fixStng =
-                        "You are a JCWF code fixer. Output ONLY valid JSON — no markdown fences, no explanations. "
-                        "Fix all validation errors while preserving the workflow's intended behavior.";
+                        "You are a JCWF code fixer. Output ONLY valid JSON — no markdown fences, no explanations, "
+                        "no introductory or closing commentary. Fix all validation errors while preserving the "
+                        "workflow's intended behavior.";
 
                     std::string const fixTask =
                         "The JCWF JSON below has validation errors. Fix them and output the corrected JCWF JSON. "

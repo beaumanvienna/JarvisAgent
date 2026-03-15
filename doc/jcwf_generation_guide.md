@@ -304,6 +304,7 @@ Branch nodes route execution based on whether a driving task succeeded or failed
 
 - `type`: Currently only `"branch"` is supported.
 - Branch nodes are NOT tasks — no working_directory, no params, no artifacts.
+- Control node IDs MUST NOT collide with any task ID. Do NOT place branch nodes in the `tasks` map — they belong only in `control_nodes`.
 
 ### Controlflow Edges
 
@@ -616,3 +617,4 @@ Same as Example A but the AI deliberately introduces a syntax error. A branch no
 6. **Controlflow without `expose_error_signal`** — An `error_signal` edge requires the source task to have `expose_error_signal: true`.
 7. **Version mismatch** — Use `"1.1"` if using `filters`, `control_nodes`, or `controlflow`. Otherwise `"1.0"` is fine.
 8. **Controlflow-gated tasks with `depends_on`** — Tasks activated by controlflow edges should generally NOT also be in `depends_on` of the branching task, as controlflow gating is independent.
+9. **Missing 'No markdown fences' in ai_call STNG** — AI output from `ai_call` tasks is consumed directly by compilers, tools, or downstream tasks — NOT by humans. Every `stng_files` content MUST include `"No markdown fences, no explanations."` to prevent the AI from wrapping output in ` ```lang ` blocks.
