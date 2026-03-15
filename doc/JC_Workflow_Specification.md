@@ -94,6 +94,13 @@ This specification focuses on:
   - [8.2 Outputs and Context](#82-outputs-and-context)
 - [9. JSON Schema (Draft)](#9-json-schema-draft)
 - [10. Security Considerations](#10-security-considerations)
+- [11. Script Metadata Format](#11-script-metadata-format)
+  - [11.1 Marker](#111-marker)
+  - [11.2 Metadata Fields](#112-metadata-fields)
+  - [11.3 Bash Script Example](#113-bash-script-example)
+  - [11.4 Python Script Example](#114-python-script-example)
+  - [11.5 Parsing Rules](#115-parsing-rules)
+  - [11.6 Registry Table Format](#116-registry-table-format)
 
 ---
 
@@ -2195,6 +2202,108 @@ Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is sui
 - JCWF files SHOULD be sourced from trusted locations; tampering can change automation behavior.  
 - Structure-based iteration over external documents and XLS files SHOULD validate inputs to avoid unexpected expansion or injection.
 - Filter nodes with `max_items: 0` (no limit) SHOULD be used with caution; unbounded expansion can exhaust system resources.
+
+---
+
+---
+
+## 11. Script Metadata Format
+
+Scripts in the `scripts/` folder MAY include a structured metadata header that JarvisAgent
+parses at startup (and on file-watch events) to build an in-memory **script registry**.
+The registry is used by the AI JCWF generation pipeline to provide the AI with an accurate
+inventory of available scripts — their purpose, call signatures, and descriptions.
+
+### 11.1 Marker
+
+A script is registered if it contains the marker line:
+
+- **Bash/shell:** `# @jarvis-script`
+- **Python:** `# @jarvis-script`
+
+The marker MUST appear within the first 20 lines of the file.
+
+### 11.2 Metadata Fields
+
+All fields use the `# @<field>:` prefix (comment-style, one per line).
+Multi-line values continue on subsequent `#`-prefixed lines until the next `@`-field
+or the end of the header block (first non-comment line).
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `@short` | YES | One-line summary (≤120 chars). Used in the registry table. |
+| `@params` | YES | Parameter list. Each parameter on its own `#   - ` line. |
+| `@description` | NO | Extended description. May span multiple lines. |
+| `@outputs` | NO | Description of what the script produces. |
+
+### 11.3 Bash Script Example
+
+```bash
+#!/usr/bin/env bash
+# @jarvis-script
+# @short: Clone a git repository to a local directory
+# @params:
+#   - $1: repo_url (string) — HTTPS or SSH URL of the repository
+#   - $2: output_dir (string) — Target directory for the clone
+# @description:
+#   Clones a git repository using the system git command.
+#   If output_dir already exists, performs a pull instead.
+#   Exits non-zero on failure.
+# @outputs:
+#   - The cloned repository in output_dir
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LAUNCH_DIR="$(dirname "$SCRIPT_DIR")"
+# ... implementation ...
+```
+
+### 11.4 Python Script Example
+
+```python
+# @jarvis-script
+# @short: Count lines of code in a directory tree
+# @params:
+#   - input_dir (str): Root directory to scan
+#   - output_file (str): Path to write the JSON summary
+# @description:
+#   Walks the directory tree, counts lines per file extension,
+#   and writes a JSON summary with per-language totals.
+# @outputs:
+#   - output_file: JSON file with line counts
+from __future__ import annotations
+from pathlib import Path
+import json
+
+def countLines(input_dir: str, output_file: str) -> dict:
+    # ... implementation ...
+    return {"output_file": str(output_path)}
+```
+
+### 11.5 Parsing Rules
+
+1. JarvisAgent scans `scripts/` at startup for files matching `*.sh`, `*.py`, `*.ps1`.
+2. For each file, read the first 50 lines looking for `@jarvis-script`.
+3. If found, extract all `@`-prefixed fields into a `ScriptRegistryEntry` struct.
+4. The registry is exposed to the AI generation pipeline as a Markdown table (see §11.6).
+5. The `scripts/` folder is monitored by the FileWatcher. When a script is added,
+   modified, or removed, the registry is updated automatically.
+
+### 11.6 Registry Table Format
+
+The script registry is serialized as a Markdown table for AI context injection:
+
+```markdown
+| Script | Short Description | Parameters |
+|--------|-------------------|------------|
+| `scripts/runMake.sh` | Wrapper for 'make' command | (none) |
+| `scripts/clone_repo.sh` | Clone a git repository | `$1`: repo_url, `$2`: output_dir |
+| `scripts/countLines.py` | Count lines of code in a directory tree | `input_dir` (str), `output_file` (str) |
+```
+
+This table is injected into the DECOMPOSE stage (Stage 1) of the AI JCWF generation
+pipeline so the AI knows which scripts already exist and can reuse them instead of
+requesting new ones.
 
 ---
 
