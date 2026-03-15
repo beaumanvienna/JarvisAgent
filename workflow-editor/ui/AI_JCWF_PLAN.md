@@ -95,7 +95,7 @@ type AiPromptAreaProps = {
 
 Both operations use the **existing WebSocket** connection to stream progress and deliver results. No new REST endpoints needed.
 
-#### Explain (JCWF → Prompt)
+#### Explain (JCWF → Prompt) — 2-Stage Pipeline
 
 **Client sends:**
 ```json
@@ -105,18 +105,66 @@ Both operations use the **existing WebSocket** connection to stream progress and
 **Server streams:**
 ```json
 { "type": "ai-explain-progress", "message": "Generating explanation..." }
+{ "type": "ai-explain-progress", "message": "Reviewing and enriching explanation..." }
 { "type": "ai-explain-result", "ok": true, "summary": "Human-readable explanation..." }
 ```
 
-Implementation:
-1. Receive JCWF JSON from the editor via WebSocket.
-2. Build a single AI request with:
-   - **STNG**: "You are a workflow documentation expert. Explain the workflow in clear, structured English."
-   - **CNTX**: The JCWF JSON (pretty-printed) + a condensed spec excerpt (task types, edge semantics).
-   - **TASK**: "Describe what this workflow does, the task pipeline, dependencies, data flow, and any error handling."
-   - **PROB**: "Explain this JCWF workflow."
-3. Submit via the existing `AiRequestPool`, send progress via WebSocket.
-4. On completion, send the AI's text as `ai-explain-result`.
+##### Stage 1: Initial Explanation (current implementation)
+
+Build a single AI request:
+- **STNG**: "You are a workflow documentation expert. Explain workflows clearly and
+  concisely in structured English. Focus on what the workflow does, the task pipeline,
+  dependencies, data flow, and any error handling."
+- **TASK**: "Describe what this JCWF workflow does in plain English. Structure your
+  explanation with: 1) Overview, 2) Tasks and their roles, 3) Dependencies and data
+  flow, 4) Error handling (if any). Keep it concise but complete."
+- **CNTX**: The JCWF JSON (pretty-printed).
+- **PROB**: "Explain this JCWF workflow."
+
+This produces a good high-level summary but may miss JCWF-specific implementation
+details (materialize, expose_error_signal, controlflow edge kinds, shared working
+directories, queue_binding structure, file_inputs/file_outputs data flow, etc.).
+
+##### Stage 2: Review / Refine / Enrich
+
+A second AI call receives the Stage 1 explanation *plus* the condensed JCWF spec
+(`doc/jcwf_generation_guide.md`) so the AI knows what fields and concepts matter:
+
+- **STNG**: "You are a JCWF workflow specification expert. You know every field in the
+  JCWF format: materialize, expose_error_signal, controlflow edges (normal, error_signal,
+  on_error), queue_binding (STNG/TASK/CNTX/PROB files), working_directory conventions,
+  file_inputs/file_outputs, dataflow, control_nodes, and branching semantics."
+- **TASK**: "Review the explanation below against the actual JCWF JSON and the JCWF
+  specification. Correct any inaccuracies. Add missing details that are important for
+  understanding the workflow's implementation — especially: materialize mappings,
+  controlflow edge routing, expose_error_signal usage, shared vs unique working
+  directories, queue_binding file content, and dataflow connections. Keep the same
+  structure (Overview, Tasks, Dependencies, Error handling) but make it precise enough
+  that someone could recreate the JCWF from the explanation alone."
+- **CNTX**: The JCWF JSON + the condensed spec + the Stage 1 explanation.
+- **PROB**: "Review and enrich this JCWF workflow explanation."
+
+##### Why 2 stages?
+
+- **Round-trip fidelity:** the explanation produced by Explain should be detailed enough
+  that feeding it back into Generate recreates a structurally equivalent JCWF. The
+  Stage 1 explanation alone is ~80% accurate (tested with exampleMakefile5.jcwf); it
+  misses materialize, expose_error_signal, controlflow edges, and shared working
+  directories. Stage 2 closes this gap.
+- **Separation of concerns:** Stage 1 captures intent (human-readable). Stage 2 adds
+  precision (machine-round-trippable). The user sees the enriched final version.
+- **Spec awareness:** Stage 1 doesn't receive the spec (keeps the context window small
+  and focused). Stage 2 receives the spec so it knows which JCWF details to verify.
+
+##### Prompt Refinement Ideas (for Stage 1)
+
+The current Stage 1 prompt could also be improved independently:
+- Add a line to the TASK: "For each task, mention its working_directory, file_inputs,
+  file_outputs, and any materialize mappings."
+- Add to STNG: "Pay attention to controlflow edges and their kinds (normal,
+  error_signal, on_error). Mention expose_error_signal if a task uses it."
+- These additions would improve Stage 1 quality but don't eliminate the need for
+  Stage 2 (the AI still needs spec context to get the details right).
 
 #### Generate (Prompt → JCWF)
 
