@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# @jarvis-script
+# @short: Create a zip archive from one or more files
+# @params: ARCHIVE — output zip file path
+#   FILES... — one or more files to include
+# @description: Creates a zip archive using the 'zip' command. Falls back to a
+#   Python zipfile module if zip is not installed.
+# @outputs: ARCHIVE — the created zip file
 set -euo pipefail
 
 TOOL_NAME="zipTool"

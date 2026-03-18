@@ -23,6 +23,7 @@
 #include "taskFreshnessChecker.h"
 
 #include "engine.h"
+#include "taskPathResolver.h"
 
 #include <algorithm>
 #include <system_error>
@@ -35,39 +36,10 @@ namespace
     [[maybe_unused]] fs::path ResolveWorkingDirectory(AIAssistant::WorkflowDefinition const& workflowDefinition,
                                                       AIAssistant::TaskDef const& taskDefinition)
     {
-        fs::path workflowBaseDirectory = workflowDefinition.m_WorkflowBaseDirectory;
-
-        if (workflowBaseDirectory.empty())
-        {
-            workflowBaseDirectory = workflowDefinition.m_WorkflowFileDirectory;
-        }
-
-        if (workflowBaseDirectory.empty())
-        {
-            fs::path const workflowFilePath = workflowDefinition.m_WorkflowFilePath;
-            if (!workflowFilePath.empty())
-            {
-                workflowBaseDirectory = workflowFilePath.parent_path();
-            }
-        }
-        fs::path taskWorkingDirectory = taskDefinition.m_WorkingDirectory;
-
-        bool const hasExplicitWorkingDirectory = !taskWorkingDirectory.empty();
-        if (!hasExplicitWorkingDirectory)
-        {
-            taskWorkingDirectory = workflowBaseDirectory;
-        }
-        else if (!workflowBaseDirectory.empty() && taskWorkingDirectory.is_relative())
-        {
-            taskWorkingDirectory = fs::path(workflowBaseDirectory) / taskWorkingDirectory;
-        }
-
-        if (!taskWorkingDirectory.empty())
-        {
-            taskWorkingDirectory = taskWorkingDirectory.lexically_normal();
-        }
-
-        return taskWorkingDirectory;
+        fs::path const workflowBaseDirectory =
+            AIAssistant::TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        return AIAssistant::TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectory,
+                                                                              taskDefinition.m_WorkingDirectory);
     }
 
     [[maybe_unused]] bool HasPathPrefix(fs::path const& fullPath, fs::path const& prefixPath)

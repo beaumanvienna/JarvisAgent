@@ -1,6 +1,6 @@
 # JarvisAgent TODO List
 
-Last reviewed: Feb 2026
+Last reviewed: Mar 2026
 
 **Build command:** `make config=release && make config=debug`
 
@@ -257,6 +257,40 @@ zero queue growth, shutdown is instant.
   `peakPendingBroadcasts`) in `webServer.h`, logged at shutdown + connect/disconnect
 - [x] WebSocket stats exposed via `GET /api/status` for live monitoring
 - [x] WebSocket forced close + `m_Server.stop()` + thread join logging in `webServer.cpp`
+
+---
+
+## Bug: WebSocket log line buffer grows unbounded when no client is connected
+
+`EnqueueLogLine()` in `webServer.cpp` pushes every log line into `m_PendingLogLines`
+with no size cap. `DrainPendingBroadcasts()` merges these into `m_PendingBroadcasts`
+and sends them only when a client is connected and sends a message. When no WebSocket
+client is connected, log lines accumulate in memory indefinitely.
+
+Observed: after a few minutes of workflow execution (4.2 MB log file), the first
+WebSocket message after connect triggered a 58 MB batch JSON envelope (log lines ×
+JSON-escaping overhead). This is data being marshaled with nowhere to marshal it to.
+
+**Suggested fix:** Either (a) cap `m_PendingLogLines` to the last N lines (e.g. 500),
+discarding older lines when no client is draining them, or (b) clear `m_PendingLogLines`
+entirely when no clients are connected (check `m_Clients.empty()`), or (c) skip
+`EnqueueLogLine()` when `m_Clients` is empty.
+
+Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was caused by
+`m_PendingBroadcasts` growing unbounded — same pattern, different buffer.
+
+---
+
+## JCWF generation pipeline (AI → workflow)
+
+- [x] ~~**`AiJcwfService` 5-stage pipeline**~~ — decompose → generate JCWF → generate Python scripts → validate → fix. Implemented in `aiJcwfService.cpp`. Each stage uses queue folder artifacts (STNG/TASK/CNTX/PROB files).
+- [x] ~~**`WorkflowFileIndex`**~~ — scans `workflows/` at startup and before generation, indexes files by basename. Provides file inventory to the decompose prompt so the AI knows which input files exist on disk. Used by the validator to suggest path corrections for unreachable `file_inputs`.
+- [x] ~~**Python hot-reload**~~ — `PythonEngine` evicts `sys.modules` entries for `scripts.*` before each import, ensuring AI-generated scripts are picked up immediately without restart.
+- [x] ~~**`context` dict always passed**~~ — `PythonEngine::ExecuteWorkflowTask` always attaches the `context` dict (with `_file_input_0`, `_task_working_directory`, etc.) to kwargs. Previously only attached when the task explicitly declared a `context` input.
+- [x] ~~**Generation prompts use `context` not `_context`**~~ — fixed hardcoded prompt strings in `aiJcwfService.cpp` and `jcwf_generation_guide.md` to match the actual kwarg name passed by the C++ executor.
+- [x] ~~**Validator file_inputs path resolution**~~ — `ValidateFileInputReachability` resolves paths relative to `workflows/` base directory (via `TaskPathResolver::ResolveWorkflowBaseDirectory`), not bare `launchCwd`. Provides `WorkflowFileIndex` basename suggestions in fix hints.
+- [x] ~~**`TaskPathResolver` extraction**~~ — `ResolveWorkflowBaseDirectory()` extracted from `workflowRuntimeManager.cpp` into shared `taskPathResolver.h/.cpp` for use by both the runtime and the validator.
+- [x] ~~**E2E verified**~~ — `cyber2` workflow: OpenSSH log → Python parse → AI threat assessment. Generated, validated, fixed, and executed without manual edits. See `example/workflows/cyber2_e2e.md`.
 
 ---
 

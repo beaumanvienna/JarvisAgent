@@ -836,3 +836,122 @@ select.input option {
   font-size: 12px;
   color: rgba(255, 200, 100, 0.85);
 }
+
+/* Script Review Panel */
+.scriptReviewPanel {
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.30);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.scriptReviewHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.scriptReviewTitle {
+  font-weight: 700;
+  font-size: 13px;
+  color: rgba(140, 220, 160, 0.95);
+}
+
+.scriptReviewList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scriptReviewItem {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.scriptReviewItemHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: none;
+  color: rgba(220, 220, 220, 0.95);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.scriptReviewItemHeader:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.scriptReviewPath {
+  flex: 1;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.scriptReviewBadge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(100, 180, 255, 0.15);
+  color: rgba(160, 210, 255, 0.85);
+}
+
+.scriptReviewToggle {
+  font-size: 10px;
+  color: rgba(180, 180, 180, 0.60);
+}
+
+.scriptReviewCode {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.40);
+  color: rgba(200, 220, 200, 0.95);
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 60px;
+  max-height: 240px;
+}
+
+.scriptReviewCode:focus {
+  outline: 1px solid rgba(100, 180, 255, 0.30);
+}
+
+.scriptReviewActions {
+  display: flex;
+  gap: 8px;
+}
+
+.scriptReviewBtn {
+  flex: 1;
+  font-size: 12px !important;
+  padding: 6px 12px !important;
+}
+
+.scriptReviewBtnPrimary {
+  background: rgba(80, 200, 120, 0.20);
+  border-color: rgba(80, 200, 120, 0.45);
+  color: rgba(140, 220, 160, 0.95);
+}
+
+.scriptReviewBtnPrimary:hover:not(:disabled) {
+  background: rgba(80, 200, 120, 0.30);
+}
+
+.scriptReviewResult {
+  font-size: 12px;
+  color: rgba(180, 220, 180, 0.85);
+}

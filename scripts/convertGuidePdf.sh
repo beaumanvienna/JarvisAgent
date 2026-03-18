@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# @jarvis-script
+# @short: Convert a Markdown file to PDF using md2pdf
+# @params: INPUT_MD — path to the input Markdown file
+#   OUTPUT_PDF — path to the output PDF file
+# @description: Converts Markdown to PDF using md2pdf with system Chrome.
+#   Auto-detects Chrome location per platform.
+# @outputs: OUTPUT_PDF — the generated PDF file
 set -euo pipefail
 
 # Portable Python detection: prefer 'python' (Windows), fall back to 'python3'.

@@ -46,6 +46,7 @@
 #include "jarvisAgent.h"
 #include "web/webServer.h"
 #include "web/chatMessages.h"
+#include "file/scriptRegistry.h"
 
 #include "session/sessionManager.h"
 #include "workflow/workflowRegistry.h"
@@ -924,6 +925,8 @@ namespace AIAssistant
         // ---- Script check API (Workflow Editor) ----
         CROW_ROUTE(m_Server, "/api/scripts/check")
             .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
+
+        CROW_ROUTE(m_Server, "/api/scripts/registry").methods("GET"_method)([this]() { return HandleScriptRegistryGet(); });
 
         // ---- Log viewer API ----
         CROW_ROUTE(m_Server, "/api/log")
@@ -2156,6 +2159,53 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
+    crow::response WebServer::HandleScriptRegistryGet()
+    {
+        // GET /api/scripts/registry
+        // Returns: { "scripts": [ { "path", "short", "params", "description", "outputs" }, ... ] }
+
+        auto* registry = App::g_App ? App::g_App->GetScriptRegistry() : nullptr;
+        if (registry == nullptr)
+        {
+            crow::json::wvalue responseJson;
+            responseJson["scripts"] = crow::json::wvalue::list();
+            return MakeJsonResponse(200, responseJson);
+        }
+
+        auto entries = registry->GetEntries();
+
+        crow::json::wvalue responseJson;
+        std::vector<crow::json::wvalue> scriptsArray;
+        scriptsArray.reserve(entries.size());
+
+        for (auto const& entry : entries)
+        {
+            crow::json::wvalue scriptJson;
+            scriptJson["path"] = entry.m_FilePath;
+            scriptJson["short"] = entry.m_Short;
+            scriptJson["description"] = entry.m_Description;
+
+            std::vector<crow::json::wvalue> paramsArray;
+            for (auto const& p : entry.m_Params)
+            {
+                paramsArray.push_back(crow::json::wvalue(p));
+            }
+            scriptJson["params"] = std::move(paramsArray);
+
+            std::vector<crow::json::wvalue> outputsArray;
+            for (auto const& o : entry.m_Outputs)
+            {
+                outputsArray.push_back(crow::json::wvalue(o));
+            }
+            scriptJson["outputs"] = std::move(outputsArray);
+
+            scriptsArray.push_back(std::move(scriptJson));
+        }
+
+        responseJson["scripts"] = std::move(scriptsArray);
+        return MakeJsonResponse(200, responseJson);
+    }
+
     crow::response WebServer::HandleLogGet(crow::request const& req)
     {
         // GET /api/log?tail=N        — return last N lines (initial load)
@@ -2549,8 +2599,8 @@ namespace AIAssistant
                                 });
                         }
                     }
-                    LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})",
-                                 m_Clients.size(), m_WsTotalConnects, m_WsPeakClients);
+                    LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})", m_Clients.size(),
+                                 m_WsTotalConnects, m_WsPeakClients);
 
                     // Queue current workflow run snapshots.
                     BroadcastWorkflowRunsSnapshot();
@@ -2689,6 +2739,106 @@ namespace AIAssistant
                             m_AiJcwfService.GenerateAsync(prompt, currentJcwf);
                         }
 
+                        else if (type == "ai-write-scripts")
+                        {
+                            crow::json::wvalue result;
+                            result["type"] = "ai-write-scripts-result";
+                            crow::json::wvalue::list writtenList;
+                            crow::json::wvalue::list errorsList;
+
+                            auto scriptsArr = doc["scripts"].get_array();
+                            if (scriptsArr.error() == simdjson::SUCCESS)
+                            {
+                                for (auto scriptEl : scriptsArr.value())
+                                {
+                                    simdjson::ondemand::object scriptObj;
+                                    if (scriptEl.get_object().get(scriptObj) != simdjson::SUCCESS)
+                                    {
+                                        continue;
+                                    }
+
+                                    std::string_view pathView;
+                                    if (scriptObj["path"].get_string().get(pathView) != simdjson::SUCCESS)
+                                    {
+                                        continue;
+                                    }
+                                    std::string scriptPath(pathView);
+
+                                    std::string_view contentView;
+                                    if (scriptObj["content"].get_string().get(contentView) != simdjson::SUCCESS)
+                                    {
+                                        continue;
+                                    }
+                                    std::string content(contentView);
+
+                                    bool executable = false;
+                                    [[maybe_unused]] auto execErr = scriptObj["executable"].get_bool().get(executable);
+
+                                    // Security: must start with "scripts/" and not escape
+                                    if (scriptPath.rfind("scripts/", 0) != 0)
+                                    {
+                                        crow::json::wvalue err;
+                                        err["path"] = scriptPath;
+                                        err["error"] = "Path must start with 'scripts/'";
+                                        errorsList.push_back(std::move(err));
+                                        continue;
+                                    }
+
+                                    fs::path normalized = fs::path(scriptPath).lexically_normal();
+                                    if (normalized.string().rfind("scripts/", 0) != 0)
+                                    {
+                                        crow::json::wvalue err;
+                                        err["path"] = scriptPath;
+                                        err["error"] = "Path escapes scripts/ directory";
+                                        errorsList.push_back(std::move(err));
+                                        continue;
+                                    }
+
+                                    // Create parent directories if needed
+                                    std::error_code ec;
+                                    fs::path parentDir = normalized.parent_path();
+                                    if (!parentDir.empty())
+                                    {
+                                        fs::create_directories(parentDir, ec);
+                                    }
+
+                                    // Write file
+                                    std::ofstream ofs(normalized, std::ios::out | std::ios::binary);
+                                    if (!ofs)
+                                    {
+                                        crow::json::wvalue err;
+                                        err["path"] = scriptPath;
+                                        err["error"] = "Failed to open file for writing";
+                                        errorsList.push_back(std::move(err));
+                                        continue;
+                                    }
+                                    ofs << content;
+                                    ofs.close();
+
+                                    // Set executable permission for shell scripts
+                                    if (executable || scriptPath.ends_with(".sh"))
+                                    {
+                                        fs::permissions(normalized,
+                                                        fs::perms::owner_exec | fs::perms::group_exec |
+                                                            fs::perms::others_exec,
+                                                        fs::perm_options::add, ec);
+                                    }
+
+                                    writtenList.push_back(scriptPath);
+                                    LOG_APP_INFO("[ai-write-scripts] Wrote script: {}", normalized.string());
+                                }
+                            }
+
+                            result["ok"] = errorsList.empty();
+                            result["written"] = std::move(writtenList);
+                            result["errors"] = std::move(errorsList);
+
+                            {
+                                std::lock_guard<std::mutex> lock(m_Mutex);
+                                m_PendingBroadcasts.push_back(result.dump());
+                            }
+                        }
+
                         else
                         {
                             std::lock_guard<std::mutex> lock(m_Mutex);
@@ -2802,8 +2952,8 @@ namespace AIAssistant
             LOG_APP_INFO("[shutdown] WebSocket stats: totalConnects={}, totalDisconnects={}, "
                          "peakClients={}, peakPendingBroadcasts={}, currentClients={}, "
                          "pendingBroadcasts={}",
-                         m_WsTotalConnects, m_WsTotalDisconnects, m_WsPeakClients,
-                         m_WsPeakPendingBroadcasts, m_Clients.size(), m_PendingBroadcasts.size());
+                         m_WsTotalConnects, m_WsTotalDisconnects, m_WsPeakClients, m_WsPeakPendingBroadcasts,
+                         m_Clients.size(), m_PendingBroadcasts.size());
             LOG_APP_INFO("[shutdown] WebSocket: force-closing {} client(s)...", m_Clients.size());
             size_t closed = 0;
             for (auto* client : m_Clients)
@@ -2894,11 +3044,21 @@ namespace AIAssistant
                     {
                         switch (c)
                         {
-                            case '"': logMsg += "\\\""; break;
-                            case '\\': logMsg += "\\\\"; break;
-                            case '\n': logMsg += "\\n"; break;
-                            case '\r': logMsg += "\\r"; break;
-                            case '\t': logMsg += "\\t"; break;
+                            case '"':
+                                logMsg += "\\\"";
+                                break;
+                            case '\\':
+                                logMsg += "\\\\";
+                                break;
+                            case '\n':
+                                logMsg += "\\n";
+                                break;
+                            case '\r':
+                                logMsg += "\\r";
+                                break;
+                            case '\t':
+                                logMsg += "\\t";
+                                break;
                             default:
                                 if (static_cast<unsigned char>(c) < 0x20)
                                 {
@@ -3066,9 +3226,9 @@ namespace AIAssistant
             item["description"] = iface.m_Description;
             item["url"] = iface.m_Url;
             item["model"] = iface.m_Model;
-            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
-                                   ? "API3"
-                                   : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
+            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
+                               : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
+                                                                                                            : "API1";
             item["key_name"] = iface.m_KeyName;
             items.push_back(std::move(item));
         }
@@ -3332,9 +3492,9 @@ namespace AIAssistant
         for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
         {
             auto const& iface = config.m_ApiInterfaces[i];
-            std::string apiStr = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
-                                     ? "API3"
-                                     : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2" : "API1";
+            std::string apiStr = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
+                                 : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
+                                                                                                              : "API1";
 
             newArray += "        {\n";
             newArray += "            \"name\": \"" + iface.m_Name + "\",\n";

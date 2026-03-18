@@ -937,7 +937,15 @@ export default function WorkflowEditorView(props: {
   const onAutoLayoutRef = useRef<(() => void) | null>(null);
 
   const onJcwfGenerated = useCallback((jcwf: JcwfFile) => {
+    // Capture the current ID before loadFromJcwf resets it.
+    const existingId = loadedWorkflowId;
+    // Load as template (null) so isDirty=true and savedSignature is reset.
     loadFromJcwf(null, jcwf);
+    // Restore the workflowId so Save does PUT (update) instead of POST (create).
+    if (existingId)
+    {
+      setLoadedWorkflowId(existingId);
+    }
     setStatusText("Loaded AI-generated workflow. Review and Save.");
     // Auto-layout arranges nodes by dependency topology, then fitView centers the result.
     // Deferred so React has time to render the new nodes.
@@ -945,7 +953,7 @@ export default function WorkflowEditorView(props: {
       onAutoLayoutRef.current?.();
       reactFlowInstance?.fitView({ padding: 0.15 });
     }, 80);
-  }, [loadFromJcwf, reactFlowInstance]);
+  }, [loadFromJcwf, loadedWorkflowId, reactFlowInstance]);
 
   const resetToNewDraftRef = useRef(resetToNewDraft);
   useEffect(() => {

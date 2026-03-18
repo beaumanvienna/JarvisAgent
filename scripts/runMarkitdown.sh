@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# @jarvis-script
+# @short: Convert a document to Markdown using markitdown
+# @params: INPUT_FILE — path to the input document (PDF, DOCX, etc.)
+#   OUTPUT_FILE — path to the output Markdown file
+# @description: Converts documents to Markdown using the markitdown CLI tool.
+#   Sends heartbeat signals to the JarvisAgent runtime to prevent timeout.
+# @outputs: OUTPUT_FILE — the converted Markdown file
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then

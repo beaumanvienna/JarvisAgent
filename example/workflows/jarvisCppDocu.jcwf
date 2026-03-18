@@ -209,6 +209,44 @@
         ]
       }
     },
+    "doc_application_file_scriptRegistry_h": {
+      "id": "doc_application_file_scriptRegistry_h",
+      "type": "ai_call",
+      "label": "Docu: application/file/scriptRegistry.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/05b_doc_application_file_scriptRegistry_h",
+      "file_inputs": [
+        "../../../application/file/scriptRegistry.h",
+        "../../../application/file/scriptRegistry.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/file/scriptRegistry.h",
+          "../../../application/file/scriptRegistry.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
     "doc_application_file_trackedFile_h": {
       "id": "doc_application_file_trackedFile_h",
       "type": "ai_call",
@@ -1372,6 +1410,44 @@
         "cntx_files": [
           "../../../application/workflow/taskPathResolver.h",
           "../../../application/workflow/taskPathResolver.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_workflow_workflowFileIndex_h": {
+      "id": "doc_application_workflow_workflowFileIndex_h",
+      "type": "ai_call",
+      "label": "Docu: application/workflow/workflowFileIndex.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/34b_doc_application_workflow_workflowFileIndex_h",
+      "file_inputs": [
+        "../../../application/workflow/workflowFileIndex.h",
+        "../../../application/workflow/workflowFileIndex.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/workflow/workflowFileIndex.h",
+          "../../../application/workflow/workflowFileIndex.cpp"
         ],
         "prob_files": [
           {
@@ -2629,6 +2705,7 @@
         "doc_application_file_fileCategory_h",
         "doc_application_file_fileWatcher_h",
         "doc_application_file_probUtils_h",
+        "doc_application_file_scriptRegistry_h",
         "doc_application_file_trackedFile_h",
         "doc_application_jarvisAgent_h",
         "doc_application_json_jsonObjectParser_h",
@@ -2659,6 +2736,7 @@
         "doc_application_workflow_taskExecutorRegistry_h",
         "doc_application_workflow_taskFreshnessChecker_h",
         "doc_application_workflow_taskPathResolver_h",
+        "doc_application_workflow_workflowFileIndex_h",
         "doc_application_workflow_templateEngine_h",
         "doc_application_workflow_triggerEngine_h",
         "doc_application_workflow_workflowJsonParserDetails_h",

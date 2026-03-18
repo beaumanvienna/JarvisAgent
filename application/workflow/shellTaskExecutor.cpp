@@ -722,52 +722,11 @@ namespace AIAssistant
     {
         (void)workflowRun;
 
-        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
-            if (!workflowFileDirectoryPath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFileDirectoryPath;
-            }
-        }
-
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
-            if (!workflowFilePath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFilePath.parent_path();
-            }
-        }
-
-        workflowBaseDirectoryPath = workflowBaseDirectoryPath.lexically_normal();
-
-        std::filesystem::path taskWorkingDirectoryPath(taskDefinition.m_WorkingDirectory);
-        if (taskWorkingDirectoryPath.empty())
-        {
-            taskWorkingDirectoryPath = workflowBaseDirectoryPath;
-        }
-        else if (taskWorkingDirectoryPath.is_relative() && !workflowBaseDirectoryPath.empty())
-        {
-            taskWorkingDirectoryPath = (workflowBaseDirectoryPath / taskWorkingDirectoryPath).lexically_normal();
-        }
-        else
-        {
-            taskWorkingDirectoryPath = taskWorkingDirectoryPath.lexically_normal();
-        }
-        if (workflowBaseDirectoryPath.empty() && taskWorkingDirectoryPath.is_relative() && !taskWorkingDirectoryPath.empty())
-        {
-            std::filesystem::path const launchCWDAbsolutePath =
-                Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
-            LOG_APP_INFO("[paths debug] debug reason=resolveTaskWorkingDirectoryCwdFallback taskId='{}' taskType='shell' "
-                         "taskWorkingDirectoryRelative='{}' launchCWDAbsolute='{}'",
-                         taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, launchCWDAbsolutePath.string());
-        }
+        std::filesystem::path const workflowBaseDirectoryPath =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
 
         std::filesystem::path const taskWorkingDirectoryPathAbsolute =
-            taskWorkingDirectoryPath.empty() ? taskWorkingDirectoryPath
-                                             : std::filesystem::absolute(taskWorkingDirectoryPath).lexically_normal();
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
 
         LOG_APP_INFO(
             "[paths debug] debug reason=resolveTaskWorkingDirectory taskId='{}' taskType='shell' "
@@ -775,7 +734,7 @@ namespace AIAssistant
             taskDefinition.m_Id, taskDefinition.m_WorkingDirectory, taskWorkingDirectoryPathAbsolute.string(),
             workflowBaseDirectoryPath.string());
 
-        if (taskWorkingDirectoryPath.empty())
+        if (taskWorkingDirectoryPathAbsolute.empty())
         {
             LOG_APP_ERROR(
                 "ShellTaskExecutor: Task '{}' has empty working directory and workflow base directory could not be resolved",
@@ -815,7 +774,7 @@ namespace AIAssistant
         if (createErrorCode)
         {
             LOG_APP_ERROR("ShellTaskExecutor: Failed to create working directory '{}' for task '{}': {}",
-                          taskWorkingDirectoryPath.string(), taskDefinition.m_Id, createErrorCode.message());
+                          taskWorkingDirectoryPathAbsolute.string(), taskDefinition.m_Id, createErrorCode.message());
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = "ShellTaskExecutor: Failed to create working directory";
             return false;
@@ -827,7 +786,7 @@ namespace AIAssistant
             std::filesystem::path inputPath(inputPathString);
             if (inputPath.is_relative())
             {
-                inputPath = (taskWorkingDirectoryPath / inputPath).lexically_normal();
+                inputPath = (taskWorkingDirectoryPathAbsolute / inputPath).lexically_normal();
             }
             else
             {
@@ -850,7 +809,7 @@ namespace AIAssistant
             std::filesystem::path outputPath(outputPathString);
             if (outputPath.is_relative())
             {
-                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
+                outputPath = (taskWorkingDirectoryPathAbsolute / outputPath).lexically_normal();
             }
             else
             {
@@ -1151,15 +1110,15 @@ namespace AIAssistant
         if (taskDefinition.m_TimeoutMs > 0 && taskState.m_Watchdog)
         {
             LOG_APP_INFO("[shell] Task '{}' inactivity watchdog: {}ms", taskDefinition.m_Id, taskDefinition.m_TimeoutMs);
-            executed = ExecuteCommandWithWatchdog(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath,
+            executed = ExecuteCommandWithWatchdog(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPathAbsolute,
                                                   taskDefinition.m_TimeoutMs, taskState.m_Watchdog.get(), exitCode,
                                                   capturedStdout, capturedStderr);
         }
         else
 #endif
         {
-            executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPath, exitCode,
-                                                        capturedStdout, capturedStderr);
+            executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPathAbsolute,
+                                                        exitCode, capturedStdout, capturedStderr);
         }
 
         // Write stdout.txt and stderr.txt to the task working directory (full size).
@@ -1248,7 +1207,7 @@ namespace AIAssistant
             std::filesystem::path outputPath(outputPair.second);
             if (outputPath.is_relative())
             {
-                outputPath = (taskWorkingDirectoryPath / outputPath).lexically_normal();
+                outputPath = (taskWorkingDirectoryPathAbsolute / outputPath).lexically_normal();
             }
             taskState.m_OutputValues[outputPair.first] = outputPath.string();
         }

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# @jarvis-script
+# @short: Create a static library archive from object files
+# @params: OBJ1 — first object file path
+#   OBJ2 — second object file path
+#   ARCHIVE — output archive path
+# @description: Creates a static library using 'ar rcs'. Falls back to a
+#   placeholder file if ar is not installed.
+# @outputs: ARCHIVE — the created .a archive file
 set -euo pipefail
 
 OBJ1="$1"

@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { JcwfFile } from "../jcwf/types";
+import ScriptReviewPanel from "./ScriptReviewPanel";
+import type { GeneratedScript } from "./ScriptReviewPanel";
 
 export type AiPromptAreaProps = {
   getCurrentJcwf: () => JcwfFile | null;
@@ -25,6 +27,7 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(false);
+  const [pendingScripts, setPendingScripts] = useState<GeneratedScript[] | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Listen for AI-related WebSocket messages.
@@ -112,6 +115,17 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
           {
             setErrorMessage(`Generated with ${retries} validation fix ${retries === 1 ? "retry" : "retries"}.`);
           }
+
+          // Show script review panel if scripts were generated
+          if (Array.isArray(msg.scripts) && msg.scripts.length > 0)
+          {
+            const scripts = (msg.scripts as Record<string, unknown>[]).map((s) => ({
+              path: typeof s.path === "string" ? s.path : "",
+              content: typeof s.content === "string" ? s.content : "",
+              executable: s.executable === true,
+            }));
+            setPendingScripts(scripts);
+          }
         }
         else
         {
@@ -171,7 +185,8 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
     }
 
     setStatus("generating");
-    setProgress({ stage: 1, totalStages: 4, message: "Starting generation pipeline..." });
+    setPendingScripts(null);
+    setProgress({ stage: 1, totalStages: 5, message: "Starting generation pipeline..." });
     setErrorMessage(null);
 
     const currentJcwf = getCurrentJcwf();
@@ -264,6 +279,14 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
         <div className={status === "error" ? "aiPromptError" : "aiPromptInfo"}>
           {errorMessage}
         </div>
+      )}
+
+      {pendingScripts && pendingScripts.length > 0 && (
+        <ScriptReviewPanel
+          scripts={pendingScripts}
+          webSocketRef={webSocketRef}
+          onDone={() => setPendingScripts(null)}
+        />
       )}
     </div>
   );

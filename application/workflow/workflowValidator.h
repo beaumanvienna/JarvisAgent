@@ -29,6 +29,19 @@
 
 namespace AIAssistant
 {
+    class ScriptRegistry;
+    class WorkflowFileIndex;
+
+    struct GeneratedScript
+    {
+        std::string path;
+        std::string content;
+        bool executable{false};
+    };
+} // namespace AIAssistant
+
+namespace AIAssistant
+{
     enum class WorkflowValidationSeverity
     {
         Error = 0,
@@ -60,12 +73,23 @@ namespace AIAssistant
 
         // Optional task id if issue is task-related.
         std::string m_TaskId;
+
+        // AI-friendly fix suggestion (Stage 5 uses this to correct the JCWF).
+        std::string m_SuggestedFix;
+
+        // Extra context (e.g. available scripts, expected paths).
+        std::string m_Context;
     };
 
     class WorkflowValidator
     {
     public:
         static void Validate(WorkflowDefinition const& workflow, std::vector<WorkflowValidationIssue>& issues);
+
+        static void Validate(WorkflowDefinition const& workflow, ScriptRegistry const* scriptRegistry,
+                             std::vector<GeneratedScript> const* pendingScripts,
+                             std::vector<WorkflowValidationIssue>& issues,
+                             WorkflowFileIndex const* workflowFileIndex = nullptr);
 
         static bool HasErrors(std::vector<WorkflowValidationIssue> const& issues);
     };

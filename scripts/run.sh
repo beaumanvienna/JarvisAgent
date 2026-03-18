@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# run.sh — run an executable located under workflows/
-# Usage: run.sh <path-relative-to-workflows/>
-# Example: run.sh exampleMakefile4/01_taskName/hello
+# @jarvis-script
+# @short: Run an executable located under workflows/
+# @params: PATH — path relative to workflows/ directory
+# @description: Locates and executes a binary under workflows/. Validates that
+#   the target exists and is executable before running it.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then

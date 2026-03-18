@@ -90,13 +90,12 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 8. Workflow editor improvements + AI assistance (new)
-- ~2 weeks of remaining work on the workflow editor UI
-- **AI → JCWF:** User describes a workflow in natural language (prompt), AI generates a valid `.jcwf` file
-- **JCWF → AI:** User loads an existing `.jcwf` file, AI generates a human-readable summary/documentation of what it does
-- Integration point: workflow editor UI sends prompt to backend, backend calls AI provider, returns structured JCWF JSON
-- Validation: generated JCWF should pass `workflowValidator` before being offered to the user
-- UX: "Generate from prompt" button and "Explain this workflow" button in the editor
+## ~~8. Workflow editor improvements + AI assistance~~ ✅
+- ~~**AI → JCWF:** User describes a workflow in natural language (prompt), AI generates a valid `.jcwf` file~~ ✅ 5-stage pipeline in `AiJcwfService`: decompose → generate JCWF → generate Python scripts → validate → fix. Validator uses `WorkflowFileIndex` to suggest file path corrections. E2E verified with `cyber2` workflow (OpenSSH log analysis). See `example/workflows/cyber2_e2e.md`.
+- ~~**JCWF → AI:** User loads an existing `.jcwf` file, AI generates a human-readable summary/documentation~~ ✅ "Explain" button in editor
+- ~~Integration point: workflow editor UI sends prompt to backend, backend calls AI provider, returns structured JCWF JSON~~ ✅
+- ~~Validation: generated JCWF should pass `workflowValidator` before being offered to the user~~ ✅ Validator runs after generation; warnings trigger a fix stage with AI auto-correction
+- ~~UX: "Generate from prompt" button and "Explain this workflow" button in the editor~~ ✅
 
 ---
 
@@ -110,35 +109,20 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 ---
 
-## 10. Error branching / conditional edges (new)
-- Currently workflow runs are atomic — if a task fails, the run fails
-- Add `"on_error"` field to task definitions in JCWF, e.g. `"on_error": "task_fallback"`
-- Support success edges and failure edges in the DAG:
-  - `"depends_on"` = success edge (existing)
-  - `"on_error"` / `"depends_on_failure"` = failure edge (new)
-- Enables powerful patterns:
-  - **Retry with different model** — fallback task uses a different AI provider
-  - **Fallback provider** — switch from OpenAI to Gemini on failure
-  - **Notification task** — Slack/email alert on failure
-  - **Auto-debug task** — AI analyzes the error output and suggests fixes
-- This is a major maturity jump for the workflow engine
-- Requires changes to: `WorkflowRuntimeManager` (task dispatch logic), `workflowJsonParser` (parse `on_error`), `workflowValidator` (validate error edges), `workflowTypes.h` (new edge type), JC Workflow Specification (new section)
+## ~~10. Error branching / conditional edges~~ ✅
+- ~~Currently workflow runs are atomic — if a task fails, the run fails~~ — solved with `control_nodes` (branch) + `controlflow` edges + `expose_error_signal`
+- Implemented via `control_nodes` array with `"type": "branch"` and `controlflow` edges with `"kind": "normal"/"error_signal"/"on_error"` — more expressive than the originally proposed `on_error` field
+- Runtime: `FireBranchIfReady` in `workflowRuntimeManager.cpp` activates selected path, skips unselected. Rule A: handled failures don't fail the run.
+- Verified with `exampleMakefile5`: AI generates code with deliberate error → shell fails → branch_1 error path → ai_call_fix → shell_retry → run hello
+- Changes: `workflowJsonParser.cpp`, `workflowValidator.cpp`, `workflowRuntimeManager.cpp`, `workflowTypes.h`, JC Workflow Specification §7
 
 ---
 
-## 11. Built-in retries with backoff (new)
-- Instead of users scripting retries in shell or AI tasks, provide infrastructure-level robustness
-- Add per-task retry configuration in JCWF:
-  ```json
-  "retry": {
-    "max_attempts": 3,
-    "backoff_ms": 2000
-  }
-  ```
-- The workflow runtime manager handles retries transparently — no changes needed in task scripts
-- Backoff strategy: fixed or exponential (e.g. 2s → 4s → 8s)
-- Interacts with error branching (#10): retries are exhausted before `on_error` edge fires
-- Requires changes to: `WorkflowRuntimeManager` (retry loop + backoff timer), `workflowJsonParser` (parse `retry` block), `workflowValidator` (validate retry params), `workflowTypes.h` (retry config struct), `TaskInstanceState` (attempt counter already exists)
+## ~~11. Built-in retries with backoff~~ ✅
+- ~~Per-task retry configuration~~ ✅ `"retries": { "max_attempts": N, "backoff_ms": N }` in JCWF task or `defaults`
+- `TryScheduleRetry` in `workflowRuntimeManager.cpp`: linear backoff (`m_BackoffMs * attempt`), `m_RetryAfterTime` respected by dispatch loop
+- Deadlock detector accounts for retry-pending tasks
+- Retries are exhausted before error branching (#10) fires
 
 ---
 

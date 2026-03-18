@@ -28,9 +28,12 @@
 
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "file/scriptRegistry.h"
+#include "simdjson/simdjson.h"
 #include "workflow/aiCallTaskExecutor.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowJsonParser.h"
+#include "workflow/workflowFileIndex.h"
 #include "workflow/workflowValidator.h"
 
 namespace fs = std::filesystem;
@@ -128,12 +131,95 @@ namespace AIAssistant
             return out;
         }
 
+        // GeneratedScript is defined in workflow/workflowValidator.h
+
+        // Extract script paths referenced by shell/python tasks in a JCWF JSON string.
+        static std::vector<std::string> ExtractScriptPaths(std::string const& jcwfJson)
+        {
+            std::vector<std::string> paths;
+
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(jcwfJson);
+            simdjson::ondemand::document doc;
+            if (parser.iterate(padded).get(doc) != simdjson::SUCCESS)
+            {
+                return paths;
+            }
+
+            simdjson::ondemand::object tasksObj;
+            if (doc["tasks"].get_object().get(tasksObj) != simdjson::SUCCESS)
+            {
+                return paths;
+            }
+
+            for (auto field : tasksObj)
+            {
+                simdjson::ondemand::object taskObj;
+                if (field.value().get_object().get(taskObj) != simdjson::SUCCESS)
+                {
+                    continue;
+                }
+
+                std::string_view typeView;
+                if (taskObj["type"].get_string().get(typeView) != simdjson::SUCCESS)
+                {
+                    continue;
+                }
+
+                if (typeView != "shell" && typeView != "python")
+                {
+                    continue;
+                }
+
+                // Shell tasks: extract script path from "command" field.
+                std::string_view commandView;
+                if (taskObj["command"].get_string().get(commandView) == simdjson::SUCCESS)
+                {
+                    std::string command(commandView);
+                    if (command.rfind("scripts/", 0) == 0)
+                    {
+                        // Strip arguments after the script path (first space-separated token)
+                        size_t spacePos = command.find(' ');
+                        std::string scriptPath = (spacePos != std::string::npos) ? command.substr(0, spacePos) : command;
+                        paths.push_back(std::move(scriptPath));
+                    }
+                }
+
+                // Python tasks: extract script path from "params.module" field.
+                // Module "scripts.parseSSHLog" → file "scripts/parseSSHLog.py".
+                if (typeView == "python")
+                {
+                    simdjson::ondemand::object paramsObj;
+                    if (taskObj["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
+                    {
+                        std::string_view moduleView;
+                        if (paramsObj["module"].get_string().get(moduleView) == simdjson::SUCCESS)
+                        {
+                            std::string modulePath(moduleView);
+                            // Convert dots to slashes and append .py
+                            for (char& c : modulePath)
+                            {
+                                if (c == '.')
+                                {
+                                    c = '/';
+                                }
+                            }
+                            modulePath += ".py";
+                            if (modulePath.rfind("scripts/", 0) == 0)
+                            {
+                                paths.push_back(std::move(modulePath));
+                            }
+                        }
+                    }
+                }
+            }
+
+            return paths;
+        }
+
     } // namespace
 
-    AiJcwfService::~AiJcwfService()
-    {
-        Shutdown();
-    }
+    AiJcwfService::~AiJcwfService() { Shutdown(); }
 
     void AiJcwfService::Shutdown()
     {
@@ -160,8 +246,8 @@ namespace AIAssistant
         std::lock_guard<std::mutex> lock(m_BroadcastMutex);
         if (m_BroadcastFn)
         {
-            LOG_APP_INFO("[AiJcwfService] Broadcast: queuing message (len={}, preview='{}')",
-                         jsonString.size(), jsonString.substr(0, 120));
+            LOG_APP_INFO("[AiJcwfService] Broadcast: queuing message (len={}, preview='{}')", jsonString.size(),
+                         jsonString.substr(0, 120));
             m_BroadcastFn(jsonString);
         }
         else
@@ -204,7 +290,9 @@ namespace AIAssistant
         return "(Generation guide not available — generate valid JCWF JSON based on your knowledge of the spec.)";
     }
 
-    bool AiJcwfService::ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary)
+    bool AiJcwfService::ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
+                                     ScriptRegistry const* scriptRegistry,
+                                     std::vector<GeneratedScript> const* pendingScripts)
     {
         outValidationSummary.clear();
 
@@ -217,8 +305,14 @@ namespace AIAssistant
             return false;
         }
 
+        WorkflowFileIndex const* fileIndex = nullptr;
+        if (JarvisAgent* app = App::g_App)
+        {
+            fileIndex = app->GetWorkflowFileIndex();
+        }
+
         std::vector<WorkflowValidationIssue> issues;
-        WorkflowValidator::Validate(parsedWorkflow, issues);
+        WorkflowValidator::Validate(parsedWorkflow, scriptRegistry, pendingScripts, issues, fileIndex);
 
         bool hasErrors = false;
         bool hasWarnings = false;
@@ -245,7 +339,19 @@ namespace AIAssistant
             {
                 ss << " (path: " << issue.m_Path << ")";
             }
+            if (!issue.m_TaskId.empty())
+            {
+                ss << " (task: " << issue.m_TaskId << ")";
+            }
             ss << "\n";
+            if (!issue.m_SuggestedFix.empty())
+            {
+                ss << "  FIX: " << issue.m_SuggestedFix << "\n";
+            }
+            if (!issue.m_Context.empty())
+            {
+                ss << "  CONTEXT: " << issue.m_Context << "\n";
+            }
         }
 
         if (!hasErrors && !hasWarnings)
@@ -258,9 +364,8 @@ namespace AIAssistant
     }
 
     bool AiJcwfService::RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
-                                         std::string const& taskContent, std::string const& cntxContent,
-                                         std::string const& probContent, std::string& outResponseText,
-                                         std::string& outError)
+                                        std::string const& taskContent, std::string const& cntxContent,
+                                        std::string const& probContent, std::string& outResponseText, std::string& outError)
     {
         outResponseText.clear();
         outError.clear();
@@ -311,8 +416,7 @@ namespace AIAssistant
         handle.requestTimestampNs = timestampNs;
 
         // Use PROB_<requestId>_<timestampNs>.txt naming so OnProbFileEvent matches the output.
-        std::string const probFilename =
-            "PROB_" + std::to_string(requestId) + "_" + std::to_string(timestampNs) + ".txt";
+        std::string const probFilename = "PROB_" + std::to_string(requestId) + "_" + std::to_string(timestampNs) + ".txt";
         fs::path const probPath = queueDir / probFilename;
 
         AiRequestHandle const registered = requestPool->RegisterPending(handle, AI_CALL_TIMEOUT_MS);
@@ -378,8 +482,8 @@ namespace AIAssistant
                      handle.requestId, handle.requestTimestampNs, AI_CALL_TIMEOUT_MS);
         std::string errorMessage;
         bool const success = requestPool->WaitForCompletion(handle, AI_CALL_TIMEOUT_MS, outResponseText, errorMessage);
-        LOG_APP_INFO("[AiJcwfService] WaitForCompletion: returned success={} responseLen={} error='{}'",
-                     success, outResponseText.size(), errorMessage);
+        LOG_APP_INFO("[AiJcwfService] WaitForCompletion: returned success={} responseLen={} error='{}'", success,
+                     outResponseText.size(), errorMessage);
 
         if (!success)
         {
@@ -422,9 +526,8 @@ namespace AIAssistant
                 // ----------------------------------------------------------
                 Broadcast(R"({"type":"ai-explain-progress","message":"Generating explanation..."})");
 
-                std::string const stng1 =
-                    "Be succinct. No embellishments. No preamble. No closing remarks. "
-                    "Output ONLY the structured explanation — nothing else.";
+                std::string const stng1 = "Be succinct. No embellishments. No preamble. No closing remarks. "
+                                          "Output ONLY the structured explanation — nothing else.";
 
                 std::string const task1 =
                     "Produce a brief, structured explanation of this JCWF workflow.\n"
@@ -450,8 +553,8 @@ namespace AIAssistant
 
                 std::string stage1Response;
                 std::string stage1Error;
-                bool const stage1Ok =
-                    RunSingleAiCall("explain_" + seqStr + "_stage1", stng1, task1, cntx1, prob1, stage1Response, stage1Error);
+                bool const stage1Ok = RunSingleAiCall("explain_" + seqStr + "_stage1", stng1, task1, cntx1, prob1,
+                                                      stage1Response, stage1Error);
 
                 if (!stage1Ok)
                 {
@@ -475,9 +578,8 @@ namespace AIAssistant
 
                 std::string const generationGuide = LoadGenerationGuide();
 
-                std::string const stng2 =
-                    "Be succinct. No embellishments. No preamble. No closing remarks. "
-                    "Output ONLY the corrected explanation — nothing else.";
+                std::string const stng2 = "Be succinct. No embellishments. No preamble. No closing remarks. "
+                                          "Output ONLY the corrected explanation — nothing else.";
 
                 std::string const task2 =
                     "Review the explanation against the JCWF JSON and the JCWF specification.\n"
@@ -504,20 +606,21 @@ namespace AIAssistant
 
                 std::string stage2Response;
                 std::string stage2Error;
-                bool const stage2Ok =
-                    RunSingleAiCall("explain_" + seqStr + "_stage2", stng2, task2, cntx2, prob2, stage2Response, stage2Error);
+                bool const stage2Ok = RunSingleAiCall("explain_" + seqStr + "_stage2", stng2, task2, cntx2, prob2,
+                                                      stage2Response, stage2Error);
 
                 if (stage2Ok)
                 {
-                    LOG_APP_INFO("[workflow] task 'explain_stage2' completed in run '{}' (workflow '{}')", runId, workflowId);
+                    LOG_APP_INFO("[workflow] task 'explain_stage2' completed in run '{}' (workflow '{}')", runId,
+                                 workflowId);
                     Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage2Response) + R"("})");
                     LOG_APP_INFO("[workflow] run '{}' completed (workflow '{}')", runId, workflowId);
                 }
                 else
                 {
                     // Stage 2 failed — fall back to Stage 1 result (still useful).
-                    LOG_APP_WARN("[workflow] task 'explain_stage2' failed in run '{}': {} — returning stage 1 result",
-                                 runId, stage2Error);
+                    LOG_APP_WARN("[workflow] task 'explain_stage2' failed in run '{}': {} — returning stage 1 result", runId,
+                                 stage2Error);
                     Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage1Response) + R"("})");
                     LOG_APP_INFO("[workflow] run '{}' completed with stage 1 fallback (workflow '{}')", runId, workflowId);
                 }
@@ -543,7 +646,7 @@ namespace AIAssistant
                 std::string const runId = GenerateRunId(workflowId);
                 int const seq = m_NextRequestSeq.fetch_add(1);
                 std::string const seqStr = std::to_string(seq);
-                int totalStages = 4;
+                int totalStages = 5;
 
                 LOG_APP_INFO("[workflow] run '{}' started (workflow '{}')", runId, workflowId);
 
@@ -555,6 +658,8 @@ namespace AIAssistant
                     Broadcast(ss.str());
                 };
 
+                std::vector<GeneratedScript> generatedScripts;
+
                 auto broadcastResult = [&](bool ok, std::string const& jcwfOrError, int retries)
                 {
                     if (ok)
@@ -562,7 +667,23 @@ namespace AIAssistant
                         // jcwfOrError is raw JSON — embed directly (not string-escaped).
                         std::ostringstream ss;
                         ss << R"({"type":"ai-generate-result","ok":true,"jcwf":)" << jcwfOrError << R"(,"retries":)"
-                           << retries << "}";
+                           << retries;
+
+                        if (!generatedScripts.empty())
+                        {
+                            ss << R"(,"scripts":[)";
+                            for (size_t i = 0; i < generatedScripts.size(); ++i)
+                            {
+                                if (i > 0)
+                                    ss << ",";
+                                ss << R"({"path":")" << JsonEscape(generatedScripts[i].path) << R"(","content":")"
+                                   << JsonEscape(generatedScripts[i].content) << R"(","executable":)"
+                                   << (generatedScripts[i].executable ? "true" : "false") << "}";
+                            }
+                            ss << "]";
+                        }
+
+                        ss << "}";
                         Broadcast(ss.str());
                         LOG_APP_INFO("[workflow] run '{}' completed (workflow '{}')", runId, workflowId);
                     }
@@ -588,9 +709,8 @@ namespace AIAssistant
                 broadcastProgress(1, "Analyzing prompt...");
                 LOG_APP_INFO("[workflow] task 'decompose' executing in run '{}' (workflow '{}')", runId, workflowId);
 
-                std::string const decomposeStng =
-                    "Be succinct. No embellishments. No preamble. No closing remarks. "
-                    "Output ONLY the structured task breakdown — nothing else.";
+                std::string const decomposeStng = "Be succinct. No embellishments. No preamble. No closing remarks. "
+                                                  "Output ONLY the structured task breakdown — nothing else.";
 
                 std::string decomposeTask =
                     "Produce a structured task breakdown from the user's request.\n"
@@ -601,8 +721,11 @@ namespace AIAssistant
                     "- working_directory (ai_call: '../queue/<wfId>/<NN>_<taskId>', shell: '<wfId>/<NN>_<taskId>')\n"
                     "- depends_on list\n"
                     "- expose_error_signal (true/false)\n"
-                    "- For ai_call: exact STNG, TASK, CNTX, PROB file content\n"
+                    "- For ai_call: exact STNG, TASK, CNTX, PROB file content. "
+                    "Use cntx_files string paths (not inline objects) to feed upstream outputs to the AI.\n"
                     "- For shell: command (MUST start with 'scripts/'), args, file_inputs paths, materialize mappings\n"
+                    "- For python: module (MUST start with 'scripts.'), function name, file_inputs, file_outputs. "
+                    "The runtime calls function(**kwargs, context=dict) — NOT via CLI.\n"
                     "- If error handling needed: which branch node, which controlflow edges (from, to, kind, ports)\n"
                     "Rules:\n"
                     "- Every ai_call STNG content MUST include 'No markdown fences, no explanations.' "
@@ -618,7 +741,31 @@ namespace AIAssistant
                                      currentJcwf + "\n--- End Current JCWF ---\n";
                 }
 
-                std::string const decomposeCntx = "--- JCWF Generation Guide (condensed spec) ---\n" + generationGuide;
+                std::string scriptRegistryTable;
+                if (JarvisAgent* app = App::g_App; app && app->GetScriptRegistry())
+                {
+                    scriptRegistryTable = app->GetScriptRegistry()->SerializeMarkdownTable();
+                }
+
+                std::string workflowFileListing;
+                if (JarvisAgent* app = App::g_App; app && app->GetWorkflowFileIndex())
+                {
+                    // Re-scan so the listing is fresh
+                    app->GetWorkflowFileIndex()->ScanDirectory(app->GetWorkflowFileIndex()->GetRootDirectory());
+                    workflowFileListing = app->GetWorkflowFileIndex()->SerializeMarkdownListing();
+                }
+
+                std::string decomposeCntx = "--- JCWF Generation Guide (condensed spec) ---\n" + generationGuide;
+                if (!scriptRegistryTable.empty())
+                {
+                    decomposeCntx += "\n\n--- Script Registry ---\n" + scriptRegistryTable;
+                }
+                if (!workflowFileListing.empty())
+                {
+                    decomposeCntx += "\n\n--- Workflow File Inventory (paths relative to workflows/) ---\n"
+                                     "These files already exist on disk. Use them in file_inputs when appropriate.\n" +
+                                     workflowFileListing;
+                }
                 std::string const decomposeProb = "User request: " + userPrompt;
 
                 std::string decomposition;
@@ -644,9 +791,8 @@ namespace AIAssistant
                 broadcastProgress(2, "Generating JCWF...");
                 LOG_APP_INFO("[workflow] task 'generate' executing in run '{}' (workflow '{}')", runId, workflowId);
 
-                std::string const generateStng =
-                    "Output ONLY valid JSON. No markdown fences. No explanations. No comments. "
-                    "The output MUST parse as a complete JCWF file.";
+                std::string const generateStng = "Output ONLY valid JSON. No markdown fences. No explanations. No comments. "
+                                                 "The output MUST parse as a complete JCWF file.";
 
                 std::string const generateTask =
                     "Generate a complete JCWF JSON file from the task breakdown below.\n"
@@ -655,6 +801,14 @@ namespace AIAssistant
                     "- ai_call working_directory MUST be '../queue/<workflowId>/<NN>_<taskId>'.\n"
                     "- shell working_directory MUST be '<workflowId>/<NN>_<taskId>'.\n"
                     "- shell command MUST start with 'scripts/'.\n"
+                    "- python params.module MUST start with 'scripts.' (e.g. 'scripts.parseLog').\n"
+                    "- python params.function MUST name the actual callable in the script.\n"
+                    "- ai_call cntx_files: use string paths to upstream outputs, NOT inline objects with placeholders.\n"
+                    "- ai_call cntx_files crossing from queue to workflows: use '../../../workflows/<pythonWorkDir>/<file>' "
+                    "(3 levels up from queue/X/Y to root, then into workflows/). NEVER use only '../../'.\n"
+                    "- file_inputs values are bare filenames relative to working_directory (e.g. 'input.log'). "
+                    "NEVER prefix with the working_directory path — that doubles the path at runtime.\n"
+                    "- Prefer a SINGLE combined JSON output file over splitting into many files.\n"
                     "- version MUST be '1.1' if using control_nodes or controlflow.\n"
                     "- depends_on MUST form a DAG (no cycles).\n"
                     "- Branch nodes MUST appear ONLY in control_nodes, NEVER in tasks.\n"
@@ -666,8 +820,18 @@ namespace AIAssistant
                     "because AI output is consumed directly by compilers/tools.\n"
                     "Output ONLY the JSON. Nothing else.";
 
-                std::string generateCntx = "--- Task Breakdown ---\n" + decomposition +
-                                           "\n\n--- JCWF Generation Guide ---\n" + generationGuide;
+                std::string generateCntx =
+                    "--- Task Breakdown ---\n" + decomposition + "\n\n--- JCWF Generation Guide ---\n" + generationGuide;
+                if (!scriptRegistryTable.empty())
+                {
+                    generateCntx += "\n\n--- Script Registry ---\n" + scriptRegistryTable;
+                }
+                if (!workflowFileListing.empty())
+                {
+                    generateCntx += "\n\n--- Workflow File Inventory (paths relative to workflows/) ---\n"
+                                    "These files already exist on disk. Use them in file_inputs when appropriate.\n" +
+                                    workflowFileListing;
+                }
 
                 if (!currentJcwf.empty())
                 {
@@ -678,8 +842,8 @@ namespace AIAssistant
 
                 std::string generatedJcwf;
                 std::string generateError;
-                if (!RunSingleAiCall("gen_" + seqStr + "_generate", generateStng, generateTask, generateCntx,
-                                     generateProb, generatedJcwf, generateError))
+                if (!RunSingleAiCall("gen_" + seqStr + "_generate", generateStng, generateTask, generateCntx, generateProb,
+                                     generatedJcwf, generateError))
                 {
                     LOG_APP_WARN("[workflow] task 'generate' failed in run '{}': {}", runId, generateError);
                     broadcastResult(false, "Generation failed: " + generateError, 0);
@@ -726,115 +890,311 @@ namespace AIAssistant
                 }
 
                 // ----------------------------------------------------------
-                // Stage 3+: Validate and fix loop
+                // Stage 3: Generate companion scripts
                 // ----------------------------------------------------------
-                int retries = 0;
-                for (int attempt = 0; attempt <= MAX_GENERATE_RETRIES; ++attempt)
+                if (m_ShuttingDown.load())
+                {
+                    broadcastResult(false, "Service is shutting down", 0);
+                    return;
+                }
+
+                {
+                    broadcastProgress(3, "Checking for new scripts...");
+                    LOG_APP_INFO("[workflow] task 'generate_scripts' executing in run '{}' (workflow '{}')", runId,
+                                 workflowId);
+
+                    std::vector<std::string> scriptPaths = ExtractScriptPaths(generatedJcwf);
+
+                    // Filter to only scripts that don't exist on disk
+                    std::vector<std::string> newScripts;
+                    for (auto const& sp : scriptPaths)
+                    {
+                        if (!fs::exists(sp))
+                        {
+                            newScripts.push_back(sp);
+                        }
+                    }
+
+                    if (!newScripts.empty())
+                    {
+                        LOG_APP_INFO("[workflow] generating {} new script(s) in run '{}'", newScripts.size(), runId);
+
+                        for (size_t i = 0; i < newScripts.size(); ++i)
+                        {
+                            if (m_ShuttingDown.load())
+                            {
+                                broadcastResult(false, "Service is shutting down", 0);
+                                return;
+                            }
+
+                            std::string const& scriptPath = newScripts[i];
+                            bool const isShell = scriptPath.ends_with(".sh");
+
+                            broadcastProgress(3, "Generating " + scriptPath + " (" + std::to_string(i + 1) + "/" +
+                                                     std::to_string(newScripts.size()) + ")...");
+
+                            std::string const scriptStng =
+                                "Output ONLY the raw script file content. No markdown fences. No explanations. "
+                                "No introductory or closing commentary. The output must be a valid, runnable script.";
+
+                            std::string scriptTask;
+                            if (isShell)
+                            {
+                                scriptTask = "Generate a bash script for '" + scriptPath +
+                                             "'.\n"
+                                             "Rules:\n"
+                                             "- First line MUST be: #!/usr/bin/env bash\n"
+                                             "- Second line MUST be: # @jarvis-script\n"
+                                             "- Include metadata with COLON format: # @short: ..., # @params: ..., "
+                                             "# @description: ..., # @outputs: ... (if any).\n"
+                                             "- After the metadata header: set -euo pipefail\n"
+                                             "- Use positional args ($1, $2, ...) for parameters.\n"
+                                             "- Output ONLY the script. Nothing else.";
+                            }
+                            else
+                            {
+                                scriptTask = "Generate a Python script for '" + scriptPath +
+                                             "'.\n"
+                                             "Rules:\n"
+                                             "- First line MUST be: #!/usr/bin/env python3\n"
+                                             "- Second line MUST be: # @jarvis-script\n"
+                                             "- Include metadata with COLON format: # @short: ..., # @description: ..., "
+                                             "# @outputs: ... (if any).\n"
+                                             "- The runtime calls the function programmatically: "
+                                             "module.function(**kwargs, context=dict). Do NOT use sys.argv, argparse, "
+                                             "or main().\n"
+                                             "- The function name MUST match the 'function' field in the JCWF params.\n"
+                                             "- Accept `context=None` and `**kwargs` as parameters.\n"
+                                             "- Read file inputs via context['_file_input_0'], context['_file_input_1'], "
+                                             "etc. (absolute resolved paths from file_inputs).\n"
+                                             "- Get working directory via context['_task_working_directory'].\n"
+                                             "- Write output files to the working directory using os.path.join().\n"
+                                             "- Output ONLY the script. Nothing else.";
+                            }
+
+                            std::string const scriptCntx =
+                                "--- JCWF Workflow ---\n" + generatedJcwf + "\n\n--- User Request ---\n" + userPrompt;
+
+                            std::string const scriptProb = "Generate the script: " + scriptPath;
+
+                            std::string scriptContent;
+                            std::string scriptError;
+                            if (!RunSingleAiCall("gen_" + seqStr + "_script_" + std::to_string(i), scriptStng, scriptTask,
+                                                 scriptCntx, scriptProb, scriptContent, scriptError))
+                            {
+                                LOG_APP_WARN("[workflow] script generation failed for '{}' in run '{}': {}", scriptPath,
+                                             runId, scriptError);
+                                // Non-fatal — continue with remaining scripts
+                                continue;
+                            }
+
+                            // Strip markdown fences if the AI wrapped the output
+                            {
+                                std::string trimmed = scriptContent;
+                                size_t start = trimmed.find_first_not_of(" \t\n\r");
+                                if (start != std::string::npos)
+                                {
+                                    trimmed = trimmed.substr(start);
+                                }
+                                if (trimmed.rfind("```", 0) == 0)
+                                {
+                                    size_t firstNewline = trimmed.find('\n');
+                                    if (firstNewline != std::string::npos)
+                                    {
+                                        trimmed = trimmed.substr(firstNewline + 1);
+                                    }
+                                }
+                                size_t lastFence = trimmed.rfind("```");
+                                if (lastFence != std::string::npos && lastFence > 0)
+                                {
+                                    trimmed = trimmed.substr(0, lastFence);
+                                }
+                                size_t end = trimmed.find_last_not_of(" \t\n\r");
+                                if (end != std::string::npos)
+                                {
+                                    trimmed = trimmed.substr(0, end + 1);
+                                }
+                                scriptContent = trimmed;
+                            }
+
+                            GeneratedScript gs;
+                            gs.path = scriptPath;
+                            gs.content = scriptContent;
+                            gs.executable = isShell;
+                            generatedScripts.push_back(std::move(gs));
+
+                            LOG_APP_INFO("[workflow] generated script '{}' in run '{}'", scriptPath, runId);
+                        }
+                    }
+
+                    LOG_APP_INFO("[workflow] task 'generate_scripts' completed in run '{}' ({} scripts generated)", runId,
+                                 generatedScripts.size());
+                }
+
+                // Minimum annunciation time for stages 4 and 5 (so the user can see them).
+                static constexpr int64_t MIN_STAGE_DISPLAY_MS = 500;
+
+                auto ensureMinDisplay = [](std::chrono::steady_clock::time_point const& start)
+                {
+                    auto elapsed =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
+                            .count();
+                    if (elapsed < MIN_STAGE_DISPLAY_MS)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(MIN_STAGE_DISPLAY_MS - elapsed));
+                    }
+                };
+
+                // Helper: run validation and return {valid, summary}
+                auto runValidation = [&](std::string const& taskLabel) -> std::pair<bool, std::string>
+                {
+                    ScriptRegistry const* scriptRegistry = nullptr;
+                    if (JarvisAgent* app = App::g_App; app != nullptr)
+                    {
+                        scriptRegistry = app->GetScriptRegistry();
+                    }
+                    std::string summary;
+                    bool valid = ValidateJcwf(generatedJcwf, summary, scriptRegistry, &generatedScripts);
+                    if (!summary.empty())
+                    {
+                        LOG_APP_WARN("[workflow] task '{}' in run '{}':\n{}", taskLabel, runId, summary);
+                    }
+                    return {valid, summary};
+                };
+
+                // Helper: strip markdown fences from AI response
+                auto stripMarkdownFences = [](std::string const& input) -> std::string
+                {
+                    std::string trimmed = input;
+                    size_t start = trimmed.find_first_not_of(" \t\n\r");
+                    if (start != std::string::npos)
+                    {
+                        trimmed = trimmed.substr(start);
+                    }
+                    if (trimmed.rfind("```", 0) == 0)
+                    {
+                        size_t firstNewline = trimmed.find('\n');
+                        if (firstNewline != std::string::npos)
+                        {
+                            trimmed = trimmed.substr(firstNewline + 1);
+                        }
+                    }
+                    size_t lastFence = trimmed.rfind("```");
+                    if (lastFence != std::string::npos && lastFence > 0)
+                    {
+                        trimmed = trimmed.substr(0, lastFence);
+                    }
+                    size_t end = trimmed.find_last_not_of(" \t\n\r");
+                    if (end != std::string::npos)
+                    {
+                        trimmed = trimmed.substr(0, end + 1);
+                    }
+                    return trimmed;
+                };
+
+                // ----------------------------------------------------------
+                // Stage 4: Validate (first pass)
+                // ----------------------------------------------------------
                 {
                     if (m_ShuttingDown.load())
                     {
-                        broadcastResult(false, "Service is shutting down", retries);
+                        broadcastResult(false, "Service is shutting down", 0);
                         return;
                     }
 
-                    std::string const validateTaskId = attempt == 0 ? "validate" : "validate_retry_" + std::to_string(attempt);
-                    broadcastProgress(3, attempt == 0 ? "Validating..." : "Validating (retry " + std::to_string(attempt) +
-                                                                              "/" + std::to_string(MAX_GENERATE_RETRIES) +
-                                                                              ")...");
-                    LOG_APP_INFO("[workflow] task '{}' executing in run '{}' (workflow '{}')", validateTaskId, runId, workflowId);
+                    auto stageStart = std::chrono::steady_clock::now();
+                    broadcastProgress(4, "Validating...");
+                    LOG_APP_INFO("[workflow] task 'validate' executing in run '{}' (workflow '{}')", runId, workflowId);
 
-                    std::string validationSummary;
-                    bool const valid = ValidateJcwf(generatedJcwf, validationSummary);
+                    auto [valid, validationSummary] = runValidation("validate");
 
-                    if (valid)
-                    {
-                        LOG_APP_INFO("[workflow] task '{}' completed in run '{}' (workflow '{}')", validateTaskId, runId, workflowId);
-                        broadcastResult(true, generatedJcwf, retries);
-                        return;
-                    }
-
-                    LOG_APP_WARN("[workflow] task '{}' failed in run '{}': {}", validateTaskId, runId, validationSummary);
-
-                    if (attempt == MAX_GENERATE_RETRIES)
-                    {
-                        // Out of retries — return what we have with validation info.
-                        LOG_APP_WARN("[workflow] run '{}' validation failed after {} retries (workflow '{}')",
-                                     runId, MAX_GENERATE_RETRIES, workflowId);
-
-                        // Try to return it anyway if it's parseable JSON.
-                        broadcastResult(false, "Validation failed after " + std::to_string(MAX_GENERATE_RETRIES) +
-                                                   " retries: " + validationSummary,
-                                        retries);
-                        return;
-                    }
+                    LOG_APP_INFO("[workflow] task 'validate' completed in run '{}' (workflow '{}') — {} errors, {} warnings",
+                                 runId, workflowId, valid ? "no" : "has", validationSummary.empty() ? "no" : "has");
+                    ensureMinDisplay(stageStart);
 
                     // ----------------------------------------------------------
-                    // Fix: ask AI to correct the validation errors
+                    // Stage 5: Fix-It (if there are any errors or warnings)
                     // ----------------------------------------------------------
-                    retries = attempt + 1;
-                    std::string const fixTaskId = "fix_" + std::to_string(retries);
-                    broadcastProgress(3, "Fixing errors (retry " + std::to_string(retries) + "/" +
-                                             std::to_string(MAX_GENERATE_RETRIES) + ")...");
-                    LOG_APP_INFO("[workflow] task '{}' executing in run '{}' (workflow '{}')", fixTaskId, runId, workflowId);
+                    if (m_ShuttingDown.load())
+                    {
+                        broadcastResult(false, "Service is shutting down", 0);
+                        return;
+                    }
+
+                    if (validationSummary.empty())
+                    {
+                        // No errors, no warnings — announce and finish
+                        auto fixStart = std::chrono::steady_clock::now();
+                        broadcastProgress(5, "No errors, no warnings to fix");
+                        LOG_APP_INFO("[workflow] task 'fix' skipped in run '{}' — nothing to fix", runId);
+                        ensureMinDisplay(fixStart);
+                        broadcastResult(true, generatedJcwf, 0);
+                        return;
+                    }
+
+                    // There are issues (errors and/or warnings) — ask AI to fix them
+                    auto fixStart = std::chrono::steady_clock::now();
+                    broadcastProgress(5, "Fixing errors and warnings...");
+                    LOG_APP_INFO("[workflow] task 'fix' executing in run '{}' (workflow '{}')", runId, workflowId);
 
                     std::string const fixStng =
                         "You are a JCWF code fixer. Output ONLY valid JSON — no markdown fences, no explanations, "
-                        "no introductory or closing commentary. Fix all validation errors while preserving the "
-                        "workflow's intended behavior.";
+                        "no introductory or closing commentary. Fix all validation errors AND warnings while "
+                        "preserving the workflow's intended behavior.";
 
                     std::string const fixTask =
-                        "The JCWF JSON below has validation errors. Fix them and output the corrected JCWF JSON. "
-                        "Output ONLY the fixed JSON, nothing else.\n\n"
-                        "Validation errors:\n" +
+                        "The JCWF JSON below has validation issues. Fix ALL errors AND warnings, then output the "
+                        "corrected JCWF JSON. Output ONLY the fixed JSON, nothing else.\n\n"
+                        "Validation issues:\n" +
                         validationSummary;
 
-                    std::string const fixCntx = "--- Current (broken) JCWF ---\n" + generatedJcwf +
-                                                "\n\n--- JCWF Generation Guide ---\n" + generationGuide;
+                    std::string const fixCntx =
+                        "--- Current JCWF ---\n" + generatedJcwf + "\n\n--- JCWF Generation Guide ---\n" + generationGuide;
 
                     std::string const fixProb = "Fix the JCWF JSON.";
 
                     std::string fixedJcwf;
                     std::string fixError;
-                    if (!RunSingleAiCall("gen_" + seqStr + "_fix_" + std::to_string(retries), fixStng, fixTask, fixCntx,
-                                         fixProb, fixedJcwf, fixError))
+                    if (!RunSingleAiCall("gen_" + seqStr + "_fix", fixStng, fixTask, fixCntx, fixProb, fixedJcwf, fixError))
                     {
-                        LOG_APP_WARN("[workflow] task '{}' failed in run '{}': {}", fixTaskId, runId, fixError);
-                        broadcastResult(false, "Fix attempt " + std::to_string(retries) + " failed: " + fixError,
-                                        retries);
+                        LOG_APP_WARN("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
+                        ensureMinDisplay(fixStart);
+                        // Return the unfixed JCWF — it may still be usable
+                        broadcastResult(!WorkflowValidator::HasErrors({}), generatedJcwf, 1);
                         return;
                     }
-                    LOG_APP_INFO("[workflow] task '{}' completed in run '{}' (workflow '{}')", fixTaskId, runId, workflowId);
 
-                    // Strip markdown fences again.
+                    generatedJcwf = stripMarkdownFences(fixedJcwf);
+                    LOG_APP_INFO("[workflow] task 'fix' completed in run '{}' (workflow '{}')", runId, workflowId);
+                    ensureMinDisplay(fixStart);
+                }
+
+                // ----------------------------------------------------------
+                // Stage 4 (second pass): Re-validate after fix
+                // ----------------------------------------------------------
+                {
+                    if (m_ShuttingDown.load())
                     {
-                        std::string trimmed = fixedJcwf;
-                        size_t start = trimmed.find_first_not_of(" \t\n\r");
-                        if (start != std::string::npos)
-                        {
-                            trimmed = trimmed.substr(start);
-                        }
-                        if (trimmed.rfind("```", 0) == 0)
-                        {
-                            size_t firstNewline = trimmed.find('\n');
-                            if (firstNewline != std::string::npos)
-                            {
-                                trimmed = trimmed.substr(firstNewline + 1);
-                            }
-                        }
-                        size_t lastFence = trimmed.rfind("```");
-                        if (lastFence != std::string::npos && lastFence > 0)
-                        {
-                            trimmed = trimmed.substr(0, lastFence);
-                        }
-                        size_t end = trimmed.find_last_not_of(" \t\n\r");
-                        if (end != std::string::npos)
-                        {
-                            trimmed = trimmed.substr(0, end + 1);
-                        }
-                        fixedJcwf = trimmed;
+                        broadcastResult(false, "Service is shutting down", 1);
+                        return;
                     }
 
-                    generatedJcwf = fixedJcwf;
+                    auto stageStart = std::chrono::steady_clock::now();
+                    broadcastProgress(4, "Re-validating...");
+                    LOG_APP_INFO("[workflow] task 'revalidate' executing in run '{}' (workflow '{}')", runId, workflowId);
+
+                    auto [valid, validationSummary] = runValidation("revalidate");
+
+                    if (!validationSummary.empty())
+                    {
+                        LOG_APP_WARN("[workflow] task 'revalidate' still has issues in run '{}':\n{}", runId,
+                                     validationSummary);
+                    }
+                    LOG_APP_INFO("[workflow] task 'revalidate' completed in run '{}' (workflow '{}')", runId, workflowId);
+                    ensureMinDisplay(stageStart);
+
+                    // Accept result regardless — we only do one fix iteration
+                    broadcastResult(true, generatedJcwf, 1);
                 }
             });
     }

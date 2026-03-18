@@ -29,6 +29,64 @@
 
 namespace AIAssistant
 {
+    std::filesystem::path TaskPathResolver::ResolveWorkflowBaseDirectory(WorkflowDefinition const& workflowDefinition)
+    {
+        namespace fs = std::filesystem;
+
+        fs::path result(workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
+        if (result.empty())
+        {
+            result = fs::path(workflowDefinition.m_WorkflowBaseDirectory);
+        }
+
+        if (result.empty())
+        {
+            fs::path fileDir(workflowDefinition.m_WorkflowFileDirectoryAbsolute);
+            if (fileDir.empty())
+            {
+                fileDir = fs::path(workflowDefinition.m_WorkflowFileDirectory);
+            }
+
+            if (!fileDir.empty())
+            {
+                result = fileDir;
+            }
+        }
+
+        if (result.empty())
+        {
+            fs::path filePath(workflowDefinition.m_WorkflowFilePathAbsolute);
+            if (filePath.empty())
+            {
+                filePath = fs::path(workflowDefinition.m_WorkflowFilePath);
+            }
+
+            if (!filePath.empty())
+            {
+                result = filePath.parent_path();
+            }
+        }
+
+        if (result.empty())
+        {
+            return result;
+        }
+
+        if (result.is_relative() && (Core::g_Core != nullptr))
+        {
+            result = (Core::g_Core->GetLaunchCWDAbsolute() / result).lexically_normal();
+        }
+
+        std::error_code ec;
+        fs::path const absolutePath = fs::absolute(result, ec).lexically_normal();
+        if (ec)
+        {
+            return result.lexically_normal();
+        }
+
+        return absolutePath;
+    }
+
     std::filesystem::path
     TaskPathResolver::ResolveTaskWorkingDirectoryPath(std::filesystem::path const& workflowBaseDirectoryPath,
                                                       std::string const& taskWorkingDirectoryText)
@@ -175,37 +233,7 @@ namespace AIAssistant
                      workflowDefinition.m_WorkflowBaseDirectoryAbsolute,
                      (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>");
 
-        std::filesystem::path workflowBaseDirectoryPathAbsolute;
-        if (!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty())
-        {
-            workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectoryAbsolute;
-        }
-        else
-        {
-            workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectory;
-        }
-
-        if (!workflowBaseDirectoryPathAbsolute.empty())
-        {
-            if (!workflowBaseDirectoryPathAbsolute.is_absolute())
-            {
-                if (Core::g_Core != nullptr)
-                {
-                    workflowBaseDirectoryPathAbsolute =
-                        Core::g_Core->GetLaunchCWDAbsolute() / workflowBaseDirectoryPathAbsolute;
-                }
-                else
-                {
-                    LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveFreshnessPathsForTask debug: "
-                                 "reason=resolveWorkflowBaseDirectoryCwdFallback workflowBaseDirectoryRelative='{}' "
-                                 "launchCWDAbsolute='<null>'",
-                                 workflowBaseDirectoryPathAbsolute.string());
-                }
-            }
-
-            workflowBaseDirectoryPathAbsolute =
-                std::filesystem::absolute(workflowBaseDirectoryPathAbsolute).lexically_normal();
-        }
+        std::filesystem::path const workflowBaseDirectoryPathAbsolute = ResolveWorkflowBaseDirectory(workflowDefinition);
 
         std::filesystem::path const taskWorkingDirectoryPath =
             ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPathAbsolute, taskDefinition.m_WorkingDirectory);

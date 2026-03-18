@@ -38,8 +38,10 @@ namespace AIAssistant
     class PythonEngine;
     class WorkflowRegistry;
     class TriggerEngine;
+    class ScriptRegistry;
 
     class AiRequestPool;
+    class WorkflowFileIndex;
     class WorkflowRuntimeManager;
 
     class JarvisAgent : public Application
@@ -63,6 +65,8 @@ namespace AIAssistant
         StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
         PythonEngine* GetPythonEngine() { return m_PythonEngine.get(); }
         WorkflowRegistry* GetWorkflowRegistry() { return m_WorkflowRegistry.get(); }
+        ScriptRegistry* GetScriptRegistry() { return m_ScriptRegistry.get(); }
+        WorkflowFileIndex* GetWorkflowFileIndex() { return m_WorkflowFileIndex.get(); }
 
         AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
         WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
@@ -95,6 +99,8 @@ namespace AIAssistant
         // submodules
         std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
         std::unique_ptr<FileWatcher> m_FileWatcher;
+        std::unique_ptr<FileWatcher> m_ScriptFileWatcher;
+        std::unique_ptr<ScriptRegistry> m_ScriptRegistry;
         std::unique_ptr<WebServer> m_WebServer;
         std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
         std::unique_ptr<PythonEngine> m_PythonEngine;
@@ -106,6 +112,7 @@ namespace AIAssistant
 
         std::unique_ptr<AiRequestPool> m_AiRequestPool;
         std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;
+        std::unique_ptr<WorkflowFileIndex> m_WorkflowFileIndex;
     };
 
     class App

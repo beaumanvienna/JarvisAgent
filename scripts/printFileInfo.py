@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# @jarvis-script
+# @short: Print file size and creation date
+# @params: FILENAME — path to the file to inspect
+# @description: Reads file metadata (size, creation time) and prints it to
+#   stdout. Used as a utility script in workflows.
 import os
 import datetime
 from pathlib import Path

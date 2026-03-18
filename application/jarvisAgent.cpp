@@ -24,7 +24,7 @@
 #ifndef _WIN32
 #include <unistd.h> // write, STDERR_FILENO (raw shutdown diagnostics)
 #else
-#include <io.h>     // _write, _fileno
+#include <io.h> // _write, _fileno
 #endif
 
 #include "engine.h"
@@ -35,6 +35,7 @@
 #include "log/terminalManager.h"
 #include "file/fileWatcher.h"
 #include "file/probUtils.h"
+#include "file/scriptRegistry.h"
 #include "web/chatMessages.h"
 #include "python/pythonEngine.h"
 #include "task/carMaintenanceTask.h"
@@ -47,6 +48,7 @@
 #include "workflow/pythonTaskExecutor.h"
 #include "workflow/triggerEngine.h"
 #include "workflow/aiRequestPool.h"
+#include "workflow/workflowFileIndex.h"
 #include "workflow/workflowRuntimeManager.h"
 
 namespace
@@ -125,6 +127,17 @@ namespace AIAssistant
         m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, 100ms);
         m_FileWatcher->Start();
 
+        // Script registry: scan scripts/ at startup, keep live via second FileWatcher
+        m_ScriptRegistry = std::make_unique<ScriptRegistry>();
+        std::filesystem::path const absoluteScriptsPath = std::filesystem::absolute("scripts");
+        m_ScriptRegistry->ScanDirectory(absoluteScriptsPath);
+        m_ScriptFileWatcher = std::make_unique<FileWatcher>(absoluteScriptsPath, 100ms);
+        m_ScriptFileWatcher->Start();
+
+        // Workflow file index: scan workflows/ at startup for basename lookup
+        m_WorkflowFileIndex = std::make_unique<WorkflowFileIndex>();
+        m_WorkflowFileIndex->ScanDirectory(std::filesystem::absolute("workflows"));
+
         m_WebServer = std::make_unique<WebServer>();
         if (!m_WebServer->Start())
         {
@@ -137,8 +150,8 @@ namespace AIAssistant
         // Stream log lines to dashboard via WebSocket instead of 500ms REST polling
         {
             WebServer* ws = m_WebServer.get();
-            Core::g_Core->GetTerminalLogStreamBuf()->SetLogBroadcastCallback(
-                [ws](std::string const& line) { ws->EnqueueLogLine(line); });
+            Core::g_Core->GetTerminalLogStreamBuf()->SetLogBroadcastCallback([ws](std::string const& line)
+                                                                             { ws->EnqueueLogLine(line); });
         }
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
@@ -499,6 +512,28 @@ namespace AIAssistant
         }
 
         // -----------------------------------------------------------------------------------
+        // Script registry: route scripts/ file events to ScriptRegistry
+        // -----------------------------------------------------------------------------------
+        if (!filePath.empty() && m_ScriptRegistry != nullptr)
+        {
+            std::string const pathStr = filePath.string();
+            std::filesystem::path const absoluteScriptsPath = std::filesystem::absolute("scripts");
+            std::string const scriptsPrefix = absoluteScriptsPath.string();
+            if (pathStr.rfind(scriptsPrefix, 0) == 0)
+            {
+                if (fileEventType == TriggerEngine::FileEventType::Deleted)
+                {
+                    m_ScriptRegistry->Remove(filePath);
+                }
+                else
+                {
+                    m_ScriptRegistry->AddOrUpdate(filePath);
+                }
+                return;
+            }
+        }
+
+        // -----------------------------------------------------------------------------------
         // Forward remaining file events to correct SessionManager
         // -----------------------------------------------------------------------------------
 
@@ -524,7 +559,11 @@ namespace AIAssistant
     {
         // --- Raw diagnostics: bypass spdlog to catch hangs inside OnShutdown ---
 #ifndef _WIN32
-#define RAW_ONSHUTDOWN(literal) do { [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); } while (0)
+#define RAW_ONSHUTDOWN(literal)                                                           \
+    do                                                                                    \
+    {                                                                                     \
+        [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); \
+    } while (0)
 #else
 #define RAW_ONSHUTDOWN(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
 #endif
@@ -557,6 +596,10 @@ namespace AIAssistant
         if (m_FileWatcher != nullptr)
         {
             m_FileWatcher->SignalStop();
+        }
+        if (m_ScriptFileWatcher != nullptr)
+        {
+            m_ScriptFileWatcher->SignalStop();
         }
         RAW_ONSHUTDOWN("[OnShutdown] WebServer::SignalStop...\n");
         if (m_WebServer != nullptr)
@@ -602,8 +645,12 @@ namespace AIAssistant
         {
             m_FileWatcher->WaitStop();
         }
-        RAW_ONSHUTDOWN("[OnShutdown] FileWatcher stopped\n");
-        LOG_APP_INFO("[shutdown] FileWatcher stopped");
+        if (m_ScriptFileWatcher != nullptr)
+        {
+            m_ScriptFileWatcher->WaitStop();
+        }
+        RAW_ONSHUTDOWN("[OnShutdown] FileWatchers stopped\n");
+        LOG_APP_INFO("[shutdown] FileWatchers stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] WebServer::WaitStop...\n");
         if (m_WebServer != nullptr)

@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# @jarvis-script
+# @short: Combine per-chapter AI summaries into a single Markdown document
+# @params: input_glob — glob pattern for per-chapter summary files
+#   output_file — path to write combined markdown
+# @description: Collects AI-generated chapter summaries matching input_glob,
+#   sorts them numerically, and writes a combined Markdown document.
+#   Called as a JCWF python task via run().
+# @outputs: output_file — the combined summary Markdown file
 """
 Combine per-chapter AI summary files into a single markdown document.
 

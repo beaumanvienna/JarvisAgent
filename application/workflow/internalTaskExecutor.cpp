@@ -150,9 +150,8 @@ namespace AIAssistant
     bool InternalTaskExecutor::Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                                        TaskDef const& taskDefinition, TaskInstanceState& taskState)
     {
-        std::filesystem::path const workflowBaseDirectoryPath(!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty()
-                                                                  ? workflowDefinition.m_WorkflowBaseDirectoryAbsolute
-                                                                  : workflowDefinition.m_WorkflowBaseDirectory);
+        std::filesystem::path const workflowBaseDirectoryPath =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
         std::filesystem::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
         LOG_APP_INFO(

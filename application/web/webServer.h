@@ -116,6 +116,7 @@ namespace AIAssistant
 
         // Script check API (Workflow Editor)
         crow::response HandleScriptCheckGet(crow::request const& req);
+        crow::response HandleScriptRegistryGet();
 
         // Log viewer API
         crow::response HandleLogGet(crow::request const& req);

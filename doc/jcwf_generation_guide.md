@@ -79,7 +79,7 @@ The `tasks` object maps each `taskId` (string key) to a task definition:
 | `depends_on` | no | array of strings | Task IDs that must complete before this task runs. Forms a DAG (no cycles). |
 | `working_directory` | no | string | Task working dir, relative to workflow file directory. |
 | `params` | no | object | Type-specific parameters (see below). |
-| `file_inputs` | no | array of strings | Files this task reads (for freshness checks and positional args). |
+| `file_inputs` | no | array of strings | Files this task reads (for freshness checks and positional args). Values are **relative to `working_directory`** — use bare filenames (e.g. `"input.log"`), NEVER prefix with the working_directory path. |
 | `file_outputs` | no | array of strings | Files this task produces. |
 | `materialize` | no | object | Copy files into working_directory before execution. Keys are source templates like `{{input[0]}}`, values are target filenames. |
 | `queue_binding` | no | object | For `ai_call` tasks: declares queue folder files (STNG, TASK, CNTX, PROB). |
@@ -185,17 +185,72 @@ Convention: `"../queue/<workflowId>/<NN>_<taskId>"` (e.g., `"../queue/myWorkflow
 
 ```jsonc
 {
-  "id": "process_data",
+  "id": "parse_log",
   "type": "python",
+  "working_directory": "myWorkflow/01_parse",
   "params": {
-    "module": "workflows.data_processor",
-    "function": "run"
-  }
+    "module": "scripts.parseLog",
+    "function": "extract_stats"
+  },
+  "file_inputs": ["input_data.log"],
+  "file_outputs": ["parsed_stats.json"]
 }
 ```
 
-- `params.module`: Python import name. Scripts in `scripts/` are on sys.path.
-- `params.function`: Callable name in the module.
+- `params.module`: Python import path. New scripts MUST be placed in `scripts/` (e.g. `"scripts.parseLog"`). The `scripts/` directory is on sys.path.
+- `params.function`: Callable name in the module. **The function MUST exist** in the script with this exact name.
+
+#### Calling Convention (IMPORTANT)
+
+The runtime calls `module.function(**kwargs)` **programmatically** — scripts are NOT invoked via CLI. Do NOT use `sys.argv`, `argparse`, or `main()` as the entry point.
+
+The function receives:
+- **Keyword arguments** from upstream task outputs (wired through the DAG).
+- **`context` dict** (optional kwarg) containing resolved file paths and metadata:
+  - `context["_file_input_0"]`, `context["_file_input_1"]`, … — absolute paths to `file_inputs`
+  - `context["_task_working_directory"]` — absolute path to the task's working directory
+  - `context["_workflow_base_directory"]` — absolute path to the workflow base
+
+#### Python Script Pattern
+
+```python
+def extract_stats(context=None, **kwargs):
+    import json, os
+    input_path = context["_file_input_0"]      # resolved from file_inputs[0]
+    work_dir = context["_task_working_directory"]
+    output_path = os.path.join(work_dir, "parsed_stats.json")
+
+    with open(input_path) as f:
+        data = f.read()
+    # ... process data ...
+    result = {"key": "value"}
+
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    return {"parsed_stats": output_path}  # optional: expose as output slot
+```
+
+#### Wiring python output → ai_call cntx_files
+
+To feed a python task's `file_outputs` into a downstream `ai_call`, reference the file relative to the ai_call's `working_directory`. Since ai_call working directories are in `../queue/` (3 levels from the JarvisAgent root) and python outputs are in `workflows/` (also relative to root), you need **3 levels up** then back down into `workflows/`:
+
+```jsonc
+// ai_call working_directory: "../queue/myWorkflow/02_generate"
+// python working_directory:  "myWorkflow/01_parse"
+// python file_outputs:       ["parsed_stats.json"]
+//
+// Path from ai_call dir:  queue/myWorkflow/02_generate
+//   ../../../              → <jarvisAgent root>
+//   workflows/myWorkflow/01_parse/parsed_stats.json
+"cntx_files": [
+  "../../../workflows/myWorkflow/01_parse/parsed_stats.json"
+]
+```
+
+The runtime copies the file into the ai_call's queue folder as `CNTX_parsed_stats.json`.
+
+**Important:** Do NOT use only `../../` — that only reaches the `queue/` parent, not the `workflows/` directory. Always use `../../../workflows/` to cross from queue to workflows.
 
 ### 3.4 `internal` — Built-in C++ action
 
@@ -618,3 +673,6 @@ Same as Example A but the AI deliberately introduces a syntax error. A branch no
 7. **Version mismatch** — Use `"1.1"` if using `filters`, `control_nodes`, or `controlflow`. Otherwise `"1.0"` is fine.
 8. **Controlflow-gated tasks with `depends_on`** — Tasks activated by controlflow edges should generally NOT also be in `depends_on` of the branching task, as controlflow gating is independent.
 9. **Missing 'No markdown fences' in ai_call STNG** — AI output from `ai_call` tasks is consumed directly by compilers, tools, or downstream tasks — NOT by humans. Every `stng_files` content MUST include `"No markdown fences, no explanations."` to prevent the AI from wrapping output in ` ```lang ` blocks.
+10. **file_inputs values prefixed with working_directory** — `file_inputs` are resolved relative to `working_directory`. Use bare filenames only (e.g. `"input.log"`). NEVER repeat the working_directory path inside file_inputs — that doubles the path at runtime.
+11. **Over-decomposed outputs** — Prefer a single combined JSON output file over splitting into multiple files. If a python task extracts statistics, write everything into ONE JSON file, not separate files per category. This simplifies downstream wiring and cntx_files references.
+12. **Wrong cntx_files path crossing queue↔workflows** — To reach a python/shell task's output from an ai_call's working directory, you need `../../../workflows/<taskWorkDir>/<outputFile>` (3 levels up from `queue/X/Y` to the JarvisAgent root, then into `workflows/`). Using only `../../` reaches `queue/` — not `workflows/`.

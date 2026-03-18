@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# @jarvis-script
+# @short: Combine engine troubleshooting sections into a single guide
+# @params: code244MdPath — path to code 244 markdown file
+#   code250MdPath — path to code 250 markdown file
+#   code301MdPath — path to code 301 markdown file
+#   outputMdPath — path to write combined guide
+# @description: Merges per-error-code troubleshooting Markdown files into a
+#   single navigable guide with a table of contents.
+#   Called as a JCWF python task via buildEngineTroubleshootingGuide().
+# @outputs: outputMdPath — the combined troubleshooting guide
 from __future__ import annotations
 
 from pathlib import Path

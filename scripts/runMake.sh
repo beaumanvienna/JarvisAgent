@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# runMake.sh — wrapper for 'make' (shell tasks must live under scripts/)
-# Input files (hello.c, Makefile) are materialized by the JCWF runtime.
+# @jarvis-script
+# @short: Run make in the current working directory
+# @description: Wrapper for 'make' — shell tasks must live under scripts/.
+#   Input files (e.g. hello.c, Makefile) are materialized by the JCWF runtime.
 set -euo pipefail
 
 make

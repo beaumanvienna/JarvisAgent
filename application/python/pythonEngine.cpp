@@ -197,8 +197,23 @@ namespace AIAssistant
 
             PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
             PyList_Append(sysPathList, directoryString);
-
             Py_DECREF(directoryString);
+
+            // Also add the parent of m_ScriptDir (i.e. the launch CWD) so that
+            // dotted package imports like "scripts.parseOpenSSHLog" work.
+            // (scripts/ must contain __init__.py to be a package.)
+            {
+                fs::path const scriptDirAbsolute = fs::absolute(fs::path(m_ScriptDir)).lexically_normal();
+                std::string const parentDir = scriptDirAbsolute.parent_path().string();
+                if (!parentDir.empty())
+                {
+                    PyObject* parentDirString = PyUnicode_FromString(parentDir.c_str());
+                    PyList_Append(sysPathList, parentDirString);
+                    Py_DECREF(parentDirString);
+                    LOG_APP_INFO("PythonEngine: added '{}' to sys.path (package imports)", parentDir);
+                }
+            }
+
             Py_DECREF(sysPathList);
             Py_DECREF(sysModule);
 
@@ -738,6 +753,44 @@ namespace AIAssistant
         // --------------------------------------------------------------------
         // Import module + look up callable
         // --------------------------------------------------------------------
+        // Hot-reload: evict the module (and its parent package for dotted names)
+        // from sys.modules so that PyImport_ImportModule re-reads the .py file.
+        {
+            PyObject* sysModules = PySys_GetObject("modules"); // borrowed ref
+            if (sysModules != nullptr && PyDict_Check(sysModules))
+            {
+                PyObject* key = PyUnicode_FromString(moduleName.c_str());
+                if (key != nullptr)
+                {
+                    if (PyDict_Contains(sysModules, key))
+                    {
+                        PyDict_DelItem(sysModules, key);
+                        LOG_APP_INFO("PythonEngine: evicted '{}' from sys.modules (hot-reload)", moduleName);
+                    }
+                    Py_DECREF(key);
+                }
+
+                // For dotted names like "scripts.parseOpenSSHLog", also evict the
+                // parent package ("scripts") so its __init__.py is re-evaluated and
+                // the submodule binding is refreshed.
+                auto dotPos = moduleName.find('.');
+                if (dotPos != std::string::npos)
+                {
+                    std::string const parentPackage = moduleName.substr(0, dotPos);
+                    PyObject* parentKey = PyUnicode_FromString(parentPackage.c_str());
+                    if (parentKey != nullptr)
+                    {
+                        if (PyDict_Contains(sysModules, parentKey))
+                        {
+                            PyDict_DelItem(sysModules, parentKey);
+                            LOG_APP_INFO("PythonEngine: evicted '{}' from sys.modules (hot-reload parent)", parentPackage);
+                        }
+                        Py_DECREF(parentKey);
+                    }
+                }
+            }
+        }
+
         PyObject* taskModule = PyImport_ImportModule(moduleName.c_str());
         if (taskModule == nullptr)
         {
@@ -776,7 +829,11 @@ namespace AIAssistant
             Py_DECREF(valueString);
         }
 
-        bool const taskWantsContextInput = (taskDefinition.m_Inputs.find("context") != taskDefinition.m_Inputs.end());
+        // Always attach the context dict for Python tasks.  Previous behaviour gated
+        // this on an explicit "context" key in task inputs, then retried heuristically
+        // if the first call failed with "missing ... context".  That breaks when scripts
+        // handle None context gracefully and raise a *different* error (e.g. "file not found").
+        bool const taskWantsContextInput = true;
 
         auto attachContextDictToKwargs = [&](PyObject* kwargsDict) -> bool
         {

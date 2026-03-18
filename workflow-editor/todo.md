@@ -31,6 +31,7 @@ Last reviewed: 2026-03-12
 - [x] ~~Script path validation (`GET /api/scripts/check`, inline warnings)~~
 - [x] ~~Dashboard Log Viewer (virtual scroll, delta polling, search, analyze run panel)~~
 - [x] ~~Log analyze: multi-run cycling (◀/▶), issue filtering by runId/workflowId~~
+- [x] ~~JCWF generation assistant~~ — "Generate" button: 5-stage AI pipeline (decompose → generate JCWF → generate Python scripts → validate → fix). Validator uses `WorkflowFileIndex` for file path suggestions. "Explain" button: AI summarizes loaded workflow. Backend: `AiJcwfService` in `aiJcwfService.cpp`. E2E verified with `cyber2` (OpenSSH log analysis).
 
 ---
 

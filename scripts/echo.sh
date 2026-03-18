@@ -1,5 +1,6 @@
 #!/bin/bash
-# Wrapper script for echo command (used by workflow templates)
-# Usage: scripts/echo.sh "message"
-
+# @jarvis-script
+# @short: Echo a message to stdout
+# @params: MESSAGE — text to print (all arguments are printed)
+# @description: Wrapper for echo — prints all arguments to stdout.
 echo "$@"

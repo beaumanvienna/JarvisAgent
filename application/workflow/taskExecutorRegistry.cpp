@@ -55,16 +55,8 @@ namespace AIAssistant
             return true;
         }
 
-        // Resolve workflow base directory (same logic as all executors).
-        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
-        if (workflowBaseDirectoryPath.empty())
-        {
-            workflowBaseDirectoryPath = std::filesystem::path(workflowDefinition.m_WorkflowBaseDirectory);
-        }
-        if (workflowBaseDirectoryPath.empty())
-        {
-            workflowBaseDirectoryPath = std::filesystem::path(workflowDefinition.m_WorkflowFileDirectory);
-        }
+        std::filesystem::path const workflowBaseDirectoryPath =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
         if (workflowBaseDirectoryPath.empty())
         {
             LOG_APP_ERROR("MaterializeFiles: Cannot resolve workflow base directory for task '{}'", taskDefinition.m_Id);

@@ -33,6 +33,13 @@ namespace AIAssistant
     class TaskPathResolver
     {
     public:
+        // Resolve the workflow base directory from a WorkflowDefinition.
+        // Fallback chain: m_WorkflowBaseDirectoryAbsolute → m_WorkflowBaseDirectory
+        //   → m_WorkflowFileDirectoryAbsolute → m_WorkflowFileDirectory
+        //   → m_WorkflowFilePathAbsolute.parent_path() → m_WorkflowFilePath.parent_path()
+        // Relative results are resolved against launchCWD.  Returns empty path only if all fields are empty.
+        static std::filesystem::path ResolveWorkflowBaseDirectory(WorkflowDefinition const& workflowDefinition);
+
         // Resolve absolute working directory for a task.
         static std::filesystem::path ResolveTaskWorkingDirectoryPath(std::filesystem::path const& workflowBaseDirectoryPath,
                                                                      std::string const& taskWorkingDirectoryText);

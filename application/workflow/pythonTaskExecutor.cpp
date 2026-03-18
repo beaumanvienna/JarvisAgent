@@ -38,58 +38,6 @@ namespace AIAssistant
     {
         namespace fs = std::filesystem;
 
-        fs::path ResolveWorkflowBaseDirectory(WorkflowDefinition const& workflowDefinition)
-        {
-            fs::path workflowBaseDirectoryPathAbsolute(workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
-            if (workflowBaseDirectoryPathAbsolute.empty())
-            {
-                workflowBaseDirectoryPathAbsolute = fs::path(workflowDefinition.m_WorkflowBaseDirectory);
-            }
-
-            if (workflowBaseDirectoryPathAbsolute.empty())
-            {
-                fs::path workflowFileDirectoryPathAbsolute(workflowDefinition.m_WorkflowFileDirectoryAbsolute);
-                if (workflowFileDirectoryPathAbsolute.empty())
-                {
-                    workflowFileDirectoryPathAbsolute = fs::path(workflowDefinition.m_WorkflowFileDirectory);
-                }
-
-                if (!workflowFileDirectoryPathAbsolute.empty())
-                {
-                    workflowBaseDirectoryPathAbsolute = workflowFileDirectoryPathAbsolute;
-                }
-            }
-
-            if (workflowBaseDirectoryPathAbsolute.empty())
-            {
-                fs::path workflowFilePathAbsolute(workflowDefinition.m_WorkflowFilePathAbsolute);
-                if (workflowFilePathAbsolute.empty())
-                {
-                    workflowFilePathAbsolute = fs::path(workflowDefinition.m_WorkflowFilePath);
-                }
-
-                if (!workflowFilePathAbsolute.empty())
-                {
-                    workflowBaseDirectoryPathAbsolute = workflowFilePathAbsolute.parent_path();
-                }
-            }
-
-            if (workflowBaseDirectoryPathAbsolute.is_relative() && (Core::g_Core != nullptr))
-            {
-                workflowBaseDirectoryPathAbsolute =
-                    (Core::g_Core->GetLaunchCWDAbsolute() / workflowBaseDirectoryPathAbsolute).lexically_normal();
-            }
-
-            std::error_code errorCode;
-            fs::path const absolutePath = fs::absolute(workflowBaseDirectoryPathAbsolute, errorCode).lexically_normal();
-            if (errorCode)
-            {
-                return workflowBaseDirectoryPathAbsolute.lexically_normal();
-            }
-
-            return absolutePath;
-        }
-
         bool ValidateFileInputsExist(TaskDef const& taskDefinition, fs::path const& taskWorkingDirectoryPath,
                                      std::string& errorMessageOut)
         {
@@ -130,7 +78,7 @@ namespace AIAssistant
             return false;
         }
 
-        fs::path const workflowBaseDirectoryPath = ResolveWorkflowBaseDirectory(workflowDefinition);
+        fs::path const workflowBaseDirectoryPath = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
         fs::path const taskWorkingDirectoryPath =
             TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDirectoryPath, taskDefinition.m_WorkingDirectory);
 

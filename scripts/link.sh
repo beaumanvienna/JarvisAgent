@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# @jarvis-script
+# @short: Link object files and archive into an executable
+# @params: MAIN_OBJ — path to main object file
+#   APP_OBJ — path to application object file
+#   ARCHIVE — path to static library archive
+#   OUTPUT — path to output executable
+# @description: Links object files and a static archive using g++. Falls back
+#   to creating a replacement shell script if g++ is not installed.
+# @outputs: OUTPUT — the linked executable
 set -euo pipefail
 
 MAIN_OBJ="$1"

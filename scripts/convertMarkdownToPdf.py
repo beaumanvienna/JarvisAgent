@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# @jarvis-script
+# @short: Convert Markdown to PDF using md2pdf
+# @params: inputMdPath — path to the input Markdown file
+#   outputPdfPath — path to the output PDF file
+# @description: Converts a Markdown file to PDF by invoking the md2pdf CLI.
+#   Called as a JCWF python task via convertMarkdownToPdf().
+# @outputs: outputPdfPath — the generated PDF file
 from __future__ import annotations
 
 import subprocess

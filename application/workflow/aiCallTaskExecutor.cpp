@@ -771,30 +771,13 @@ namespace AIAssistant
         // ------------------------------------------------------------
         // Resolve workflow base directory (directory containing the loaded .jcwf file)
         // ------------------------------------------------------------
-        std::filesystem::path workflowBaseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFileDirectoryPath(workflowDefinition.m_WorkflowFileDirectory);
-            if (!workflowFileDirectoryPath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFileDirectoryPath;
-            }
-        }
-
-        if (workflowBaseDirectoryPath.empty())
-        {
-            std::filesystem::path const workflowFilePath(workflowDefinition.m_WorkflowFilePath);
-            if (!workflowFilePath.empty())
-            {
-                workflowBaseDirectoryPath = workflowFilePath.parent_path();
-            }
-        }
+        std::filesystem::path const workflowBaseDirectoryPath =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
 
         LOG_APP_INFO("[paths debug] debug reason=resolveWorkflowBaseDirectory workflowId='{}' runId='{}' "
-                     "selectedWorkflowBaseDirectory='{}' selectedWasRelative='{}'",
+                     "selectedWorkflowBaseDirectory='{}'",
                      workflowDefinition.m_Id, workflowRun.m_RunId,
-                     workflowBaseDirectoryPath.lexically_normal().generic_string(), workflowBaseDirectoryPath.is_relative());
+                     workflowBaseDirectoryPath.lexically_normal().generic_string());
         if (workflowBaseDirectoryPath.empty())
         {
             taskState.m_State = TaskInstanceStateKind::Failed;

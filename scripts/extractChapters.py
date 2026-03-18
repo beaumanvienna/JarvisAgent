@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# @jarvis-script
+# @short: Extract chapter titles from a Markdown file
+# @params: input_file — path to the input Markdown file
+#   output_file — path to write extracted chapter titles (one per line)
+# @description: Extracts chapter titles matching "Chapter N, Title" patterns,
+#   deduplicates them, sorts by chapter number, and writes to output.
+#   Called as a JCWF python task via run() or standalone CLI.
+# @outputs: output_file — text file with one chapter title per line
 """
 Extract chapter titles from a markdown file and write one chapter per line.
 

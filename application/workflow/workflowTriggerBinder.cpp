@@ -22,6 +22,7 @@
 
 #include "engine.h"
 
+#include "taskPathResolver.h"
 #include "workflowTriggerBinder.h"
 #include "workflowRegistry.h"
 #include "workflowTypes.h"
@@ -375,20 +376,8 @@ namespace AIAssistant
 
                         if (!watchedPath.empty())
                         {
-                            std::filesystem::path workflowBaseDirectoryPathAbsolute;
-
-                            if (!workflowDefinition.m_WorkflowBaseDirectoryAbsolute.empty())
-                            {
-                                workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectoryAbsolute;
-                            }
-                            else
-                            {
-                                workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowBaseDirectory;
-                                if (workflowBaseDirectoryPathAbsolute.empty())
-                                {
-                                    workflowBaseDirectoryPathAbsolute = workflowDefinition.m_WorkflowFileDirectory;
-                                }
-                            }
+                            std::filesystem::path const workflowBaseDirectoryPathAbsolute =
+                                TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
 
                             // Spec: workflow-level relative trigger paths resolve relative to Workflow Base Directory.
                             if (!watchedPath.empty() && watchedPath.front() != '/')
