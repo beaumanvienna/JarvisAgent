@@ -118,6 +118,9 @@ namespace AIAssistant
         crow::response HandleScriptCheckGet(crow::request const& req);
         crow::response HandleScriptRegistryGet();
 
+        // File existence check API (Workflow Editor — static file_inputs)
+        crow::response HandleFileCheckGet(crow::request const& req);
+
         // Log viewer API
         crow::response HandleLogGet(crow::request const& req);
         crow::response HandleLogAnalyzeLastRunGet(crow::request const& req);

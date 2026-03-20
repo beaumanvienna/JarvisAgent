@@ -747,6 +747,11 @@ select.input option {
   max-height: 260px;
 }
 
+.aiPromptArea.hasScriptReview {
+  max-height: 55vh;
+  overflow: hidden;
+}
+
 .aiPromptAreaCollapsed {
   border-top: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(0, 0, 0, 0.20);
@@ -841,18 +846,19 @@ select.input option {
 .scriptReviewPanel {
   border-top: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(0, 0, 0, 0.30);
-  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 320px;
-  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .scriptReviewHeader {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  padding: 10px 14px 6px;
+  flex-shrink: 0;
 }
 
 .scriptReviewTitle {
@@ -865,12 +871,25 @@ select.input option {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 0 14px;
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
 }
 
 .scriptReviewItem {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 4px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+.scriptReviewItem.expanded {
+  flex: 1 1 0;
+  min-height: 80px;
 }
 
 .scriptReviewItemHeader {
@@ -921,9 +940,10 @@ select.input option {
   font-family: monospace;
   font-size: 11px;
   line-height: 1.5;
-  resize: vertical;
-  min-height: 60px;
-  max-height: 240px;
+  resize: none;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .scriptReviewCode:focus {
@@ -933,6 +953,10 @@ select.input option {
 .scriptReviewActions {
   display: flex;
   gap: 8px;
+  padding: 8px 14px;
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.40);
 }
 
 .scriptReviewBtn {
@@ -954,4 +978,40 @@ select.input option {
 .scriptReviewResult {
   font-size: 12px;
   color: rgba(180, 220, 180, 0.85);
+  padding: 0 14px 8px;
+  flex-shrink: 0;
+}
+
+.scriptReviewItemAccept {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid rgba(80, 200, 120, 0.40);
+  background: rgba(80, 200, 120, 0.12);
+  color: rgba(140, 220, 160, 0.90);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.scriptReviewItemAccept:hover {
+  background: rgba(80, 200, 120, 0.25);
+}
+
+.scriptReviewItemAccept:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.scriptReviewItemAccepted {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(80, 200, 120, 0.18);
+  color: rgba(140, 220, 160, 0.85);
+  white-space: nowrap;
+}
+
+.scriptReviewItem.accepted {
+  border-color: rgba(80, 200, 120, 0.25);
+  opacity: 0.7;
 }

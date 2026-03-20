@@ -75,6 +75,7 @@ namespace AIAssistant
         fs::path const ModifyFile(fs::path const& filePath);
 
         CategorizedFiles& GetCategorizedFiles() { return m_CategorizedFiles; }
+        CategorizedFiles const& GetCategorizedFiles() const { return m_CategorizedFiles; }
         void PrintCategorizedFiles() const;
 
     private:

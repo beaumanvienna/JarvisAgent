@@ -33,6 +33,7 @@ namespace AIAssistant
     class AiRequestPool;
     class ScriptRegistry;
     struct GeneratedScript;
+    struct WorkflowValidationIssue;
 
     // Callback for broadcasting a JSON string to all WebSocket clients.
     using BroadcastFn = std::function<void(std::string const& jsonString)>;
@@ -79,7 +80,8 @@ namespace AIAssistant
         // Returns true if the JCWF is valid (no errors).
         static bool ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
                                  ScriptRegistry const* scriptRegistry = nullptr,
-                                 std::vector<GeneratedScript> const* pendingScripts = nullptr);
+                                 std::vector<GeneratedScript> const* pendingScripts = nullptr,
+                                 std::vector<WorkflowValidationIssue>* outIssues = nullptr);
 
         // Load the generation guide from doc/jcwf_generation_guide.md.
         static std::string LoadGenerationGuide();

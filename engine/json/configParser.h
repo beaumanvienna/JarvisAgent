@@ -69,6 +69,7 @@ namespace AIAssistant
             size_t m_ApiIndex{0};
             std::vector<ApiInterface> m_ApiInterfaces;
             size_t m_MaxFileSizekB{20};
+            size_t m_JcwfBatchSize{10};
             std::string m_KeysFilePath{"keys.json.enc"};
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
@@ -96,6 +97,7 @@ namespace AIAssistant
             InterfaceName,
             InterfaceDescription,
             InterfaceKeyName,
+            JcwfBatchSize,
             NumConfigFields
         };
 
@@ -119,7 +121,8 @@ namespace AIAssistant
                 "KeysFile",             //
                 "InterfaceName",        //
                 "InterfaceDescription", //
-                "InterfaceKeyName"      //
+                "InterfaceKeyName",     //
+                "JcwfBatchSize"         //
         };
 
     public:

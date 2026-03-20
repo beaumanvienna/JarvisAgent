@@ -59,9 +59,8 @@ namespace AIAssistant
         m_KeyName = api.m_KeyName;
 
         // Resolve API key: prefer key_name from interface config, fall back to default provider
-        auto const* provider = m_KeyName.empty()
-                                   ? Core::g_Core->GetKeyManager().GetDefaultProvider()
-                                   : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
+        auto const* provider = m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                                 : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
         if (provider)
         {
             m_ApiKey = provider->m_ApiKey;
@@ -247,15 +246,21 @@ namespace AIAssistant
         return state == StateMachine::State::AllResponsesReceived || state == StateMachine::State::Failed;
     }
 
+    bool SessionManager::HasTrackedFiles() const
+    {
+        auto const& c = m_FileCategorizer.GetCategorizedFiles();
+        return !c.m_Settings.m_Map.empty() || !c.m_Context.m_Map.empty() || !c.m_Tasks.m_Map.empty() ||
+               !c.m_Provider.m_Map.empty() || !c.m_Requirements.m_Map.empty();
+    }
+
     void SessionManager::DispatchQuery(TrackedFile& requirementFile)
     {
         // Lazy re-resolve: if API key is still empty, try again from KeyManager
         // (covers the case where the user adds a key via the UI after startup)
         if (m_ApiKey.empty())
         {
-            auto const* provider = m_KeyName.empty()
-                                       ? Core::g_Core->GetKeyManager().GetDefaultProvider()
-                                       : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
+            auto const* provider = m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                                     : Core::g_Core->GetKeyManager().GetProvider(m_KeyName);
             if (provider && !provider->m_ApiKey.empty())
             {
                 m_ApiKey = provider->m_ApiKey;

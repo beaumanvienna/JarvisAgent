@@ -61,5 +61,6 @@
     ],
 
     "API index": 3,
-    "max file size in kB": 24
+    "max file size in kB": 24,
+    "jcwf batch size": 1
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import type { JcwfFile } from "../jcwf/types";
 import ScriptReviewPanel from "./ScriptReviewPanel";
 import type { GeneratedScript } from "./ScriptReviewPanel";
@@ -10,6 +10,10 @@ export type AiPromptAreaProps = {
   isWebSocketConnected: boolean;
 };
 
+export type AiPromptAreaHandle = {
+  flushPendingScripts: () => Promise<void>;
+};
+
 type AiStatus = "idle" | "explaining" | "generating" | "error";
 
 type ProgressInfo = {
@@ -18,7 +22,7 @@ type ProgressInfo = {
   message: string;
 };
 
-export default function AiPromptArea(props: AiPromptAreaProps): React.ReactElement
+const AiPromptArea = forwardRef<AiPromptAreaHandle, AiPromptAreaProps>(function AiPromptArea(props, ref)
 {
   const { getCurrentJcwf, onJcwfGenerated, webSocketRef, isWebSocketConnected } = props;
 
@@ -28,7 +32,49 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(false);
   const [pendingScripts, setPendingScripts] = useState<GeneratedScript[] | null>(null);
+  const pendingScriptsRef = useRef<GeneratedScript[] | null>(null);
+  pendingScriptsRef.current = pendingScripts;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    flushPendingScripts: (): Promise<void> => {
+      const scripts = pendingScriptsRef.current;
+      if (!scripts || scripts.length === 0) return Promise.resolve();
+
+      const socket = webSocketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.resolve();
+
+      return new Promise<void>((resolve) => {
+        const handler = (event: MessageEvent) => {
+          let msg: Record<string, unknown>;
+          try { msg = JSON.parse(String(event.data)) as Record<string, unknown>; }
+          catch { return; }
+
+          if (msg?.type === "batch" && Array.isArray(msg.messages))
+          {
+            for (const sub of msg.messages as Record<string, unknown>[])
+            {
+              if (sub?.type === "ai-write-scripts-result") { done(); return; }
+            }
+            return;
+          }
+          if (msg?.type === "ai-write-scripts-result") { done(); }
+        };
+
+        const done = () => {
+          socket.removeEventListener("message", handler);
+          setPendingScripts(null);
+          resolve();
+        };
+
+        socket.addEventListener("message", handler);
+        socket.send(JSON.stringify({
+          type: "ai-write-scripts",
+          scripts: scripts.map((s) => ({ path: s.path, content: s.content, executable: s.executable })),
+        }));
+      });
+    },
+  }), [webSocketRef]);
 
   // Listen for AI-related WebSocket messages.
   useEffect(() => {
@@ -199,6 +245,10 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
   }, [promptText, getCurrentJcwf, webSocketRef]);
 
   const isBusy = status === "explaining" || status === "generating";
+  const canvasHasTasks = (() => {
+    const jcwf = getCurrentJcwf();
+    return jcwf !== null && typeof jcwf.tasks === "object" && jcwf.tasks !== null && Object.keys(jcwf.tasks).length > 0;
+  })();
 
   if (collapsed)
   {
@@ -217,7 +267,7 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
   }
 
   return (
-    <div className="aiPromptArea">
+    <div className={`aiPromptArea${pendingScripts && pendingScripts.length > 0 ? " hasScriptReview" : ""}`}>
       <div className="aiPromptHeader">
         <span className="aiPromptTitle">AI Prompt</span>
         <div className="aiPromptHeaderRight">
@@ -250,8 +300,8 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
           className="btn aiPromptBtn"
           type="button"
           onClick={onExplain}
-          disabled={isBusy || !isWebSocketConnected}
-          title="Generate a natural language summary of the current workflow"
+          disabled={isBusy || !isWebSocketConnected || !canvasHasTasks}
+          title={!canvasHasTasks ? "Add tasks to the canvas first" : "Generate a natural language summary of the current workflow"}
         >
           {status === "explaining" ? "Explaining..." : "Explain"}
         </button>
@@ -290,4 +340,6 @@ export default function AiPromptArea(props: AiPromptAreaProps): React.ReactEleme
       )}
     </div>
   );
-}
+});
+
+export default AiPromptArea;

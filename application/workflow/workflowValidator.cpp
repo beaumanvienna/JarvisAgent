@@ -880,9 +880,22 @@ namespace
                         {
                             fs::path const rootDir = workflowFileIndex->GetRootDirectory();
                             fs::path const relMatch = matches[0].lexically_relative(rootDir);
-                            suggestedFix = "File '" + basename + "' exists at '" + relMatch.generic_string() +
-                                           "' (relative to workflows/). Change file_inputs to reference the correct "
-                                           "relative path from working_directory.";
+
+                            // Compute the exact relative path from working_directory to the file
+                            // so the fix AI doesn't have to do the directory-traversal math.
+                            if (!task.m_WorkingDirectory.empty())
+                            {
+                                fs::path const correctRel = relMatch.lexically_relative(fs::path(task.m_WorkingDirectory));
+                                suggestedFix = "File '" + basename + "' exists at '" + relMatch.generic_string() +
+                                               "' (relative to workflows/). Change file_inputs[" + std::to_string(i) +
+                                               "] to '" + correctRel.generic_string() + "'.";
+                            }
+                            else
+                            {
+                                suggestedFix = "File '" + basename + "' exists at '" + relMatch.generic_string() +
+                                               "' (relative to workflows/). Change file_inputs[" + std::to_string(i) +
+                                               "] to '" + relMatch.generic_string() + "'.";
+                            }
                         }
                     }
 

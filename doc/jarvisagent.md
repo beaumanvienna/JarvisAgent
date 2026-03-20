@@ -86,6 +86,7 @@ The following fields are recognized:
 - **`"max threads"`** — (number) Maximum number of concurrent AI request threads.
 - **`"engine sleep time in run loop in ms"`** — (number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness.
 - **`"max file size in kB"`** — (number) Maximum input file size in kilobytes. Files larger than this are chunked before being sent to the AI. Default: 20.
+- **`"jcwf batch size"`** — (number) Number of tasks per batch when the AI JCWF generator fans out to multiple parallel calls for large workflows. Workflows with fewer tasks than this threshold are generated in a single call. Default: 10.
 - **`"verbose"`** — (boolean) Enable verbose logging output.
 - **`"keys_file"`** — (string) Path to the encrypted API keys file. Default: `keys.json.enc`.
 - **`"API index"`** — (number) Zero-based index of the default AI interface to use from the `"API interfaces"` array.

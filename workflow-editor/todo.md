@@ -41,6 +41,14 @@ Last reviewed: 2026-03-12
 - [ ] Box select: left-click drag on empty canvas area opens a selection rectangle to select
       multiple nodes at once (for group move/delete). Note: Ctrl+click already works for
       multi-select; this adds the more intuitive drag-box alternative.
+- [x] ~~Generated Scripts review panel UX facelift — per-script accept/reject buttons,
+      collapsible taller code editor, sticky action bar (Accept All / Skip always visible),
+      clearer visual hierarchy for the review step.~~
+- [x] ~~"Accept & Save All" combined button after AI generation — when neither the JCWF nor
+      the generated scripts are saved yet, offer a single action that writes the scripts to
+      disk and saves the JCWF in one step. Currently the user must accept scripts and save
+      the workflow separately, which is confusing if they hit Run before either is persisted.~~
+      Resolved: Run now auto-flushes pending AI scripts before saving JCWF and starting the run.
 - [ ] Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files
 - [ ] Drag-to-reorder in queue_binding entries (stretch goal)
 

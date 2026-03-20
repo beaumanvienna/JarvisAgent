@@ -195,6 +195,11 @@
     <dd>(number) Maximum input file size in kilobytes. Files larger than this are chunked before
       being sent to the AI. Default: 20.</dd>
 
+    <dt><code>"jcwf batch size"</code></dt>
+    <dd>(number) Number of tasks per batch when the AI JCWF generator fans out to multiple parallel
+      calls for large workflows. Workflows with fewer tasks than this threshold are generated in a
+      single call. Default: 10.</dd>
+
     <dt><code>"verbose"</code></dt>
     <dd>(boolean) Enable verbose logging output.</dd>
 

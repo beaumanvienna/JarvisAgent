@@ -257,6 +257,20 @@ export async function checkScript(scriptPath: string): Promise<ScriptCheckRespon
   return (await response.json()) as ScriptCheckResponse;
 }
 
+export type FileCheckResponse = {
+  ok: boolean;
+  path: string;
+  exists: boolean;
+  error?: string;
+  message?: string;
+};
+
+export async function checkFileExists(filePath: string): Promise<FileCheckResponse>
+{
+  const response = await fetch(`/api/files/check?path=${encodeURIComponent(filePath)}`);
+  return (await response.json()) as FileCheckResponse;
+}
+
 export async function fetchRunDetails(runId: string): Promise<RunDetailResponse>
 {
   const response = await fetch(`/api/workflow-runs/${encodeURIComponent(runId)}`);

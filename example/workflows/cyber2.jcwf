@@ -1,35 +1,45 @@
 {
   "version": "1.0",
   "id": "cyber2",
-  "label": "OpenSSH 2k Attack Analysis Workflow",
-  "doc": "Workflow to parse OpenSSH log, extract attack statistics, and perform AI threat assessment.",
+  "label": "OpenSSH 2000 Log Attack Analysis",
+  "doc": "Workflow to parse OpenSSH log file and extract attack statistics.",
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual",
+      "enabled": true
+    }
+  ],
+  "defaults": {
+    "timeout_ms": 60000
+  },
   "tasks": {
-    "ai_threat_assessment": {
-      "id": "ai_threat_assessment",
+    "analyze_threats": {
+      "id": "analyze_threats",
       "type": "ai_call",
-      "label": "AI threat assessment on extracted attack statistics",
-      "working_directory": "../queue/OpenSSH_2k/02_ai_threat_assessment",
+      "label": "AI threat assessment and mitigation recommendations",
+      "working_directory": "../queue/OpenSSH_2k/02_analyze_threats",
       "expose_error_signal": false,
       "queue_binding": {
         "stng_files": [
           {
             "path": "STNG_threat_assessment.txt",
-            "content": "Classify attacker IPs by attack type, rank severity, flag suspicious successful logins, and recommend mitigations. No markdown fences, no explanations."
+            "content": "Analyze cybersecurity threat data precisely. Output only raw Markdown report. No markdown fences, no explanations."
           }
         ],
         "task_files": [
           {
             "path": "TASK_threat_assessment.txt",
-            "content": "Analyze the JSON-formatted SSH attack statistics and produce a detailed Markdown report with classifications and mitigation recommendations."
+            "content": "Classify attacker IPs by type (brute force, dictionary attack, credential stuffing), rank severity, flag suspicious successful logins, recommend mitigations like fail2ban rules, firewall blocks, SSH hardening."
           }
         ],
         "cntx_files": [
-          "../../../workflows/OpenSSH_2k/01_parse_ssh_log/attack_stats.json"
+          "../../../workflows/OpenSSH_2k/01_parse/attack_stats.json"
         ],
         "prob_files": [
           {
-            "path": "PROB_threat_assessment.txt",
-            "content": "Based on the extracted attack statistics, classify each IP as brute force, dictionary attack, or credential stuffing, rank by threat severity, flag suspicious successful logins, and recommend fail2ban, firewall, and SSH hardening mitigations."
+            "path": "PROB_threat_report.txt",
+            "content": "Produce a detailed Markdown report with threat classification, severity ranking, suspicious login flags, and mitigation recommendations."
           }
         ]
       },
@@ -40,12 +50,12 @@
     "parse_ssh_log": {
       "id": "parse_ssh_log",
       "type": "python",
-      "label": "Parse OpenSSH log to extract attack statistics",
-      "working_directory": "OpenSSH_2k/01_parse_ssh_log",
+      "label": "Parse OpenSSH log and extract attack statistics",
+      "working_directory": "OpenSSH_2k/01_parse",
       "expose_error_signal": false,
       "params": {
-        "module": "scripts.parseSshLog",
-        "function": "extract_attack_statistics"
+        "module": "scripts.parseSshdLog",
+        "function": "extract_attack_stats"
       },
       "file_inputs": [
         "../../OpenSSH_2k.log"

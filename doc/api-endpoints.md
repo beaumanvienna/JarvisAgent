@@ -193,6 +193,51 @@ Security: the raw path must start with `scripts/` and the lexically-normalized p
 
 ---
 
+## File Existence Check (Workflow Editor)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/files/check?path=<filePath>` | Check if a file exists relative to the working directory. |
+
+### GET /api/files/check
+
+Used by the Workflow Editor to provide real-time validation warnings (W badge) for python and shell tasks whose static `file_inputs` reference files that do not exist on disk.
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `path` | Yes | Relative file path. Resolved relative to the JarvisAgent Launch Working Directory. Absolute paths are rejected. |
+
+**Response (200) — file found:**
+```json
+{ "ok": true, "path": "OpenSSH_2k.log", "exists": true }
+```
+
+**Response (200) — file not found:**
+```json
+{ "ok": true, "path": "OpenSSH_2k.log", "exists": false }
+```
+
+**Response (400) — missing path:**
+```json
+{ "ok": false, "error": "missing_path", "message": "Query parameter 'path' is required." }
+```
+
+**Response (400) — absolute path rejected:**
+```json
+{ "ok": false, "error": "invalid_path", "message": "Absolute paths are not allowed.", "path": "/etc/passwd" }
+```
+
+**Response (400) — path escapes working directory:**
+```json
+{ "ok": false, "error": "invalid_path", "message": "Resolved path escapes the working directory.", "path": "../../etc/passwd" }
+```
+
+Security: only relative paths are accepted. The resolved path must remain inside the JarvisAgent Launch Working Directory after lexical normalization.
+
+---
+
 ## Workflows — Run Control & Monitoring
 
 | Method | Path | Description |

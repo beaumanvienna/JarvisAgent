@@ -277,7 +277,11 @@ namespace AIAssistant
 
         // --- Raw diagnostics: bypass spdlog/streambuf to catch post-log hangs ---
 #ifndef _WIN32
-#define RAW_SHUTDOWN(literal) do { [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); } while (0)
+#define RAW_SHUTDOWN(literal)                                                             \
+    do                                                                                    \
+    {                                                                                     \
+        [[maybe_unused]] auto rc_ = ::write(STDERR_FILENO, literal, sizeof(literal) - 1); \
+    } while (0)
 #else
 #define RAW_SHUTDOWN(literal) _write(_fileno(stderr), literal, sizeof(literal) - 1)
 #endif

@@ -92,6 +92,12 @@ namespace AIAssistant
         sessionStatus.lastErrorMessage = lastErrorMessage;
     }
 
+    void StatusRenderer::RemoveSession(std::string const& name)
+    {
+        std::lock_guard<std::mutex> guard(m_Mutex);
+        m_Sessions.erase(name);
+    }
+
     size_t StatusRenderer::GetSessionCount()
     {
         std::lock_guard<std::mutex> guard(m_Mutex);

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 export type GeneratedScript = {
   path: string;
@@ -19,8 +19,15 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
     scripts.map((s) => ({ ...s }))
   );
   const [expandedIndex, setExpandedIndex] = useState<number | null>(0);
+  const [acceptedSet, setAcceptedSet] = useState<Set<number>>(() => new Set());
   const [writing, setWriting] = useState(false);
   const [writeResult, setWriteResult] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the panel when it mounts
+  useEffect(() => {
+    panelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, []);
 
   const updateContent = (index: number, newContent: string) => {
     setEditedScripts((prev) => {
@@ -30,7 +37,7 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
     });
   };
 
-  const onAcceptAll = () => {
+  const sendWriteRequest = (scriptsToWrite: GeneratedScript[], onSuccess: (written: string[]) => void) => {
     const socket = webSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN)
     {
@@ -41,7 +48,6 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
     setWriting(true);
     setWriteResult(null);
 
-    // Listen for the write result
     const handler = (event: MessageEvent) => {
       let msg: Record<string, unknown>;
       try
@@ -82,8 +88,7 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
 
       if (errors.length === 0)
       {
-        setWriteResult(`Wrote ${written.length} script${written.length !== 1 ? "s" : ""} to disk.`);
-        setTimeout(onDone, 1500);
+        onSuccess(written);
       }
       else
       {
@@ -96,7 +101,7 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
 
     socket.send(JSON.stringify({
       type: "ai-write-scripts",
-      scripts: editedScripts.map((s) => ({
+      scripts: scriptsToWrite.map((s) => ({
         path: s.path,
         content: s.content,
         executable: s.executable,
@@ -104,12 +109,48 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
     }));
   };
 
+  const onAcceptOne = (index: number) => {
+    sendWriteRequest([editedScripts[index]], (written) => {
+      setAcceptedSet((prev) => {
+        const next = new Set(prev);
+        next.add(index);
+        // If all scripts are now accepted, auto-dismiss after a short delay
+        if (next.size === editedScripts.length)
+        {
+          setWriteResult(`Wrote ${written.length} script${written.length !== 1 ? "s" : ""} to disk.`);
+          setTimeout(onDone, 1500);
+        }
+        else
+        {
+          setWriteResult(`Wrote ${editedScripts[index].path}`);
+        }
+        return next;
+      });
+    });
+  };
+
+  const onAcceptAll = () => {
+    const remaining = editedScripts.filter((_, i) => !acceptedSet.has(i));
+    if (remaining.length === 0)
+    {
+      onDone();
+      return;
+    }
+
+    sendWriteRequest(remaining, (written) => {
+      setWriteResult(`Wrote ${written.length} script${written.length !== 1 ? "s" : ""} to disk.`);
+      setTimeout(onDone, 1500);
+    });
+  };
+
   const onSkip = () => {
     onDone();
   };
 
+  const remainingCount = editedScripts.length - acceptedSet.size;
+
   return (
-    <div className="scriptReviewPanel">
+    <div className="scriptReviewPanel" ref={panelRef}>
       <div className="scriptReviewHeader">
         <span className="scriptReviewTitle">
           Generated Scripts ({editedScripts.length})
@@ -118,18 +159,27 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
 
       <div className="scriptReviewList">
         {editedScripts.map((script, i) => (
-          <div key={script.path} className="scriptReviewItem">
+          <div key={script.path} className={`scriptReviewItem${expandedIndex === i ? " expanded" : ""}${acceptedSet.has(i) ? " accepted" : ""}`}>
             <button
               className="scriptReviewItemHeader"
               type="button"
               onClick={() => setExpandedIndex(expandedIndex === i ? null : i)}
             >
               <span className="scriptReviewPath">{script.path}</span>
-              <span className="scriptReviewBadge">
-                {script.executable ? "executable" : "script"}
-              </span>
+              {acceptedSet.has(i)
+                ? <span className="scriptReviewItemAccepted">accepted</span>
+                : (
+                  <button
+                    className="scriptReviewItemAccept"
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onAcceptOne(i); }}
+                    disabled={writing}
+                  >
+                    accept
+                  </button>
+                )}
               <span className="scriptReviewToggle">
-                {expandedIndex === i ? "▾" : "▸"}
+                {expandedIndex === i ? "\u25BE" : "\u25B8"}
               </span>
             </button>
 
@@ -139,7 +189,6 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
                 value={script.content}
                 onChange={(e) => updateContent(i, e.target.value)}
                 spellCheck={false}
-                rows={Math.min(20, script.content.split("\n").length + 1)}
               />
             )}
           </div>
@@ -151,9 +200,9 @@ export default function ScriptReviewPanel(props: ScriptReviewPanelProps): React.
           className="btn scriptReviewBtn scriptReviewBtnPrimary"
           type="button"
           onClick={onAcceptAll}
-          disabled={writing}
+          disabled={writing || remainingCount === 0}
         >
-          {writing ? "Writing..." : "Accept All"}
+          {writing ? "Writing..." : remainingCount === 0 ? "All Accepted" : remainingCount === editedScripts.length ? "Accept All" : `Accept Remaining (${remainingCount})`}
         </button>
         <button
           className="btn scriptReviewBtn"

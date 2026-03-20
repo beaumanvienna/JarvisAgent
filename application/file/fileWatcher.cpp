@@ -176,6 +176,7 @@ namespace AIAssistant
             {
                 if (!fs::exists(it->first))
                 {
+                    LOG_APP_INFO("FileWatcher: file deleted from disk: {}", it->first);
                     Core::g_Core->PushEvent(std::make_shared<FileRemovedEvent>(it->first));
                     it = files.erase(it);
                 }

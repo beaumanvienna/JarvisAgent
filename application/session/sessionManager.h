@@ -84,6 +84,7 @@ namespace AIAssistant
         void OnShutdown();
 
         bool IsIdle() const;
+        bool HasTrackedFiles() const;
 
     public:
         std::string const& GetName() const { return m_Name; }

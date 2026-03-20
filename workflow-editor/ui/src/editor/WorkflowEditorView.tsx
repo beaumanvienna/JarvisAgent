@@ -29,6 +29,7 @@ import {
   cancelRun,
   cleanWorkflow,
   createWorkflowWithId,
+  checkFileExists,
   checkScript,
   fetchRunDetails,
   loadWorkflow,
@@ -43,6 +44,7 @@ import {
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
 import AiPromptArea from "./AiPromptArea";
+import type { AiPromptAreaHandle } from "./AiPromptArea";
 
 const nodeTypes = { task: TaskNode, filter: FilterNode, branch: BranchNode };
 
@@ -239,6 +241,7 @@ export default function WorkflowEditorView(props: {
 
   const loadedJcwfRef = useRef<JcwfFile | null>(null);
   const webSocketRef = useRef<WebSocket | null>(null);
+  const aiPromptAreaRef = useRef<AiPromptAreaHandle>(null);
   const [isWebSocketConnected, setIsWebSocketConnected] = useState<boolean>(false);
   const [activeRuns, setActiveRuns] = useState<WorkflowRunListItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -257,10 +260,13 @@ export default function WorkflowEditorView(props: {
 
   // Async script existence check cache (command path → check result).
   const scriptCheckCacheRef = useRef<Record<string, { exists: boolean; executable: boolean }>>({})
+  // Async file_input existence check cache (file path → exists).
+  const fileCheckCacheRef = useRef<Record<string, { exists: boolean }>>({});
   const [scriptCheckTick, setScriptCheckTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => {
       scriptCheckCacheRef.current = {};
+      fileCheckCacheRef.current = {};
       setScriptCheckTick((t) => t + 1);
     }, 5000);
     return () => clearInterval(timer);
@@ -672,7 +678,41 @@ export default function WorkflowEditorView(props: {
           }
         }
       }
-      const mergedWarnings = [...clientWarnings, ...serverWarnings, ...scriptWarnings];
+      else if (taskNode.data.task?.type === "python")
+      {
+        const params = (taskNode.data.task.params ?? {}) as Record<string, unknown>;
+        const mod = typeof params.module === "string" ? params.module : "";
+        if (mod.startsWith("scripts.") || mod.startsWith("scripts/"))
+        {
+          const filePath = mod.replace(/\./g, "/") + ".py";
+          const cached = scriptCheckCacheRef.current[filePath];
+          if (cached && !cached.exists)
+          {
+            scriptWarnings.push(`Script '${filePath}' not found.`);
+          }
+        }
+      }
+      // File input existence warnings from async check cache
+      const fileInputWarnings: string[] = [];
+      const taskType = taskNode.data.task?.type;
+      if (taskType === "python" || taskType === "shell")
+      {
+        const wd = typeof taskNode.data.task.working_directory === "string" ? taskNode.data.task.working_directory : "";
+        const fileInputs = Array.isArray(taskNode.data.task.file_inputs) ? taskNode.data.task.file_inputs as string[] : [];
+        for (const filePath of fileInputs)
+        {
+          // Skip template bindings like {{input[0]}}
+          if (filePath.includes("{{")) continue;
+          if (filePath.length === 0) continue;
+          const resolvedKey = resolveFileInputPath(filePath, wd);
+          const cached = fileCheckCacheRef.current[resolvedKey];
+          if (cached && !cached.exists)
+          {
+            fileInputWarnings.push(`Input file '${filePath}' not found.`);
+          }
+        }
+      }
+      const mergedWarnings = [...clientWarnings, ...serverWarnings, ...scriptWarnings, ...fileInputWarnings];
 
       const clientInfos = validation.nodeInfosById ? (validation.nodeInfosById.get(n.id) ?? []) : [];
       const serverInfos = backendInfosByTaskId.get(n.id) ?? [];
@@ -704,19 +744,31 @@ export default function WorkflowEditorView(props: {
     setEdges(graph.edges);
   }, [setNodes, setEdges, backendErrors, backendWarnings, backendInfos, lastSavedNodeSnapshot, props.hideTierDWarnings]);
 
-  // Async script existence check — fires when shell commands change.
+  // Async script existence check — fires when shell/python commands change.
   const shellCommandsFingerprint = useMemo(() => {
     const commands: string[] = [];
     for (const node of nodes)
     {
       if (node.type !== "task") continue;
       const taskData = (node as EditorTaskNode).data;
-      if (taskData.task?.type !== "shell") continue;
-      const params = (taskData.task.params ?? {}) as Record<string, unknown>;
-      const cmd = typeof params.command === "string" ? params.command : "";
-      if (cmd.startsWith("scripts/"))
+      const taskType = taskData.task?.type;
+      const params = (taskData.task?.params ?? {}) as Record<string, unknown>;
+      if (taskType === "shell")
       {
-        commands.push(`${node.id}:${cmd}`);
+        const cmd = typeof params.command === "string" ? params.command : "";
+        if (cmd.startsWith("scripts/"))
+        {
+          commands.push(`${node.id}:${cmd}`);
+        }
+      }
+      else if (taskType === "python")
+      {
+        const mod = typeof params.module === "string" ? params.module : "";
+        if (mod.startsWith("scripts.") || mod.startsWith("scripts/"))
+        {
+          const filePath = mod.replace(/\./g, "/") + ".py";
+          commands.push(`${node.id}:${filePath}`);
+        }
       }
     }
     return commands.sort().join("|");
@@ -772,6 +824,87 @@ export default function WorkflowEditorView(props: {
 
     return () => { cancelled = true; };
   }, [shellCommandsFingerprint, nodes, edges, scriptCheckTick]);
+
+  // Resolve a file_input path relative to workflows/<working_directory>/ (matching runtime).
+  // Returns a normalized relative path suitable for /api/files/check.
+  const resolveFileInputPath = (fileInput: string, workingDirectory: string): string => {
+    const combined = workingDirectory
+      ? `workflows/${workingDirectory}/${fileInput}`
+      : `workflows/${fileInput}`;
+    const parts = combined.split("/");
+    const resolved: string[] = [];
+    for (const part of parts)
+    {
+      if (part === "..") { resolved.pop(); }
+      else if (part !== "." && part !== "") { resolved.push(part); }
+    }
+    return resolved.join("/");
+  };
+
+  // Async file_input existence check — fires when static file_input paths change.
+  const fileInputsFingerprint = useMemo(() => {
+    const paths: string[] = [];
+    for (const node of nodes)
+    {
+      if (node.type !== "task") continue;
+      const taskData = (node as EditorTaskNode).data;
+      const taskType = taskData.task?.type;
+      if (taskType !== "python" && taskType !== "shell") continue;
+      const wd = typeof taskData.task.working_directory === "string" ? taskData.task.working_directory : "";
+      const fileInputs = Array.isArray(taskData.task.file_inputs) ? taskData.task.file_inputs as string[] : [];
+      for (const fp of fileInputs)
+      {
+        if (fp.length === 0 || fp.includes("{{")) continue;
+        const resolved = resolveFileInputPath(fp, wd);
+        paths.push(`${node.id}:${resolved}`);
+      }
+    }
+    return paths.sort().join("|");
+  }, [nodes]);
+
+  useEffect(() => {
+    if (fileInputsFingerprint.length === 0) return;
+
+    const entries = fileInputsFingerprint.split("|").map((s) => {
+      const idx = s.indexOf(":");
+      return { nodeId: s.slice(0, idx), filePath: s.slice(idx + 1) };
+    });
+
+    const uncached = [...new Set(entries.map((e) => e.filePath))].filter(
+      (fp) => !(fp in fileCheckCacheRef.current)
+    );
+    if (uncached.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const results: Record<string, { exists: boolean }> = {};
+      await Promise.all(
+        uncached.map(async (fp) => {
+          try
+          {
+            const res = await checkFileExists(fp);
+            results[fp] = { exists: res.exists };
+          }
+          catch
+          {
+            // Transient error — leave uncached so it retries next time
+          }
+        })
+      );
+
+      if (cancelled) return;
+
+      fileCheckCacheRef.current = { ...fileCheckCacheRef.current, ...results };
+
+      recomputeValidationRef.current({
+        nodes: nodes as EditorTaskNode[],
+        edges: edges as EditorTaskEdge[],
+      });
+    })();
+
+    return () => { cancelled = true; };
+  }, [fileInputsFingerprint, nodes, edges, scriptCheckTick]);
 
   useEffect(() => {
     const runPaused = selectedRunId
@@ -951,9 +1084,11 @@ export default function WorkflowEditorView(props: {
     // Deferred so React has time to render the new nodes.
     setTimeout(() => {
       onAutoLayoutRef.current?.();
-      reactFlowInstance?.fitView({ padding: 0.15 });
+      reactFlowInstance?.fitView({ padding: 0.15, maxZoom: 1.2 });
     }, 80);
   }, [loadFromJcwf, loadedWorkflowId, reactFlowInstance]);
+
+  const skipFitViewRef = useRef(false);
 
   const resetToNewDraftRef = useRef(resetToNewDraft);
   useEffect(() => {
@@ -1014,8 +1149,13 @@ export default function WorkflowEditorView(props: {
     {
       return;
     }
+    if (skipFitViewRef.current)
+    {
+      skipFitViewRef.current = false;
+      return;
+    }
     const timer = setTimeout(() => {
-      reactFlowInstance.fitView({ padding: 0.15 });
+      reactFlowInstance.fitView({ padding: 0.15, maxZoom: 1.2 });
       const vp = reactFlowInstance.getViewport();
       if (vp.zoom <= MIN_ZOOM)
       {
@@ -2050,6 +2190,7 @@ export default function WorkflowEditorView(props: {
         merged.manual_start = false;
       }
       const result = await createWorkflowWithId(newId, merged);
+      skipFitViewRef.current = true;
       setLoadedWorkflowId(newId);
       props.onWorkflowCreated(newId);
       setStatusText(result.ok ? `${mode === "create" ? "Created" : "Saved as"} '${newId}'.` : `${mode === "create" ? "Create" : "Save As"} returned ok=false for '${newId}'.`);
@@ -2171,6 +2312,13 @@ export default function WorkflowEditorView(props: {
 
     try
     {
+      // Auto-save pending AI scripts (if any) before running
+      if (aiPromptAreaRef.current)
+      {
+        setStatusText("Writing pending scripts…");
+        await aiPromptAreaRef.current.flushPendingScripts();
+      }
+
       // Always save before running to ensure backend has the latest version
       setStatusText("Saving before run…");
       await onSave();
@@ -2198,7 +2346,7 @@ export default function WorkflowEditorView(props: {
       setErrorText(`Run failed: ${message}`);
       setStatusText("");
     }
-  }, [loadedWorkflowId, props.workflowId, onSave]);
+  }, [loadedWorkflowId, props.workflowId, onSave, aiPromptAreaRef]);
 
   const onClean = useCallback(async () => {
     const workflowId = loadedWorkflowId ?? props.workflowId;
@@ -2833,6 +2981,7 @@ export default function WorkflowEditorView(props: {
           </ReactFlow>
         </div>
         <AiPromptArea
+          ref={aiPromptAreaRef}
           getCurrentJcwf={getCurrentJcwf}
           onJcwfGenerated={onJcwfGenerated}
           webSocketRef={webSocketRef}

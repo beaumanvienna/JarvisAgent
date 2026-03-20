@@ -103,6 +103,12 @@ Controls CPU usage vs. responsiveness.
 Files larger than this are chunked before being sent to the AI.
 Default: 20.
 .TP
+.B "jcwf batch size"
+(number) Number of tasks per batch when the AI JCWF generator fans out to
+multiple parallel calls for large workflows.
+Workflows with fewer tasks than this threshold are generated in a single call.
+Default: 10.
+.TP
 .B "verbose"
 (boolean) Enable verbose logging output.
 .TP

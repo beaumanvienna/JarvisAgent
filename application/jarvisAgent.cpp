@@ -292,6 +292,32 @@ namespace AIAssistant
             sessionManager.second->OnUpdate();
         }
 
+        // Remove stale session managers: idle, no tracked files, queue folder gone.
+        {
+            size_t const smCountBefore = m_SessionManagers.size();
+            for (auto it = m_SessionManagers.begin(); it != m_SessionManagers.end();)
+            {
+                auto& sm = *it->second;
+                bool const hasFiles = sm.HasTrackedFiles();
+                bool const dirExists = fs::is_directory(it->first);
+                if (!hasFiles && !dirExists)
+                {
+                    LOG_APP_INFO("Removing stale session manager '{}'", it->first);
+                    m_StatusRenderer.RemoveSession(it->first);
+                    it = m_SessionManagers.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            size_t const removed = smCountBefore - m_SessionManagers.size();
+            if (removed > 0)
+            {
+                LOG_APP_INFO("Stale session cleanup: removed {} of {} session managers", removed, smCountBefore);
+            }
+        }
+
         // Clean old chat messages
         m_ChatMessagePool->RemoveExpired();
 

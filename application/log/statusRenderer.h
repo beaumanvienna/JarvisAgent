@@ -53,6 +53,7 @@ namespace AIAssistant
 
         void UpdateSession(std::string const& name, std::string_view state, size_t outputs, size_t inflight,
                            size_t completed, size_t failed, int lastErrorCode, std::string const& lastErrorMessage);
+        void RemoveSession(std::string const& name);
 
         void Start();
         void Stop();

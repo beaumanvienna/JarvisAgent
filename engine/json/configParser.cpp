@@ -147,6 +147,17 @@ namespace AIAssistant
                 LOG_CORE_INFO("API index: {}", engineConfig.m_ApiIndex);
                 ++fieldOccurances[ConfigFields::ApiIndex];
             }
+            else if (jsonObjectKey == "jcwf batch size")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto batchSize = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("jcwf batch size: {}", batchSize);
+                if (batchSize > 0)
+                {
+                    engineConfig.m_JcwfBatchSize = static_cast<size_t>(batchSize);
+                }
+                ++fieldOccurances[ConfigFields::JcwfBatchSize];
+            }
             else if (jsonObjectKey == "keys_file")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");

@@ -449,17 +449,28 @@ namespace AIAssistant
             m_PendingByOutputPath.erase(iterator);
         }
 
+        // Skip if already completed (e.g. duplicate event or deletion after creation).
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+            if (pendingEntry->m_IsCompleted)
+            {
+                return true;
+            }
+        }
+
         // Read file content.
         std::string fileContent;
         {
             std::ifstream inputStream(fullFilePath, std::ios::binary);
             if (!inputStream.is_open())
             {
-                std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-                pendingEntry->m_IsCompleted = true;
-                pendingEntry->m_IsFailed = true;
-                pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
-                pendingEntry->conditionVariable.notify_all();
+                {
+                    std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+                    pendingEntry->m_IsCompleted = true;
+                    pendingEntry->m_IsFailed = true;
+                    pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
+                    pendingEntry->conditionVariable.notify_all();
+                }
                 QueueCompletionIfNeeded(pendingEntry);
                 return true;
             }
@@ -593,17 +604,28 @@ namespace AIAssistant
             pendingEntry = iterator->second;
         }
 
+        // Skip if already completed (e.g. file deletion event after the creation event was already handled).
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+            if (pendingEntry->m_IsCompleted)
+            {
+                return true;
+            }
+        }
+
         // Read file content. If file can't be read, fail this request but still consume the event.
         std::string fileContent;
         {
             std::ifstream inputStream(fullFilePath, std::ios::binary);
             if (!inputStream.is_open())
             {
-                std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-                pendingEntry->m_IsCompleted = true;
-                pendingEntry->m_IsFailed = true;
-                pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
-                pendingEntry->conditionVariable.notify_all();
+                {
+                    std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+                    pendingEntry->m_IsCompleted = true;
+                    pendingEntry->m_IsFailed = true;
+                    pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
+                    pendingEntry->conditionVariable.notify_all();
+                }
                 QueueCompletionIfNeeded(pendingEntry);
                 return true;
             }

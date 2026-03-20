@@ -928,6 +928,10 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/scripts/registry").methods("GET"_method)([this]() { return HandleScriptRegistryGet(); });
 
+        // ---- File existence check API (Workflow Editor) ----
+        CROW_ROUTE(m_Server, "/api/files/check")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleFileCheckGet(req); });
+
         // ---- Log viewer API ----
         CROW_ROUTE(m_Server, "/api/log")
             .methods("GET"_method)([this](crow::request const& req) { return HandleLogGet(req); });
@@ -2156,6 +2160,71 @@ namespace AIAssistant
         responseJson["path"] = scriptPath;
         responseJson["exists"] = exists;
         responseJson["executable"] = executable;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleFileCheckGet(crow::request const& req)
+    {
+        // GET /api/files/check?path=OpenSSH_2k.log
+        // Returns: { ok, path, exists }
+
+        std::string filePath;
+        auto pathParam = req.url_params.get("path");
+        if (pathParam != nullptr)
+        {
+            filePath = std::string(pathParam);
+        }
+
+        if (filePath.empty())
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "missing_path";
+            responseJson["message"] = "Query parameter 'path' is required.";
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        // Security: reject absolute paths
+        if (fs::path(filePath).is_absolute())
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "invalid_path";
+            responseJson["message"] = "Absolute paths are not allowed.";
+            responseJson["path"] = filePath;
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        // Resolve and verify it stays within CWD
+        fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
+        if (launchCWD.empty())
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "server_error";
+            responseJson["message"] = "Cannot determine JarvisAgent working directory.";
+            return MakeJsonResponse(500, responseJson);
+        }
+
+        fs::path const absolutePath = (launchCWD / fs::path(filePath)).lexically_normal();
+        std::string const absStr = absolutePath.string();
+        std::string const cwdStr = launchCWD.string();
+        if (absStr.rfind(cwdStr, 0) != 0)
+        {
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = false;
+            responseJson["error"] = "invalid_path";
+            responseJson["message"] = "Resolved path escapes the working directory.";
+            responseJson["path"] = filePath;
+            return MakeJsonResponse(400, responseJson);
+        }
+
+        bool const exists = fs::exists(absolutePath);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["path"] = filePath;
+        responseJson["exists"] = exists;
         return MakeJsonResponse(200, responseJson);
     }
 
