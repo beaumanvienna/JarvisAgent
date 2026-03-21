@@ -260,21 +260,15 @@ zero queue growth, shutdown is instant.
 
 ---
 
-## Bug: WebSocket log line buffer grows unbounded when no client is connected
+## ~~Bug: WebSocket log line buffer grows unbounded when no client is connected~~ ✅
 
-`EnqueueLogLine()` in `webServer.cpp` pushes every log line into `m_PendingLogLines`
-with no size cap. `DrainPendingBroadcasts()` merges these into `m_PendingBroadcasts`
-and sends them only when a client is connected and sends a message. When no WebSocket
-client is connected, log lines accumulate in memory indefinitely.
+~~`EnqueueLogLine()` in `webServer.cpp` pushes every log line into `m_PendingLogLines`
+with no size cap. When no WebSocket client is connected, log lines accumulate in memory
+indefinitely.~~
 
-Observed: after a few minutes of workflow execution (4.2 MB log file), the first
-WebSocket message after connect triggered a 58 MB batch JSON envelope (log lines ×
-JSON-escaping overhead). This is data being marshaled with nowhere to marshal it to.
-
-**Suggested fix:** Either (a) cap `m_PendingLogLines` to the last N lines (e.g. 500),
-discarding older lines when no client is draining them, or (b) clear `m_PendingLogLines`
-entirely when no clients are connected (check `m_Clients.empty()`), or (c) skip
-`EnqueueLogLine()` when `m_Clients` is empty.
+**Fix (applied):** Two-layer defense in `EnqueueLogLine()`:
+1. `m_ClientCount` atomic (lock-free mirror of `m_Clients.size()`, updated in `onopen`/`onclose`) — skip buffering entirely when no WebSocket client is connected.
+2. `kMaxPendingLogLines = 500` cap — if a client is connected but the drain lags, oldest lines are evicted.
 
 Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was caused by
 `m_PendingBroadcasts` growing unbounded — same pattern, different buffer.

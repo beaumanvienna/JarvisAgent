@@ -144,6 +144,7 @@ namespace AIAssistant
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
+        std::atomic<size_t> m_ClientCount{0}; // lock-free mirror of m_Clients.size() for EnqueueLogLine
 
         // WebSocket accumulation statistics (all guarded by m_Mutex)
         size_t m_WsTotalConnects{0};
@@ -155,6 +156,7 @@ namespace AIAssistant
 
         std::mutex m_LogMutex; // separate from m_Mutex to avoid deadlock when logging inside m_Mutex scope
         std::vector<std::string> m_PendingLogLines;
+        static constexpr size_t kMaxPendingLogLines = 500; // defense-in-depth cap
 
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;

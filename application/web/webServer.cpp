@@ -2642,6 +2642,7 @@ namespace AIAssistant
                     {
                         std::lock_guard<std::mutex> lock(m_Mutex);
                         m_Clients.insert(&conn);
+                        m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
                         ++m_WsTotalConnects;
                         if (m_Clients.size() > m_WsPeakClients)
                         {
@@ -2680,6 +2681,7 @@ namespace AIAssistant
                 {
                     std::lock_guard<std::mutex> lock(m_Mutex);
                     m_Clients.erase(&conn);
+                    m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
                     ++m_WsTotalDisconnects;
                     LOG_APP_INFO("WebSocket client disconnected ({}, code {}) (remaining: {}, lifetime disconnects: {})",
                                  reason, code, m_Clients.size(), m_WsTotalDisconnects);
@@ -3057,6 +3059,9 @@ namespace AIAssistant
 
     void WebServer::Broadcast(const std::string& jsonMessage)
     {
+        if (m_ClientCount.load(std::memory_order_relaxed) == 0)
+            return;
+
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonMessage);
         if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
@@ -3067,6 +3072,9 @@ namespace AIAssistant
 
     void WebServer::BroadcastJSON(std::string const& jsonString)
     {
+        if (m_ClientCount.load(std::memory_order_relaxed) == 0)
+            return;
+
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonString);
         if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
@@ -3077,7 +3085,14 @@ namespace AIAssistant
 
     void WebServer::EnqueueLogLine(std::string const& line)
     {
+        // Skip buffering when no WebSocket client is connected — avoids
+        // unbounded memory growth when JarvisAgent runs without a browser.
+        if (m_ClientCount.load(std::memory_order_relaxed) == 0)
+            return;
+
         std::lock_guard<std::mutex> lock(m_LogMutex);
+        if (m_PendingLogLines.size() >= kMaxPendingLogLines)
+            m_PendingLogLines.erase(m_PendingLogLines.begin());
         m_PendingLogLines.push_back(line);
     }
 
