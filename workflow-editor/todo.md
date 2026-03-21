@@ -31,16 +31,14 @@ Last reviewed: 2026-03-12
 - [x] ~~Script path validation (`GET /api/scripts/check`, inline warnings)~~
 - [x] ~~Dashboard Log Viewer (virtual scroll, delta polling, search, analyze run panel)~~
 - [x] ~~Log analyze: multi-run cycling (◀/▶), issue filtering by runId/workflowId~~
-- [x] ~~JCWF generation assistant~~ — "Generate" button: 5-stage AI pipeline (decompose → generate JCWF → generate Python scripts → validate → fix). Validator uses `WorkflowFileIndex` for file path suggestions. "Explain" button: AI summarizes loaded workflow. Backend: `AiJcwfService` in `aiJcwfService.cpp`. E2E verified with `cyber2` (OpenSSH log analysis).
+- [x] ~~JCWF generation assistant~~ — "Generate" button: multi-stage AI pipeline (decompose → generate JCWF with batched fan-out → generate scripts → review → validate → fix). Supports both Python and **shell (bash)** script generation with POSIX awk rules, host OS detection, and positional arg mapping. "Explain" button: AI summarizes loaded workflow. **Fix Script** button: sends failed script + stderr to AI, user reviews fix in `ScriptReviewPanel`. Backend: `AiJcwfService` in `aiJcwfService.cpp`. E2E verified with `cyber2` (Python) and `cyber3` (shell). See `example/workflows/cyber2_e2e.md` and `cyber3_e2e.md`.
 
 ---
 
 ## Remaining Work
 
 ### Editor UI
-- [ ] Box select: left-click drag on empty canvas area opens a selection rectangle to select
-      multiple nodes at once (for group move/delete). Note: Ctrl+click already works for
-      multi-select; this adds the more intuitive drag-box alternative.
+- [x] ~~Box select: Shift+drag on canvas opens a selection rectangle (partial intersection mode). Implemented via `SelectionMode.Partial` + `selectionOnDrag={shiftHeld}` in `WorkflowEditorView.tsx`.~~
 - [x] ~~Generated Scripts review panel UX facelift — per-script accept/reject buttons,
       collapsible taller code editor, sticky action bar (Accept All / Skip always visible),
       clearer visual hierarchy for the review step.~~

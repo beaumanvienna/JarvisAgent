@@ -277,14 +277,22 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 
 ## JCWF generation pipeline (AI → workflow)
 
-- [x] ~~**`AiJcwfService` 5-stage pipeline**~~ — decompose → generate JCWF → generate Python scripts → validate → fix. Implemented in `aiJcwfService.cpp`. Each stage uses queue folder artifacts (STNG/TASK/CNTX/PROB files).
+- [x] ~~**`AiJcwfService` multi-stage pipeline**~~ — decompose → generate JCWF (batched fan-out) → generate scripts → review → validate → fix. Supports both Python and **shell (bash)** script generation. Implemented in `aiJcwfService.cpp`. Each stage uses queue folder artifacts (STNG/TASK/CNTX/PROB files).
+- [x] ~~**Shell script generation**~~ — AI generates bash scripts with POSIX awk rules (prohibition list: no 3-arg `match()`, `nextfile`, `asort()`, `gensub()`, multidimensional arrays). Prompts include positional arg mapping from JCWF `file_inputs`/`file_outputs`, host OS detection (`GetHostOsDescription()`), and `set -euo pipefail` requirement. Separate review stage checks shell-specific correctness.
+- [x] ~~**Fix Script button**~~ — `FixFailedScriptAsync()`: reads failed script + stderr from disk, sends to AI for fix, broadcasts result via WebSocket (`ai-fix-script-progress`/`ai-fix-script-result`). Frontend shows fix in `ScriptReviewPanel` for accept/reject. WebSocket handler: `ai-fix-failed-script` in `webServer.cpp`.
+- [x] ~~**Fan-out batched generation**~~ — with `"jcwf batch size": N` in `config.json`, tasks are split into N-sized batches. Batch 0 gets full workflow skeleton; subsequent batches produce task-only fragments. `MergeJcwfFragments()` combines them. Early validate+fix runs before script generation.
+- [x] ~~**Host OS detection in all AI prompts**~~ — `GetHostOsDescription()` reads `/etc/os-release` on Linux, `sw_vers` on macOS, static string on Windows. Injected into decompose, generate, script generation, and fix prompts.
+- [x] ~~**`ExtractTaskIdsFromDecomposition` fallback**~~ — AI sometimes returns `{ "task_id": {...} }` without a `"tasks"` wrapper. Added root-level key iteration fallback (skipping known workflow fields) so `PatchTasksIntoJcwf()` no longer silently drops fixes.
+- [x] ~~**Shell executor individual arg injection**~~ — `EnsureDefaultInputOutputArgs` now injects `{{input[0]}}`, `{{input[1]}}`, …, `{{output[0]}}`, … instead of `{{inputs}}`/`{{outputs}}` (which joined all files into one quoted arg). Validator warns on duplicated literal paths in `args` that match `file_inputs`/`file_outputs`.
+- [x] ~~**Validator script content checks**~~ — `ValidateScriptContentOnDisk()` reads first 50 lines of scripts on disk; checks shebang, `@jarvis-script` marker, `@short` metadata, and (shell only) `set -euo pipefail`. Runs for both shell and Python scripts.
+- [x] ~~**Validator file_input path hint**~~ — `lexically_relative()` computes correct relative depth from `working_directory` (was hardcoded single `..`).
 - [x] ~~**`WorkflowFileIndex`**~~ — scans `workflows/` at startup and before generation, indexes files by basename. Provides file inventory to the decompose prompt so the AI knows which input files exist on disk. Used by the validator to suggest path corrections for unreachable `file_inputs`.
 - [x] ~~**Python hot-reload**~~ — `PythonEngine` evicts `sys.modules` entries for `scripts.*` before each import, ensuring AI-generated scripts are picked up immediately without restart.
 - [x] ~~**`context` dict always passed**~~ — `PythonEngine::ExecuteWorkflowTask` always attaches the `context` dict (with `_file_input_0`, `_task_working_directory`, etc.) to kwargs. Previously only attached when the task explicitly declared a `context` input.
 - [x] ~~**Generation prompts use `context` not `_context`**~~ — fixed hardcoded prompt strings in `aiJcwfService.cpp` and `jcwf_generation_guide.md` to match the actual kwarg name passed by the C++ executor.
 - [x] ~~**Validator file_inputs path resolution**~~ — `ValidateFileInputReachability` resolves paths relative to `workflows/` base directory (via `TaskPathResolver::ResolveWorkflowBaseDirectory`), not bare `launchCwd`. Provides `WorkflowFileIndex` basename suggestions in fix hints.
 - [x] ~~**`TaskPathResolver` extraction**~~ — `ResolveWorkflowBaseDirectory()` extracted from `workflowRuntimeManager.cpp` into shared `taskPathResolver.h/.cpp` for use by both the runtime and the validator.
-- [x] ~~**E2E verified**~~ — `cyber2` workflow: OpenSSH log → Python parse → AI threat assessment. Generated, validated, fixed, and executed without manual edits. See `example/workflows/cyber2_e2e.md`.
+- [x] ~~**E2E verified**~~ — `cyber2` workflow: OpenSSH log → Python parse → AI threat assessment. `cyber3` workflow: OpenSSH log → **shell** parse → AI threat assessment (includes Fix Script iteration). See `example/workflows/cyber2_e2e.md` and `example/workflows/cyber3_e2e.md`.
 
 ---
 
