@@ -6,6 +6,7 @@ import type { GeneratedScript } from "./ScriptReviewPanel";
 export type AiPromptAreaProps = {
   getCurrentJcwf: () => JcwfFile | null;
   onJcwfGenerated: (jcwf: JcwfFile) => void;
+  onScriptsAccepted?: () => void;
   webSocketRef: React.RefObject<WebSocket | null>;
   isWebSocketConnected: boolean;
 };
@@ -24,7 +25,7 @@ type ProgressInfo = {
 
 const AiPromptArea = forwardRef<AiPromptAreaHandle, AiPromptAreaProps>(function AiPromptArea(props, ref)
 {
-  const { getCurrentJcwf, onJcwfGenerated, webSocketRef, isWebSocketConnected } = props;
+  const { getCurrentJcwf, onJcwfGenerated, onScriptsAccepted, webSocketRef, isWebSocketConnected } = props;
 
   const [promptText, setPromptText] = useState<string>("");
   const [status, setStatus] = useState<AiStatus>("idle");
@@ -178,6 +179,34 @@ const AiPromptArea = forwardRef<AiPromptAreaHandle, AiPromptAreaProps>(function 
           setStatus("error");
           setErrorMessage(typeof msg.error === "string" ? msg.error : "Generation failed.");
           setProgress(null);
+        }
+      }
+      else if (msgType === "ai-fix-script-progress")
+      {
+        setStatus("generating");
+        setProgress({
+          message: typeof msg.message === "string" ? msg.message : "Fixing script...",
+        });
+      }
+      else if (msgType === "ai-fix-script-result")
+      {
+        setStatus("idle");
+        setProgress(null);
+        const ok = msg.ok === true;
+        if (ok && Array.isArray(msg.scripts) && msg.scripts.length > 0)
+        {
+          const scripts = (msg.scripts as Record<string, unknown>[]).map((s) => ({
+            path: typeof s.path === "string" ? s.path : "",
+            content: typeof s.content === "string" ? s.content : "",
+            executable: s.executable === true,
+          }));
+          setPendingScripts(scripts);
+          setErrorMessage("AI fix ready for review.");
+        }
+        else
+        {
+          setErrorMessage(typeof msg.error === "string" ? msg.error : "Script fix failed.");
+          setStatus("error");
         }
       }
     }
@@ -335,7 +364,7 @@ const AiPromptArea = forwardRef<AiPromptAreaHandle, AiPromptAreaProps>(function 
         <ScriptReviewPanel
           scripts={pendingScripts}
           webSocketRef={webSocketRef}
-          onDone={() => setPendingScripts(null)}
+          onDone={() => { setPendingScripts(null); onScriptsAccepted?.(); }}
         />
       )}
     </div>

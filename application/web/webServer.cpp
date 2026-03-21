@@ -2910,6 +2910,40 @@ namespace AIAssistant
                             }
                         }
 
+                        else if (type == "ai-fix-failed-script")
+                        {
+                            std::string scriptPath;
+                            std::string stderrContent;
+                            std::string taskType;
+
+                            {
+                                std::string_view sv;
+                                if (doc["scriptPath"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    scriptPath = std::string(sv);
+                                }
+                                if (doc["stderr"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    stderrContent = std::string(sv);
+                                }
+                                if (doc["taskType"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    taskType = std::string(sv);
+                                }
+                            }
+
+                            if (scriptPath.empty())
+                            {
+                                std::lock_guard<std::mutex> lock(m_Mutex);
+                                m_PendingBroadcasts.push_back(
+                                    R"({"type":"ai-fix-script-result","ok":false,"error":"Missing scriptPath"})");
+                            }
+                            else
+                            {
+                                m_AiJcwfService.FixFailedScriptAsync(scriptPath, stderrContent, taskType);
+                            }
+                        }
+
                         else
                         {
                             std::lock_guard<std::mutex> lock(m_Mutex);

@@ -103,7 +103,7 @@ The `tasks` object maps each `taskId` (string key) to a task definition:
   "type": "shell",
   "params": {
     "command": "scripts/build.sh",
-    "args": ["${input[0]}", "--output", "${output[0]}"]
+    "args": ["{{input[0]}}", "--output", "{{output[0]}}"]
   },
   "working_directory": "myWorkflow/01_compile",
   "file_inputs": ["source.cpp"],
@@ -112,7 +112,8 @@ The `tasks` object maps each `taskId` (string key) to a task definition:
 ```
 
 - `params.command` (REQUIRED): Must start with `scripts/`. Resolved relative to JarvisAgent launch directory.
-- `params.args` (optional): Array of strings. May use `${input[i]}` and `${output[i]}` to reference resolved `file_inputs`/`file_outputs` paths.
+- `params.args` (optional): Array of strings. May use `{{input[i]}}` and `{{output[i]}}` to reference resolved `file_inputs`/`file_outputs` paths.
+- **Auto-injection (Option B)**: If `args` is omitted or contains NO `{{input[`/`{{inputs}}`/`{{output[`/`{{outputs}}` macros, the executor auto-injects individual `{{input[0]}}`, `{{input[1]}}`, … as the first positional args, followed by `{{output[0]}}`, `{{output[1]}}`, … So `file_inputs` become `$1`, `$2`, … and `file_outputs` become the next positional args. **Do NOT put literal file paths in `args` if they duplicate `file_inputs`/`file_outputs`** — that causes doubled arguments. Prefer omitting `args` entirely (recommended for simple scripts) and letting auto-injection handle it, or use explicit `{{input[i]}}`/`{{output[i]}}` macros.
 - `working_directory`: Where the script runs. Relative to workflow file directory.
 
 ### 3.2 `ai_call` — Call an AI model
@@ -676,3 +677,4 @@ Same as Example A but the AI deliberately introduces a syntax error. A branch no
 10. **file_inputs values prefixed with working_directory** — `file_inputs` are resolved relative to `working_directory`. Use bare filenames only (e.g. `"input.log"`). NEVER repeat the working_directory path inside file_inputs — that doubles the path at runtime.
 11. **Over-decomposed outputs** — Prefer a single combined JSON output file over splitting into multiple files. If a python task extracts statistics, write everything into ONE JSON file, not separate files per category. This simplifies downstream wiring and cntx_files references.
 12. **Wrong cntx_files path crossing queue↔workflows** — To reach a python/shell task's output from an ai_call's working directory, you need `../../../workflows/<taskWorkDir>/<outputFile>` (3 levels up from `queue/X/Y` to the JarvisAgent root, then into `workflows/`). Using only `../../` reaches `queue/` — not `workflows/`.
+13. **Duplicated literal paths in `args` + `file_inputs`/`file_outputs`** — If a shell task has `file_inputs` and `file_outputs`, do NOT also put the same literal paths in `args`. The executor auto-injects individual `{{input[0]}}`, `{{input[1]}}`, …, `{{output[0]}}`, `{{output[1]}}`, … when no macros are present in args. Either omit `args` entirely (recommended for simple scripts) or use explicit `{{input[i]}}` / `{{output[i]}}` macros.

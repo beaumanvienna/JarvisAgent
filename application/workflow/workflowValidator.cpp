@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -228,6 +229,81 @@ namespace
                         AddIssue(issues, WorkflowValidationSeverity::Warning, "shell_command_not_found",
                                  "Shell task script not found: " + scriptPath.string(), taskPath + ".params.command",
                                  taskId);
+                    }
+                }
+            }
+
+            // Check for duplicated literal paths in args that match file_inputs/file_outputs.
+            // If args has no {{inputs}}/{{outputs}} macros, the executor auto-injects them,
+            // causing doubled arguments at runtime.
+            if (!task.m_FileInputs.empty() || !task.m_FileOutputs.empty())
+            {
+                simdjson::ondemand::parser argsParser;
+                simdjson::padded_string argsPadded(task.m_ParamsJson);
+                simdjson::ondemand::document argsDoc;
+                if (argsParser.iterate(argsPadded).get(argsDoc) == simdjson::SUCCESS)
+                {
+                    simdjson::ondemand::array argsArray;
+                    if (argsDoc["args"].get_array().get(argsArray) == simdjson::SUCCESS)
+                    {
+                        std::vector<std::string> argValues;
+                        bool hasMacro = false;
+                        for (auto entry : argsArray)
+                        {
+                            std::string_view sv;
+                            if (entry.get_string().get(sv) == simdjson::SUCCESS)
+                            {
+                                std::string s(sv);
+                                if (s.find("{{input") != std::string::npos || s.find("{{output") != std::string::npos)
+                                {
+                                    hasMacro = true;
+                                }
+                                argValues.push_back(std::move(s));
+                            }
+                        }
+
+                        if (!hasMacro && !argValues.empty())
+                        {
+                            // Check if any arg literally matches a file_input or file_output
+                            std::unordered_set<std::string> fileSet;
+                            for (auto const& fi : task.m_FileInputs)
+                            {
+                                fileSet.insert(fi);
+                            }
+                            for (auto const& fo : task.m_FileOutputs)
+                            {
+                                fileSet.insert(fo);
+                            }
+
+                            bool hasDuplicate = false;
+                            for (auto const& arg : argValues)
+                            {
+                                if (fileSet.count(arg))
+                                {
+                                    hasDuplicate = true;
+                                    break;
+                                }
+                            }
+
+                            if (hasDuplicate)
+                            {
+                                WorkflowValidationIssue issue;
+                                issue.m_Severity = WorkflowValidationSeverity::Warning;
+                                issue.m_Tier = WorkflowValidationTier::B;
+                                issue.m_Code = "shell_args_duplicate_file_io";
+                                issue.m_Message =
+                                    "Shell task args contain literal paths that duplicate file_inputs/file_outputs. "
+                                    "The executor auto-injects {{inputs}} and {{outputs}} when no macros are present "
+                                    "in args, causing doubled arguments at runtime.";
+                                issue.m_Path = taskPath + ".params.args";
+                                issue.m_TaskId = taskId;
+                                issue.m_SuggestedFix =
+                                    "Remove the literal file paths from args. Either omit args entirely "
+                                    "(recommended — the executor auto-injects file_inputs as positional args "
+                                    "followed by file_outputs), or use {{input[0]}}/{{output[0]}} macros.";
+                                issues.push_back(std::move(issue));
+                            }
+                        }
                     }
                 }
             }
@@ -471,6 +547,183 @@ namespace
         issues.push_back(std::move(issue));
     }
 
+    // Read the first N lines of a text file. Returns empty vector on read failure.
+    std::vector<std::string> ReadFirstLines(fs::path const& filePath, size_t maxLines)
+    {
+        std::vector<std::string> lines;
+        std::ifstream file(filePath);
+        if (!file.is_open())
+        {
+            return lines;
+        }
+        std::string line;
+        while (lines.size() < maxLines && std::getline(file, line))
+        {
+            lines.push_back(line);
+        }
+        return lines;
+    }
+
+    // Validate the content of a script file on disk (shebang, @jarvis-script, @short, shell-specific pipefail).
+    void ValidateScriptContentOnDisk(std::vector<WorkflowValidationIssue>& issues, fs::path const& diskPath, bool isPython,
+                                     std::string const& taskPath, std::string const& taskId)
+    {
+        auto const lines = ReadFirstLines(diskPath, 50);
+        if (lines.empty())
+        {
+            return;
+        }
+
+        std::string const filename = diskPath.filename().string();
+
+        if (isPython)
+        {
+            if (lines[0].find("#!/usr/bin/env python3") == std::string::npos &&
+                lines[0].find("#!/usr/bin/python3") == std::string::npos)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B, "python_missing_shebang",
+                           "Python script missing shebang (expected '#!/usr/bin/env python3')", taskPath + ".params.module",
+                           taskId, "Add '#!/usr/bin/env python3' as the first line of " + filename);
+            }
+
+            bool hasMarker = false;
+            for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+            {
+                if (lines[i].find("@jarvis-script") != std::string::npos)
+                {
+                    hasMarker = true;
+                    break;
+                }
+            }
+            if (!hasMarker)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B,
+                           "python_missing_jarvis_marker", "Python script missing '# @jarvis-script' metadata marker",
+                           taskPath + ".params.module", taskId, "Add '# @jarvis-script' as the second line of " + filename);
+            }
+
+            bool hasShort = false;
+            for (auto const& l : lines)
+            {
+                if (l.find("@short") != std::string::npos)
+                {
+                    hasShort = true;
+                    break;
+                }
+            }
+            if (!hasShort)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Info, WorkflowValidationTier::C, "python_missing_short",
+                           "Python script missing '# @short: ...' metadata", taskPath + ".params.module", taskId,
+                           "Add '# @short: <brief description>' to " + filename);
+            }
+        }
+        else
+        {
+            if (lines[0].find("#!/usr/bin/env bash") == std::string::npos &&
+                lines[0].find("#!/bin/bash") == std::string::npos)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B, "shell_missing_shebang",
+                           "Shell script missing bash shebang (expected '#!/usr/bin/env bash')",
+                           taskPath + ".params.command", taskId,
+                           "Add '#!/usr/bin/env bash' as the first line of " + filename);
+            }
+
+            bool hasMarker = false;
+            for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+            {
+                if (lines[i].find("@jarvis-script") != std::string::npos)
+                {
+                    hasMarker = true;
+                    break;
+                }
+            }
+            if (!hasMarker)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B,
+                           "shell_missing_jarvis_marker", "Shell script missing '# @jarvis-script' metadata marker",
+                           taskPath + ".params.command", taskId, "Add '# @jarvis-script' as the second line of " + filename);
+            }
+
+            bool hasShort = false;
+            for (auto const& l : lines)
+            {
+                if (l.find("@short") != std::string::npos)
+                {
+                    hasShort = true;
+                    break;
+                }
+            }
+            if (!hasShort)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Info, WorkflowValidationTier::C, "shell_missing_short",
+                           "Shell script missing '# @short: ...' metadata", taskPath + ".params.command", taskId,
+                           "Add '# @short: <brief description>' to " + filename);
+            }
+
+            bool hasPipefail = false;
+            for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+            {
+                if (lines[i].find("set -euo pipefail") != std::string::npos ||
+                    lines[i].find("set -euxo pipefail") != std::string::npos)
+                {
+                    hasPipefail = true;
+                    break;
+                }
+            }
+            if (!hasPipefail)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B, "shell_missing_pipefail",
+                           "Shell script missing 'set -euo pipefail'", taskPath + ".params.command", taskId,
+                           "Add 'set -euo pipefail' after the metadata header in " + filename);
+            }
+        }
+    }
+
+    // ---- Tier B extended: shell script content validation ----
+    void ValidateShellScriptContent(std::vector<WorkflowValidationIssue>& issues, WorkflowDefinition const& workflow)
+    {
+        if (Core::g_Core == nullptr)
+        {
+            return;
+        }
+        fs::path const launchCwd = Core::g_Core->GetLaunchCWDAbsolute();
+        if (launchCwd.empty())
+        {
+            return;
+        }
+
+        for (auto const& [taskId, task] : workflow.m_Tasks)
+        {
+            if (task.m_Type != TaskType::Shell)
+            {
+                continue;
+            }
+
+            std::string const taskPath = "$.tasks." + taskId;
+
+            std::string command;
+            if (!TryGetParamsString(task.m_ParamsJson, "command", command) || command.empty())
+            {
+                continue;
+            }
+
+            if (!StartsWith(command, "scripts/") || ContainsPathTraversal(command))
+            {
+                continue;
+            }
+
+            fs::path const scriptPath = (launchCwd / fs::path(command)).lexically_normal();
+            std::error_code ec;
+            if (!fs::exists(scriptPath, ec))
+            {
+                continue;
+            }
+
+            ValidateScriptContentOnDisk(issues, scriptPath, false, taskPath, taskId);
+        }
+    }
+
     // Convert Python module path to relative file path: "scripts.parseLog" -> "scripts/parseLog.py"
     std::string ModuleToFilePath(std::string const& modulePath)
     {
@@ -613,6 +866,17 @@ namespace
                            "Ensure the file '" + scriptFilePath +
                                "' exists in the scripts/ directory with a @jarvis-script header.");
                 continue; // Can't check function if script doesn't exist
+            }
+
+            // B-2b: Script content validation (only for scripts found on disk)
+            if (foundOnDisk && Core::g_Core != nullptr)
+            {
+                fs::path const launchCwd = Core::g_Core->GetLaunchCWDAbsolute();
+                if (!launchCwd.empty())
+                {
+                    fs::path const diskPath = (launchCwd / scriptFilePath).lexically_normal();
+                    ValidateScriptContentOnDisk(issues, diskPath, true, taskPath, taskId);
+                }
             }
 
             // B-3: Function exists in script
@@ -850,6 +1114,27 @@ namespace
                 if (existsOnDisk)
                 {
                     continue;
+                }
+
+                // Check 1b: file might be directly in workflow base directory (not under working_directory)
+                if (!existsOnDisk && !workflowBaseDir.empty() && !task.m_WorkingDirectory.empty())
+                {
+                    fs::path const baseCheckPath = (workflowBaseDir / fileInput).lexically_normal();
+                    std::error_code ec2;
+                    if (fs::exists(baseCheckPath, ec2))
+                    {
+                        // File exists at workflows root — compute correct relative path from working_directory
+                        fs::path const correctRel =
+                            fs::path(fileInput).lexically_relative(fs::path(task.m_WorkingDirectory));
+                        AddIssueEx(
+                            issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::C, "file_input_path_hint",
+                            "file_inputs[" + std::to_string(i) + "] '" + fileInput +
+                                "' found in workflows/ root but not in working_directory '" + task.m_WorkingDirectory + "'",
+                            inputPath, taskId,
+                            "Change file_inputs[" + std::to_string(i) + "] to '" + correctRel.generic_string() +
+                                "' so it resolves correctly.");
+                        continue;
+                    }
                 }
 
                 // Check 2: does an upstream task produce this file?
@@ -1382,6 +1667,9 @@ namespace AIAssistant
 
         // ---- Tier B extended: python module policy, script+function existence ----
         ValidatePythonScriptRegistry(issues, workflow, scriptRegistry, pendingScripts);
+
+        // ---- Tier B extended: shell script content validation ----
+        ValidateShellScriptContent(issues, workflow);
 
         // ---- Tier B extended: ai_call STNG content check ----
         ValidateAiCallStng(issues, workflow);

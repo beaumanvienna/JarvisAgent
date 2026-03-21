@@ -577,9 +577,10 @@ make
   **Argument templating (positional file arguments):**
 
   - If a shell task declares `file_inputs` and/or `file_outputs`, the runtime MUST provide positional template variables:
-    - `${input[i]}` expands to the resolved path of `file_inputs[i]`
-    - `${output[i]}` expands to the resolved path of `file_outputs[i]`
-  - `args` MAY include additional literal flags (for example `"-O3"`) alongside `${input[i]}` / `${output[i]}`.
+    - `{{input[i]}}` expands to the resolved path of `file_inputs[i]`
+    - `{{output[i]}}` expands to the resolved path of `file_outputs[i]`
+  - `args` MAY include additional literal flags (for example `"-O3"`) alongside `{{input[i]}}` / `{{output[i]}}`.
+  - **Auto-injection (Option B):** If `args` is omitted or contains NO `{{input[`/`{{inputs}}`/`{{output[`/`{{outputs}}` macros, the runtime MUST auto-inject individual `{{input[0]}}`, `{{input[1]}}`, … as the first positional arguments, followed by `{{output[0]}}`, `{{output[1]}}`, … as the remaining arguments. This means `file_inputs` become `$1`, `$2`, … and `file_outputs` become the next positional arguments. JCWF authors MUST NOT place literal file paths in `args` that duplicate `file_inputs`/`file_outputs` — that causes doubled arguments at runtime.
 
 - `ai_call`  
   A high-level “call AI” task that routes via Python or C++ backend.
@@ -756,8 +757,8 @@ Inputs and outputs are declared to aid validation and UI:
 **Relationship to `file_inputs` / `file_outputs`:**
 
 - `inputs` / `outputs` describe **named data slots** for validation and `dataflow` wiring.  
-- `file_inputs` / `file_outputs` describe **file dependencies** for freshness checks and (for shell tasks) positional argument templating via `${input[i]}` / `${output[i]}`.
-- A shell task MAY omit `inputs` entirely and still run, as long as its `params` are resolvable (for example, only using `${input[i]}` / `${output[i]}`).
+- `file_inputs` / `file_outputs` describe **file dependencies** for freshness checks and (for shell tasks) positional argument templating via `{{input[i]}}` / `{{output[i]}}`.
+- A shell task MAY omit `inputs` entirely and still run, as long as its `params` are resolvable (for example, only using `{{input[i]}}` / `{{output[i]}}`).
 - When a task defines named `outputs` and also defines `file_outputs`, the runtime MAY populate output slot values with the corresponding `file_outputs` paths (commonly the first output slot maps to `file_outputs[0]`) to support `dataflow` wiring in Makefile-style workflows.
 
 #### 3.3.5 Clean Tasks
@@ -1865,7 +1866,7 @@ If none of these mechanisms resolve a value:
 
 After all inputs are resolved, template expansion (`{{inputs.slot_name}}`) is applied to substitute resolved values into `params.args` and other template-enabled fields.
 
-**Note (shell tasks):** `${input[i]}` / `${output[i]}` positional template expansion is based on `file_inputs` / `file_outputs` and does not require named `inputs` / `outputs` declarations.
+**Note (shell tasks):** `{{input[i]}}` / `{{output[i]}}` positional template expansion is based on `file_inputs` / `file_outputs` and does not require named `inputs` / `outputs` declarations. If `args` is omitted, the runtime auto-injects individual `{{input[N]}}` and `{{output[N]}}` as positional arguments (see §3.3.1 Option B).
 
 ### 8.2 Outputs and Context
 

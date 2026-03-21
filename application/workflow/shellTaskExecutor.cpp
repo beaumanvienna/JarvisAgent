@@ -220,10 +220,14 @@ namespace AIAssistant
         // Scan raw args for the presence of any input/output macros.
         //
         // Used to implement Option B:
-        //   - If no input macro is present, inject "{{inputs}}" at the front.
-        //   - If no output macro is present, append "{{outputs}}".
+        //   - If no input macro is present, inject individual {{input[0]}}, {{input[1]}}, ...
+        //   - If no output macro is present, append individual {{output[0]}}, {{output[1]}}, ...
+        //
+        // We inject indexed macros (not {{inputs}}/{{outputs}}) so that each file
+        // becomes a separate positional argument. The plural forms join all files
+        // into a single space-separated string, which gets quoted as one arg.
         // ------------------------------------------------------------
-        void EnsureDefaultInputOutputArgs(std::vector<std::string>& rawArgs)
+        void EnsureDefaultInputOutputArgs(std::vector<std::string>& rawArgs, size_t fileInputCount, size_t fileOutputCount)
         {
             bool hasInputMacro = false;
             bool hasOutputMacro = false;
@@ -243,12 +247,19 @@ namespace AIAssistant
 
             if (!hasInputMacro)
             {
-                rawArgs.insert(rawArgs.begin(), std::string("{{inputs}}"));
+                // Insert individual {{input[N]}} at front (in reverse order to maintain 0,1,2... ordering)
+                for (size_t i = fileInputCount; i > 0; --i)
+                {
+                    rawArgs.insert(rawArgs.begin(), "{{input[" + std::to_string(i - 1) + "]}}");
+                }
             }
 
             if (!hasOutputMacro)
             {
-                rawArgs.push_back(std::string("{{outputs}}"));
+                for (size_t i = 0; i < fileOutputCount; ++i)
+                {
+                    rawArgs.push_back("{{output[" + std::to_string(i) + "]}}");
+                }
             }
         }
 
@@ -1023,7 +1034,7 @@ namespace AIAssistant
         }
 
         // Option B: inject default input/output macros if none are present.
-        EnsureDefaultInputOutputArgs(rawArgs);
+        EnsureDefaultInputOutputArgs(rawArgs, taskDefinition.m_FileInputs.size(), taskDefinition.m_FileOutputs.size());
 
         // ------------------------------------------------------------
         // 5) Build argv-style list: [commandPath, expanded args...]

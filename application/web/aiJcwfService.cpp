@@ -78,6 +78,60 @@ namespace AIAssistant
             return AiCallTaskExecutor::WriteTextFile(filePath.string(), content, outError);
         }
 
+        // Detect the host OS/distro for shell script generation prompts.
+        static std::string GetHostOsDescription()
+        {
+#if defined(__APPLE__)
+            // macOS: run sw_vers
+            FILE* pipe = popen("sw_vers 2>/dev/null", "r");
+            if (pipe)
+            {
+                char buf[256];
+                std::string result;
+                while (fgets(buf, sizeof(buf), pipe))
+                {
+                    result += buf;
+                }
+                pclose(pipe);
+                if (!result.empty())
+                {
+                    // Trim trailing whitespace
+                    while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+                    {
+                        result.pop_back();
+                    }
+                    return result;
+                }
+            }
+            return "macOS (version unknown)";
+#elif defined(_WIN32)
+            return "Windows (use PowerShell-compatible commands)";
+#else
+            // Linux: read first 5 lines of /etc/os-release
+            std::ifstream osRelease("/etc/os-release");
+            if (osRelease)
+            {
+                std::string result;
+                std::string line;
+                int count = 0;
+                while (count < 5 && std::getline(osRelease, line))
+                {
+                    if (!result.empty())
+                    {
+                        result += '\n';
+                    }
+                    result += line;
+                    ++count;
+                }
+                if (!result.empty())
+                {
+                    return result;
+                }
+            }
+            return "Linux (distro unknown)";
+#endif
+        }
+
         static bool ReadFile(fs::path const& filePath, std::string& outContent)
         {
             std::ifstream stream(filePath, std::ios::in | std::ios::binary);
@@ -173,17 +227,25 @@ namespace AIAssistant
                     continue;
                 }
 
-                // Shell tasks: extract script path from "command" field.
-                std::string_view commandView;
-                if (taskObj["command"].get_string().get(commandView) == simdjson::SUCCESS)
+                // Shell tasks: extract script path from "params.command" field.
+                if (typeView == "shell")
                 {
-                    std::string command(commandView);
-                    if (command.rfind("scripts/", 0) == 0)
+                    simdjson::ondemand::object shellParamsObj;
+                    if (taskObj["params"].get_object().get(shellParamsObj) == simdjson::SUCCESS)
                     {
-                        // Strip arguments after the script path (first space-separated token)
-                        size_t spacePos = command.find(' ');
-                        std::string scriptPath = (spacePos != std::string::npos) ? command.substr(0, spacePos) : command;
-                        paths.push_back(std::move(scriptPath));
+                        std::string_view commandView;
+                        if (shellParamsObj["command"].get_string().get(commandView) == simdjson::SUCCESS)
+                        {
+                            std::string command(commandView);
+                            if (command.rfind("scripts/", 0) == 0)
+                            {
+                                // Strip arguments after the script path (first space-separated token)
+                                size_t spacePos = command.find(' ');
+                                std::string scriptPath =
+                                    (spacePos != std::string::npos) ? command.substr(0, spacePos) : command;
+                                paths.push_back(std::move(scriptPath));
+                            }
+                        }
                     }
                 }
 
@@ -217,6 +279,106 @@ namespace AIAssistant
             }
 
             return paths;
+        }
+
+        // ----------------------------------------------------------------
+        // Shell task I/O info extraction
+        // ----------------------------------------------------------------
+
+        struct ShellTaskIoInfo
+        {
+            std::vector<std::string> fileInputs;
+            std::vector<std::string> fileOutputs;
+        };
+
+        // Extract file_inputs/file_outputs for each shell script path in the JCWF.
+        static std::unordered_map<std::string, ShellTaskIoInfo> ExtractShellTaskIoMap(std::string const& jcwfJson)
+        {
+            std::unordered_map<std::string, ShellTaskIoInfo> result;
+
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(jcwfJson);
+            simdjson::ondemand::document doc;
+            if (parser.iterate(padded).get(doc) != simdjson::SUCCESS)
+            {
+                return result;
+            }
+
+            simdjson::ondemand::object tasksObj;
+            if (doc["tasks"].get_object().get(tasksObj) != simdjson::SUCCESS)
+            {
+                return result;
+            }
+
+            for (auto field : tasksObj)
+            {
+                simdjson::ondemand::object taskObj;
+                if (field.value().get_object().get(taskObj) != simdjson::SUCCESS)
+                {
+                    continue;
+                }
+
+                std::string_view typeView;
+                if (taskObj["type"].get_string().get(typeView) != simdjson::SUCCESS || typeView != "shell")
+                {
+                    continue;
+                }
+
+                // Extract command path
+                std::string scriptPath;
+                {
+                    simdjson::ondemand::object paramsObj;
+                    if (taskObj["params"].get_object().get(paramsObj) != simdjson::SUCCESS)
+                    {
+                        continue;
+                    }
+                    std::string_view cmdView;
+                    if (paramsObj["command"].get_string().get(cmdView) != simdjson::SUCCESS)
+                    {
+                        continue;
+                    }
+                    scriptPath = std::string(cmdView);
+                    size_t sp = scriptPath.find(' ');
+                    if (sp != std::string::npos)
+                    {
+                        scriptPath = scriptPath.substr(0, sp);
+                    }
+                }
+
+                ShellTaskIoInfo info;
+
+                // Extract file_inputs
+                simdjson::ondemand::array fiArr;
+                if (taskObj["file_inputs"].get_array().get(fiArr) == simdjson::SUCCESS)
+                {
+                    for (auto entry : fiArr)
+                    {
+                        std::string_view sv;
+                        if (entry.get_string().get(sv) == simdjson::SUCCESS)
+                        {
+                            info.fileInputs.emplace_back(sv);
+                        }
+                    }
+                }
+
+                // Extract file_outputs
+                simdjson::ondemand::array foArr;
+                if (taskObj["file_outputs"].get_array().get(foArr) == simdjson::SUCCESS)
+                {
+                    for (auto entry : foArr)
+                    {
+                        std::string_view sv;
+                        if (entry.get_string().get(sv) == simdjson::SUCCESS)
+                        {
+                            info.fileOutputs.emplace_back(sv);
+                        }
+                    }
+                }
+
+                result[scriptPath] = std::move(info);
+            }
+
+            return result;
         }
 
         // ----------------------------------------------------------------
@@ -418,6 +580,37 @@ namespace AIAssistant
                 {
                     vr.issues.push_back("Missing '# @jarvis-script' metadata marker in the first 20 lines.");
                 }
+
+                // Check 3: @short metadata
+                bool hasShortShell = false;
+                for (size_t i = 0; i < std::min(lines.size(), size_t(50)); ++i)
+                {
+                    if (lines[i].find("@short") != std::string::npos)
+                    {
+                        hasShortShell = true;
+                        break;
+                    }
+                }
+                if (!hasShortShell)
+                {
+                    vr.issues.push_back("Missing '# @short: ...' metadata line.");
+                }
+
+                // Check 4: set -euo pipefail (within first 20 lines, after shebang/metadata)
+                bool hasPipefail = false;
+                for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+                {
+                    if (lines[i].find("set -euo pipefail") != std::string::npos ||
+                        lines[i].find("set -euxo pipefail") != std::string::npos)
+                    {
+                        hasPipefail = true;
+                        break;
+                    }
+                }
+                if (!hasPipefail)
+                {
+                    vr.issues.push_back("Missing 'set -euo pipefail' (or 'set -euxo pipefail') after the metadata header.");
+                }
             }
 
             vr.passed = vr.issues.empty();
@@ -475,21 +668,51 @@ namespace AIAssistant
                 return taskIds;
             }
 
+            // Try doc["tasks"] first (wrapped format), then root-level keys (unwrapped).
+            // The AI sometimes returns { "id1": {...}, "id2": {...} } without a "tasks" wrapper.
             simdjson::ondemand::object tasksObj;
-            if (doc["tasks"].get_object().get(tasksObj) != simdjson::SUCCESS)
-            {
-                return taskIds;
-            }
+            bool foundTasks = (doc["tasks"].get_object().get(tasksObj) == simdjson::SUCCESS);
 
-            for (auto field : tasksObj)
+            if (foundTasks)
             {
-                std::string_view key;
-                if (field.unescaped_key().get(key) == simdjson::SUCCESS)
+                for (auto field : tasksObj)
                 {
-                    taskIds.emplace_back(key);
+                    std::string_view key;
+                    if (field.unescaped_key().get(key) == simdjson::SUCCESS)
+                    {
+                        taskIds.emplace_back(key);
+                    }
+                    [[maybe_unused]] auto val = field.value();
                 }
-                // Must consume the value to advance the parser
-                [[maybe_unused]] auto val = field.value();
+            }
+            else
+            {
+                // Fallback: re-parse and iterate root-level keys
+                simdjson::ondemand::parser parser2;
+                simdjson::padded_string padded2(cleaned);
+                simdjson::ondemand::document doc2;
+                if (parser2.iterate(padded2).get(doc2) == simdjson::SUCCESS)
+                {
+                    simdjson::ondemand::object rootObj;
+                    if (doc2.get_object().get(rootObj) == simdjson::SUCCESS)
+                    {
+                        for (auto field : rootObj)
+                        {
+                            std::string_view key;
+                            if (field.unescaped_key().get(key) == simdjson::SUCCESS)
+                            {
+                                // Skip known workflow-level fields
+                                if (key != "version" && key != "id" && key != "label" && key != "doc" && key != "triggers" &&
+                                    key != "defaults" && key != "base_directory" && key != "manual_start" &&
+                                    key != "control_nodes" && key != "controlflow")
+                                {
+                                    taskIds.emplace_back(key);
+                                }
+                            }
+                            [[maybe_unused]] auto val = field.value();
+                        }
+                    }
+                }
             }
 
             return taskIds;
@@ -1263,6 +1486,9 @@ namespace AIAssistant
 
                 std::string decomposeTask =
                     "Produce a structured task breakdown from the user's request.\n"
+                    "Host OS: " +
+                    GetHostOsDescription() +
+                    "\n"
                     "For each task you MUST specify:\n"
                     "- task_id (short slug)\n"
                     "- type (shell | ai_call | python | internal)\n"
@@ -1342,6 +1568,8 @@ namespace AIAssistant
 
                 // Shared MUST rules for all generate calls (single-call and batched).
                 std::string const generateMustRules =
+                    "Host OS: " + GetHostOsDescription() +
+                    "\n"
                     "MUST rules:\n"
                     "- Every task 'id' field MUST match its key in the 'tasks' map.\n"
                     "- ai_call working_directory MUST be '../queue/<workflowId>/<NN>_<taskId>'.\n"
@@ -1614,6 +1842,7 @@ namespace AIAssistant
 
                     std::vector<std::string> scriptPaths = ExtractScriptPaths(generatedJcwf);
                     auto const scriptFunctionMap = ExtractScriptFunctionMap(generatedJcwf);
+                    auto const shellIoMap = ExtractShellTaskIoMap(generatedJcwf);
 
                     // Filter to only scripts that don't exist on disk
                     std::vector<std::string> newScripts;
@@ -1650,15 +1879,50 @@ namespace AIAssistant
                             std::string scriptTask;
                             if (isShell)
                             {
+                                // Build explicit positional-arg mapping from JCWF file_inputs/file_outputs
+                                std::string argMapping;
+                                auto ioIt = shellIoMap.find(scriptPath);
+                                if (ioIt != shellIoMap.end())
+                                {
+                                    int argNum = 1;
+                                    for (auto const& fi : ioIt->second.fileInputs)
+                                    {
+                                        argMapping += "  $" + std::to_string(argNum) + " = file_inputs (\"" + fi + "\")\n";
+                                        argNum++;
+                                    }
+                                    for (auto const& fo : ioIt->second.fileOutputs)
+                                    {
+                                        argMapping += "  $" + std::to_string(argNum) + " = file_outputs (\"" + fo + "\")\n";
+                                        argNum++;
+                                    }
+                                }
+
                                 scriptTask = "Generate a bash script for '" + scriptPath +
                                              "'.\n"
+                                             "Host OS: " +
+                                             GetHostOsDescription() +
+                                             "\n"
                                              "Rules:\n"
                                              "- First line MUST be: #!/usr/bin/env bash\n"
                                              "- Second line MUST be: # @jarvis-script\n"
                                              "- Include metadata with COLON format: # @short: ..., # @params: ..., "
                                              "# @description: ..., # @outputs: ... (if any).\n"
                                              "- After the metadata header: set -euo pipefail\n"
-                                             "- Use positional args ($1, $2, ...) for parameters.\n"
+                                             "- CRITICAL: The executor passes file_inputs as the first positional "
+                                             "args, then file_outputs. Your script receives:\n" +
+                                             argMapping +
+                                             "  The script MUST use $1, $2, etc. to access these files. "
+                                             "NEVER hardcode file paths. NEVER use literal paths from the JCWF. "
+                                             "Always assign positional args to named variables at the top "
+                                             "(e.g. infile=\"$1\"; outfile=\"$2\").\n"
+                                             "- POSIX portability: when using awk, use ONLY POSIX-compatible syntax. "
+                                             "Do NOT use gawk extensions: no multidimensional arrays (arr[k1][k2]), "
+                                             "no 3-argument match() (match(s,r,arr)), no asort()/asorti(), "
+                                             "no nextfile, no PROCINFO, no @include, no gensub(). "
+                                             "Use SUBSEP-based keys: arr[k1,k2] with split(key, parts, SUBSEP). "
+                                             "For sorting, pipe to external 'sort' command instead of asort() or "
+                                             "PROCINFO[\"sorted_in\"]. Use gsub() instead of gensub(). "
+                                             "If GNU awk is truly required, call 'gawk' explicitly.\n"
                                              "- Output ONLY the script. Nothing else.";
                             }
                             else
@@ -1736,16 +2000,53 @@ namespace AIAssistant
 
                                 std::string sFixTask = "The generated script has structural issues. Fix ALL of "
                                                        "them:\n\n" +
-                                                       issueSummary +
-                                                       "\nRules:\n"
-                                                       "- First line: #!/usr/bin/env python3\n"
-                                                       "- Second line: # @jarvis-script\n"
-                                                       "- Include # @short: ... and # @description: ... metadata\n"
-                                                       "- Output ONLY the fixed script.";
-                                if (!expectedFunc.empty())
+                                                       issueSummary + "\nRules:\n";
+                                if (isShell)
                                 {
-                                    sFixTask += "\n- Function name MUST be: " + expectedFunc +
-                                                "\n- Function must accept (context=None, **kwargs)";
+                                    // Build arg mapping for the fix prompt too
+                                    std::string fixArgMapping;
+                                    auto fixIoIt = shellIoMap.find(scriptPath);
+                                    if (fixIoIt != shellIoMap.end())
+                                    {
+                                        int fixArgNum = 1;
+                                        for (auto const& fi : fixIoIt->second.fileInputs)
+                                        {
+                                            fixArgMapping +=
+                                                "  $" + std::to_string(fixArgNum) + " = file_inputs (\"" + fi + "\")\n";
+                                            fixArgNum++;
+                                        }
+                                        for (auto const& fo : fixIoIt->second.fileOutputs)
+                                        {
+                                            fixArgMapping +=
+                                                "  $" + std::to_string(fixArgNum) + " = file_outputs (\"" + fo + "\")\n";
+                                            fixArgNum++;
+                                        }
+                                    }
+
+                                    sFixTask += "- First line: #!/usr/bin/env bash\n"
+                                                "- Second line: # @jarvis-script\n"
+                                                "- Include # @short: ... and # @description: ... metadata\n"
+                                                "- After the metadata header: set -euo pipefail\n"
+                                                "- The executor passes file_inputs then file_outputs as "
+                                                "positional args:\n" +
+                                                fixArgMapping +
+                                                "  MUST use $1, $2 etc. NEVER hardcode file paths.\n"
+                                                "- POSIX awk only: no arr[k1][k2], no 3-arg match(), "
+                                                "no asort()/asorti(), no PROCINFO, no gensub(). "
+                                                "Use SUBSEP keys, external sort, and gsub().\n"
+                                                "- Output ONLY the fixed script.";
+                                }
+                                else
+                                {
+                                    sFixTask += "- First line: #!/usr/bin/env python3\n"
+                                                "- Second line: # @jarvis-script\n"
+                                                "- Include # @short: ... and # @description: ... metadata\n"
+                                                "- Output ONLY the fixed script.";
+                                    if (!expectedFunc.empty())
+                                    {
+                                        sFixTask += "\n- Function name MUST be: " + expectedFunc +
+                                                    "\n- Function must accept (context=None, **kwargs)";
+                                    }
                                 }
 
                                 std::string const sFixCntx = "--- Current Script ---\n" + scriptContent +
@@ -1773,24 +2074,37 @@ namespace AIAssistant
                                 std::string const sRevStng = "You are a code reviewer. Output ONLY the final script. "
                                                              "No markdown fences. No explanations. No commentary.";
 
-                                std::string const sRevTask = "Review this script for correctness and fix any issues.\n"
-                                                             "Check for:\n"
-                                                             "1. Type safety: no operations comparing incompatible types "
-                                                             "(e.g. datetime vs string, int vs None)\n"
-                                                             "2. Correct context usage: file inputs from "
-                                                             "context['_file_input_0'], working dir from "
-                                                             "context['_task_working_directory']\n"
-                                                             "3. Output files written to working directory via "
-                                                             "os.path.join()\n"
-                                                             "4. Proper error handling for file I/O\n"
-                                                             "5. All imports at top of file\n"
-                                                             "6. Consistent data types throughout (don't store a value as "
-                                                             "a string then compare it as a different type later)\n"
-                                                             "7. No use of sys.argv, argparse, or if __name__ == "
-                                                             "'__main__'\n\n"
-                                                             "If you find issues, fix them. If it's correct, output it "
-                                                             "unchanged.\n"
-                                                             "Output ONLY the script. Nothing else.";
+                                std::string sRevTask = "Review this script for correctness and fix any issues.\n"
+                                                       "Check for:\n";
+                                if (isShell)
+                                {
+                                    sRevTask += "1. Correct shebang: #!/usr/bin/env bash\n"
+                                                "2. set -euo pipefail present after metadata header\n"
+                                                "3. Proper quoting of variables (\"$var\" not $var)\n"
+                                                "4. Correct use of positional args ($1, $2, ...)\n"
+                                                "5. Proper error handling (exit codes, error messages to stderr)\n"
+                                                "6. No hardcoded absolute paths — use relative paths\n"
+                                                "7. Output files written to the correct working directory\n";
+                                }
+                                else
+                                {
+                                    sRevTask += "1. Type safety: no operations comparing incompatible types "
+                                                "(e.g. datetime vs string, int vs None)\n"
+                                                "2. Correct context usage: file inputs from "
+                                                "context['_file_input_0'], working dir from "
+                                                "context['_task_working_directory']\n"
+                                                "3. Output files written to working directory via "
+                                                "os.path.join()\n"
+                                                "4. Proper error handling for file I/O\n"
+                                                "5. All imports at top of file\n"
+                                                "6. Consistent data types throughout (don't store a value as "
+                                                "a string then compare it as a different type later)\n"
+                                                "7. No use of sys.argv, argparse, or if __name__ == "
+                                                "'__main__'\n";
+                                }
+                                sRevTask += "\nIf you find issues, fix them. If it's correct, output it "
+                                            "unchanged.\n"
+                                            "Output ONLY the script. Nothing else.";
 
                                 std::string const sRevCntx = "--- Script to Review ---\n" + scriptContent +
                                                              "\n\n--- JCWF Workflow ---\n" + generatedJcwf +
@@ -2039,6 +2353,112 @@ namespace AIAssistant
                     // Accept result regardless — we only do one fix iteration
                     broadcastResult(true, generatedJcwf, 1);
                 }
+            });
+    }
+
+    void AiJcwfService::FixFailedScriptAsync(std::string const& scriptPath, std::string const& stderrContent,
+                                             std::string const& taskType)
+    {
+        JoinFinishedThreads();
+
+        std::lock_guard<std::mutex> lock(m_ThreadsMutex);
+        m_BackgroundThreads.emplace_back(
+            [this, scriptPath, stderrContent, taskType]()
+            {
+                if (m_ShuttingDown.load())
+                {
+                    Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":"Service is shutting down"})");
+                    return;
+                }
+
+                Broadcast(R"({"type":"ai-fix-script-progress","message":"Reading script..."})");
+
+                // Read the current script from disk
+                std::string scriptContent;
+                {
+                    std::ifstream ifs(scriptPath);
+                    if (!ifs)
+                    {
+                        Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":"Cannot read script: )" +
+                                  JsonEscape(scriptPath) + R"("})");
+                        return;
+                    }
+                    std::ostringstream ss;
+                    ss << ifs.rdbuf();
+                    scriptContent = ss.str();
+                }
+
+                if (m_ShuttingDown.load())
+                {
+                    Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":"Service is shutting down"})");
+                    return;
+                }
+
+                Broadcast(R"({"type":"ai-fix-script-progress","message":"Sending to AI for fix..."})");
+
+                bool const isShell = scriptPath.ends_with(".sh");
+
+                // Build the fix prompt
+                std::string const stng = "You are a script fixer. Output ONLY the corrected script. "
+                                         "No markdown fences. No explanations. No commentary.";
+
+                std::string task = "The script failed at runtime with the following error output:\n\n"
+                                   "--- stderr ---\n" +
+                                   stderrContent +
+                                   "\n--- end stderr ---\n\n"
+                                   "Host OS: " +
+                                   GetHostOsDescription() +
+                                   "\n\n"
+                                   "Fix the script so it runs without errors. Preserve its original purpose and logic.\n"
+                                   "Rules:\n";
+
+                if (isShell)
+                {
+                    task += "- First line: #!/usr/bin/env bash\n"
+                            "- Second line: # @jarvis-script\n"
+                            "- Include # @short: ... and # @description: ... metadata\n"
+                            "- After the metadata header: set -euo pipefail\n"
+                            "- Use positional args ($1, $2, ...) for file parameters. NEVER hardcode paths.\n"
+                            "- POSIX awk only: no arr[k1][k2], no 3-arg match(), "
+                            "no asort()/asorti(), no nextfile, no PROCINFO, no gensub(). "
+                            "Use SUBSEP keys, external sort, and gsub().\n"
+                            "- Output ONLY the fixed script.";
+                }
+                else
+                {
+                    task += "- First line: #!/usr/bin/env python3\n"
+                            "- Second line: # @jarvis-script\n"
+                            "- Include # @short: ... and # @description: ... metadata\n"
+                            "- Output ONLY the fixed script.";
+                }
+
+                std::string const cntx = "--- Current Script (" + scriptPath + ") ---\n" + scriptContent;
+                std::string const prob = "Fix the runtime error in " + scriptPath;
+
+                std::string fixedContent;
+                std::string fixError;
+
+                std::string const subfolder = "fix_script_" + std::to_string(m_NextRequestSeq.fetch_add(1));
+
+                bool const ok = RunSingleAiCall(subfolder, stng, task, cntx, prob, fixedContent, fixError);
+
+                if (!ok)
+                {
+                    Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":")" + JsonEscape(fixError) + R"("})");
+                    return;
+                }
+
+                // Strip markdown fences if the AI wrapped them
+                fixedContent = StripMarkdownFences(fixedContent);
+
+                // Broadcast result with the fixed script for review
+                std::ostringstream ss;
+                ss << R"({"type":"ai-fix-script-result","ok":true,"scripts":[{"path":")" << JsonEscape(scriptPath)
+                   << R"(","content":")" << JsonEscape(fixedContent) << R"(","executable":)" << (isShell ? "true" : "false")
+                   << R"(}]})";
+                Broadcast(ss.str());
+
+                LOG_APP_INFO("[ai-fix-script] Fixed script '{}' — sending to frontend for review", scriptPath);
             });
     }
 

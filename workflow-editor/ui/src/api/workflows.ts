@@ -80,9 +80,13 @@ export async function listWorkflows(): Promise<WorkflowListResponse>
  * GET /api/workflows/{id}
  * Backend returns the raw JCWF JSON body (canonical) as the response.
  */
-export async function loadWorkflow(workflowId: string): Promise<unknown>
+export async function loadWorkflow(workflowId: string): Promise<unknown | null>
 {
   const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`);
+  if (response.status === 404)
+  {
+    return null;
+  }
   ensureOk(response);
   return await response.json();
 }

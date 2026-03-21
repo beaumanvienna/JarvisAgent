@@ -57,10 +57,18 @@
             "model": "gemini-2.5-flash-lite",
             "API": "API3",
             "key_name": "google"
+        },
+        {
+            "name": "api.openai.com/gpt-4.1/MAX",
+            "description": "Maximum reasoning quality. Slowest and most expensive option. Use for hardest problems, architecture design, and critical debugging. Use API index 6.",
+            "url": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4.1",
+            "API": "API1",
+            "key_name": "openai"
         }
     ],
 
-    "API index": 3,
+    "API index": 6,
     "max file size in kB": 24,
     "jcwf batch size": 1
 }

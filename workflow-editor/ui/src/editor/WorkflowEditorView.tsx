@@ -3,6 +3,7 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
+  SelectionMode,
   addEdge,
   applyNodeChanges,
   useEdgesState,
@@ -212,6 +213,18 @@ export default function WorkflowEditorView(props: {
 {
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [currentZoom, setCurrentZoom] = useState<number>(1);
+  const [shiftHeld, setShiftHeld] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(true); };
+    const onKeyUp = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(false); };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
 
   const [statusText, setStatusText] = useState<string>("");
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -1124,7 +1137,14 @@ export default function WorkflowEditorView(props: {
         const jcwf = await loadWorkflow(props.workflowId);
         if (!isCancelled)
         {
-          loadFromJcwfRef.current(props.workflowId, jcwf);
+          if (jcwf !== null)
+          {
+            loadFromJcwfRef.current(props.workflowId, jcwf);
+          }
+          else
+          {
+            setStatusText("");
+          }
         }
       }
       catch (e)
@@ -2970,6 +2990,9 @@ export default function WorkflowEditorView(props: {
             onEdgesChange={onEdgesChangeWithUndo}
             onConnect={onConnect}
             onSelectionChange={onSelectionChange}
+            selectionOnDrag={shiftHeld}
+            panOnDrag={!shiftHeld}
+            selectionMode={SelectionMode.Partial}
             deleteKeyCode={["Backspace", "Delete"]}
             minZoom={MIN_ZOOM}
             onInit={(instance) => { setReactFlowInstance(instance); instance.fitView(); }}
@@ -2984,6 +3007,7 @@ export default function WorkflowEditorView(props: {
           ref={aiPromptAreaRef}
           getCurrentJcwf={getCurrentJcwf}
           onJcwfGenerated={onJcwfGenerated}
+          onScriptsAccepted={onValidate}
           webSocketRef={webSocketRef}
           isWebSocketConnected={isWebSocketConnected}
         />
@@ -3058,6 +3082,65 @@ export default function WorkflowEditorView(props: {
               : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   <div className="small">taskId: <code>{selectedNode.id}</code></div>
+
+                  {runtimeTasksById[selectedNode.id]
+                    ? (
+                      <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
+                        <div className="small" style={{ fontWeight: 700, marginBottom: 4 }}>Runtime</div>
+                        <div className="small">State: <code>{runtimeTasksById[selectedNode.id].state}</code></div>
+                        {runtimeTasksById[selectedNode.id].attemptCount !== undefined
+                          ? <div className="small">Attempts: {runtimeTasksById[selectedNode.id].attemptCount}</div>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].lastErrorMessage
+                          ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].capturedStderr
+                          ? <pre style={{ marginTop: 6, fontSize: 11, color: "#ff8a8a", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,80,80,0.06)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStderr}</pre>
+                          : null}
+                        {runtimeTasksById[selectedNode.id].capturedStdout
+                          ? <pre style={{ marginTop: 4, fontSize: 11, color: "rgba(220,230,240,0.9)", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,255,255,0.03)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStdout}</pre>
+                          : null}
+                        {/* Fix Script button: shown when a shell/python task failed with stderr */}
+                        {(() => {
+                          const snap = runtimeTasksById[selectedNode.id];
+                          const taskData = selectedNode.data.task;
+                          const taskType = typeof taskData.type === "string" ? taskData.type : "";
+                          const isFixable = (taskType === "shell" || taskType === "python");
+                          const hasFailed = snap.state === "failed";
+                          const hasStderr = typeof snap.capturedStderr === "string" && snap.capturedStderr.length > 0;
+                          if (!isFixable || !hasFailed || !hasStderr) return null;
+
+                          const params = taskData.params as Record<string, unknown> | undefined;
+                          const scriptPath = taskType === "shell"
+                            ? (typeof params?.command === "string" ? params.command : "")
+                            : (typeof params?.module === "string" ? params.module : "");
+                          if (!scriptPath) return null;
+
+                          return (
+                            <button
+                              className="btn"
+                              type="button"
+                              style={{ marginTop: 8, color: "#ffb347", fontWeight: 700, fontSize: 12, width: "100%" }}
+                              title={`Send ${scriptPath} + stderr to AI for a fix`}
+                              disabled={!isWebSocketConnected}
+                              onClick={() => {
+                                const socket = webSocketRef.current;
+                                if (!socket || socket.readyState !== WebSocket.OPEN) return;
+                                socket.send(JSON.stringify({
+                                  type: "ai-fix-failed-script",
+                                  scriptPath,
+                                  stderr: snap.capturedStderr,
+                                  taskType,
+                                }));
+                              }}
+                            >
+                              Fix Script
+                            </button>
+                          );
+                        })()}
+                      </div>
+                    )
+                    : null}
 
                   <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
                     <input
@@ -3552,26 +3635,6 @@ export default function WorkflowEditorView(props: {
                     )
                     : null}
 
-                  {runtimeTasksById[selectedNode.id]
-                    ? (
-                      <div style={{ marginTop: 10, padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 4 }}>
-                        <div className="small" style={{ fontWeight: 700, marginBottom: 4 }}>Runtime</div>
-                        <div className="small">State: <code>{runtimeTasksById[selectedNode.id].state}</code></div>
-                        {runtimeTasksById[selectedNode.id].attemptCount !== undefined
-                          ? <div className="small">Attempts: {runtimeTasksById[selectedNode.id].attemptCount}</div>
-                          : null}
-                        {runtimeTasksById[selectedNode.id].lastErrorMessage
-                          ? <div className="errorText small" style={{ marginTop: 4 }}>{runtimeTasksById[selectedNode.id].lastErrorMessage}</div>
-                          : null}
-                        {runtimeTasksById[selectedNode.id].capturedStderr
-                          ? <pre style={{ marginTop: 6, fontSize: 11, color: "#ff8a8a", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,80,80,0.06)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStderr}</pre>
-                          : null}
-                        {runtimeTasksById[selectedNode.id].capturedStdout
-                          ? <pre style={{ marginTop: 4, fontSize: 11, color: "rgba(220,230,240,0.9)", whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 120, overflow: "auto", background: "rgba(255,255,255,0.03)", borderRadius: 3, padding: 4 }}>{runtimeTasksById[selectedNode.id].capturedStdout}</pre>
-                          : null}
-                      </div>
-                    )
-                    : null}
                 </div>
               )}
         </div>

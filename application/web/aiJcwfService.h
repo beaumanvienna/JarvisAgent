@@ -66,6 +66,11 @@ namespace AIAssistant
         // Runs asynchronously; broadcasts ai-generate-progress / ai-generate-result.
         void GenerateAsync(std::string const& prompt, std::string const& currentJcwfJson);
 
+        // Fix a failed script: reads the script from disk, sends it + stderr to AI for a fix.
+        // Runs asynchronously; broadcasts ai-fix-script-progress / ai-fix-script-result.
+        void FixFailedScriptAsync(std::string const& scriptPath, std::string const& stderrContent,
+                                  std::string const& taskType);
+
         // Shutdown: signal all background threads to stop and join them.
         void Shutdown();
 
