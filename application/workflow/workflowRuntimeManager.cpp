@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <filesystem>
 #include <optional>
 #include <ctime>
@@ -256,6 +257,46 @@ namespace AIAssistant
                     {
                         taskSummaryJson += ",\"error\":\"" + JsonEscape(taskState.m_LastErrorMessage) + "\"";
                     }
+
+                    // Include task output content for succeeded tasks.
+                    if (taskState.m_State == TaskInstanceStateKind::Succeeded && !taskState.m_OutputValues.empty())
+                    {
+                        static constexpr size_t kMaxOutputBytes = 65536;
+                        taskSummaryJson += ",\"outputs\":{";
+                        bool firstOutput = true;
+                        for (auto const& [slotName, slotValue] : taskState.m_OutputValues)
+                        {
+                            if (!firstOutput)
+                            {
+                                taskSummaryJson += ",";
+                            }
+                            firstOutput = false;
+
+                            // Try to read file content if the value looks like a path.
+                            std::string content;
+                            std::filesystem::path const filePath(slotValue);
+                            std::error_code ec;
+                            if (std::filesystem::is_regular_file(filePath, ec) && !ec)
+                            {
+                                std::ifstream ifs(filePath, std::ios::binary);
+                                if (ifs.is_open())
+                                {
+                                    content.resize(kMaxOutputBytes);
+                                    ifs.read(content.data(), static_cast<std::streamsize>(kMaxOutputBytes));
+                                    content.resize(static_cast<size_t>(ifs.gcount()));
+                                }
+                            }
+
+                            if (content.empty())
+                            {
+                                content = slotValue; // Fallback: use the raw value.
+                            }
+
+                            taskSummaryJson += "\"" + JsonEscape(slotName) + "\":\"" + JsonEscape(content) + "\"";
+                        }
+                        taskSummaryJson += "}";
+                    }
+
                     taskSummaryJson += "}";
                 }
                 taskSummaryJson += "}";

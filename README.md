@@ -23,7 +23,9 @@ Its engine core dispatches many concurrent AI requests — think parallel requir
 <br>
 Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to Markdown via Microsoft's [MarkItDown](https://github.com/microsoft/markitdown) — and chunked when too large — before being sent to the AI. JarvisAgent is file-oriented by design: all inputs, outputs, and intermediate results live on disk, making it a natural fit for engineering environments with large file landscapes.  <br>
 <br>
-Workflows let you chain **serial and parallel tasks** — AI calls, Python scripts, shell commands, or native C++ — in a visual graph editor with various trigger types.  <br>
+Workflows let you chain **serial and parallel tasks** — AI calls, Python scripts, shell commands, or native C++ — in a visual graph editor with various trigger types. Workflows can be **triggered externally** via webhooks (with HMAC signature verification) and integrated with **n8n** or any HTTP-capable orchestrator. Completion callbacks deliver results — including full AI output — back to the caller automatically.  <br>
+<br>
+A built-in **AI assistant** can generate entire workflows from a natural language description — decomposing the task, producing the JCWF definition, and generating all required scripts.  <br>
 <br>
 The application ships with an **ncurses terminal UI** for local or SSH sessions and a **browser-based React dashboard** for remote monitoring. It compiles under **Linux, macOS, and Windows**.  <br>
 <br>
@@ -42,12 +44,12 @@ The application ships with an **ncurses terminal UI** for local or SSH sessions 
 |-------|----------------|--------|
 | **Engine** | Networking (`libcurl` + `openssl`), logging (`spdlog`), JSON parsing (`simdjson`), threading (`BS thread-pool`), profiling (`tracy`) | ✅ |
 | **Event System** | Thread-safe atomic event queue and dispatcher for cross-thread communication | ✅ |
-| **Workflow Runtime** | DAG-based workflow engine — serial/parallel task execution, cron & file-watch triggers, timezone-aware scheduling | ✅ |
+| **Workflow Runtime** | DAG-based workflow engine — serial/parallel task execution, cron/file-watch/webhook triggers, error branching, run control (pause/resume/stop), timezone-aware scheduling | ✅ |
 | **Application** | Orchestrates queue handling, event dispatching, file tracking, and AI query flow | ✅ |
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
 | **I/O** | File watcher, categorizer, environment assembly (STNG/CNTX/TASK), automatic binary detection and MarkItDown-based document conversion | ✅ |
 | **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) with multi-model selection | ✅ |
-| **Frontend** | React workflow editor (ReactFlow graph UI), workflow list, live run monitoring via WebSocket | ✅ |
+| **Frontend** | React workflow editor (ReactFlow graph UI), AI workflow generator, workflow versioning, live run monitoring via WebSocket | ✅ |
 
 ---
 
@@ -110,9 +112,14 @@ Any detected file modification automatically triggers selective reprocessing:
 - **Multi-model support** — Compatible with **GPT-4**, **GPT-4.1-mini**, **GPT-5**, and **Google Gemini** (both OpenAI-compatible and native API) through configurable API endpoints.  
 - **Visual workflow editor** — React-based graph UI for building DAG workflows with drag-and-drop nodes, auto-layout, and live run status.  
 - **Flexible task types** — Workflow tasks can be AI calls, Python scripts, shell commands, or native C++ — mixed freely in serial and parallel.  
-- **Cron & trigger scheduling** — Cron triggers with IANA timezone support, file-watch triggers, manual triggers, and auto-start triggers.  
+- **Triggers & scheduling** — Cron (with IANA timezone), file-watch, webhook (HMAC-SHA256), manual, and auto-start triggers.  
 - **Office document conversion** — PDF, DOCX, XLSX, PPTX, and HTML are converted to Markdown via Microsoft MarkItDown before AI processing.  
 - **Smart dependency tracking** — Re-evaluates files only when inputs or environment have changed, preventing unnecessary re-queries.  
+- **n8n integration** — Custom n8n node (`n8n-nodes-jarvisagent`) for triggering workflows from n8n. Supports HMAC signing, context injection, and completion callbacks that deliver AI output back to n8n for downstream routing (email, Slack, etc.).  
+- **AI workflow generation** — Describe a workflow in natural language and the AI assistant generates the JCWF definition, decomposes tasks, and produces Python or shell scripts — with validation and auto-fix.  
+- **Error branching** — Branch nodes and controlflow edges route execution on task success or failure, enabling automatic retry and recovery patterns.  
+- **Run control** — Pause, resume, and stop running workflows via REST API or the editor UI.  
+- **Workflow versioning** — Auto-backup on every save with full restore history. Browse and restore previous versions from the editor.  
 - **Dual UI** — ncurses terminal UI for headless/SSH operation, plus a browser-based React dashboard for remote monitoring.  
 - **Encrypted API key management** — AES-256-GCM encrypted key store with master password, per-provider key names, and runtime key resolution via `key_name` in config.json interfaces.  
 - **Per-item fan-out** — CSV, text_lines, and Polarion filters produce item lists; `per_item` tasks spawn one AI call per item, all running in parallel.  
@@ -152,6 +159,7 @@ queue/
 | [AI Car Maintenance Pipeline](example/workflows/aiCarMaintenancePipeline.md) | Retrieves user manuals based on AI categorization, multi-stage pipeline |
 | [Vehicle Troubleshooting Guide](example/workflows/vehicleTroubleshootingGuide.md) | AI-generated flow charts based on user prompt, shell + AI pipeline |
 | [Make-Style Build Example](example/workflows/make_example.md) | Classic dependency graph, file I/O, shell tasks |
+| [Hamburg Tourist Day Planner](example/workflows/hamburg-tourist-day-planner.md) | Webhook trigger, n8n integration, HMAC signing, completion callback with AI output |
 
 ---
 
@@ -159,7 +167,12 @@ queue/
 
 - [x] Docker deployment & CI/CD — 3-stage build, pushed to GHCR ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
 - [x] Native Google Gemini reply parser (API3 — `x-goog-api-key` auth, `/models/{model}:generateContent` URL scheme)  
-- [ ] n8n workflow integration ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
+- [x] n8n workflow integration — webhook triggers, HMAC-SHA256, completion callbacks, custom n8n node  
+- [x] AI workflow generation — natural language → JCWF + scripts (decompose → generate → validate → fix)  
+- [x] Error branching & controlflow — branch nodes, error-signal edges, automatic retry/recovery  
+- [x] Workflow versioning — auto-backup on save, browse & restore from editor  
+- [ ] Python Engine parallelization (sub-interpreters / multiprocessing)  
+- [ ] Browser-based AI chat terminal  
 - [ ] Enable HTTP/2 for improved network performance  
 
 ---
