@@ -1017,6 +1017,80 @@ select.input option {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.templateDropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  max-height: 160px;
+  overflow-y: auto;
+  background: #1e1e2e;
+  border: 1px solid rgba(120, 180, 255, 0.30);
+  border-radius: 6px;
+  z-index: 100;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  margin-bottom: 2px;
+}
+
+.templateDropdownItem {
+  padding: 4px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(220, 230, 255, 0.85);
+}
+
+.templateDropdownItem:hover,
+.templateDropdownItemActive {
+  background: rgba(80, 140, 255, 0.20);
+  color: #fff;
+}
+
+/* Status LEDs */
+.statusLedRow {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.statusLedGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.statusLed {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.statusLedLabel {
+  font-size: 0.75rem;
+  color: #8a8a8a;
+}
+
+.statusRunCounters {
+  display: flex;
+  gap: 12px;
+  margin-left: 4px;
+  font-size: 0.75rem;
+  border-left: 1px solid #333;
+  padding-left: 12px;
 }

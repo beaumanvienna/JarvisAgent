@@ -898,6 +898,19 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/workflows/<string>")
             .methods("DELETE"_method)([this](std::string const& workflowId) { return HandleWorkflowDelete(workflowId); });
 
+        // ---- Workflow Editor: versioning ----
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions")
+            .methods("GET"_method)([this](std::string const& workflowId)
+                                   { return HandleWorkflowVersionsListGet(workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>")
+            .methods("GET"_method)([this](std::string const& workflowId, std::string const& timestamp)
+                                   { return HandleWorkflowVersionGetGet(workflowId, timestamp); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>/restore")
+            .methods("POST"_method)([this](std::string const& workflowId, std::string const& timestamp)
+                                    { return HandleWorkflowVersionRestorePost(workflowId, timestamp); });
+
         // ---- Workflow Editor: validation ----
         CROW_ROUTE(m_Server, "/api/workflows/validate")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
@@ -1372,6 +1385,25 @@ namespace AIAssistant
                                          "PUT /api/workflows/{id}", workflowId);
         }
 
+        // Version history: backup the existing file before overwriting
+        {
+            fs::path const historyDir = workflowsDirectoryAbsolute / ".history" / workflowId;
+            std::error_code ec;
+            fs::create_directories(historyDir, ec);
+            if (!ec)
+            {
+                auto const now = std::chrono::system_clock::now();
+                auto const timeT = std::chrono::system_clock::to_time_t(now);
+                std::tm gmTime{};
+                gmtime_r(&timeT, &gmTime);
+                char timestampBuf[32];
+                std::strftime(timestampBuf, sizeof(timestampBuf), "%Y%m%dT%H%M%S", &gmTime);
+
+                fs::path const backupPath = historyDir / (std::string(timestampBuf) + ".jcwf");
+                fs::copy_file(targetPath, backupPath, fs::copy_options::overwrite_existing, ec);
+            }
+        }
+
         std::string writeErrorMessage;
         if (!WriteTextFileAtomic(targetPath, req.body, writeErrorMessage))
         {
@@ -1452,6 +1484,201 @@ namespace AIAssistant
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["id"] = workflowId;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    // ---- Workflow versioning ----
+
+    crow::response WebServer::HandleWorkflowVersionsListGet(std::string const& workflowId)
+    {
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
+                                         "GET /api/workflows/{id}/versions", workflowId);
+        }
+
+        std::string errorMessage;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
+        if (workflowsDirectoryAbsolute.empty())
+        {
+            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}/versions", workflowId);
+        }
+
+        fs::path const historyDir = workflowsDirectoryAbsolute / ".history" / workflowId;
+        std::vector<std::string> timestamps;
+
+        if (fs::exists(historyDir) && fs::is_directory(historyDir))
+        {
+            for (auto const& entry : fs::directory_iterator(historyDir))
+            {
+                if (entry.is_regular_file() && entry.path().extension() == ".jcwf")
+                {
+                    timestamps.push_back(entry.path().stem().string());
+                }
+            }
+        }
+
+        // Sort descending (newest first)
+        std::sort(timestamps.begin(), timestamps.end(), std::greater<>());
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["workflowId"] = workflowId;
+
+        std::vector<crow::json::wvalue> versionList;
+        for (auto const& ts : timestamps)
+        {
+            crow::json::wvalue versionEntry;
+            versionEntry["timestamp"] = ts;
+
+            // Compute file size
+            fs::path const versionPath = historyDir / (ts + ".jcwf");
+            std::error_code ec;
+            auto const fileSize = fs::file_size(versionPath, ec);
+            if (!ec)
+            {
+                versionEntry["sizeBytes"] = static_cast<int64_t>(fileSize);
+            }
+            versionList.push_back(std::move(versionEntry));
+        }
+        responseJson["versions"] = std::move(versionList);
+        responseJson["count"] = static_cast<int>(timestamps.size());
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleWorkflowVersionGetGet(std::string const& workflowId, std::string const& timestamp)
+    {
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
+                                         "GET /api/workflows/{id}/versions/{ts}", workflowId);
+        }
+
+        // Sanitize timestamp: allow only alphanumeric and 'T'
+        for (char const c : timestamp)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != 'T')
+            {
+                return MakeWorkflowJsonError(400, "invalid_timestamp", "Timestamp contains invalid characters",
+                                             "GET /api/workflows/{id}/versions/{ts}", workflowId);
+            }
+        }
+
+        std::string errorMessage;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
+        if (workflowsDirectoryAbsolute.empty())
+        {
+            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}/versions/{ts}",
+                                         workflowId);
+        }
+
+        fs::path const versionPath = workflowsDirectoryAbsolute / ".history" / workflowId / (timestamp + ".jcwf");
+        if (!fs::exists(versionPath))
+        {
+            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
+                                         "GET /api/workflows/{id}/versions/{ts}", workflowId);
+        }
+
+        std::ifstream ifs(versionPath);
+        if (!ifs.is_open())
+        {
+            return MakeWorkflowJsonError(500, "read_failed", "Failed to read version file",
+                                         "GET /api/workflows/{id}/versions/{ts}", workflowId);
+        }
+
+        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        crow::response resp(200, content);
+        resp.set_header("Content-Type", "application/json");
+        return resp;
+    }
+
+    crow::response WebServer::HandleWorkflowVersionRestorePost(std::string const& workflowId, std::string const& timestamp)
+    {
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
+                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+        }
+
+        // Sanitize timestamp
+        for (char const c : timestamp)
+        {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != 'T')
+            {
+                return MakeWorkflowJsonError(400, "invalid_timestamp", "Timestamp contains invalid characters",
+                                             "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+            }
+        }
+
+        std::string errorMessage;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
+        if (workflowsDirectoryAbsolute.empty())
+        {
+            return MakeWorkflowJsonError(500, "config_error", errorMessage, "POST /api/workflows/{id}/versions/{ts}/restore",
+                                         workflowId);
+        }
+
+        fs::path const versionPath = workflowsDirectoryAbsolute / ".history" / workflowId / (timestamp + ".jcwf");
+        if (!fs::exists(versionPath))
+        {
+            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
+                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+        }
+
+        fs::path const targetPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
+
+        // Read the version content
+        std::ifstream ifs(versionPath);
+        if (!ifs.is_open())
+        {
+            return MakeWorkflowJsonError(500, "read_failed", "Failed to read version file",
+                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+        }
+        std::string versionContent((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        ifs.close();
+
+        // Backup current before restoring
+        if (fs::exists(targetPath))
+        {
+            fs::path const historyDir = workflowsDirectoryAbsolute / ".history" / workflowId;
+            std::error_code ec;
+            fs::create_directories(historyDir, ec);
+            if (!ec)
+            {
+                auto const now = std::chrono::system_clock::now();
+                auto const timeT = std::chrono::system_clock::to_time_t(now);
+                std::tm gmTime{};
+                gmtime_r(&timeT, &gmTime);
+                char timestampBuf[32];
+                std::strftime(timestampBuf, sizeof(timestampBuf), "%Y%m%dT%H%M%S", &gmTime);
+
+                fs::path const backupPath = historyDir / (std::string(timestampBuf) + ".jcwf");
+                fs::copy_file(targetPath, backupPath, fs::copy_options::overwrite_existing, ec);
+            }
+        }
+
+        // Write the restored version
+        std::string writeErrorMessage;
+        if (!WriteTextFileAtomic(targetPath, versionContent, writeErrorMessage))
+        {
+            return MakeWorkflowJsonError(500, "restore_failed", writeErrorMessage,
+                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+        }
+
+        // Update registry
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRegistry != nullptr)
+            {
+                std::string upsertErrorMessage;
+                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(versionContent, targetPath, upsertErrorMessage);
+            }
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["workflowId"] = workflowId;
+        responseJson["restoredVersion"] = timestamp;
         return MakeJsonResponse(200, responseJson);
     }
 

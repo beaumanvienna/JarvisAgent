@@ -43,6 +43,7 @@ import {
   type WorkflowValidationFinding,
 } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
+import VersionHistoryModal from "../components/VersionHistoryModal";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
 import AiPromptArea from "./AiPromptArea";
 import type { AiPromptAreaHandle } from "./AiPromptArea";
@@ -251,6 +252,7 @@ export default function WorkflowEditorView(props: {
 
   const [showFilterBuilder, setShowFilterBuilder] = useState<boolean>(false);
   const [editingFilter, setEditingFilter] = useState<JcwfFilter | null>(null);
+  const [showVersionHistory, setShowVersionHistory] = useState<boolean>(false);
 
   const loadedJcwfRef = useRef<JcwfFile | null>(null);
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -1591,6 +1593,45 @@ export default function WorkflowEditorView(props: {
     return (found as EditorControlNode | undefined) ?? null;
   }, [nodes, selectedNodeId]);
 
+  const templateVariables = useMemo((): string[] => {
+    if (!selectedNode) return [];
+    const vars: string[] = [];
+    const task = selectedNode.data.task;
+
+    // Task's own declared inputs (bare names)
+    const inputs = task.inputs as Record<string, unknown> | undefined;
+    if (inputs)
+    {
+      for (const name of Object.keys(inputs)) vars.push(name);
+    }
+
+    // file_inputs indexed: input[0], input[1], ...
+    const fi = Array.isArray(task.file_inputs) ? task.file_inputs as string[] : [];
+    for (let i = 0; i < fi.length; i++) vars.push(`input[${i}]`);
+    if (fi.length > 0) vars.push("inputs");
+
+    // file_outputs indexed: output[0], output[1], ...
+    const fo = Array.isArray(task.file_outputs) ? task.file_outputs as string[] : [];
+    for (let i = 0; i < fo.length; i++) vars.push(`output[${i}]`);
+    if (fo.length > 0) vars.push("outputs");
+
+    // Upstream task outputs reachable via dataflow (taskId.outputName)
+    const taskNodes = (nodes as EditorTaskNode[]).filter((n) => n.type === "task" && n.id !== selectedNode.id);
+    for (const tn of taskNodes)
+    {
+      const outs = tn.data.task.outputs as Record<string, unknown> | undefined;
+      if (outs)
+      {
+        for (const outName of Object.keys(outs))
+        {
+          vars.push(`${tn.id}.${outName}`);
+        }
+      }
+    }
+
+    return vars;
+  }, [selectedNode, nodes]);
+
   const [aiInterfaces, setAiInterfaces] = useState<AiInterface[]>([]);
   useEffect(() => {
     listAiInterfaces().then((res) => {
@@ -2754,6 +2795,7 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" onClick={onValidate}>Validate</button>
             <button className="btn" type="button" onClick={onRun} disabled={(!loadedWorkflowId && !props.workflowId) || !manualStartEnabled} title={!manualStartEnabled ? "manual_start is disabled for this workflow" : undefined}>Run</button>
             <button className="btn" type="button" onClick={onClean} disabled={!loadedWorkflowId && !props.workflowId}>Clean</button>
+            <button className="btn" type="button" onClick={() => setShowVersionHistory(true)} disabled={!loadedWorkflowId && !props.workflowId}>History</button>
             <button className="btn" type="button" onClick={onAutoLayout}>Auto Layout</button>
             <button className="btn" type="button" onClick={onExportToConsole}>Export (console)</button>
           </div>
@@ -3543,6 +3585,7 @@ export default function WorkflowEditorView(props: {
                     <QueueBindingEditor
                       queueBinding={selectedNode.data.task.queue_binding as JcwfQueueBinding | undefined}
                       onChange={(binding) => { updateSelectedTaskField({ queue_binding: binding } as Partial<JcwfTask>); }}
+                      templateVariables={templateVariables}
                     />
                   )}
 
@@ -3664,6 +3707,17 @@ export default function WorkflowEditorView(props: {
           filter={editingFilter}
           onSave={onFilterBuilderSave}
           onCancel={() => { setShowFilterBuilder(false); setEditingFilter(null); }}
+        />
+      )}
+
+      {showVersionHistory && (loadedWorkflowId || props.workflowId) && (
+        <VersionHistoryModal
+          workflowId={loadedWorkflowId ?? props.workflowId!}
+          onClose={() => setShowVersionHistory(false)}
+          onRestored={() => {
+            setShowVersionHistory(false);
+            window.location.reload();
+          }}
         />
       )}
     </div>

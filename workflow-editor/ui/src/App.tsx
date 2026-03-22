@@ -5,6 +5,8 @@ import ProvidersSettingsView from "./views/ProvidersSettingsView";
 import AiManagerView from "./views/AiManagerView";
 import SettingsModal from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
+import StatusLeds from "./components/StatusLeds";
+import { useStatusWebSocket } from "./hooks/useStatusWebSocket";
 import { getKeysStatus, type KeysStatusResponse } from "./api/keys";
 import type { JcwfFile } from "./jcwf/types";
 
@@ -51,6 +53,7 @@ export default function App(): JSX.Element
   const [masterPassword, setMasterPassword] = useState<string | null>(null);
   const [aiManagerDirty, setAiManagerDirty] = useState<boolean>(false);
   const [keysDirty, setKeysDirty] = useState<boolean>(false);
+  const statusWs = useStatusWebSocket();
 
   // Check master password / keys status on mount
   useEffect(() => {
@@ -198,6 +201,8 @@ export default function App(): JSX.Element
           <div className="brandTitle">JarvisAgent</div>
           <div className="brandSub">Workflow Editor</div>
         </div>
+
+        <StatusLeds status={statusWs} />
 
         <nav className="navButtons">
           <button

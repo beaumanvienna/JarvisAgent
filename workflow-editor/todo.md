@@ -50,8 +50,9 @@ Last reviewed: 2026-03-21
 - [x] ~~AI test button~~ — direct curl ping with 10s timeout (bypasses SessionManager). Backend: `POST /api/settings/ai-interfaces/test`, `TestAiInterface()` in `aiJcwfService`. Frontend: test button + LED indicator in `AiManagerView.tsx`. Bad URLs fail instantly (e.g. HTTP 404), no more 2-minute hang.
 - [x] ~~AI Manager edit modal~~ — centered overlay with blurred backdrop replaces inline edit form at bottom of provider list. Click-outside-to-close.
 - [x] ~~Settings dialog for workflow editor~~ — config.json fields exposed in the gear-icon Settings modal. Backend: `GET/PUT /api/settings/config`. Frontend: `SettingsModal.tsx` with Default AI Interface, Max Threads, Max File Size, JCWF Batch Size, Verbose toggle.
-- [ ] Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files
-- [ ] Drag-to-reorder in queue_binding entries (stretch goal)
+- [x] ~~Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files~~ — `TemplateTextarea` component with inline dropdown for `{{...}}` placeholders. Suggestions sourced from task inputs, file_inputs/outputs indices, and upstream task outputs.
+- [x] ~~Drag-to-reorder in queue_binding entries~~ — ▲/▼ buttons on each entry in `QueueBindingEditor`
+- [x] ~~Status LEDs in editor header~~ — `StatusLeds` component + `useStatusWebSocket` hook in `App.tsx` header. Shows Connected/Disconnected, Queries in flight, Workflow running, Python Offline, succeeded/failed counters — matching dashboard.
 
 ### Validation Expansion (all implemented in `workflowValidator.cpp`)
 - [x] ~~Task-type required fields (shell `params.command`, python `module`/`function`, internal `action`, ai_call `prob_files`)~~
@@ -77,9 +78,9 @@ Last reviewed: 2026-03-21
       simple (cyber2) and large (jarvisCppDocu) workflows.
 
 ### Future (n8n integration)
-- [ ] Seamless n8n integration — `POST /api/integrations/n8n/start` endpoint with callback URL, bidirectional triggering
+- [x] ~~Seamless n8n integration~~ — `POST /api/webhook/<workflowId>` with HMAC-SHA256, completion callback POST to `callbackUrl`, n8n custom node v2 (webhook/legacy toggle + HMAC signing). Legacy `POST /api/integrations/n8n/start` retained for backward compat.
 - [ ] Sub-workflows / workflow-call node
-- [ ] Workflow versioning
+- [x] ~~Workflow versioning~~ — auto-backup on save to `.history/<workflowId>/<timestamp>.jcwf`. REST API: `GET /api/workflows/<id>/versions` (list), `GET /api/workflows/<id>/versions/<ts>` (get), `POST /api/workflows/<id>/versions/<ts>/restore` (restore with pre-restore backup). Frontend: "History" button in toolbar opens `VersionHistoryModal` with version list, sizes, and restore buttons.
 
 ---
 

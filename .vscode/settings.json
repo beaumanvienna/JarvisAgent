@@ -106,5 +106,6 @@
         "editor.formatOnSave": false
     },
     "zenMode.hideLineNumbers": false,
-    "CodeGPT.apiKey": "OpenAI"
+    "CodeGPT.apiKey": "OpenAI",
+    "python.defaultInterpreterPath": "/home/beaumanvienna/dev/jarvisAgent/.venv/bin/python"
 }

@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from "react";
 import type { JcwfQueueBinding, JcwfQueueFileEntry } from "../jcwf/types";
+import TemplateTextarea from "./TemplateTextarea";
 
 type FileCategory = "stng_files" | "task_files" | "cntx_files" | "prob_files";
 
@@ -28,9 +29,10 @@ function entryContent(entry: JcwfQueueFileEntry | string): string
 type Props = {
   queueBinding: JcwfQueueBinding | undefined;
   onChange: (binding: JcwfQueueBinding) => void;
+  templateVariables?: string[];
 };
 
-export default function QueueBindingEditor({ queueBinding, onChange }: Props): JSX.Element
+export default function QueueBindingEditor({ queueBinding, onChange, templateVariables }: Props): JSX.Element
 {
   const binding: JcwfQueueBinding = queueBinding ?? {};
   const [expandedEntries, setExpandedEntries] = useState<Record<string, boolean>>({});
@@ -110,6 +112,14 @@ export default function QueueBindingEditor({ queueBinding, onChange }: Props): J
     updateCategory(category, existing);
   }, [binding, updateCategory]);
 
+  const moveEntry = useCallback((category: FileCategory, index: number, direction: -1 | 1) => {
+    const existing = [...(binding[category] ?? [])];
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= existing.length) return;
+    [existing[index], existing[targetIndex]] = [existing[targetIndex], existing[index]];
+    updateCategory(category, existing);
+  }, [binding, updateCategory]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ fontWeight: 700, fontSize: 12 }}>queue_binding</div>
@@ -150,6 +160,22 @@ export default function QueueBindingEditor({ queueBinding, onChange }: Props): J
                       className="btn"
                       type="button"
                       style={{ padding: "2px 6px", fontSize: 10 }}
+                      title="Move up"
+                      disabled={idx === 0}
+                      onClick={() => moveEntry(key, idx, -1)}
+                    >▲</button>
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ padding: "2px 6px", fontSize: 10 }}
+                      title="Move down"
+                      disabled={idx === entries.length - 1}
+                      onClick={() => moveEntry(key, idx, 1)}
+                    >▼</button>
+                    <button
+                      className="btn"
+                      type="button"
+                      style={{ padding: "2px 6px", fontSize: 10 }}
                       title={inline ? "Switch to path reference" : "Add inline content"}
                       onClick={() => toggleInline(key, idx)}
                     >{inline ? "ref" : "inline"}</button>
@@ -171,13 +197,14 @@ export default function QueueBindingEditor({ queueBinding, onChange }: Props): J
                       >{expanded ? "collapse content" : `expand content (${content.length} chars)`}</button>
 
                       {expanded && (
-                        <textarea
+                        <TemplateTextarea
                           className="input codeInput"
                           style={{ fontSize: 11, padding: "6px 8px", marginTop: 4 }}
                           value={content}
-                          onChange={(e) => updateEntryContent(key, idx, e.target.value)}
+                          onChange={(val) => updateEntryContent(key, idx, val)}
                           rows={Math.min(Math.max(content.split("\n").length, 3), 12)}
-                          placeholder="inline file content"
+                          placeholder="inline file content — type {{ for variable autocomplete"
+                          templateVariables={templateVariables ?? []}
                         />
                       )}
                     </div>

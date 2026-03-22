@@ -90,13 +90,13 @@ See also:
 
 ---
 
-## 9. Webhook trigger type (future)
-- Currently, external systems can already trigger workflows via `POST /api/workflows/<id>/run` and `POST /api/integrations/n8n/start`
-- A dedicated `"type": "webhook"` trigger would add:
-  - Per-workflow webhook secrets (HMAC signature verification)
-  - Cleaner URLs like `/api/webhook/<workflowId>`
-  - Declarative intent in the JCWF ("this workflow is designed to be called externally")
-- Not a blocker — existing REST API covers the functionality; this is a polish/security item for v0.9+
+## ~~9. Webhook trigger type~~ ✅
+- ~~A dedicated `"type": "webhook"` trigger~~ ✅ Implemented across 4 phases:
+  - Per-workflow HMAC-SHA256 signature verification (`X-Webhook-Signature` header)
+  - `POST /api/webhook/<workflowId>` endpoint with context injection
+  - Completion callback POST to `callbackUrl` when run finishes (fire-and-forget, 15s timeout)
+  - Frontend webhook trigger editing (secret field + endpoint URL hint)
+  - n8n custom node v2 with webhook/legacy endpoint toggle + HMAC signing
 
 ---
 

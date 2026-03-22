@@ -111,6 +111,11 @@ namespace AIAssistant
         crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
         crow::response HandleWorkflowDelete(std::string const& workflowId);
 
+        // Workflow versioning
+        crow::response HandleWorkflowVersionsListGet(std::string const& workflowId);
+        crow::response HandleWorkflowVersionGetGet(std::string const& workflowId, std::string const& timestamp);
+        crow::response HandleWorkflowVersionRestorePost(std::string const& workflowId, std::string const& timestamp);
+
         // AI interfaces API (config.json "API interfaces")
         crow::response HandleAiInterfacesListGet();
         crow::response HandleAiInterfaceCreatePost(crow::request const& req);
