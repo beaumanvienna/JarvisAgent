@@ -22,9 +22,9 @@ n8n (or curl)
   │
   ▼
 ┌──────────────────────────────────────────────┐
-│ plan (ai_call)                                │
+│ plan (ai_call)                               │
 │ Queue: STNG_plan + TASK_plan + CNTX_weather  │
-│        + PROB_plan                            │
+│        + PROB_plan                           │
 │ Output: PROB_plan.output.txt (Markdown)      │
 └──────────────────────────────────────────────┘
 ```
