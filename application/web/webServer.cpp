@@ -1411,7 +1411,11 @@ namespace AIAssistant
                 auto const now = std::chrono::system_clock::now();
                 auto const timeT = std::chrono::system_clock::to_time_t(now);
                 std::tm gmTime{};
+#ifdef _WIN32
+                gmtime_s(&gmTime, &timeT);
+#else
                 gmtime_r(&timeT, &gmTime);
+#endif
                 char timestampBuf[32];
                 std::strftime(timestampBuf, sizeof(timestampBuf), "%Y%m%dT%H%M%S", &gmTime);
 
@@ -1664,7 +1668,11 @@ namespace AIAssistant
                 auto const now = std::chrono::system_clock::now();
                 auto const timeT = std::chrono::system_clock::to_time_t(now);
                 std::tm gmTime{};
+#ifdef _WIN32
+                gmtime_s(&gmTime, &timeT);
+#else
                 gmtime_r(&timeT, &gmTime);
+#endif
                 char timestampBuf[32];
                 std::strftime(timestampBuf, sizeof(timestampBuf), "%Y%m%dT%H%M%S", &gmTime);
 
