@@ -62,6 +62,14 @@ namespace AIAssistant
             std::string m_TriggerId;
         };
 
+        struct WebhookTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_Secret; // HMAC-SHA256 shared secret (empty = open)
+            bool m_IsEnabled{true};
+        };
+
         using TriggerCallback = std::function<void(TriggerFiredEvent const&)>;
 
     public:
@@ -98,6 +106,11 @@ namespace AIAssistant
         // Register a manual trigger.
         void AddManualTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled);
 
+        // Register a webhook trigger.
+        // secret: shared secret for HMAC-SHA256 verification (empty = open webhook, no signature check).
+        void AddWebhookTrigger(std::string const& workflowId, std::string const& triggerId, std::string const& secret,
+                               bool isEnabled);
+
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
@@ -115,6 +128,10 @@ namespace AIAssistant
         // Called by CLI / Web UI when the user explicitly wants to run
         // a manual trigger.
         void FireManualTrigger(std::string const& workflowId, std::string const& triggerId);
+
+        // Look up a registered webhook trigger for a given workflowId.
+        // Returns nullptr if no webhook trigger is registered for that workflow.
+        WebhookTriggerInstance const* GetWebhookTrigger(std::string const& workflowId) const;
 
     private:
         // Simple cron expression: supports either "*" or a single integer
@@ -208,9 +225,13 @@ namespace AIAssistant
         std::vector<CronTriggerInstance> m_CronTriggers;
         std::vector<FileWatchTriggerInstance> m_FileWatchTriggers;
         std::vector<ManualTriggerInstance> m_ManualTriggers;
+        std::vector<WebhookTriggerInstance> m_WebhookTriggers;
 
         // Optional acceleration structure for file-trigger lookups:
         // map path → indices into m_FileWatchTriggers.
         std::unordered_map<std::string, std::vector<size_t>> m_FileWatchIndex;
+
+        // Acceleration structure for webhook lookups: workflowId → index into m_WebhookTriggers.
+        std::unordered_map<std::string, size_t> m_WebhookIndex;
     };
 } // namespace AIAssistant

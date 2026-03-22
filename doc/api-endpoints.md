@@ -373,6 +373,7 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 | PUT | `/api/settings/ai-interfaces/<name>` | Update an existing AI interface (by name, URL-encoded). |
 | DELETE | `/api/settings/ai-interfaces/<name>` | Delete an AI interface (by name). |
 | POST | `/api/settings/ai-interfaces/save` | Persist in-memory AI interfaces to `config.json` on disk. |
+| POST | `/api/settings/ai-interfaces/test` | Ping-test a specific AI interface (direct curl, 10s timeout). |
 | POST | `/api/settings/config/reload` | Reload `config.json` from disk into memory. |
 
 ### GET /api/settings/ai-interfaces
@@ -405,6 +406,35 @@ Writes the in-memory interfaces back to the `config.json` file by replacing the 
 ```json
 { "ok": true, "path": "/abs/path/config.json" }
 ```
+
+### POST /api/settings/ai-interfaces/test
+Sends a minimal prompt ("Say hello") directly to the specified AI interface via curl with a **10-second timeout**. Bypasses the SessionManager queue-file pipeline entirely — this is a lightweight connectivity and authentication check.
+
+**Request body:**
+```json
+{ "index": 0 }
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `index` | Yes | 0-based index into the `"API interfaces"` array. |
+
+**Response (200) — success:**
+```json
+{ "ok": true, "index": 0, "name": "api.openai.com/gpt-4.1/API1", "model": "gpt-4.1", "latency_ms": 1234, "response_preview": "Hello! ..." }
+```
+
+**Response (200) — failure:**
+```json
+{ "ok": false, "index": 0, "name": "api.openai.com/gpt-4.1/API1", "model": "gpt-4.1", "error": "404 Not Found" }
+```
+
+**Response (400) — bad request:**
+```json
+{ "ok": false, "error": "missing_index", "message": "Request body must contain 'index'." }
+```
+
+The frontend displays results as a colored LED indicator next to each interface: green = success, red = failure, yellow (pulsing) = testing in progress.
 
 ### POST /api/settings/config/reload
 Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
@@ -607,14 +637,14 @@ A persistent WebSocket connection for real-time communication.
 | Type | Fields | Description |
 |------|--------|-------------|
 | `chat` | `subsystem`, `message` | Submit a chat message (same as POST /api/chat but via WS). Creates a `PROB_<id>_<ts>.txt` file. |
-| `workflow-runs-request` | — | Request the current workflow runs snapshot. |
+| `workflow-runs-request` | — | Request the current workflow runs snapshot. Sent once on connect; server pushes updates automatically thereafter. |
 
 ### Server → Client Messages
 
 | Type | Description |
 |------|-------------|
 | `queued` | Acknowledgement of a chat message with `id` and `file` path. |
-| `workflow-runs-snapshot` | Full snapshot of active runs with per-task states. Sent on request and after run/cancel actions. |
+| `workflow-runs-snapshot` | Full snapshot of active runs with per-task states (including `capturedStdout`/`capturedStderr`). **Server-pushed** on every state change (task start/complete/fail, run start/complete). Also sent on initial `workflow-runs-request`. Replaces the previous 500ms client polling. |
 | `python-status` | Broadcast when Python engine status changes (`{ "running": true/false }`). |
 | `log` | Live log lines streamed from the server. `{ "type": "log", "lines": ["...", ...] }`. Replaces 500ms REST polling for the Log Viewer page. |
 | *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on next `onmessage`. |

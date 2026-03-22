@@ -3,7 +3,7 @@ export type JcwfDoc = string | string[];
 export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal";
 export type JcwfTaskMode = "single" | "per_item";
 export type JcwfFilterSourceKind = "csv" | "text_lines" | "query" | "polarion_query";
-export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual";
+export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual" | "webhook";
 
 export type JcwfTrigger = {
   type: JcwfTriggerType;

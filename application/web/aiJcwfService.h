@@ -71,15 +71,24 @@ namespace AIAssistant
         void FixFailedScriptAsync(std::string const& scriptPath, std::string const& stderrContent,
                                   std::string const& taskType);
 
+        // Test a specific AI interface by index. Sends a simple prompt and returns
+        // whether the interface responded successfully. Blocking call — intended to be
+        // called from a Crow HTTP handler thread, not the main thread.
+        // Returns true on success; outResponsePreview contains the first ~200 chars.
+        bool TestAiInterface(size_t interfaceIndex, std::string& outResponsePreview, std::string& outError,
+                             int64_t& outLatencyMs);
+
         // Shutdown: signal all background threads to stop and join them.
         void Shutdown();
 
     private:
         // Single AI call: writes queue files, waits for completion, returns response text.
         // Returns true on success; on failure, outError describes the issue.
+        // If provContent is non-empty, a PROV_provider.json sidecar is written to force
+        // a specific AI interface (otherwise the default provider is used).
         bool RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
                              std::string const& taskContent, std::string const& cntxContent, std::string const& probContent,
-                             std::string& outResponseText, std::string& outError);
+                             std::string& outResponseText, std::string& outError, std::string const& provContent = "");
 
         // Validate JCWF JSON text and return errors/warnings as a formatted string.
         // Returns true if the JCWF is valid (no errors).

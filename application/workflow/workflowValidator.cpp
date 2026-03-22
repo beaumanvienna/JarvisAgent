@@ -176,6 +176,18 @@ namespace
                          "file_watch trigger params missing required field: path", basePath + ".params.path");
             }
         }
+
+        if (trigger.m_Type == WorkflowTriggerType::Webhook)
+        {
+            std::string secret;
+            bool hasSecret = TryGetParamsString(trigger.m_ParamsJson, "secret", secret) && !secret.empty();
+            if (!hasSecret)
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Warning, "webhook_no_secret",
+                         "Webhook trigger has no secret — incoming requests will not be verified (open webhook)",
+                         basePath + ".params.secret");
+            }
+        }
     }
 
     void ValidateTaskParams(std::vector<WorkflowValidationIssue>& issues, WorkflowDefinition const& workflow,

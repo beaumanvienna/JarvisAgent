@@ -80,6 +80,7 @@ namespace AIAssistant
             std::string m_Data;
             std::string m_ApiKey;
             AuthStyle m_AuthStyle{AuthStyle::Bearer};
+            long m_TimeoutMs{0}; // 0 = no timeout (default); >0 = max transfer time in ms
             bool IsValid() const;
         };
 

@@ -1,116 +1,107 @@
-# hamburg‑tourist‑day‑planner Workflow – n8n Integration Demo
+# hamburg‑tourist‑day‑planner — n8n Integration Demo
 
-## Executive Summary
+## Summary
 
-The **hamburg‑tourist‑day‑planner** workflow demonstrates how JarvisAgent integrates with **n8n** as an external orchestrator. An n8n workflow fetches live weather data for Hamburg, then triggers this JCWF workflow via the REST integration endpoint, passing weather context. JarvisAgent generates a tourist day plan with AI and returns the result to n8n via a callback URL.
+The **hamburg‑tourist‑day‑planner** workflow demonstrates how JarvisAgent integrates with **n8n** (or any external system). An n8n workflow fetches live weather data for Hamburg, then triggers this JCWF workflow via `POST /api/webhook/hamburg-tourist-day-planner`, passing weather context. JarvisAgent generates a weather‑aware tourist day plan with AI.
 
-At its core, this workflow shows:
+This workflow shows:
 
-- how n8n triggers a JCWF workflow via `POST /api/integrations/n8n/start`,
-- how external context (`date`, `timezone`, `weatherJson`, `rainCategory`) flows into AI prompts,
-- how a python finalization task posts results back to n8n's callback URL.
+- **External triggering** — n8n (or `curl`) starts a JCWF workflow via REST
+- **Context injection** — weather data flows from the run context into AI prompt templates via `{{variable}}` expansion in inline `queue_binding` content
+- **Standard ai_call pattern** — STNG/TASK/CNTX/PROB queue files, all inline
 
 ---
 
-## Pipeline Overview
+## Pipeline
 
 ```
-n8n (weather fetch)
+n8n (or curl)
   │
-  │  POST /api/integrations/n8n/start
-  │  context: { date, timezone, rainCategory, weatherJson, callbackUrl }
+  │  POST /api/webhook/hamburg-tourist-day-planner
+  │  { context: { date, timezone, rainCategory, weatherJson } }
   │
   ▼
-┌──────────────────┐
-│ plan              │  ai_call: generate a tourist day plan for Hamburg
-└────────┬─────────┘
-         ▼
-┌──────────────────┐
-│ finalize          │  python: format result and POST back to n8n callback
-└──────────────────┘
+┌──────────────────────────────────────────────┐
+│ plan (ai_call)                                │
+│ Queue: STNG_plan + TASK_plan + CNTX_weather  │
+│        + PROB_plan                            │
+│ Output: PROB_plan.output.txt (Markdown)      │
+└──────────────────────────────────────────────┘
 ```
 
 ---
 
-## Task Details
+## Task: plan (ai_call)
 
-### 1. plan (ai_call)
-
-Generates a markdown day plan using weather context injected by n8n.
+Generates a Markdown day plan using weather context injected from the run context.
 
 | Field | Value |
 |-------|-------|
 | Type | `ai_call` |
-| Mode | `blocking` |
-| System prompt | "You are a helpful travel planner." |
-| User prompt | Includes `{{context.date}}`, `{{context.timezone}}`, `{{context.rainCategory}}`, `{{context.weatherJson}}` |
+| Working directory | `../queue/hamburg-tourist-day-planner/01_plan` |
+| Inputs (from context) | `date`, `timezone`, `rainCategory`, `weatherJson` |
 | Output | `plan_markdown` (string) |
+| Timeout | 120 s |
 
-The prompt instructs the AI to produce a full‑day tourist itinerary for Hamburg, adapted to the current weather conditions.
+The task declares `inputs` that are resolved from the **run context** (populated by the webhook handler). The `{{variable}}` placeholders in the inline CNTX and PROB content are expanded by the runtime before the queue files are written.
 
-### 2. finalize (python)
+### Queue files
 
-Receives the AI‑generated plan and the n8n callback metadata, then posts the result back.
-
-| Field | Value |
-|-------|-------|
-| Type | `python` |
-| Depends on | `plan` |
-| Entrypoint | `tasks/finalize.py` |
-| Inputs | `plan_markdown`, `n8n_request_path`, `callbackUrl`, `n8n_task` |
-| Output | `result_markdown` (string) |
+| File | Role | Content |
+|------|------|---------|
+| `STNG_plan.txt` | Style | "Output only raw Markdown. No fences." |
+| `TASK_plan.txt` | Instructions | Activity recommendations adapted to rain category |
+| `CNTX_weather.txt` | Context | `Date: {{date}}`, `Rain category: {{rainCategory}}`, weather JSON |
+| `PROB_plan.txt` | Request | "Generate the Hamburg tourist day plan for {{date}}" |
 
 ---
 
-## Context Variables (Provided by n8n)
+## Context Variables (provided by caller)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `date` | Yes | Target date (e.g. `2026-03-21`) |
+| `timezone` | No | IANA timezone (default: `Europe/Berlin`) |
+| `rainCategory` | Yes | `no_rain`, `some_rain`, or `rain` |
+| `weatherJson` | Yes | Raw weather forecast JSON string |
+
+Additional context set automatically by the webhook handler:
 
 | Variable | Description |
 |----------|-------------|
-| `context.date` | Target date for the day plan |
-| `context.timezone` | Timezone string (e.g. `Europe/Berlin`) |
-| `context.rainCategory` | Rain likelihood category from weather API |
-| `context.weatherJson` | Full weather forecast JSON |
-| `context.callbackUrl` | n8n webhook URL to receive results |
-| `context.n8n_request_path` | Path to the persisted n8n request JSON |
-| `context.n8n_task` | n8n task identifier |
+| `webhook_request_path` | Absolute path to the persisted `request.json` |
+| `webhook_trigger_id` | Trigger ID that matched the incoming request |
+| `callbackUrl` | Callback URL for completion notification (if provided) |
 
 ---
 
-## n8n Integration Flow
+## Integration Flow
 
-1. **n8n** fetches weather data for Hamburg from an external API.
-2. **n8n** sends `POST /api/integrations/n8n/start` with `workflowId: "hamburg-tourist-day-planner"` and weather context.
-3. **JarvisAgent** persists the request JSON, creates a workflow run, and seeds the context.
-4. The `plan` task generates a day plan via AI.
-5. The `finalize` task posts the result markdown back to n8n's `callbackUrl`.
-6. **n8n** receives the result and continues its own workflow (e.g. send email, format PDF).
+1. **n8n** fetches weather data for Hamburg (e.g. from Open‑Meteo: `GET https://api.open-meteo.com/v1/forecast?latitude=53.5511&longitude=9.9937&daily=precipitation_sum,weather_code&timezone=Europe%2FBerlin`).
+2. **n8n** sends `POST /api/webhook/hamburg-tourist-day-planner` with weather context.
+3. **JarvisAgent** verifies the webhook trigger, persists the request JSON to disk, creates a workflow run, and seeds the run context with the provided fields.
+4. The `plan` ai_call task writes STNG/TASK/CNTX/PROB files (with `{{variable}}` expansion), and the SessionManager dispatches the AI query.
+5. The AI response is written to `PROB_plan.output.txt`.
+6. If `callbackUrl` was provided, the runtime POSTs the completion payload back to the caller automatically.
 
 ---
 
-## Running
-
-This workflow is designed to be triggered by n8n, not manually. However, it can be tested via curl:
+## Testing with curl
 
 ```bash
-curl -s -X POST http://localhost:8080/api/integrations/n8n/start \
+curl -s -X POST http://localhost:8080/api/webhook/hamburg-tourist-day-planner \
   -H 'Content-Type: application/json' \
   -d '{
-    "workflowId": "hamburg-tourist-day-planner",
     "context": {
-      "date": "2026-02-17",
+      "date": "2026-03-21",
       "timezone": "Europe/Berlin",
-      "rainCategory": "light",
-      "weatherJson": "{\"temp\": 5, \"description\": \"overcast clouds\"}",
-      "callbackUrl": "https://n8n.example.com/webhook/callback"
+      "rainCategory": "some_rain",
+      "weatherJson": "{\"temp_max\": 8, \"precipitation_sum\": 2.1, \"weather_code\": 61}"
     }
   }'
 ```
 
----
-
-## Key Concepts Demonstrated
-
-- **n8n integration** — external orchestrator triggers JCWF workflows via REST
-- **Context injection** — weather data flows from n8n into AI prompt templates
-- **Callback pattern** — python task posts results back to the calling system
-- **Two‑task pipeline** — minimal AI → finalize pattern for integration workflows
+Check run status:
+```bash
+curl -s http://localhost:8080/api/workflow-runs/active | jq .
+```

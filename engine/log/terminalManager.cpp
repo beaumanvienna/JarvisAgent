@@ -38,6 +38,92 @@
 
 namespace AIAssistant
 {
+    // Sanitize a UTF-8 string for PDCursesMod: replace any codepoint >= MAX_UNICODE
+    // (0x110000) or any malformed UTF-8 byte sequence with '?'.  This prevents an
+    // assertion failure inside PDC_transform_line (pdcdisp.c) when AI response text
+    // contains unusual Unicode or corrupt bytes.
+    static std::string SanitizeForCurses(std::string const& input)
+    {
+        static constexpr uint32_t kMaxCodepoint = 0x10FFFF; // highest valid Unicode
+
+        std::string output;
+        output.reserve(input.size());
+
+        size_t const len = input.size();
+        size_t i = 0;
+
+        while (i < len)
+        {
+            unsigned char const c = static_cast<unsigned char>(input[i]);
+
+            int seqLen = 0;
+            uint32_t codepoint = 0;
+
+            if (c < 0x80)
+            {
+                // ASCII
+                output.push_back(input[i]);
+                ++i;
+                continue;
+            }
+            else if ((c & 0xE0) == 0xC0)
+            {
+                seqLen = 2;
+                codepoint = c & 0x1F;
+            }
+            else if ((c & 0xF0) == 0xE0)
+            {
+                seqLen = 3;
+                codepoint = c & 0x0F;
+            }
+            else if ((c & 0xF8) == 0xF0)
+            {
+                seqLen = 4;
+                codepoint = c & 0x07;
+            }
+            else
+            {
+                // Invalid leading byte — replace and skip.
+                output.push_back('?');
+                ++i;
+                continue;
+            }
+
+            // Check we have enough continuation bytes.
+            if (i + static_cast<size_t>(seqLen) > len)
+            {
+                output.push_back('?');
+                ++i;
+                continue;
+            }
+
+            bool valid = true;
+            for (int j = 1; j < seqLen; ++j)
+            {
+                unsigned char const cont = static_cast<unsigned char>(input[i + static_cast<size_t>(j)]);
+                if ((cont & 0xC0) != 0x80)
+                {
+                    valid = false;
+                    break;
+                }
+                codepoint = (codepoint << 6) | (cont & 0x3F);
+            }
+
+            if (!valid || codepoint > kMaxCodepoint)
+            {
+                output.push_back('?');
+                ++i;
+                continue;
+            }
+
+            // Valid sequence — copy original bytes.
+            output.append(input, i, static_cast<size_t>(seqLen));
+            i += static_cast<size_t>(seqLen);
+        }
+
+        return output;
+    }
+
     struct TerminalManager::Impl
     {
         WINDOW* m_LogWindow{nullptr};
@@ -266,8 +352,9 @@ namespace AIAssistant
                 wclrtoeol(m_LogWindow);
             }
 
+            std::string const safe = SanitizeForCurses(message);
             wattron(m_LogWindow, COLOR_PAIR(1));
-            mvwprintw(m_LogWindow, m_LogPrintLine, 0, "%s", message.c_str());
+            mvwprintw(m_LogWindow, m_LogPrintLine, 0, "%s", safe.c_str());
             wattroff(m_LogWindow, COLOR_PAIR(1));
 
             ++m_LogPrintLine;
@@ -328,7 +415,8 @@ namespace AIAssistant
             int lineIndex = 0;
             for (; lineIndex < statusRows && lineIndex < static_cast<int>(lines.size()); ++lineIndex)
             {
-                mvwprintw(m_StatusWindow, lineIndex, 0, "%s", lines[static_cast<size_t>(lineIndex)].c_str());
+                std::string const safe = SanitizeForCurses(lines[static_cast<size_t>(lineIndex)]);
+                mvwprintw(m_StatusWindow, lineIndex, 0, "%s", safe.c_str());
             }
 
             while (lineIndex < statusRows)

@@ -34,6 +34,7 @@ namespace AIAssistant
 {
     class WorkflowRegistry;
     class WorkflowRuntimeManager;
+    class TriggerEngine;
     class WebServer
     {
     public:
@@ -49,6 +50,7 @@ namespace AIAssistant
         // If not set, editor run-monitoring endpoints will return "not configured".
         void SetWorkflowRegistry(WorkflowRegistry* workflowRegistry);
         void SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager);
+        void SetTriggerEngine(TriggerEngine* triggerEngine);
 
         // Workflow Editor: optional server-side push of run snapshots (call periodically from main thread).
         void BroadcastWorkflowRunsSnapshot();
@@ -99,6 +101,9 @@ namespace AIAssistant
         // Integrations: n8n
         crow::response HandleN8nStartPost(crow::request const& req);
 
+        // Webhook trigger endpoint
+        crow::response HandleWebhookPost(crow::request const& req, std::string const& workflowId);
+
         crow::response HandleWorkflowsListGet();
         crow::response HandleWorkflowsReloadPost();
         crow::response HandleWorkflowsCreatePost(crow::request const& req);
@@ -112,7 +117,10 @@ namespace AIAssistant
         crow::response HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name);
         crow::response HandleAiInterfaceDeleteDelete(std::string const& name);
         crow::response HandleAiInterfacesSavePost();
+        crow::response HandleAiInterfaceTestPost(crow::request const& req);
         crow::response HandleConfigReloadPost();
+        crow::response HandleConfigSettingsGet();
+        crow::response HandleConfigSettingsPut(crow::request const& req);
 
         // Script check API (Workflow Editor)
         crow::response HandleScriptCheckGet(crow::request const& req);
@@ -160,6 +168,7 @@ namespace AIAssistant
 
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
+        TriggerEngine* m_TriggerEngine = nullptr;
 
         AiJcwfService m_AiJcwfService;
     };

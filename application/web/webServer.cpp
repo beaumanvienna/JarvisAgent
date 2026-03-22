@@ -59,6 +59,10 @@
 
 #include "event/events.h"
 #include "keys/keyEncryption.h"
+#include "workflow/triggerEngine.h"
+
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 namespace fs = std::filesystem;
 namespace AIAssistant
@@ -71,6 +75,50 @@ namespace AIAssistant
             auto const now = std::chrono::system_clock::now().time_since_epoch();
             auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
             return workflowId + "_" + std::to_string(millis);
+        }
+
+        std::string ComputeHmacSha256Hex(std::string const& secret, std::string const& data)
+        {
+            unsigned char digest[EVP_MAX_MD_SIZE];
+            unsigned int digestLength = 0;
+
+            HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
+                 reinterpret_cast<unsigned char const*>(data.data()), data.size(), digest, &digestLength);
+
+            std::string hex;
+            hex.reserve(digestLength * 2);
+            static constexpr char hexDigits[] = "0123456789abcdef";
+            for (unsigned int i = 0; i < digestLength; ++i)
+            {
+                hex.push_back(hexDigits[(digest[i] >> 4) & 0x0F]);
+                hex.push_back(hexDigits[digest[i] & 0x0F]);
+            }
+            return hex;
+        }
+
+        bool VerifyHmacSignature(std::string const& secret, std::string const& body, std::string const& headerValue)
+        {
+            // Expected header format: "sha256=<hex>"
+            static constexpr std::string_view kPrefix = "sha256=";
+            if (headerValue.size() <= kPrefix.size() || headerValue.compare(0, kPrefix.size(), kPrefix) != 0)
+            {
+                return false;
+            }
+
+            std::string const providedHex = headerValue.substr(kPrefix.size());
+            std::string const expectedHex = ComputeHmacSha256Hex(secret, body);
+
+            // Constant-time comparison to prevent timing attacks.
+            if (providedHex.size() != expectedHex.size())
+            {
+                return false;
+            }
+            unsigned char result = 0;
+            for (size_t i = 0; i < providedHex.size(); ++i)
+            {
+                result |= static_cast<unsigned char>(providedHex[i]) ^ static_cast<unsigned char>(expectedHex[i]);
+            }
+            return result == 0;
         }
 
         void SetJsonHeaders(crow::response& response)
@@ -434,6 +482,12 @@ namespace AIAssistant
         m_WorkflowRuntimeManager = workflowRuntimeManager;
     }
 
+    void WebServer::SetTriggerEngine(TriggerEngine* triggerEngine)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        m_TriggerEngine = triggerEngine;
+    }
+
     namespace
     {
         // Replace invalid UTF-8 bytes with the Unicode replacement character so
@@ -569,6 +623,14 @@ namespace AIAssistant
                 task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
                 task["attemptCount"] = taskState.m_AttemptCount;
                 task["lastErrorMessage"] = SanitizeUtf8(taskState.m_LastErrorMessage);
+                if (!taskState.m_CapturedStdout.empty())
+                {
+                    task["capturedStdout"] = SanitizeUtf8(taskState.m_CapturedStdout);
+                }
+                if (!taskState.m_CapturedStderr.empty())
+                {
+                    task["capturedStderr"] = SanitizeUtf8(taskState.m_CapturedStderr);
+                }
 
                 tasks.push_back(std::move(task));
             }
@@ -877,6 +939,11 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
             .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
 
+        // ---- Webhook trigger ----
+        CROW_ROUTE(m_Server, "/api/webhook/<string>")
+            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
+                                    { return HandleWebhookPost(req, workflowId); });
+
         // ---- AI interfaces API (config.json) ----
         CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
             .methods("GET"_method)([this]() { return HandleAiInterfacesListGet(); });
@@ -887,6 +954,9 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
             .methods("POST"_method)([this]() { return HandleAiInterfacesSavePost(); });
 
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/test")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceTestPost(req); });
+
         CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
             .methods("PUT"_method)([this](crow::request const& req, std::string const& name)
                                    { return HandleAiInterfaceUpdatePut(req, name); });
@@ -896,6 +966,11 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/settings/config/reload")
             .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/config").methods("GET"_method)([this]() { return HandleConfigSettingsGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/config")
+            .methods("PUT"_method)([this](crow::request const& req) { return HandleConfigSettingsPut(req); });
 
         // ---- Key management API ----
         CROW_ROUTE(m_Server, "/api/settings/keys/status").methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
@@ -2079,6 +2154,206 @@ namespace AIAssistant
         {
             return MakeWorkflowJsonError(400, "invalid_json", e.what(), "POST /api/integrations/n8n/start");
         }
+    }
+
+    crow::response WebServer::HandleWebhookPost(crow::request const& req, std::string const& workflowId)
+    {
+        static constexpr char const* kEndpoint = "POST /api/webhook/{id}";
+
+        if (!IsValidWorkflowId(workflowId))
+        {
+            return MakeWorkflowJsonError(400, "invalid_workflow_id", "workflowId contains invalid characters", kEndpoint,
+                                         workflowId);
+        }
+
+        // ---- Look up the webhook trigger for this workflow ----
+        TriggerEngine* triggerEngine = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            triggerEngine = m_TriggerEngine;
+        }
+
+        if (triggerEngine == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Trigger engine not configured", kEndpoint, workflowId);
+        }
+
+        TriggerEngine::WebhookTriggerInstance const* webhookTrigger = triggerEngine->GetWebhookTrigger(workflowId);
+        if (webhookTrigger == nullptr)
+        {
+            return MakeWorkflowJsonError(404, "no_webhook_trigger",
+                                         "No webhook trigger registered for workflow '" + workflowId + "'", kEndpoint,
+                                         workflowId);
+        }
+
+        if (!webhookTrigger->m_IsEnabled)
+        {
+            return MakeWorkflowJsonError(403, "trigger_disabled",
+                                         "Webhook trigger for workflow '" + workflowId + "' is disabled", kEndpoint,
+                                         workflowId);
+        }
+
+        // ---- HMAC-SHA256 signature verification ----
+        if (!webhookTrigger->m_Secret.empty())
+        {
+            std::string signatureHeader;
+            auto const it = req.headers.find("X-Webhook-Signature");
+            if (it != req.headers.end())
+            {
+                signatureHeader = it->second;
+            }
+
+            if (signatureHeader.empty())
+            {
+                LOG_APP_WARN("WebServer::HandleWebhookPost: missing X-Webhook-Signature header for workflow '{}'",
+                             workflowId);
+                return MakeWorkflowJsonError(401, "missing_signature",
+                                             "X-Webhook-Signature header is required for this webhook", kEndpoint,
+                                             workflowId);
+            }
+
+            if (!VerifyHmacSignature(webhookTrigger->m_Secret, req.body, signatureHeader))
+            {
+                LOG_APP_WARN("WebServer::HandleWebhookPost: HMAC signature mismatch for workflow '{}'", workflowId);
+                return MakeWorkflowJsonError(401, "invalid_signature", "HMAC signature verification failed", kEndpoint,
+                                             workflowId);
+            }
+        }
+
+        // ---- Parse optional context from request body ----
+        ContextMap context;
+        std::string runId;
+        std::string callbackUrl;
+
+        if (!req.body.empty())
+        {
+            try
+            {
+                simdjson::ondemand::parser parser;
+                simdjson::padded_string json(req.body);
+                auto doc = parser.iterate(json);
+
+                // Optional runId
+                {
+                    auto runIdField = doc["runId"].get_string();
+                    if (runIdField.error() == simdjson::SUCCESS)
+                    {
+                        runId = std::string(runIdField.value());
+                    }
+                }
+
+                // Optional callbackUrl
+                {
+                    auto callbackUrlField = doc["callbackUrl"].get_string();
+                    if (callbackUrlField.error() == simdjson::SUCCESS)
+                    {
+                        callbackUrl = std::string(callbackUrlField.value());
+                        context["callbackUrl"].m_Value = callbackUrl;
+                    }
+                }
+
+                // Optional context object
+                auto contextField = doc["context"];
+                if (contextField.error() == simdjson::SUCCESS)
+                {
+                    simdjson::ondemand::object ctxObj;
+                    if (contextField.get_object().get(ctxObj) == simdjson::SUCCESS)
+                    {
+                        for (auto field : ctxObj)
+                        {
+                            simdjson::simdjson_result<std::string_view> keyResult = field.unescaped_key();
+                            if (keyResult.error() != simdjson::SUCCESS)
+                            {
+                                continue;
+                            }
+
+                            std::string const key = std::string(keyResult.value());
+
+                            if (field.value().is_string())
+                            {
+                                auto strValue = field.value().get_string();
+                                if (strValue.error() == simdjson::SUCCESS)
+                                {
+                                    context[key].m_Value = std::string(strValue.value());
+                                }
+                            }
+                            else
+                            {
+                                auto rawJson = field.value().get_raw_json_string();
+                                if (rawJson.error() == simdjson::SUCCESS)
+                                {
+                                    context[key].m_Value = std::string(rawJson.value().raw());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (std::exception const& e)
+            {
+                return MakeWorkflowJsonError(400, "invalid_json", e.what(), kEndpoint, workflowId);
+            }
+        }
+
+        // ---- Persist request for traceability ----
+        std::string workflowsDirError;
+        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(workflowsDirError);
+        if (!workflowsDirectoryAbsolute.empty() && !req.body.empty())
+        {
+            if (runId.empty())
+            {
+                runId = GenerateIntegrationRunId(workflowId);
+            }
+
+            fs::path const runsRoot = workflowsDirectoryAbsolute / workflowId / "webhook" / runId;
+            fs::path const requestJsonPath = runsRoot / "request.json";
+
+            std::string writeError;
+            if (WriteTextFileAtomic(requestJsonPath, req.body, writeError))
+            {
+                context["webhook_request_path"].m_Value = requestJsonPath.string();
+            }
+            else
+            {
+                LOG_APP_WARN("WebServer::HandleWebhookPost: failed to persist request.json: {}", writeError);
+            }
+        }
+
+        if (runId.empty())
+        {
+            runId = GenerateIntegrationRunId(workflowId);
+        }
+
+        context["webhook_trigger_id"].m_Value = webhookTrigger->m_TriggerId;
+
+        // ---- Enqueue the workflow run ----
+        WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            workflowRuntimeManager = m_WorkflowRuntimeManager;
+        }
+
+        if (workflowRuntimeManager == nullptr)
+        {
+            return MakeWorkflowJsonError(501, "not_configured", "Workflow runtime manager not configured", kEndpoint,
+                                         workflowId);
+        }
+
+        std::string const enqueuedRunId =
+            workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, runId, context);
+
+        LOG_APP_INFO("WebServer::HandleWebhookPost: enqueued run '{}' for workflow '{}' (trigger '{}')", enqueuedRunId,
+                     workflowId, webhookTrigger->m_TriggerId);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["workflowId"] = workflowId;
+        responseJson["runId"] = enqueuedRunId;
+        responseJson["triggerId"] = webhookTrigger->m_TriggerId;
+
+        BroadcastWorkflowRunsSnapshot();
+        BroadcastWorkflowRunsLastSnapshot();
+        return MakeJsonResponse(202, responseJson);
     }
 
     crow::response WebServer::HandleScriptCheckGet(crow::request const& req)
@@ -3726,6 +4001,67 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
+    crow::response WebServer::HandleAiInterfaceTestPost(crow::request const& req)
+    {
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string json(req.body);
+        auto doc = parser.iterate(json);
+
+        int64_t index = -1;
+        auto indexResult = doc["index"].get_int64();
+        if (indexResult.error() != simdjson::SUCCESS)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "bad_request";
+            err["message"] = "Missing required field: 'index' (integer).";
+            return MakeJsonResponse(400, err);
+        }
+        index = indexResult.value();
+
+        if (index < 0)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "bad_request";
+            err["message"] = "Index must be >= 0.";
+            return MakeJsonResponse(400, err);
+        }
+
+        std::string responsePreview;
+        std::string error;
+        int64_t latencyMs = 0;
+
+        bool const ok = m_AiJcwfService.TestAiInterface(static_cast<size_t>(index), responsePreview, error, latencyMs);
+
+        auto const& config = Core::g_Core->GetConfig();
+        std::string interfaceName;
+        std::string model;
+        if (static_cast<size_t>(index) < config.m_ApiInterfaces.size())
+        {
+            interfaceName = config.m_ApiInterfaces[static_cast<size_t>(index)].m_Name;
+            model = config.m_ApiInterfaces[static_cast<size_t>(index)].m_Model;
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = ok;
+        responseJson["index"] = index;
+        responseJson["name"] = interfaceName;
+        responseJson["model"] = model;
+        responseJson["latency_ms"] = latencyMs;
+
+        if (ok)
+        {
+            responseJson["response_preview"] = responsePreview;
+        }
+        else
+        {
+            responseJson["error"] = error;
+        }
+
+        return MakeJsonResponse(200, responseJson);
+    }
+
     crow::response WebServer::HandleConfigReloadPost()
     {
         auto const& configPath = Core::g_Core->GetConfigFilePath();
@@ -3763,6 +4099,192 @@ namespace AIAssistant
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["interface_count"] = config.m_ApiInterfaces.size();
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConfigSettingsGet()
+    {
+        auto const& config = Core::g_Core->GetConfig();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["api_index"] = config.m_ApiIndex;
+        responseJson["max_threads"] = config.m_MaxThreads;
+        responseJson["verbose"] = config.m_Verbose;
+        responseJson["max_file_size_kb"] = config.m_MaxFileSizekB;
+        responseJson["jcwf_batch_size"] = config.m_JcwfBatchSize;
+        responseJson["queue_folder"] = config.m_QueueFolderFilepath;
+        responseJson["workflows_folder"] = config.m_WorkflowsFolderFilepath;
+        responseJson["interface_count"] = config.m_ApiInterfaces.size();
+
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConfigSettingsPut(crow::request const& req)
+    {
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string json(req.body);
+        auto doc = parser.iterate(json);
+
+        auto& config = Core::g_Core->GetMutableConfig();
+        bool anyChanged = false;
+
+        // api_index
+        {
+            auto result = doc["api_index"].get_int64();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                int64_t val = result.value();
+                if (val >= 0 && static_cast<size_t>(val) < config.m_ApiInterfaces.size())
+                {
+                    config.m_ApiIndex = static_cast<size_t>(val);
+                    anyChanged = true;
+                }
+            }
+        }
+
+        // max_threads
+        {
+            auto result = doc["max_threads"].get_int64();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                int64_t val = result.value();
+                if (val > 0 && val <= 256)
+                {
+                    config.m_MaxThreads = static_cast<size_t>(val);
+                    anyChanged = true;
+                }
+            }
+        }
+
+        // verbose
+        {
+            auto result = doc["verbose"].get_bool();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                config.m_Verbose = result.value();
+                anyChanged = true;
+            }
+        }
+
+        // max_file_size_kb
+        {
+            auto result = doc["max_file_size_kb"].get_int64();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                int64_t val = result.value();
+                if (val > 0 && val <= 10240)
+                {
+                    config.m_MaxFileSizekB = static_cast<size_t>(val);
+                    anyChanged = true;
+                }
+            }
+        }
+
+        // jcwf_batch_size
+        {
+            auto result = doc["jcwf_batch_size"].get_int64();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                int64_t val = result.value();
+                if (val >= 1 && val <= 100)
+                {
+                    config.m_JcwfBatchSize = static_cast<size_t>(val);
+                    anyChanged = true;
+                }
+            }
+        }
+
+        if (!anyChanged)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_changes";
+            err["message"] = "No valid fields provided or values unchanged.";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Persist to config.json: read, patch the scalar fields, write back.
+        auto const& configPath = Core::g_Core->GetConfigFilePath();
+        if (!configPath.empty() && std::filesystem::exists(configPath))
+        {
+            std::string fileContent;
+            {
+                std::ifstream ifs(configPath, std::ios::binary);
+                if (ifs)
+                {
+                    std::ostringstream oss;
+                    oss << ifs.rdbuf();
+                    fileContent = oss.str();
+                }
+            }
+
+            if (!fileContent.empty())
+            {
+                // Helper: replace a JSON scalar field value in-place.
+                auto replaceField = [&](std::string const& key, std::string const& newValue)
+                {
+                    std::string const searchKey = "\"" + key + "\"";
+                    auto pos = fileContent.find(searchKey);
+                    if (pos == std::string::npos)
+                        return;
+                    auto colonPos = fileContent.find(':', pos + searchKey.size());
+                    if (colonPos == std::string::npos)
+                        return;
+                    // Find start of value (skip whitespace)
+                    size_t valStart = colonPos + 1;
+                    while (valStart < fileContent.size() && (fileContent[valStart] == ' ' || fileContent[valStart] == '\t'))
+                        ++valStart;
+                    // Find end of value (next comma, newline, or closing brace)
+                    size_t valEnd = valStart;
+                    if (fileContent[valEnd] == '"')
+                    {
+                        // String value
+                        ++valEnd;
+                        while (valEnd < fileContent.size() && fileContent[valEnd] != '"')
+                        {
+                            if (fileContent[valEnd] == '\\')
+                                ++valEnd;
+                            ++valEnd;
+                        }
+                        if (valEnd < fileContent.size())
+                            ++valEnd; // past closing quote
+                    }
+                    else
+                    {
+                        // Numeric/bool value
+                        while (valEnd < fileContent.size() && fileContent[valEnd] != ',' && fileContent[valEnd] != '\n' &&
+                               fileContent[valEnd] != '\r' && fileContent[valEnd] != '}')
+                            ++valEnd;
+                        // Trim trailing whitespace from the value
+                        while (valEnd > valStart && (fileContent[valEnd - 1] == ' ' || fileContent[valEnd - 1] == '\t'))
+                            --valEnd;
+                    }
+                    fileContent.replace(valStart, valEnd - valStart, newValue);
+                };
+
+                replaceField("API index", std::to_string(config.m_ApiIndex));
+                replaceField("max threads", std::to_string(config.m_MaxThreads));
+                replaceField("verbose", config.m_Verbose ? "true" : "false");
+                replaceField("max file size in kB", std::to_string(config.m_MaxFileSizekB));
+                replaceField("jcwf batch size", std::to_string(config.m_JcwfBatchSize));
+
+                std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
+                if (ofs)
+                {
+                    ofs << fileContent;
+                    LOG_CORE_INFO("WebServer: saved config settings to '{}'", configPath.string());
+                }
+            }
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["api_index"] = config.m_ApiIndex;
+        responseJson["max_threads"] = config.m_MaxThreads;
+        responseJson["verbose"] = config.m_Verbose;
+        responseJson["max_file_size_kb"] = config.m_MaxFileSizekB;
+        responseJson["jcwf_batch_size"] = config.m_JcwfBatchSize;
         return MakeJsonResponse(200, responseJson);
     }
 

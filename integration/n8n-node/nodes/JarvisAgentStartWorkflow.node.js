@@ -1,10 +1,12 @@
+const crypto = require('crypto');
+
 class JarvisAgentStartWorkflow {
   description = {
     displayName: 'JarvisAgent: Start Workflow',
     name: 'jarvisAgentStartWorkflow',
     group: ['transform'],
-    version: 1,
-    description: 'Start a JarvisAgent workflow run via POST /api/integrations/n8n/start',
+    version: 2,
+    description: 'Start a JarvisAgent workflow run via webhook or legacy endpoint',
     defaults: {
       name: 'JarvisAgent Start Workflow',
     },
@@ -17,6 +19,17 @@ class JarvisAgentStartWorkflow {
         type: 'string',
         default: 'http://localhost:8080',
         required: true,
+      },
+      {
+        displayName: 'Endpoint',
+        name: 'endpoint',
+        type: 'options',
+        options: [
+          { name: 'Webhook (recommended)', value: 'webhook' },
+          { name: 'Legacy n8n/start', value: 'legacy' },
+        ],
+        default: 'webhook',
+        description: 'Webhook: POST /api/webhook/<id>. Legacy: POST /api/integrations/n8n/start.',
       },
       {
         displayName: 'Workflow ID',
@@ -38,7 +51,18 @@ class JarvisAgentStartWorkflow {
         type: 'string',
         default: 'n8n',
         required: false,
-        description: 'Used for on-disk traceability under workflows/<workflowId>/<taskName>/...'
+        description: 'Legacy only. On-disk traceability folder name.',
+        displayOptions: { show: { endpoint: ['legacy'] } },
+      },
+      {
+        displayName: 'HMAC Secret',
+        name: 'hmacSecret',
+        type: 'string',
+        typeOptions: { password: true },
+        default: '',
+        required: false,
+        description: 'Webhook only. Shared secret for X-Webhook-Signature HMAC-SHA256 signing. Leave empty for open webhooks.',
+        displayOptions: { show: { endpoint: ['webhook'] } },
       },
       {
         displayName: 'Callback URL',
@@ -46,6 +70,7 @@ class JarvisAgentStartWorkflow {
         type: 'string',
         default: '',
         required: false,
+        description: 'URL to receive a completion callback POST when the run finishes.',
       },
       {
         displayName: 'Context (JSON)',
@@ -66,10 +91,10 @@ class JarvisAgentStartWorkflow {
     const returnData = [];
 
     for (let i = 0; i < items.length; i++) {
-      const baseUrl = this.getNodeParameter('baseUrl', i);
+      const baseUrl = String(this.getNodeParameter('baseUrl', i)).replace(/\/$/, '');
+      const endpoint = this.getNodeParameter('endpoint', i) || 'webhook';
       const workflowId = this.getNodeParameter('workflowId', i);
       const runId = this.getNodeParameter('runId', i);
-      const taskName = this.getNodeParameter('taskName', i);
       const callbackUrl = this.getNodeParameter('callbackUrl', i);
       const contextJsonText = this.getNodeParameter('contextJson', i);
 
@@ -80,20 +105,40 @@ class JarvisAgentStartWorkflow {
         throw new Error(`Invalid Context (JSON): ${e.message}`);
       }
 
-      const body = {
-        workflowId,
-        context,
-      };
+      let url;
+      let body;
 
-      if (runId) body.runId = runId;
-      if (taskName) body.taskName = taskName;
-      if (callbackUrl) body.callbackUrl = callbackUrl;
+      if (endpoint === 'webhook') {
+        url = `${baseUrl}/api/webhook/${encodeURIComponent(workflowId)}`;
+        body = { context };
+        if (runId) body.runId = runId;
+        if (callbackUrl) body.callbackUrl = callbackUrl;
+      } else {
+        url = `${baseUrl}/api/integrations/n8n/start`;
+        const taskName = this.getNodeParameter('taskName', i);
+        body = { workflowId, context };
+        if (runId) body.runId = runId;
+        if (taskName) body.taskName = taskName;
+        if (callbackUrl) body.callbackUrl = callbackUrl;
+      }
+
+      const headers = { 'Content-Type': 'application/json' };
+
+      if (endpoint === 'webhook') {
+        const hmacSecret = this.getNodeParameter('hmacSecret', i) || '';
+        if (hmacSecret) {
+          const rawBody = JSON.stringify(body);
+          const sig = crypto.createHmac('sha256', hmacSecret).update(rawBody).digest('hex');
+          headers['X-Webhook-Signature'] = `sha256=${sig}`;
+        }
+      }
 
       const options = {
         method: 'POST',
-        uri: `${String(baseUrl).replace(/\/$/, '')}/api/integrations/n8n/start`,
-        json: true,
+        url,
+        headers,
         body,
+        json: true,
       };
 
       const response = await this.helpers.httpRequest(options);

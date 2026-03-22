@@ -320,6 +320,35 @@ namespace AIAssistant
                      workflowId);
     }
 
+    void TriggerEngine::AddWebhookTrigger(std::string const& workflowId, std::string const& triggerId,
+                                          std::string const& secret, bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        WebhookTriggerInstance webhookTriggerInstance{};
+        webhookTriggerInstance.m_WorkflowId = workflowId;
+        webhookTriggerInstance.m_TriggerId = triggerId;
+        webhookTriggerInstance.m_Secret = secret;
+        webhookTriggerInstance.m_IsEnabled = isEnabled;
+
+        size_t const index = m_WebhookTriggers.size();
+        m_WebhookTriggers.push_back(std::move(webhookTriggerInstance));
+        m_WebhookIndex[workflowId] = index;
+
+        LOG_APP_INFO("TriggerEngine::AddWebhookTrigger: registered webhook trigger '{}' for workflow '{}' (secret={})",
+                     triggerId, workflowId, secret.empty() ? "<none>" : "<set>");
+    }
+
+    TriggerEngine::WebhookTriggerInstance const* TriggerEngine::GetWebhookTrigger(std::string const& workflowId) const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        auto const iterator = m_WebhookIndex.find(workflowId);
+        if (iterator == m_WebhookIndex.end())
+        {
+            return nullptr;
+        }
+        return &m_WebhookTriggers[iterator->second];
+    }
+
     void TriggerEngine::ClearWorkflowTriggers(std::string const& workflowId)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -328,6 +357,7 @@ namespace AIAssistant
         EraseWorkflowFromVector(m_CronTriggers, workflowId);
         EraseWorkflowFromVector(m_FileWatchTriggers, workflowId);
         EraseWorkflowFromVector(m_ManualTriggers, workflowId);
+        EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
 
         // Rebuild file-watch index because indices may have changed.
         m_FileWatchIndex.clear();
@@ -335,6 +365,13 @@ namespace AIAssistant
         {
             FileWatchTriggerInstance const& instance = m_FileWatchTriggers[index];
             m_FileWatchIndex[instance.m_WatchedPath].push_back(index);
+        }
+
+        // Rebuild webhook index.
+        m_WebhookIndex.clear();
+        for (size_t index = 0; index < m_WebhookTriggers.size(); ++index)
+        {
+            m_WebhookIndex[m_WebhookTriggers[index].m_WorkflowId] = index;
         }
     }
 

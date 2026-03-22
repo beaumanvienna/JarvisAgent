@@ -30,7 +30,11 @@
 
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "curlWrapper/curlManager.h"
+#include "curlWrapper/curlWrapper.h"
 #include "file/scriptRegistry.h"
+#include "json/replyParser.h"
+#include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 #include "workflow/aiCallTaskExecutor.h"
 #include "workflow/aiRequestPool.h"
@@ -1133,9 +1137,121 @@ namespace AIAssistant
         return !hasErrors;
     }
 
+    bool AiJcwfService::TestAiInterface(size_t interfaceIndex, std::string& outResponsePreview, std::string& outError,
+                                        int64_t& outLatencyMs)
+    {
+        outResponsePreview.clear();
+        outError.clear();
+        outLatencyMs = 0;
+
+        static constexpr long kTestTimeoutMs = 10000; // 10 seconds
+
+        auto const& config = Core::g_Core->GetConfig();
+        if (interfaceIndex >= config.m_ApiInterfaces.size())
+        {
+            outError = "Interface index " + std::to_string(interfaceIndex) + " out of range (have " +
+                       std::to_string(config.m_ApiInterfaces.size()) + ")";
+            return false;
+        }
+
+        auto const& iface = config.m_ApiInterfaces[interfaceIndex];
+
+        // Resolve API key from KeyManager.
+        std::string apiKey;
+        {
+            auto const* provider = iface.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                                           : Core::g_Core->GetKeyManager().GetProvider(iface.m_KeyName);
+            if (provider && !provider->m_ApiKey.empty())
+            {
+                apiKey = provider->m_ApiKey;
+            }
+        }
+
+        if (apiKey.empty())
+        {
+            outError = "No API key configured for key_name '" + iface.m_KeyName + "'";
+            return false;
+        }
+
+        // Build request payload and URL based on API type.
+        std::string const prompt = "Say hello";
+        std::string requestData;
+        std::string queryUrl = iface.m_Url;
+        CurlWrapper::AuthStyle authStyle = CurlWrapper::AuthStyle::Bearer;
+
+        switch (iface.m_InterfaceType)
+        {
+            case ConfigParser::EngineConfig::InterfaceType::API3:
+            {
+                // Gemini native: model in URL, different body format.
+                requestData = R"({"contents":[{"parts":[{"text":")" + prompt + R"("}],"role":"user"}]})";
+                queryUrl = iface.m_Url + "/models/" + iface.m_Model + ":generateContent";
+                authStyle = CurlWrapper::AuthStyle::XGoogApiKey;
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API2:
+            {
+                requestData = R"({"model":")" + iface.m_Model + R"(","input":")" + prompt + R"(","store":false})";
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API1:
+            default:
+            {
+                requestData =
+                    R"({"model":")" + iface.m_Model + R"(","messages":[{"role":"user","content":")" + prompt + R"("}]})";
+                break;
+            }
+        }
+
+        // Direct curl POST with short timeout — no queue files, no SessionManager.
+        CurlWrapper::QueryData queryData = {
+            .m_Url = queryUrl,
+            .m_Data = requestData,
+            .m_ApiKey = apiKey,
+            .m_AuthStyle = authStyle,
+            .m_TimeoutMs = kTestTimeoutMs,
+        };
+
+        auto const startTime = std::chrono::steady_clock::now();
+
+        auto& curl = CurlManager::GetThreadCurl();
+        curl.Clear();
+        QueryResult result = curl.Query(queryData);
+
+        auto const endTime = std::chrono::steady_clock::now();
+        outLatencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+
+        if (!result.m_Ok)
+        {
+            outError = result.m_ErrorMessage.empty() ? QueryErrorCode::Describe(result.m_ErrorCode) : result.m_ErrorMessage;
+            LOG_APP_INFO("[AiJcwfService] TestAiInterface: index={} name='{}' FAILED latency={}ms error='{}'",
+                         interfaceIndex, iface.m_Name, outLatencyMs, outError);
+            return false;
+        }
+
+        // Parse response to extract a preview.
+        auto parser = ReplyParser::Create(iface.m_InterfaceType, curl.GetBuffer());
+        if (parser && parser->HasContent() > 0)
+        {
+            std::string content = parser->GetContent(0);
+            constexpr size_t kPreviewLen = 200;
+            outResponsePreview = content.size() > kPreviewLen ? content.substr(0, kPreviewLen) + "..." : content;
+        }
+        else
+        {
+            outResponsePreview = "(response received, " + std::to_string(curl.GetBuffer().size()) + " bytes)";
+        }
+
+        LOG_APP_INFO("[AiJcwfService] TestAiInterface: index={} name='{}' OK latency={}ms responseLen={}", interfaceIndex,
+                     iface.m_Name, outLatencyMs, curl.GetBuffer().size());
+
+        return true;
+    }
+
     bool AiJcwfService::RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
                                         std::string const& taskContent, std::string const& cntxContent,
-                                        std::string const& probContent, std::string& outResponseText, std::string& outError)
+                                        std::string const& probContent, std::string& outResponseText, std::string& outError,
+                                        std::string const& provContent)
     {
         outResponseText.clear();
         outError.clear();
@@ -1196,12 +1312,22 @@ namespace AIAssistant
             return false;
         }
 
-        // No PROV file needed — the SessionManager constructor reads the default
-        // provider from config.json. A PROV override would only be needed if we
-        // later add a per-generator provider setting in the UI.
+        // Write PROV sidecar if a provider override was requested.
+        // Must be written BEFORE the PROB file so the SessionManager picks it up.
+        std::string writeError;
+
+        if (!provContent.empty())
+        {
+            if (!WriteFile(queueDir / "PROV_provider.json", provContent, writeError))
+            {
+                requestPool->Forget(handle);
+                outError = "Failed to write PROV file: " + writeError;
+                return false;
+            }
+            requestPool->KickFileActivityWatchdog(handle);
+        }
 
         // Write queue files.
-        std::string writeError;
 
         if (!stngContent.empty())
         {

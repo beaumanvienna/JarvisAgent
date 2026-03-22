@@ -104,6 +104,26 @@ export async function saveAiInterfaces(): Promise<AiInterfacesSaveResponse>
   return (await response.json()) as AiInterfacesSaveResponse;
 }
 
+export type AiInterfaceTestResponse = {
+  ok: boolean;
+  index: number;
+  name?: string;
+  model?: string;
+  latency_ms?: number;
+  response_preview?: string;
+  error?: string;
+};
+
+export async function testAiInterface(index: number): Promise<AiInterfaceTestResponse>
+{
+  const response = await fetch("/api/settings/ai-interfaces/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index }),
+  });
+  return (await response.json()) as AiInterfaceTestResponse;
+}
+
 export async function reloadConfig(): Promise<ConfigReloadResponse>
 {
   const response = await fetch("/api/settings/config/reload", {

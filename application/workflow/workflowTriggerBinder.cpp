@@ -295,6 +295,59 @@ namespace
         return true;
     }
 
+    bool ParseWebhookParams(std::string const& paramsJson, std::string& outSecret)
+    {
+        outSecret.clear();
+
+        if (paramsJson.empty())
+        {
+            return true; // no params → open webhook (no secret)
+        }
+
+        ondemand::parser parser;
+        padded_string json = padded_string(paramsJson.data(), paramsJson.size());
+
+        ondemand::document document;
+        simdjson::error_code errorCode = parser.iterate(json).get(document);
+        if (errorCode != simdjson::SUCCESS)
+        {
+            LOG_APP_WARN("ParseWebhookParams: failed to parse params JSON: {}", simdjson::error_message(errorCode));
+            return true; // treat as open webhook
+        }
+
+        auto objectResult = document.get_object();
+        if (objectResult.error() != simdjson::SUCCESS)
+        {
+            return true;
+        }
+
+        ondemand::object rootObject = objectResult.value();
+
+        for (auto field : rootObject)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                continue;
+            }
+
+            std::string_view keyView = keyResult.value();
+
+            if (keyView == "secret")
+            {
+                ondemand::value value = field.value();
+                auto stringResult = value.get_string(false);
+                if (stringResult.error() == simdjson::SUCCESS)
+                {
+                    std::string_view secretView = stringResult.value();
+                    outSecret.assign(secretView.begin(), secretView.end());
+                }
+            }
+        }
+
+        return true;
+    }
+
 } // anonymous namespace
 
 namespace AIAssistant
@@ -409,6 +462,16 @@ namespace AIAssistant
                     {
                         triggerEngine.AddManualTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
                                                        workflowTrigger.m_IsEnabled);
+                        break;
+                    }
+
+                    case WorkflowTriggerType::Webhook:
+                    {
+                        std::string secret;
+                        ParseWebhookParams(workflowTrigger.m_ParamsJson, secret);
+
+                        triggerEngine.AddWebhookTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, secret,
+                                                        workflowTrigger.m_IsEnabled);
                         break;
                     }
 

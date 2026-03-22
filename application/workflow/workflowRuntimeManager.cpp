@@ -28,6 +28,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <thread>
+
+#include <curl/curl.h>
 
 #include "core.h"
 #include "engine.h"
@@ -130,6 +133,184 @@ namespace AIAssistant
         {
             return (state == TaskInstanceStateKind::Succeeded || state == TaskInstanceStateKind::Skipped ||
                     state == TaskInstanceStateKind::Failed);
+        }
+
+        std::string WorkflowRunStateToString(WorkflowRunState const state)
+        {
+            switch (state)
+            {
+                case WorkflowRunState::Pending:
+                    return "pending";
+                case WorkflowRunState::Running:
+                    return "running";
+                case WorkflowRunState::Paused:
+                    return "paused";
+                case WorkflowRunState::Stopping:
+                    return "stopping";
+                case WorkflowRunState::Succeeded:
+                    return "succeeded";
+                case WorkflowRunState::Failed:
+                    return "failed";
+                case WorkflowRunState::Cancelled:
+                    return "cancelled";
+                case WorkflowRunState::Stopped:
+                    return "stopped";
+                default:
+                    return "unknown";
+            }
+        }
+
+        // Escape a string for inclusion in a JSON value (minimal escaping).
+        std::string JsonEscape(std::string const& input)
+        {
+            std::string out;
+            out.reserve(input.size() + 16);
+            for (char const character : input)
+            {
+                switch (character)
+                {
+                    case '\"':
+                        out += "\\\"";
+                        break;
+                    case '\\':
+                        out += "\\\\";
+                        break;
+                    case '\n':
+                        out += "\\n";
+                        break;
+                    case '\r':
+                        out += "\\r";
+                        break;
+                    case '\t':
+                        out += "\\t";
+                        break;
+                    default:
+                        out += character;
+                        break;
+                }
+            }
+            return out;
+        }
+
+        // Fire-and-forget POST to the callbackUrl with the run completion payload.
+        // Runs on a detached thread to avoid blocking the main loop.
+        void FireCompletionCallback(WorkflowRun const& workflowRun)
+        {
+            auto const callbackIterator = workflowRun.m_Context.find("callbackUrl");
+            if (callbackIterator == workflowRun.m_Context.end() || callbackIterator->second.m_Value.empty())
+            {
+                return;
+            }
+
+            std::string const callbackUrl = callbackIterator->second.m_Value;
+            std::string const workflowId = workflowRun.m_WorkflowId;
+            std::string const runId = workflowRun.m_RunId;
+            std::string const state = WorkflowRunStateToString(workflowRun.m_State);
+            std::string const completedAt = workflowRun.m_CompletedAtIso8601;
+            bool const hasFailed = workflowRun.m_HasFailed;
+
+            // Build per-task summary.
+            std::string taskSummaryJson;
+            {
+                taskSummaryJson += "{";
+                bool first = true;
+                for (auto const& [taskId, taskState] : workflowRun.m_TaskStates)
+                {
+                    if (!first)
+                    {
+                        taskSummaryJson += ",";
+                    }
+                    first = false;
+
+                    std::string taskStateStr;
+                    switch (taskState.m_State)
+                    {
+                        case TaskInstanceStateKind::Pending:
+                            taskStateStr = "pending";
+                            break;
+                        case TaskInstanceStateKind::Ready:
+                            taskStateStr = "ready";
+                            break;
+                        case TaskInstanceStateKind::Running:
+                            taskStateStr = "running";
+                            break;
+                        case TaskInstanceStateKind::Skipped:
+                            taskStateStr = "skipped";
+                            break;
+                        case TaskInstanceStateKind::Succeeded:
+                            taskStateStr = "succeeded";
+                            break;
+                        case TaskInstanceStateKind::Failed:
+                            taskStateStr = "failed";
+                            break;
+                        case TaskInstanceStateKind::WaitingExternal:
+                            taskStateStr = "waiting_external";
+                            break;
+                        default:
+                            taskStateStr = "unknown";
+                            break;
+                    }
+
+                    taskSummaryJson += "\"" + JsonEscape(taskId) + "\":{\"state\":\"" + taskStateStr + "\"";
+                    if (!taskState.m_LastErrorMessage.empty())
+                    {
+                        taskSummaryJson += ",\"error\":\"" + JsonEscape(taskState.m_LastErrorMessage) + "\"";
+                    }
+                    taskSummaryJson += "}";
+                }
+                taskSummaryJson += "}";
+            }
+
+            // Build the full callback payload.
+            std::string payload = "{";
+            payload += "\"workflowId\":\"" + JsonEscape(workflowId) + "\",";
+            payload += "\"runId\":\"" + JsonEscape(runId) + "\",";
+            payload += "\"state\":\"" + state + "\",";
+            payload += "\"ok\":" + std::string(hasFailed ? "false" : "true") + ",";
+            payload += "\"completedAt\":\"" + JsonEscape(completedAt) + "\",";
+            payload += "\"tasks\":" + taskSummaryJson;
+            payload += "}";
+
+            LOG_APP_INFO("[callback] firing completion callback for run '{}' to '{}'", runId, callbackUrl);
+
+            std::thread callbackThread(
+                [callbackUrl, runId, payload = std::move(payload)]()
+                {
+                    CURL* curl = curl_easy_init();
+                    if (curl == nullptr)
+                    {
+                        LOG_APP_WARN("[callback] curl_easy_init failed for run '{}' callback to '{}'", runId, callbackUrl);
+                        return;
+                    }
+
+                    struct curl_slist* headers = nullptr;
+                    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+                    curl_easy_setopt(curl, CURLOPT_URL, callbackUrl.c_str());
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
+                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+                    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L);
+                    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                    CURLcode const res = curl_easy_perform(curl);
+                    if (res == CURLE_OK)
+                    {
+                        long httpCode = 0;
+                        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+                        LOG_APP_INFO("[callback] completion callback for run '{}' succeeded (URL: '{}', HTTP {})", runId,
+                                     callbackUrl, httpCode);
+                    }
+                    else
+                    {
+                        LOG_APP_WARN("[callback] completion callback for run '{}' failed (URL: '{}', curl error: {})", runId,
+                                     callbackUrl, curl_easy_strerror(res));
+                    }
+
+                    curl_slist_free_all(headers);
+                    curl_easy_cleanup(curl);
+                });
+            callbackThread.detach();
         }
 
         // Returns true if the task was rescheduled for retry (caller should NOT mark run as failed).
@@ -370,8 +551,7 @@ namespace AIAssistant
                     // so the dispatch loop can pick it up.
                     for (auto& [instanceId, taskState] : workflowRun.m_TaskStates)
                     {
-                        if (ParentTaskId(instanceId) == targetTaskId &&
-                            taskState.m_State == TaskInstanceStateKind::Skipped)
+                        if (ParentTaskId(instanceId) == targetTaskId && taskState.m_State == TaskInstanceStateKind::Skipped)
                         {
                             taskState.m_State = TaskInstanceStateKind::Pending;
                             taskState.m_LastErrorMessage.clear();
@@ -390,8 +570,7 @@ namespace AIAssistant
                 {
                     continue;
                 }
-                SkipAllInstancesOfTask(workflowRun, targetTaskId,
-                                       "skipped: branch '" + branchId + "' took other path");
+                SkipAllInstancesOfTask(workflowRun, targetTaskId, "skipped: branch '" + branchId + "' took other path");
             }
         }
     }
@@ -890,6 +1069,9 @@ namespace AIAssistant
                     }
                 }
 
+                // Fire completion callback (async, fire-and-forget) if callbackUrl is in context.
+                FireCompletionCallback(m_ActiveRuns[index].m_Run);
+
                 m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
                 stateChanged = true;
                 continue;
@@ -1071,8 +1253,7 @@ namespace AIAssistant
                             (activeRun.m_HandledFailureTasks.find(handledParentId) != activeRun.m_HandledFailureTasks.end());
                         LOG_APP_INFO("[controlflow debug] task '{}' failed, parentId='{}' handled={} "
                                      "handledFailureTasksCount={} branchDrivingTaskCount={}",
-                                     result.m_TaskId, handledParentId, handled,
-                                     activeRun.m_HandledFailureTasks.size(),
+                                     result.m_TaskId, handledParentId, handled, activeRun.m_HandledFailureTasks.size(),
                                      activeRun.m_BranchDrivingTask.size());
                         if (!handled)
                         {
@@ -1085,9 +1266,9 @@ namespace AIAssistant
                 else
                 {
                     // Successful completion may fire a branch's normal path.
-                    FireBranchIfReady(activeRun, result.m_TaskId, stateIterator != workflowRun.m_TaskStates.end()
-                                                           ? stateIterator->second.m_State
-                                                           : TaskInstanceStateKind::Succeeded);
+                    FireBranchIfReady(activeRun, result.m_TaskId,
+                                      stateIterator != workflowRun.m_TaskStates.end() ? stateIterator->second.m_State
+                                                                                      : TaskInstanceStateKind::Succeeded);
                 }
             }
 
@@ -1255,7 +1436,8 @@ namespace AIAssistant
             // Child instances are managed by the parent and bypass this gate.
             if (!isChild)
             {
-                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) != activeRun.m_TasksWithIncomingControlflow.end())
+                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) !=
+                    activeRun.m_TasksWithIncomingControlflow.end())
                 {
                     if (activeRun.m_ActivatedTasks.find(parentId) == activeRun.m_ActivatedTasks.end())
                     {
@@ -1393,7 +1575,8 @@ namespace AIAssistant
                 }
 
                 std::string const parentId = ParentTaskId(instanceId);
-                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) == activeRun.m_TasksWithIncomingControlflow.end())
+                if (activeRun.m_TasksWithIncomingControlflow.find(parentId) ==
+                    activeRun.m_TasksWithIncomingControlflow.end())
                 {
                     continue;
                 }
@@ -2109,8 +2292,7 @@ namespace AIAssistant
         // Collect working directories for recursive cleanup.
         std::vector<fs::path> workingDirsToClean;
 
-        LOG_APP_INFO("[clean] workflowBasePath='{}' taskCount={}", workflowBasePath.string(),
-                     workflowDef.m_Tasks.size());
+        LOG_APP_INFO("[clean] workflowBasePath='{}' taskCount={}", workflowBasePath.string(), workflowDef.m_Tasks.size());
 
         for (auto const& [taskId, taskDef] : workflowDef.m_Tasks)
         {
@@ -2120,8 +2302,8 @@ namespace AIAssistant
             {
                 taskWorkDir =
                     TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBasePath, taskDef.m_WorkingDirectory);
-                LOG_APP_INFO("[clean] task '{}' workingDirectory='{}' resolved='{}'", taskId,
-                             taskDef.m_WorkingDirectory, taskWorkDir.string());
+                LOG_APP_INFO("[clean] task '{}' workingDirectory='{}' resolved='{}'", taskId, taskDef.m_WorkingDirectory,
+                             taskWorkDir.string());
             }
 
             // Delete declared file_outputs.

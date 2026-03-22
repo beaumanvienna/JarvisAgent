@@ -49,6 +49,7 @@ This specification focuses on:
     - [3.2.3 Structure-Based Triggers](#323-structure-based-triggers)
     - [3.2.4 Auto Triggers](#324-auto-triggers)
     - [3.2.5 Manual Triggers](#325-manual-triggers)
+    - [3.2.6 Webhook Triggers](#326-webhook-triggers)
   - [3.3 Tasks](#33-tasks)
     - [3.3.1 Task Types](#331-task-types)
     - [3.3.2 Mode: single vs per_item](#332-mode-single-vs-per_item)
@@ -405,6 +406,39 @@ At runtime, the engine will expand designated tasks from this iterator (see task
 - Manual triggers are exposed in the web UI and/or CLI.
 - A manual trigger entry is not required to allow manual start; manual start is enabled by default (see above).
 - An explicit manual trigger is useful to control parameters such as `exposed_in_ui`.
+
+#### 3.2.6 Webhook Triggers
+
+```jsonc
+{
+  "type": "webhook",
+  "id": "webhook-trigger",
+  "enabled": true,
+  "params": {
+    "secret": "my-shared-secret"   // optional HMAC-SHA256 shared secret
+  }
+}
+```
+
+- Webhook triggers expose the workflow at `POST /api/webhook/<workflowId>`.
+- When a POST request is received, the runtime enqueues a new workflow run.
+- The request body MAY contain optional fields:
+  - `runId` (string) — caller-chosen run identifier (auto-generated if omitted).
+  - `callbackUrl` (string) — URL to POST completion results to when the run finishes.
+  - `context` (object) — key-value pairs injected into the workflow run context.
+- If `params.secret` is set, the caller MUST include an `X-Webhook-Signature` header
+  with the value `sha256=<hex>`, where `<hex>` is the HMAC-SHA256 of the raw request
+  body using the shared secret. Requests with missing or invalid signatures are
+  rejected with HTTP 401.
+- If `params.secret` is empty or omitted, the webhook is **open** (no signature check).
+- The raw request body is persisted to `workflows/<workflowId>/webhook/<runId>/request.json`
+  for disk-first traceability.
+- **Completion callback:** When the run finishes, if `callbackUrl` was provided in the
+  request body, JarvisAgent POSTs a JSON payload to that URL containing `workflowId`,
+  `runId`, `state` (`succeeded`/`failed`/`cancelled`/`stopped`), `ok` (boolean), `completedAt`
+  (ISO-8601), and a `tasks` object with per-task state and optional error messages.
+  The callback is fire-and-forget (15 s timeout, failures are logged but do not affect
+  the run result).
 
 ---
 

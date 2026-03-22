@@ -6,6 +6,7 @@ import {
   deleteAiInterface,
   saveAiInterfaces,
   reloadConfig,
+  testAiInterface,
   type AiInterface,
 } from "../api/aiInterfaces";
 import { listProviders, type ProviderEntry } from "../api/providers";
@@ -63,6 +64,8 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [dirty, setDirty] = useState<boolean>(false);
+  const [testStatus, setTestStatus] = useState<Record<number, "idle" | "testing" | "success" | "error">>({})
+  const [testDetails, setTestDetails] = useState<Record<number, string>>({});
 
   const refresh = useCallback(async () => {
     try
@@ -185,6 +188,30 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
       setStatusMessage("");
     }
   }, [refresh]);
+
+  const handleTest = useCallback(async (index: number) => {
+    setTestStatus((prev) => ({ ...prev, [index]: "testing" }));
+    setTestDetails((prev) => ({ ...prev, [index]: "" }));
+    try
+    {
+      const result = await testAiInterface(index);
+      if (result.ok)
+      {
+        setTestStatus((prev) => ({ ...prev, [index]: "success" }));
+        setTestDetails((prev) => ({ ...prev, [index]: `${result.latency_ms}ms` }));
+      }
+      else
+      {
+        setTestStatus((prev) => ({ ...prev, [index]: "error" }));
+        setTestDetails((prev) => ({ ...prev, [index]: result.error ?? "Test failed" }));
+      }
+    }
+    catch (err: unknown)
+    {
+      setTestStatus((prev) => ({ ...prev, [index]: "error" }));
+      setTestDetails((prev) => ({ ...prev, [index]: err instanceof Error ? err.message : "Network error" }));
+    }
+  }, []);
 
   const handleReloadConfig = useCallback(async () => {
     setStatusMessage("Reloading config.json...");
@@ -322,7 +349,38 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
                 </div>
               </div>
 
-              <div style={{ display: "flex", gap: 6, flexShrink: 0, marginLeft: 12 }}>
+              <div style={{ display: "flex", gap: 6, flexShrink: 0, marginLeft: 12, alignItems: "center" }}>
+                <span
+                  title={testDetails[idx] || "Not tested"}
+                  style={{
+                    display: "inline-block",
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    background:
+                      testStatus[idx] === "success" ? "#4cff72"
+                      : testStatus[idx] === "error" ? "#ff4c4c"
+                      : testStatus[idx] === "testing" ? "#ffcc00"
+                      : "#555",
+                    boxShadow:
+                      testStatus[idx] === "success" ? "0 0 6px #4cff72"
+                      : testStatus[idx] === "error" ? "0 0 6px #ff4c4c"
+                      : testStatus[idx] === "testing" ? "0 0 6px #ffcc00"
+                      : "none",
+                    transition: "background 0.3s, box-shadow 0.3s",
+                    animation: testStatus[idx] === "testing" ? "pulse 1s infinite" : undefined,
+                  }}
+                />
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => handleTest(idx)}
+                  disabled={testStatus[idx] === "testing"}
+                  title="Send a test prompt to this AI interface"
+                  style={{ fontSize: 12, padding: "4px 8px" }}
+                >
+                  {testStatus[idx] === "testing" ? "Testing…" : "Test"}
+                </button>
                 <button className="btn" type="button" onClick={() => setEditing(fromEntry(iface))}>
                   Edit
                 </button>
@@ -336,54 +394,79 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
       )}
 
       {editing && (
-        <div className="card" style={{ marginTop: 16, borderColor: "rgba(120,180,255,0.35)" }}>
-          <h3 style={{ margin: "0 0 12px 0", fontSize: 15 }}>
-            {editing.isNew ? "Add AI Interface" : `Edit: ${editing.originalName}`}
-          </h3>
-          {field("Name (unique key — auto-generated from URL domain + model if empty)", "name", "e.g. api.openai.com/gpt-4o")}
-          {field("Description", "description", "e.g. OpenAI GPT-4o")}
-          {field("URL", "url", "https://api.openai.com/v1/chat/completions")}
-          {field("Model", "model", "e.g. gpt-4o")}
-          <div className="field" style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 12, opacity: 0.8 }}>API Type</label>
-            <select
-              className="input"
-              value={editing.api_type}
-              onChange={(e) => setEditing((prev) => prev ? { ...prev, api_type: e.target.value } : prev)}
-            >
-              <option value="API1">API1 (OpenAI-compatible)</option>
-              <option value="API2">API2 (Anthropic-style)</option>
-              <option value="API3">API3 (Gemini native)</option>
-            </select>
-          </div>
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.55)",
+            backdropFilter: "blur(4px)",
+          }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setEditing(null); }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: "85vh",
+              overflowY: "auto",
+              borderColor: "rgba(120,180,255,0.35)",
+              margin: 16,
+              boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
+            }}
+          >
+            <h3 style={{ margin: "0 0 12px 0", fontSize: 15 }}>
+              {editing.isNew ? "Add AI Interface" : `Edit: ${editing.originalName}`}
+            </h3>
+            {field("Name (unique key — auto-generated from URL domain + model if empty)", "name", "e.g. api.openai.com/gpt-4o")}
+            {field("Description", "description", "e.g. OpenAI GPT-4o")}
+            {field("URL", "url", "https://api.openai.com/v1/chat/completions")}
+            {field("Model", "model", "e.g. gpt-4o")}
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>API Type</label>
+              <select
+                className="input"
+                value={editing.api_type}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, api_type: e.target.value } : prev)}
+              >
+                <option value="API1">API1 (OpenAI-compatible)</option>
+                <option value="API2">API2 (Anthropic-style)</option>
+                <option value="API3">API3 (Gemini native)</option>
+              </select>
+            </div>
 
-          <div className="field" style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 12, opacity: 0.8 }}>API Key</label>
-            <select
-              className="input"
-              value={editing.key_name}
-              onChange={(e) => setEditing((prev) => prev ? { ...prev, key_name: e.target.value } : prev)}
-            >
-              {keys.length === 0 ? (
-                <option value="">no key configured</option>
-              ) : (
-                <>
-                  <option value="">— not set —</option>
-                  {keys.map((k) => (
-                    <option key={k.name} value={k.name}>{k.name}{k.has_key ? "" : " (no key)"}</option>
-                  ))}
-                </>
-              )}
-            </select>
-          </div>
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>API Key</label>
+              <select
+                className="input"
+                value={editing.key_name}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, key_name: e.target.value } : prev)}
+              >
+                {keys.length === 0 ? (
+                  <option value="">no key configured</option>
+                ) : (
+                  <>
+                    <option value="">— not set —</option>
+                    {keys.map((k) => (
+                      <option key={k.name} value={k.name}>{k.name}{k.has_key ? "" : " (no key)"}</option>
+                    ))}
+                  </>
+                )}
+              </select>
+            </div>
 
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button className="btn btnPrimary" type="button" onClick={handleSave}>
-              {editing.isNew ? "Create" : "Update"}
-            </button>
-            <button className="btn" type="button" onClick={() => setEditing(null)}>
-              Cancel
-            </button>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button className="btn btnPrimary" type="button" onClick={handleSave}>
+                {editing.isNew ? "Create" : "Update"}
+              </button>
+              <button className="btn" type="button" onClick={() => setEditing(null)}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

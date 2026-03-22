@@ -324,6 +324,15 @@ namespace AIAssistant
         curl_easy_setopt(m_Curl, CURLOPT_WRITEDATA, &m_ReadBuffer);
         curl_easy_setopt(m_Curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(m_Curl, CURLOPT_XFERINFOFUNCTION, static_cast<curl_xferinfo_callback>(progressCallback));
+
+        if (queryData.m_TimeoutMs > 0)
+        {
+            curl_easy_setopt(m_Curl, CURLOPT_TIMEOUT_MS, queryData.m_TimeoutMs);
+        }
+        else
+        {
+            curl_easy_setopt(m_Curl, CURLOPT_TIMEOUT_MS, 0L); // no timeout
+        }
         if (Core::g_Core->Verbose())
         {
             curl_easy_setopt(m_Curl, CURLOPT_VERBOSE, 1L);

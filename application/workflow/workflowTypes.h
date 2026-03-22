@@ -69,7 +69,8 @@ namespace AIAssistant
         Cron,
         FileWatch,
         Structure,
-        Manual
+        Manual,
+        Webhook
     };
 
     // ---------------------------------------------------------------------

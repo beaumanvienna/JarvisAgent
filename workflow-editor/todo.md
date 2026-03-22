@@ -1,6 +1,6 @@
 # Workflow Editor — TODO & Reference
 
-Last reviewed: 2026-03-12
+Last reviewed: 2026-03-21
 
 ---
 
@@ -47,6 +47,9 @@ Last reviewed: 2026-03-12
       disk and saves the JCWF in one step. Currently the user must accept scripts and save
       the workflow separately, which is confusing if they hit Run before either is persisted.~~
       Resolved: Run now auto-flushes pending AI scripts before saving JCWF and starting the run.
+- [x] ~~AI test button~~ — direct curl ping with 10s timeout (bypasses SessionManager). Backend: `POST /api/settings/ai-interfaces/test`, `TestAiInterface()` in `aiJcwfService`. Frontend: test button + LED indicator in `AiManagerView.tsx`. Bad URLs fail instantly (e.g. HTTP 404), no more 2-minute hang.
+- [x] ~~AI Manager edit modal~~ — centered overlay with blurred backdrop replaces inline edit form at bottom of provider list. Click-outside-to-close.
+- [x] ~~Settings dialog for workflow editor~~ — config.json fields exposed in the gear-icon Settings modal. Backend: `GET/PUT /api/settings/config`. Frontend: `SettingsModal.tsx` with Default AI Interface, Max Threads, Max File Size, JCWF Batch Size, Verbose toggle.
 - [ ] Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files
 - [ ] Drag-to-reorder in queue_binding entries (stretch goal)
 
@@ -66,15 +69,15 @@ Last reviewed: 2026-03-12
 - [x] ~~`exampleMakefile5` error recovery workflow~~ — verified end-to-end: shell fails → AI fix → retry → run hello
 
 ### WebSocket Push (replace polling)
-- [ ] Replace the editor's 500ms `workflow-runs-request` polling with true server-push broadcasts.
-      Currently the Crow backend only drains pending broadcasts inside `onmessage` (i.e. when
-      the client sends a message).  A Crow IO-thread timer or an `io_service::post()` wake-up
-      would let the server push updates immediately without waiting for the next client message.
-      This would reduce latency for AI progress, run-state changes, and log streaming.
+- [x] ~~Replace the editor's 500ms `workflow-runs-request` polling with true server-push broadcasts.~~
+      Backend already called `BroadcastWorkflowRunsSnapshot()` on every state change from
+      `JarvisAgent::OnUpdate()`. Fix: removed the 500ms `setInterval` client poll, added
+      `capturedStdout`/`capturedStderr` to the server-pushed snapshot, kept a 10s REST
+      safety-net fallback for `pendingRunId`. Verified real-time badge updates on both
+      simple (cyber2) and large (jarvisCppDocu) workflows.
 
 ### Future (n8n integration)
-- [ ] `POST /api/integrations/n8n/start` endpoint with callback URL
-- [ ] n8n → JCWF converter
+- [ ] Seamless n8n integration — `POST /api/integrations/n8n/start` endpoint with callback URL, bidirectional triggering
 - [ ] Sub-workflows / workflow-call node
 - [ ] Workflow versioning
 

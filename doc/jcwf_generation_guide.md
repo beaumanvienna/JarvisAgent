@@ -418,12 +418,14 @@ A workflow run fails **only** if it has at least one Failed task whose failure i
   { "type": "auto", "id": "auto", "enabled": true },
   { "type": "manual", "id": "manual", "enabled": true },
   { "type": "cron", "id": "daily", "enabled": true, "params": { "expression": "0 8 * * *" } },
-  { "type": "file_watch", "id": "on-change", "enabled": true, "params": { "path": "data/input.csv" } }
+  { "type": "file_watch", "id": "on-change", "enabled": true, "params": { "path": "data/input.csv" } },
+  { "type": "webhook", "id": "wh", "enabled": true, "params": { "secret": "my-shared-secret" } }
 ]
 ```
 
 - If `triggers` is omitted: implicit auto-trigger (starts on registration).
 - `manual_start: true` (default) allows manual start regardless of triggers.
+- **Webhook triggers** expose the workflow at `POST /api/webhook/<workflowId>`. The request body may include `runId`, `callbackUrl`, and a `context` object (key-value pairs injected into run context). If `params.secret` is set, the caller must send `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the body). Empty/missing secret = open webhook. If `callbackUrl` is provided, JarvisAgent POSTs a completion payload (`workflowId`, `runId`, `state`, `ok`, `completedAt`, per-task `tasks`) to that URL when the run finishes (fire-and-forget, 15 s timeout).
 
 ---
 

@@ -1,76 +1,252 @@
-# integration/
+# integration/ — External Integration Guide
 
-This folder contains everything related to external integrations for JarvisAgent.
+How to trigger JarvisAgent workflows from **n8n**, **curl**, **CI pipelines**, or any HTTP client.
 
-## n8n
+---
 
-### Start a workflow run (disk-first traceability)
+## Quick Start (curl)
 
-**Endpoint**
+```bash
+# Start a workflow run via webhook
+curl -s -X POST http://localhost:8080/api/webhook/hamburg-tourist-day-planner \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "context": {
+      "date": "2026-03-21",
+      "timezone": "Europe/Berlin",
+      "rainCategory": "some_rain",
+      "weatherJson": "{\"temp_max\": 8, \"precipitation_sum\": 2.1}"
+    }
+  }'
 
-`POST /api/integrations/n8n/start`
+# Check active runs
+curl -s http://localhost:8080/api/workflow-runs/active | jq .
 
-**Purpose**
+# Check a specific run
+curl -s http://localhost:8080/api/workflow-runs/<runId> | jq .
+```
 
-- Accept a workflow start request from n8n.
-- Persist the raw request JSON to disk for traceability.
-- Enqueue a workflow run with the provided `runId` (or auto-generated).
+---
 
-**Request body**
+## Endpoints
+
+### POST /api/webhook/\<workflowId\> (recommended)
+
+Start a workflow run via the **webhook trigger**. The workflow JCWF must have a `"type": "webhook"` trigger. Works for n8n, curl, CI, or any HTTP client.
+
+**Request body (all fields optional):**
 
 ```json
 {
-  "workflowId": "hamburg-tourist-day-planner",
-  "taskName": "n8n",
-  "runId": "hamburg-2026-01-19",
-  "callbackUrl": "https://<n8n-host>/webhook/jarvisagent-hamburg",
+  "runId": "my-run-001",
+  "callbackUrl": "https://my-server.com/webhook/callback",
   "context": {
-    "date": "2026-01-19",
+    "date": "2026-03-21",
     "timezone": "Europe/Berlin",
-    "language": "de",
-    "location": "Hamburg",
     "rainCategory": "some_rain",
-    "weatherJson": "{...raw open-meteo json...}"
+    "weatherJson": "{...}"
   }
 }
 ```
 
-**Response** (202 Accepted)
+| Field | Required | Description |
+|-------|----------|-------------|
+| `runId` | No | Custom run ID (auto-generated if omitted). |
+| `callbackUrl` | No | URL to POST completion results to when the run finishes. |
+| `context` | No | Key-value pairs injected into the workflow run context. Tasks can reference these via declared `inputs`. |
+
+**Response (202 Accepted):**
 
 ```json
 {
   "ok": true,
   "workflowId": "hamburg-tourist-day-planner",
-  "runId": "hamburg-2026-01-19",
-  "requestPath": "workflows/<workflowId>/<taskName>/n8n/<runId>/request.json"
+  "runId": "my-run-001",
+  "triggerId": "webhook"
 }
 ```
 
-### Trace files written by JarvisAgent
+#### HMAC Signature Verification
 
-For each start request, JarvisAgent writes:
+If the webhook trigger's JCWF has `"params": { "secret": "my-shared-secret" }`, every request **must** include:
 
-- `workflows/<workflowId>/<taskName>/n8n/<runId>/request.json`
+```
+X-Webhook-Signature: sha256=<hex-encoded HMAC-SHA256 of the raw request body>
+```
 
-The workflow run context will also include:
+Requests with a missing or invalid signature are rejected with HTTP 401. If no secret is configured (empty `params` or no `secret` key), the webhook is **open** — no signature check.
 
-- `n8n_request_path`: path to `request.json`
-- `n8n_task`: the `taskName` used for persistence
-- `callbackUrl`: if provided
-- all keys under the request `context` object (strings stored as-is; non-strings stored as raw JSON text)
+**Example with HMAC (bash):**
 
-### Getting run status
+```bash
+BODY='{"context":{"date":"2026-03-21"}}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac 'my-shared-secret' | awk '{print $2}')
+curl -s -X POST http://localhost:8080/api/webhook/hamburg-tourist-day-planner \
+  -H 'Content-Type: application/json' \
+  -H "X-Webhook-Signature: sha256=$SIG" \
+  -d "$BODY"
+```
 
-Use the existing workflow run endpoints:
+### POST /api/integrations/n8n/start (legacy)
 
-- `GET /api/workflow-runs/<runId>`
-- `GET /api/workflow-runs/active`
-- `GET /api/workflow-runs/last`
+Older endpoint that also starts workflow runs. Still works but **POST /api/webhook/\<id\>** is preferred for new integrations.
 
-### n8n node bundle
+| Field | Required | Description |
+|-------|----------|-------------|
+| `workflowId` | **Yes** | ID of the JCWF workflow to run. |
+| `runId` | No | Custom run ID. |
+| `taskName` | No | Disk traceability folder name (default: `n8n`). |
+| `callbackUrl` | No | Callback URL. |
+| `context` | No | Context key-value pairs. |
 
-An internal n8n custom node bundle lives here:
+### POST /api/workflows/\<id\>/run
 
-- `integration/n8n-node/`
+Start a workflow run from the editor UI or a simple trigger. Supports optional context.
 
-It provides a basic node that calls `POST /api/integrations/n8n/start`.
+### GET /api/workflow-runs/active
+
+Returns all currently running workflows with per-task state.
+
+### GET /api/workflow-runs/last
+
+Returns the last completed run for each workflow.
+
+### GET /api/workflow-runs/\<runId\>
+
+Returns detailed state for a specific run, including per-task status, stdout/stderr, and timing.
+
+---
+
+## Completion Callback
+
+When a workflow run finishes (succeeded, failed, cancelled, or stopped), JarvisAgent checks the run context for a `callbackUrl` key. If present, it fires an **async POST** to that URL with a JSON payload describing the run result:
+
+```json
+{
+  "workflowId": "hamburg-tourist-day-planner",
+  "runId": "my-run-001",
+  "state": "succeeded",
+  "ok": true,
+  "completedAt": "2026-03-21T20:15:00Z",
+  "tasks": {
+    "plan": { "state": "succeeded" },
+    "finalize": { "state": "succeeded" }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workflowId` | string | Workflow that was run. |
+| `runId` | string | Run identifier. |
+| `state` | string | Terminal state: `succeeded`, `failed`, `cancelled`, or `stopped`. |
+| `ok` | boolean | `true` if no task failed. |
+| `completedAt` | string | ISO-8601 UTC timestamp. |
+| `tasks` | object | Per-task summary. Each key is a task instance ID with `state` and optional `error`. |
+
+The callback is **fire-and-forget** with a 15-second timeout. If the target server is unreachable, the failure is logged but does not affect the workflow run result.
+
+---
+
+## How Context Injection Works
+
+When you POST to the start endpoint, every key in the `context` object is stored in the workflow run's context map. Tasks can declare `inputs` that match these keys — the runtime resolves them automatically:
+
+```
+POST body:  context.date = "2026-03-21"
+                ↓
+JCWF task:  "inputs": { "date": { "type": "string", "required": true } }
+                ↓
+Runtime:    {{date}} in queue_binding inline content → "2026-03-21"
+```
+
+See `example/workflows/hamburg-tourist-day-planner.jcwf` for a complete working example.
+
+---
+
+## Disk-First Traceability
+
+For each start request, JarvisAgent persists the raw request JSON to disk **before** enqueuing the run:
+
+```
+# Webhook endpoint:
+workflows/<workflowId>/webhook/<runId>/request.json
+
+# Legacy n8n endpoint:
+workflows/<workflowId>/<taskName>/n8n/<runId>/request.json
+```
+
+The run context automatically includes:
+
+| Context key | Set by | Value |
+|-------------|--------|-------|
+| `webhook_request_path` | webhook | Absolute path to persisted `request.json` |
+| `webhook_trigger_id` | webhook | Trigger ID that matched the request |
+| `n8n_request_path` | n8n/start | Absolute path to persisted `request.json` |
+| `n8n_task` | n8n/start | The `taskName` used for persistence |
+| `callbackUrl` | both | The callback URL (if provided) |
+| *(all context keys)* | both | Strings stored as-is; non-strings as raw JSON text |
+
+---
+
+## Monitoring Runs
+
+### REST polling
+
+```bash
+# Active runs (all workflows)
+curl -s http://localhost:8080/api/workflow-runs/active | jq .
+
+# Specific run
+curl -s http://localhost:8080/api/workflow-runs/<runId> | jq .
+
+# Last completed run per workflow
+curl -s http://localhost:8080/api/workflow-runs/last | jq .
+```
+
+### WebSocket (real-time)
+
+Connect to `ws://localhost:8080/ws` and send:
+
+```json
+{ "type": "workflow-runs-request" }
+```
+
+The server pushes `workflow-runs-snapshot` messages on every state change (task start/complete/fail, run start/complete). No polling needed after the initial request.
+
+---
+
+## n8n Custom Node
+
+An n8n custom node bundle is provided in `integration/n8n-node/`:
+
+- **Node name:** `JarvisAgent: Start Workflow`
+- **Endpoint toggle:** Webhook (default, `POST /api/webhook/<id>`) or Legacy (`POST /api/integrations/n8n/start`)
+- **HMAC signing:** Automatic when HMAC Secret is configured (webhook mode only)
+- **Fields:** Base URL, Endpoint, Workflow ID, Run ID, HMAC Secret, Task Name (legacy), Callback URL, Context (JSON)
+
+### Install into n8n
+
+1. Copy or symlink `integration/n8n-node/` into your n8n custom extensions directory.
+2. Restart n8n.
+3. Add the "JarvisAgent: Start Workflow" node to a workflow.
+
+---
+
+## Example Workflow
+
+See `example/workflows/hamburg-tourist-day-planner.jcwf` and its companion `hamburg-tourist-day-planner.md` for a complete integration demo:
+
+- n8n fetches Hamburg weather data → triggers JarvisAgent → AI generates a tourist day plan
+- Context variables (`date`, `timezone`, `rainCategory`, `weatherJson`) flow into AI prompts via `{{variable}}` expansion in inline `queue_binding` content
+
+---
+
+## Files in this folder
+
+| File | Description |
+|------|-------------|
+| `IntegrationPlan.md` | Development plan for webhook trigger type + n8n integration |
+| `README.md` | This file — quick-start guide |
+| `jarvisAgentN8nRoundTripWeatherWorkflow.md` | *(Legacy)* Early design notes for the Hamburg round-trip demo. Superseded by `example/workflows/hamburg-tourist-day-planner.md`. |
+| `n8n-node/` | n8n custom node bundle |

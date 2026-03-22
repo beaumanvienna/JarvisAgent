@@ -364,6 +364,11 @@ namespace AIAssistant
             return WorkflowTriggerType::Manual;
         }
 
+        if (typeString == "webhook")
+        {
+            return WorkflowTriggerType::Webhook;
+        }
+
         LOG_CORE_WARN("Unknown trigger type '{}', defaulting to Unknown", typeString);
         return WorkflowTriggerType::Unknown;
     }
@@ -1166,9 +1171,8 @@ namespace AIAssistant
                      "filtersCount={} controlNodesCount={} controlflowCount={}",
                      outputDefinition.m_Id, outputDefinition.m_WorkflowBaseDirectory,
                      IsRelativePathString(outputDefinition.m_WorkflowBaseDirectory), outputDefinition.m_Triggers.size(),
-                     outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size(),
-                     outputDefinition.m_Filters.size(), outputDefinition.m_ControlNodes.size(),
-                     outputDefinition.m_ControlflowEdges.size());
+                     outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size(), outputDefinition.m_Filters.size(),
+                     outputDefinition.m_ControlNodes.size(), outputDefinition.m_ControlflowEdges.size());
 
         return true;
     }

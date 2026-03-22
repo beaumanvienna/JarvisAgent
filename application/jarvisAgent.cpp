@@ -263,6 +263,8 @@ namespace AIAssistant
                 }
             });
 
+        m_WebServer->SetTriggerEngine(m_TriggerEngine.get());
+
         // -----------------------------------------------------------------
         // Bind all JCWF triggers into TriggerEngine
         // -----------------------------------------------------------------

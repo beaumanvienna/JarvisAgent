@@ -66,27 +66,17 @@ See also:
 
 ---
 
-## 7. Multi-user support for system-wide installs (new)
-- When installed system-wide via deb/rpm/Arch (`/opt/jarvisagent/`), `queue/` and `workflows/` are owned by root
-- Non-root users cannot write to these directories without `sudo`
+## ~~7. Multi-user support for system-wide installs~~ ✅
+- ~~When installed system-wide via deb/rpm/Arch (`/opt/jarvisagent/`), `queue/` and `workflows/` are owned by root~~
+- ~~Non-root users cannot write to these directories without `sudo`~~
 
-**Proposed solution: user-space launcher script**
+**Solution: user-space launcher script** (implemented for all platforms)
 
-A wrapper script (installed to `/usr/bin/jarvisagent` on Linux, available on PATH via MSI on Windows) that:
-1. Creates a per-user working directory on first run:
-   - **Linux/macOS:** `~/JarvisAgent` (default), overridable via CLI argument or env var
-   - **Windows:** `%USERPROFILE%\JarvisAgent` (default)
-2. Copies/symlinks the required folder structure from the install location (`/opt/jarvisagent/` or `C:\Program Files\JarvisAgent\`):
-   - Read-only assets (binary, dashboard, workflow-editor, doc, scripts) → **symlink** to install dir
-   - Writable user data (queue, workflows, log, config.json) → **copy templates** or **create empty dirs**
-3. Activates the Python venv (so `markitdown`, `md2pdf` are on PATH)
-4. Starts jarvisAgent in the terminal (CWD = user directory)
-5. Opens the dashboard (`http://localhost:8080`) in the default browser
-
-This is already how AppImage and Flatpak work (via `AppRun` / `jarvisagent-wrapper.sh`).
-The same pattern should be adopted for deb/rpm/Arch/MSI installs.
-
-- `md2pdf` (from the Python venv at `/opt/jarvisagent/.venv`) is not on PATH by default — the launcher or shell scripts need to activate the venv or add it to PATH so workflows like `vehicleTroubleshootingGuide` can find it
+- **Linux:** `packaging/Linux/jarvisagent-launcher.sh` — shared launcher for RPM, DEB, Arch, AppImage, Flatpak. Per-user `~/JarvisAgent`, `ln -sfn` symlinks, venv activation, browser launch. Supports `--home DIR`, `--no-browser`, `JARVISAGENT_HOME` env var.
+- **macOS:** DMG `build-dmg.sh` inline launcher, Homebrew formula `jarvisagent.rb`. Uses `open` for browser launch.
+- **Windows:** `jarvisagent.bat` with directory junctions (`mklink /J`, no admin). `setup-venv.bat` for manual venv repair. Uses `start` for browser launch.
+- Docker: no launcher needed (headless mode).
+- All platforms: per-user Python venv setup on first run, browser launch on first run, no `rm` commands.
 
 ---
 
@@ -198,24 +188,16 @@ The same pattern should be adopted for deb/rpm/Arch/MSI installs.
 
 
 
-## 20. AI test button (new)
-- Add a test button in AI manager of workflow-ediotr react app
-- button should send "say hello world, in Python" or something similar
-- visually confirm if the AI is online or not (red/green LED after test before test LED is in off state)
+## ~~20. AI test button~~ ✅
+- ~~Add a test button in AI manager of workflow-editor react app~~ ✅
+- Direct curl ping with 10s timeout (bypasses SessionManager). Backend: `POST /api/settings/ai-interfaces/test`. Frontend: LED indicator (green=success, red=failure, yellow=testing). Bad URLs fail instantly (e.g. HTTP 404).
+- Edit modal: centered overlay with blurred backdrop replaces inline edit form.
 
 ---
 
-## 21. Settings dialog for workflow editor + JCWF assistant provider config
-- Add a settings dialog in the workflow editor for `config.json` fields that are
-  **not** already covered by the AI Manager page (e.g. queue paths, misc. options).
-- Add a setting to select which **API interface index** the JCWF generation assistant
-  uses (currently it inherits the default provider from `config.json`).
-  - This will write a PROV file for the `_ai_jcwf_service` queue so `SessionManager`
-    picks up the override (the PROV plumbing in `AiJcwfService` was removed for now
-    because it wasn't needed — it will need to be re-added).
-  - An advanced model (e.g. Claude Opus Thinking) may be required for complex JCWF
-    generation, so letting the user choose a different provider than the default is
-    important.
+## ~~21. Settings dialog for workflow editor + JCWF assistant provider config~~ ✅
+- ~~Add a settings dialog in the workflow editor for `config.json` fields~~ ✅ Gear-icon modal with Default AI Interface, Max Threads, Max File Size, JCWF Batch Size, Verbose toggle. Backend: `GET/PUT /api/settings/config`.
+- JCWF assistant provider override (PROV file selection) deferred to a future iteration.
 
 ---
 

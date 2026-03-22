@@ -1210,8 +1210,6 @@ export default function WorkflowEditorView(props: {
       const socket = new WebSocket(buildWebSocketUrl("/ws"));
       webSocketRef.current = socket;
 
-      let pollTimer: ReturnType<typeof setInterval> | null = null;
-
       socket.onopen = () => {
         setIsWebSocketConnected(true);
         try
@@ -1222,23 +1220,9 @@ export default function WorkflowEditorView(props: {
         {
           // ignore
         }
-        pollTimer = setInterval(() => {
-          try
-          {
-            if (socket.readyState === WebSocket.OPEN)
-            {
-              socket.send(JSON.stringify({ type: "workflow-runs-request" }));
-            }
-          }
-          catch
-          {
-            // ignore
-          }
-        }, 500);
       };
 
       socket.onclose = () => {
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         setIsWebSocketConnected(false);
         if (!unmounted)
         {
@@ -1563,15 +1547,15 @@ export default function WorkflowEditorView(props: {
       }
     };
 
-    // Initial poll after a short delay (give backend time to register the run)
+    // Safety-net poll: WS push handles real-time updates; this is a fallback
+    // in case the WebSocket connection drops or misses a terminal transition.
     const initialTimer = setTimeout(() => {
       void poll();
-    }, 1500);
+    }, 3000);
 
-    // Then poll every 2 seconds
     const interval = setInterval(() => {
       void poll();
-    }, 2000);
+    }, 10000);
 
     return () => {
       cancelled = true;
@@ -2680,6 +2664,20 @@ export default function WorkflowEditorView(props: {
                       }} />
                   </div>
                 ) : null}
+                {trigger.type === "webhook" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                    <input className="input" placeholder="secret (optional HMAC-SHA256 shared secret)" style={{ fontSize: 12, padding: "3px 6px" }}
+                      value={(trigger.params?.secret as string) ?? ""}
+                      onChange={(e) => {
+                        const secret = e.target.value;
+                        setTriggers((prev) => prev.map((t, i) => i === index ? { ...t, params: { ...t.params, secret: secret || undefined } } : t));
+                        setIsDirty(true);
+                      }} />
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace", wordBreak: "break-all" }}>
+                      POST /api/webhook/{loadedWorkflowId ?? props.workflowId ?? "<workflowId>"}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ))}
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
@@ -2699,6 +2697,10 @@ export default function WorkflowEditorView(props: {
                 setTriggers((prev) => [...prev, { type: "file_watch", id: `file-watch-${prev.length + 1}`, enabled: true, params: { path: "", events: ["modified"] } }]);
                 setIsDirty(true);
               }}>+ file_watch</button>
+              <button className="btn" type="button" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                setTriggers((prev) => [...prev, { type: "webhook", id: "webhook", enabled: true, params: {} }]);
+                setIsDirty(true);
+              }}>+ webhook</button>
             </div>
           </div>
         </div>

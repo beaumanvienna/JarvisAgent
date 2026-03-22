@@ -1,41 +1,61 @@
 {
-  "workflow_id": "hamburg-tourist-day-planner",
-  "name": "Hamburg Tourist Day Planner (n8n)",
-  "version": 1,
-  "description": "Generates a tourist day plan for Hamburg using weather context provided by n8n.",
+  "version": "1.0",
+  "id": "hamburg-tourist-day-planner",
+  "label": "Hamburg Tourist Day Planner (n8n Integration Demo)",
+  "doc": "Generates a weather-aware tourist day plan for Hamburg. Triggered externally via POST /api/webhook/hamburg-tourist-day-planner. Context variables (date, timezone, rainCategory, weatherJson) are injected into the AI prompt from the run context.",
+  "manual_start": true,
   "triggers": [
     {
-      "type": "manual"
+      "type": "webhook",
+      "id": "webhook",
+      "enabled": true,
+      "params": {}
     }
   ],
-  "tasks": [
-    {
+  "defaults": {
+    "timeout_ms": 120000
+  },
+  "tasks": {
+    "plan": {
       "id": "plan",
       "type": "ai_call",
-      "mode": "blocking",
-      "prompt": {
-        "system": "You are a helpful travel planner.",
-        "user": "Create a day plan for tourists in Hamburg for date={{context.date}} timezone={{context.timezone}}. Rain category: {{context.rainCategory}}. Weather JSON: {{context.weatherJson}}. Output Markdown only."
-      },
-      "outputs": {
-        "plan_markdown": "string"
-      }
-    },
-    {
-      "id": "finalize",
-      "type": "python",
-      "mode": "blocking",
-      "depends_on": ["plan"],
-      "entrypoint": "tasks/finalize.py",
+      "label": "Generate tourist day plan using weather context",
+      "working_directory": "../queue/hamburg-tourist-day-planner/01_plan",
       "inputs": {
-        "plan_markdown": "{{tasks.plan.outputs.plan_markdown}}",
-        "n8n_request_path": "{{context.n8n_request_path}}",
-        "callbackUrl": "{{context.callbackUrl}}",
-        "n8n_task": "{{context.n8n_task}}"
+        "date":         { "type": "string", "required": true },
+        "timezone":     { "type": "string", "required": true, "default": "Europe/Berlin" },
+        "rainCategory": { "type": "string", "required": true },
+        "weatherJson":  { "type": "string", "required": true }
       },
       "outputs": {
-        "result_markdown": "string"
+        "plan_markdown": { "type": "string" }
+      },
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_plan.txt",
+            "content": "You write daily content for a tourist information kiosk in Hamburg, Germany. Output only raw Markdown. No markdown fences, no explanations, no preamble."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_plan.txt",
+            "content": "Generate a full-day tourist itinerary for Hamburg. Include morning, afternoon, and evening activities. Adapt recommendations to the current weather:\n- no_rain: emphasize outdoor activities (parks, harbor walks, Elbphilharmonie plaza)\n- some_rain: mixed plan with short outdoor walks and indoor attractions\n- rain: focus on indoor attractions (museums, galleries, covered markets)\nDo NOT mention other cities. Hamburg only. Keep suggestions realistic."
+          }
+        ],
+        "cntx_files": [
+          {
+            "path": "CNTX_weather.txt",
+            "content": "Date: {{date}}\nTimezone: {{timezone}}\nRain category: {{rainCategory}}\nWeather forecast (raw JSON): {{weatherJson}}"
+          }
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_plan.txt",
+            "content": "Generate the Hamburg tourist day plan for {{date}} as Markdown. Include the date in the first heading."
+          }
+        ]
       }
     }
-  ]
+  }
 }
