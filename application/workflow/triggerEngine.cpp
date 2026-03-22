@@ -349,6 +349,18 @@ namespace AIAssistant
         return &m_WebhookTriggers[iterator->second];
     }
 
+    void TriggerEngine::ClearAll()
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        m_CronTriggers.clear();
+        m_FileWatchTriggers.clear();
+        m_ManualTriggers.clear();
+        m_WebhookTriggers.clear();
+        m_FileWatchIndex.clear();
+        m_WebhookIndex.clear();
+        LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
+    }
+
     void TriggerEngine::ClearWorkflowTriggers(std::string const& workflowId)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);

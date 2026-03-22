@@ -60,6 +60,7 @@
 #include "event/events.h"
 #include "keys/keyEncryption.h"
 #include "workflow/triggerEngine.h"
+#include "workflow/workflowTriggerBinder.h"
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
@@ -1235,12 +1236,27 @@ namespace AIAssistant
 
         std::vector<std::string> workflowIds = workflowRegistryPtr->GetWorkflowIds();
 
+        // Re-bind triggers so new/changed webhook/cron/file_watch triggers take effect.
+        {
+            TriggerEngine* triggerEngine = nullptr;
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                triggerEngine = m_TriggerEngine;
+            }
+            if (triggerEngine != nullptr)
+            {
+                triggerEngine->ClearAll();
+                WorkflowTriggerBinder workflowTriggerBinder;
+                workflowTriggerBinder.RegisterAll(*workflowRegistryPtr, *triggerEngine);
+            }
+        }
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["reloaded"] = true;
         responseJson["workflowCount"] = static_cast<int>(workflowIds.size());
 
-        LOG_APP_INFO("Workflow registry reloaded from disk: {} workflows loaded", workflowIds.size());
+        LOG_APP_INFO("Workflow registry reloaded from disk: {} workflows loaded (triggers re-bound)", workflowIds.size());
 
         return MakeJsonResponse(200, responseJson);
     }

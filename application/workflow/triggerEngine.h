@@ -114,6 +114,9 @@ namespace AIAssistant
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
+        // Remove all triggers (for full reload).
+        void ClearAll();
+
         // --------------------------------------------------------------------
         // Runtime API
         // --------------------------------------------------------------------
