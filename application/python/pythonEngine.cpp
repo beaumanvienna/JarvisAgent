@@ -591,7 +591,8 @@ namespace AIAssistant
                                            std::unordered_map<std::string, std::string> const& inputValues,
                                            std::unordered_map<std::string, std::string> const& contextValues,
                                            std::unordered_map<std::string, std::string>& outputValuesOut,
-                                           std::string& errorMessage)
+                                           std::string& errorMessage, std::string& capturedStdout,
+                                           std::string& capturedStderr)
     {
         outputValuesOut.clear();
 
@@ -626,6 +627,8 @@ namespace AIAssistant
 
         outputValuesOut = std::move(request->m_OutputValues);
         errorMessage = request->m_ErrorMessage;
+        capturedStdout = std::move(request->m_CapturedStdout);
+        capturedStderr = std::move(request->m_CapturedStderr);
         return ok;
     }
 
@@ -890,11 +893,75 @@ namespace AIAssistant
         }
 
         // --------------------------------------------------------------------
+        // Set up stdout/stderr tee capture (real-time + buffer)
+        // --------------------------------------------------------------------
+        PyRun_SimpleString("import io as _jarvis_io\n"
+                           "_jarvis_old_stdout = sys.stdout\n"
+                           "_jarvis_old_stderr = sys.stderr\n"
+                           "_jarvis_cap_stdout = _jarvis_io.StringIO()\n"
+                           "_jarvis_cap_stderr = _jarvis_io.StringIO()\n"
+                           "class _JarvisTee:\n"
+                           "    def __init__(self, orig, cap):\n"
+                           "        self._orig = orig\n"
+                           "        self._cap = cap\n"
+                           "    def write(self, msg):\n"
+                           "        self._orig.write(msg)\n"
+                           "        self._cap.write(msg)\n"
+                           "    def flush(self):\n"
+                           "        self._orig.flush()\n"
+                           "        self._cap.flush()\n"
+                           "sys.stdout = _JarvisTee(_jarvis_old_stdout, _jarvis_cap_stdout)\n"
+                           "sys.stderr = _JarvisTee(_jarvis_old_stderr, _jarvis_cap_stderr)\n");
+
+        // Helper: tear down tee capture and read captured output into request.
+        auto teardownCapture = [&]()
+        {
+            PyRun_SimpleString("sys.stdout = _jarvis_old_stdout\n"
+                               "sys.stderr = _jarvis_old_stderr\n");
+
+            PyObject* mainMod = PyImport_AddModule("__main__");                  // borrowed
+            PyObject* mainDict2 = mainMod ? PyModule_GetDict(mainMod) : nullptr; // borrowed
+
+            if (mainDict2)
+            {
+                PyObject* capOut = PyDict_GetItemString(mainDict2, "_jarvis_cap_stdout"); // borrowed
+                if (capOut)
+                {
+                    PyObject* val = PyObject_CallMethod(capOut, "getvalue", nullptr);
+                    if (val)
+                    {
+                        char const* utf8 = PyUnicode_AsUTF8(val);
+                        if (utf8)
+                            request->m_CapturedStdout = utf8;
+                        Py_DECREF(val);
+                    }
+                }
+
+                PyObject* capErr = PyDict_GetItemString(mainDict2, "_jarvis_cap_stderr"); // borrowed
+                if (capErr)
+                {
+                    PyObject* val = PyObject_CallMethod(capErr, "getvalue", nullptr);
+                    if (val)
+                    {
+                        char const* utf8 = PyUnicode_AsUTF8(val);
+                        if (utf8)
+                            request->m_CapturedStderr = utf8;
+                        Py_DECREF(val);
+                    }
+                }
+            }
+
+            PyRun_SimpleString("del _jarvis_old_stdout, _jarvis_old_stderr, "
+                               "_jarvis_cap_stdout, _jarvis_cap_stderr, _JarvisTee, _jarvis_io\n");
+        };
+
+        // --------------------------------------------------------------------
         // Execute
         // --------------------------------------------------------------------
         PyObject* argsTuple = PyTuple_New(0);
         if (argsTuple == nullptr)
         {
+            teardownCapture();
             Py_DECREF(kwargs);
             Py_DECREF(taskFunction);
             return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple");
@@ -913,6 +980,7 @@ namespace AIAssistant
 
             if (!looksLikeMissingContext)
             {
+                teardownCapture();
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
                 return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + firstException);
@@ -920,6 +988,7 @@ namespace AIAssistant
 
             if (!attachContextDictToKwargs(kwargs))
             {
+                teardownCapture();
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
                 return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate context dict");
@@ -928,6 +997,7 @@ namespace AIAssistant
             argsTuple = PyTuple_New(0);
             if (argsTuple == nullptr)
             {
+                teardownCapture();
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
                 return fail("PythonEngine::ExecuteWorkflowTask: failed to allocate args tuple");
@@ -938,6 +1008,7 @@ namespace AIAssistant
 
             if (resultObject == nullptr)
             {
+                teardownCapture();
                 Py_DECREF(kwargs);
                 Py_DECREF(taskFunction);
                 return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException());
@@ -945,10 +1016,13 @@ namespace AIAssistant
         }
         else if (resultObject == nullptr)
         {
+            teardownCapture();
             Py_DECREF(kwargs);
             Py_DECREF(taskFunction);
             return fail("PythonEngine::ExecuteWorkflowTask: python exception: " + consumePythonException());
         }
+
+        teardownCapture();
 
         Py_DECREF(kwargs);
         Py_DECREF(taskFunction);

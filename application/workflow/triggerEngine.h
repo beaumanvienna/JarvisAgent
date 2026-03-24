@@ -86,8 +86,10 @@ namespace AIAssistant
         // --------------------------------------------------------------------
 
         // Register an auto trigger.
-        // Auto triggers fire once immediately when registered (if enabled).
-        void AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled);
+        // Auto triggers fire once immediately when registered (if enabled and fireImmediately is true).
+        // Set fireImmediately=false when re-registering triggers after a reload to avoid re-running all auto workflows.
+        void AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled,
+                            bool fireImmediately = true);
 
         // Register a cron trigger.
         // expression: 5-field cron string (minute hour day month weekday).

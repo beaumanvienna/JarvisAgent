@@ -158,6 +158,14 @@ namespace AIAssistant
                 }
                 ++fieldOccurances[ConfigFields::JcwfBatchSize];
             }
+            else if (jsonObjectKey == "jcwf AI interface")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto ifaceIndex = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("jcwf AI interface: {}", ifaceIndex);
+                engineConfig.m_JcwfAiInterfaceIndex = static_cast<int>(ifaceIndex);
+                ++fieldOccurances[ConfigFields::JcwfAiInterface];
+            }
             else if (jsonObjectKey == "keys_file")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");

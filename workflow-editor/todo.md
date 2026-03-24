@@ -1,6 +1,6 @@
 # Workflow Editor — TODO & Reference
 
-Last reviewed: 2026-03-21
+Last reviewed: 2026-03-23
 
 ---
 
@@ -48,7 +48,7 @@ Last reviewed: 2026-03-21
       the workflow separately, which is confusing if they hit Run before either is persisted.~~
       Resolved: Run now auto-flushes pending AI scripts before saving JCWF and starting the run.
 - [x] ~~AI test button~~ — direct curl ping with 10s timeout (bypasses SessionManager). Backend: `POST /api/settings/ai-interfaces/test`, `TestAiInterface()` in `aiJcwfService`. Frontend: test button + LED indicator in `AiManagerView.tsx`. Bad URLs fail instantly (e.g. HTTP 404), no more 2-minute hang.
-- [x] ~~AI Manager edit modal~~ — centered overlay with blurred backdrop replaces inline edit form at bottom of provider list. Click-outside-to-close.
+- [x] ~~AI Manager edit modal~~ — centered overlay replaces inline edit form at bottom of provider list. Click-outside-to-close. Updated 2026-03-23: restyled to use `modalOverlay`/`modalContent`/`modalHeader`/`modalBody` CSS classes matching `SettingsModal.tsx` (solid dark background, no transparency, no blur).
 - [x] ~~Settings dialog for workflow editor~~ — config.json fields exposed in the gear-icon Settings modal. Backend: `GET/PUT /api/settings/config`. Frontend: `SettingsModal.tsx` with Default AI Interface, Max Threads, Max File Size, JCWF Batch Size, Verbose toggle.
 - [x] ~~Template variable autocomplete for `{{binding.field}}` in queue_binding prob_files~~ — `TemplateTextarea` component with inline dropdown for `{{...}}` placeholders. Suggestions sourced from task inputs, file_inputs/outputs indices, and upstream task outputs.
 - [x] ~~Drag-to-reorder in queue_binding entries~~ — ▲/▼ buttons on each entry in `QueueBindingEditor`
@@ -79,7 +79,10 @@ Last reviewed: 2026-03-21
 
 ### Future (n8n integration)
 - [x] ~~Seamless n8n integration~~ — `POST /api/webhook/<workflowId>` with HMAC-SHA256, completion callback POST to `callbackUrl`, n8n custom node v2 (webhook/legacy toggle + HMAC signing). Legacy `POST /api/integrations/n8n/start` retained for backward compat.
-- [ ] Sub-workflows / workflow-call node
+- [ ] Sub-workflows / workflow-call node (Remaining TODO #3)
+- [x] ~~JCWF assistant provider override~~ — "JCWF AI Interface" dropdown in Settings modal selects a non-default AI interface for the Generate / Explain / Fix Script pipeline. Stored as `jcwf_ai_interface` in `config.json`. Backend resolves selected interface and writes `PROV_provider.json` sidecar files. E2E verified.
+- [x] ~~Python task stdout/stderr capture~~ — inline `_JarvisTee` in `PythonEngine` tees output to real-time terminal + `StringIO` buffer. `PythonTaskExecutor` writes `stdout.txt`/`stderr.txt` + stores in `TaskInstanceState`. Tooltip shows captured output.
+- [x] ~~Workflow reload auto-trigger fix~~ — navigating to the Workflows page no longer re-fires all auto-trigger workflows. `AddAutoTrigger` accepts `fireImmediately` param; reload path passes `false`.
 - [x] ~~Workflow versioning~~ — auto-backup on save to `.history/<workflowId>/<timestamp>.jcwf`. REST API: `GET /api/workflows/<id>/versions` (list), `GET /api/workflows/<id>/versions/<ts>` (get), `POST /api/workflows/<id>/versions/<ts>/restore` (restore with pre-restore backup). Frontend: "History" button in toolbar opens `VersionHistoryModal` with version list, sizes, and restore buttons.
 
 ---

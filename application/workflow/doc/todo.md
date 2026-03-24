@@ -1,6 +1,6 @@
 # JarvisAgent TODO List
 
-Last reviewed: Mar 2026
+Last reviewed: 2026-03-23
 
 **Build command:** `make config=release && make config=debug`
 
@@ -301,3 +301,13 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
   - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.
   - [x] ~~Cron trigger timezone support~~ — implemented C++20 `std::chrono::zoned_time` in `ComputeNextFireTime`, parsed `params.timezone` in `WorkflowTriggerBinder`, added trigger config UI in editor.
   - [x] ~~README.md rewrite~~ — updated project description, added workflow editor screenshot, planned features (Docker, n8n).
+
+---
+
+## Recent fixes (2026-03-23)
+
+- [x] ~~**JCWF assistant provider override**~~ — "JCWF AI Interface" dropdown in Settings modal. Stored as `jcwf_ai_interface` in `config.json`. `AiJcwfService` resolves selected interface → `PROV_provider.json` sidecar. E2E verified with `api.openai.com/gpt-4.1-mini/API2`.
+- [x] ~~**Python task stdout/stderr capture**~~ — inline `_JarvisTee` class in `PythonEngine` tees output to both real-time terminal and `StringIO` buffer. `PythonTaskExecutor` writes `stdout.txt`/`stderr.txt` + stores in `TaskInstanceState`. Verified with "Print Hello World" tooltip.
+- [x] ~~**AI Manager modal styling**~~ — replaced inline transparent/blur styles with `modalOverlay`/`modalContent` CSS classes matching `SettingsModal.tsx`.
+- [x] ~~**Workflow reload auto-trigger bug**~~ — `HandleWorkflowsReloadPost` re-registered auto triggers and fired them on every page navigation. Added `bool fireImmediately` to `AddAutoTrigger`; reload path passes `false`.
+- [x] ~~**PDCurses MAX_UNICODE crash**~~ — `assert(ch < MAX_UNICODE)` in `vt/pdcdisp.c:363` crashed on emoji in AI responses. Replaced with `break` guard so outer loop handles combining chars correctly.

@@ -223,7 +223,8 @@ namespace AIAssistant
 
     TriggerEngine::TriggerEngine(TriggerCallback const& triggerCallback) : m_TriggerCallback{triggerCallback} {}
 
-    void TriggerEngine::AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled)
+    void TriggerEngine::AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled,
+                                       bool fireImmediately)
     {
         bool shouldFire = false;
         {
@@ -235,6 +236,12 @@ namespace AIAssistant
             {
                 LOG_APP_INFO("TriggerEngine::AddAutoTrigger: trigger '{}' for workflow '{}' is disabled; not firing",
                              triggerId, workflowId);
+            }
+            else if (!fireImmediately)
+            {
+                LOG_APP_INFO(
+                    "TriggerEngine::AddAutoTrigger: trigger '{}' for workflow '{}' registered (reload — not firing)",
+                    triggerId, workflowId);
             }
             else
             {

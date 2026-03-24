@@ -53,16 +53,7 @@ See also:
 
 ---
 
-## 6. Python Engine parallelization (new)
-- Add support for multiple independent PythonEngine instances
-- Ensure each interpreter instance owns its own GIL
-- Store PythonEngine instances in std::vector
-- Default engine count: 4
-- Allow override via config.json
-- Expose internal task-queue size for load balancing
-- Dispatch OnEvent() to the PythonEngine with the lowest queued workload
-- Ensure isolated interpreter state per engine
-- **Complexity note:** CPython sub-interpreters + per-interpreter GIL (PEP 684, Python 3.12+) is the cleanest path but has restrictions on C extension modules. Alternative: multiprocessing with IPC.
+## ~~6. Python Engine parallelization~~ (moved to Remaining TODOs #1)
 
 ---
 
@@ -117,19 +108,7 @@ See also:
 
 ---
 
-## 12. Browser-based AI chat terminal (new)
-- **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
-  Not just a command prompt, but a conversational AI interface that can:
-  - Answer questions about the system, workflows, and task outputs
-  - Trigger and monitor workflow runs
-  - Inspect task state, logs, and captured output
-  - Suggest fixes for failed tasks
-- **Frontend:** xterm.js terminal emulator on a dedicated page/tab, connected via WebSocket (Crow already in stack)
-- **Backend:**
-  - Chat message router in C++ (WS protocol: `{ "type": "chat" | "command" | "complete", ... }`)
-  - AI provider integration for natural language understanding
-  - Context injection: system state, active runs, task history
-  - Command fallback: direct commands (`/run`, `/status`, `/help`) for non-AI actions
+## ~~12. Browser-based AI chat terminal~~ (moved to Remaining TODOs #2)
 
 ---
 
@@ -149,30 +128,7 @@ See also:
 
 ---
 
-## 15. Landing page for new users (new)
-- Create a welcoming landing page / website for JarvisAgent
-- Should explain what JarvisAgent is, key features, screenshots, and download links
-- Target audience: first-time visitors who discover the project
-
----
-
-## 16. Self-hosted Docker registry (new)
-- Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
-- Benefits: custom domain, no GitHub dependency, potential for private images
-- Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
-
----
-
-## 17. Promotion video (new)
-- Create a demo / promotion video showcasing JarvisAgent
-- Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
-- Target: GitHub README embed, YouTube, social media
-
----
-
-## 18. Launchpad PPA (new)
-- Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley
-- Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`
+## ~~15–18~~ (moved to Remaining TODOs #4–7)
 
 ---
 
@@ -197,7 +153,75 @@ See also:
 
 ## ~~21. Settings dialog for workflow editor + JCWF assistant provider config~~ ✅
 - ~~Add a settings dialog in the workflow editor for `config.json` fields~~ ✅ Gear-icon modal with Default AI Interface, Max Threads, Max File Size, JCWF Batch Size, Verbose toggle. Backend: `GET/PUT /api/settings/config`.
-- JCWF assistant provider override (PROV file selection) deferred to a future iteration.
+- ~~JCWF assistant provider override (PROV file selection)~~ ✅ "JCWF AI Interface" dropdown in Settings modal selects a non-default AI interface for the Generate / Explain / Fix Script pipeline. Stored as `jcwf_ai_interface` in `config.json`. Backend: `HandleConfigSettingsPut` persists the index; `AiJcwfService` resolves the selected interface and writes `PROV_provider.json` sidecar files. E2E verified: `api.openai.com/gpt-4.1-mini/API2` correctly appears in PROV files for both decompose and generate stages.
+
+---
+
+## ~~22. Python task stdout/stderr capture~~ ✅
+- ~~Capture stdout/stderr from Python task scripts~~ ✅ Inline `_JarvisTee` class in `PythonEngine` duplicates output to both the original `_JarvisRedirect` (real-time terminal) and a `StringIO` buffer. `ExecuteWorkflowTask` returns captured strings; `PythonTaskExecutor` stores them in `TaskInstanceState` and writes `stdout.txt`/`stderr.txt` to the task working directory. Cross-platform (pure Python). Verified with "Print Hello World" workflow showing `Hello, World!` in the editor tooltip.
+
+---
+
+## ~~23. AI Manager modal styling consistency~~ ✅
+- ~~AI Manager "Add Interface" modal used transparent backdrop with blur, inconsistent with Settings modal~~ ✅ Replaced inline styles with `modalOverlay` + `modalContent` + `modalHeader` + `modalBody` CSS classes matching `SettingsModal.tsx`. Solid dark background, no transparency, no blur.
+
+---
+
+## ~~24. Workflow reload re-fires all auto triggers~~ ✅
+- ~~Navigating to the Workflows page triggered `POST /api/workflows/reload` which re-registered all auto triggers and fired them immediately~~ ✅ Added `bool fireImmediately` parameter to `TriggerEngine::AddAutoTrigger` (default `true`). `WorkflowTriggerBinder::RegisterAll` accepts `bool fireAutoTriggers` and propagates it. `HandleWorkflowsReloadPost` passes `false` — triggers are re-registered (cron/file_watch still work) but auto triggers don't re-fire. Startup path unchanged.
+
+---
+
+## ~~25. PDCurses MAX_UNICODE assertion crash~~ ✅
+- ~~`PDC_transform_line` in `vendor/pdcursesmod/vt/pdcdisp.c:363` crashed with `assert(ch < MAX_UNICODE)` when AI responses contained emoji characters above the BMP (e.g. 🌟 U+1F31F)~~ ✅ Replaced `assert` with a `break` guard — if `ch >= MAX_UNICODE`, the inner loop exits and the outer loop handles the character correctly via the `USING_COMBINING_CHARACTER_SCHEME` path.
+
+---
+
+## Remaining TODOs
+
+### 1. Python Engine parallelization
+- Add support for multiple independent PythonEngine instances
+- Ensure each interpreter instance owns its own GIL
+- Store PythonEngine instances in std::vector
+- Default engine count: 4
+- Allow override via config.json
+- Expose internal task-queue size for load balancing
+- Dispatch OnEvent() to the PythonEngine with the lowest queued workload
+- Ensure isolated interpreter state per engine
+- **Complexity note:** CPython sub-interpreters + per-interpreter GIL (PEP 684, Python 3.12+) is the cleanest path but has restrictions on C extension modules. Alternative: multiprocessing with IPC.
+
+### 2. Browser-based AI chat terminal
+- **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
+- **Frontend:** xterm.js terminal emulator on a dedicated page/tab, connected via WebSocket
+- **Backend:** Chat message router in C++ (WS protocol), AI provider integration, context injection, command fallback (`/run`, `/status`, `/help`)
+
+### 3. Sub-workflows / workflow-call node
+- Invoke one JCWF from another as a task
+- Enables modular composition of complex pipelines
+
+### 4. Launchpad PPA
+- Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley
+- Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`
+
+### 5. Landing page for new users
+- Create a welcoming landing page / website for JarvisAgent
+- Should explain what JarvisAgent is, key features, screenshots, and download links
+- Target audience: first-time visitors who discover the project
+
+### 6. Self-hosted Docker registry
+- Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
+- Benefits: custom domain, no GitHub dependency, potential for private images
+- Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
+
+### 7. Promotion video
+- Create a demo / promotion video showcasing JarvisAgent
+- Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
+- Target: GitHub README embed, YouTube, social media
+
+### 8. Enable HTTP/2 for AI provider requests
+- Enable HTTP/2 in `CurlWrapper` for improved network performance when communicating with AI provider APIs
+- libcurl supports HTTP/2 via `CURLOPT_HTTP_VERSION` / `CURL_HTTP_VERSION_2TLS`
+- Requires OpenSSL with ALPN support (already vendored)
 
 ---
 

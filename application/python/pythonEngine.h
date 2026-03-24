@@ -50,6 +50,8 @@ namespace AIAssistant
         // Result (filled by worker)
         std::unordered_map<std::string, std::string> m_OutputValues;
         std::string m_ErrorMessage;
+        std::string m_CapturedStdout;
+        std::string m_CapturedStderr;
         bool m_Success{false};
 
         std::promise<bool> m_Promise;
@@ -91,7 +93,8 @@ namespace AIAssistant
         bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
                                  std::unordered_map<std::string, std::string> const& inputValues,
                                  std::unordered_map<std::string, std::string> const& contextValues,
-                                 std::unordered_map<std::string, std::string>& outputValuesOut, std::string& errorMessage);
+                                 std::unordered_map<std::string, std::string>& outputValuesOut, std::string& errorMessage,
+                                 std::string& capturedStdout, std::string& capturedStderr);
 
     private:
         void Reset();

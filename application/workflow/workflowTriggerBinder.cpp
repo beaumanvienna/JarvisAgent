@@ -352,7 +352,8 @@ namespace
 
 namespace AIAssistant
 {
-    void WorkflowTriggerBinder::RegisterAll(WorkflowRegistry const& workflowRegistry, TriggerEngine& triggerEngine) const
+    void WorkflowTriggerBinder::RegisterAll(WorkflowRegistry const& workflowRegistry, TriggerEngine& triggerEngine,
+                                            bool fireAutoTriggers) const
     {
         std::vector<std::string> workflowIds = workflowRegistry.GetWorkflowIds();
 
@@ -370,7 +371,7 @@ namespace AIAssistant
 
             if (workflowDefinition.m_Triggers.empty())
             {
-                triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, "auto", true);
+                triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, "auto", true, fireAutoTriggers);
                 continue;
             }
 
@@ -381,7 +382,7 @@ namespace AIAssistant
                     case WorkflowTriggerType::Auto:
                     {
                         triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
-                                                     workflowTrigger.m_IsEnabled);
+                                                     workflowTrigger.m_IsEnabled, fireAutoTriggers);
                         break;
                     }
 

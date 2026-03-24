@@ -395,33 +395,20 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
 
       {editing && (
         <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "rgba(0,0,0,0.55)",
-            backdropFilter: "blur(4px)",
-          }}
+          className="modalOverlay"
           onMouseDown={(e) => { if (e.target === e.currentTarget) setEditing(null); }}
         >
           <div
-            className="card"
-            style={{
-              width: "100%",
-              maxWidth: 520,
-              maxHeight: "85vh",
-              overflowY: "auto",
-              borderColor: "rgba(120,180,255,0.35)",
-              margin: 16,
-              boxShadow: "0 8px 32px rgba(0,0,0,0.45)",
-            }}
+            className="modalContent"
+            style={{ maxWidth: 520 }}
           >
-            <h3 style={{ margin: "0 0 12px 0", fontSize: 15 }}>
-              {editing.isNew ? "Add AI Interface" : `Edit: ${editing.originalName}`}
-            </h3>
+            <div className="modalHeader">
+              <h3 style={{ margin: 0, fontSize: 15 }}>
+                {editing.isNew ? "Add AI Interface" : `Edit: ${editing.originalName}`}
+              </h3>
+              <button className="btn" type="button" onClick={() => setEditing(null)}>×</button>
+            </div>
+            <div className="modalBody">
             {field("Name (unique key — auto-generated from URL domain + model if empty)", "name", "e.g. api.openai.com/gpt-4o")}
             {field("Description", "description", "e.g. OpenAI GPT-4o")}
             {field("URL", "url", "https://api.openai.com/v1/chat/completions")}
@@ -466,6 +453,7 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
               <button className="btn" type="button" onClick={() => setEditing(null)}>
                 Cancel
               </button>
+            </div>
             </div>
           </div>
         </div>

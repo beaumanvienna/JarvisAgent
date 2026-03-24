@@ -30,6 +30,7 @@
 #include "taskPathResolver.h"
 
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 
 namespace AIAssistant
@@ -247,8 +248,46 @@ namespace AIAssistant
                          taskDefinition.m_Id, argumentName, argumentValue, argumentPathAbsolute.string());
         }
 
-        bool const ok = pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
-                                                          contextValues, pythonOutputs, errorMessage);
+        std::string capturedStdout;
+        std::string capturedStderr;
+        bool const ok =
+            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
+                                              contextValues, pythonOutputs, errorMessage, capturedStdout, capturedStderr);
+
+        // Store first 1024 characters for the frontend tooltip.
+        static constexpr size_t kMaxCaptureChars = 1024;
+        taskState.m_CapturedStdout = capturedStdout.substr(0, std::min(capturedStdout.size(), kMaxCaptureChars));
+        taskState.m_CapturedStderr = capturedStderr.substr(0, std::min(capturedStderr.size(), kMaxCaptureChars));
+
+        // Write stdout.txt and stderr.txt to the task working directory (full size).
+        {
+            std::error_code ec;
+            if (!capturedStdout.empty())
+            {
+                std::ofstream stdoutFile(taskWorkingDirectoryPath / "stdout.txt", std::ios::binary | std::ios::trunc);
+                if (stdoutFile.is_open())
+                {
+                    stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
+                }
+            }
+            else
+            {
+                fs::remove(taskWorkingDirectoryPath / "stdout.txt", ec);
+            }
+
+            if (!capturedStderr.empty())
+            {
+                std::ofstream stderrFile(taskWorkingDirectoryPath / "stderr.txt", std::ios::binary | std::ios::trunc);
+                if (stderrFile.is_open())
+                {
+                    stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
+                }
+            }
+            else
+            {
+                fs::remove(taskWorkingDirectoryPath / "stderr.txt", ec);
+            }
+        }
 
         if (!ok)
         {

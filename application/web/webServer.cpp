@@ -1247,7 +1247,7 @@ namespace AIAssistant
             {
                 triggerEngine->ClearAll();
                 WorkflowTriggerBinder workflowTriggerBinder;
-                workflowTriggerBinder.RegisterAll(*workflowRegistryPtr, *triggerEngine);
+                workflowTriggerBinder.RegisterAll(*workflowRegistryPtr, *triggerEngine, /*fireAutoTriggers=*/false);
             }
         }
 
@@ -4364,6 +4364,7 @@ namespace AIAssistant
         responseJson["verbose"] = config.m_Verbose;
         responseJson["max_file_size_kb"] = config.m_MaxFileSizekB;
         responseJson["jcwf_batch_size"] = config.m_JcwfBatchSize;
+        responseJson["jcwf_ai_interface"] = config.m_JcwfAiInterfaceIndex;
         responseJson["queue_folder"] = config.m_QueueFolderFilepath;
         responseJson["workflows_folder"] = config.m_WorkflowsFolderFilepath;
         responseJson["interface_count"] = config.m_ApiInterfaces.size();
@@ -4446,6 +4447,20 @@ namespace AIAssistant
             }
         }
 
+        // jcwf_ai_interface (-1 = use global default, >= 0 = specific interface index)
+        {
+            auto result = doc["jcwf_ai_interface"].get_int64();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                int64_t val = result.value();
+                if (val >= -1 && (val < 0 || static_cast<size_t>(val) < config.m_ApiInterfaces.size()))
+                {
+                    config.m_JcwfAiInterfaceIndex = static_cast<int>(val);
+                    anyChanged = true;
+                }
+            }
+        }
+
         if (!anyChanged)
         {
             crow::json::wvalue err;
@@ -4519,6 +4534,7 @@ namespace AIAssistant
                 replaceField("verbose", config.m_Verbose ? "true" : "false");
                 replaceField("max file size in kB", std::to_string(config.m_MaxFileSizekB));
                 replaceField("jcwf batch size", std::to_string(config.m_JcwfBatchSize));
+                replaceField("jcwf AI interface", std::to_string(config.m_JcwfAiInterfaceIndex));
 
                 std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
                 if (ofs)
@@ -4536,6 +4552,7 @@ namespace AIAssistant
         responseJson["verbose"] = config.m_Verbose;
         responseJson["max_file_size_kb"] = config.m_MaxFileSizekB;
         responseJson["jcwf_batch_size"] = config.m_JcwfBatchSize;
+        responseJson["jcwf_ai_interface"] = config.m_JcwfAiInterfaceIndex;
         return MakeJsonResponse(200, responseJson);
     }
 

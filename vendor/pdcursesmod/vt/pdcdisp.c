@@ -360,7 +360,8 @@ void PDC_transform_line(int lineno, int x, int len, const chtype* srcp)
             {
                 ch = srcp[count] & A_CHARTEXT;
 #ifdef PDC_WIDE
-                assert(ch < MAX_UNICODE);
+                if (ch >= (int)MAX_UNICODE)
+                    break; /* let the outer loop handle combining chars */
 #endif
 
                 if (_is_altcharset(srcp[count]))

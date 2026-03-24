@@ -26,6 +26,7 @@ export default function SettingsModal({
   const [draftVerbose, setDraftVerbose] = useState<boolean>(false);
   const [draftMaxFileSize, setDraftMaxFileSize] = useState<string>("24");
   const [draftBatchSize, setDraftBatchSize] = useState<string>("1");
+  const [draftJcwfAiInterface, setDraftJcwfAiInterface] = useState<number>(-1);
 
   useEffect(() => {
     Promise.all([getConfigSettings(), listAiInterfaces()]).then(([cfg, ifaces]) => {
@@ -36,6 +37,7 @@ export default function SettingsModal({
       setDraftVerbose(cfg.verbose);
       setDraftMaxFileSize(String(cfg.max_file_size_kb));
       setDraftBatchSize(String(cfg.jcwf_batch_size));
+      setDraftJcwfAiInterface(cfg.jcwf_ai_interface);
     }).catch(() => {
       setServerMessage("Failed to load server settings");
     });
@@ -52,7 +54,8 @@ export default function SettingsModal({
     Number(draftMaxThreads) !== serverConfig.max_threads ||
     draftVerbose !== serverConfig.verbose ||
     Number(draftMaxFileSize) !== serverConfig.max_file_size_kb ||
-    Number(draftBatchSize) !== serverConfig.jcwf_batch_size
+    Number(draftBatchSize) !== serverConfig.jcwf_batch_size ||
+    draftJcwfAiInterface !== serverConfig.jcwf_ai_interface
   );
 
   const handleSaveServerSettings = useCallback(async () => {
@@ -66,6 +69,7 @@ export default function SettingsModal({
         verbose: draftVerbose,
         max_file_size_kb: Number(draftMaxFileSize),
         jcwf_batch_size: Number(draftBatchSize),
+        jcwf_ai_interface: draftJcwfAiInterface,
       });
       if (result.ok)
       {
@@ -87,7 +91,7 @@ export default function SettingsModal({
     {
       setSaving(false);
     }
-  }, [draftApiIndex, draftMaxThreads, draftVerbose, draftMaxFileSize, draftBatchSize]);
+  }, [draftApiIndex, draftMaxThreads, draftVerbose, draftMaxFileSize, draftBatchSize, draftJcwfAiInterface]);
 
   const fieldRow = (label: string, content: React.ReactNode, hint?: string) => (
     <div style={{ marginBottom: 10 }}>
@@ -186,7 +190,25 @@ export default function SettingsModal({
                     value={draftBatchSize}
                     onChange={(e) => setDraftBatchSize(e.target.value)}
                   />,
-                  "Number of JCWF generation iterations per cycle (1–100)"
+                  "Number of JCWF generation iterations per cycle (1\u2013100)"
+                )}
+
+                {fieldRow(
+                  "JCWF AI Interface",
+                  <select
+                    className="input"
+                    style={{ fontSize: 12, padding: "3px 6px", flex: 1 }}
+                    value={draftJcwfAiInterface}
+                    onChange={(e) => setDraftJcwfAiInterface(Number(e.target.value))}
+                  >
+                    <option value={-1}>Use Default (API index {draftApiIndex})</option>
+                    {interfaces.map((iface, idx) => (
+                      <option key={iface.name} value={idx}>
+                        {idx}: {iface.name}
+                      </option>
+                    ))}
+                  </select>,
+                  "AI interface used for Generate / Explain / Fix Script (\u20131 = global default)"
                 )}
 
                 {fieldRow(

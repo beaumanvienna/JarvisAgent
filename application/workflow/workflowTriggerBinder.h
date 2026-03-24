@@ -35,7 +35,8 @@ namespace AIAssistant
         WorkflowTriggerBinder() = default;
         ~WorkflowTriggerBinder() = default;
 
-        void RegisterAll(WorkflowRegistry const& workflowRegistry, TriggerEngine& triggerEngine) const;
+        void RegisterAll(WorkflowRegistry const& workflowRegistry, TriggerEngine& triggerEngine,
+                         bool fireAutoTriggers = true) const;
     };
 
 } // namespace AIAssistant

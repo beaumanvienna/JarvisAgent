@@ -82,6 +82,36 @@ namespace AIAssistant
             return AiCallTaskExecutor::WriteTextFile(filePath.string(), content, outError);
         }
 
+        // Build a PROV sidecar JSON string from the configured JCWF AI interface.
+        // Returns empty string when -1 (use global default) or index is out of range.
+        static std::string BuildJcwfProvContent()
+        {
+            auto const& config = Core::g_Core->GetConfig();
+            int const idx = config.m_JcwfAiInterfaceIndex;
+            if (idx < 0 || static_cast<size_t>(idx) >= config.m_ApiInterfaces.size())
+            {
+                return {}; // use global default
+            }
+
+            auto const& iface = config.m_ApiInterfaces[static_cast<size_t>(idx)];
+
+            std::string apiTypeStr = "API1";
+            if (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2)
+                apiTypeStr = "API2";
+            else if (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
+                apiTypeStr = "API3";
+
+            std::string json = "{";
+            // Store key_name (not interface name) so SessionManager resolves the API key.
+            std::string const& providerKey = iface.m_KeyName.empty() ? iface.m_Name : iface.m_KeyName;
+            json += "\"provider\":\"" + providerKey + "\"";
+            json += ",\"url\":\"" + iface.m_Url + "\"";
+            json += ",\"api_type\":\"" + apiTypeStr + "\"";
+            json += ",\"model\":\"" + iface.m_Model + "\"";
+            json += "}";
+            return json;
+        }
+
         // Detect the host OS/distro for shell script generation prompts.
         static std::string GetHostOsDescription()
         {
@@ -1256,6 +1286,9 @@ namespace AIAssistant
         outResponseText.clear();
         outError.clear();
 
+        // If no explicit PROV override was given, apply the JCWF AI interface setting.
+        std::string const effectiveProv = provContent.empty() ? BuildJcwfProvContent() : provContent;
+
         fs::path const queueBase = GetQueueBasePath();
         if (queueBase.empty())
         {
@@ -1316,9 +1349,9 @@ namespace AIAssistant
         // Must be written BEFORE the PROB file so the SessionManager picks it up.
         std::string writeError;
 
-        if (!provContent.empty())
+        if (!effectiveProv.empty())
         {
-            if (!WriteFile(queueDir / "PROV_provider.json", provContent, writeError))
+            if (!WriteFile(queueDir / "PROV_provider.json", effectiveProv, writeError))
             {
                 requestPool->Forget(handle);
                 outError = "Failed to write PROV file: " + writeError;
