@@ -199,9 +199,10 @@ See also:
 - Invoke one JCWF from another as a task
 - Enables modular composition of complex pipelines
 
-### 4. Launchpad PPA
-- Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley
-- Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`
+### 4. ~~Launchpad PPA~~ ✅
+- ~~Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley~~
+- ~~Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`~~
+- **Done (v0.8.2):** published, installed, and tested end-to-end. Shared launcher creates `~/JarvisAgent` with user-space Python venv on first run.
 
 ### 5. Landing page for new users
 - Create a welcoming landing page / website for JarvisAgent
@@ -222,6 +223,14 @@ See also:
 - Enable HTTP/2 in `CurlWrapper` for improved network performance when communicating with AI provider APIs
 - libcurl supports HTTP/2 via `CURLOPT_HTTP_VERSION` / `CURL_HTTP_VERSION_2TLS`
 - Requires OpenSSL with ALPN support (already vendored)
+
+---
+
+### 10. Fix JCWF examples for first install
+- Example workflows must not show failures when the dashboard opens automatically on first launch
+- Current issue: `aiCarMaintenancePipeline`, `make-example`, and `vehicleTroubleshootingGuide` fail because they require API keys or build tools not yet configured
+- Options: ship only examples that work out of the box (no API keys needed), or change trigger type so they don't auto-run, or add a "setup required" notice
+- First impression matters — a fresh install should look clean in the dashboard
 
 ---
 
