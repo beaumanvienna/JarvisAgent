@@ -2,7 +2,7 @@ Source: jarvisagent
 Section: utils
 Priority: optional
 Maintainer: JC <beaumanvienna@gmail.com>
-Build-Depends: debhelper-compat (= 13), gcc, g++, make, premake5, zlib1g-dev
+Build-Depends: debhelper-compat (= 13), python3-dev, zlib1g-dev, uuid-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/beaumanvienna/JarvisAgent
 

@@ -1,6 +1,6 @@
 # JarvisAgent — Packaging Plan
 
-Last updated: 2026-03-10
+Last updated: 2026-03-25
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
 C++ libraries are vendored under `vendor/` so that every platform builds against the
@@ -153,7 +153,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 
 **Format:** `.deb` (binary via `dpkg-deb`, source via `debuild` for Launchpad)
 **Directory:** `packaging/Linux/Ubuntu/24_04/`
-**Status:** Binary .deb built in CI; source package for Launchpad planned
+**Status:** Binary .deb built locally via `build-deb.sh`; source package published on Launchpad PPA
 
 **Package names (Ubuntu/Debian):**
 
@@ -187,18 +187,18 @@ rm -rf ~/JarvisAgent/   # remove user data
 # From packaging/Linux/Ubuntu/24_04/
 sudo ./prerequisites.sh   # one-time: install deps
 ./build-deb.sh
-sudo dpkg -i build/jarvisagent_0.75-1_amd64.deb
+sudo dpkg -i build/jarvisagent_*_amd64.deb
 sudo apt install -f   # resolve dependencies
 jarvisagent            # creates ~/JarvisAgent, sets up venv, opens browser
 ```
 
 **Install (binary .deb, pre-built):**
 ```bash
-sudo dpkg -i jarvisagent_0.75-1_amd64.deb
+sudo dpkg -i jarvisagent_*_amd64.deb
 sudo apt install -f   # resolve dependencies
 ```
 
-**Install (from PPA — once source package is published):**
+**Install (from PPA):**
 ```bash
 sudo add-apt-repository ppa:beauman/marley
 sudo apt update
@@ -242,8 +242,8 @@ packaging/Linux/Ubuntu/24_04/debian/
 ├── control            # source + binary package metadata
 ├── copyright          # DEP-5 machine-readable copyright
 ├── install            # list of files to install
-├── postinst           # post-install hook (venv setup)
-├── postrm             # post-remove hook (cleanup)
+├── postinst           # post-install hook (prints launcher instructions)
+├── postrm             # post-remove hook (prints user-data cleanup hint)
 ├── rules              # makefile — the actual build recipe
 └── source/
     └── format         # "3.0 (native)"
@@ -303,13 +303,18 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 
 #### Key points
 
-- `debian/control` lists `premake5` in `Build-Depends` — Launchpad pulls it
-  from the same PPA (`ppa:beauman/marley`) during the build.
+- **premake5 is bundled:** `build-ppa.sh` downloads `premake-core` and includes
+  it in the source tarball. `debian/rules` builds premake5 from source
+  (`Bootstrap.sh`) and uses it to generate Makefiles. No external premake5
+  package needed on the build farm.
+- **React UIs are pre-built:** `build-ppa.sh` injects the local `dist/` folders
+  into the source tarball. Launchpad has no npm/Node.js — the UIs ship as-is.
 - Launchpad builds run in a **clean chroot** with no network access after
-  source download, so all build dependencies must be declared.
-- The `debian/rules` file handles: `premake5 gmake`, `make config=release`,
-  `npm install && npm run build` for both React UIs, and installation of all
-  package contents to `/opt/jarvisagent/`.
+  source download, so all build dependencies must be declared in `debian/control`.
+- `debian/rules` installs the shared `packaging/Linux/jarvisagent-launcher.sh`
+  as `/usr/bin/jarvisagent` (same launcher used by RPM and Arch).
+- `debian/postinst` only prints first-launch instructions (no system-wide venv).
+  Python venv is created per-user by the launcher on first run.
 
 ---
 
@@ -346,7 +351,7 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 # From packaging/Linux/RPM/
 sudo ./prerequisites.sh   # one-time: install deps
 ./build-rpm.sh
-sudo dnf install build/jarvisagent-0.75-1.el10.x86_64.rpm
+sudo dnf install build/jarvisagent-*_x86_64.rpm
 jarvisagent               # creates ~/JarvisAgent, sets up venv, opens browser
 ```
 

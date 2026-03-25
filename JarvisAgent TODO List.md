@@ -225,3 +225,191 @@ See also:
 
 ---
 
+### 9. Dual-edition architecture — **j9t Engine** vs **j9t Studio**
+
+#### Motivation (cybersecurity)
+
+JarvisAgent is gaining powerful developer-facing features: a visual workflow
+editor, AI-powered JCWF generation that writes scripts to disk, and an upcoming
+AI assistant with persistent memory, file system access, and shell command
+execution.  These capabilities are essential for a **development workstation**
+but represent a significant attack surface on a **production server** whose only
+job is to orchestrate and execute pre-defined workflows.
+
+Shipping a single binary forces production operators to accept IDE-grade
+privileges they never need. Two compile-time editions solve this cleanly.
+
+#### Naming
+
+| Edition | Binary name | Purpose |
+|---------|-------------|---------|
+| **j9t Engine** | `jarvisAgent` | Lean orchestration server. Read-only workflows, run monitoring, webhook triggers. No editing, no AI assistant, no script generation. |
+| **j9t Studio** | `jarvisAgent` | Full developer IDE. Everything in Engine **plus** workflow editor, AI JCWF generation/explain/fix, AI assistant, config editing from browser, script writing. |
+
+Same binary name, different compile-time feature set. Packaging can
+distinguish them (e.g. `jarvisagent` vs `jarvisagent-studio` DEB packages,
+or a single package with a build flag).
+
+#### Feature matrix
+
+| Feature / Subsystem | Engine | Studio | Security rationale |
+|---------------------|:------:|:------:|-------------------|
+| **Workflow execution** (RuntimeManager, task executors) | ✅ | ✅ | Core function of both |
+| **Workflow loading & validation** (WorkflowRegistry) | ✅ | ✅ | Needed to run workflows |
+| **Trigger engine** (auto, cron, file_watch, webhook) | ✅ | ✅ | Production triggers |
+| **AI provider integration** (SessionManager, AiRequestPool) | ✅ | ✅ | Powers ai_call tasks in workflows |
+| **Python engine** (embedded CPython for python tasks) | ✅ | ✅ | Powers python tasks in workflows |
+| **REST API — status** (`GET /api/status`) | ✅ | ✅ | Health check |
+| **REST API — workflow list** (`GET /api/workflows`) | ✅ | ✅ | Read-only listing |
+| **REST API — run control** (run, cancel, pause, resume, stop) | ✅ | ✅ | Operate pre-loaded workflows |
+| **REST API — run monitoring** (active runs, last runs, run detail) | ✅ | ✅ | Observe execution |
+| **Webhook endpoint** (`POST /api/webhook/:id`) | ✅ | ✅ | External trigger integration |
+| **n8n integration** (`POST /api/integrations/n8n/start`) | ✅ | ✅ | External trigger integration |
+| **Task heartbeat** (`POST /api/task/:id/heartbeat`) | ✅ | ✅ | Watchdog keep-alive |
+| **WebSocket — run snapshots & log streaming** (`/ws`) | ✅ | ✅ | Real-time monitoring |
+| **Dashboard UI** (React read-only monitoring) | ✅ | ✅ | Observe system state |
+| **TUI** (ncurses terminal) | ✅ | ✅ | Server console |
+| **Key management** (status, unlock) | ✅ | ✅ | Needed to decrypt API keys for workflow execution |
+| **Provider list** (`GET /api/settings/providers`) | ✅ | ✅ | Read-only provider info |
+| **Log viewer** (`GET /api/log`, analyze-last-run) | ✅ | ✅ | Debugging production runs |
+| **Shutdown** (`POST /api/shutdown`) | ✅ | ✅ | Graceful server stop |
+| | | | |
+| **Workflow Editor UI** (React visual DAG editor) | ❌ | ✅ | Allows creating/modifying workflows — dev-only |
+| **Workflow CRUD** (`POST/PUT/DELETE /api/workflows`) | ❌ | ✅ | Mutates workflow definitions on disk |
+| **Workflow reload** (`POST /api/workflows/reload`) | ❌ | ✅ | Re-scans workflow directory |
+| **Workflow versioning** (list/get/restore versions) | ❌ | ✅ | Version management is an editing feature |
+| **AI JCWF generation** (generate, explain, fix-script via WS) | ❌ | ✅ | AI writes JCWF + scripts to disk |
+| **Script writing** (`ai-write-scripts` WS handler) | ❌ | ✅ | Writes executable files to disk |
+| **Script check / registry** (`GET /api/scripts/*`) | ❌ | ✅ | Editor support tool |
+| **File check** (`GET /api/files/check`) | ❌ | ✅ | Editor support tool |
+| **AI interface CRUD** (`POST/PUT/DELETE /api/settings/ai-interfaces`) | ❌ | ✅ | Mutates config.json |
+| **AI interface test** (`POST /api/settings/ai-interfaces/test`) | ❌ | ✅ | Dev testing tool |
+| **Config editing** (`PUT /api/settings/config`) | ❌ | ✅ | Mutates config.json from browser |
+| **Config reload** (`POST /api/settings/config/reload`) | ❌ | ✅ | Triggers config re-read |
+| **Provider CRUD** (`POST/PUT/DELETE /api/settings/providers`) | ❌ | ✅ | Mutates provider config |
+| **Provider set-default** (`POST /api/settings/providers/:name/default`) | ❌ | ✅ | Mutates config |
+| **AI Assistant** (planned — L1/L2/L3) | ❌ | ✅ | File reading, code search, shell execution, persistent memory |
+| **Chat POST** (`POST /api/chat`) | ❌ | ✅ | Interactive chat (writes PROB files) |
+
+#### Backend control — C++ preprocessor define `J9T_STUDIO`
+
+A single define gates all Studio-only code:
+
+```cpp
+// In webServer.cpp RegisterRoutes():
+#ifdef J9T_STUDIO
+    // Workflow CRUD (create, update, delete)
+    CROW_ROUTE(m_Server, "/api/workflows")
+        .methods("POST"_method)([this](crow::request const& req) { ... });
+    // ... PUT, DELETE, versions, validate, reload ...
+
+    // AI interface + config + provider management
+    // Script check / file check
+    // Workflow Editor UI serving (/editor, /assets)
+#endif
+
+// In webServer.cpp RegisterWebSocket() onmessage:
+#ifdef J9T_STUDIO
+    else if (type == "ai-explain-jcwf") { ... }
+    else if (type == "ai-generate-jcwf") { ... }
+    else if (type == "ai-write-scripts") { ... }
+    else if (type == "ai-fix-failed-script") { ... }
+    else if (type == "chat") { ... }
+#endif
+
+// In webServer.h:
+#ifdef J9T_STUDIO
+    AiJcwfService m_AiJcwfService;
+#endif
+```
+
+**premake5.lua** — add a `--studio` option:
+
+```lua
+newoption {
+    trigger     = "studio",
+    description = "Build j9t Studio edition (workflow editor + AI assistant)"
+}
+
+filter "options:studio"
+    defines { "J9T_STUDIO" }
+```
+
+Build commands:
+- `premake5 gmake` → Engine (default, production-safe)
+- `premake5 gmake --studio` → Studio (full IDE)
+- `make config=release` works for both — the define is baked into the generated Makefile
+
+Engine-excluded source files (`assistantController.cpp`, `aiJcwfService.cpp`
+method bodies) should still compile but have their entry points `#ifdef`-guarded
+so the linker doesn't pull in unused code. Alternatively, wrap entire files:
+
+```cpp
+// assistantController.cpp
+#ifdef J9T_STUDIO
+// ... full implementation ...
+#endif
+```
+
+#### Frontend control
+
+The frontend is **less security-critical** because all dangerous operations
+(file writes, shell execution, config mutation) happen on the backend. The
+frontend merely presents UI and relays user intent. If the backend rejects
+the request (Engine edition), the frontend button does nothing.
+
+**Recommended approach: two shipped UI bundles**
+
+| Edition | Shipped UIs | Notes |
+|---------|-------------|-------|
+| Engine | `dashboard/ui/dist` only | Monitoring dashboard; no `/editor` route |
+| Studio | `dashboard/ui/dist` + `workflow-editor/ui/dist` | Full editor + dashboard |
+
+The workflow-editor React app does **not** need a compile-time split. It simply
+isn't shipped in Engine builds. The `build-ppa.sh` / CI scripts skip copying
+`workflow-editor/ui/dist` for Engine packages.
+
+If a single frontend build is preferred (simpler CI), use a Vite env var:
+
+```bash
+VITE_J9T_EDITION=engine npx vite build   # hides editor tabs
+VITE_J9T_EDITION=studio npx vite build   # full UI (default)
+```
+
+In `App.tsx`:
+```tsx
+{import.meta.env.VITE_J9T_EDITION !== 'engine' && (
+    <Route path="/editor/*" element={<WorkflowEditorView />} />
+)}
+```
+
+But since the backend already won't serve `/editor` in Engine mode, this is
+defense-in-depth, not strictly required.
+
+#### Packaging
+
+| Package | Edition | Contents |
+|---------|---------|----------|
+| `jarvisagent` (DEB/RPM/Arch) | Engine | Binary without `J9T_STUDIO`, dashboard UI only |
+| `jarvisagent-studio` (DEB/RPM/Arch) | Studio | Binary with `J9T_STUDIO`, dashboard + editor UIs |
+| Docker `ghcr.io/beaumanvienna/jarvisagent` | Engine | Production container |
+| Docker `ghcr.io/beaumanvienna/jarvisagent-studio` | Studio | Development container |
+| macOS DMG / Windows MSI | Studio | Desktop users are developers |
+| AppImage / Flatpak | Studio | Desktop users are developers |
+
+#### Implementation steps
+
+- [ ] Add `--studio` option to `premake5.lua`, set `J9T_STUDIO` define
+- [ ] Wrap Studio-only routes in `#ifdef J9T_STUDIO` in `webServer.cpp`
+- [ ] Wrap Studio-only WS handlers in `#ifdef J9T_STUDIO` in `webServer.cpp`
+- [ ] Wrap `AiJcwfService` member in `#ifdef J9T_STUDIO` in `webServer.h`
+- [ ] Wrap `m_AiJcwfService.Shutdown()` in `SignalStop()` with `#ifdef J9T_STUDIO`
+- [ ] Guard `/editor` + `/assets` static file serving with `#ifdef J9T_STUDIO`
+- [ ] Guard `POST /api/chat` WS handler with `#ifdef J9T_STUDIO`
+- [ ] Update `build-ppa.sh` to support `--edition engine|studio`
+- [ ] Update CI workflows to build both editions
+- [ ] When AI assistant is implemented, all assistant modules are `#ifdef J9T_STUDIO`
+- [ ] Update README with edition descriptions
+
+---
+

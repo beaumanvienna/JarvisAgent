@@ -1,9 +1,27 @@
-jarvisagent (0.75) noble; urgency=medium
+jarvisagent (0.8.2) noble; urgency=medium
 
-  * Initial release for Launchpad PPA
-  * C++ backend with vendored OpenSSL and pdcursesmod
+  * Use shared jarvisagent-launcher.sh instead of old jarvisagent.wrapper
+  * Python venv created in user-space ~/JarvisAgent/.venv on first launch
+    (no longer installed system-wide in postinst)
+  * postinst/postrm aligned with RPM, Arch, and local DEB packaging
+
+ -- JC <beaumanvienna@gmail.com>  Tue, 25 Mar 2026 05:00:00 +0000
+
+jarvisagent (0.8.1) noble; urgency=medium
+
+  * Fix rsync exclude patterns: anchor /log/* and /queue/* to transfer root
+    so engine/log/ and application/log/ source files are included in tarball
+
+ -- JC <beaumanvienna@gmail.com>  Tue, 25 Mar 2026 04:00:00 +0000
+
+jarvisagent (0.8) noble; urgency=medium
+
+  * C++ backend with vendored OpenSSL, libcurl, and pdcursesmod
   * React dashboard and workflow editor (pre-built)
-  * Python automation scripts
+  * Python automation scripts with stdout/stderr capture
   * Example JCWF workflows
+  * JCWF assistant provider override
+  * Webhook triggers with HMAC-SHA256 signing
+  * Per-user launcher script (~/JarvisAgent working directory)
 
- -- JC <beaumanvienna@gmail.com>  Wed, 05 Mar 2026 04:00:00 +0000
+ -- JC <beaumanvienna@gmail.com>  Mon, 24 Mar 2026 04:00:00 +0000

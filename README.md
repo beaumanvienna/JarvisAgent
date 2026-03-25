@@ -203,14 +203,24 @@ Go to the [Actions](https://github.com/beaumanvienna/JarvisAgent/actions) tab an
 
 **DEB** (Ubuntu / Debian / Zorin / Linux Mint / Pop!_OS):
 
+Install from the PPA (recommended):
 ```bash
-sudo dpkg -i jarvisagent_0.75_amd64.deb
+sudo add-apt-repository ppa:beauman/marley
+sudo apt update
+sudo apt install jarvisagent
+jarvisagent
+```
+
+Or install a local `.deb`:
+```bash
+sudo dpkg -i jarvisagent_*_amd64.deb
+sudo apt install -f
 jarvisagent
 ```
 
 To uninstall:
 ```bash
-sudo dpkg -r jarvisagent
+sudo apt remove jarvisagent
 ```
 
 **RPM** (Fedora / RHEL / Rocky / CentOS):

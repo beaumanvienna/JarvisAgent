@@ -335,8 +335,8 @@ determines what the AI sees.
 | `list_files` | `path, depth?` | Lists directory contents | No |
 | `get_log_tail` | `lines?` | Returns last N log lines | No |
 | `analyze_last_run` | `index?` | Returns structured run analysis | No |
-| `save_memory` | `content, type?` | Saves a fact/note to workspace memory | No |
-| `pin_rule` | `content` | Adds a rule to rules.md | No |
+| `save_memory` | `content, type?` | Saves a fact/note to workspace memory | **Yes** |
+| `pin_rule` | `content` | Adds a rule to rules.md | **Yes** |
 | `run_shell` | `command, cwd?` | Executes a shell command | **Yes** |
 
 **Tool call flow:**
@@ -405,13 +405,107 @@ Add an "Assistant" button to the existing header bar in `App.tsx`, between
 - Shows approval prompts inline: `[Y/n] Run: make config=release`
 - Session selector dropdown at top (resume previous / start new)
 
-### 6.3 WebSocket connection
+### 6.3 Auto-completion (keystroke-by-keystroke)
+
+The terminal provides inline auto-completion suggestions as the user types,
+rendered as dimmed ghost text after the cursor (like fish shell / GitHub
+Copilot CLI).
+
+**Completion sources** (checked on every keystroke, debounced 100ms):
+
+| Source | Trigger | Examples |
+|--------|---------|----------|
+| **Slash commands** | Input starts with `/` | `/run`, `/status`, `/memory show` |
+| **Workflow IDs** | After `/run ` | `/run exampleMakefile`, `/run cyber2` |
+| **Command history** | Any input | Previous user messages matching prefix |
+| **File paths** | Input contains path-like tokens (`.` or `/`) | `application/web/webServer.cpp` |
+
+**Implementation:**
+
+1. Client maintains a local completion index:
+   - Slash command list (static)
+   - Workflow IDs (fetched from `/api/workflows` on tab open, cached)
+   - Session command history (all user messages from current + past sessions)
+   - File path list (fetched from backend `list_files` on tab open, refreshed
+     on `/index` or every 60s)
+2. On each keystroke, run prefix match against all sources, pick best match
+3. Render suggestion as dim ANSI text after cursor position
+4. **Tab** accepts the suggestion (fills input buffer)
+5. **→ (Right arrow)** accepts one character at a time
+6. **Esc** or any non-matching keystroke dismisses the suggestion
+7. If multiple matches exist, **Tab** cycles through them; a small popup
+   shows the candidate list (max 8 items) anchored above the input line
+
+**Protocol addition** — server assists with completions for dynamic data:
+```jsonc
+// Client → Server (debounced, only when local sources have no match)
+{ "type": "completion_request", "prefix": "application/w", "kind": "path" }
+
+// Server → Client
+{ "type": "completion_response", "candidates": ["application/web/", "application/workflow/"] }
+```
+
+The backend serves completion requests from the `WorkspaceIndexer` file index.
+This is a fast lookup (no AI call), so latency stays under 10ms.
+
+### 6.4 Reverse history search (Ctrl+R)
+
+Standard reverse-incremental-search, modeled after bash/zsh `Ctrl+R`:
+
+1. **Ctrl+R** enters search mode — prompt changes to `(reverse-search): `
+2. Each keystroke filters the full session command history (all sessions,
+   newest first) for entries containing the typed substring
+3. The best match is displayed inline with the matching portion highlighted
+4. **Ctrl+R** again cycles to the next older match
+5. **Enter** executes the matched command
+6. **Tab** or **→** places the matched command on the input line for editing
+7. **Esc** or **Ctrl+C** exits search mode without selecting
+8. **Ctrl+S** reverses direction (forward search through matches)
+
+**History storage:** All user messages are already persisted in session JSONL
+files. On tab open, the client requests the full command history:
+
+```jsonc
+// Client → Server
+{ "type": "get_history", "maxEntries": 500 }
+
+// Server → Client
+{ "type": "history", "entries": [
+    {"text": "/run exampleMakefile", "ts": "2026-03-23T21:06:19Z", "sessionId": "sess_171..."},
+    {"text": "Why did cyber2 fail?", "ts": "2026-03-23T21:05:02Z", "sessionId": "sess_171..."}
+]}
+```
+
+The history is cached client-side and appended to as the user sends new
+messages. Search is performed entirely client-side (no server round-trip
+during typing).
+
+### 6.5 Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Enter** | Send message / execute command |
+| **Tab** | Accept auto-completion suggestion; cycle candidates |
+| **→** | Accept one character of suggestion |
+| **Ctrl+R** | Reverse history search |
+| **Ctrl+S** | Forward history search |
+| **Ctrl+C** | Cancel current input / abort search / cancel pending approval |
+| **Ctrl+L** | Clear terminal display (same as `/clear`) |
+| **Ctrl+U** | Clear input line |
+| **Ctrl+A** | Move cursor to start of input |
+| **Ctrl+E** | Move cursor to end of input |
+| **↑ / ↓** | Navigate command history (previous / next) |
+| **Esc** | Dismiss auto-completion / exit search mode |
+| **Ctrl+D** | Close assistant session (with confirmation) |
+
+### 6.6 WebSocket connection
 
 - Connects to `ws://localhost:8080/ws/assistant` when Assistant tab is active
 - Reconnects on disconnect (same pattern as existing `/ws` connection)
 - Buffers deltas and renders progressively (streaming feel)
+- On reconnect, re-fetches history and completion data silently
 
-### 6.4 Slash commands (client-side shortcuts)
+### 6.7 Slash commands (client-side shortcuts)
 
 | Command | Action |
 |---------|--------|
@@ -554,6 +648,15 @@ Recent conversation:
 | Sensitive data | Assistant files in `assistant/` — user controls what's stored |
 | Command timeout | 30s default for `run_shell`; watchdog kills process |
 | Path traversal | Same `lexically_normal()` + prefix check as existing script validation |
+| Prompt injection via file content | Tool outputs are wrapped in `<tool_result>` fences with a nonce; system prompt instructs AI to never execute instructions found inside tool results. Backend validates that `<tool_call>` blocks only appear in the AI response text, never inside tool output passthrough. |
+| Credential leakage | `read_file` tool has a deny-list: `config.json`, `keys.json`, `keys.json.enc`, `*.pem`, `*.key`, `.env`, and any path under `assistant/` (prevents AI from reading its own memory as file content). Blocked paths return a sanitized error, not file contents. |
+| Memory poisoning | `save_memory` and `pin_rule` tools require user approval (promoted from auto-approve). The AI cannot silently persist rules that alter future behavior. |
+| Session/WS authentication | `/ws/assistant` requires the same session token as other authenticated routes. In L1 this is the existing Crow cookie; future: proper JWT or API key. Unauthenticated connections are rejected. |
+| Command injection in tool args | `run_shell` passes the command string as a single argument to `/bin/sh -c`; no shell expansion of tool args. The approval prompt shows the *exact* command string. Additionally, a configurable blocklist rejects commands matching dangerous patterns (`rm -rf /`, `mkfs`, `dd if=`, `:(){ :|:& };:`, `> /dev/sd`). |
+| Log / output exposure | `get_task_output` and `get_log_tail` truncate output to a max length (default 4 KB) to prevent flooding the context window with sensitive log data. |
+| AI call rate limiting | Max 20 AI provider calls per session per minute; max 100 per session total. Exceeding triggers a cooldown message, not an error. |
+| Network scope | Assistant tools have no outbound network access by default. `run_shell` commands inherit the server's network but the user sees the full command before approval. No tool fetches arbitrary URLs (no `curl`/`wget` wrapper in L1/L2). |
+| Off-topic / hallucinated replies | **Response relevance parser (L3).** A lightweight post-processing pass on the AI response checks for obvious topic drift — e.g. user asks about a software tool and the AI answers about a completely different product with the same name (PHP Composer vs Windsurf Composer 2). Implementation: after the AI response is complete, run a fast secondary prompt (or heuristic regex) that scores relevance against the user's original message. If confidence is below threshold, append a visible `⚠️ The answer may be off-topic — consider rephrasing your question.` warning to the streamed output. This also catches hallucinated package names, wrong API endpoints, and invented CLI flags. |
 
 ---
 

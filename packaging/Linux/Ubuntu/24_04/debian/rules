@@ -9,7 +9,10 @@ INSTDIR  = $(DESTDIR)/opt/jarvisagent
 	dh $@
 
 override_dh_auto_configure:
-	premake5 gmake
+	# Build premake5 from bundled source (no network on Launchpad)
+	cd vendor/premake-core && ./Bootstrap.sh
+	# Generate Makefiles with correct Python paths for this build environment
+	vendor/premake-core/bin/release/premake5 gmake
 
 override_dh_auto_build:
 	$(MAKE) -j$$(nproc) config=release
@@ -56,9 +59,9 @@ override_dh_auto_install:
 	install -dm755 $(INSTDIR)/queue
 	install -dm755 $(INSTDIR)/log
 
-	# Launcher script
+	# Launcher script (shared across deb/rpm/arch — creates ~/JarvisAgent on first run)
 	install -dm755 $(DESTDIR)/usr/bin
-	install -Dm755 debian/jarvisagent.wrapper $(DESTDIR)/usr/bin/jarvisagent
+	install -Dm755 packaging/Linux/jarvisagent-launcher.sh $(DESTDIR)/usr/bin/jarvisagent
 
 override_dh_auto_test:
 	# Skip tests
