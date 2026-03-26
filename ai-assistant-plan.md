@@ -339,6 +339,29 @@ determines what the AI sees.
 | `pin_rule` | `content` | Adds a rule to rules.md | **Yes** |
 | `run_shell` | `command, cwd?` | Executes a shell command | **Yes** |
 
+**L2 tools (JCWF development — see §14):**
+
+| Tool | Args | Description | Approval |
+|------|------|-------------|----------|
+| `jcwf_read` | `workflow_id` | Reads a JCWF file and returns its full JSON content | No |
+| `jcwf_read_plan` | `workflow_id` | Reads the markdown development plan for a JCWF | No |
+| `jcwf_write_plan` | `workflow_id, content` | Creates or updates the markdown development plan | **Yes** |
+| `jcwf_generate` | `workflow_id` | Generates/regenerates a JCWF from its markdown plan using the existing batched generate pipeline | **Yes** |
+| `jcwf_explain` | `workflow_id, task_ids?` | Explains the JCWF: lists and numbers all task nodes, describes edges, triggers, and data flow. If `task_ids` given, explains only those nodes. | No |
+| `jcwf_fix_task` | `workflow_id, task_id, instructions` | Fixes a single task node based on review of errors, logs, and user instructions | **Yes** |
+| `jcwf_write_script` | `path, content, type` | Writes a Python or shell script referenced by a JCWF task | **Yes** |
+| `jcwf_validate` | `workflow_id` | Validates a JCWF against the JC Workflow Specification (structure, edges, required fields) | No |
+
+**L2 tools (runtime control):**
+
+| Tool | Args | Description | Approval |
+|------|------|-------------|----------|
+| `workflow_start` | `workflow_id` | Starts a workflow run | **Yes** |
+| `workflow_pause` | `run_id` | Pauses a running workflow | **Yes** |
+| `workflow_resume` | `run_id` | Resumes a paused workflow | **Yes** |
+| `workflow_stop` | `run_id` | Stops/cancels a running workflow | **Yes** |
+| `get_dashboard_status` | — | Returns a full status report: registered JCWFs, active runs, JCWFs in flight, AI queries in flight, warnings, errors, Python engine state | No |
+
 **Tool call flow:**
 1. AI response includes a structured tool call (JSON in response text, parsed by backend)
 2. Backend validates tool name + args against registry
@@ -734,3 +757,186 @@ No new C++ libraries required. The backend is pure C++20 + existing vendors.
 - File index built on startup, updated incrementally
 - AI can request and cache file/folder summaries
 - Context assembly pulls relevant summaries based on query
+
+---
+
+## 14. JCWF Development Capabilities
+
+The assistant can create, explain, fix, and iteratively improve JC Workflows
+(JCWFs) through a **markdown-plan-first** workflow. It can also write the
+Python and shell scripts that JCWF tasks reference, and control workflow
+execution (start / pause / resume / stop).
+
+### 14.1 Markdown-first development model
+
+Every JCWF managed by the assistant has an associated **development plan** — a
+Markdown document stored alongside the `.jcwf` file:
+
+```
+workflows/
+├── myPipeline.jcwf
+├── myPipeline.plan.md          ← development plan (source of truth for intent)
+├── scripts/
+│   ├── myPipeline_extract.py   ← Python script referenced by a task
+│   └── myPipeline_report.sh    ← shell script referenced by a task
+```
+
+**Rule: plan must be up to date before any JCWF modification.**
+
+Before generating or modifying a JCWF, the assistant checks file dates:
+
+| Condition | Action |
+|-----------|--------|
+| No `.plan.md` exists | Create the plan first from the current JCWF (reverse-document it) |
+| `.jcwf` mtime > `.plan.md` mtime | The JCWF was edited outside the assistant — update the plan first to reflect current state |
+| `.plan.md` mtime ≥ `.jcwf` mtime | Plan is current — proceed with generation/modification |
+
+This ensures the Markdown plan is always the **source of truth for design
+intent**, even if the user edits the JCWF manually in the workflow editor.
+
+### 14.2 Plan document format
+
+```markdown
+# myPipeline — Development Plan
+
+## Purpose
+One-paragraph description of what this workflow does.
+
+## Trigger
+- Type: file_watch / manual / webhook / cron
+- Details: watched path, schedule, etc.
+
+## Task nodes
+
+### 1. extractData (shell)
+- Script: `scripts/myPipeline_extract.py`
+- Inputs: `message.txt` from trigger
+- Outputs: `extracted.json`
+- Working directory: (relative to jcwf)
+- Error handling: on failure → goto errorReport
+
+### 2. analyzeData (ai_call)
+- AI interface: API1
+- System prompt: "You are a data analyst..."
+- Task prompt: contents of `extracted.json`
+- Outputs: `analysis.prob`
+
+### 3. errorReport (shell)
+- Script: `scripts/myPipeline_report.sh`
+- Inputs: error output from failed upstream task
+- Trigger condition: only on error from extractData
+
+## Edges
+- extractData → analyzeData (success)
+- extractData → errorReport (failure)
+
+## Notes
+- Requires API key for OpenAI (API1)
+- extract script needs `jq` installed
+```
+
+### 14.3 Generation pipeline (reuses existing AiJcwfService)
+
+The assistant delegates JCWF generation to the **same batched pipeline** used
+by the workflow editor's generate/explain feature:
+
+1. **Plan → task descriptions** — the assistant extracts per-task specs from
+   the Markdown plan
+2. **Batched generation** — tasks are sent to the AI in batches (existing
+   batch-size logic), each task generated independently
+3. **Early validation** — each generated task is validated against the JC
+   Workflow Specification before proceeding
+4. **Script generation** — for `shell` tasks, the assistant generates the
+   referenced Python or shell scripts and writes them via `jcwf_write_script`
+5. **Final assembly** — all tasks + edges assembled into the `.jcwf` JSON
+6. **Full validation** — the complete JCWF is validated (structure, edges,
+   required fields, script paths exist)
+7. **Plan update** — the `.plan.md` is updated with any adjustments made
+   during generation (e.g. added error handling, renamed outputs)
+
+### 14.4 Fixing workflows — one task at a time
+
+When a workflow fails, the assistant can diagnose and fix it incrementally:
+
+1. **Review the JCWF** — `jcwf_read` to load the workflow definition
+2. **Review the log** — `get_log_tail` / `read_file` on `log/log.txt` to find
+   error messages
+3. **Review run output** — `get_run_status` + `get_task_output` to see which
+   task failed and its stdout/stderr
+4. **Explain the failure** — present the user with a numbered list of task
+   nodes, highlight which one failed and why
+5. **Fix one task** — `jcwf_fix_task` modifies a single task node based on the
+   diagnosis (e.g. fix a script path, correct an edge, adjust a prompt)
+6. **Re-validate** — `jcwf_validate` to confirm the fix didn't break anything
+7. **Update the plan** — `jcwf_write_plan` to reflect what was fixed and why
+8. **Re-run** — optionally `workflow_start` to test the fix
+
+The assistant fixes **one task node at a time** to keep changes small,
+reviewable, and reversible.
+
+### 14.5 Interactive JCWF discussion
+
+The assistant can discuss a JCWF with the user conversationally:
+
+- **Explain** — "Explain this workflow" → numbered list of all task nodes with
+  their type, inputs, outputs, and connections
+- **Drill down** — "What does task 3 do?" → detailed explanation of a specific
+  node including its script content
+- **Suggest improvements** — "The error output isn't wired" → assistant
+  identifies the missing error branch and offers to create it
+- **Apply user requests** — "Change the trigger to cron every 5 minutes" →
+  assistant updates both the plan and the JCWF
+- **Wire error branches** — "Add error handling for task 2" → assistant creates
+  an error-handling task node, writes the script if needed, and wires the
+  failure edge from task 2
+- **Refactor** — "Split task 4 into two steps" → assistant updates the plan,
+  regenerates affected tasks, rewires edges
+
+All modifications go through the plan-first flow: update `.plan.md`, then
+regenerate or patch the `.jcwf`.
+
+### 14.6 Runtime control and status reporting
+
+The assistant can control workflow execution and provide system-wide status:
+
+**Control commands:**
+
+| Command | Tool | Description |
+|---------|------|-------------|
+| "Start myPipeline" | `workflow_start` | Queues a new run |
+| "Pause run 42" | `workflow_pause` | Pauses a running workflow (tasks in flight complete, no new tasks start) |
+| "Resume run 42" | `workflow_resume` | Resumes a paused workflow |
+| "Stop run 42" | `workflow_stop` | Cancels a running workflow |
+
+**Status reporting:**
+
+"What's the status?" → `get_dashboard_status` returns:
+
+```
+JarvisAgent Status
+──────────────────
+Registered workflows:  6
+Active runs:           2  (myPipeline: running, cyber2: paused)
+JCWFs in flight:       1
+AI queries in flight:  3
+Completed runs:       14
+Failed runs:           2
+Warnings:              1  (cyber2: paused for >10 min)
+Errors:                0
+Python engine:         ready
+Uptime:                2h 34m
+```
+
+### 14.7 Slash commands (JCWF-specific)
+
+| Command | Action |
+|---------|--------|
+| `/explain <workflow>` | Explain workflow — numbered task list with connections |
+| `/fix <workflow>` | Review last failure + suggest fix |
+| `/generate <workflow>` | Generate JCWF from its plan |
+| `/validate <workflow>` | Validate JCWF against spec |
+| `/start <workflow>` | Start a workflow run |
+| `/pause <run_id>` | Pause a running workflow |
+| `/resume <run_id>` | Resume a paused workflow |
+| `/stop <run_id>` | Stop/cancel a running workflow |
+| `/dashboard` | Show full system status |

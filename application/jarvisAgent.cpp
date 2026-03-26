@@ -138,6 +138,16 @@ namespace AIAssistant
         m_WorkflowFileIndex = std::make_unique<WorkflowFileIndex>();
         m_WorkflowFileIndex->ScanDirectory(std::filesystem::absolute("workflows"));
 
+        // Create assistant storage directory (sessions are persisted as JSONL)
+        {
+            std::error_code ec;
+            std::filesystem::create_directories("assistant/sessions", ec);
+            if (!ec)
+            {
+                LOG_APP_INFO("assistant/sessions directory ready");
+            }
+        }
+
         m_WebServer = std::make_unique<WebServer>();
         if (!m_WebServer->Start())
         {
@@ -608,6 +618,15 @@ namespace AIAssistant
         {
             m_AiRequestPool->Shutdown();
         }
+
+        // Shut down assistant controller early: its background threads hold pointers
+        // to WRM and WorkflowRegistry, so it must be joined before those are reset.
+        RAW_ONSHUTDOWN("[OnShutdown] AssistantController::Shutdown...\n");
+        if (m_WebServer != nullptr)
+        {
+            m_WebServer->ShutdownAssistantController();
+        }
+        RAW_ONSHUTDOWN("[OnShutdown] AssistantController stopped\n");
 
         LOG_APP_INFO("[shutdown] phase 1: signalling all subsystems...");
         RAW_ONSHUTDOWN("[OnShutdown] WRM::SignalStop...\n");

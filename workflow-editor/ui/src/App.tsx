@@ -3,6 +3,7 @@ import WorkflowEditorView, { type WorkflowPersistEvent } from "./editor/Workflow
 import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
 import ProvidersSettingsView from "./views/ProvidersSettingsView";
 import AiManagerView from "./views/AiManagerView";
+import AssistantView from "./views/AssistantView";
 import SettingsModal from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
 import StatusLeds from "./components/StatusLeds";
@@ -38,7 +39,7 @@ function saveSettings(settings: EditorSettings): void {
   }
 }
 
-type RouteKey = "workflows" | "editor" | "ai-manager" | "settings";
+type RouteKey = "workflows" | "editor" | "ai-manager" | "settings" | "assistant";
 
 export default function App(): JSX.Element
 {
@@ -164,6 +165,11 @@ export default function App(): JSX.Element
       );
     }
 
+    if (route === "assistant")
+    {
+      return <AssistantView />;
+    }
+
     if (route === "ai-manager")
     {
       return <AiManagerView onDirtyStateChange={setAiManagerDirty} />;
@@ -237,6 +243,14 @@ export default function App(): JSX.Element
             type="button"
           >
             AI Keys{keysDirty ? "*" : ""}
+          </button>
+
+          <button
+            className={`btn ${route === "assistant" ? "btnActive" : ""}`}
+            onClick={() => { navigate("assistant"); }}
+            type="button"
+          >
+            Assistant
           </button>
 
           <a

@@ -23,6 +23,7 @@
 #include "crow.h"
 #include "auxiliary/threadPool.h"
 #include "web/aiJcwfService.h"
+#include "assistant/assistantController.h"
 #include <atomic>
 #include <filesystem>
 #include <mutex>
@@ -63,6 +64,9 @@ namespace AIAssistant
         // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
         void EnqueueLogLine(std::string const& line);
 
+        // Shut down the assistant controller early (before WRM/AiRequestPool are reset).
+        void ShutdownAssistantController();
+
         // Drain queued broadcasts to connected WS clients.
         // Must be called periodically from the main thread (JarvisAgent::OnUpdate).
         void DrainPendingBroadcasts();
@@ -70,6 +74,7 @@ namespace AIAssistant
     private:
         void RegisterRoutes();
         void RegisterWebSocket();
+        void RegisterAssistantWebSocket();
 
         // Static file serving (Dashboard + Workflow Editor UI)
         crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
@@ -176,5 +181,6 @@ namespace AIAssistant
         TriggerEngine* m_TriggerEngine = nullptr;
 
         AiJcwfService m_AiJcwfService;
+        AssistantController m_AssistantController;
     };
 } // namespace AIAssistant

@@ -460,6 +460,7 @@ namespace AIAssistant
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
+        RegisterAssistantWebSocket();
 
         m_AiJcwfService.SetBroadcastFn(
             [this](std::string const& jsonString)
@@ -475,12 +476,14 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         m_WorkflowRegistry = workflowRegistry;
+        m_AssistantController.SetWorkflowRegistry(workflowRegistry);
     }
 
     void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         m_WorkflowRuntimeManager = workflowRuntimeManager;
+        m_AssistantController.SetWorkflowRuntimeManager(workflowRuntimeManager);
     }
 
     void WebServer::SetTriggerEngine(TriggerEngine* triggerEngine)
@@ -3498,6 +3501,18 @@ namespace AIAssistant
                 });
     }
 
+    void WebServer::ShutdownAssistantController() { m_AssistantController.Shutdown(); }
+
+    void WebServer::RegisterAssistantWebSocket()
+    {
+        CROW_WEBSOCKET_ROUTE(m_Server, "/ws/assistant")
+            .onopen([this](crow::websocket::connection& conn) { m_AssistantController.OnOpen(conn); })
+            .onclose([this](crow::websocket::connection& conn, const std::string& /*reason*/, uint16_t /*code*/)
+                     { m_AssistantController.OnClose(conn); })
+            .onmessage([this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
+                       { m_AssistantController.OnMessage(conn, data); });
+    }
+
     bool WebServer::Start()
     {
         if (m_Running)
@@ -3575,6 +3590,10 @@ namespace AIAssistant
 
         // Shut down the AI JCWF service so background threads are joined.
         m_AiJcwfService.Shutdown();
+
+        // Assistant controller is shut down early via ShutdownAssistantController().
+        // The call here is a no-op safety net (Shutdown() is idempotent).
+        m_AssistantController.Shutdown();
 
         // Force-close all WebSocket connections before stopping.
         // Crow's I/O loop won't exit while connections are open.
