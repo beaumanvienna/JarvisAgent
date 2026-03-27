@@ -20,6 +20,7 @@ const ASSISTANT_PREFIX = `${BOLD}${CYAN}assistant${RESET}${DIM}: ${RESET}`;
 const USER_PREFIX = `${BOLD}${GREEN}you${RESET}${DIM}: ${RESET}`;
 const TOOL_PREFIX = `${DIM}${MAGENTA}tool${RESET}${DIM}: ${RESET}`;
 const THINKING = `${DIM}${YELLOW}thinking...${RESET}`;
+const APPROVAL_PREFIX = `${BOLD}${YELLOW}\u26a0 ${RESET}`;
 
 export default function AssistantView(): JSX.Element {
   const [state, actions] = useAssistantWebSocket();
@@ -30,6 +31,22 @@ export default function AssistantView(): JSX.Element {
   const cursorPosRef = useRef<number>(0);
   const renderedTurnsRef = useRef<number>(0);
   const thinkingLineRef = useRef<boolean>(false);
+  const approvalActiveRef = useRef<boolean>(false);
+  const approvalRequestIdRef = useRef<string>("");
+
+  // Ghost-text auto-completion
+  const ghostSuffixRef = useRef<string>("");
+  const ghostCandidateIndexRef = useRef<number>(-1);
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reverse history search (Ctrl+R)
+  const searchModeRef = useRef<boolean>(false);
+  const searchQueryRef = useRef<string>("");
+  const searchMatchIndexRef = useRef<number>(0);
+  const searchMatchesRef = useRef<string[]>([]);
+  const savedInputRef = useRef<string>("");
+  const historyRef = useRef<string[]>([]);
+  const historyFetchedRef = useRef<boolean>(false);
 
   // Initialize xterm.js
   useEffect(() => {
@@ -93,7 +110,7 @@ export default function AssistantView(): JSX.Element {
       `${DIM}Type a message and press Enter to chat.${RESET}`
     );
     term.writeln(
-      `${DIM}Type /help for available commands.${RESET}`
+      `${DIM}Type /help for available commands.  Tab: autocomplete  Ctrl+R: search history${RESET}`
     );
     term.writeln("");
     term.write(PROMPT);
@@ -174,6 +191,27 @@ export default function AssistantView(): JSX.Element {
     }
   }, [state.thinking]);
 
+  // Show approval prompt when a tool requires user approval
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) return;
+
+    if (state.pendingApproval && !approvalActiveRef.current) {
+      // Clear thinking indicator if present
+      if (thinkingLineRef.current) {
+        term.write("\r\x1b[2K");
+        thinkingLineRef.current = false;
+      }
+      approvalActiveRef.current = true;
+      approvalRequestIdRef.current = state.pendingApproval.requestId;
+      term.writeln(`${APPROVAL_PREFIX}${BOLD}${YELLOW}Tool requires approval:${RESET} ${state.pendingApproval.description}`);
+      term.write(`${BOLD}${YELLOW}  Allow? [Y/n] ${RESET}`);
+    } else if (!state.pendingApproval && approvalActiveRef.current) {
+      approvalActiveRef.current = false;
+      approvalRequestIdRef.current = "";
+    }
+  }, [state.pendingApproval]);
+
   // Replay history when resuming a session
   useEffect(() => {
     const term = xtermRef.current;
@@ -198,17 +236,85 @@ export default function AssistantView(): JSX.Element {
     }
   }, [state.sessionId, state.turns]);
 
-  // Redraw the current input line (prompt + buffer) with cursor repositioned.
+  // Clear ghost text state (does not redraw).
+  const clearGhost = useCallback(() => {
+    ghostSuffixRef.current = "";
+    ghostCandidateIndexRef.current = -1;
+  }, []);
+
+  // Redraw the current input line (prompt + buffer + optional ghost suffix).
   const redrawInputLine = useCallback((term: Terminal) => {
-    // Move to start of line, clear it, write prompt + buffer, reposition cursor.
     const buf = inputBufferRef.current;
     const pos = cursorPosRef.current;
+    const ghost = ghostSuffixRef.current;
     term.write("\r\x1b[2K" + PROMPT + buf);
-    // Move cursor back from end to correct position.
-    const moveBack = buf.length - pos;
+    if (ghost) {
+      term.write(DIM + ghost + RESET);
+    }
+    const moveBack = (buf.length - pos) + ghost.length;
     if (moveBack > 0) {
       term.write(`\x1b[${moveBack}D`);
     }
+  }, []);
+
+  // Redraw the search-mode prompt: (reverse-i-search)'query': matchedText
+  const redrawSearchLine = useCallback((term: Terminal) => {
+    const query = searchQueryRef.current;
+    const matches = searchMatchesRef.current;
+    const idx = searchMatchIndexRef.current;
+    const matched = matches.length > 0 ? matches[idx] ?? "" : "";
+    term.write(
+      "\r\x1b[2K" +
+        `${DIM}(reverse-i-search)${RESET}${YELLOW}'${query}'${RESET}${DIM}: ${RESET}${matched}`
+    );
+  }, []);
+
+  // Schedule a debounced completion request after typing.
+  const scheduleCompletion = useCallback(
+    (prefix: string) => {
+      if (completionTimerRef.current) clearTimeout(completionTimerRef.current);
+      if (prefix.length < 1) {
+        clearGhost();
+        return;
+      }
+      completionTimerRef.current = setTimeout(() => {
+        actions.requestCompletion(prefix);
+      }, 150);
+    },
+    [actions, clearGhost]
+  );
+
+  // Exit search mode and restore normal prompt.
+  const exitSearchMode = useCallback(
+    (term: Terminal, placeText?: string) => {
+      searchModeRef.current = false;
+      searchQueryRef.current = "";
+      searchMatchIndexRef.current = 0;
+      searchMatchesRef.current = [];
+      if (placeText !== undefined) {
+        inputBufferRef.current = placeText;
+        cursorPosRef.current = placeText.length;
+      } else {
+        inputBufferRef.current = savedInputRef.current;
+        cursorPosRef.current = savedInputRef.current.length;
+      }
+      savedInputRef.current = "";
+      redrawInputLine(term);
+    },
+    [redrawInputLine]
+  );
+
+  // Filter history entries by search query and update matches.
+  const updateSearchMatches = useCallback(() => {
+    const q = searchQueryRef.current.toLowerCase();
+    if (!q) {
+      searchMatchesRef.current = historyRef.current;
+    } else {
+      searchMatchesRef.current = historyRef.current.filter((e) =>
+        e.toLowerCase().includes(q)
+      );
+    }
+    searchMatchIndexRef.current = 0;
   }, []);
 
   const handleTerminalInput = useCallback(
@@ -216,8 +322,74 @@ export default function AssistantView(): JSX.Element {
       const term = xtermRef.current;
       if (!term) return;
 
-      // xterm.js delivers escape sequences as multi-char strings.
-      // Process them as a single unit.
+      // If an approval prompt is active, intercept keystrokes for Y/n.
+      if (approvalActiveRef.current && approvalRequestIdRef.current) {
+        const ch = data[0];
+        if (ch === "y" || ch === "Y" || ch === "\r" || ch === "\n") {
+          term.writeln(`${GREEN}yes${RESET}`);
+          term.writeln(`${DIM}${MAGENTA}  \u2713 Approved${RESET}`);
+          actions.respondToApproval(approvalRequestIdRef.current, true);
+        } else if (ch === "n" || ch === "N" || ch === "\x1b" || ch === "\x03") {
+          term.writeln(`${RED}no${RESET}`);
+          term.writeln(`${DIM}${MAGENTA}  \u2717 Denied${RESET}`);
+          actions.respondToApproval(approvalRequestIdRef.current, false);
+        }
+        return;
+      }
+
+      // --- Reverse history search mode ---
+      if (searchModeRef.current) {
+        for (let si = 0; si < data.length; si++) {
+          const sch = data[si];
+
+          if (sch === "\x12") {
+            // Ctrl+R again — cycle to next match
+            if (searchMatchesRef.current.length > 1) {
+              searchMatchIndexRef.current =
+                (searchMatchIndexRef.current + 1) % searchMatchesRef.current.length;
+              redrawSearchLine(term);
+            }
+          } else if (sch === "\r" || sch === "\n") {
+            // Enter — send matched text
+            const matches = searchMatchesRef.current;
+            const matched = matches.length > 0 ? matches[searchMatchIndexRef.current] ?? "" : "";
+            exitSearchMode(term, matched);
+            if (matched.length > 0) {
+              term.writeln("");
+              actions.sendMessage(matched);
+              inputBufferRef.current = "";
+              cursorPosRef.current = 0;
+            }
+            return;
+          } else if (sch === "\t" || (sch === "\x1b" && si + 2 < data.length && data[si + 1] === "[" && data[si + 2] === "C")) {
+            // Tab or Right arrow — place on input line, exit search
+            const matches = searchMatchesRef.current;
+            const matched = matches.length > 0 ? matches[searchMatchIndexRef.current] ?? "" : "";
+            exitSearchMode(term, matched);
+            if (sch !== "\t") si += 2; // skip rest of escape sequence
+            return;
+          } else if (sch === "\x1b" || sch === "\x03") {
+            // Esc or Ctrl+C — cancel search
+            exitSearchMode(term);
+            return;
+          } else if (sch === "\x7f" || sch === "\b") {
+            // Backspace — remove last char from search query
+            if (searchQueryRef.current.length > 0) {
+              searchQueryRef.current = searchQueryRef.current.slice(0, -1);
+              updateSearchMatches();
+              redrawSearchLine(term);
+            }
+          } else if (sch >= " ") {
+            // Printable — add to search query
+            searchQueryRef.current += sch;
+            updateSearchMatches();
+            redrawSearchLine(term);
+          }
+        }
+        return;
+      }
+
+      // --- Normal input mode ---
       let i = 0;
       while (i < data.length) {
         // Check for escape sequences (\x1b[...)
@@ -225,26 +397,72 @@ export default function AssistantView(): JSX.Element {
           const code = data[i + 2];
           if (code === "D") {
             // Left arrow
+            clearGhost();
             if (cursorPosRef.current > 0) {
               cursorPosRef.current--;
-              term.write("\x1b[D");
+              redrawInputLine(term);
             }
           } else if (code === "C") {
             // Right arrow
-            if (cursorPosRef.current < inputBufferRef.current.length) {
+            if (
+              cursorPosRef.current >= inputBufferRef.current.length &&
+              ghostSuffixRef.current.length > 0
+            ) {
+              // Accept one character from ghost text
+              const accepted = ghostSuffixRef.current[0];
+              inputBufferRef.current += accepted;
               cursorPosRef.current++;
-              term.write("\x1b[C");
+              ghostSuffixRef.current = ghostSuffixRef.current.slice(1);
+              if (ghostSuffixRef.current.length === 0) ghostCandidateIndexRef.current = -1;
+              redrawInputLine(term);
+            } else if (cursorPosRef.current < inputBufferRef.current.length) {
+              cursorPosRef.current++;
+              clearGhost();
+              redrawInputLine(term);
             }
           }
           i += 3;
           continue;
         }
 
+        // Bare Esc — dismiss ghost text
+        if (data[i] === "\x1b") {
+          if (ghostSuffixRef.current) {
+            clearGhost();
+            redrawInputLine(term);
+          }
+          i++;
+          continue;
+        }
+
         const ch = data[i];
         i++;
 
-        if (ch === "\r" || ch === "\n") {
+        if (ch === "\t") {
+          // Tab — accept ghost completion or cycle candidates
+          if (ghostSuffixRef.current.length > 0) {
+            // Accept full ghost text
+            inputBufferRef.current += ghostSuffixRef.current;
+            cursorPosRef.current = inputBufferRef.current.length;
+            clearGhost();
+            redrawInputLine(term);
+          } else if (
+            state.completionCandidates.length > 0 &&
+            state.completionPrefix === inputBufferRef.current
+          ) {
+            // Cycle to next candidate
+            ghostCandidateIndexRef.current =
+              (ghostCandidateIndexRef.current + 1) % state.completionCandidates.length;
+            const candidate = state.completionCandidates[ghostCandidateIndexRef.current];
+            ghostSuffixRef.current = candidate.slice(inputBufferRef.current.length);
+            redrawInputLine(term);
+          } else {
+            // Request completions for current input
+            scheduleCompletion(inputBufferRef.current);
+          }
+        } else if (ch === "\r" || ch === "\n") {
           // Enter
+          clearGhost();
           const input = inputBufferRef.current.trim();
           term.writeln("");
 
@@ -258,15 +476,31 @@ export default function AssistantView(): JSX.Element {
           cursorPosRef.current = 0;
         } else if (ch === "\x7f" || ch === "\b") {
           // Backspace
+          clearGhost();
           if (cursorPosRef.current > 0) {
             const buf = inputBufferRef.current;
             inputBufferRef.current =
               buf.slice(0, cursorPosRef.current - 1) + buf.slice(cursorPosRef.current);
             cursorPosRef.current--;
             redrawInputLine(term);
+            scheduleCompletion(inputBufferRef.current);
           }
+        } else if (ch === "\x12") {
+          // Ctrl+R — enter reverse history search
+          if (!historyFetchedRef.current) {
+            actions.requestHistory();
+            historyFetchedRef.current = true;
+          }
+          clearGhost();
+          savedInputRef.current = inputBufferRef.current;
+          searchModeRef.current = true;
+          searchQueryRef.current = "";
+          searchMatchesRef.current = historyRef.current;
+          searchMatchIndexRef.current = 0;
+          redrawSearchLine(term);
         } else if (ch === "\x03") {
           // Ctrl+C
+          clearGhost();
           term.writeln("^C");
           inputBufferRef.current = "";
           cursorPosRef.current = 0;
@@ -277,28 +511,63 @@ export default function AssistantView(): JSX.Element {
           redrawInputLine(term);
         } else if (ch === "\x15") {
           // Ctrl+U — clear line
+          clearGhost();
           inputBufferRef.current = "";
           cursorPosRef.current = 0;
           redrawInputLine(term);
         } else if (ch >= " ") {
           // Printable character
+          clearGhost();
           const buf = inputBufferRef.current;
           inputBufferRef.current =
             buf.slice(0, cursorPosRef.current) + ch + buf.slice(cursorPosRef.current);
           cursorPosRef.current++;
 
           if (cursorPosRef.current === inputBufferRef.current.length) {
-            // Appending at end — just write the character
             term.write(ch);
           } else {
-            // Inserting in middle — redraw
             redrawInputLine(term);
           }
+          scheduleCompletion(inputBufferRef.current);
         }
       }
     },
-    [actions, redrawInputLine]
+    [actions, state.completionCandidates, state.completionPrefix, clearGhost, redrawInputLine, redrawSearchLine, exitSearchMode, updateSearchMatches, scheduleCompletion]
   );
+
+  // When completion candidates arrive, show the first one as ghost text.
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) return;
+    if (searchModeRef.current) return; // don't show ghost in search mode
+    if (
+      state.completionCandidates.length > 0 &&
+      state.completionPrefix === inputBufferRef.current
+    ) {
+      ghostCandidateIndexRef.current = 0;
+      const candidate = state.completionCandidates[0];
+      ghostSuffixRef.current = candidate.slice(state.completionPrefix.length);
+      redrawInputLine(term);
+    } else {
+      if (ghostSuffixRef.current) {
+        clearGhost();
+        redrawInputLine(term);
+      }
+    }
+  }, [state.completionCandidates, state.completionPrefix, clearGhost, redrawInputLine]);
+
+  // Sync history entries from state to ref (for use in search mode callbacks).
+  useEffect(() => {
+    historyRef.current = state.historyEntries;
+  }, [state.historyEntries]);
+
+  // Request history when connected (pre-fetch for Ctrl+R).
+  useEffect(() => {
+    if (state.connected && !historyFetchedRef.current) {
+      actions.requestHistory();
+      historyFetchedRef.current = true;
+    }
+  }, [state.connected, actions]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#1a1b26" }}>

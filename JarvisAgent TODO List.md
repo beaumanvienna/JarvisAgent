@@ -108,7 +108,8 @@ See also:
 
 ---
 
-## ~~12. Browser-based AI chat terminal~~ (moved to Remaining TODOs #2)
+## ~~12. Browser-based AI chat terminal~~ ✅
+- ~~Phases 1–4 implemented~~ ✅ xterm.js terminal in "Assistant" tab, `/ws/assistant` WebSocket, `AssistantController` + `AssistantSession` + `ContextAssembler` + `ToolRegistry` (16 tools) + `MemoryStore` + `WorkspaceIndexer`. Persistent sessions (JSONL), workspace memory (`memory.json`), file index with cached AI summaries (`file_index.jsonl`). Slash commands: `/help`, `/status`, `/runs`, `/log`, `/memory`, `/index`. Assistant button greyed out when no AI provider configured. See `application/assistant/ai-assistant.md`.
 
 ---
 
@@ -190,10 +191,8 @@ See also:
 - Ensure isolated interpreter state per engine
 - **Complexity note:** CPython sub-interpreters + per-interpreter GIL (PEP 684, Python 3.12+) is the cleanest path but has restrictions on C extension modules. Alternative: multiprocessing with IPC.
 
-### 2. Browser-based AI chat terminal
-- **Goal:** An AI-powered chat terminal in the browser — like the Cascade terminal in Windsurf.
-- **Frontend:** xterm.js terminal emulator on a dedicated page/tab, connected via WebSocket
-- **Backend:** Chat message router in C++ (WS protocol), AI provider integration, context injection, command fallback (`/run`, `/status`, `/help`)
+### ~~2. Browser-based AI chat terminal~~ ✅
+- ~~Implemented (Phases 1–4).~~ See item #12 above and `application/assistant/ai-assistant.md`.
 
 ### 3. Sub-workflows / workflow-call node
 - Invoke one JCWF from another as a task
@@ -231,6 +230,17 @@ See also:
 - Current issue: `aiCarMaintenancePipeline`, `make-example`, and `vehicleTroubleshootingGuide` fail because they require API keys or build tools not yet configured
 - Options: ship only examples that work out of the box (no API keys needed), or change trigger type so they don't auto-run, or add a "setup required" notice
 - First impression matters — a fresh install should look clean in the dashboard
+
+---
+
+### 11. Add Windows native scripting in PowerShell for the JC workflow engine and for the AI assistant
+- Currently all shell execution (workflow engine `ShellTaskExecutor` and AI assistant tools) assumes bash (MSYS2 / Git Bash) on Windows
+- Add native PowerShell support: detect `.ps1` scripts and route through `powershell -ExecutionPolicy Bypass -File ...`
+- Workflow engine: update `ExecuteCommandWithCapturedOutput` to dispatch by script extension (`.sh` → bash, `.ps1` → PowerShell)
+- Workflow validator: accept PowerShell scripts (skip bash shebang check for `.ps1`)
+- Argument quoting: add `QuoteForPowerShell` function (double-quote escaping instead of POSIX single-quote)
+- AI assistant `run_shell`: detect platform and use PowerShell as the default shell on Windows when bash is not available
+- AI assistant tools (`search_files`, `list_files`, `get_log_tail`): provide PowerShell equivalents for `rg`/`grep`, `Get-ChildItem`, `Get-Content -Tail`
 
 ---
 

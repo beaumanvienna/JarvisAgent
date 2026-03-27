@@ -32,6 +32,7 @@ Last reviewed: 2026-03-23
 - [x] ~~Dashboard Log Viewer (virtual scroll, delta polling, search, analyze run panel)~~
 - [x] ~~Log analyze: multi-run cycling (◀/▶), issue filtering by runId/workflowId~~
 - [x] ~~JCWF generation assistant~~ — "Generate" button: multi-stage AI pipeline (decompose → generate JCWF with batched fan-out → generate scripts → review → validate → fix). Supports both Python and **shell (bash)** script generation with POSIX awk rules, host OS detection, and positional arg mapping. "Explain" button: AI summarizes loaded workflow. **Fix Script** button: sends failed script + stderr to AI, user reviews fix in `ScriptReviewPanel`. Backend: `AiJcwfService` in `aiJcwfService.cpp`. E2E verified with `cyber2` (Python) and `cyber3` (shell). See `example/workflows/cyber2_e2e.md` and `cyber3_e2e.md`.
+- [x] ~~AI Assistant terminal~~ — "Assistant" tab with xterm.js terminal connected via `/ws/assistant` WebSocket. Conversational AI with 16 tools (file read/search, workflow control, memory, indexing). Persistent sessions (JSONL), workspace memory (`memory.json`), file index with cached AI summaries (`file_index.jsonl`). Slash commands: `/help`, `/status`, `/runs`, `/log`, `/memory`, `/index`, `/sessions`, `/new`, `/clear`. Assistant button greyed out when no AI provider configured. Backend: `application/assistant/` (6 C++ modules). See `application/assistant/ai-assistant.md`.
 
 ---
 

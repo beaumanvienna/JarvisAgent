@@ -24,7 +24,9 @@
 #include "assistant/assistantSession.h"
 #include "assistant/assistantMemory.h"
 #include "assistant/assistantTools.h"
+#include "assistant/workspaceIndexer.h"
 #include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -91,6 +93,8 @@ namespace AIAssistant
         void HandleListSessions(crow::websocket::connection& conn);
         void HandleResumeSession(crow::websocket::connection& conn, std::string const& sessionId);
         void HandleNewSession(crow::websocket::connection& conn);
+        void HandleGetHistory(crow::websocket::connection& conn, int maxEntries);
+        void HandleCompletionRequest(crow::websocket::connection& conn, std::string const& prefix, std::string const& kind);
 
         // Run AI call on background thread, queue response.
         void RunAiCallAsync(std::string const& sessionId, std::string const& userMessage);
@@ -106,6 +110,19 @@ namespace AIAssistant
         std::string HandleRunsCommand();
         std::string HandleLogCommand(std::string const& args);
         std::string HandleMemoryCommand(std::string const& args);
+        std::string HandleIndexCommand(std::string const& args);
+
+        // Blocking AI call helper — used as callback for tool-initiated AI calls
+        // (e.g. get_file_summary summarization).  Runs via the queue-file pipeline.
+        bool MakeToolAiCall(std::string const& systemPrompt, std::string const& userPrompt, std::string& outResponse,
+                            std::string& outError);
+
+        // Tool approval flow — blocks the calling thread until the user responds or timeout.
+        // Returns true if approved, false if denied or timed out.
+        bool RequestToolApproval(std::string const& sessionId, ToolCall const& call, std::string const& description);
+
+        // Called from OnMessage when the frontend sends an approval_response.
+        void HandleApprovalResponse(std::string const& requestId, bool approved);
 
         // Queue a JSON message for delivery to all assistant clients.
         void QueueMessage(std::string const& jsonMessage);
@@ -118,6 +135,10 @@ namespace AIAssistant
 
         std::filesystem::path GetSessionsDir() const;
         static bool WriteFile(std::filesystem::path const& path, std::string const& content, std::string& outError);
+
+        // Response relevance checking (Phase 12).
+        // Returns empty string if OK, or a warning to append.
+        std::string ValidateResponse(std::string const& userMessage, std::string const& aiResponse) const;
 
         // Connected assistant clients.
         std::mutex m_ClientsMutex;
@@ -144,11 +165,28 @@ namespace AIAssistant
         // Persistent memory.
         MemoryStore m_MemoryStore;
 
+        // Workspace file index.
+        WorkspaceIndexer m_WorkspaceIndexer;
+
         // Optional subsystem pointers (for slash commands).
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
 
+        // Pending tool approvals (keyed by requestId).
+        struct PendingApproval
+        {
+            std::string requestId;
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool responded{false};
+            bool approved{false};
+        };
+        std::mutex m_ApprovalsMutex;
+        std::unordered_map<std::string, std::shared_ptr<PendingApproval>> m_PendingApprovals;
+        std::atomic<int> m_NextApprovalSeq{1};
+
         static constexpr int AI_CALL_TIMEOUT_MS = 120000; // 2 minutes
-        static constexpr int MAX_TOOL_ITERATIONS = 5;     // max tool-call re-sends per turn
+        static constexpr int MAX_TOOL_ITERATIONS = 10;    // max tool-call re-sends per turn
+        static constexpr int APPROVAL_TIMEOUT_S = 60;     // approval wait timeout
     };
 } // namespace AIAssistant

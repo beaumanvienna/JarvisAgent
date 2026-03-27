@@ -304,6 +304,17 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 
 ---
 
+## AI Assistant (browser-based chat terminal)
+
+- [x] ~~**Phase 1 — Chat terminal skeleton**~~ — `/ws/assistant` WebSocket route, `AssistantController`, `AssistantSession` (JSONL persistence), `ContextAssembler`, xterm.js frontend (`AssistantView.tsx`), slash commands (`/help`, `/status`, `/runs`, `/sessions`, `/new`, `/clear`). Streamed AI responses via `AiRequestPool` queue-file pipeline.
+- [x] ~~**Phase 2 — Tools (L1→L2 bridge)**~~ — `ToolRegistry` with 10 tools: `get_system_status`, `list_workflows`, `run_workflow`, `get_run_status`, `get_task_output`, `list_recent_runs`, `read_file`, `search_files`, `list_files`, `get_log_tail`. `<tool_call>` parsing, tool-use loop (max 5 iterations), tool status/result events to frontend. Security: deny-list for `read_file`, 4 KB output cap, prompt injection fences.
+- [x] ~~**Phase 3 — Memory (L2)**~~ — `MemoryStore` with JSON persistence (`assistant/memory.json`). 4 memory tools: `save_memory`, `recall_memory`, `list_memories`, `delete_memory`. Keyword-based relevance search, auto-injection of relevant memories into context. `/memory` and `/memory clear` slash commands.
+- [x] ~~**Phase 4 — Indexing and summaries (L2)**~~ — `WorkspaceIndexer` scans workspace at startup, persists to `assistant/index/file_index.jsonl`. `get_file_summary` tool generates and caches AI summaries on demand (via `MakeToolAiCall` callback). `get_folder_summary` returns all cached summaries in a directory. Keyword-based summary injection into context. `/index` and `/index rescan` slash commands.
+
+**Documentation:** `application/assistant/ai-assistant.md`
+
+---
+
 ## Recent fixes (2026-03-23)
 
 - [x] ~~**JCWF assistant provider override**~~ — "JCWF AI Interface" dropdown in Settings modal. Stored as `jcwf_ai_interface` in `config.json`. `AiJcwfService` resolves selected interface → `PROV_provider.json` sidecar. E2E verified with `api.openai.com/gpt-4.1-mini/API2`.

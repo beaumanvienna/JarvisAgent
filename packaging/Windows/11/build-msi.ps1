@@ -34,7 +34,7 @@ if (-not (Test-Path $StageDir)) {
 $WxsSource = "$ScriptDir\jarvisagent.wxs"
 $WxsBuild  = "$BuildDir\jarvisagent.wxs"
 Copy-Item $WxsSource $WxsBuild
-(Get-Content $WxsBuild) -replace 'Version="0\.1\.0\.0"', "Version=`"$PkgVersion.0.0`"" `
+(Get-Content $WxsBuild) -replace 'Version="0\.1\.0\.0"', "Version=`"$PkgVersion.0`"" `
     -replace 'JarvisAgent-x64', "JarvisAgent-${PkgVersion}-x64" | Set-Content $WxsBuild
 
 # ---- Check for WiX ----
@@ -83,11 +83,13 @@ if ($wixV4) {
     $wxsFiles = @("$WxsBuild") + ($harvestDirs.Keys | ForEach-Object { "$BuildDir\$_.wxs" })
     foreach ($wxs in $wxsFiles) {
         candle -arch x64 -o "$BuildDir\$([IO.Path]::GetFileNameWithoutExtension($wxs)).wixobj" $wxs
+        if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: candle failed on $wxs"; exit 1 }
     }
 
     Write-Host "==> Linking MSI ..."
     $wixobjs = Get-ChildItem "$BuildDir\*.wixobj" | ForEach-Object { $_.FullName }
     light -o $MsiOutput $wixobjs
+    if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: light failed"; exit 1 }
 
 } else {
     Write-Host "ERROR: WiX Toolset not found."

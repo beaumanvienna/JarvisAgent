@@ -31,13 +31,30 @@
 
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <sstream>
 
 // simdjson for incoming message parsing
 #include "simdjson/simdjson.h"
 
+#if defined(_WIN32)
+#define popen _popen
+#define pclose _pclose
+#endif
+
 namespace
 {
+    // On Windows, _popen routes through cmd.exe which cannot run POSIX commands.
+    // Wrap the command in bash (MSYS2 / Git Bash) to match the workflow engine.
+    std::string WrapForBash([[maybe_unused]] std::string const& cmd)
+    {
+#if defined(_WIN32)
+        return "bash -c \"" + cmd + "\"";
+#else
+        return cmd;
+#endif
+    }
+
     namespace fs = std::filesystem;
 
     std::string JsonEscape(std::string const& input)
@@ -91,10 +108,23 @@ namespace
 
 namespace AIAssistant
 {
-    AssistantController::AssistantController() : m_MemoryStore(fs::absolute("assistant/memory.json"))
+    AssistantController::AssistantController()
+        : m_MemoryStore(fs::absolute("assistant/memory.json")), m_WorkspaceIndexer(fs::absolute("assistant/index"))
     {
         m_ToolRegistry.SetMemoryStore(&m_MemoryStore);
-        LOG_APP_INFO("[assistant] AssistantController created ({} memories loaded)", m_MemoryStore.Size());
+        m_ToolRegistry.SetWorkspaceIndexer(&m_WorkspaceIndexer);
+
+        // Provide the tool registry with a callback for making blocking AI calls
+        // (used by get_file_summary to generate summaries on-demand).
+        m_ToolRegistry.SetAiCallFn([this](std::string const& sysPrompt, std::string const& userPrompt, std::string& outResp,
+                                          std::string& outErr) -> bool
+                                   { return MakeToolAiCall(sysPrompt, userPrompt, outResp, outErr); });
+
+        // Run initial workspace scan (indexes files, preserves cached summaries).
+        m_WorkspaceIndexer.ScanWorkspace();
+
+        LOG_APP_INFO("[assistant] AssistantController created ({} memories, {} indexed files, {} summaries)",
+                     m_MemoryStore.Size(), m_WorkspaceIndexer.FileCount(), m_WorkspaceIndexer.SummaryCount());
     }
 
     AssistantController::~AssistantController() { Shutdown(); }
@@ -189,6 +219,38 @@ namespace AIAssistant
             else if (type == "new_session")
             {
                 HandleNewSession(conn);
+            }
+            else if (type == "approval_response")
+            {
+                std::string requestId = std::string(doc["requestId"].get_string().value());
+                bool approved = false;
+                {
+                    bool val;
+                    if (doc["approved"].get_bool().get(val) == simdjson::SUCCESS)
+                        approved = val;
+                }
+                HandleApprovalResponse(requestId, approved);
+            }
+            else if (type == "get_history")
+            {
+                int maxEntries = 500;
+                {
+                    int64_t val;
+                    if (doc["maxEntries"].get_int64().get(val) == simdjson::SUCCESS)
+                        maxEntries = static_cast<int>(val);
+                }
+                HandleGetHistory(conn, maxEntries);
+            }
+            else if (type == "completion_request")
+            {
+                std::string prefix = std::string(doc["prefix"].get_string().value());
+                std::string kind;
+                {
+                    std::string_view sv;
+                    if (doc["kind"].get_string().get(sv) == simdjson::SUCCESS)
+                        kind = std::string(sv);
+                }
+                HandleCompletionRequest(conn, prefix, kind);
             }
             else
             {
@@ -305,6 +367,10 @@ namespace AIAssistant
         {
             response = HandleMemoryCommand(args);
         }
+        else if (command == "index")
+        {
+            response = HandleIndexCommand(args);
+        }
         else if (command == "sessions")
         {
             auto ids = AssistantSession::ListSessions(GetSessionsDir());
@@ -395,6 +461,156 @@ namespace AIAssistant
     }
 
     // -----------------------------------------------------------------
+    // get_history — return deduplicated user messages across all sessions
+    // -----------------------------------------------------------------
+
+    void AssistantController::HandleGetHistory(crow::websocket::connection& /*conn*/, int maxEntries)
+    {
+        // Collect user messages from all sessions (newest first).
+        auto sessionIds = AssistantSession::ListSessions(GetSessionsDir());
+
+        // Use an ordered vector to preserve recency; dedup with a set.
+        std::vector<std::string> history;
+        std::unordered_set<std::string> seen;
+        history.reserve(static_cast<size_t>(maxEntries));
+
+        for (auto const& sid : sessionIds)
+        {
+            if (static_cast<int>(history.size()) >= maxEntries)
+                break;
+
+            auto* session = GetSession(sid);
+            if (!session)
+                continue;
+
+            auto turns = session->GetAllTurns();
+            // Iterate newest-first within this session.
+            for (auto it = turns.rbegin(); it != turns.rend(); ++it)
+            {
+                if (it->role != "user")
+                    continue;
+                std::string trimmed = it->text;
+                if (trimmed.empty())
+                    continue;
+                if (seen.count(trimmed))
+                    continue;
+                seen.insert(trimmed);
+                history.push_back(trimmed);
+                if (static_cast<int>(history.size()) >= maxEntries)
+                    break;
+            }
+        }
+
+        // Build JSON response.
+        std::string json = "{\"type\":\"history\",\"entries\":[";
+        for (size_t i = 0; i < history.size(); ++i)
+        {
+            if (i > 0)
+                json += ",";
+            json += "\"" + JsonEscape(history[i]) + "\"";
+        }
+        json += "]}";
+        QueueMessage(json);
+    }
+
+    // -----------------------------------------------------------------
+    // completion_request — return completions for the current input prefix
+    // -----------------------------------------------------------------
+
+    void AssistantController::HandleCompletionRequest(crow::websocket::connection& /*conn*/, std::string const& prefix,
+                                                      std::string const& kind)
+    {
+        // Slash commands.
+        static std::vector<std::string> const slashCommands = {"/help",   "/status",       "/runs",        "/log",
+                                                               "/memory", "/index",        "/sessions",    "/new",
+                                                               "/clear",  "/index rescan", "/memory clear"};
+
+        std::vector<std::string> candidates;
+        constexpr int kMaxCandidates = 10;
+
+        if (kind.empty() || kind == "slash")
+        {
+            if (!prefix.empty() && prefix[0] == '/')
+            {
+                for (auto const& cmd : slashCommands)
+                {
+                    if (cmd.size() > prefix.size() && cmd.rfind(prefix, 0) == 0)
+                    {
+                        candidates.push_back(cmd);
+                        if (static_cast<int>(candidates.size()) >= kMaxCandidates)
+                            break;
+                    }
+                }
+            }
+        }
+
+        if ((kind.empty() || kind == "workflow") && static_cast<int>(candidates.size()) < kMaxCandidates)
+        {
+            // Workflow IDs as completions (useful when user starts typing a workflow name).
+            if (m_WorkflowRegistry)
+            {
+                auto ids = m_WorkflowRegistry->GetWorkflowIds();
+                for (auto const& id : ids)
+                {
+                    if (id.size() > prefix.size() && id.rfind(prefix, 0) == 0)
+                    {
+                        candidates.push_back(id);
+                        if (static_cast<int>(candidates.size()) >= kMaxCandidates)
+                            break;
+                    }
+                }
+            }
+        }
+
+        if ((kind.empty() || kind == "history") && static_cast<int>(candidates.size()) < kMaxCandidates)
+        {
+            // Match against recent user messages in the active session.
+            std::lock_guard<std::mutex> lock(m_SessionsMutex);
+            for (auto const& [sid, session] : m_Sessions)
+            {
+                auto turns = session->GetAllTurns();
+                for (auto it = turns.rbegin(); it != turns.rend(); ++it)
+                {
+                    if (it->role != "user")
+                        continue;
+                    if (it->text.size() > prefix.size() && it->text.rfind(prefix, 0) == 0)
+                    {
+                        // Avoid duplicates.
+                        bool dupe = false;
+                        for (auto const& c : candidates)
+                        {
+                            if (c == it->text)
+                            {
+                                dupe = true;
+                                break;
+                            }
+                        }
+                        if (!dupe)
+                        {
+                            candidates.push_back(it->text);
+                            if (static_cast<int>(candidates.size()) >= kMaxCandidates)
+                                break;
+                        }
+                    }
+                }
+                if (static_cast<int>(candidates.size()) >= kMaxCandidates)
+                    break;
+            }
+        }
+
+        // Build JSON response.
+        std::string json = "{\"type\":\"completion_response\",\"prefix\":\"" + JsonEscape(prefix) + "\",\"candidates\":[";
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (i > 0)
+                json += ",";
+            json += "\"" + JsonEscape(candidates[i]) + "\"";
+        }
+        json += "]}";
+        QueueMessage(json);
+    }
+
+    // -----------------------------------------------------------------
     // AI call
     // -----------------------------------------------------------------
 
@@ -458,17 +674,36 @@ namespace AIAssistant
                 if (!memoryContext.empty())
                     prompt.cntx += memoryContext;
 
-                // --- Tool-use loop ---
+                // Inject relevant file summaries based on query keywords.
+                {
+                    auto relevantFiles = m_WorkspaceIndexer.GetRelevantFiles(msg, 3);
+                    if (!relevantFiles.empty())
+                    {
+                        prompt.cntx += "\n\n=== Relevant File Summaries ===\n";
+                        for (auto const& file : relevantFiles)
+                        {
+                            prompt.cntx += "- " + file.relativePath + ": " + file.summary + "\n";
+                        }
+                        prompt.cntx += "=== End File Summaries ===\n";
+                        LOG_APP_INFO("[assistant] Injected {} file summaries into context", relevantFiles.size());
+                    }
+                }
+
+                // --- Multi-step tool-use loop ---
                 // After each AI response, check for <tool_call> blocks.
-                // Execute tools, append results, and re-send to AI.
-                // Max iterations prevent infinite loops.
+                // Execute tools (with approval where required), append results, and
+                // re-send to AI.  Tools are allowed on every iteration except the
+                // last one, which forces a final answer.
 
                 std::string currentProb = prompt.prob;
                 std::string accumulatedToolContext;
 
-                // STNG without tool descriptions — used for follow-up iterations
-                // so the AI cannot call tools again and must give a final answer.
+                // STNG without tool descriptions — used on the final iteration
+                // to force a final answer without tool calls.
                 std::string const stngNoTools = ContextAssembler::Assemble(recentTurns, msg).stng;
+
+                // Loop detection: track (tool_name, sorted_args) → call count.
+                std::map<std::string, int> toolCallSignatureCounts;
 
                 for (int iteration = 0; iteration < MAX_TOOL_ITERATIONS; ++iteration)
                 {
@@ -478,17 +713,23 @@ namespace AIAssistant
                     int const seq = m_NextRequestSeq.fetch_add(1);
 
                     // Unique folder name: UTC timestamp (YYYYMMDD_HHMMSS) + atomic seq.
-                    // Avoids collisions across restarts.
                     auto const nowUtc = std::chrono::system_clock::now();
                     auto const nowTime = std::chrono::system_clock::to_time_t(nowUtc);
                     std::tm utcTm{};
+#ifdef _WIN32
+                    gmtime_s(&utcTm, &nowTime);
+#else
                     gmtime_r(&nowTime, &utcTm);
+#endif
                     char timeBuf[32];
                     std::strftime(timeBuf, sizeof(timeBuf), "%Y%m%d_%H%M%S", &utcTm);
                     std::string const subfolder = "_assistant/call_" + std::string(timeBuf) + "_" + std::to_string(seq);
 
-                    LOG_APP_INFO("[assistant] Starting AI call iteration {} (seq={}, STNG={} bytes, PROB={} bytes)",
-                                 iteration, seq, prompt.stng.size(), currentProb.size());
+                    bool const isFinalIteration = (iteration == MAX_TOOL_ITERATIONS - 1);
+
+                    LOG_APP_INFO(
+                        "[assistant] Starting AI call iteration {} (seq={}, STNG={} bytes, PROB={} bytes, final={})",
+                        iteration, seq, prompt.stng.size(), currentProb.size(), isFinalIteration);
 
                     // Build CNTX: original conversation context + accumulated tool results.
                     std::string fullCntx = prompt.cntx;
@@ -497,19 +738,19 @@ namespace AIAssistant
                         fullCntx += "\n\n" + accumulatedToolContext;
                     }
 
-                    // On follow-up iterations (after tools ran), strip tool descriptions
-                    // from STNG so the AI cannot call tools again. This forces a final answer.
+                    // On the final iteration, strip tool descriptions to force a final answer.
+                    // On all other iterations (including follow-ups), keep tools available.
+                    std::string const& iterStng = isFinalIteration ? stngNoTools : prompt.stng;
                     std::string const iterTask =
-                        (iteration == 0)
-                            ? prompt.task
-                            : std::string(
-                                  "You have received tool results. Provide your final answer to the user. "
-                                  "Do NOT call any tools. Present the raw data as-is — do not summarize or paraphrase it.");
+                        isFinalIteration
+                            ? std::string("You have received tool results. Provide your final answer to the user. "
+                                          "Do NOT call any tools. Present the information clearly and directly.")
+                            : prompt.task;
 
                     std::string responseText;
                     std::string error;
-                    bool const ok = RunSingleAiCall(subfolder, (iteration == 0) ? prompt.stng : stngNoTools, iterTask,
-                                                    fullCntx, currentProb, responseText, error);
+                    bool const ok =
+                        RunSingleAiCall(subfolder, iterStng, iterTask, fullCntx, currentProb, responseText, error);
 
                     LOG_APP_INFO("[assistant] AI call iteration {} complete: ok={}, response={} bytes", iteration, ok,
                                  responseText.size());
@@ -526,19 +767,21 @@ namespace AIAssistant
                         return;
                     }
 
-                    // Only parse tool calls on iteration 0.  On follow-up iterations
-                    // the response is always treated as the final answer — even if the
-                    // AI still emits <tool_call> blocks (it can learn the syntax from
-                    // the <tool_result> tags in the PROB).
+                    // Parse tool calls on every iteration except the final one.
                     std::string cleanText;
                     auto toolCalls =
-                        (iteration == 0) ? ToolRegistry::ParseToolCalls(responseText, cleanText) : std::vector<ToolCall>{};
+                        isFinalIteration ? std::vector<ToolCall>{} : ToolRegistry::ParseToolCalls(responseText, cleanText);
 
                     if (toolCalls.empty())
                     {
-                        // No tool calls (or follow-up iteration) — this is the final response.
-                        // Strip any stray <tool_call> tags the AI may have echoed.
-                        std::string const& finalText = cleanText.empty() ? responseText : cleanText;
+                        // No tool calls — this is the final response.
+                        std::string finalText = cleanText.empty() ? responseText : cleanText;
+
+                        // Response relevance check (Phase 12).
+                        std::string validationWarnings = ValidateResponse(msg, finalText);
+                        if (!validationWarnings.empty())
+                            finalText += validationWarnings;
+
                         session->AddAssistantMessage(finalText);
                         QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"text\":\"" +
                                      JsonEscape(finalText) + "\"}");
@@ -550,19 +793,55 @@ namespace AIAssistant
                                  iteration + 1);
 
                     std::string toolResultsBlock;
+                    bool loopDetected = false;
+
                     for (auto const& call : toolCalls)
                     {
+                        // --- Loop detection ---
+                        // Build a signature from tool name + sorted args.
+                        std::string sig = call.name + "(";
+                        {
+                            std::map<std::string, std::string> sortedArgs(call.args.begin(), call.args.end());
+                            bool first = true;
+                            for (auto const& [k, v] : sortedArgs)
+                            {
+                                if (!first)
+                                    sig += ",";
+                                sig += k + "=" + v;
+                                first = false;
+                            }
+                        }
+                        sig += ")";
+
+                        int& callCount = toolCallSignatureCounts[sig];
+                        ++callCount;
+                        if (callCount > 3)
+                        {
+                            LOG_APP_WARN("[assistant] Loop detected: tool {} called {} times with identical args", call.name,
+                                         callCount);
+                            toolResultsBlock +=
+                                "<tool_result name=\"" + call.name +
+                                "\" status=\"error\">\n"
+                                "Loop detected: this tool has been called " +
+                                std::to_string(callCount) +
+                                " times with identical arguments. Provide your final answer now.\n</tool_result>\n\n";
+                            loopDetected = true;
+                            continue;
+                        }
+
                         // Notify frontend about tool execution.
                         QueueMessage("{\"type\":\"tool_status\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"tool\":\"" +
                                      JsonEscape(call.name) + "\",\"status\":\"running\"}");
 
                         // Check if tool requires approval.
                         bool needsApproval = false;
+                        std::string toolDescription;
                         for (auto const& def : m_ToolRegistry.GetToolDefs())
                         {
                             if (def.name == call.name)
                             {
                                 needsApproval = def.requiresApproval;
+                                toolDescription = def.description;
                                 break;
                             }
                         }
@@ -570,9 +849,29 @@ namespace AIAssistant
                         ToolResult result;
                         if (needsApproval)
                         {
-                            // For now, skip tools that require approval with a message.
-                            // Full approval flow will come later.
-                            result = {call.name, false, "Tool requires user approval (not yet implemented). Skipped."};
+                            // Build human-readable description for the approval prompt.
+                            std::string approvalDesc = call.name + "(";
+                            {
+                                bool first = true;
+                                for (auto const& [k, v] : call.args)
+                                {
+                                    if (!first)
+                                        approvalDesc += ", ";
+                                    approvalDesc += k + "=\"" + v + "\"";
+                                    first = false;
+                                }
+                            }
+                            approvalDesc += ")";
+
+                            bool approved = RequestToolApproval(sid, call, approvalDesc);
+                            if (approved)
+                            {
+                                result = m_ToolRegistry.Execute(call);
+                            }
+                            else
+                            {
+                                result = {call.name, false, "Tool execution denied by user."};
+                            }
                         }
                         else
                         {
@@ -596,28 +895,180 @@ namespace AIAssistant
                     // Accumulate tool results for the next iteration.
                     accumulatedToolContext += toolResultsBlock;
 
-                    // Re-send to AI with the original user message + tool results.
-                    // The instruction is explicit: answer now, do not call more tools.
-                    currentProb = msg +
-                                  "\n\n[SYSTEM: Tool results are below. You MUST now answer the user's "
-                                  "question using these results. Do NOT emit any more <tool_call> blocks. "
-                                  "Provide your final answer directly.]\n\n" +
-                                  toolResultsBlock;
-
-                    // If there was clean text before tool calls, record it.
-                    if (!cleanText.empty())
+                    // Build PROB for the next iteration.
+                    // Include the original user message + tool results.
+                    // If this is NOT the second-to-last iteration, allow more tool calls.
+                    bool const nextIsFinal = (iteration + 1 >= MAX_TOOL_ITERATIONS - 1);
+                    if (loopDetected || nextIsFinal)
                     {
-                        // Trim whitespace.
-                        while (!cleanText.empty() && (cleanText.back() == '\n' || cleanText.back() == ' '))
-                            cleanText.pop_back();
+                        currentProb = msg +
+                                      "\n\n[SYSTEM: Tool results are below. Provide your final answer to the user "
+                                      "using these results. Do NOT call any more tools.]\n\n" +
+                                      toolResultsBlock;
+                    }
+                    else
+                    {
+                        currentProb = msg +
+                                      "\n\n[SYSTEM: Tool results are below. Examine them carefully. If you have "
+                                      "enough information, provide your final answer. If you need more data, "
+                                      "you may call additional tools.]\n\n" +
+                                      toolResultsBlock;
                     }
                 }
 
                 // Exhausted max iterations — send whatever we have.
-                session->AddAssistantMessage("Reached maximum tool call iterations. Please try a simpler query.");
+                session->AddAssistantMessage("Reached maximum tool call iterations (" + std::to_string(MAX_TOOL_ITERATIONS) +
+                                             "). Please try a simpler query.");
                 QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) +
                              "\",\"text\":\"Reached maximum tool call iterations. Please try a simpler query.\"}");
             });
+    }
+
+    // -----------------------------------------------------------------
+    // Response relevance checking (Phase 12)
+    // -----------------------------------------------------------------
+
+    namespace
+    {
+        // Tokenise text into lowercase words (≥3 chars), skip common stop words.
+        std::vector<std::string> ExtractKeywords(std::string const& text)
+        {
+            static std::unordered_set<std::string> const stopWords = {
+                "the",   "and",   "for",   "are",   "but",    "not",   "you",   "all",  "can",   "her",   "was",
+                "one",   "our",   "out",   "has",   "have",   "had",   "its",   "let",  "may",   "who",   "how",
+                "any",   "new",   "get",   "from",  "been",   "call",  "come",  "each", "make",  "like",  "than",
+                "them",  "then",  "this",  "that",  "what",   "when",  "will",  "with", "would", "could", "should",
+                "there", "their", "about", "which", "these",  "those", "other", "some", "just",  "also",  "into",
+                "your",  "does",  "very",  "here",  "much",   "more",  "most",  "only", "over",  "such",  "take",
+                "than",  "they",  "well",  "were",  "please", "want",  "need",  "help", "tell"};
+
+            std::vector<std::string> keywords;
+            std::string word;
+            for (char c : text)
+            {
+                if (std::isalnum(static_cast<unsigned char>(c)))
+                {
+                    word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                else
+                {
+                    if (word.size() >= 3 && stopWords.find(word) == stopWords.end())
+                        keywords.push_back(word);
+                    word.clear();
+                }
+            }
+            if (word.size() >= 3 && stopWords.find(word) == stopWords.end())
+                keywords.push_back(word);
+            return keywords;
+        }
+
+        // Extract potential file paths from text using a simple heuristic.
+        // Looks for tokens containing '/' with common source extensions.
+        std::vector<std::string> ExtractFilePaths(std::string const& text)
+        {
+            static std::unordered_set<std::string> const knownExtensions = {
+                ".cpp",  ".h",    ".hpp",  ".c",   ".cc",   ".cxx", ".py",   ".sh",  ".ts",   ".tsx", ".js",
+                ".jsx",  ".json", ".yaml", ".yml", ".toml", ".md",  ".txt",  ".cfg", ".conf", ".ini", ".xml",
+                ".html", ".css",  ".jcwf", ".lua", ".rs",   ".go",  ".java", ".rb",  ".pl"};
+
+            std::vector<std::string> paths;
+            std::istringstream iss(text);
+            std::string token;
+            while (iss >> token)
+            {
+                // Strip surrounding punctuation (quotes, backticks, parens, brackets, commas).
+                while (!token.empty() && (token.front() == '`' || token.front() == '\'' || token.front() == '"' ||
+                                          token.front() == '(' || token.front() == '['))
+                    token.erase(token.begin());
+                while (!token.empty() &&
+                       (token.back() == '`' || token.back() == '\'' || token.back() == '"' || token.back() == ')' ||
+                        token.back() == ']' || token.back() == ',' || token.back() == ';' || token.back() == ':'))
+                    token.pop_back();
+
+                if (token.find('/') == std::string::npos)
+                    continue;
+
+                // Check if it ends with a known extension.
+                bool hasKnownExt = false;
+                for (auto const& ext : knownExtensions)
+                {
+                    if (token.size() > ext.size() && token.compare(token.size() - ext.size(), ext.size(), ext) == 0)
+                    {
+                        hasKnownExt = true;
+                        break;
+                    }
+                }
+                if (hasKnownExt)
+                    paths.push_back(token);
+            }
+            return paths;
+        }
+    } // anonymous namespace
+
+    std::string AssistantController::ValidateResponse(std::string const& userMessage, std::string const& aiResponse) const
+    {
+        std::string warnings;
+
+        // --- 1. Keyword overlap check ---
+        auto userKeywords = ExtractKeywords(userMessage);
+        if (userKeywords.size() >= 3) // only check if the user message has enough substance
+        {
+            std::string responseLower;
+            responseLower.reserve(aiResponse.size());
+            for (char c : aiResponse)
+                responseLower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+            int matchCount = 0;
+            std::unordered_set<std::string> seen;
+            for (auto const& kw : userKeywords)
+            {
+                if (seen.count(kw))
+                    continue;
+                seen.insert(kw);
+                if (responseLower.find(kw) != std::string::npos)
+                    matchCount++;
+            }
+
+            double overlap = static_cast<double>(matchCount) / static_cast<double>(seen.size());
+            if (overlap < 0.30)
+            {
+                warnings += "\n\n\xe2\x9a\xa0 This response may not be relevant to your question. Consider rephrasing.";
+            }
+        }
+
+        // --- 2. File path existence check ---
+        auto mentionedPaths = ExtractFilePaths(aiResponse);
+        if (!mentionedPaths.empty())
+        {
+            fs::path basePath;
+            if (Core::g_Core)
+                basePath = Core::g_Core->GetLaunchCWDAbsolute();
+
+            std::vector<std::string> missing;
+            std::unordered_set<std::string> checked;
+            for (auto const& p : mentionedPaths)
+            {
+                if (checked.count(p))
+                    continue;
+                checked.insert(p);
+
+                // Resolve relative paths against the workspace root.
+                fs::path resolved = p;
+                if (resolved.is_relative() && !basePath.empty())
+                    resolved = basePath / resolved;
+
+                std::error_code ec;
+                if (!fs::exists(resolved, ec))
+                    missing.push_back(p);
+            }
+
+            for (auto const& m : missing)
+            {
+                warnings += "\nNote: " + m + " was not found in the workspace.";
+            }
+        }
+
+        return warnings;
     }
 
     bool AssistantController::RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
@@ -763,6 +1214,8 @@ namespace AIAssistant
                "  /log [N]       — Show last N lines of the log (default 20)\n"
                "  /memory        — List saved memories\n"
                "  /memory clear  — Clear all memories\n"
+               "  /index         — Show file index status\n"
+               "  /index rescan  — Re-scan workspace files\n"
                "  /sessions      — List previous sessions\n"
                "  /new           — Start a new session\n"
                "  /clear         — Clear terminal display\n"
@@ -911,10 +1364,11 @@ namespace AIAssistant
             return "Log file not found: " + logPath.string();
 
         std::string cmd = "tail -" + std::to_string(lines) + " '" + logPath.string() + "' 2>/dev/null";
+        std::string const shellCmd = WrapForBash(cmd);
         std::array<char, 4096> buffer;
         std::string result;
 
-        FILE* pipe = popen(cmd.c_str(), "r");
+        FILE* pipe = popen(shellCmd.c_str(), "r");
         if (!pipe)
             return "Failed to read log file.";
 
@@ -960,6 +1414,167 @@ namespace AIAssistant
         }
         oss << "\nUse /memory clear to delete all memories.";
         return oss.str();
+    }
+
+    std::string AssistantController::HandleIndexCommand(std::string const& args)
+    {
+        if (args == "rescan")
+        {
+            m_WorkspaceIndexer.ScanWorkspace();
+            return "Workspace re-scan complete: " + std::to_string(m_WorkspaceIndexer.FileCount()) + " files indexed, " +
+                   std::to_string(m_WorkspaceIndexer.SummaryCount()) + " cached summaries.";
+        }
+
+        size_t fileCount = m_WorkspaceIndexer.FileCount();
+        size_t summaryCount = m_WorkspaceIndexer.SummaryCount();
+
+        std::ostringstream oss;
+        oss << "Workspace Index Status\n";
+        oss << std::string(40, '-') << "\n";
+        oss << "Indexed files:      " << fileCount << "\n";
+        oss << "Cached summaries:   " << summaryCount << "\n";
+        oss << "Coverage:           ";
+        if (fileCount > 0)
+            oss << (summaryCount * 100 / fileCount) << "%";
+        else
+            oss << "N/A";
+        oss << "\n\n";
+
+        // Show extension breakdown.
+        auto entries = m_WorkspaceIndexer.GetAllEntries();
+        std::map<std::string, int> extCounts;
+        for (auto const& e : entries)
+            extCounts[e.extension]++;
+
+        oss << "By extension:\n";
+        for (auto const& [ext, count] : extCounts)
+            oss << "  " << ext << "  " << count << " files\n";
+
+        oss << "\nUse /index rescan to re-scan workspace files.\n";
+        oss << "The AI can use get_file_summary to generate summaries on demand.";
+        return oss.str();
+    }
+
+    bool AssistantController::MakeToolAiCall(std::string const& systemPrompt, std::string const& userPrompt,
+                                             std::string& outResponse, std::string& outError)
+    {
+        if (m_ShuttingDown.load())
+        {
+            outError = "Shutting down";
+            return false;
+        }
+
+        int const seq = m_NextRequestSeq.fetch_add(1);
+
+        // Build a unique subfolder name for this tool AI call.
+        auto const nowUtc = std::chrono::system_clock::now();
+        auto const nowTime = std::chrono::system_clock::to_time_t(nowUtc);
+        std::tm utcTm{};
+#ifdef _WIN32
+        gmtime_s(&utcTm, &nowTime);
+#else
+        gmtime_r(&nowTime, &utcTm);
+#endif
+        char timeBuf[32];
+        std::strftime(timeBuf, sizeof(timeBuf), "%Y%m%d_%H%M%S", &utcTm);
+        std::string const subfolder = "_assistant/tool_" + std::string(timeBuf) + "_" + std::to_string(seq);
+
+        LOG_APP_INFO("[assistant] MakeToolAiCall: subfolder='{}' sysPrompt={} bytes, userPrompt={} bytes", subfolder,
+                     systemPrompt.size(), userPrompt.size());
+
+        return RunSingleAiCall(subfolder, systemPrompt, /*taskContent=*/"", /*cntxContent=*/"", userPrompt, outResponse,
+                               outError);
+    }
+
+    // -----------------------------------------------------------------
+    // Tool approval flow
+    // -----------------------------------------------------------------
+
+    bool AssistantController::RequestToolApproval(std::string const& sessionId, ToolCall const& call,
+                                                  std::string const& description)
+    {
+        int const seq = m_NextApprovalSeq.fetch_add(1);
+        std::string const requestId = "apr_" + std::to_string(seq);
+
+        auto approval = std::make_shared<PendingApproval>();
+        approval->requestId = requestId;
+
+        {
+            std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
+            m_PendingApprovals[requestId] = approval;
+        }
+
+        // Build args JSON for the approval request message.
+        std::string argsJson = "{";
+        {
+            bool first = true;
+            for (auto const& [k, v] : call.args)
+            {
+                if (!first)
+                    argsJson += ",";
+                argsJson += "\"" + JsonEscape(k) + "\":\"" + JsonEscape(v) + "\"";
+                first = false;
+            }
+        }
+        argsJson += "}";
+
+        // Send approval_request to frontend.
+        QueueMessage("{\"type\":\"approval_request\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"requestId\":\"" +
+                     JsonEscape(requestId) + "\",\"tool\":\"" + JsonEscape(call.name) + "\",\"args\":" + argsJson +
+                     ",\"description\":\"" + JsonEscape(description) + "\"}");
+
+        LOG_APP_INFO("[assistant] Approval requested: {} — {}", requestId, description);
+
+        // Block until the user responds or timeout.
+        bool approved = false;
+        {
+            std::unique_lock<std::mutex> lock(approval->mutex);
+            bool notTimedOut = approval->cv.wait_for(lock, std::chrono::seconds(APPROVAL_TIMEOUT_S),
+                                                     [&] { return approval->responded || m_ShuttingDown.load(); });
+            if (notTimedOut && approval->responded)
+            {
+                approved = approval->approved;
+            }
+            else
+            {
+                LOG_APP_WARN("[assistant] Approval timed out or shutdown: {}", requestId);
+                QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"tool\":\"" +
+                             JsonEscape(call.name) + "\",\"ok\":false,\"summary\":\"Approval timed out after " +
+                             std::to_string(APPROVAL_TIMEOUT_S) + " seconds.\"}");
+            }
+        }
+
+        // Remove from pending map.
+        {
+            std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
+            m_PendingApprovals.erase(requestId);
+        }
+
+        LOG_APP_INFO("[assistant] Approval result: {} — {}", requestId, approved ? "approved" : "denied");
+        return approved;
+    }
+
+    void AssistantController::HandleApprovalResponse(std::string const& requestId, bool approved)
+    {
+        std::shared_ptr<PendingApproval> approval;
+        {
+            std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
+            auto it = m_PendingApprovals.find(requestId);
+            if (it == m_PendingApprovals.end())
+            {
+                LOG_APP_WARN("[assistant] Approval response for unknown request: {}", requestId);
+                return;
+            }
+            approval = it->second;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(approval->mutex);
+            approval->responded = true;
+            approval->approved = approved;
+        }
+        approval->cv.notify_one();
+        LOG_APP_INFO("[assistant] Approval response received: {} — {}", requestId, approved ? "approved" : "denied");
     }
 
     // -----------------------------------------------------------------
@@ -1076,6 +1691,15 @@ namespace AIAssistant
         // Idempotent: only the first call does real work.
         if (m_ShuttingDown.exchange(true))
             return;
+
+        // Wake all pending approvals so background threads can finish.
+        {
+            std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
+            for (auto& [id, approval] : m_PendingApprovals)
+            {
+                approval->cv.notify_all();
+            }
+        }
 
         // Force-close assistant WS connections.
         {

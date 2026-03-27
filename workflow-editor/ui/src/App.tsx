@@ -9,6 +9,7 @@ import MasterPasswordDialog from "./components/MasterPasswordDialog";
 import StatusLeds from "./components/StatusLeds";
 import { useStatusWebSocket } from "./hooks/useStatusWebSocket";
 import { getKeysStatus, type KeysStatusResponse } from "./api/keys";
+import { listAiInterfaces } from "./api/aiInterfaces";
 import type { JcwfFile } from "./jcwf/types";
 
 export type EditorSettings = {
@@ -54,6 +55,7 @@ export default function App(): JSX.Element
   const [masterPassword, setMasterPassword] = useState<string | null>(null);
   const [aiManagerDirty, setAiManagerDirty] = useState<boolean>(false);
   const [keysDirty, setKeysDirty] = useState<boolean>(false);
+  const [hasAiProvider, setHasAiProvider] = useState<boolean>(true);
   const statusWs = useStatusWebSocket();
 
   // Check master password / keys status on mount
@@ -63,6 +65,9 @@ export default function App(): JSX.Element
       .catch(() => {
         // Server not reachable — don't block the UI
       });
+    listAiInterfaces()
+      .then((resp) => setHasAiProvider(resp.ok && resp.api_index >= 0 && resp.interfaces.length > 0))
+      .catch(() => setHasAiProvider(false));
   }, []);
 
   const onSettingsChange = useCallback((newSettings: EditorSettings) => {
@@ -85,6 +90,12 @@ export default function App(): JSX.Element
       {
         return;
       }
+    }
+    if (route === "ai-manager" && nextRoute !== "ai-manager")
+    {
+      listAiInterfaces()
+        .then((resp) => setHasAiProvider(resp.ok && resp.api_index >= 0 && resp.interfaces.length > 0))
+        .catch(() => {});
     }
     setRoute(nextRoute);
   }, [route, confirmLoseChanges]);
@@ -249,6 +260,8 @@ export default function App(): JSX.Element
             className={`btn ${route === "assistant" ? "btnActive" : ""}`}
             onClick={() => { navigate("assistant"); }}
             type="button"
+            disabled={!hasAiProvider && route !== "assistant"}
+            title={!hasAiProvider && route !== "assistant" ? "No AI provider configured. Add one in AI Manager." : undefined}
           >
             Assistant
           </button>

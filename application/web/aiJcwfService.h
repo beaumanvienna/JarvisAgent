@@ -81,6 +81,14 @@ namespace AIAssistant
         // Shutdown: signal all background threads to stop and join them.
         void Shutdown();
 
+        // Validate JCWF JSON text and return errors/warnings as a formatted string.
+        // Returns true if the JCWF is valid (no errors).
+        // Public so assistant tools can call it directly.
+        static bool ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
+                                 ScriptRegistry const* scriptRegistry = nullptr,
+                                 std::vector<GeneratedScript> const* pendingScripts = nullptr,
+                                 std::vector<WorkflowValidationIssue>* outIssues = nullptr);
+
     private:
         // Single AI call: writes queue files, waits for completion, returns response text.
         // Returns true on success; on failure, outError describes the issue.
@@ -89,13 +97,6 @@ namespace AIAssistant
         bool RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
                              std::string const& taskContent, std::string const& cntxContent, std::string const& probContent,
                              std::string& outResponseText, std::string& outError, std::string const& provContent = "");
-
-        // Validate JCWF JSON text and return errors/warnings as a formatted string.
-        // Returns true if the JCWF is valid (no errors).
-        static bool ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
-                                 ScriptRegistry const* scriptRegistry = nullptr,
-                                 std::vector<GeneratedScript> const* pendingScripts = nullptr,
-                                 std::vector<WorkflowValidationIssue>* outIssues = nullptr);
 
         // Load the generation guide from doc/jcwf_generation_guide.md.
         static std::string LoadGenerationGuide();

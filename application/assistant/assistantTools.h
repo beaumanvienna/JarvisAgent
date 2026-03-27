@@ -28,8 +28,13 @@
 namespace AIAssistant
 {
     class MemoryStore;
+    class WorkspaceIndexer;
     class WorkflowRegistry;
     class WorkflowRuntimeManager;
+
+    // Callback for making a blocking AI call (used by get_file_summary tool).
+    // Parameters: systemPrompt, userPrompt → outResponse, outError.  Returns true on success.
+    using AiCallFn = std::function<bool(std::string const&, std::string const&, std::string&, std::string&)>;
 
     // -----------------------------------------------------------------
     // Tool definition
@@ -76,6 +81,8 @@ namespace AIAssistant
         void SetWorkflowRegistry(WorkflowRegistry* registry) { m_WorkflowRegistry = registry; }
         void SetWorkflowRuntimeManager(WorkflowRuntimeManager* manager) { m_RuntimeManager = manager; }
         void SetMemoryStore(MemoryStore* store) { m_MemoryStore = store; }
+        void SetWorkspaceIndexer(WorkspaceIndexer* indexer) { m_WorkspaceIndexer = indexer; }
+        void SetAiCallFn(AiCallFn fn) { m_AiCallFn = std::move(fn); }
 
         // Get all tool definitions (for system prompt injection).
         std::vector<ToolDef> const& GetToolDefs() const { return m_ToolDefs; }
@@ -106,6 +113,33 @@ namespace AIAssistant
         ToolResult ExecRecallMemory(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecListMemories(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecDeleteMemory(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecGetFileSummary(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecGetFolderSummary(std::unordered_map<std::string, std::string> const& args);
+
+        // L3 mutating tools (all require approval)
+        ToolResult ExecRunShell(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecWriteFile(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecEditFile(std::unordered_map<std::string, std::string> const& args);
+
+        // L3 runtime control tools
+        ToolResult ExecWorkflowPause(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecWorkflowResume(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecWorkflowStop(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecGetDashboardStatus(std::unordered_map<std::string, std::string> const& args);
+
+        // L3 JCWF development tools
+        ToolResult ExecJcwfRead(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfExplain(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfValidate(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfReadPlan(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfWritePlan(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfGenerate(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfFixTask(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecJcwfWriteScript(std::unordered_map<std::string, std::string> const& args);
+
+        // Helper: resolve workflow_id to absolute .jcwf file path.
+        // Returns empty string and sets outError on failure.
+        std::string ResolveWorkflowPath(std::string const& workflowId, std::string& outError) const;
 
         using ToolFn = std::function<ToolResult(std::unordered_map<std::string, std::string> const&)>;
 
@@ -115,6 +149,8 @@ namespace AIAssistant
         WorkflowRegistry* m_WorkflowRegistry{nullptr};
         WorkflowRuntimeManager* m_RuntimeManager{nullptr};
         MemoryStore* m_MemoryStore{nullptr};
+        WorkspaceIndexer* m_WorkspaceIndexer{nullptr};
+        AiCallFn m_AiCallFn;
 
         // Deny-list for read_file (security)
         static bool IsPathDenied(std::string const& path);

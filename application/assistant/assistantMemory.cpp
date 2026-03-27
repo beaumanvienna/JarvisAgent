@@ -346,7 +346,11 @@ namespace AIAssistant
         auto now = std::chrono::system_clock::now();
         auto tt = std::chrono::system_clock::to_time_t(now);
         std::tm utc{};
+#ifdef _WIN32
+        gmtime_s(&utc, &tt);
+#else
         gmtime_r(&tt, &utc);
+#endif
         char buf[32];
         std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc);
         return buf;

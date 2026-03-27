@@ -8,11 +8,22 @@ export interface AssistantTurn {
   toolOk?: boolean;
 }
 
+export interface PendingApproval {
+  requestId: string;
+  tool: string;
+  args: Record<string, string>;
+  description: string;
+}
+
 export interface AssistantState {
   connected: boolean;
   sessionId: string | null;
   turns: AssistantTurn[];
   thinking: boolean;
+  pendingApproval: PendingApproval | null;
+  completionCandidates: string[];
+  completionPrefix: string;
+  historyEntries: string[];
 }
 
 export interface AssistantActions {
@@ -20,6 +31,9 @@ export interface AssistantActions {
   newSession: () => void;
   resumeSession: (sessionId: string) => void;
   listSessions: () => void;
+  respondToApproval: (requestId: string, approved: boolean) => void;
+  requestCompletion: (prefix: string) => void;
+  requestHistory: (maxEntries?: number) => void;
 }
 
 type MessageHandler = (msg: Record<string, unknown>) => void;
@@ -35,6 +49,10 @@ export function useAssistantWebSocket(): [AssistantState, AssistantActions] {
     sessionId: null,
     turns: [],
     thinking: false,
+    pendingApproval: null,
+    completionCandidates: [],
+    completionPrefix: "",
+    historyEntries: [],
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -103,8 +121,26 @@ export function useAssistantWebSocket(): [AssistantState, AssistantActions] {
         ...prev,
         turns: [...prev.turns, { role: "tool", text: resultText, toolName: tool, toolOk: ok }],
       }));
+    } else if (type === "approval_request") {
+      const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+      const tool = typeof msg.tool === "string" ? msg.tool : "";
+      const args = (msg.args && typeof msg.args === "object" && !Array.isArray(msg.args))
+        ? msg.args as Record<string, string>
+        : {};
+      const description = typeof msg.description === "string" ? msg.description : "";
+      setState((prev) => ({
+        ...prev,
+        pendingApproval: { requestId, tool, args, description },
+      }));
+    } else if (type === "completion_response") {
+      const candidates = Array.isArray(msg.candidates) ? (msg.candidates as string[]) : [];
+      const prefix = typeof msg.prefix === "string" ? msg.prefix : "";
+      setState((prev) => ({ ...prev, completionCandidates: candidates, completionPrefix: prefix }));
+    } else if (type === "history") {
+      const entries = Array.isArray(msg.entries) ? (msg.entries as string[]) : [];
+      setState((prev) => ({ ...prev, historyEntries: entries }));
     } else if (type === "clear") {
-      setState((prev) => ({ ...prev, turns: [] }));
+      setState((prev) => ({ ...prev, turns: [], pendingApproval: null }));
     }
   }, []);
 
@@ -189,7 +225,23 @@ export function useAssistantWebSocket(): [AssistantState, AssistantActions] {
     wsRef.current.send(JSON.stringify({ type: "list_sessions" }));
   }, []);
 
-  const actions: AssistantActions = { sendMessage, newSession, resumeSession, listSessions };
+  const respondToApproval = useCallback((requestId: string, approved: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: "approval_response", requestId, approved }));
+    setState((prev) => ({ ...prev, pendingApproval: null }));
+  }, []);
+
+  const requestCompletion = useCallback((prefix: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: "completion_request", prefix }));
+  }, []);
+
+  const requestHistory = useCallback((maxEntries?: number) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: "get_history", maxEntries: maxEntries ?? 500 }));
+  }, []);
+
+  const actions: AssistantActions = { sendMessage, newSession, resumeSession, listSessions, respondToApproval, requestCompletion, requestHistory };
 
   return [state, actions];
 }
