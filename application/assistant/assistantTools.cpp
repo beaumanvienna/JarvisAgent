@@ -322,14 +322,50 @@ namespace AIAssistant
 
             size_t jsonStart = openPos + openTag.size();
             size_t closePos = responseText.find(closeTag, jsonStart);
+
+            std::string jsonStr;
             if (closePos == std::string::npos)
             {
-                // Malformed — no closing tag. Include remaining text as-is.
-                outCleanText.append(responseText, openPos, std::string::npos);
-                break;
+                // No closing tag — attempt to extract a complete JSON object by
+                // counting braces from the first '{'.
+                size_t braceStart = responseText.find('{', jsonStart);
+                if (braceStart == std::string::npos)
+                {
+                    // Nothing usable — include remaining text as-is and stop.
+                    outCleanText.append(responseText, openPos, std::string::npos);
+                    break;
+                }
+                int depth = 0;
+                size_t braceEnd = std::string::npos;
+                for (size_t i = braceStart; i < responseText.size(); ++i)
+                {
+                    if (responseText[i] == '{')
+                        ++depth;
+                    else if (responseText[i] == '}')
+                    {
+                        --depth;
+                        if (depth == 0)
+                        {
+                            braceEnd = i;
+                            break;
+                        }
+                    }
+                }
+                if (braceEnd == std::string::npos)
+                {
+                    // Incomplete JSON — include remaining text as-is and stop.
+                    outCleanText.append(responseText, openPos, std::string::npos);
+                    break;
+                }
+                jsonStr = responseText.substr(braceStart, braceEnd - braceStart + 1);
+                // Consume the rest of the response (the truncated block was the last thing).
+                pos = braceEnd + 1;
             }
-
-            std::string jsonStr = responseText.substr(jsonStart, closePos - jsonStart);
+            else
+            {
+                jsonStr = responseText.substr(jsonStart, closePos - jsonStart);
+                pos = closePos + closeTag.size();
+            }
 
             // Trim whitespace.
             while (!jsonStr.empty() && (jsonStr.front() == ' ' || jsonStr.front() == '\n' || jsonStr.front() == '\r'))
@@ -348,8 +384,6 @@ namespace AIAssistant
                 // Failed to parse — include the raw block in output as a note.
                 outCleanText += "[Failed to parse tool call: " + jsonStr + "]";
             }
-
-            pos = closePos + closeTag.size();
         }
 
         return calls;
@@ -895,6 +929,14 @@ namespace AIAssistant
 
         // Resolve relative to CWD.
         fs::path filePath = fs::path(path).lexically_normal();
+        std::string normalized = filePath.string();
+
+        // Reject path traversal and absolute paths.
+        if (normalized.find("..") != std::string::npos)
+            return {"read_file", false, "Path traversal not allowed: " + path};
+        if (filePath.is_absolute())
+            return {"read_file", false, "Absolute paths not allowed. Use paths relative to project root."};
+
         std::error_code ec;
         if (!fs::exists(filePath, ec))
             return {"read_file", false, "File not found: " + path};

@@ -109,7 +109,7 @@ See also:
 ---
 
 ## ~~12. Browser-based AI chat terminal~~ ✅
-- ~~Phases 1–4 implemented~~ ✅ xterm.js terminal in "Assistant" tab, `/ws/assistant` WebSocket, `AssistantController` + `AssistantSession` + `ContextAssembler` + `ToolRegistry` (16 tools) + `MemoryStore` + `WorkspaceIndexer`. Persistent sessions (JSONL), workspace memory (`memory.json`), file index with cached AI summaries (`file_index.jsonl`). Slash commands: `/help`, `/status`, `/runs`, `/log`, `/memory`, `/index`. Assistant button greyed out when no AI provider configured. See `application/assistant/ai-assistant.md`.
+- ~~Phases 1–10 implemented~~ ✅ xterm.js terminal in "Assistant" tab, `/ws/assistant` WebSocket, `AssistantController` + `AssistantSession` + `ContextAssembler` + `ToolRegistry` (31 tools) + `MemoryStore` + `WorkspaceIndexer`. Persistent sessions (JSONL), workspace memory (`memory.json`), file index with cached AI summaries (`file_index.jsonl`). Slash commands: `/help`, `/status`, `/runs`, `/log`, `/memory`, `/index`, `/sessions`, `/new`, `/clear`. Ghost-text auto-completion + Ctrl+R history search. Multi-step tool loop (max 10 iterations) with loop detection. User approval flow for all mutating tools (60s timeout). Mutating tools: `run_shell`, `write_file`, `edit_file`. JCWF development tools (8): `jcwf_read/explain/validate/read_plan/write_plan/generate/fix_task/write_script`. Runtime control tools: `workflow_pause/resume/stop`, `get_dashboard_status`. Response validation (keyword overlap + path existence). 70-test suite covering all tools, approval flow, loop detection, access control. Assistant button greyed out when no AI provider configured. See `application/assistant/ai-assistant.md`.
 
 ---
 

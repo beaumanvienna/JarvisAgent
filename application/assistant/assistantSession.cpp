@@ -27,6 +27,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <atomic>
 #include <sstream>
 
 // Minimal JSON helpers — avoid pulling in a full JSON writer for simple JSONL.
@@ -226,10 +227,12 @@ namespace AIAssistant
 
     std::string AssistantSession::GenerateSessionId()
     {
+        static std::atomic<uint32_t> s_Counter{0};
         auto now = std::chrono::system_clock::now();
         auto epoch = now.time_since_epoch();
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(epoch).count();
-        return "sess_" + std::to_string(seconds);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(epoch).count();
+        uint32_t n = s_Counter.fetch_add(1, std::memory_order_relaxed);
+        return "sess_" + std::to_string(ms) + "_" + std::to_string(n);
     }
 
     std::string AssistantSession::NowIso8601()

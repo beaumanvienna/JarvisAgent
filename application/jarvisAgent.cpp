@@ -588,7 +588,8 @@ namespace AIAssistant
         }
 
         // Forward event to Python
-        m_PythonEngine->OnEvent(eventPtr);
+        if (m_PythonEngine)
+            m_PythonEngine->OnEvent(eventPtr);
     }
 
     //--------------------------------------------------------------------

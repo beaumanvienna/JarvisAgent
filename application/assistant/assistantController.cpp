@@ -404,7 +404,31 @@ namespace AIAssistant
 
     void AssistantController::HandleListSessions(crow::websocket::connection& /*conn*/)
     {
+        // Start with sessions persisted to disk.
         auto ids = AssistantSession::ListSessions(GetSessionsDir());
+
+        // Also include in-memory sessions that have not yet written a file
+        // (e.g. newly created sessions with no messages).
+        {
+            std::lock_guard<std::mutex> lock(m_SessionsMutex);
+            for (auto const& [sid, _] : m_Sessions)
+            {
+                bool found = false;
+                for (auto const& id : ids)
+                {
+                    if (id == sid)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    ids.push_back(sid);
+            }
+        }
+
+        // Re-sort newest first (session IDs are timestamp-based).
+        std::sort(ids.begin(), ids.end(), std::greater<>());
 
         std::string json = "{\"type\":\"session_list\",\"sessions\":[";
         for (size_t i = 0; i < ids.size(); ++i)
@@ -697,6 +721,7 @@ namespace AIAssistant
 
                 std::string currentProb = prompt.prob;
                 std::string accumulatedToolContext;
+                bool anyToolsUsed = false;
 
                 // STNG without tool descriptions — used on the final iteration
                 // to force a final answer without tool calls.
@@ -777,10 +802,47 @@ namespace AIAssistant
                         // No tool calls — this is the final response.
                         std::string finalText = cleanText.empty() ? responseText : cleanText;
 
+                        // Detect "described but didn't call" pattern: the AI said it would execute/run
+                        // something but produced no tool call.  Append a clear note so the user isn't misled.
+                        if (!anyToolsUsed && iteration == 0)
+                        {
+                            std::string lower;
+                            lower.reserve(finalText.size());
+                            for (char ch : finalText)
+                                lower += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+                            static std::vector<std::string> const falseActionPhrases = {
+                                "proceeding to execute",
+                                "proceeding to run",
+                                "will execute the command",
+                                "will run the command",
+                                "executing the command",
+                                "running the command",
+                            };
+                            bool falseAction = false;
+                            for (auto const& phrase : falseActionPhrases)
+                            {
+                                if (lower.find(phrase) != std::string::npos)
+                                {
+                                    falseAction = true;
+                                    break;
+                                }
+                            }
+                            if (falseAction)
+                            {
+                                finalText += "\n\n\xe2\x9a\xa0 Note: no command was actually executed. "
+                                             "The AI described an action but did not call the tool.";
+                            }
+                        }
+
                         // Response relevance check (Phase 12).
-                        std::string validationWarnings = ValidateResponse(msg, finalText);
-                        if (!validationWarnings.empty())
-                            finalText += validationWarnings;
+                        // Skip if tools were used — the response reflects tool output, not the raw user message keywords.
+                        if (!anyToolsUsed)
+                        {
+                            std::string validationWarnings = ValidateResponse(msg, finalText);
+                            if (!validationWarnings.empty())
+                                finalText += validationWarnings;
+                        }
 
                         session->AddAssistantMessage(finalText);
                         QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"text\":\"" +
@@ -789,6 +851,7 @@ namespace AIAssistant
                     }
 
                     // Execute each tool call.
+                    anyToolsUsed = true;
                     LOG_APP_INFO("[assistant] AI response contains {} tool call(s) (iteration {})", toolCalls.size(),
                                  iteration + 1);
 
@@ -1146,9 +1209,11 @@ namespace AIAssistant
         }
         requestPool->KickFileActivityWatchdog(handle);
 
-        if (!taskContent.empty())
+        // TASK file must always be written — the SessionManager
+        // requires STNG + TASK + CNTX + PROB for a complete environment.
         {
-            if (!WriteFile(queueDir / "TASK_instructions.txt", taskContent, writeError))
+            std::string const task = taskContent.empty() ? "Process the request." : taskContent;
+            if (!WriteFile(queueDir / "TASK_instructions.txt", task, writeError))
             {
                 requestPool->Forget(handle);
                 outError = "Failed to write TASK file: " + writeError;

@@ -120,6 +120,8 @@ export function useAssistantWebSocket(): [AssistantState, AssistantActions] {
       setState((prev) => ({
         ...prev,
         turns: [...prev.turns, { role: "tool", text: resultText, toolName: tool, toolOk: ok }],
+        // Clear any pending approval — the tool has completed (approved, denied, or timed out).
+        pendingApproval: null,
       }));
     } else if (type === "approval_request") {
       const requestId = typeof msg.requestId === "string" ? msg.requestId : "";

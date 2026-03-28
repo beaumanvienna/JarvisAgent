@@ -1,7 +1,7 @@
 # AI Assistant — Technical Documentation
 
 **Status:** Implemented
-**Last updated:** 2026-03-26
+**Last updated:** 2026-03-28
 
 ---
 
@@ -23,6 +23,21 @@ validate its own responses for relevance and hallucinations.
 | L1 | Chat terminal | ✅ Implemented |
 | L2 | Project-aware assistant | ✅ Implemented |
 | L3 | Agentic assistant (multi-step planning, file edits, compile/test/fix) | ✅ Implemented |
+
+The assistant exposes **31 tools** spanning read-only queries (system status,
+file reading, code search), project-aware operations (memory persistence,
+workspace indexing with cached AI-generated file summaries), and mutating
+actions (shell execution, file writes/edits, JCWF workflow development, runtime
+control). Tool invocations run inside a **multi-step loop** (up to 10
+iterations per user message) with automatic **loop detection** that forces a
+final answer when the same tool+args combination is called more than three
+times. All mutating tools require explicit **user approval** via an inline Y/n
+prompt (60-second timeout, auto-denied on expiry). The frontend provides
+**ghost-text auto-completion** (slash commands, workflow IDs, command history)
+and **Ctrl+R reverse history search** across all sessions. Before delivering
+each response, a **relevance validator** checks keyword overlap between the
+user's question and the AI's answer and verifies that any file paths mentioned
+in the response actually exist in the workspace.
 
 ---
 
@@ -134,7 +149,7 @@ assistant/
 - Owns the JSONL history file (append-only)
 - `GetRecentTurns(maxTokens)` — returns recent turns within a token budget
 - `AddUserMessage()`, `AddAssistantMessage()`
-- Session ID generated from timestamp on creation
+- Session ID generated from milliseconds timestamp + atomic counter at creation
 
 ### MemoryStore (`assistantMemory.h/.cpp`)
 
@@ -188,7 +203,7 @@ invoked via `<tool_call>` blocks in AI responses.
 | Tool | Description | Approval |
 |------|-------------|----------|
 | `run_workflow` | Start a workflow run. Args: `workflow_id` | Yes |
-| `run_shell` | Execute shell command via `/bin/sh -c`. Args: `command`, `cwd` (optional). 30s timeout, blocklist (`rm -rf /`, `mkfs`, `dd if=`, fork bomb, `> /dev/sd`, `sudo`), process group kill on timeout | Yes |
+| `run_shell` | Execute shell command via `/bin/sh -c`. Args: `command`, `cwd` (optional). 30s timeout, process group kill on timeout | Yes |
 | `write_file` | Write content to a file. Args: `path`, `content`. Creates parent dirs, atomic write (`.tmp` + rename), `.bak` backup, path deny-list | Yes |
 | `edit_file` | Find-and-replace in file. Args: `path`, `old_text`, `new_text`. Must match exactly once (fails on 0 or >1 matches), atomic write, `.bak` backup | Yes |
 
@@ -349,7 +364,7 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 
 | Concern | Mitigation |
 |---------|-----------|
-| Shell commands | `run_shell` requires approval, blocklist (`rm -rf /`, `mkfs`, `dd if=`, etc.), 30s timeout, process group kill |
+| Shell commands | `run_shell` requires approval (all commands go through approval flow), 30s timeout, process group kill |
 | Workflow execution | `run_workflow` requires approval |
 | File writes | `write_file`, `edit_file` require approval, atomic writes with `.bak` backup |
 | JCWF mutations | `jcwf_generate`, `jcwf_fix_task`, `jcwf_write_plan`, `jcwf_write_script` require approval, atomic writes with backup |
@@ -377,7 +392,7 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 | `assistantController.h/.cpp` | WS handler, message routing, AI calls, slash commands, approval flow, completion, history, response validation |
 | `assistantSession.h/.cpp` | JSONL session persistence, turn management |
 | `contextAssembler.h/.cpp` | Prompt assembly (system prompt + context + tools + memories + summaries + L3 guidelines) |
-| `assistantTools.h/.cpp` | Tool registry, tool execution, tool descriptions (35 tools) |
+| `assistantTools.h/.cpp` | Tool registry, tool execution, tool descriptions (31 tools) |
 | `assistantMemory.h/.cpp` | Persistent key-value memory store |
 | `workspaceIndexer.h/.cpp` | Workspace file indexing, summary caching |
 
