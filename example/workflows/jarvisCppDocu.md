@@ -56,7 +56,7 @@ All tasks follow the same pattern:
 
 ## Tasks generated from the source tree
 
-Total AI tasks: **60**
+Total AI tasks: **73**
 
 ### application/
 
@@ -102,33 +102,45 @@ Total AI tasks: **60**
 | `application/workflow/workflowTriggerBinder.h` | yes | `doc_application_workflow_workflowTriggerBinder_h` | `../queue/jarvisCppDocu/37_doc_application_workflow_workflowTriggerBinder_h` |
 | `application/workflow/workflowTypes.h` | no | `doc_application_workflow_workflowTypes_h` | `../queue/jarvisCppDocu/38_doc_application_workflow_workflowTypes_h` |
 
+### application/assistant/
+
+| Source | Includes .cpp? | Task ID | Working directory |
+|---|---:|---|---|
+
+| `application/assistant/assistantController.h` | yes | `doc_application_assistant_assistantController_h` | `../queue/jarvisCppDocu/44_doc_application_assistant_assistantController_h` |
+| `application/assistant/assistantMemory.h` | yes | `doc_application_assistant_assistantMemory_h` | `../queue/jarvisCppDocu/45_doc_application_assistant_assistantMemory_h` |
+| `application/assistant/assistantSession.h` | yes | `doc_application_assistant_assistantSession_h` | `../queue/jarvisCppDocu/46_doc_application_assistant_assistantSession_h` |
+| `application/assistant/assistantTools.h` | yes | `doc_application_assistant_assistantTools_h` | `../queue/jarvisCppDocu/47_doc_application_assistant_assistantTools_h` |
+| `application/assistant/contextAssembler.h` | yes | `doc_application_assistant_contextAssembler_h` | `../queue/jarvisCppDocu/48_doc_application_assistant_contextAssembler_h` |
+| `application/assistant/workspaceIndexer.h` | yes | `doc_application_assistant_workspaceIndexer_h` | `../queue/jarvisCppDocu/49_doc_application_assistant_workspaceIndexer_h` |
+
 ### engine/
 
 | Source | Includes .cpp? | Task ID | Working directory |
 |---|---:|---|---|
 
-| `engine/auxiliary/file.h` | yes | `doc_engine_auxiliary_file_h` | `../queue/jarvisCppDocu/39_doc_engine_auxiliary_file_h` |
-| `engine/auxiliary/threadPool.h` | yes | `doc_engine_auxiliary_threadPool_h` | `../queue/jarvisCppDocu/40_doc_engine_auxiliary_threadPool_h` |
-| `engine/core.h` | yes | `doc_engine_core_h` | `../queue/jarvisCppDocu/41_doc_engine_core_h` |
-| `engine/curlWrapper/curlManager.h` | no | `doc_engine_curlWrapper_curlManager_h` | `../queue/jarvisCppDocu/42_doc_engine_curlWrapper_curlManager_h` |
-| `engine/curlWrapper/curlWrapper.h` | yes | `doc_engine_curlWrapper_curlWrapper_h` | `../queue/jarvisCppDocu/43_doc_engine_curlWrapper_curlWrapper_h` |
-| `engine/engine.h` | yes | `doc_engine_engine_h` | `../queue/jarvisCppDocu/44_doc_engine_engine_h` |
-| `engine/event/applicationEvent.h` | no | `doc_engine_event_applicationEvent_h` | `../queue/jarvisCppDocu/45_doc_engine_event_applicationEvent_h` |
-| `engine/event/engineEvent.h` | no | `doc_engine_event_engineEvent_h` | `../queue/jarvisCppDocu/46_doc_engine_event_engineEvent_h` |
-| `engine/event/event.h` | no | `doc_engine_event_event_h` | `../queue/jarvisCppDocu/47_doc_engine_event_event_h` |
-| `engine/event/eventQueue.h` | yes | `doc_engine_event_eventQueue_h` | `../queue/jarvisCppDocu/48_doc_engine_event_eventQueue_h` |
-| `engine/event/events.h` | no | `doc_engine_event_events_h` | `../queue/jarvisCppDocu/49_doc_engine_event_events_h` |
-| `engine/event/filesystemEvent.h` | no | `doc_engine_event_filesystemEvent_h` | `../queue/jarvisCppDocu/50_doc_engine_event_filesystemEvent_h` |
-| `engine/event/keyboardEvent.h` | no | `doc_engine_event_keyboardEvent_h` | `../queue/jarvisCppDocu/51_doc_engine_event_keyboardEvent_h` |
-| `engine/event/pythonErrorEvent.h` | no | `doc_engine_event_pythonErrorEvent_h` | `../queue/jarvisCppDocu/52_doc_engine_event_pythonErrorEvent_h` |
-| `engine/event/timerEvent.h` | no | `doc_engine_event_timerEvent_h` | `../queue/jarvisCppDocu/53_doc_engine_event_timerEvent_h` |
-| `engine/input/keyboardInput.h` | yes | `doc_engine_input_keyboardInput_h` | `../queue/jarvisCppDocu/54_doc_engine_input_keyboardInput_h` |
-| `engine/json/configChecker.h` | yes | `doc_engine_json_configChecker_h` | `../queue/jarvisCppDocu/55_doc_engine_json_configChecker_h` |
-| `engine/json/configParser.h` | yes | `doc_engine_json_configParser_h` | `../queue/jarvisCppDocu/56_doc_engine_json_configParser_h` |
-| `engine/json/jsonHelper.h` | yes | `doc_engine_json_jsonHelper_h` | `../queue/jarvisCppDocu/57_doc_engine_json_jsonHelper_h` |
-| `engine/log/log.h` | yes | `doc_engine_log_log_h` | `../queue/jarvisCppDocu/58_doc_engine_log_log_h` |
-| `engine/log/terminalLogStreamBuf.h` | no | `doc_engine_log_terminalLogStreamBuf_h` | `../queue/jarvisCppDocu/59_doc_engine_log_terminalLogStreamBuf_h` |
-| `engine/log/terminalManager.h` | yes | `doc_engine_log_terminalManager_h` | `../queue/jarvisCppDocu/60_doc_engine_log_terminalManager_h` |
+| `engine/auxiliary/file.h` | yes | `doc_engine_auxiliary_file_h` | `../queue/jarvisCppDocu/50_doc_engine_auxiliary_file_h` |
+| `engine/auxiliary/threadPool.h` | yes | `doc_engine_auxiliary_threadPool_h` | `../queue/jarvisCppDocu/51_doc_engine_auxiliary_threadPool_h` |
+| `engine/core.h` | yes | `doc_engine_core_h` | `../queue/jarvisCppDocu/52_doc_engine_core_h` |
+| `engine/curlWrapper/curlManager.h` | no | `doc_engine_curlWrapper_curlManager_h` | `../queue/jarvisCppDocu/53_doc_engine_curlWrapper_curlManager_h` |
+| `engine/curlWrapper/curlWrapper.h` | yes | `doc_engine_curlWrapper_curlWrapper_h` | `../queue/jarvisCppDocu/54_doc_engine_curlWrapper_curlWrapper_h` |
+| `engine/engine.h` | yes | `doc_engine_engine_h` | `../queue/jarvisCppDocu/55_doc_engine_engine_h` |
+| `engine/event/applicationEvent.h` | no | `doc_engine_event_applicationEvent_h` | `../queue/jarvisCppDocu/56_doc_engine_event_applicationEvent_h` |
+| `engine/event/engineEvent.h` | no | `doc_engine_event_engineEvent_h` | `../queue/jarvisCppDocu/57_doc_engine_event_engineEvent_h` |
+| `engine/event/event.h` | no | `doc_engine_event_event_h` | `../queue/jarvisCppDocu/58_doc_engine_event_event_h` |
+| `engine/event/eventQueue.h` | yes | `doc_engine_event_eventQueue_h` | `../queue/jarvisCppDocu/59_doc_engine_event_eventQueue_h` |
+| `engine/event/events.h` | no | `doc_engine_event_events_h` | `../queue/jarvisCppDocu/60_doc_engine_event_events_h` |
+| `engine/event/filesystemEvent.h` | no | `doc_engine_event_filesystemEvent_h` | `../queue/jarvisCppDocu/61_doc_engine_event_filesystemEvent_h` |
+| `engine/event/keyboardEvent.h` | no | `doc_engine_event_keyboardEvent_h` | `../queue/jarvisCppDocu/62_doc_engine_event_keyboardEvent_h` |
+| `engine/event/pythonErrorEvent.h` | no | `doc_engine_event_pythonErrorEvent_h` | `../queue/jarvisCppDocu/63_doc_engine_event_pythonErrorEvent_h` |
+| `engine/event/timerEvent.h` | no | `doc_engine_event_timerEvent_h` | `../queue/jarvisCppDocu/64_doc_engine_event_timerEvent_h` |
+| `engine/input/keyboardInput.h` | yes | `doc_engine_input_keyboardInput_h` | `../queue/jarvisCppDocu/65_doc_engine_input_keyboardInput_h` |
+| `engine/json/configChecker.h` | yes | `doc_engine_json_configChecker_h` | `../queue/jarvisCppDocu/66_doc_engine_json_configChecker_h` |
+| `engine/json/configParser.h` | yes | `doc_engine_json_configParser_h` | `../queue/jarvisCppDocu/67_doc_engine_json_configParser_h` |
+| `engine/json/jsonHelper.h` | yes | `doc_engine_json_jsonHelper_h` | `../queue/jarvisCppDocu/68_doc_engine_json_jsonHelper_h` |
+| `engine/log/log.h` | yes | `doc_engine_log_log_h` | `../queue/jarvisCppDocu/69_doc_engine_log_log_h` |
+| `engine/log/terminalLogStreamBuf.h` | no | `doc_engine_log_terminalLogStreamBuf_h` | `../queue/jarvisCppDocu/70_doc_engine_log_terminalLogStreamBuf_h` |
+| `engine/log/terminalManager.h` | yes | `doc_engine_log_terminalManager_h` | `../queue/jarvisCppDocu/71_doc_engine_log_terminalManager_h` |
 
 ## Up-to-date behavior
 

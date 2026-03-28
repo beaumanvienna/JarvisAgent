@@ -225,11 +225,19 @@ See also:
 
 ---
 
-### 10. Fix JCWF examples for first install
-- Example workflows must not show failures when the dashboard opens automatically on first launch
-- Current issue: `aiCarMaintenancePipeline`, `make-example`, and `vehicleTroubleshootingGuide` fail because they require API keys or build tools not yet configured
-- Options: ship only examples that work out of the box (no API keys needed), or change trigger type so they don't auto-run, or add a "setup required" notice
-- First impression matters — a fresh install should look clean in the dashboard
+### 10. Fix JCWF examples for first install + fix currently broken JCWFs
+
+#### Part A — Clean first-install experience
+- AI-requiring workflows must not auto-run and fail on a fresh install (no API keys yet)
+- Fix: set `"enabled": false` on the `auto` trigger for all workflows that require AI or external tools (`aiCarMaintenancePipeline`, `vehicleTroubleshootingGuide`, `make-example`, etc.) — keep `manual` trigger so they still work once configured
+- Ideally ship one always-green auto-trigger workflow (pure shell/python, no AI) so the dashboard opens with at least one succeeded run
+
+#### Part B — Fix currently broken example workflows (4 failures visible in dashboard)
+- `aiCarMaintenancePipeline` — failed, needs investigation
+- `bookSummaryPipeline` — failed, needs investigation
+- `portfolioDividendAnalysis` — failed, needs investigation
+- `vehicleTroubleshootingGuide` — failed, needs investigation
+- All broken JCWFs are under `example/workflows/` — fix scripts, paths, or prompt content as needed, then re-verify E2E
 
 ---
 

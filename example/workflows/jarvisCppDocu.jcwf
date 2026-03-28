@@ -1801,12 +1801,240 @@
         ]
       }
     },
+    "doc_application_assistant_assistantController_h": {
+      "id": "doc_application_assistant_assistantController_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/assistantController.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/44_doc_application_assistant_assistantController_h",
+      "file_inputs": [
+        "../../../application/assistant/assistantController.h",
+        "../../../application/assistant/assistantController.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/assistantController.h",
+          "../../../application/assistant/assistantController.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_assistant_assistantMemory_h": {
+      "id": "doc_application_assistant_assistantMemory_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/assistantMemory.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/45_doc_application_assistant_assistantMemory_h",
+      "file_inputs": [
+        "../../../application/assistant/assistantMemory.h",
+        "../../../application/assistant/assistantMemory.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/assistantMemory.h",
+          "../../../application/assistant/assistantMemory.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_assistant_assistantSession_h": {
+      "id": "doc_application_assistant_assistantSession_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/assistantSession.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/46_doc_application_assistant_assistantSession_h",
+      "file_inputs": [
+        "../../../application/assistant/assistantSession.h",
+        "../../../application/assistant/assistantSession.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/assistantSession.h",
+          "../../../application/assistant/assistantSession.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_assistant_assistantTools_h": {
+      "id": "doc_application_assistant_assistantTools_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/assistantTools.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/47_doc_application_assistant_assistantTools_h",
+      "file_inputs": [
+        "../../../application/assistant/assistantTools.h",
+        "../../../application/assistant/assistantTools.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/assistantTools.h",
+          "../../../application/assistant/assistantTools.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_assistant_contextAssembler_h": {
+      "id": "doc_application_assistant_contextAssembler_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/contextAssembler.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/48_doc_application_assistant_contextAssembler_h",
+      "file_inputs": [
+        "../../../application/assistant/contextAssembler.h",
+        "../../../application/assistant/contextAssembler.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/contextAssembler.h",
+          "../../../application/assistant/contextAssembler.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
+    "doc_application_assistant_workspaceIndexer_h": {
+      "id": "doc_application_assistant_workspaceIndexer_h",
+      "type": "ai_call",
+      "label": "Docu: application/assistant/workspaceIndexer.h",
+      "mode": "single",
+      "working_directory": "../queue/jarvisCppDocu/49_doc_application_assistant_workspaceIndexer_h",
+      "file_inputs": [
+        "../../../application/assistant/workspaceIndexer.h",
+        "../../../application/assistant/workspaceIndexer.cpp"
+      ],
+      "file_outputs": [
+        "docu.output.md"
+      ],
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_docu.txt",
+            "content": "write consise, succinct, no guessing, no embelishments Do not wrap the output in triple-backtick code fences (no ```markdown). Output plain Markdown text only."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_docu.txt",
+            "content": "Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does."
+          }
+        ],
+        "cntx_files": [
+          "../../../application/assistant/workspaceIndexer.h",
+          "../../../application/assistant/workspaceIndexer.cpp"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_docu.txt",
+            "content": "Generate documentation for the provided C++ class. Output Markdown.\n"
+          }
+        ]
+      }
+    },
     "doc_engine_auxiliary_file_h": {
       "id": "doc_engine_auxiliary_file_h",
       "type": "ai_call",
       "label": "Docu: engine/auxiliary/file.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/44_doc_engine_auxiliary_file_h",
+      "working_directory": "../queue/jarvisCppDocu/50_doc_engine_auxiliary_file_h",
       "file_inputs": [
         "../../../engine/auxiliary/file.h",
         "../../../engine/auxiliary/file.cpp"
@@ -1844,7 +2072,7 @@
       "type": "ai_call",
       "label": "Docu: engine/auxiliary/threadPool.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/45_doc_engine_auxiliary_threadPool_h",
+      "working_directory": "../queue/jarvisCppDocu/51_doc_engine_auxiliary_threadPool_h",
       "file_inputs": [
         "../../../engine/auxiliary/threadPool.h",
         "../../../engine/auxiliary/threadPool.cpp"
@@ -1882,7 +2110,7 @@
       "type": "ai_call",
       "label": "Docu: engine/core.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/46_doc_engine_core_h",
+      "working_directory": "../queue/jarvisCppDocu/52_doc_engine_core_h",
       "file_inputs": [
         "../../../engine/core.h",
         "../../../engine/core.cpp"
@@ -1920,7 +2148,7 @@
       "type": "ai_call",
       "label": "Docu: engine/curlWrapper/curlManager.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/47_doc_engine_curlWrapper_curlManager_h",
+      "working_directory": "../queue/jarvisCppDocu/53_doc_engine_curlWrapper_curlManager_h",
       "file_inputs": [
         "../../../engine/curlWrapper/curlManager.h"
       ],
@@ -1956,7 +2184,7 @@
       "type": "ai_call",
       "label": "Docu: engine/curlWrapper/curlWrapper.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/48_doc_engine_curlWrapper_curlWrapper_h",
+      "working_directory": "../queue/jarvisCppDocu/54_doc_engine_curlWrapper_curlWrapper_h",
       "file_inputs": [
         "../../../engine/curlWrapper/curlWrapper.h",
         "../../../engine/curlWrapper/curlWrapper.cpp"
@@ -1994,7 +2222,7 @@
       "type": "ai_call",
       "label": "Docu: engine/engine.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/49_doc_engine_engine_h",
+      "working_directory": "../queue/jarvisCppDocu/55_doc_engine_engine_h",
       "file_inputs": [
         "../../../engine/engine.h",
         "../../../engine/engine.cpp"
@@ -2032,7 +2260,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/applicationEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/50_doc_engine_event_applicationEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/56_doc_engine_event_applicationEvent_h",
       "file_inputs": [
         "../../../engine/event/applicationEvent.h"
       ],
@@ -2068,7 +2296,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/engineEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/51_doc_engine_event_engineEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/57_doc_engine_event_engineEvent_h",
       "file_inputs": [
         "../../../engine/event/engineEvent.h"
       ],
@@ -2104,7 +2332,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/event.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/52_doc_engine_event_event_h",
+      "working_directory": "../queue/jarvisCppDocu/58_doc_engine_event_event_h",
       "file_inputs": [
         "../../../engine/event/event.h"
       ],
@@ -2140,7 +2368,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/eventQueue.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/53_doc_engine_event_eventQueue_h",
+      "working_directory": "../queue/jarvisCppDocu/59_doc_engine_event_eventQueue_h",
       "file_inputs": [
         "../../../engine/event/eventQueue.h",
         "../../../engine/event/eventQueue.cpp"
@@ -2178,7 +2406,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/events.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/54_doc_engine_event_events_h",
+      "working_directory": "../queue/jarvisCppDocu/60_doc_engine_event_events_h",
       "file_inputs": [
         "../../../engine/event/events.h"
       ],
@@ -2214,7 +2442,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/filesystemEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/55_doc_engine_event_filesystemEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/61_doc_engine_event_filesystemEvent_h",
       "file_inputs": [
         "../../../engine/event/filesystemEvent.h"
       ],
@@ -2250,7 +2478,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/keyboardEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/56_doc_engine_event_keyboardEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/62_doc_engine_event_keyboardEvent_h",
       "file_inputs": [
         "../../../engine/event/keyboardEvent.h"
       ],
@@ -2286,7 +2514,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/pythonErrorEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/57_doc_engine_event_pythonErrorEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/63_doc_engine_event_pythonErrorEvent_h",
       "file_inputs": [
         "../../../engine/event/pythonErrorEvent.h"
       ],
@@ -2322,7 +2550,7 @@
       "type": "ai_call",
       "label": "Docu: engine/event/timerEvent.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/58_doc_engine_event_timerEvent_h",
+      "working_directory": "../queue/jarvisCppDocu/64_doc_engine_event_timerEvent_h",
       "file_inputs": [
         "../../../engine/event/timerEvent.h"
       ],
@@ -2358,7 +2586,7 @@
       "type": "ai_call",
       "label": "Docu: engine/input/keyboardInput.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/59_doc_engine_input_keyboardInput_h",
+      "working_directory": "../queue/jarvisCppDocu/65_doc_engine_input_keyboardInput_h",
       "file_inputs": [
         "../../../engine/input/keyboardInput.h",
         "../../../engine/input/keyboardInput.cpp"
@@ -2396,7 +2624,7 @@
       "type": "ai_call",
       "label": "Docu: engine/json/configChecker.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/60_doc_engine_json_configChecker_h",
+      "working_directory": "../queue/jarvisCppDocu/66_doc_engine_json_configChecker_h",
       "file_inputs": [
         "../../../engine/json/configChecker.h",
         "../../../engine/json/configChecker.cpp"
@@ -2434,7 +2662,7 @@
       "type": "ai_call",
       "label": "Docu: engine/json/configParser.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/61_doc_engine_json_configParser_h",
+      "working_directory": "../queue/jarvisCppDocu/67_doc_engine_json_configParser_h",
       "file_inputs": [
         "../../../engine/json/configParser.h",
         "../../../engine/json/configParser.cpp"
@@ -2472,7 +2700,7 @@
       "type": "ai_call",
       "label": "Docu: engine/json/jsonHelper.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/62_doc_engine_json_jsonHelper_h",
+      "working_directory": "../queue/jarvisCppDocu/68_doc_engine_json_jsonHelper_h",
       "file_inputs": [
         "../../../engine/json/jsonHelper.h",
         "../../../engine/json/jsonHelper.cpp"
@@ -2510,7 +2738,7 @@
       "type": "ai_call",
       "label": "Docu: engine/keys/keyEncryption.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/63_doc_engine_keys_keyEncryption_h",
+      "working_directory": "../queue/jarvisCppDocu/69_doc_engine_keys_keyEncryption_h",
       "file_inputs": [
         "../../../engine/keys/keyEncryption.h",
         "../../../engine/keys/keyEncryption.cpp"
@@ -2548,7 +2776,7 @@
       "type": "ai_call",
       "label": "Docu: engine/keys/keyManager.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/64_doc_engine_keys_keyManager_h",
+      "working_directory": "../queue/jarvisCppDocu/70_doc_engine_keys_keyManager_h",
       "file_inputs": [
         "../../../engine/keys/keyManager.h",
         "../../../engine/keys/keyManager.cpp"
@@ -2586,7 +2814,7 @@
       "type": "ai_call",
       "label": "Docu: engine/log/log.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/65_doc_engine_log_log_h",
+      "working_directory": "../queue/jarvisCppDocu/71_doc_engine_log_log_h",
       "file_inputs": [
         "../../../engine/log/log.h",
         "../../../engine/log/log.cpp"
@@ -2624,7 +2852,7 @@
       "type": "ai_call",
       "label": "Docu: engine/log/terminalLogStreamBuf.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/66_doc_engine_log_terminalLogStreamBuf_h",
+      "working_directory": "../queue/jarvisCppDocu/72_doc_engine_log_terminalLogStreamBuf_h",
       "file_inputs": [
         "../../../engine/log/terminalLogStreamBuf.h"
       ],
@@ -2660,7 +2888,7 @@
       "type": "ai_call",
       "label": "Docu: engine/log/terminalManager.h",
       "mode": "single",
-      "working_directory": "../queue/jarvisCppDocu/67_doc_engine_log_terminalManager_h",
+      "working_directory": "../queue/jarvisCppDocu/73_doc_engine_log_terminalManager_h",
       "file_inputs": [
         "../../../engine/log/terminalManager.h",
         "../../../engine/log/terminalManager.cpp"
@@ -2746,6 +2974,12 @@
         "doc_application_workflow_workflowTriggerBinder_h",
         "doc_application_workflow_workflowTypes_h",
         "doc_application_workflow_workflowValidator_h",
+        "doc_application_assistant_assistantController_h",
+        "doc_application_assistant_assistantMemory_h",
+        "doc_application_assistant_assistantSession_h",
+        "doc_application_assistant_assistantTools_h",
+        "doc_application_assistant_contextAssembler_h",
+        "doc_application_assistant_workspaceIndexer_h",
         "doc_engine_auxiliary_file_h",
         "doc_engine_auxiliary_threadPool_h",
         "doc_engine_core_h",
@@ -2771,7 +3005,7 @@
         "doc_engine_log_terminalLogStreamBuf_h",
         "doc_engine_log_terminalManager_h"
       ],
-      "working_directory": "../workflows/jarvisCppDocu/68_combineDocumentation",
+      "working_directory": "../workflows/jarvisCppDocu/74_combineDocumentation",
       "file_inputs": [
         "../../../queue/jarvisCppDocu"
       ],
