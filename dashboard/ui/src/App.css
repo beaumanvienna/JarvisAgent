@@ -5,9 +5,9 @@
 }
 
 body {
-  font-family: "Consolas", "Monaco", "Courier New", monospace;
-  background: #0a0a0a;
-  color: #c8d6c0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #0b0f14;
+  color: #e8eef5;
   min-height: 100vh;
 }
 
@@ -17,8 +17,8 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 12px 20px;
-  background: #111;
-  border-bottom: 1px solid #222;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .status-bar-left {
@@ -30,7 +30,6 @@ body {
 .title {
   font-size: 1.2rem;
   font-weight: bold;
-  color: #44a01c;
 }
 
 .led-row {
@@ -69,7 +68,7 @@ body {
   gap: 12px;
   margin-left: 12px;
   font-size: 0.75rem;
-  border-left: 1px solid #333;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
   padding-left: 12px;
 }
 
@@ -92,50 +91,28 @@ body {
 .btn {
   font-family: inherit;
   font-size: 0.8rem;
-  font-weight: bold;
   padding: 6px 14px;
-  border: none;
-  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
   cursor: pointer;
   text-decoration: none;
   display: inline-block;
+  color: inherit;
 }
 
-.btn-editor {
-  background: #44a01c;
-  color: #111;
+.btn:hover {
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.btn-editor:hover {
-  background: #5cc028;
-}
-
-.btn-quit {
-  background: #c33;
-  color: white;
-}
-
-.btn-quit:hover {
-  background: #e44;
-}
 
 .btn-small {
   font-size: 0.7rem;
   padding: 3px 10px;
 }
 
-.btn-run {
-  background: #2563eb;
-  color: white;
-}
-
-.btn-run:hover {
-  background: #3b82f6;
-}
-
 .btn-run:disabled {
-  background: #334155;
-  color: #666;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
@@ -149,22 +126,22 @@ body {
 
 /* ---- Panels ---- */
 .panel {
-  background: #111;
-  border: 1px solid #222;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
   padding: 14px 18px;
 }
 
 .panel h2 {
   font-size: 0.95rem;
-  color: #44a01c;
   margin-bottom: 10px;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   padding-bottom: 6px;
+  opacity: 0.75;
 }
 
 .muted {
-  color: #555;
+  opacity: 0.5;
   font-size: 0.8rem;
 }
 
@@ -207,26 +184,26 @@ body {
 
 .data-table th {
   text-align: left;
-  color: #6a8a5a;
+  opacity: 0.55;
   font-weight: 600;
   padding: 4px 10px 6px 0;
-  border-bottom: 1px solid #1a2a14;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   white-space: nowrap;
 }
 
 .data-table td {
   padding: 5px 10px 5px 0;
-  border-bottom: 1px solid #151515;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   vertical-align: middle;
 }
 
 .data-table tbody tr:hover {
-  background: #151515;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .mono {
-  font-family: inherit;
-  color: #b0c8a0;
+  font-family: "Consolas", "Monaco", "Courier New", monospace;
+  color: #c8d6c0;
 }
 
 .num {
@@ -260,10 +237,7 @@ body {
 /* ---- Tab bar ---- */
 .tab-bar {
   display: flex;
-  gap: 2px;
-  background: #1a1a1a;
-  border-radius: 6px;
-  padding: 2px;
+  gap: 4px;
   margin-right: 12px;
 }
 
@@ -271,27 +245,27 @@ body {
   font-family: inherit;
   font-size: 0.75rem;
   font-weight: 600;
-  padding: 5px 14px;
-  border: none;
-  border-radius: 4px;
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
   cursor: pointer;
-  background: transparent;
-  color: #666;
-  transition: background 0.15s, color 0.15s;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  transition: background 0.15s;
 }
 
 .tab-btn:hover {
-  color: #aaa;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .tab-btn-active {
-  background: #44a01c;
-  color: #111;
+  border-color: rgba(120, 180, 255, 0.55);
+  background: rgba(120, 180, 255, 0.10);
+  color: rgba(160, 210, 255, 0.95);
 }
 
 .tab-btn-active:hover {
-  background: #5cc028;
-  color: #111;
+  background: rgba(120, 180, 255, 0.16);
 }
 
 /* ---- Log Viewer ---- */
@@ -299,7 +273,7 @@ body {
   display: flex;
   flex-direction: column;
   height: calc(100vh - 70px);
-  background: #0a0a0a;
+  background: #0b0f14;
 }
 
 .log-toolbar {
@@ -307,8 +281,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: #111;
-  border-bottom: 1px solid #222;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   flex-shrink: 0;
   gap: 12px;
 }
@@ -338,7 +312,6 @@ body {
 .log-title {
   font-size: 0.85rem;
   font-weight: 700;
-  color: #44a01c;
 }
 
 .log-stats {
@@ -350,16 +323,16 @@ body {
   font-family: inherit;
   font-size: 0.8rem;
   padding: 4px 10px;
-  border: 1px solid #333;
-  border-radius: 4px;
-  background: #1a1a1a;
-  color: #c8d6c0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
   width: 280px;
   outline: none;
 }
 
 .log-search-input:focus {
-  border-color: #44a01c;
+  border-color: rgba(120, 180, 255, 0.55);
 }
 
 .log-search-nav {
@@ -379,17 +352,16 @@ body {
   font-family: inherit;
   font-size: 0.7rem;
   padding: 2px 6px;
-  border: 1px solid #333;
-  border-radius: 3px;
-  background: #1a1a1a;
-  color: #aaa;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
   cursor: pointer;
   line-height: 1;
 }
 
 .log-nav-btn:hover {
-  background: #222;
-  border-color: #444;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .log-btn {
@@ -397,23 +369,22 @@ body {
   font-size: 0.7rem;
   font-weight: 600;
   padding: 4px 10px;
-  border: 1px solid #333;
-  border-radius: 4px;
-  background: #1a1a1a;
-  color: #aaa;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .log-btn:hover {
-  background: #222;
-  border-color: #444;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .log-btn-active {
-  background: #1a2a14;
-  border-color: #44a01c;
-  color: #44a01c;
+  background: rgba(120, 180, 255, 0.10);
+  border-color: rgba(120, 180, 255, 0.55);
+  color: rgba(160, 210, 255, 0.95);
 }
 
 /* ---- Log content (virtual scroll) ---- */
@@ -451,7 +422,7 @@ body {
 }
 
 .log-line-text {
-  color: #b0c8a0;
+  color: #c8d6c0;
 }
 
 .log-error .log-line-text {
@@ -463,16 +434,16 @@ body {
 }
 
 .log-current-match {
-  background: rgba(68, 160, 28, 0.2) !important;
+  background: rgba(120, 180, 255, 0.20) !important;
 }
 
 .log-match-line {
-  background: rgba(68, 160, 28, 0.08);
+  background: rgba(120, 180, 255, 0.06);
 }
 
 .log-highlight {
-  background: #44a01c;
-  color: #000;
+  background: rgba(120, 180, 255, 0.85);
+  color: #0b0f14;
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -488,9 +459,9 @@ body {
 }
 
 .log-analyze-panel {
-  background: #111;
-  border: 1px solid #333;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 14px;
   width: 720px;
   max-height: calc(100vh - 100px);
   display: flex;
@@ -503,14 +474,13 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 10px 14px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   flex-shrink: 0;
 }
 
 .log-analyze-title {
   font-size: 0.9rem;
   font-weight: 700;
-  color: #44a01c;
 }
 
 .log-analyze-body {
@@ -523,12 +493,12 @@ body {
   display: flex;
   gap: 10px;
   padding: 3px 0;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .log-analyze-label {
   font-weight: 600;
-  color: #6a8a5a;
+  opacity: 0.55;
   min-width: 90px;
   flex-shrink: 0;
 }
@@ -536,7 +506,7 @@ body {
 .log-analyze-section {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid #222;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .log-analyze-section-title {
@@ -567,13 +537,13 @@ body {
 }
 
 .log-analyze-issue-active {
-  background: rgba(68, 160, 28, 0.15) !important;
-  outline: 1px solid rgba(68, 160, 28, 0.4);
+  background: rgba(120, 180, 255, 0.12) !important;
+  outline: 1px solid rgba(120, 180, 255, 0.40);
 }
 
 .log-analyze-issue-line {
   flex-shrink: 0;
-  color: #44a01c;
+  opacity: 0.65;
   font-weight: 600;
   min-width: 50px;
 }
@@ -588,7 +558,7 @@ body {
   font-family: inherit;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #44a01c;
+  color: rgba(120, 180, 255, 0.90);
   background: none;
   border: none;
   cursor: pointer;
@@ -598,7 +568,7 @@ body {
 }
 
 .log-link-btn:hover {
-  color: #5cc028;
+  color: rgba(160, 210, 255, 0.95);
 }
 
 .log-analyze-run-nav {
@@ -624,9 +594,9 @@ body {
 }
 
 .mpd-dialog {
-  background: #111;
-  border: 1px solid #333;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
   width: 420px;
   max-width: 90vw;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
@@ -634,13 +604,12 @@ body {
 
 .mpd-header {
   padding: 16px 20px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .mpd-header h2 {
   margin: 0;
   font-size: 0.95rem;
-  color: #44a01c;
 }
 
 .mpd-body {
@@ -650,7 +619,7 @@ body {
 .mpd-description {
   margin: 0 0 14px 0;
   font-size: 0.8rem;
-  color: #8a8a8a;
+  opacity: 0.55;
   line-height: 1.5;
 }
 
@@ -663,16 +632,16 @@ body {
   padding: 8px 36px 8px 12px;
   font-family: inherit;
   font-size: 0.85rem;
-  border-radius: 4px;
-  border: 1px solid #333;
-  background: #0a0a0a;
-  color: #c8d6c0;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
   box-sizing: border-box;
   outline: none;
 }
 
 .mpd-input:focus {
-  border-color: #44a01c;
+  border-color: rgba(120, 180, 255, 0.55);
 }
 
 .mpd-eye-btn {
@@ -703,5 +672,5 @@ body {
   padding: 12px 20px;
   display: flex;
   justify-content: flex-end;
-  border-top: 1px solid #222;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }

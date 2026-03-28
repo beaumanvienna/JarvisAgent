@@ -38,37 +38,12 @@ Last reviewed: 2026-03-23
 
 ## Remaining Work
 
-### Disclaimer
-- [ ] Add a disclaimer/about section somewhere in the UI (e.g. footer, settings modal, or
-      dedicated "About" dialog accessible from the header gear icon). Content TBD — should
-      include: license (GPL-3.0), project name, version (`JARVIS_AGENT_VERSION`), copyright,
-      and a link to the GitHub repository.
+### ~~Disclaimer~~ ✅
+- [x] ~~Add a disclaimer/about section somewhere in the UI~~ — Added to `SettingsModal.tsx` footer: logo + "JarvisAgent v0.8.2 · MIT License · © 2026 JC Technolabs · GitHub (link)".
 
-### Unify look & feel with Dashboard
-The dashboard and workflow editor currently have **different visual identities**. The dashboard
-looks better (cohesive terminal aesthetic) and should be the reference design.
-
-**Differences to resolve:**
-
-| Aspect | Dashboard (keep) | Editor (change) |
-|--------|-----------------|-----------------|
-| Font | Monospace (`Consolas, Monaco, Courier New`) | Sans-serif (`system-ui, Segoe UI`) |
-| Accent color | Green `#44a01c` | Blue `rgba(120, 180, 255)` |
-| Background | `#0a0a0a` | `#0b0f14` |
-| Text color | `#c8d6c0` (green-grey) | `#e8eef5` (blue-white) |
-| Buttons | Solid fills (green/red/blue) | Translucent glassmorphic |
-| Border radius | 4–8px | 10–14px |
-| Borders | Solid `#222` | `rgba(255,255,255,0.08)` |
-| Tab/nav bar | Grouped tabs, green active | Individual buttons, blue active |
-
-- [ ] Align `:root` font-family, background, and text color with dashboard `App.css`
-- [ ] Replace blue accent (`rgba(120,180,255)`) with dashboard green (`#44a01c`) throughout
-- [ ] Switch `.btn` from translucent glassmorphic to solid dashboard-style buttons
-- [ ] Reduce border-radius from 10–14px to 4–8px for consistency
-- [ ] Switch borders from transparent rgba to solid colors matching dashboard
-- [ ] Unify header bar layout (tab-bar style navigation, green active state)
-- [ ] Keep workflow-specific styles (React Flow nodes, dataflow handles, etc.) as-is —
-      only the chrome/shell/buttons/text need to match
+### ~~Unify look & feel~~ ✅
+- [x] ~~Dashboard updated to match editor: sans-serif font, `#0b0f14` background, `#e8eef5` text, blue glassmorphic buttons/panels/borders, blue active tab accent~~
+- Dashboard `App.css`: font, background, color, status bar, all buttons neutral glassmorphic (blue only on active tab), panels (translucent rgba), tab bar (blue active), log viewer toolbar/buttons, log highlights, analyze panel, master password dialog. Action buttons (Workflow Editor, Quit, Run) are neutral — color only conveys active/selected state.
 
 ### Editor UI
 - [x] ~~Box select: Shift+drag on canvas opens a selection rectangle (partial intersection mode). Implemented via `SelectionMode.Partial` + `selectionOnDrag={shiftHeld}` in `WorkflowEditorView.tsx`.~~

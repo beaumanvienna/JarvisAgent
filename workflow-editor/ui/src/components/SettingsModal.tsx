@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import type { EditorSettings } from "../App";
 import { getConfigSettings, updateConfigSettings, type ConfigSettings } from "../api/configSettings";
 import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
+import logoUrl from "../assets/logo.png";
 
 type SettingsModalProps = {
   settings: EditorSettings;
@@ -261,7 +262,24 @@ export default function SettingsModal({
           </div>
         </div>
 
-        <div className="modalFooter">
+        <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <img src={logoUrl} alt="JarvisAgent" style={{ width: 36, height: 36, borderRadius: "50%", opacity: 0.85, flexShrink: 0 }} />
+            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 600 }}>JarvisAgent v0.8.2</div>
+              <div style={{ opacity: 0.55 }}>
+                MIT License &middot; &#169; 2026 JC Technolabs &middot;{" "}
+                <a
+                  href="https://github.com/beaumanvienna/JarvisAgent"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "rgba(120,180,255,0.85)", textDecoration: "none" }}
+                >
+                  GitHub
+                </a>
+              </div>
+            </div>
+          </div>
           <button className="btn" type="button" onClick={onClose}>Close</button>
         </div>
       </div>
