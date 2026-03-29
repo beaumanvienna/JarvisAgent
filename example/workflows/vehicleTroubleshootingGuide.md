@@ -8,7 +8,7 @@ This workflow generates a **Vehicle Troubleshooting Guide** from three AI-genera
 
 - Tasks **aiCode244/250/301** ask the AI to produce one Mermaid flowchart per code.
 - Task **combineGuideMd** merges those Markdown files into one combined `engineTroubleshootingGuide.md`.
-- Task **convertGuidePdf** converts the combined Markdown to a PDF via `md2pdf` (shell task).
+- Task **convertGuidePdf** converts the combined Markdown to a PDF via `mmdc` + `pandoc` (shell task).
 
 ## Triggers
 
@@ -201,7 +201,7 @@ This task calls `combineEngineTroubleshootingGuide.buildEngineTroubleshootingGui
 ### convertGuidePdf
 
 - **Type:** `shell`
-- **Label:** Convert guide MD -> PDF (md2pdf-mermaid)
+- **Label:** Convert guide MD -> PDF (mmdc + pandoc)
 - **Working directory:** `../workflows/vehicleTroubleshootingGuide/05_convertGuidePdf`
 - **Depends on:** `combineGuideMd`
 - **File inputs:**
@@ -209,12 +209,12 @@ This task calls `combineEngineTroubleshootingGuide.buildEngineTroubleshootingGui
 - **File outputs:**
   - `Vehicle Troubleshooting Guide.pdf`
 
-This task runs a shell script to invoke `md2pdf` and produce the final PDF.
+This task runs a shell script that pre-renders Mermaid blocks to PNG via `mmdc`, then calls `pandoc` (pdflatex engine) to produce the final PDF.
 
 Configured command:
 
 ```bash
-scripts/convertGuidePdf.sh
+scripts/mermaidMdToPdf.sh
   {{input[0]}}
   {{output[0]}}
 ```

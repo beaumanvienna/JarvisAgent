@@ -95,8 +95,14 @@ namespace AIAssistant
                      "reason=resolveTaskWorkingDirectory baseDirectoryAbsolute='{}' taskWorkingDirectoryRelative='{}'",
                      workflowBaseDirectoryPath.string(), taskWorkingDirectoryText);
 
-        std::filesystem::path const taskWorkingDirectoryPathAbsolute =
+        std::filesystem::path taskWorkingDirectoryPathAbsolute =
             ResolveTaskScopedPath(workflowBaseDirectoryPath, taskWorkingDirectoryText);
+
+        // Spec §3.3: if working_directory is omitted or empty, default to the Workflow Base Directory
+        if (taskWorkingDirectoryPathAbsolute.empty() && !workflowBaseDirectoryPath.empty())
+        {
+            taskWorkingDirectoryPathAbsolute = workflowBaseDirectoryPath;
+        }
 
         LOG_APP_INFO("[paths debug] TaskPathResolver::ResolveTaskWorkingDirectoryPath debug: "
                      "reason=resolveTaskWorkingDirectory taskWorkingDirectoryAbsolute='{}'",

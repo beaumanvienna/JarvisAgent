@@ -97,8 +97,7 @@ Get-ChildItem -Path "$StageDir\scripts" -Recurse -Directory -Filter "__pycache__
 New-Item -ItemType Directory -Force -Path "$StageDir\workflows" | Out-Null
 $jcwfFiles = @(
     "aiCarMaintenancePipeline", "aiZipDemo",
-    "make-example", "portfolioDividendAnalysis",
-    "vehicleTroubleshootingGuide"
+    "make-example", "portfolioDividendAnalysis"
 )
 foreach ($jcwf in $jcwfFiles) {
     $src = "$RepoRoot\example\workflows\$jcwf.jcwf"
@@ -234,12 +233,11 @@ if not exist "!USER_HOME!\.venv" (
     python -m venv "!USER_HOME!\.venv" 2>nul
     if exist "!USER_HOME!\.venv\Scripts\pip.exe" (
         "!USER_HOME!\.venv\Scripts\pip" install --quiet --upgrade pip 2>nul
-        echo ==^> Installing Python tools (markitdown, md2pdf-mermaid, playwright^) ...
-        "!USER_HOME!\.venv\Scripts\pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>nul
-        "!USER_HOME!\.venv\Scripts\playwright" install chromium 2>nul
+        echo ==^> Installing Python tools (markitdown^) ...
+        "!USER_HOME!\.venv\Scripts\pip" install --quiet "markitdown[all]" 2>nul
     ) else (
         echo WARNING: Could not create Python venv (python may not be on PATH^)
-        echo          Shell tasks using markitdown/md2pdf will not work until fixed.
+        echo          Shell tasks using markitdown will not work until fixed.
     )
 )
 
@@ -278,14 +276,15 @@ echo ==> Creating Python virtual environment in !TARGET!\.venv ...
 python -m venv "!TARGET!\.venv"
 "!TARGET!\.venv\Scripts\pip" install --quiet --upgrade pip
 
-echo ==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ...
-"!TARGET!\.venv\Scripts\pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright
-
-echo ==> Installing Playwright Chromium ...
-"!TARGET!\.venv\Scripts\playwright" install chromium
+echo ==> Installing Python tools (markitdown) ...
+"!TARGET!\.venv\Scripts\pip" install --quiet "markitdown[all]"
 
 echo.
 echo ==> Python venv created at !TARGET!\.venv\
+echo.
+echo NOTE: PDF workflows (vehicleTroubleshootingGuide) also require:
+echo   mmdc:   npm install -g @mermaid-js/mermaid-cli@10.x
+echo   pandoc: choco install pandoc miktex
 echo.
 pause
 '@

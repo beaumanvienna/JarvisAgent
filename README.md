@@ -368,8 +368,8 @@ JarvisAgent depends on
 * libz (Linux — linked at build time; vendored on Windows, included in Xcode SDK on macOS)
 * premake5
 * markitdown (document conversion)
-* md2pdf-mermaid (Markdown → PDF with Mermaid diagram support)
-* playwright (headless Chrome, used by md2pdf-mermaid)
+* pandoc + pdflatex (Markdown → PDF; `apt install pandoc texlive-latex-base texlive-latex-extra`)
+* mmdc — @mermaid-js/mermaid-cli (Mermaid diagram rendering; `npm install -g @mermaid-js/mermaid-cli@10.x`)
 
 > OpenSSL and libcurl are vendored in the repository and built from source on all platforms.
 
@@ -429,7 +429,7 @@ MSYS2 and Git Bash provide the POSIX shell environment (`bash`, `wc`, `dirname`,
 
 ### Python Virtual Environment
 
-JarvisAgent's shell-based workflows call Python tools (`markitdown`, `md2pdf`). These should be installed in a **virtual environment** and activated before starting JarvisAgent.
+JarvisAgent's shell-based workflows call Python tools (`markitdown`) and system tools (`pandoc`, `mmdc`). The Python tools should be installed in a **virtual environment** and activated before starting JarvisAgent. `pandoc` and `mmdc` are system/npm dependencies installed separately.
 
 **Create and activate the venv** (one-time setup):
 
@@ -454,8 +454,23 @@ source .venv/Scripts/activate
 **Install the Python dependencies** (inside the active venv, same on all platforms):
 
 ```bash
-pip install "markitdown[all]" md2pdf-mermaid playwright
-playwright install chromium
+pip install "markitdown[all]"
+```
+
+For PDF workflows (`vehicleTroubleshootingGuide`), also install system deps once:
+
+```bash
+# Linux
+sudo apt install pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended
+npm install -g @mermaid-js/mermaid-cli@10.x
+
+# macOS
+brew install pandoc basictex
+npm install -g @mermaid-js/mermaid-cli@10.x
+
+# Windows
+choco install pandoc miktex
+npm install -g @mermaid-js/mermaid-cli@10.x
 ```
 
 **Quick start** — use the launcher script (creates the venv automatically on first run):
@@ -482,7 +497,7 @@ $ source .venv/Scripts/activate
 (.venv) $ ./bin/x64/Release/jarvisAgent.exe
 ```
 
-> **Note:** Always activate the venv before running JarvisAgent so that `markitdown` and `md2pdf` are on the PATH.
+> **Note:** Always activate the venv before running JarvisAgent so that `markitdown` is on the PATH.
 
 ---
 

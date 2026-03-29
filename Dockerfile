@@ -56,22 +56,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gosu \
     zlib1g \
     ca-certificates \
+    # Node.js + mmdc (Mermaid → PNG rendering)
+    nodejs \
+    npm \
+    # pandoc + pdflatex (Markdown → PDF)
+    pandoc \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    # Chromium system deps required by mmdc's bundled Puppeteer
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2t64 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pipx tools into a shared location accessible by any UID (gosu drops to host user)
 ENV PIPX_HOME=/opt/pipx
 ENV PIPX_BIN_DIR=/opt/pipx/bin
 
-# markitdown for PDF-to-markdown conversion
+# markitdown for document-to-markdown conversion
 RUN pipx install "markitdown[all]"
 
-# md2pdf-mermaid for markdown-to-PDF conversion
-RUN pipx install md2pdf-mermaid
+# mmdc (mermaid-cli) for Mermaid diagram → PNG rendering
+# Pinned to 10.x — stable, monthly releases, no Playwright dependency
+RUN npm install -g @mermaid-js/mermaid-cli@10.x
 
-# Install Playwright's Chromium browser + system dependencies for md2pdf-mermaid's PDF rendering
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
-RUN /opt/pipx/venvs/md2pdf-mermaid/bin/playwright install --with-deps chromium
-RUN chmod -R a+rX /opt/pipx /opt/playwright-browsers
+# Puppeteer config: disable sandbox (required in Docker without user namespaces)
+RUN echo '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' \
+    > /etc/mmdc-puppeteer-config.json
+
+RUN chmod -R a+rX /opt/pipx
 
 ENV PATH="/opt/pipx/bin:$PATH"
 

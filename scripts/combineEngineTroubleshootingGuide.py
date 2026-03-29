@@ -32,6 +32,7 @@ def buildEngineTroubleshootingGuide(
     code250MdPath: str,
     code301MdPath: str,
     outputMdPath: str,
+    **kwargs,
 ) -> dict:
     code244Content = _readTextFile(code244MdPath).strip()
     code250Content = _readTextFile(code250MdPath).strip()

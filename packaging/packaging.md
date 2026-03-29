@@ -50,7 +50,7 @@ All platforms share the same core build pipeline:
 1. **premake5 gmake** (or `vs2022` / `xcode4`) — generates Makefiles / project files
 2. **make config=release && make config=debug** — compiles C++ backend
 3. **npm install && npm run build** — builds React UIs (dashboard + workflow editor)
-4. **Python venv** — `markitdown`, `md2pdf-mermaid`, `playwright` installed via pip
+4. **Python venv** — `markitdown` installed via pip; `pandoc` (system) + `mmdc` (npm) for PDF workflows
 
 ### Vendored Libraries (built from source, no system packages needed)
 
@@ -78,18 +78,24 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 
 | Dependency | Purpose |
 |------------|---------|
-| Python 3 | Python task execution, markitdown, md2pdf |
+| Python 3 | Python task execution, markitdown |
 | zlib | Compression |
 | bash | Shell task execution |
-| Chromium (headless) | playwright for md2pdf-mermaid |
+| pandoc + pdflatex | Markdown → PDF (PDF workflows only) |
+| mmdc (@mermaid-js/mermaid-cli) | Mermaid → PNG rendering (PDF workflows only) |
 
 ### Runtime Python Tools (installed in venv)
 
 | Tool | Purpose |
 |------|---------|
 | markitdown | Office document → Markdown conversion |
-| md2pdf-mermaid | Markdown → PDF with Mermaid diagrams |
-| playwright | Headless Chrome for md2pdf-mermaid |
+
+### Runtime System Tools (installed separately — PDF workflows only)
+
+| Tool | Install | Purpose |
+|------|---------|---------|
+| pandoc | `apt install pandoc texlive-latex-base texlive-latex-extra` | Markdown → PDF conversion |
+| mmdc | `npm install -g @mermaid-js/mermaid-cli@10.x` | Mermaid diagram → PNG rendering |
 
 ---
 

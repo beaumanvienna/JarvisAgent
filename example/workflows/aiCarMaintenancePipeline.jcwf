@@ -15,7 +15,7 @@
     {
       "type": "auto",
       "id": "auto-trigger",
-      "enabled": true,
+      "enabled": false,
       "params": {}
     }
   ],

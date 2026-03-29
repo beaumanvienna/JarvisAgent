@@ -225,19 +225,20 @@ See also:
 
 ---
 
-### 10. Fix JCWF examples for first install + fix currently broken JCWFs
+### ~~10. Fix JCWF examples for first install + fix currently broken JCWFs~~ ✅
 
-#### Part A — Clean first-install experience
-- AI-requiring workflows must not auto-run and fail on a fresh install (no API keys yet)
-- Fix: set `"enabled": false` on the `auto` trigger for all workflows that require AI or external tools (`aiCarMaintenancePipeline`, `vehicleTroubleshootingGuide`, `make-example`, etc.) — keep `manual` trigger so they still work once configured
-- Ideally ship one always-green auto-trigger workflow (pure shell/python, no AI) so the dashboard opens with at least one succeeded run
+#### ~~Part A — Clean first-install experience~~ ✅
+- Set `"enabled": false` on auto trigger for all AI-requiring workflows: `aiCarMaintenancePipeline`, `aiZipDemo`, `vehicleTroubleshootingGuide` — `manual` trigger retained so they run once configured.
+- `make-example` auto trigger left enabled (no AI required, always green).
+- `vehicleTroubleshootingGuide` removed from all packaging (DEB, RPM, Flatpak, macOS DMG, Homebrew, Windows ZIP) — too fragile (Chrome/markitdown dependency, low demo value).
 
-#### Part B — Fix currently broken example workflows (4 failures visible in dashboard)
-- `aiCarMaintenancePipeline` — failed, needs investigation
-- `bookSummaryPipeline` — failed, needs investigation
-- `portfolioDividendAnalysis` — failed, needs investigation
-- `vehicleTroubleshootingGuide` — failed, needs investigation
-- All broken JCWFs are under `example/workflows/` — fix scripts, paths, or prompt content as needed, then re-verify E2E
+#### ~~Part B — Fix currently broken example workflows~~ ✅
+- `aiCarMaintenancePipeline` — auto trigger disabled (was firing without API keys). ✅
+- `bookSummaryPipeline` / `portfolioDividendAnalysis` — stale failure badges from prior session; Python scripts already use `**kwargs`. Cleared on next run. ✅
+- `vehicleTroubleshootingGuide` — removed from packaging entirely. ✅
+- `make-example` — root cause was `taskPathResolver.cpp` not implementing spec §3.3 ("omit `working_directory` → default to Workflow Base Directory"). Fixed in C++: `ResolveTaskWorkingDirectoryPath()` now falls back to `workflowBaseDirectoryPath` when the resolved path is empty. `working_directory: ""` lines removed from JCWF (field omitted). ✅
+- Python `**kwargs` fixes: `scripts/printFileInfo.py` and `scripts/combineEngineTroubleshootingGuide.py` updated to accept `**kwargs` (PythonEngine injects `context` kwarg on every call). ✅
+- All packaged workflows verified: full green dashboard. ✅
 
 ---
 

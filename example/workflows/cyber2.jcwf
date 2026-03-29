@@ -54,8 +54,8 @@
       "working_directory": "OpenSSH_2k/01_parse",
       "expose_error_signal": false,
       "params": {
-        "module": "scripts.parseSshdLog",
-        "function": "extract_attack_stats"
+        "module": "scripts.parseSshLog",
+        "function": "extract_attack_statistics"
       },
       "file_inputs": [
         "../../OpenSSH_2k.log"

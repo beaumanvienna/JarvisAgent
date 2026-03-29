@@ -329,3 +329,13 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 - [x] ~~**AI Manager modal styling**~~ — replaced inline transparent/blur styles with `modalOverlay`/`modalContent` CSS classes matching `SettingsModal.tsx`.
 - [x] ~~**Workflow reload auto-trigger bug**~~ — `HandleWorkflowsReloadPost` re-registered auto triggers and fired them on every page navigation. Added `bool fireImmediately` to `AddAutoTrigger`; reload path passes `false`.
 - [x] ~~**PDCurses MAX_UNICODE crash**~~ — `assert(ch < MAX_UNICODE)` in `vt/pdcdisp.c:363` crashed on emoji in AI responses. Replaced with `break` guard so outer loop handles combining chars correctly.
+
+---
+
+## Recent fixes (2026-03-28)
+
+- [x] ~~**`working_directory` omit/empty spec compliance**~~ — `TaskPathResolver::ResolveTaskWorkingDirectoryPath` now falls back to `workflowBaseDirectoryPath` when the resolved path is empty, implementing spec §3.3: "If `working_directory` is omitted, it MUST default to the Workflow Base Directory." Previously caused `ShellTaskExecutor: Missing working directory` for tasks without the field.
+- [x] ~~**Python scripts missing `**kwargs`**~~ — `scripts/printFileInfo.py::get_file_info()` and `scripts/combineEngineTroubleshootingGuide.py::buildEngineTroubleshootingGuide()` crashed with `got an unexpected keyword argument 'context'` after the "context always passed" fix. Added `**kwargs` to both function signatures.
+- [x] ~~**Example JCWF auto-triggers disabled for fresh install**~~ — `aiCarMaintenancePipeline`, `aiZipDemo`, `vehicleTroubleshootingGuide` auto triggers set to `enabled: false`; `make-example` kept enabled (scripts fall back to mock files when g++ absent). `vehicleTroubleshootingGuide` removed from all packaging scripts (DEB, RPM, DMG, Homebrew, Windows ZIP, Flatpak) — fragile chrome dependency not worth shipping.
+- [x] ~~**`jarvisCppDocu` JCWF updated for AI assistant classes**~~ — 6 new tasks added for `application/assistant/` headers (`assistantController`, `assistantMemory`, `assistantSession`, `assistantTools`, `contextAssembler`, `workspaceIndexer`); engine tasks renumbered 44→50 through 67→73; `combineDocumentation` at 74. All 6 new tasks in `depends_on`. Total AI tasks: 73.
+- [x] ~~**Dashboard log analyzer panel background**~~ — `.log-analyze-panel` was nearly transparent (`rgba(255,255,255,0.03)`); changed to solid `#1e1e1e` matching editor modals.

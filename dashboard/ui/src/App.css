@@ -459,8 +459,8 @@ body {
 }
 
 .log-analyze-panel {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: #1e1e1e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 14px;
   width: 720px;
   max-height: calc(100vh - 100px);

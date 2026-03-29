@@ -15,7 +15,7 @@
     {
       "type": "auto",
       "id": "auto-run",
-      "enabled": true,
+      "enabled": false,
       "params": {}
     },
     {
@@ -212,13 +212,13 @@
     "convertGuidePdf": {
       "id": "convertGuidePdf",
       "type": "shell",
-      "label": "Convert guide MD -> PDF (md2pdf-mermaid)",
+      "label": "Convert guide MD -> PDF (mmdc + pandoc)",
       "depends_on": [
         "combineGuideMd"
       ],
       "working_directory": "../workflows/vehicleTroubleshootingGuide/05_convertGuidePdf",
       "params": {
-        "command": "scripts/convertGuidePdf.sh",
+        "command": "scripts/mermaidMdToPdf.sh",
         "args": [
           "{{input[0]}}",
           "{{output[0]}}"

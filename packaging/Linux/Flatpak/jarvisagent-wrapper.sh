@@ -48,14 +48,13 @@ if [[ ! -d "$DATA_DIR/.venv" ]]; then
     echo "==> Creating Python virtual environment at $DATA_DIR/.venv ..."
     python3 -m venv "$DATA_DIR/.venv" 2>/dev/null || {
         echo "WARNING: Could not create Python venv"
-        echo "         Shell tasks using markitdown/md2pdf will not work until fixed."
+        echo "         Shell tasks using markitdown will not work until fixed."
     }
 
     if [[ -d "$DATA_DIR/.venv" ]]; then
         "$DATA_DIR/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-        echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-        "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
-        "$DATA_DIR/.venv/bin/playwright" install chromium 2>/dev/null || true
+        echo "==> Installing Python tools (markitdown) ..."
+        "$DATA_DIR/.venv/bin/pip" install --quiet "markitdown[all]" 2>/dev/null || true
     fi
 fi
 

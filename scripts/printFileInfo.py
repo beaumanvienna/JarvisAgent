@@ -8,7 +8,7 @@ import os
 import datetime
 from pathlib import Path
 
-def get_file_info(filename):
+def get_file_info(filename, **kwargs):
     try:
         # Create a Path object
         file_path = Path(filename)

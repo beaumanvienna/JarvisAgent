@@ -213,7 +213,7 @@ A full-screen, virtual-scrolling log display (up to 100,000 lines).
 - **`workflows/`** — Directory containing `.jcwf` workflow definition files.
 - **`queue/`** — Monitored directory for incoming files.
 - **`log/log.txt`** — Application log file.
-- **`.venv/`** — Python virtual environment (auto-created by launcher scripts). Contains markitdown, md2pdf-mermaid, and playwright.
+- **`.venv/`** — Python virtual environment (auto-created by launcher scripts). Contains markitdown. PDF workflows additionally require `pandoc` (system package) and `mmdc` (`npm install -g @mermaid-js/mermaid-cli@10.x`).
 
 ## SEE ALSO
 

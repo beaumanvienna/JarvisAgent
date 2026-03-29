@@ -18,10 +18,11 @@ if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
     echo "[jarvisagent.sh] Installing Python dependencies ..."
     "$VENV_DIR/bin/pip" install --upgrade pip
-    "$VENV_DIR/bin/pip" install "markitdown[all]" md2pdf-mermaid playwright
-    echo "[jarvisagent.sh] Installing Playwright Chromium browser ..."
-    "$VENV_DIR/bin/playwright" install chromium
+    "$VENV_DIR/bin/pip" install "markitdown[all]"
     echo "[jarvisagent.sh] Virtual environment ready."
+    echo "[jarvisagent.sh] NOTE: PDF workflows (vehicleTroubleshootingGuide) also require:"
+    echo "  mmdc:   npm install -g @mermaid-js/mermaid-cli@10.x"
+    echo "  pandoc: apt install pandoc texlive-latex-base texlive-latex-extra"
 fi
 
 # ── Activate venv ────────────────────────────────────────────────────────────

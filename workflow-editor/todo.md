@@ -44,6 +44,7 @@ Last reviewed: 2026-03-23
 ### ~~Unify look & feel~~ ✅
 - [x] ~~Dashboard updated to match editor: sans-serif font, `#0b0f14` background, `#e8eef5` text, blue glassmorphic buttons/panels/borders, blue active tab accent~~
 - Dashboard `App.css`: font, background, color, status bar, all buttons neutral glassmorphic (blue only on active tab), panels (translucent rgba), tab bar (blue active), log viewer toolbar/buttons, log highlights, analyze panel, master password dialog. Action buttons (Workflow Editor, Quit, Run) are neutral — color only conveys active/selected state.
+- [x] ~~Log analyze panel was translucent (`rgba(255,255,255,0.03)`) — unreadable against the log background~~ — Fixed: `.log-analyze-panel` background changed to solid `#1e1e1e`, border to `rgba(255,255,255,0.12)`, matching editor Settings modal and AI Manager modal solid style.
 
 ### Editor UI
 - [x] ~~Box select: Shift+drag on canvas opens a selection rectangle (partial intersection mode). Implemented via `SelectionMode.Partial` + `selectionOnDrag={shiftHeld}` in `WorkflowEditorView.tsx`.~~

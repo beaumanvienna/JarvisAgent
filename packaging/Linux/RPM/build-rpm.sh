@@ -95,8 +95,7 @@ chmod +x "$STAGING/opt/jarvisagent/scripts/"*.sh
 
 # Example workflows (curated list — no subdirs, no build artifacts)
 for jcwf in aiCarMaintenancePipeline aiZipDemo \
-            make-example portfolioDividendAnalysis \
-            vehicleTroubleshootingGuide; do
+            make-example portfolioDividendAnalysis; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
 done
 # Loose input files needed by the example workflows
@@ -163,8 +162,7 @@ if command -v rpmbuild &>/dev/null; then
     # Example workflows + loose input files
     mkdir -p "$SRCDIR/example/workflows"
     for jcwf in aiCarMaintenancePipeline aiZipDemo \
-                make-example portfolioDividendAnalysis \
-                vehicleTroubleshootingGuide; do
+                make-example portfolioDividendAnalysis; do
         cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SRCDIR/example/workflows/" 2>/dev/null || true
     done
     for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \

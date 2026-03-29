@@ -8,6 +8,7 @@ class Jarvisagent < Formula
   depends_on "premake" => :build
   depends_on "node" => :build
   depends_on "python@3"
+  depends_on "pandoc"
 
   def install
     # Generate Makefiles
@@ -45,7 +46,6 @@ class Jarvisagent < Formula
     %w[
       aiCarMaintenancePipeline aiZipDemo
       make-example portfolioDividendAnalysis
-      vehicleTroubleshootingGuide
     ].each { |w| (prefix/"workflows").install "example/workflows/#{w}.jcwf" }
     # Loose input files needed by the example workflows
     %w[
@@ -124,9 +124,8 @@ class Jarvisagent < Formula
           python3 -m venv "$USER_HOME/.venv" 2>/dev/null || true
           if [[ -d "$USER_HOME/.venv" ]]; then
               "$USER_HOME/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-              echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-              "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
-              "$USER_HOME/.venv/bin/playwright" install chromium 2>/dev/null || true
+              echo "==> Installing Python tools (markitdown) ..."
+              "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" 2>/dev/null || true
           fi
       fi
 
@@ -157,6 +156,9 @@ class Jarvisagent < Formula
 
       Custom working directory:  jarvisagent --home /path/to/dir
       Skip browser:              jarvisagent --no-browser
+
+      PDF workflow (vehicleTroubleshootingGuide) also requires mmdc:
+        npm install -g @mermaid-js/mermaid-cli@10.x
     EOS
   end
 

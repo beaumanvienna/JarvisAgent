@@ -129,18 +129,17 @@ if [[ ! -d "$USER_HOME/.venv" ]]; then
     echo "==> Creating Python virtual environment at $USER_HOME/.venv ..."
     python3 -m venv "$USER_HOME/.venv" 2>/dev/null || {
         echo "WARNING: Could not create Python venv (python3-venv may not be installed)"
-        echo "         Shell tasks using markitdown/md2pdf will not work until fixed."
+        echo "         Shell tasks using markitdown will not work until fixed."
     }
 
     if [[ -d "$USER_HOME/.venv" ]]; then
         "$USER_HOME/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-        echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-        "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
-        "$USER_HOME/.venv/bin/playwright" install chromium 2>/dev/null || true
+        echo "==> Installing Python tools (markitdown) ..."
+        "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" 2>/dev/null || true
     fi
 fi
 
-# Activate venv if present (adds markitdown, md2pdf etc. to PATH)
+# Activate venv if present (adds markitdown etc. to PATH)
 if [[ -f "$USER_HOME/.venv/bin/activate" ]]; then
     source "$USER_HOME/.venv/bin/activate"
 fi

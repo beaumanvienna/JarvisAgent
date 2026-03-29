@@ -7,7 +7,7 @@
     {
       "type": "auto",
       "id": "auto",
-      "enabled": true,
+      "enabled": false,
       "params": {}
     }
   ],

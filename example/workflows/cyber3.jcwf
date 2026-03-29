@@ -1,1 +1,72 @@
-{"version":"1.0","id":"cyber3","label":"OpenSSH Cybersecurity Threat Analysis","doc":"Parse OpenSSH log file to extract structured statistics with shell tools, then use AI to assess threats, classify attack patterns, and recommend mitigations.","tasks":{"ai_assess_threats":{"id":"ai_assess_threats","type":"ai_call","label":"Assess threats and recommend mitigations (AI)","working_directory":"../queue/openssh_threat_analysis/02_ai_assess_threats","expose_error_signal":false,"queue_binding":{"stng_files":[{"path":"STNG_threat_assessment.txt","content":"Be precise, concise, and actionable. Output only Markdown. No markdown fences, no explanations."}],"task_files":[{"path":"TASK_assessment.txt","content":"Analyze the provided structured OpenSSH attack statistics. For each attacker IP, classify the attack type (brute force, dictionary, credential stuffing), rank by severity, flag any IPs with successful suspicious logins, and recommend concrete mitigations (fail2ban rules, firewall settings, SSH configuration hardening). Present a clear, prioritized report for a security analyst."}],"cntx_files":["../../../workflows/openssh_threat_analysis/01_shell_parse_log/attack_stats.json"],"prob_files":[{"path":"PROB_assess.txt","content":"Based on the supplied OpenSSH attack statistics, perform a detailed threat assessment for incident response."}]},"depends_on":["shell_parse_log"]},"shell_parse_log":{"id":"shell_parse_log","type":"shell","label":"Parse OpenSSH log: extract attack statistics","working_directory":"openssh_threat_analysis/01_shell_parse_log","expose_error_signal":false,"params":{"command":"scripts/parseSshLog.sh"},"file_inputs":["../../OpenSSH_2k.log"],"file_outputs":["attack_stats.json"],"materialize":{"{{input[0]}}":"OpenSSH_2k.log"}}},"triggers":[{"type":"manual","id":"manual","enabled":true}],"defaults":{"timeout_ms":30000},"control_nodes":[],"controlflow":[]}
+{
+  "version": "1.0",
+  "id": "cyber3",
+  "label": "OpenSSH Cybersecurity Threat Analysis",
+  "doc": "Parse OpenSSH log file to extract structured statistics with shell tools, then use AI to assess threats, classify attack patterns, and recommend mitigations.",
+  "tasks": {
+    "ai_assess_threats": {
+      "id": "ai_assess_threats",
+      "type": "ai_call",
+      "label": "Assess threats and recommend mitigations (AI)",
+      "working_directory": "../queue/openssh_threat_analysis/02_ai_assess_threats",
+      "expose_error_signal": false,
+      "queue_binding": {
+        "stng_files": [
+          {
+            "path": "STNG_threat_assessment.txt",
+            "content": "Be precise, concise, and actionable. Output only Markdown. No markdown fences, no explanations."
+          }
+        ],
+        "task_files": [
+          {
+            "path": "TASK_assessment.txt",
+            "content": "Analyze the provided structured OpenSSH attack statistics. For each attacker IP, classify the attack type (brute force, dictionary, credential stuffing), rank by severity, flag any IPs with successful suspicious logins, and recommend concrete mitigations (fail2ban rules, firewall settings, SSH configuration hardening). Present a clear, prioritized report for a security analyst."
+          }
+        ],
+        "cntx_files": [
+          "../../../workflows/openssh_threat_analysis/01_shell_parse_log/attack_stats.json"
+        ],
+        "prob_files": [
+          {
+            "path": "PROB_assess.txt",
+            "content": "Based on the supplied OpenSSH attack statistics, perform a detailed threat assessment for incident response."
+          }
+        ]
+      },
+      "depends_on": [
+        "shell_parse_log"
+      ]
+    },
+    "shell_parse_log": {
+      "id": "shell_parse_log",
+      "type": "shell",
+      "label": "Parse OpenSSH log: extract attack statistics",
+      "working_directory": "openssh_threat_analysis/01_shell_parse_log",
+      "expose_error_signal": false,
+      "params": {
+        "command": "scripts/parseOpenSshLog.sh"
+      },
+      "file_inputs": [
+        "../../OpenSSH_2k.log"
+      ],
+      "file_outputs": [
+        "attack_stats.json"
+      ],
+      "materialize": {
+        "{{input[0]}}": "OpenSSH_2k.log"
+      }
+    }
+  },
+  "triggers": [
+    {
+      "type": "manual",
+      "id": "manual",
+      "enabled": true
+    }
+  ],
+  "defaults": {
+    "timeout_ms": 30000
+  },
+  "control_nodes": [],
+  "controlflow": []
+}

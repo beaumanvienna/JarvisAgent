@@ -89,8 +89,7 @@ chmod +x "$SHARE/scripts/"*.sh
 # Example workflows (curated list — no subdirs, no build artifacts)
 mkdir -p "$SHARE/example-workflows"
 for jcwf in aiCarMaintenancePipeline aiZipDemo \
-            make-example portfolioDividendAnalysis \
-            vehicleTroubleshootingGuide; do
+            make-example portfolioDividendAnalysis; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SHARE/example-workflows/" 2>/dev/null || true
 done
 # Loose input files needed by the example workflows
@@ -209,9 +208,8 @@ if [[ ! -d "$USER_HOME/.venv" ]]; then
 
     if [[ -d "$USER_HOME/.venv" ]]; then
         "$USER_HOME/.venv/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-        echo "==> Installing Python tools (markitdown, md2pdf-mermaid, playwright) ..."
-        "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" md2pdf-mermaid playwright 2>/dev/null || true
-        "$USER_HOME/.venv/bin/playwright" install chromium 2>/dev/null || true
+        echo "==> Installing Python tools (markitdown) ..."
+        "$USER_HOME/.venv/bin/pip" install --quiet "markitdown[all]" 2>/dev/null || true
     fi
 fi
 
