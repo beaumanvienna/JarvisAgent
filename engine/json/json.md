@@ -79,6 +79,7 @@ struct EngineConfig
     {
         API1 = 0,
         API2,
+        API3,
         NumAPIs,
         InvalidAPI
     };
@@ -197,7 +198,10 @@ void ParseInterfaces(simdjson::ondemand::array jsonArray,
   - `"description"` (string) → `ApiInterface::m_Description`. Optional human-readable hint.
   - `"url"` (string) → `ApiInterface::m_Url`
   - `"model"` (string) → `ApiInterface::m_Model`
-  - `"API"` (string) → maps `"API1"` / `"API2"` to `InterfaceType::API1` / `API2`, otherwise `CORE_HARD_STOP`.
+  - `"API"` (string) → maps `"API1"` / `"API2"` / `"API3"` to `InterfaceType::API1` / `API2` / `API3`, otherwise `CORE_HARD_STOP`.
+    - `API1` — OpenAI-compatible chat completions (`/v1/chat/completions`): OpenAI, Google Gemini via OpenAI-compat endpoint, Anthropic, Ollama, and any compatible provider.
+    - `API2` — OpenAI Responses API (GPT-5 and later models).
+    - `API3` — Google Gemini native API (`x-goog-api-key` header, `/models/{model}:generateContent` URL scheme).
   - `"key_name"` (string) → `ApiInterface::m_KeyName`. Optional reference to an API key by name (as stored in the encrypted keys file). If empty, the default (first available) key is used at runtime.
 - Appends each `ApiInterface` to `engineConfig.m_ApiInterfaces`.
 

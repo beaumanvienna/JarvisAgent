@@ -317,6 +317,9 @@ namespace AIAssistant
             return 0;
         };
 
+        // Attempt HTTP/2 for HTTPS connections; fall back to HTTP/1.1 via ALPN if unsupported.
+        curl_easy_setopt(m_Curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+
         curl_easy_setopt(m_Curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(m_Curl, CURLOPT_HTTPHEADER, headers.Get());
         curl_easy_setopt(m_Curl, CURLOPT_POSTFIELDS, data.c_str());
@@ -364,11 +367,17 @@ namespace AIAssistant
             return QueryResult::Fail(curlCode, std::move(msg));
         }
 
-        // curl succeeded — check HTTP status code
+        // curl succeeded — check HTTP version and status code
+        long httpVersion = 0;
+        curl_easy_getinfo(m_Curl, CURLINFO_HTTP_VERSION, &httpVersion);
+        std::string_view versionLabel =
+            (httpVersion == CURL_HTTP_VERSION_2) ? "HTTP/2" :
+            (httpVersion == CURL_HTTP_VERSION_1_1) ? "HTTP/1.1" : "HTTP/1.0";
+
         long httpCode = 0;
         curl_easy_getinfo(m_Curl, CURLINFO_RESPONSE_CODE, &httpCode);
 
-        LOG_CORE_INFO("Response (HTTP {}): {}", httpCode, m_ReadBuffer);
+        LOG_CORE_INFO("query {} used {} (HTTP {})", m_QueryCounter.load(), versionLabel, httpCode);
 
         if (httpCode >= 400)
         {

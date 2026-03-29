@@ -17,17 +17,15 @@
 
 <br>
 
-JarvisAgent is a **C++ backend / React frontend** application for parallel AI-driven automation.  <br>
+JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** because the backend is multithreaded C++ that batches AI queries concurrently — dozens of AI calls run in parallel across a thread pool, so a 73-task workflow dispatches all requests simultaneously rather than one at a time.  <br>
 <br>
-Its engine core dispatches many concurrent AI requests — think parallel requirements analysis, stock-portfolio deep-research across every position, or chapter-by-chapter processing of entire PDF books.  <br>
+Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When a task fails, the **fix-it** button sends the error output to the AI for a suggested repair. The **explain** button summarises what a workflow does; the **generate** function drafts an entire new workflow from a natural language description.  <br>
 <br>
-Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to Markdown via Microsoft's [MarkItDown](https://github.com/microsoft/markitdown) — and chunked when too large — before being sent to the AI. JarvisAgent is file-oriented by design: all inputs, outputs, and intermediate results live on disk, making it a natural fit for engineering environments with large file landscapes.  <br>
+The **React dashboard** gives an overview of active workflow runs, AI session counts, and completed/failed counters. Its **log viewer** streams up to 100,000 lines live with color-coded severity, and the **Run Analyzer** overlay (press `1`) maps every run to its log region, lists all warnings and errors with one-click navigation, and lets you step through issues with ▲ / ▼.  <br>
 <br>
-Workflows let you chain **serial and parallel tasks** — AI calls, Python scripts, shell commands, or native C++ — in a visual graph editor with various trigger types. Workflows can be **triggered externally** via webhooks (with HMAC signature verification) and integrated with **n8n** or any HTTP-capable orchestrator. Completion callbacks deliver results — including full AI output — back to the caller automatically.  <br>
+Tasks can be AI calls, shell commands, **Python scripts** (executed by the embedded Python engine), or internal C++ actions. The **AI assistant** has 31 specialized tools — it can read and write workflow files, run tasks, inspect logs, and query the running engine — going well beyond a chat interface. Workflows can be triggered on a cron schedule, by a file appearing in a watched directory, or via webhooks with HMAC signature verification, integrating with n8n or any HTTP-capable orchestrator.  <br>
 <br>
-A built-in **AI assistant** can generate entire workflows from a natural language description — decomposing the task, producing the JCWF definition, and generating all required scripts.  <br>
-<br>
-The application ships with an **ncurses terminal UI** for local or SSH sessions and a **browser-based React dashboard** for remote monitoring. It compiles under **Linux, macOS, and Windows**.  <br>
+Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk. It compiles under **Linux, macOS, and Windows**.  <br>
 <br>
 
 | Terminal UI | Dashboard | Workflow Editor |

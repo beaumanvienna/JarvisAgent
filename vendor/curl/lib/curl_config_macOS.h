@@ -744,7 +744,7 @@
 /* #undef CURL_DISABLE_OPENSSL_AUTO_LOAD_CONFIG */
 
 /* to enable NGHTTP2  */
-/* #undef USE_NGHTTP2 */
+#define USE_NGHTTP2 1
 
 /* to enable NGTCP2 */
 /* #undef USE_NGTCP2 */

@@ -57,15 +57,18 @@ project "curl"
     {
         "curl/include",
         "curl/lib",
-        "openssl/include"
+        "openssl/include",
+        "nghttp2/lib/includes"
     }
-    
+
     defines
     {
         "CURL_STATICLIB",
         "USE_MANUAL",
         "CURL_HIDDEN_SYMBOLS",
-        "BUILDING_LIBCURL"
+        "BUILDING_LIBCURL",
+        "USE_NGHTTP2",
+        "NGHTTP2_STATICLIB"
     }
     
     filter "system:windows"

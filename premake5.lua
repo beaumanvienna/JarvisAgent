@@ -61,6 +61,7 @@ project "jarvisAgent"
         "vendor/",
         "vendor/spdlog/include",
         "vendor/curl/include",
+        "vendor/nghttp2/lib/includes",
         "vendor/thread-pool/include",
         "vendor/tracy/include",
         "vendor/openssl/include",
@@ -69,6 +70,8 @@ project "jarvisAgent"
         "vendor/pdcursesmod",
         "vendor/date/include"
     }
+
+    defines { "NGHTTP2_STATICLIB" }
 
     filter "system:linux"
 
@@ -111,6 +114,7 @@ project "jarvisAgent"
 
             links {
                 "curl",
+                "nghttp2",
                 "pthread",
                 "dl",
                 "ssl",
@@ -225,6 +229,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
 
             links {
                 "curl",
+                "nghttp2",
                 "ssl",
                 "crypto",
                 "z",
@@ -261,7 +266,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         --
         -- Windows system libs (always).
         --
-        links { "wldap32", "advapi32", "crypt32", "secur32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "ssl", "crypto" }
+        links { "wldap32", "advapi32", "crypt32", "secur32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "nghttp2", "ssl", "crypto" }
 
         --
         -- Robust Python discovery on Windows:
@@ -345,6 +350,12 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         ----------------------------------------------------
         os.remove("vendor/curl/lib/curl_config.h")
 
+        ----------------------------------------------------
+        -- nghttp2 build folders
+        ----------------------------------------------------
+        os.rmdir("vendor/nghttp2/bin")
+        os.rmdir("vendor/nghttp2/bin-int")
+
 
         ----------------------------------------------------
         -- OpenSSL build folders
@@ -363,6 +374,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
     end
 
     include "vendor/curl.lua"
+    include "vendor/nghttp2.lua"
     include "vendor/openssl/crypto.lua"
     include "vendor/openssl/ssl.lua"
     include "vendor/pdcursesmod/pdcursesmod.lua"
