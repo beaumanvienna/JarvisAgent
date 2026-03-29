@@ -48,6 +48,7 @@
 #include "workflow/pythonTaskExecutor.h"
 #include "workflow/triggerEngine.h"
 #include "workflow/aiRequestPool.h"
+#include "curlWrapper/curlMultiDispatcher.h"
 #include "workflow/workflowFileIndex.h"
 #include "workflow/workflowRuntimeManager.h"
 
@@ -183,6 +184,7 @@ namespace AIAssistant
         }
 
         m_AiRequestPool = std::make_unique<AiRequestPool>();
+        m_CurlMultiDispatcher = std::make_unique<CurlMultiDispatcher>();
 
         // ---------------------------------------------------------
         // Initialize workflow system (registry + runtime manager + triggers)
@@ -620,6 +622,12 @@ namespace AIAssistant
             m_AiRequestPool->Shutdown();
         }
 
+        RAW_ONSHUTDOWN("[OnShutdown] CurlMultiDispatcher::SignalStop...\n");
+        if (m_CurlMultiDispatcher != nullptr)
+        {
+            m_CurlMultiDispatcher->SignalStop();
+        }
+
         // Shut down assistant controller early: its background threads hold pointers
         // to WRM and WorkflowRegistry, so it must be joined before those are reset.
         RAW_ONSHUTDOWN("[OnShutdown] AssistantController::Shutdown...\n");
@@ -669,6 +677,16 @@ namespace AIAssistant
         LOG_APP_INFO("[shutdown] WorkflowRuntimeManager stopped");
 
         m_AiRequestPool.reset();
+
+        RAW_ONSHUTDOWN("[OnShutdown] CurlMultiDispatcher::WaitStop...\n");
+        if (m_CurlMultiDispatcher != nullptr)
+        {
+            m_CurlMultiDispatcher->WaitStop();
+            m_CurlMultiDispatcher.reset();
+        }
+        RAW_ONSHUTDOWN("[OnShutdown] CurlMultiDispatcher stopped\n");
+        LOG_APP_INFO("[shutdown] CurlMultiDispatcher stopped");
+
         App::g_App = nullptr;
 
         RAW_ONSHUTDOWN("[OnShutdown] session managers...\n");

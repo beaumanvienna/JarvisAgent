@@ -176,7 +176,7 @@ The Gemini native API differs from OpenAI:
 
 ## High‑Level Flow
 
-1. **Raw JSON arrives from Python/OpenAI.**
+1. **Raw JSON arrives from the AI provider.**
 2. **ReplyParser::Create()** picks API1, API2, or API3.
 3. Parser converts raw JSON → `simdjson::padded_string`.
 4. Walks top‑level fields:

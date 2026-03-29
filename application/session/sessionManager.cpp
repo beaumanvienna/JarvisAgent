@@ -26,11 +26,13 @@
 #include "core.h"
 #include "event/events.h"
 #include "json/jsonHelper.h"
+#include "json/replyParser.h"
 #include "log/statusRenderer.h"
 #include "auxiliary/file.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 #include "workflow/aiRequestPool.h"
+#include "curlWrapper/curlMultiDispatcher.h"
 
 namespace AIAssistant
 {
@@ -82,7 +84,7 @@ namespace AIAssistant
                 .m_EnvironmentComplete = m_Environment.GetEnvironmentComplete(), //
                 .m_QueriesChanged = queriesChanged,                              //
                 .m_AllQueriesSent = allQueriesSent,                              //
-                .m_AllResponsesReceived = (m_QueryFutures.size() == 0),          // idle when no futures are outstanding
+                .m_AllResponsesReceived = (m_InFlightCount.load() == 0),          // idle when no requests are in-flight
                 .m_HasFailures = (m_FailedQueriesThisRun > 0)                    //
             };
             m_StateMachine.OnUpdate(stateInfo);
@@ -90,7 +92,7 @@ namespace AIAssistant
 
         // limit queued queries to 1½ the number of configured threads
         // thread pool has queue but we can limit it here to safe queue memory
-        if ((m_QueryFutures.size() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f) &&
+        if ((m_InFlightCount.load() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f) &&
             m_Environment.GetEnvironmentComplete())
         {
             bool anyQueryDispatched = false;
@@ -126,8 +128,8 @@ namespace AIAssistant
                 StatusRenderer& statusRenderer = jarvisAgent->GetStatusRenderer();
                 statusRenderer.UpdateSession(m_Name, SessionManager::StateMachine::StateNames[m_StateMachine.GetState()],
                                              m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(),
-                                             m_QueryFutures.size(), m_CompletedQueriesThisRun, m_FailedQueriesThisRun,
-                                             m_LastErrorCode, m_LastErrorMessage);
+                                             m_InFlightCount.load(), m_CompletedQueriesThisRun.load(),
+                                             m_FailedQueriesThisRun.load(), m_LastErrorCode, m_LastErrorMessage);
             }
         }
 
@@ -138,9 +140,9 @@ namespace AIAssistant
             msg["name"] = m_Name;
             msg["state"] = std::string(SessionManager::StateMachine::StateNames[m_StateMachine.GetState()]);
             msg["outputs"] = m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size();
-            msg["inflight"] = m_QueryFutures.size();
-            msg["completed"] = m_CompletedQueriesThisRun;
-            msg["failed"] = m_FailedQueriesThisRun;
+            msg["inflight"] = m_InFlightCount.load();
+            msg["completed"] = m_CompletedQueriesThisRun.load();
+            msg["failed"] = m_FailedQueriesThisRun.load();
             if (m_LastErrorCode != 0)
             {
                 msg["last_error_code"] = m_LastErrorCode;
@@ -230,14 +232,8 @@ namespace AIAssistant
 
     void SessionManager::OnShutdown()
     {
-        for (auto& future : m_QueryFutures)
-        {
-            if (future.valid())
-            {
-                future.wait_for(std::chrono::milliseconds(50));
-            }
-        }
-        m_QueryFutures.clear();
+        // CurlMultiDispatcher::WaitStop() has already joined the I/O thread by the time
+        // session managers are shut down, so all callbacks have fired and m_InFlightCount is 0.
     }
 
     bool SessionManager::IsIdle() const
@@ -351,76 +347,114 @@ namespace AIAssistant
             .m_AuthStyle = authStyle //
         };
 
-        auto& threadpool = Core::g_Core->GetThreadPool();
         std::string inputFilename = requirementFile.GetPath().string();
-        auto query = [this, queryData, inputFilename]() -> QueryResult
+        std::string apiType = m_ApiType; // capture by value — PROV can change m_ApiType
+        std::string model = m_Model;     // capture by value for same reason
+
+        // Count before Submit so the state machine never sees a spurious idle window.
+        ++m_InFlightCount;
+
+        auto callback = [this, inputFilename, apiType, model](QueryResult curlResult, std::string responseBody)
         {
             try
             {
-                auto& curl = CurlManager::GetThreadCurl();
-                curl.Clear();
-
-                QueryResult curlResult = curl.Query(queryData);
-
-                // Always create a parser, even if curl failed (empty buffer).
-                // Use the per-session api type (may be overridden by PROV file)
-                // rather than the global default.
                 auto interfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
-                if (m_ApiType == "API2")
+                if (apiType == "API2")
                     interfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
-                else if (m_ApiType == "API3")
+                else if (apiType == "API3")
                     interfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
-                m_ReplyParser = ReplyParser::Create(interfaceType, curlResult.m_Ok ? curl.GetBuffer() : "");
+
+                auto replyParser = ReplyParser::Create(interfaceType, curlResult.m_Ok ? responseBody : "");
 
                 if (!curlResult.m_Ok)
                 {
                     LOG_APP_ERROR("Query failed for '{}' (error {}): {}", inputFilename, curlResult.m_ErrorCode,
                                   curlResult.m_ErrorMessage);
-                    return curlResult;
+                    ++m_FailedQueriesThisRun;
+                    {
+                        std::lock_guard<std::mutex> lock(m_ResultMutex);
+                        m_LastErrorCode = curlResult.m_ErrorCode;
+                        m_LastErrorMessage = curlResult.m_ErrorMessage;
+                    }
+                    auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+                    Core::g_Core->PushEvent(appErrorEvent);
                 }
-
-                // Parser error?
-                if (m_ReplyParser->HasError())
+                else if (replyParser->HasError())
                 {
-                    return QueryResult::Fail(QueryErrorCode::ParserError,
-                                             "Response parser error for '" + inputFilename + "'");
+                    LOG_APP_ERROR("Response parser error for '{}'", inputFilename);
+                    ++m_FailedQueriesThisRun;
+                    {
+                        std::lock_guard<std::mutex> lock(m_ResultMutex);
+                        m_LastErrorCode = QueryErrorCode::ParserError;
+                        m_LastErrorMessage = "Response parser error for '" + inputFilename + "'";
+                    }
+                    auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+                    Core::g_Core->PushEvent(appErrorEvent);
                 }
-
-                size_t hasContent = m_ReplyParser->HasContent();
-                if (hasContent == 0)
+                else
                 {
-                    LOG_APP_WARN("No content returned for '{}'", inputFilename);
-                    return QueryResult::Fail(QueryErrorCode::EmptyResponse,
-                                             "Empty response from AI for '" + inputFilename + "'");
+                    size_t const hasContent = replyParser->HasContent();
+                    if (hasContent == 0)
+                    {
+                        LOG_APP_WARN("No content returned for '{}'", inputFilename);
+                        ++m_FailedQueriesThisRun;
+                        {
+                            std::lock_guard<std::mutex> lock(m_ResultMutex);
+                            m_LastErrorCode = QueryErrorCode::EmptyResponse;
+                            m_LastErrorMessage = "Empty response from AI for '" + inputFilename + "'";
+                        }
+                        auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
+                        Core::g_Core->PushEvent(appErrorEvent);
+                    }
+                    else
+                    {
+                        for (size_t index = 0; index < hasContent; ++index)
+                        {
+                            std::string contentText = replyParser->GetContent(index);
+                            LOG_APP_INFO("message:");
+                            std::cout << contentText << "\n";
+
+                            fs::path outputPath(inputFilename);
+                            outputPath.replace_filename(outputPath.stem().string() + ".output" +
+                                                        outputPath.extension().string());
+
+                            FileWriter::Get().WriteWithHeader(outputPath, contentText, model);
+                        }
+                        ++m_CompletedQueriesThisRun;
+                    }
                 }
-
-                // Write all returned content blocks
-                for (size_t index = 0; index < hasContent; ++index)
-                {
-                    std::string contentText = m_ReplyParser->GetContent(index);
-                    LOG_APP_INFO("message:");
-                    std::cout << contentText << "\n";
-
-                    fs::path outputPath(inputFilename);
-                    outputPath.replace_filename(outputPath.stem().string() + ".output" + outputPath.extension().string());
-
-                    FileWriter::Get().WriteWithHeader(outputPath, contentText, m_Model);
-                }
-
-                return QueryResult::Ok();
             }
             catch (const std::exception& e)
             {
-                LOG_APP_ERROR("Exception in query thread for '{}': {}", inputFilename, e.what());
-                return QueryResult::Fail(QueryErrorCode::ExceptionThrown, e.what());
+                LOG_APP_ERROR("Exception in callback for '{}': {}", inputFilename, e.what());
+                ++m_FailedQueriesThisRun;
+                {
+                    std::lock_guard<std::mutex> lock(m_ResultMutex);
+                    m_LastErrorCode = QueryErrorCode::ExceptionThrown;
+                    m_LastErrorMessage = e.what();
+                }
             }
+
+            --m_InFlightCount;
         };
 
-        m_QueryFutures.push_back(threadpool.SubmitTask(query));
-
-        // Signal the AiRequestPool that curl was dispatched for this PROB file.
-        // This confirms the handoff from file-placement to HTTP dispatch.
         JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+        CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
+
+        if (dispatcher != nullptr)
+        {
+            dispatcher->Submit(queryData, std::move(callback));
+        }
+        else
+        {
+            // Dispatcher unavailable — cancel immediately to keep m_InFlightCount consistent.
+            LOG_APP_ERROR("CurlMultiDispatcher unavailable — query dropped for '{}'", inputFilename);
+            --m_InFlightCount;
+            return;
+        }
+
+        // Signal the AiRequestPool that an HTTP request was dispatched for this PROB file.
+        // This confirms the handoff from file-placement to HTTP dispatch.
         if (jarvisAgent != nullptr)
         {
             AiRequestPool* requestPool = jarvisAgent->GetAiRequestPool();
@@ -487,37 +521,8 @@ namespace AIAssistant
 
     void SessionManager::TrackInFlightQueries()
     {
-        // --- clean up futures and report result ---
-        m_QueryFutures.erase(           //
-            std::remove_if(             //
-                m_QueryFutures.begin(), //
-                m_QueryFutures.end(),   //
-                [&](auto& future)
-                {
-                    if (future.wait_for(std::chrono::seconds(0s)) == std::future_status::ready)
-                    {
-                        QueryResult result = future.get();
-                        if (result.m_Ok)
-                        {
-                            ++m_CompletedQueriesThisRun;
-                        }
-                        else
-                        {
-                            ++m_FailedQueriesThisRun;
-                            m_LastErrorCode = result.m_ErrorCode;
-                            m_LastErrorMessage = result.m_ErrorMessage;
-
-                            LOG_APP_ERROR("[{}] query failed (error {}): {}", m_Name, result.m_ErrorCode,
-                                          result.m_ErrorMessage);
-
-                            auto appErrorEvent = std::make_shared<AppErrorEvent>(AppErrorEvent::AppErrorBadCurl);
-                            Core::g_Core->PushEvent(appErrorEvent);
-                        }
-                        return true; // remove from list
-                    }
-                    return false; // keep in list, we'll check next frame again
-                }),
-            m_QueryFutures.end());
+        // Completions are handled asynchronously in the CurlMultiDispatcher callback.
+        // The state machine reads m_InFlightCount directly in OnUpdate().
     }
 
     void SessionManager::AssembleSettings()

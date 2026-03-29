@@ -218,10 +218,11 @@ See also:
 - Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
 - Target: GitHub README embed, YouTube, social media
 
-### 8. Enable HTTP/2 for AI provider requests
-- Enable HTTP/2 in `CurlWrapper` for improved network performance when communicating with AI provider APIs
-- libcurl supports HTTP/2 via `CURLOPT_HTTP_VERSION` / `CURL_HTTP_VERSION_2TLS`
-- Requires OpenSSL with ALPN support (already vendored)
+### ~~8. Enable HTTP/2 for AI provider requests~~ ✅
+- ~~Enable HTTP/2 in `CurlWrapper` for improved network performance when communicating with AI provider APIs~~ ✅
+- Phase 1: vendored nghttp2, set `CURLOPT_HTTP_VERSION_2TLS` in `CurlWrapper::Query()` — all AI requests now negotiate HTTP/2 via ALPN, log line confirms "HTTP/2 (HTTP 200)" per query.
+- Phase 2: `CurlMultiDispatcher` — dedicated I/O thread with `curl_multi` + `CURLPIPE_MULTIPLEX`; all concurrent requests to the same host share one TCP/TLS connection; zero thread-pool threads blocked on network I/O. `SessionManager` converted from futures-based dispatch to async callback via `Submit(data, callback)`.
+- Verified: log shows HTTP/2 for all queries; burst of 10+ completions within 1 second confirms multiplexing is active.
 
 ---
 

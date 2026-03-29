@@ -41,6 +41,7 @@ namespace AIAssistant
     class ScriptRegistry;
 
     class AiRequestPool;
+    class CurlMultiDispatcher;
     class WorkflowFileIndex;
     class WorkflowRuntimeManager;
 
@@ -69,6 +70,7 @@ namespace AIAssistant
         WorkflowFileIndex* GetWorkflowFileIndex() { return m_WorkflowFileIndex.get(); }
 
         AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
+        CurlMultiDispatcher* GetCurlMultiDispatcher() const { return m_CurlMultiDispatcher.get(); }
         WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
 
         IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
@@ -111,6 +113,7 @@ namespace AIAssistant
         InternalTaskRegistry m_InternalTaskRegistry;
 
         std::unique_ptr<AiRequestPool> m_AiRequestPool;
+        std::unique_ptr<CurlMultiDispatcher> m_CurlMultiDispatcher;
         std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;
         std::unique_ptr<WorkflowFileIndex> m_WorkflowFileIndex;
     };

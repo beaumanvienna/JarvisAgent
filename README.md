@@ -17,9 +17,9 @@
 
 <br>
 
-JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** because the backend is multithreaded C++ that batches AI queries concurrently — dozens of AI calls run in parallel across a thread pool, so a 73-task workflow dispatches all requests simultaneously rather than one at a time.  <br>
+JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** for two reasons: hundreds of AI calls run at the same time rather than one after another, and all outgoing requests share a single HTTP/2 connection per provider — so network overhead stays minimal no matter how many tasks are in flight.  <br>
 <br>
-Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When a task fails, the **fix-it** button sends the error output to the AI for a suggested repair. The **explain** button summarises what a workflow does; the **generate** function drafts an entire new workflow from a natural language description.  <br>
+Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When something goes wrong the **fix-it** button sends the error to the AI for a suggested repair; the **explain** button summarises what a workflow does in plain language; and the **generate** button drafts an entirely new workflow from a natural language description.  <br>
 <br>
 The **React dashboard** gives an overview of active workflow runs, AI session counts, and completed/failed counters. Its **log viewer** streams up to 100,000 lines live with color-coded severity, and the **Run Analyzer** overlay (press `1`) maps every run to its log region, lists all warnings and errors with one-click navigation, and lets you step through issues with ▲ / ▼.  <br>
 <br>
@@ -171,7 +171,7 @@ queue/
 - [x] Workflow versioning — auto-backup on save, browse & restore from editor  
 - [ ] Python Engine parallelization (sub-interpreters / multiprocessing)  
 - [ ] Browser-based AI chat terminal  
-- [ ] Enable HTTP/2 for improved network performance  
+- [x] HTTP/2 multiplexing — all concurrent AI requests share a single TLS connection per provider via a dedicated I/O thread; no thread-pool threads blocked on network I/O
 
 ---
 

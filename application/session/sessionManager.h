@@ -20,16 +20,15 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <future>
 #include <array>
+#include <atomic>
+#include <mutex>
 #include <optional>
 
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
-#include "curlWrapper/curlManager.h"
 #include "file/trackedFile.h"
 #include "file/fileCategorizer.h"
-#include "json/replyParser.h"
 #include "jarvisAgent.h"
 
 namespace AIAssistant
@@ -88,9 +87,9 @@ namespace AIAssistant
 
     public:
         std::string const& GetName() const { return m_Name; }
-        size_t GetInflightCount() const { return m_QueryFutures.size(); }
-        size_t GetCompletedCount() const { return m_CompletedQueriesThisRun; }
-        size_t GetFailedCount() const { return m_FailedQueriesThisRun; }
+        size_t GetInflightCount() const { return m_InFlightCount.load(); }
+        size_t GetCompletedCount() const { return m_CompletedQueriesThisRun.load(); }
+        size_t GetFailedCount() const { return m_FailedQueriesThisRun.load(); }
         size_t GetOutputsCount() { return m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size(); }
         std::string_view GetStateName() const { return StateMachine::StateNames[m_StateMachine.GetState()]; }
         int GetLastErrorCode() const { return m_LastErrorCode; }
@@ -142,9 +141,6 @@ namespace AIAssistant
         std::string m_Context;
         std::string m_Tasks;
 
-        // handles to queries
-        std::vector<std::future<QueryResult>> m_QueryFutures;
-
         std::string m_Url;
         std::string m_Model;
         std::string m_ApiType;
@@ -152,9 +148,11 @@ namespace AIAssistant
         std::string m_KeyName; // key_name from interface config (for lazy re-resolve)
         std::optional<double> m_Temperature;
 
-        std::unique_ptr<ReplyParser> m_ReplyParser;
-        size_t m_CompletedQueriesThisRun{0};
-        size_t m_FailedQueriesThisRun{0};
+        // in-flight request counter — incremented before Submit(), decremented in callback
+        std::atomic<size_t> m_InFlightCount{0};
+        std::atomic<size_t> m_CompletedQueriesThisRun{0};
+        std::atomic<size_t> m_FailedQueriesThisRun{0};
+        std::mutex m_ResultMutex; // protects m_LastErrorCode + m_LastErrorMessage
         int m_LastErrorCode{0};
         std::string m_LastErrorMessage;
     };
