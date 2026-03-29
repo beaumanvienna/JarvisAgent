@@ -61,7 +61,10 @@ project "nghttp2"
 
     filter "system:windows"
         systemversion "latest"
-        defines { "WIN32", "HAVE_WINDOWS_H" }
+        -- ssize_t is POSIX-only; MSVC doesn't define it in sys/types.h.
+        -- ptrdiff_t is signed, pointer-sized, and already available via <stddef.h>
+        -- (included by nghttp2.h before any ssize_t typedef).
+        defines { "WIN32", "HAVE_WINDOWS_H", "ssize_t=ptrdiff_t" }
 
     filter "configurations:Release"
         runtime "Release"
