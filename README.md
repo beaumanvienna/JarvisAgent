@@ -25,7 +25,7 @@ The **React dashboard** gives an overview of active workflow runs, AI session co
 <br>
 Tasks can be AI calls, shell commands, **Python scripts** (executed by the embedded Python engine), or internal C++ actions. The **AI assistant** has 31 specialized tools — it can read and write workflow files, run tasks, inspect logs, and query the running engine — going well beyond a chat interface. Workflows can be triggered on a cron schedule, by a file appearing in a watched directory, or via webhooks with HMAC signature verification, integrating with n8n or any HTTP-capable orchestrator.  <br>
 <br>
-Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk. It compiles under **Linux, macOS, and Windows**.  <br>
+Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk.  <br>
 <br>
 
 | Terminal UI | Dashboard | Workflow Editor |
