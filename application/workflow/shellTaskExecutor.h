@@ -30,6 +30,14 @@
 
 namespace AIAssistant
 {
+#if defined(_WIN32)
+    enum class WindowsShell
+    {
+        PowerShell,
+        Bash
+    };
+#endif
+
     class ShellTaskExecutor : public ITaskExecutor
     {
     public:
@@ -38,6 +46,14 @@ namespace AIAssistant
         bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
                      TaskInstanceState& taskState) override;
 
+#if defined(_WIN32)
+        // Probe PATH for bash (if use_bash config is true) and cache result. Call once at startup.
+        static void ProbeWindowsShell(bool useBashConfig);
+
+        // Return the cached shell selection.
+        static WindowsShell GetWindowsShell();
+#endif
+
     private:
         // Restrict which scripts can be invoked (e.g., must live under "scripts/").
         bool ValidateScriptPath(std::string const& path) const;
@@ -45,5 +61,9 @@ namespace AIAssistant
         // Conservative safety check: allow typical path / flag characters and spaces,
         // but reject characters commonly used for shell injection.
         bool IsSafeArgument(std::string const& argument) const;
+
+#if defined(_WIN32)
+        static WindowsShell s_WindowsShell;
+#endif
     };
 } // namespace AIAssistant

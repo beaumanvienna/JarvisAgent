@@ -28,6 +28,7 @@ export default function SettingsModal({
   const [draftMaxFileSize, setDraftMaxFileSize] = useState<string>("24");
   const [draftBatchSize, setDraftBatchSize] = useState<string>("1");
   const [draftJcwfAiInterface, setDraftJcwfAiInterface] = useState<number>(-1);
+  const [draftUseBash, setDraftUseBash] = useState<boolean>(false);
 
   useEffect(() => {
     Promise.all([getConfigSettings(), listAiInterfaces()]).then(([cfg, ifaces]) => {
@@ -39,6 +40,7 @@ export default function SettingsModal({
       setDraftMaxFileSize(String(cfg.max_file_size_kb));
       setDraftBatchSize(String(cfg.jcwf_batch_size));
       setDraftJcwfAiInterface(cfg.jcwf_ai_interface);
+      setDraftUseBash(cfg.use_bash);
     }).catch(() => {
       setServerMessage("Failed to load server settings");
     });
@@ -56,7 +58,8 @@ export default function SettingsModal({
     draftVerbose !== serverConfig.verbose ||
     Number(draftMaxFileSize) !== serverConfig.max_file_size_kb ||
     Number(draftBatchSize) !== serverConfig.jcwf_batch_size ||
-    draftJcwfAiInterface !== serverConfig.jcwf_ai_interface
+    draftJcwfAiInterface !== serverConfig.jcwf_ai_interface ||
+    draftUseBash !== serverConfig.use_bash
   );
 
   const handleSaveServerSettings = useCallback(async () => {
@@ -71,6 +74,7 @@ export default function SettingsModal({
         max_file_size_kb: Number(draftMaxFileSize),
         jcwf_batch_size: Number(draftBatchSize),
         jcwf_ai_interface: draftJcwfAiInterface,
+        use_bash: draftUseBash,
       });
       if (result.ok)
       {
@@ -92,7 +96,7 @@ export default function SettingsModal({
     {
       setSaving(false);
     }
-  }, [draftApiIndex, draftMaxThreads, draftVerbose, draftMaxFileSize, draftBatchSize, draftJcwfAiInterface]);
+  }, [draftApiIndex, draftMaxThreads, draftVerbose, draftMaxFileSize, draftBatchSize, draftJcwfAiInterface, draftUseBash]);
 
   const fieldRow = (label: string, content: React.ReactNode, hint?: string) => (
     <div style={{ marginBottom: 10 }}>
@@ -222,6 +226,19 @@ export default function SettingsModal({
                     />
                     <span style={{ fontSize: 12 }}>Enable</span>
                   </label>
+                )}
+
+                {serverConfig.platform === "windows" && fieldRow(
+                  "Use Bash (Windows)",
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={draftUseBash}
+                      onChange={(e) => setDraftUseBash(e.target.checked)}
+                    />
+                    <span style={{ fontSize: 12 }}>Enable</span>
+                  </label>,
+                  "Use Bash (MSYS2 / Git Bash) instead of PowerShell. Requires bash on PATH; falls back to PowerShell if not found."
                 )}
 
                 {fieldRow(

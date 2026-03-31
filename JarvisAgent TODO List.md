@@ -243,14 +243,20 @@ See also:
 
 ---
 
-### 11. Add Windows native scripting in PowerShell for the JC workflow engine and for the AI assistant
-- Currently all shell execution (workflow engine `ShellTaskExecutor` and AI assistant tools) assumes bash (MSYS2 / Git Bash) on Windows
-- Add native PowerShell support: detect `.ps1` scripts and route through `powershell -ExecutionPolicy Bypass -File ...`
-- Workflow engine: update `ExecuteCommandWithCapturedOutput` to dispatch by script extension (`.sh` → bash, `.ps1` → PowerShell)
-- Workflow validator: accept PowerShell scripts (skip bash shebang check for `.ps1`)
-- Argument quoting: add `QuoteForPowerShell` function (double-quote escaping instead of POSIX single-quote)
-- AI assistant `run_shell`: detect platform and use PowerShell as the default shell on Windows when bash is not available
-- AI assistant tools (`search_files`, `list_files`, `get_log_tail`): provide PowerShell equivalents for `rg`/`grep`, `Get-ChildItem`, `Get-Content -Tail`
+### ~~11. Add Windows native scripting in PowerShell for the JC workflow engine and for the AI assistant~~ ✅
+- ~~Currently all shell execution (workflow engine `ShellTaskExecutor` and AI assistant tools) assumes bash (MSYS2 / Git Bash) on Windows~~ ✅
+- ~~Add native PowerShell support: detect `.ps1` scripts and route through `powershell -ExecutionPolicy Bypass -File ...`~~ ✅
+- ~~Workflow engine: update `ExecuteCommandWithCapturedOutput` to dispatch by script extension (`.sh` → bash, `.ps1` → PowerShell)~~ ✅
+- ~~Workflow validator: accept PowerShell scripts (skip bash shebang check for `.ps1`)~~ ✅
+- ~~Argument quoting: add `QuoteForPowerShell` function (single-quote wrap, inner `'` → `''`)~~ ✅
+- ~~AI assistant `run_shell`: detect platform and use PowerShell as the default shell on Windows when bash is not available~~ ✅
+- `use_bash` config toggle: PowerShell default, `use_bash: true` probes PATH for bash and falls back to PowerShell if not found ✅
+- `.sh` → `.ps1` sibling resolution: executor looks for `.ps1` sibling before executing, fails with clear error if missing ✅
+- AI JCWF pipeline (aiJcwfService): strengthened Windows OS detection, added `.ps1` generation/validation/fix/review rules ✅
+- Added `compile.ps1`, `archive.ps1`, `link.ps1`, `run.ps1` PowerShell siblings for the make-example workflow ✅
+- Settings UI: `use_bash` checkbox (Windows-only, gated on `platform` field from config API) ✅
+
+**Follow-up:** ~~`run_shell` timeout on Windows — currently runs to completion with no kill mechanism. Need `CreateProcess()` + `WaitForSingleObject(handle, 30000)` + `TerminateProcess()` on timeout, matching the 30s Linux/macOS watchdog.~~ ✅ Implemented: `CreateProcess` + reader thread + `WaitForSingleObject(30s)` + `TerminateProcess` on expiry.
 
 ---
 

@@ -139,7 +139,11 @@ namespace AIAssistant
             }
             return "macOS (version unknown)";
 #elif defined(_WIN32)
-            return "Windows (use PowerShell-compatible commands)";
+            return "Windows — generate PowerShell (.ps1) scripts. "
+                   "Use PowerShell conventions: param([string]$Arg1, ...) for positional args, "
+                   "Set-StrictMode -Version Latest, $ErrorActionPreference = 'Stop', "
+                   "Write-Output / Copy-Item / Remove-Item cmdlets, Join-Path for paths. "
+                   "No shebang, no POSIX awk/sed/grep, no single-quote shell escaping.";
 #else
             // Linux: read first 5 lines of /etc/os-release
             std::ifstream osRelease("/etc/os-release");
@@ -497,7 +501,8 @@ namespace AIAssistant
 
         // Validate a generated script for structural correctness.
         static ScriptValidationResult ValidateGeneratedScript(std::string const& scriptContent,
-                                                              std::string const& expectedFunctionName, bool isPython)
+                                                              std::string const& expectedFunctionName, bool isPython,
+                                                              bool isPowerShell = false)
         {
             ScriptValidationResult vr;
 
@@ -590,6 +595,52 @@ namespace AIAssistant
                         vr.issues.push_back("Function '" + expectedFunctionName +
                                             "' should accept 'context=None' as a parameter.");
                     }
+                }
+            }
+            else if (isPowerShell)
+            {
+                // PowerShell script checks: no shebang, but require @jarvis-script and Set-StrictMode.
+                bool hasMarker = false;
+                for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+                {
+                    if (lines[i].find("@jarvis-script") != std::string::npos)
+                    {
+                        hasMarker = true;
+                        break;
+                    }
+                }
+                if (!hasMarker)
+                {
+                    vr.issues.push_back("Missing '# @jarvis-script' metadata marker in the first 20 lines.");
+                }
+
+                bool hasShort = false;
+                for (size_t i = 0; i < std::min(lines.size(), size_t(50)); ++i)
+                {
+                    if (lines[i].find("@short") != std::string::npos)
+                    {
+                        hasShort = true;
+                        break;
+                    }
+                }
+                if (!hasShort)
+                {
+                    vr.issues.push_back("Missing '# @short: ...' metadata line.");
+                }
+
+                bool hasStrictMode = false;
+                for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+                {
+                    if (lines[i].find("Set-StrictMode") != std::string::npos)
+                    {
+                        hasStrictMode = true;
+                        break;
+                    }
+                }
+                if (!hasStrictMode)
+                {
+                    vr.issues.push_back(
+                        "Missing 'Set-StrictMode -Version Latest' (PowerShell equivalent of set -euo pipefail).");
                 }
             }
             else
@@ -2027,6 +2078,7 @@ namespace AIAssistant
 
                             std::string const& scriptPath = newScripts[i];
                             bool const isShell = scriptPath.ends_with(".sh");
+                            bool const isPs1 = scriptPath.ends_with(".ps1");
 
                             broadcastProgress(3, "Generating " + scriptPath + " (" + std::to_string(i + 1) + "/" +
                                                      std::to_string(newScripts.size()) + ")...");
@@ -2084,6 +2136,53 @@ namespace AIAssistant
                                              "If GNU awk is truly required, call 'gawk' explicitly.\n"
                                              "- Output ONLY the script. Nothing else.";
                             }
+                            else if (isPs1)
+                            {
+                                // Build explicit positional-arg mapping from JCWF file_inputs/file_outputs
+                                std::string argMapping;
+                                auto ioIt = shellIoMap.find(scriptPath);
+                                int argNum = 1;
+                                if (ioIt != shellIoMap.end())
+                                {
+                                    for (auto const& fi : ioIt->second.fileInputs)
+                                    {
+                                        argMapping +=
+                                            "  $Arg" + std::to_string(argNum) + " = file_inputs (\"" + fi + "\")\n";
+                                        argNum++;
+                                    }
+                                    for (auto const& fo : ioIt->second.fileOutputs)
+                                    {
+                                        argMapping +=
+                                            "  $Arg" + std::to_string(argNum) + " = file_outputs (\"" + fo + "\")\n";
+                                        argNum++;
+                                    }
+                                }
+
+                                scriptTask = "Generate a PowerShell script for '" + scriptPath +
+                                             "'.\n"
+                                             "Host OS: " +
+                                             GetHostOsDescription() +
+                                             "\n"
+                                             "Rules:\n"
+                                             "- First line MUST be: # @jarvis-script\n"
+                                             "- No shebang line (PowerShell does not use one).\n"
+                                             "- Include metadata comments: # @short: ..., # @params: ..., "
+                                             "# @description: ..., # @outputs: ... (if any).\n"
+                                             "- After metadata, declare a param() block with named parameters:\n"
+                                             "    param([string]$Arg1, [string]$Arg2, ...)\n"
+                                             "- After param(): Set-StrictMode -Version Latest\n"
+                                             "- After Set-StrictMode: $ErrorActionPreference = 'Stop'\n"
+                                             "- CRITICAL: The executor passes file_inputs as the first positional "
+                                             "args, then file_outputs. Your script receives:\n" +
+                                             argMapping +
+                                             "  Use $Arg1, $Arg2, etc. (matching your param() declaration). "
+                                             "NEVER hardcode file paths. NEVER use literal paths from the JCWF.\n"
+                                             "- Use PowerShell cmdlets: Write-Output, Copy-Item, Remove-Item, "
+                                             "Join-Path, Get-Content, Set-Content, etc.\n"
+                                             "- Use & operator to call external executables: & g++ $Source -o $Output\n"
+                                             "- No POSIX awk/sed/grep. No bash syntax.\n"
+                                             "- Output ONLY the script. Nothing else.";
+                            }
                             else
                             {
                                 scriptTask = "Generate a Python script for '" + scriptPath +
@@ -2137,7 +2236,8 @@ namespace AIAssistant
                             }
 
                             // Layer 1: Structural validation
-                            auto scriptVr = ValidateGeneratedScript(scriptContent, expectedFunc, !isShell);
+                            bool const isPythonScript = !isShell && !isPs1;
+                            auto scriptVr = ValidateGeneratedScript(scriptContent, expectedFunc, isPythonScript, isPs1);
 
                             if (!scriptVr.passed)
                             {
@@ -2195,6 +2295,39 @@ namespace AIAssistant
                                                 "Use SUBSEP keys, external sort, and gsub().\n"
                                                 "- Output ONLY the fixed script.";
                                 }
+                                else if (isPs1)
+                                {
+                                    std::string fixArgMapping;
+                                    auto fixIoIt = shellIoMap.find(scriptPath);
+                                    if (fixIoIt != shellIoMap.end())
+                                    {
+                                        int fixArgNum = 1;
+                                        for (auto const& fi : fixIoIt->second.fileInputs)
+                                        {
+                                            fixArgMapping +=
+                                                "  $Arg" + std::to_string(fixArgNum) + " = file_inputs (\"" + fi + "\")\n";
+                                            fixArgNum++;
+                                        }
+                                        for (auto const& fo : fixIoIt->second.fileOutputs)
+                                        {
+                                            fixArgMapping +=
+                                                "  $Arg" + std::to_string(fixArgNum) +
+                                                " = file_outputs (\"" + fo + "\")\n";
+                                            fixArgNum++;
+                                        }
+                                    }
+
+                                    sFixTask += "- First line: # @jarvis-script (no shebang)\n"
+                                                "- Include # @short: ... and # @description: ... metadata\n"
+                                                "- param([string]$Arg1, ...) block after metadata\n"
+                                                "- Set-StrictMode -Version Latest and $ErrorActionPreference = 'Stop' "
+                                                "after param()\n"
+                                                "- The executor passes file_inputs then file_outputs as positional args:\n" +
+                                                fixArgMapping +
+                                                "  MUST use $Arg1, $Arg2 etc. NEVER hardcode file paths.\n"
+                                                "- Use PowerShell cmdlets. No POSIX awk/sed/grep.\n"
+                                                "- Output ONLY the fixed script.";
+                                }
                                 else
                                 {
                                     sFixTask += "- First line: #!/usr/bin/env python3\n"
@@ -2243,6 +2376,16 @@ namespace AIAssistant
                                                 "4. Correct use of positional args ($1, $2, ...)\n"
                                                 "5. Proper error handling (exit codes, error messages to stderr)\n"
                                                 "6. No hardcoded absolute paths — use relative paths\n"
+                                                "7. Output files written to the correct working directory\n";
+                                }
+                                else if (isPs1)
+                                {
+                                    sRevTask += "1. No shebang line (PowerShell does not use one)\n"
+                                                "2. Set-StrictMode -Version Latest present after param() block\n"
+                                                "3. $ErrorActionPreference = 'Stop' present\n"
+                                                "4. Correct use of param() block for positional args\n"
+                                                "5. No POSIX awk/sed/grep; use PowerShell cmdlets\n"
+                                                "6. No hardcoded absolute paths\n"
                                                 "7. Output files written to the correct working directory\n";
                                 }
                                 else
@@ -2556,6 +2699,7 @@ namespace AIAssistant
                 Broadcast(R"({"type":"ai-fix-script-progress","message":"Sending to AI for fix..."})");
 
                 bool const isShell = scriptPath.ends_with(".sh");
+                bool const isPs1Fix = scriptPath.ends_with(".ps1");
 
                 // Build the fix prompt
                 std::string const stng = "You are a script fixer. Output ONLY the corrected script. "
@@ -2581,6 +2725,16 @@ namespace AIAssistant
                             "- POSIX awk only: no arr[k1][k2], no 3-arg match(), "
                             "no asort()/asorti(), no nextfile, no PROCINFO, no gensub(). "
                             "Use SUBSEP keys, external sort, and gsub().\n"
+                            "- Output ONLY the fixed script.";
+                }
+                else if (isPs1Fix)
+                {
+                    task += "- First line: # @jarvis-script (no shebang for PowerShell)\n"
+                            "- Include # @short: ... and # @description: ... metadata\n"
+                            "- param([string]$Arg1, ...) block after metadata\n"
+                            "- Set-StrictMode -Version Latest and $ErrorActionPreference = 'Stop' after param()\n"
+                            "- Use $Arg1, $Arg2, ... for file parameters. NEVER hardcode paths.\n"
+                            "- Use PowerShell cmdlets. No POSIX awk/sed/grep. No bash syntax.\n"
                             "- Output ONLY the fixed script.";
                 }
                 else

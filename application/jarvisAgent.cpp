@@ -122,6 +122,10 @@ namespace AIAssistant
         // ---------------------------------------------------------
         // Start all other subsystems
         // ---------------------------------------------------------
+#if defined(_WIN32)
+        ShellTaskExecutor::ProbeWindowsShell(Core::g_Core->GetConfig().m_UseBashOnWindows);
+#endif
+
         const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
         std::filesystem::path const absoluteQueuePath = std::filesystem::absolute(queuePath);
 

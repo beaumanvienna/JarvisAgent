@@ -30,6 +30,7 @@
 #include "workflow/workflowRuntimeManager.h"
 #include "workflow/workflowTypes.h"
 #include "workflow/workflowValidator.h"
+#include "workflow/shellTaskExecutor.h"
 
 #include <algorithm>
 #include <array>
@@ -38,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #if !defined(_WIN32)
 // POSIX headers for run_shell (fork/exec/waitpid/poll/pipe/kill)
@@ -46,7 +48,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #else
-// MSVC equivalents for popen/pclose.
+// Windows headers for run_shell (CreateProcess/WaitForSingleObject/TerminateProcess).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+// MSVC equivalents for popen/pclose (still used by search_files / list_files / get_log_tail).
 #define popen _popen
 #define pclose _pclose
 #endif
@@ -65,6 +72,25 @@ namespace
         return cmd;
 #endif
     }
+
+#if defined(_WIN32)
+    // Single-quote quoting for PowerShell: wrap in single quotes, double inner single quotes.
+    std::string QuoteForPowerShellArg(std::string const& value)
+    {
+        std::string quoted;
+        quoted.reserve(value.size() + 2);
+        quoted.push_back('\'');
+        for (char c : value)
+        {
+            if (c == '\'')
+                quoted.append("''");
+            else
+                quoted.push_back(c);
+        }
+        quoted.push_back('\'');
+        return quoted;
+    }
+#endif
 } // namespace
 
 namespace AIAssistant
@@ -1569,8 +1595,8 @@ namespace AIAssistant
         return {"run_shell", exitCode == 0, TruncateOutput(header + output, 16384)};
     }
 #else
-    // Windows implementation: route through bash (MSYS2 / Git Bash) via _popen.
-    // No fork/exec timeout — command runs until completion.
+    // Windows implementation: route through PowerShell or bash depending on config.
+    // Uses CreateProcess() + a reader thread + WaitForSingleObject() for a 30-second timeout.
     ToolResult ToolRegistry::ExecRunShell(std::unordered_map<std::string, std::string> const& args)
     {
         auto cmdIt = args.find("command");
@@ -1600,30 +1626,112 @@ namespace AIAssistant
         if (cwdNorm.find("..") != std::string::npos)
             return {"run_shell", false, "Path traversal not allowed in cwd"};
 
-        // Build bash command: cd into cwd, then run the command.
-        std::string genericCwd = cwdPath.generic_string(); // forward slashes for bash
-        std::string fullCmd = "cd '" + genericCwd + "' && " + command + " 2>&1";
-        std::string shellCmd = WrapForBash(fullCmd);
-
-        std::string output;
-        output.reserve(1024);
-
-        FILE* pipe = popen(shellCmd.c_str(), "r");
-        if (!pipe)
-            return {"run_shell", false, "Failed to execute command (is bash available?)"};
-
-        char buf[4096];
-        while (fgets(buf, static_cast<int>(sizeof(buf)), pipe) != nullptr)
+        std::string shellCmd;
+        if (ShellTaskExecutor::GetWindowsShell() == WindowsShell::PowerShell)
         {
-            output += buf;
-            if (output.size() > 16384)
-            {
-                output += "\n... [output truncated at 16 KB]";
-                break;
-            }
+            // PowerShell inline command: Set-Location then run the command, merge stderr.
+            std::string psCommand =
+                "Set-Location " + QuoteForPowerShellArg(cwdPath.string()) + "; " + command + " 2>&1";
+            shellCmd = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                       "-Command \"" + psCommand + "\"";
+        }
+        else
+        {
+            // Bash mode: cd into cwd, then run the command.
+            std::string genericCwd = cwdPath.generic_string();
+            std::string fullCmd = "cd '" + genericCwd + "' && " + command + " 2>&1";
+            shellCmd = WrapForBash(fullCmd);
         }
 
-        int exitCode = pclose(pipe);
+        // Set up an anonymous pipe for stdout + stderr capture.
+        HANDLE hReadPipe  = INVALID_HANDLE_VALUE;
+        HANDLE hWritePipe = INVALID_HANDLE_VALUE;
+        SECURITY_ATTRIBUTES sa{};
+        sa.nLength              = sizeof(sa);
+        sa.bInheritHandle       = TRUE; // Child inherits the write end.
+        sa.lpSecurityDescriptor = nullptr;
+        if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
+            return {"run_shell", false, "Failed to create pipe"};
+        // Parent's read end must not be inherited.
+        SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+        STARTUPINFOA si{};
+        si.cb         = sizeof(si);
+        si.dwFlags    = STARTF_USESTDHANDLES;
+        si.hStdOutput = hWritePipe;
+        si.hStdError  = hWritePipe;
+        si.hStdInput  = INVALID_HANDLE_VALUE;
+
+        PROCESS_INFORMATION pi{};
+        std::string cmdMutable = shellCmd; // CreateProcessA requires non-const lpCommandLine.
+        BOOL created = CreateProcessA(
+            nullptr,
+            cmdMutable.data(),
+            nullptr,
+            nullptr,
+            TRUE,             // bInheritHandles — child inherits the pipe write end.
+            CREATE_NO_WINDOW, // Don't flash a console window.
+            nullptr,
+            cwdPath.string().c_str(),
+            &si,
+            &pi);
+
+        // Close the write end in the parent — when the child exits its copy is also closed,
+        // which causes ReadFile in the reader thread to return with a broken-pipe error.
+        CloseHandle(hWritePipe);
+
+        if (!created)
+        {
+            CloseHandle(hReadPipe);
+            return {"run_shell", false, "Failed to create process"};
+        }
+
+        // Reader thread: drains the pipe into `output` until the pipe is closed.
+        std::string output;
+        output.reserve(1024);
+        std::thread reader([&]()
+        {
+            char buf[4096];
+            DWORD bytesRead = 0;
+            while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0)
+            {
+                output.append(buf, bytesRead);
+                if (output.size() > 16384)
+                {
+                    output += "\n... [output truncated at 16 KB]";
+                    break;
+                }
+            }
+        });
+
+        // Wait for the process with a 30-second hard timeout.
+        constexpr DWORD k_TimeoutMs = 30000;
+        bool const timedOut = (WaitForSingleObject(pi.hProcess, k_TimeoutMs) == WAIT_TIMEOUT);
+
+        if (timedOut)
+        {
+            TerminateProcess(pi.hProcess, 1);
+            // Give the OS up to 5 s to confirm termination so the child's pipe handle is closed,
+            // which unblocks the reader thread's ReadFile call.
+            WaitForSingleObject(pi.hProcess, 5000);
+        }
+
+        // Reader thread exits once the pipe is broken (child dead → write end closed).
+        reader.join();
+        CloseHandle(hReadPipe);
+
+        if (timedOut)
+        {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            output += "\n[Process killed: exceeded 30-second timeout]";
+            return {"run_shell", false, TruncateOutput(output, 16384)};
+        }
+
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
 
         std::string header = "Exit code: " + std::to_string(exitCode) + "\n";
         if (!cwd.empty() && cwd != ".")

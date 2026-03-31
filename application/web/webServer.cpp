@@ -4387,6 +4387,14 @@ namespace AIAssistant
         responseJson["queue_folder"] = config.m_QueueFolderFilepath;
         responseJson["workflows_folder"] = config.m_WorkflowsFolderFilepath;
         responseJson["interface_count"] = config.m_ApiInterfaces.size();
+        responseJson["use_bash"] = config.m_UseBashOnWindows;
+#if defined(_WIN32)
+        responseJson["platform"] = "windows";
+#elif defined(__APPLE__)
+        responseJson["platform"] = "macos";
+#else
+        responseJson["platform"] = "linux";
+#endif
 
         return MakeJsonResponse(200, responseJson);
     }
@@ -4480,6 +4488,16 @@ namespace AIAssistant
             }
         }
 
+        // use_bash (Windows-only meaning; accepted on all platforms)
+        {
+            auto result = doc["use_bash"].get_bool();
+            if (result.error() == simdjson::SUCCESS)
+            {
+                config.m_UseBashOnWindows = result.value();
+                anyChanged = true;
+            }
+        }
+
         if (!anyChanged)
         {
             crow::json::wvalue err;
@@ -4554,6 +4572,7 @@ namespace AIAssistant
                 replaceField("max file size in kB", std::to_string(config.m_MaxFileSizekB));
                 replaceField("jcwf batch size", std::to_string(config.m_JcwfBatchSize));
                 replaceField("jcwf AI interface", std::to_string(config.m_JcwfAiInterfaceIndex));
+                replaceField("use_bash", config.m_UseBashOnWindows ? "true" : "false");
 
                 std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
                 if (ofs)
@@ -4572,6 +4591,7 @@ namespace AIAssistant
         responseJson["max_file_size_kb"] = config.m_MaxFileSizekB;
         responseJson["jcwf_batch_size"] = config.m_JcwfBatchSize;
         responseJson["jcwf_ai_interface"] = config.m_JcwfAiInterfaceIndex;
+        responseJson["use_bash"] = config.m_UseBashOnWindows;
         return MakeJsonResponse(200, responseJson);
     }
 

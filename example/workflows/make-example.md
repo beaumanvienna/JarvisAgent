@@ -140,7 +140,8 @@ From the logs and the current architecture, these are the main components that p
      4. Collects the exit code and reports success/failure back to the orchestrator.
 
 7. **External Scripts + Toolchain**
-   - These are the actual shell scripts that do the work.
+   - These are the actual scripts that do the work.
+   - On Linux/macOS the `.sh` scripts are used; on Windows the executor looks for a `.ps1` sibling with the same base name and runs that instead via PowerShell.
    - In your current setup, the scripts are written to accept optional extra flags passed from JCWF (e.g. `-O3`):
 
    ```bash
@@ -154,8 +155,10 @@ From the logs and the current architecture, these are the main components that p
    g++ -Wall -Wextra "$MAIN_OBJ" "$APP_OBJ" "$ARCHIVE" -o "$OUTPUT" "${@:5}"
    ```
 
+   PowerShell equivalents (`compile.ps1`, `archive.ps1`, `link.ps1`, `run.ps1`) live alongside the `.sh` files and follow the same parameter order.
+
    - JCWF + JarvisAgent decides **what to run, and in which order**.
-   - The shell scripts + `g++`/`ar`/linker actually do the compilation and linking.
+   - The scripts + `g++`/`ar`/linker actually do the compilation and linking.
 
 ---
 
@@ -290,7 +293,7 @@ Practical implication for `make-example`:
   - TriggerEngine (auto + other triggers)
   - WorkflowOrchestrator (task DAG scheduling + skip up-to-date tasks)
   - Shell task executor helper (constructs commands & spawns child processes)
-  - External shell scripts (`compile.sh`, `archive.sh`, `link.sh`) and toolchain (`g++`, `ar`, linker)
+  - External shell scripts (`compile.sh`, `archive.sh`, `link.sh`) with PowerShell siblings (`compile.ps1`, `archive.ps1`, `link.ps1`, `run.ps1`) used automatically on Windows; toolchain (`g++`, `ar`, linker)
 
 - **Order of operations for `make-example`**:
   1. Engine + JarvisAgent start.

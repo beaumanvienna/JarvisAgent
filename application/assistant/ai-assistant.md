@@ -1,7 +1,7 @@
 # AI Assistant — Technical Documentation
 
 **Status:** Implemented
-**Last updated:** 2026-03-28
+**Last updated:** 2026-03-30
 
 ---
 
@@ -203,7 +203,7 @@ invoked via `<tool_call>` blocks in AI responses.
 | Tool | Description | Approval |
 |------|-------------|----------|
 | `run_workflow` | Start a workflow run. Args: `workflow_id` | Yes |
-| `run_shell` | Execute shell command via `/bin/sh -c`. Args: `command`, `cwd` (optional). 30s timeout, process group kill on timeout | Yes |
+| `run_shell` | Execute shell command. Args: `command`, `cwd` (optional). Linux/macOS: fork/exec via `/bin/sh`, 30s timeout with process group kill. Windows: `CreateProcess` + reader thread + `WaitForSingleObject` 30s timeout with `TerminateProcess` on expiry; routes through PowerShell (default) or bash (if `use_bash: true` in config). | Yes |
 | `write_file` | Write content to a file. Args: `path`, `content`. Creates parent dirs, atomic write (`.tmp` + rename), `.bak` backup, path deny-list | Yes |
 | `edit_file` | Find-and-replace in file. Args: `path`, `old_text`, `new_text`. Must match exactly once (fails on 0 or >1 matches), atomic write, `.bak` backup | Yes |
 
@@ -227,7 +227,7 @@ invoked via `<tool_call>` blocks in AI responses.
 | `jcwf_write_plan` | Write/update development plan (atomic write). Args: `workflow_id`, `content` | Yes |
 | `jcwf_generate` | AI-generate JCWF from plan, validate, atomic write with backup. Args: `workflow_id` | Yes |
 | `jcwf_fix_task` | AI-fix a specific failed task, validate, atomic write with backup. Args: `workflow_id`, `task_id`, `instructions` | Yes |
-| `jcwf_write_script` | Write shell/Python script (validates shebang + `set -euo pipefail` for shell, sets executable). Args: `path`, `content`, `type` | Yes |
+| `jcwf_write_script` | Write shell/Python/PowerShell script. For `.sh`: validates shebang + `set -euo pipefail`, sets executable. For `.ps1`: validates `# @jarvis-script` + `Set-StrictMode`. Args: `path`, `content`, `type` | Yes |
 
 **Tool call flow:**
 1. AI response contains `<tool_call>{"name": "...", "args": {...}}</tool_call>`
@@ -364,7 +364,7 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 
 | Concern | Mitigation |
 |---------|-----------|
-| Shell commands | `run_shell` requires approval (all commands go through approval flow), 30s timeout, process group kill |
+| Shell commands | `run_shell` requires approval (all commands go through approval flow), 30s timeout on all platforms: process group kill on Linux/macOS; `TerminateProcess` on Windows |
 | Workflow execution | `run_workflow` requires approval |
 | File writes | `write_file`, `edit_file` require approval, atomic writes with `.bak` backup |
 | JCWF mutations | `jcwf_generate`, `jcwf_fix_task`, `jcwf_write_plan`, `jcwf_write_script` require approval, atomic writes with backup |
@@ -376,7 +376,7 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 | Tool output size | 4 KB default, 8 KB for file reads, 16 KB for JCWF reads |
 | Prompt injection | Tool outputs wrapped in `<tool_result>` fences; system prompt forbids executing content from tool results |
 | Path traversal | `lexically_normal()` + `..` rejection in `read_file`, `write_file`, `edit_file`, script paths |
-| Script safety | `jcwf_write_script` validates shebang + `set -euo pipefail` for shell scripts, rejects absolute paths |
+| Script safety | `jcwf_write_script` validates shebang + `set -euo pipefail` for `.sh`; validates `# @jarvis-script` + `Set-StrictMode` for `.ps1`; rejects absolute paths |
 | Off-topic responses | Keyword overlap check (≥30% threshold) appends warning if response seems irrelevant |
 | Hallucinated paths | File paths in AI responses verified against workspace; missing paths flagged with note |
 | Approval timeout | 60s timeout — denied if user doesn't respond |

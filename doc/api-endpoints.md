@@ -374,6 +374,8 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 | DELETE | `/api/settings/ai-interfaces/<name>` | Delete an AI interface (by name). |
 | POST | `/api/settings/ai-interfaces/save` | Persist in-memory AI interfaces to `config.json` on disk. |
 | POST | `/api/settings/ai-interfaces/test` | Ping-test a specific AI interface (direct curl, 10s timeout). |
+| GET | `/api/settings/config` | Read current scalar config values + platform. |
+| PUT | `/api/settings/config` | Update scalar config fields and persist to `config.json`. |
 | POST | `/api/settings/config/reload` | Reload `config.json` from disk into memory. |
 
 ### GET /api/settings/ai-interfaces
@@ -442,6 +444,77 @@ Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
 ```json
 { "ok": true, "interface_count": 3 }
 ```
+
+---
+
+## Settings — Config
+
+Read and update the scalar runtime configuration fields stored in `config.json`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/settings/config` | Read current config values (and platform info). |
+| PUT | `/api/settings/config` | Update one or more config fields and persist to `config.json`. |
+
+### GET /api/settings/config
+**Response (200):**
+```json
+{
+  "ok": true,
+  "api_index": 0,
+  "max_threads": 20,
+  "verbose": false,
+  "max_file_size_kb": 24,
+  "jcwf_batch_size": 1,
+  "jcwf_ai_interface": -1,
+  "use_bash": false,
+  "queue_folder": "../queue",
+  "workflows_folder": "../workflows",
+  "platform": "linux"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `api_index` | Active AI interface index (into `"API interfaces"` array). |
+| `max_threads` | Worker-thread pool size. |
+| `verbose` | Verbose logging enabled. |
+| `max_file_size_kb` | Maximum queue file size in kB. |
+| `jcwf_batch_size` | JCWF generation batch size. |
+| `jcwf_ai_interface` | AI interface override for JCWF operations (`-1` = use global default). |
+| `use_bash` | Windows only: prefer bash over PowerShell (`false` = PowerShell default). |
+| `queue_folder` | Read-only: path to the queue folder (from `config.json`). |
+| `workflows_folder` | Read-only: path to the workflows folder (from `config.json`). |
+| `platform` | Read-only: `"linux"`, `"macos"`, or `"windows"`. Used by the frontend to gate Windows-only UI controls (e.g. the `use_bash` checkbox). |
+
+### PUT /api/settings/config
+Updates the specified fields in memory and persists them to `config.json`.
+**Request body (all fields optional):**
+```json
+{
+  "api_index": 0,
+  "max_threads": 20,
+  "verbose": false,
+  "max_file_size_kb": 24,
+  "jcwf_batch_size": 1,
+  "jcwf_ai_interface": -1,
+  "use_bash": false
+}
+```
+**Response (200):**
+```json
+{
+  "ok": true,
+  "api_index": 0,
+  "max_threads": 20,
+  "verbose": false,
+  "max_file_size_kb": 24,
+  "jcwf_batch_size": 1,
+  "jcwf_ai_interface": -1,
+  "use_bash": false
+}
+```
+Returns 400 if a required field is missing or malformed. Validation errors (e.g. `api_index` out of range) return `{ "ok": false, "message": "..." }`.
 
 ---
 

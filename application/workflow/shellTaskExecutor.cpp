@@ -166,6 +166,24 @@ namespace AIAssistant
         // For now we assume arguments are already validated as "safe".
         // We simply join them with spaces.
         // ------------------------------------------------------------
+#if defined(_WIN32)
+        std::string QuoteForPowerShell(std::string const& value)
+        {
+            std::string quoted;
+            quoted.reserve(value.size() + 2);
+            quoted.push_back('\'');
+            for (char c : value)
+            {
+                if (c == '\'')
+                    quoted.append("''");
+                else
+                    quoted.push_back(c);
+            }
+            quoted.push_back('\'');
+            return quoted;
+        }
+#endif
+
         std::string QuoteForPosixShell(std::string const& value)
         {
             std::string quoted;
@@ -271,7 +289,8 @@ namespace AIAssistant
         // (which bypasses TerminalLogStreamBuf / ncurses and can corrupt the UI).
         // ------------------------------------------------------------
         bool ExecuteCommandWithCapturedOutput(std::string const& command, std::string const& taskId,
-                                              std::filesystem::path const& workingDirectoryPath, int& exitCodeOut,
+                                              std::filesystem::path const& workingDirectoryPath,
+                                              std::vector<std::string> const& argumentList, int& exitCodeOut,
                                               std::string& stdoutOut, std::string& stderrOut)
         {
             std::scoped_lock<std::mutex> const lock(g_ShellTaskExecutorCurrentPathMutex);
@@ -287,18 +306,37 @@ namespace AIAssistant
             // rely on it. Instead, run the command inside a subshell that changes directory only for
             // the spawned shell process.
             std::filesystem::path const stderrTmpPath = workingDirectoryPath / ".ja_stderr_tmp";
-            std::string const stderrRedirect = " 2>" + QuoteForPosixShell(stderrTmpPath.string());
 
 #if defined(_WIN32)
-            // On Windows, _popen() routes through cmd.exe which cannot run .sh scripts
-            // or understand POSIX single-quote quoting. We invoke bash explicitly (available
-            // in MSYS2 / Git Bash environments) and convert paths to forward slashes.
-            std::string genericDir = workingDirectoryPath.generic_string();
-            std::string genericCommand = command;
-            std::replace(genericCommand.begin(), genericCommand.end(), '\\', '/');
-            std::string const commandWithRedirect =
-                "bash -c \"cd " + QuoteForPosixShell(genericDir) + " && " + genericCommand + stderrRedirect + "\"";
+            std::string commandWithRedirect;
+            if (ShellTaskExecutor::GetWindowsShell() == WindowsShell::PowerShell)
+            {
+                // PowerShell mode: build -Command "Set-Location 'dir'; & 'script.ps1' 'arg1' ..."
+                // Stderr redirect is at the cmd.exe level (outside -Command "...") using double-quoted path.
+                std::string psCommand;
+                psCommand += "Set-Location " + QuoteForPowerShell(workingDirectoryPath.string()) + "; ";
+                if (!argumentList.empty())
+                {
+                    psCommand += "& " + QuoteForPowerShell(argumentList[0]);
+                    for (size_t i = 1; i < argumentList.size(); ++i)
+                        psCommand += " " + QuoteForPowerShell(argumentList[i]);
+                }
+                commandWithRedirect =
+                    "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                    "-Command \"" + psCommand + "\" 2>\"" + stderrTmpPath.string() + "\"";
+            }
+            else
+            {
+                // Bash mode: same as the original Windows path.
+                std::string const stderrRedirect = " 2>" + QuoteForPosixShell(stderrTmpPath.string());
+                std::string genericDir = workingDirectoryPath.generic_string();
+                std::string genericCommand = command;
+                std::replace(genericCommand.begin(), genericCommand.end(), '\\', '/');
+                commandWithRedirect =
+                    "bash -c \"cd " + QuoteForPosixShell(genericDir) + " && " + genericCommand + stderrRedirect + "\"";
+            }
 #else
+            std::string const stderrRedirect = " 2>" + QuoteForPosixShell(stderrTmpPath.string());
             std::string const commandWithRedirect =
                 "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + stderrRedirect;
 #endif
@@ -678,6 +716,35 @@ namespace AIAssistant
 
     } // anonymous namespace
 
+#if defined(_WIN32)
+    WindowsShell ShellTaskExecutor::s_WindowsShell = WindowsShell::PowerShell;
+
+    void ShellTaskExecutor::ProbeWindowsShell(bool useBashConfig)
+    {
+        if (!useBashConfig)
+        {
+            s_WindowsShell = WindowsShell::PowerShell;
+            LOG_CORE_INFO("[shell] Windows shell: PowerShell (use_bash is false)");
+            return;
+        }
+
+        // Probe PATH for bash
+        int const result = std::system("bash --version >NUL 2>&1");
+        if (result == 0)
+        {
+            s_WindowsShell = WindowsShell::Bash;
+            LOG_CORE_INFO("[shell] Windows shell: Bash (found on PATH)");
+        }
+        else
+        {
+            s_WindowsShell = WindowsShell::PowerShell;
+            LOG_CORE_WARN("[shell] Windows shell: PowerShell (use_bash is true but bash not found on PATH — falling back)");
+        }
+    }
+
+    WindowsShell ShellTaskExecutor::GetWindowsShell() { return s_WindowsShell; }
+#endif
+
     bool ShellTaskExecutor::ValidateScriptPath(std::string const& path) const
     {
         // Enforce "scripts/" prefix to avoid arbitrary command execution.
@@ -926,6 +993,39 @@ namespace AIAssistant
             commandPath.assign(commandView);
         }
 
+#if defined(_WIN32)
+        // On Windows in PowerShell mode, transparently swap .sh scripts for a .ps1 sibling.
+        if (s_WindowsShell == WindowsShell::PowerShell)
+        {
+            std::filesystem::path cmdFsPath(commandPath);
+            if (cmdFsPath.extension() == ".sh")
+            {
+                std::filesystem::path ps1Relative = cmdFsPath;
+                ps1Relative.replace_extension(".ps1");
+                std::filesystem::path const launchCwd =
+                    (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
+                std::filesystem::path const ps1Absolute = (launchCwd / ps1Relative).lexically_normal();
+                if (std::filesystem::exists(ps1Absolute))
+                {
+                    std::string const originalPath = commandPath;
+                    commandPath = ps1Relative.generic_string();
+                    LOG_APP_INFO("[shell] Windows PowerShell: '{}' resolved to sibling '{}'", originalPath, commandPath);
+                }
+                else
+                {
+                    LOG_APP_ERROR("ShellTaskExecutor: Script '{}' referenced but PowerShell is active and no .ps1 sibling "
+                                  "exists. Add '{}' or set use_bash: true in config.json.",
+                                  commandPath, ps1Relative.generic_string());
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastErrorMessage =
+                        "ShellTaskExecutor: '" + commandPath +
+                        "' requires bash but PowerShell is active (no .ps1 sibling found)";
+                    return false;
+                }
+            }
+        }
+#endif
+
         if (!ValidateScriptPath(commandPath))
         {
             LOG_APP_ERROR(
@@ -1129,7 +1229,7 @@ namespace AIAssistant
 #endif
         {
             executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPathAbsolute,
-                                                        exitCode, capturedStdout, capturedStderr);
+                                                        argumentList, exitCode, capturedStdout, capturedStderr);
         }
 
         // Write stdout.txt and stderr.txt to the task working directory (full size).

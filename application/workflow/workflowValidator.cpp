@@ -630,6 +630,58 @@ namespace
                            "Add '# @short: <brief description>' to " + filename);
             }
         }
+        else if (diskPath.extension() == ".ps1")
+        {
+            // PowerShell script: no shebang, but requires @jarvis-script, @short, and Set-StrictMode.
+            bool hasMarker = false;
+            for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+            {
+                if (lines[i].find("@jarvis-script") != std::string::npos)
+                {
+                    hasMarker = true;
+                    break;
+                }
+            }
+            if (!hasMarker)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B,
+                           "ps1_missing_jarvis_marker", "PowerShell script missing '# @jarvis-script' metadata marker",
+                           taskPath + ".params.command", taskId, "Add '# @jarvis-script' as the first line of " + filename);
+            }
+
+            bool hasShort = false;
+            for (auto const& l : lines)
+            {
+                if (l.find("@short") != std::string::npos)
+                {
+                    hasShort = true;
+                    break;
+                }
+            }
+            if (!hasShort)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Info, WorkflowValidationTier::C, "ps1_missing_short",
+                           "PowerShell script missing '# @short: ...' metadata", taskPath + ".params.command", taskId,
+                           "Add '# @short: <brief description>' to " + filename);
+            }
+
+            bool hasStrictMode = false;
+            for (size_t i = 0; i < std::min(lines.size(), size_t(20)); ++i)
+            {
+                if (lines[i].find("Set-StrictMode") != std::string::npos)
+                {
+                    hasStrictMode = true;
+                    break;
+                }
+            }
+            if (!hasStrictMode)
+            {
+                AddIssueEx(issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::B,
+                           "ps1_missing_strict_mode", "PowerShell script missing 'Set-StrictMode -Version Latest'",
+                           taskPath + ".params.command", taskId,
+                           "Add 'Set-StrictMode -Version Latest' after the param() block in " + filename);
+            }
+        }
         else
         {
             if (lines[0].find("#!/usr/bin/env bash") == std::string::npos &&

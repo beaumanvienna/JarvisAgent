@@ -9,6 +9,8 @@ export type ConfigSettings = {
   queue_folder: string;
   workflows_folder: string;
   interface_count: number;
+  use_bash: boolean;
+  platform: "windows" | "linux" | "macos";
 };
 
 export type ConfigSettingsUpdateResponse = {
@@ -30,7 +32,7 @@ export async function getConfigSettings(): Promise<ConfigSettings>
 }
 
 export async function updateConfigSettings(
-  settings: Partial<Pick<ConfigSettings, "api_index" | "max_threads" | "verbose" | "max_file_size_kb" | "jcwf_batch_size" | "jcwf_ai_interface">>
+  settings: Partial<Pick<ConfigSettings, "api_index" | "max_threads" | "verbose" | "max_file_size_kb" | "jcwf_batch_size" | "jcwf_ai_interface" | "use_bash">>
 ): Promise<ConfigSettingsUpdateResponse>
 {
   const response = await fetch("/api/settings/config", {

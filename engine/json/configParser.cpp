@@ -174,6 +174,17 @@ namespace AIAssistant
                 engineConfig.m_KeysFilePath = keysFile;
                 ++fieldOccurances[ConfigFields::KeysFile];
             }
+            else if (jsonObjectKey == "use_bash")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
+                engineConfig.m_UseBashOnWindows = jsonObject.value().get_bool();
+#if defined(_WIN32)
+                LOG_CORE_INFO("use_bash: {}", engineConfig.m_UseBashOnWindows);
+#else
+                LOG_CORE_INFO("use_bash: {} (Windows-only, ignored on this platform)", engineConfig.m_UseBashOnWindows);
+#endif
+                ++fieldOccurances[ConfigFields::UseBashOnWindows];
+            }
             else
             {
                 // Try to get the value as a string for display

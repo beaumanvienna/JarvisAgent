@@ -3,7 +3,8 @@
     "allow": [
       "Bash(make config=release)",
       "Bash(chmod:*)",
-      "Bash(premake5 gmake:*)"
+      "Bash(premake5 gmake:*)",
+      "Bash(ls /home/beaumanvienna/dev/jarvisAgent/scripts/*.sh)"
     ]
   }
 }

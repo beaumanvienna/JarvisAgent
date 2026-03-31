@@ -39,7 +39,8 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 
     "API index": 0,
     "max file size in kB": 24,
-    "keys_file": "keys.json.enc"
+    "keys_file": "keys.json.enc",
+    "use_bash": false
 }
 ```
 
@@ -59,6 +60,7 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 | `API index` | number | Selects active interface in `API interfaces`. | Stored as `EngineConfig::m_ApiIndex`. Must point to an existing entry (see `ConfigChecker`). |
 | `max file size in kB` | number | Maximum allowed file size for queue items. | Stored as `EngineConfig::m_MaxFileSizekB`. Defaults applied if out of range. |
 | `keys_file` | string | Path to the encrypted keys file. | Stored as `EngineConfig::m_KeysFilePath`. Defaults to `"keys.json.enc"` if not specified. |
+| `use_bash` | boolean | Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. | Stored as `EngineConfig::m_UseBashOnWindows`. Defaults to `false` (PowerShell is the default on Windows). Parsed on all platforms but only meaningful on Windows; on Linux/macOS the startup log appends `(Windows-only, ignored on this platform)`. |
 
 ---
 
@@ -108,6 +110,7 @@ struct EngineConfig
     std::vector<ApiInterface> m_ApiInterfaces;
     size_t m_MaxFileSizekB{20};
     std::string m_KeysFilePath{"keys.json.enc"};
+    bool m_UseBashOnWindows{false};
     bool m_ConfigValid{false};
 
     bool IsValid() const { return m_ConfigValid; }
@@ -125,6 +128,7 @@ struct EngineConfig
 - `m_ApiIndex` from `"API index"`
 - `m_MaxFileSizekB` from `"max file size in kB"`
 - `m_KeysFilePath` from `"keys_file"` (defaults to `"keys.json.enc"`)
+- `m_UseBashOnWindows` from `"use_bash"` (defaults to `false`)
 
 **Logged-only (not stored):**
 
