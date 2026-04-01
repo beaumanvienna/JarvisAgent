@@ -18,6 +18,11 @@ newoption {
     description = "Enable Tracy profiler instrumentation"
 }
 
+newoption {
+    trigger = "studio",
+    description = "Build the Studio edition (workflow editor, AI pipeline, AI assistant). Default builds the Engine edition."
+}
+
 project "jarvisAgent"
     kind "ConsoleApp"
     language "C++"
@@ -34,13 +39,30 @@ project "jarvisAgent"
     }
 
     ------------------------------------
-    -- Tracy toggle logic (added)
+    -- Tracy toggle
     ------------------------------------
     if _OPTIONS["tracy"] then
         defines { "TRACY_ENABLE" }
         print(">>> Tracy profiling: ENABLED")
     else
         print(">>> Tracy profiling: DISABLED")
+    end
+
+    ------------------------------------
+    -- Edition toggle
+    ------------------------------------
+    if _OPTIONS["studio"] then
+        defines { "J9T_STUDIO" }
+        print(">>> Edition: Studio")
+    else
+        -- Engine edition: remove Studio-only modules so they don't compile.
+        removefiles {
+            "application/assistant/**",
+            "application/web/aiJcwfService.h",
+            "application/web/aiJcwfService.cpp",
+            "application/web/webServerStudio.cpp",
+        }
+        print(">>> Edition: Engine")
     end
 
     files

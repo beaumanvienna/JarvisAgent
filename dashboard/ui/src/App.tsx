@@ -17,7 +17,9 @@ export default function App() {
     return params.get("tab") === "log" ? "log" : "dashboard";
   });
   const ws = useWebSocket();
-  const { workflows, hasProviders, refresh } = usePolling(5000);
+  const { status, workflows, hasProviders, refresh } = usePolling(5000);
+  const isStudio = status?.edition === "studio";
+  const canRunWorkflows = status?.capabilities?.workflow_run_endpoint !== false;
 
   const [keysPromptReason, setKeysPromptReason] = useState<
     "no_password" | "wrong_password" | null
@@ -67,6 +69,7 @@ export default function App() {
         onQuit={handleQuit}
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        isStudio={isStudio}
       />
       {activeTab === "dashboard" ? (
         <main className="main-content">
@@ -76,6 +79,7 @@ export default function App() {
             runs={ws.runs}
             lastRuns={ws.lastRuns}
             onRefresh={refresh}
+            canRunWorkflows={canRunWorkflows}
           />
           <SessionManagersPanel sessions={ws.sessions} />
         </main>

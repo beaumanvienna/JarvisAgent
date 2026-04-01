@@ -8,6 +8,8 @@ interface PollingState {
   hasProviders: boolean;
 }
 
+const KEYS_DEFAULT = { ok: true, has_providers: true, status: "ok", message: "" };
+
 export function usePolling(intervalMs: number = 3000) {
   const [state, setState] = useState<PollingState>({
     status: null,
@@ -20,7 +22,8 @@ export function usePolling(intervalMs: number = 3000) {
       const [status, wfResponse, keysResponse] = await Promise.all([
         fetchStatus(),
         fetchWorkflows(),
-        fetchKeysStatus(),
+        // Keys endpoint is Studio-only; gracefully default in Engine mode
+        fetchKeysStatus().catch(() => KEYS_DEFAULT),
       ]);
       setState({
         status,

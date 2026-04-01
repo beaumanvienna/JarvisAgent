@@ -22,8 +22,10 @@
 #pragma once
 #include "crow.h"
 #include "auxiliary/threadPool.h"
+#ifdef J9T_STUDIO
 #include "web/aiJcwfService.h"
 #include "assistant/assistantController.h"
+#endif
 #include <atomic>
 #include <filesystem>
 #include <mutex>
@@ -64,8 +66,10 @@ namespace AIAssistant
         // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
         void EnqueueLogLine(std::string const& line);
 
+#ifdef J9T_STUDIO
         // Shut down the assistant controller early (before WRM/AiRequestPool are reset).
         void ShutdownAssistantController();
+#endif
 
         // Drain queued broadcasts to connected WS clients.
         // Must be called periodically from the main thread (JarvisAgent::OnUpdate).
@@ -73,28 +77,23 @@ namespace AIAssistant
 
     private:
         void RegisterRoutes();
+        void RegisterCommonRoutes();
+        void RegisterEngineRoutes();
         void RegisterWebSocket();
+#ifdef J9T_STUDIO
+        void RegisterStudioRoutes();
         void RegisterAssistantWebSocket();
+#endif
 
-        // Static file serving (Dashboard + Workflow Editor UI)
+        // Static file serving — Dashboard (both editions)
         crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
         crow::response ServeDashboardIndex() const;
         crow::response ServeDashboardStatic(std::string const& requestPath) const;
-        crow::response ServeWorkflowEditorIndex() const;
-        crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
 
-        // Handlers
-        crow::response HandleChatPost(crow::request const& req);
+        // ---- Engine handlers (both editions) ----
         crow::response HandleStatusGet();
-
-        // Workflow editor API (Phase 1: CRUD)
-        // All /api/workflows endpoints return application/json.
-        // Workflow editor API (Phase 2: validation + run monitoring/control)
-        crow::response HandleWorkflowValidatePost(crow::request const& req);
-        crow::response HandleWorkflowValidateGet(std::string const& workflowId);
-
-        crow::response HandleWorkflowRunPost(crow::request const& req, std::string const& workflowId);
-        crow::response HandleWorkflowCleanDelete(std::string const& workflowId);
+        crow::response HandleWorkflowsListGet();
+        crow::response HandleWorkflowGet(std::string const& workflowId);
         crow::response HandleWorkflowRunsActiveGet();
         crow::response HandleWorkflowRunsLastGet();
         crow::response HandleWorkflowRunGet(std::string const& runId);
@@ -102,17 +101,23 @@ namespace AIAssistant
         crow::response HandleWorkflowRunPausePost(std::string const& runId);
         crow::response HandleWorkflowRunResumePost(std::string const& runId);
         crow::response HandleWorkflowRunStopPost(std::string const& runId);
-
-        // Integrations: n8n
         crow::response HandleN8nStartPost(crow::request const& req);
-
-        // Webhook trigger endpoint
         crow::response HandleWebhookPost(crow::request const& req, std::string const& workflowId);
+        crow::response HandleLogGet(crow::request const& req);
 
-        crow::response HandleWorkflowsListGet();
+#ifdef J9T_STUDIO
+        // ---- Studio handlers (Studio edition only) ----
+
+        // Workflow Editor UI
+        crow::response ServeWorkflowEditorIndex() const;
+        crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
+
+        // Chat
+        crow::response HandleChatPost(crow::request const& req);
+
+        // Workflow CRUD
         crow::response HandleWorkflowsReloadPost();
         crow::response HandleWorkflowsCreatePost(crow::request const& req);
-        crow::response HandleWorkflowGet(std::string const& workflowId);
         crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
         crow::response HandleWorkflowDelete(std::string const& workflowId);
 
@@ -121,27 +126,32 @@ namespace AIAssistant
         crow::response HandleWorkflowVersionGetGet(std::string const& workflowId, std::string const& timestamp);
         crow::response HandleWorkflowVersionRestorePost(std::string const& workflowId, std::string const& timestamp);
 
-        // AI interfaces API (config.json "API interfaces")
+        // Workflow validation + run trigger
+        crow::response HandleWorkflowValidatePost(crow::request const& req);
+        crow::response HandleWorkflowValidateGet(std::string const& workflowId);
+        crow::response HandleWorkflowRunPost(crow::request const& req, std::string const& workflowId);
+        crow::response HandleWorkflowCleanDelete(std::string const& workflowId);
+
+        // Script / file check
+        crow::response HandleScriptCheckGet(crow::request const& req);
+        crow::response HandleScriptRegistryGet();
+        crow::response HandleFileCheckGet(crow::request const& req);
+
+        // Log analysis (requires AI)
+        crow::response HandleLogAnalyzeLastRunGet(crow::request const& req);
+
+        // AI interfaces API
         crow::response HandleAiInterfacesListGet();
         crow::response HandleAiInterfaceCreatePost(crow::request const& req);
         crow::response HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name);
         crow::response HandleAiInterfaceDeleteDelete(std::string const& name);
         crow::response HandleAiInterfacesSavePost();
         crow::response HandleAiInterfaceTestPost(crow::request const& req);
+
+        // Config settings API
         crow::response HandleConfigReloadPost();
         crow::response HandleConfigSettingsGet();
         crow::response HandleConfigSettingsPut(crow::request const& req);
-
-        // Script check API (Workflow Editor)
-        crow::response HandleScriptCheckGet(crow::request const& req);
-        crow::response HandleScriptRegistryGet();
-
-        // File existence check API (Workflow Editor — static file_inputs)
-        crow::response HandleFileCheckGet(crow::request const& req);
-
-        // Log viewer API
-        crow::response HandleLogGet(crow::request const& req);
-        crow::response HandleLogAnalyzeLastRunGet(crow::request const& req);
 
         // Key management API
         crow::response HandleKeysStatusGet();
@@ -154,6 +164,7 @@ namespace AIAssistant
         crow::response HandleProviderDelete(std::string const& providerName);
         crow::response HandleProviderSetDefaultPost(std::string const& providerName);
         crow::response HandleProvidersSavePost(crow::request const& req);
+#endif // J9T_STUDIO
 
     private:
         crow::SimpleApp m_Server;
@@ -180,7 +191,9 @@ namespace AIAssistant
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
         TriggerEngine* m_TriggerEngine = nullptr;
 
+#ifdef J9T_STUDIO
         AiJcwfService m_AiJcwfService;
         AssistantController m_AssistantController;
+#endif
     };
 } // namespace AIAssistant

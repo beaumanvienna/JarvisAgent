@@ -1,5 +1,15 @@
+export interface StatusCapabilities {
+  workflow_crud: boolean;
+  workflow_run_endpoint: boolean;
+  ai_assistant: boolean;
+  ai_jcwf: boolean;
+  settings_api: boolean;
+}
+
 export interface StatusResponse {
   ok: boolean;
+  edition?: string;
+  capabilities?: StatusCapabilities;
   workflows_registered: number;
   workflow_runs_active: number;
   session_managers_total: number;

@@ -12,6 +12,7 @@ interface Props {
   onQuit: () => void;
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
+  isStudio: boolean;
 }
 
 function Led({ color, label }: { color: string; label: string }) {
@@ -39,6 +40,7 @@ export default function StatusBar({
   onQuit,
   activeTab,
   onTabChange,
+  isStudio,
 }: Props) {
   const anyInflight = Array.from(sessions.values()).some(
     (s) => s.inflight > 0
@@ -53,6 +55,21 @@ export default function StatusBar({
     <header className="status-bar">
       <div className="status-bar-left">
         <span className="title">JarvisAgent Dashboard</span>
+        <span
+          className="edition-badge"
+          style={{
+            fontSize: "0.65rem",
+            padding: "1px 6px",
+            borderRadius: 3,
+            background: isStudio ? "#3b82f6" : "#64748b",
+            color: "#fff",
+            marginLeft: 8,
+            verticalAlign: "middle",
+            letterSpacing: "0.04em",
+          }}
+        >
+          {isStudio ? "Studio" : "Engine"}
+        </span>
         <div className="led-row">
           <Led
             color={connectionColor}
@@ -92,9 +109,11 @@ export default function StatusBar({
             Log
           </button>
         </div>
-        <a href="/editor" className="btn btn-editor">
-          Workflow Editor
-        </a>
+        {isStudio && (
+          <a href="/editor" className="btn btn-editor">
+            Workflow Editor
+          </a>
+        )}
         <button className="btn btn-quit" onClick={onQuit}>
           Quit
         </button>

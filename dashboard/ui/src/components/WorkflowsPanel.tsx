@@ -7,6 +7,7 @@ interface Props {
   runs: RunSnapshot[];
   lastRuns: LastRunInfo[];
   onRefresh: () => void;
+  canRunWorkflows: boolean;
 }
 
 function progressText(run: RunSnapshot): string {
@@ -39,7 +40,7 @@ function stateClass(state: string): string {
   }
 }
 
-export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh }: Props) {
+export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh, canRunWorkflows }: Props) {
   const runsByWorkflow = new Map<string, RunSnapshot>();
   for (const run of runs) {
     runsByWorkflow.set(run.workflowId, run);
@@ -118,7 +119,7 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
                         : "\u2014"}
                   </td>
                   <td>
-                    {wf.manual_start && (
+                    {canRunWorkflows && wf.manual_start && (
                       <button
                         className="btn btn-small btn-run"
                         onClick={() => handleRun(wf.id)}

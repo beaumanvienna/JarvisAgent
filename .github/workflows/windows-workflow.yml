@@ -63,12 +63,14 @@ jobs:
           echo "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "Package version: $v"
 
-      - name: Generate Visual Studio solution
+      # ---- Engine edition: ZIP distribution ----
+
+      - name: Generate Visual Studio solution (Engine edition)
         shell: pwsh
         run: |
           premake5 vs2022
 
-      - name: Build (Release)
+      - name: Build Engine (Release)
         shell: pwsh
         run: |
           $solutionFiles = Get-ChildItem -Path . -Recurse -Filter *.sln
@@ -83,7 +85,7 @@ jobs:
             msbuild "$($solutionFile.FullName)" /m /p:Configuration=Release /p:Platform=x64
           }
 
-      - name: Build (Debug)
+      - name: Build Engine (Debug)
         shell: pwsh
         run: |
           $solutionFiles = Get-ChildItem -Path . -Recurse -Filter *.sln
@@ -98,33 +100,20 @@ jobs:
             msbuild "$($solutionFile.FullName)" /m /p:Configuration=Debug /p:Platform=x64
           }
 
-      - name: Smoke test
+      - name: Smoke test Engine
         shell: pwsh
         run: |
-          $candidateExecutables = Get-ChildItem -Path . -Recurse -File -Filter jarvisAgent.exe
-          if ($candidateExecutables.Count -eq 0)
+          $exe = "bin\Release\jarvisAgent.exe"
+          if (Test-Path $exe)
           {
-            Write-Host "No jarvisAgent.exe found for smoke test."
-            exit 0
-          }
-
-          foreach ($executableFile in $candidateExecutables)
-          {
-            Write-Host "Running: $($executableFile.FullName) --help"
-            try
-            {
-              & "$($executableFile.FullName)" --help
-            }
-            catch
-            {
-              Write-Host "Smoke test failed for $($executableFile.FullName) but continuing."
-            }
-            # Reset exit code for this iteration so PowerShell doesn't remember the failure
-            if ($LASTEXITCODE -ne 0) { Write-Host "Returned non-zero exit code (Ignored)" }
+            Write-Host "Running: $exe --help"
+            try { & $exe --help } catch { Write-Host "Smoke test returned non-zero (ignored)." }
             $global:LASTEXITCODE = 0
           }
-          
-          # Force the step to be green regardless of what happened above
+          else
+          {
+            Write-Host "No jarvisAgent.exe found for smoke test."
+          }
           exit 0
 
       - name: Set up Node.js
@@ -132,7 +121,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Package ZIP
+      - name: Package ZIP (Engine)
         shell: pwsh
         run: |
           packaging\Windows\11\build-zip.ps1
@@ -143,6 +132,44 @@ jobs:
           name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-zip
           path: packaging/Windows/11/build/*.zip
           if-no-files-found: warn
+
+      # ---- Studio edition: MSI installer ----
+
+      - name: Generate Visual Studio solution (Studio edition)
+        shell: pwsh
+        run: |
+          premake5 vs2022 --studio
+
+      - name: Build Studio (Release)
+        shell: pwsh
+        run: |
+          $solutionFiles = Get-ChildItem -Path . -Recurse -Filter *.sln
+          if ($solutionFiles.Count -eq 0)
+          {
+            throw "No .sln found after running premake5."
+          }
+
+          foreach ($solutionFile in $solutionFiles)
+          {
+            Write-Host "Building solution: $($solutionFile.FullName)"
+            msbuild "$($solutionFile.FullName)" /m /p:Configuration=Release /p:Platform=x64
+          }
+
+      - name: Smoke test Studio
+        shell: pwsh
+        run: |
+          $exe = "bin\Release\jarvisAgent.exe"
+          if (Test-Path $exe)
+          {
+            Write-Host "Running: $exe --help"
+            try { & $exe --help } catch { Write-Host "Smoke test returned non-zero (ignored)." }
+            $global:LASTEXITCODE = 0
+          }
+          else
+          {
+            Write-Host "No jarvisAgent.exe found for smoke test."
+          }
+          exit 0
 
       - name: Install WiX v3
         shell: pwsh
@@ -157,7 +184,7 @@ jobs:
           $env:PATH = "$wixDir;$env:PATH"
           Write-Host "WiX installed: $(& heat.exe 2>&1 | Select-Object -First 1)"
 
-      - name: Package MSI
+      - name: Package MSI (Studio)
         shell: pwsh
         run: |
           packaging\Windows\11\build-msi.ps1

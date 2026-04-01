@@ -159,6 +159,7 @@ namespace AIAssistant
             return MakeJsonResponse(httpStatus, responseJson);
         }
 
+#ifdef J9T_STUDIO
         struct WorkflowValidationFinding
         {
             std::string m_Code;
@@ -292,6 +293,7 @@ namespace AIAssistant
             workflowIdOut = parsedWorkflow.m_Id;
             ValidateJcwfParsedWorkflow(parsedWorkflow, errors, warnings, infos);
         }
+#endif // J9T_STUDIO
 
         bool IsValidWorkflowId(std::string const& workflowId)
         {
@@ -460,6 +462,7 @@ namespace AIAssistant
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
+#ifdef J9T_STUDIO
         RegisterAssistantWebSocket();
 
         m_AiJcwfService.SetBroadcastFn(
@@ -468,6 +471,7 @@ namespace AIAssistant
                 std::lock_guard<std::mutex> lock(m_Mutex);
                 m_PendingBroadcasts.push_back(jsonString);
             });
+#endif
     }
 
     WebServer::~WebServer() { Stop(); }
@@ -476,14 +480,18 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         m_WorkflowRegistry = workflowRegistry;
+#ifdef J9T_STUDIO
         m_AssistantController.SetWorkflowRegistry(workflowRegistry);
+#endif
     }
 
     void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         m_WorkflowRuntimeManager = workflowRuntimeManager;
+#ifdef J9T_STUDIO
         m_AssistantController.SetWorkflowRuntimeManager(workflowRuntimeManager);
+#endif
     }
 
     void WebServer::SetTriggerEngine(TriggerEngine* triggerEngine)
@@ -810,6 +818,7 @@ namespace AIAssistant
         return ServeDashboardIndex();
     }
 
+#ifdef J9T_STUDIO
     crow::response WebServer::ServeWorkflowEditorIndex() const
     {
         std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
@@ -854,83 +863,34 @@ namespace AIAssistant
 
         return crow::response(404, "Not found");
     }
+#endif // J9T_STUDIO
 
     void WebServer::RegisterRoutes()
     {
-        // ---- Dashboard UI (React) ----
-        // Serves the production build from: dashboard/ui/dist
-        CROW_ROUTE(m_Server, "/")([this]() { return ServeDashboardIndex(); });
+        RegisterCommonRoutes();
+        RegisterEngineRoutes();
+#ifdef J9T_STUDIO
+        RegisterStudioRoutes();
+#endif
+    }
 
-        // Dashboard assets: /dash-assets/...
+    void WebServer::RegisterCommonRoutes()
+    {
+        // ---- Dashboard UI (React) — both editions ----
+        CROW_ROUTE(m_Server, "/")([this]() { return ServeDashboardIndex(); });
         CROW_ROUTE(m_Server, "/dash-assets/<path>")
         ([this](std::string const& path) { return ServeDashboardStatic(std::string("/dash-assets/") + path); });
-
-        // ---- Workflow Editor UI (React) ----
-        // Serves the production build from: workflow-editor/ui/dist
-        CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
-
-        // Vite default asset paths are rooted at "/assets/...".
-        CROW_ROUTE(m_Server, "/assets/<path>")
-        ([this](std::string const& path) { return ServeWorkflowEditorStatic(std::string("/assets/") + path); });
-
-        // SPA fallback for any sub-route under /editor (e.g. /editor/workflows/...)
-        CROW_ROUTE(m_Server, "/editor/<path>")
-        ([this](std::string const& path) { return ServeWorkflowEditorStatic(std::string("/editor/") + path); });
-        // ---- POST /api/chat ----
-        CROW_ROUTE(m_Server, "/api/chat")
-            .methods("POST"_method)([this](const crow::request& req) { return HandleChatPost(req); });
 
         // ---- GET /api/status ----
         CROW_ROUTE(m_Server, "/api/status")([this]() { return HandleStatusGet(); });
 
-        // ---- Workflow Editor: CRUD (stubs moved to real implementation) ----
+        // ---- Workflow list + detail (read-only) ----
         CROW_ROUTE(m_Server, "/api/workflows").methods("GET"_method)([this]() { return HandleWorkflowsListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/reload")
-            .methods("POST"_method)([this]() { return HandleWorkflowsReloadPost(); });
-
-        CROW_ROUTE(m_Server, "/api/workflows")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
 
         CROW_ROUTE(m_Server, "/api/workflows/<string>")
             .methods("GET"_method)([this](std::string const& workflowId) { return HandleWorkflowGet(workflowId); });
 
-        CROW_ROUTE(m_Server, "/api/workflows/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& workflowId)
-                                   { return HandleWorkflowUpdatePut(req, workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>")
-            .methods("DELETE"_method)([this](std::string const& workflowId) { return HandleWorkflowDelete(workflowId); });
-
-        // ---- Workflow Editor: versioning ----
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions")
-            .methods("GET"_method)([this](std::string const& workflowId)
-                                   { return HandleWorkflowVersionsListGet(workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>")
-            .methods("GET"_method)([this](std::string const& workflowId, std::string const& timestamp)
-                                   { return HandleWorkflowVersionGetGet(workflowId, timestamp); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>/restore")
-            .methods("POST"_method)([this](std::string const& workflowId, std::string const& timestamp)
-                                    { return HandleWorkflowVersionRestorePost(workflowId, timestamp); });
-
-        // ---- Workflow Editor: validation ----
-        CROW_ROUTE(m_Server, "/api/workflows/validate")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/validate")
-            .methods("GET"_method)([this](std::string const& workflowId) { return HandleWorkflowValidateGet(workflowId); });
-
-        // ---- Workflow Editor: run control + monitoring ----
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
-            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
-                                    { return HandleWorkflowRunPost(req, workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
-            .methods("DELETE"_method)([this](std::string const& workflowId)
-                                      { return HandleWorkflowCleanDelete(workflowId); });
-
+        // ---- Run monitoring + control ----
         CROW_ROUTE(m_Server, "/api/workflow-runs/active")
             .methods("GET"_method)([this]() { return HandleWorkflowRunsActiveGet(); });
 
@@ -952,84 +912,9 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/stop")
             .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunStopPost(runId); });
 
-        // ---- Integrations: n8n ----
-        CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
-
-        // ---- Webhook trigger ----
-        CROW_ROUTE(m_Server, "/api/webhook/<string>")
-            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
-                                    { return HandleWebhookPost(req, workflowId); });
-
-        // ---- AI interfaces API (config.json) ----
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
-            .methods("GET"_method)([this]() { return HandleAiInterfacesListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
-            .methods("POST"_method)([this]() { return HandleAiInterfacesSavePost(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/test")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceTestPost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& name)
-                                   { return HandleAiInterfaceUpdatePut(req, name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
-            .methods("DELETE"_method)([this](std::string const& name) { return HandleAiInterfaceDeleteDelete(name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/config/reload")
-            .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/config").methods("GET"_method)([this]() { return HandleConfigSettingsGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/config")
-            .methods("PUT"_method)([this](crow::request const& req) { return HandleConfigSettingsPut(req); });
-
-        // ---- Key management API ----
-        CROW_ROUTE(m_Server, "/api/settings/keys/status").methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/keys/unlock")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleKeysUnlockPost(req); });
-
-        // ---- Provider settings API ----
-        CROW_ROUTE(m_Server, "/api/settings/providers").methods("GET"_method)([this]() { return HandleProvidersListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleProviderCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/save")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleProvidersSavePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& name)
-                                   { return HandleProviderUpdatePut(req, name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
-            .methods("DELETE"_method)([this](std::string const& name) { return HandleProviderDelete(name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
-            .methods("POST"_method)([this](std::string const& name) { return HandleProviderSetDefaultPost(name); });
-
-        // ---- Script check API (Workflow Editor) ----
-        CROW_ROUTE(m_Server, "/api/scripts/check")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
-
-        CROW_ROUTE(m_Server, "/api/scripts/registry").methods("GET"_method)([this]() { return HandleScriptRegistryGet(); });
-
-        // ---- File existence check API (Workflow Editor) ----
-        CROW_ROUTE(m_Server, "/api/files/check")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleFileCheckGet(req); });
-
-        // ---- Log viewer API ----
+        // ---- Log viewer ----
         CROW_ROUTE(m_Server, "/api/log")
             .methods("GET"_method)([this](crow::request const& req) { return HandleLogGet(req); });
-
-        CROW_ROUTE(m_Server, "/api/log/analyze-last-run")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleLogAnalyzeLastRunGet(req); });
 
         // ---- POST /api/task/<taskId>/heartbeat ----
         CROW_ROUTE(m_Server, "/api/task/<string>/heartbeat")
@@ -1074,6 +959,152 @@ namespace AIAssistant
                 });
     }
 
+    void WebServer::RegisterEngineRoutes()
+    {
+        // ---- Authenticated external triggers ----
+        CROW_ROUTE(m_Server, "/api/webhook/<string>")
+            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
+                                    { return HandleWebhookPost(req, workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
+    }
+
+#ifdef J9T_STUDIO
+    void WebServer::RegisterStudioRoutes()
+    {
+        // ---- Workflow Editor UI (React SPA) ----
+        CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
+        CROW_ROUTE(m_Server, "/assets/<path>")
+        ([this](std::string const& path) { return ServeWorkflowEditorStatic("/assets/" + path); });
+        CROW_ROUTE(m_Server, "/editor/<path>")
+        ([this](std::string const& path) { return ServeWorkflowEditorStatic("/editor/" + path); });
+
+        // ---- Chat ----
+        CROW_ROUTE(m_Server, "/api/chat")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleChatPost(req); });
+
+        // ---- Workflow CRUD ----
+        CROW_ROUTE(m_Server, "/api/workflows")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/reload")
+            .methods("POST"_method)([this]() { return HandleWorkflowsReloadPost(); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>")
+            .methods("PUT"_method)([this](crow::request const& req, std::string const& workflowId)
+                                   { return HandleWorkflowUpdatePut(req, workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>")
+            .methods("DELETE"_method)(
+                [this](std::string const& workflowId) { return HandleWorkflowDelete(workflowId); });
+
+        // ---- Workflow versioning ----
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions")
+            .methods("GET"_method)(
+                [this](std::string const& workflowId) { return HandleWorkflowVersionsListGet(workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>")
+            .methods("GET"_method)([this](std::string const& workflowId, std::string const& timestamp)
+                                   { return HandleWorkflowVersionGetGet(workflowId, timestamp); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>/restore")
+            .methods("POST"_method)([this](std::string const& workflowId, std::string const& timestamp)
+                                    { return HandleWorkflowVersionRestorePost(workflowId, timestamp); });
+
+        // ---- Workflow validation + run trigger ----
+        CROW_ROUTE(m_Server, "/api/workflows/validate")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/validate")
+            .methods("GET"_method)(
+                [this](std::string const& workflowId) { return HandleWorkflowValidateGet(workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
+            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
+                                    { return HandleWorkflowRunPost(req, workflowId); });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
+            .methods("DELETE"_method)(
+                [this](std::string const& workflowId) { return HandleWorkflowCleanDelete(workflowId); });
+
+        // ---- Script / file check ----
+        CROW_ROUTE(m_Server, "/api/scripts/check")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
+
+        CROW_ROUTE(m_Server, "/api/scripts/registry")
+            .methods("GET"_method)([this]() { return HandleScriptRegistryGet(); });
+
+        CROW_ROUTE(m_Server, "/api/files/check")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleFileCheckGet(req); });
+
+        // ---- Log analysis (requires AI) ----
+        CROW_ROUTE(m_Server, "/api/log/analyze-last-run")
+            .methods("GET"_method)([this](crow::request const& req) { return HandleLogAnalyzeLastRunGet(req); });
+
+        // ---- AI interfaces API ----
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("GET"_method)([this]() { return HandleAiInterfacesListGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("PUT"_method)(
+                [this](crow::request const& req, std::string const& name) { return HandleAiInterfaceUpdatePut(req, name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("DELETE"_method)(
+                [this](std::string const& name) { return HandleAiInterfaceDeleteDelete(name); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
+            .methods("POST"_method)([this]() { return HandleAiInterfacesSavePost(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/test")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceTestPost(req); });
+
+        // ---- Config settings API ----
+        CROW_ROUTE(m_Server, "/api/settings/config")
+            .methods("GET"_method)([this]() { return HandleConfigSettingsGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/config")
+            .methods("PUT"_method)([this](crow::request const& req) { return HandleConfigSettingsPut(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/config/reload")
+            .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
+
+        // ---- Key management API ----
+        CROW_ROUTE(m_Server, "/api/settings/keys/status")
+            .methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/keys/unlock")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleKeysUnlockPost(req); });
+
+        // ---- Provider settings API ----
+        CROW_ROUTE(m_Server, "/api/settings/providers")
+            .methods("GET"_method)([this]() { return HandleProvidersListGet(); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleProviderCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("PUT"_method)([this](crow::request const& req, std::string const& providerName)
+                                   { return HandleProviderUpdatePut(req, providerName); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("DELETE"_method)(
+                [this](std::string const& providerName) { return HandleProviderDelete(providerName); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
+            .methods("POST"_method)(
+                [this](std::string const& providerName) { return HandleProviderSetDefaultPost(providerName); });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/save")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleProvidersSavePost(req); });
+    }
+#endif // J9T_STUDIO
+
+#ifdef J9T_STUDIO
     crow::response WebServer::HandleChatPost(const crow::request& req)
     {
         simdjson::ondemand::parser parser;
@@ -1109,11 +1140,29 @@ namespace AIAssistant
             return MakeJsonResponse(400, error);
         }
     }
+#endif // J9T_STUDIO
 
     crow::response WebServer::HandleStatusGet()
     {
         crow::json::wvalue status;
         status["ok"] = true;
+
+        // Edition + capabilities
+#ifdef J9T_STUDIO
+        status["edition"] = "studio";
+        status["capabilities"]["workflow_crud"] = true;
+        status["capabilities"]["workflow_run_endpoint"] = true;
+        status["capabilities"]["ai_assistant"] = true;
+        status["capabilities"]["ai_jcwf"] = true;
+        status["capabilities"]["settings_api"] = true;
+#else
+        status["edition"] = "engine";
+        status["capabilities"]["workflow_crud"] = false;
+        status["capabilities"]["workflow_run_endpoint"] = false;
+        status["capabilities"]["ai_assistant"] = false;
+        status["capabilities"]["ai_jcwf"] = false;
+        status["capabilities"]["settings_api"] = false;
+#endif
 
         // Workflows
         size_t registeredWorkflows = 0;
@@ -1208,6 +1257,7 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
+#ifdef J9T_STUDIO
     crow::response WebServer::HandleWorkflowsReloadPost()
     {
         WorkflowRegistry* workflowRegistryPtr = nullptr;
@@ -1263,6 +1313,7 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, responseJson);
     }
+#endif // J9T_STUDIO
 
     crow::response WebServer::HandleWorkflowGet(std::string const& workflowId)
     {
@@ -1313,6 +1364,7 @@ namespace AIAssistant
         return MakeJsonTextResponse(200, workflowJsonContent);
     }
 
+#ifdef J9T_STUDIO
     crow::response WebServer::HandleWorkflowsCreatePost(crow::request const& req)
     {
         std::string errorMessage;
@@ -1955,6 +2007,7 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, responseJson);
     }
+#endif // J9T_STUDIO
 
     crow::response WebServer::HandleWorkflowRunsActiveGet()
     {
@@ -2610,6 +2663,7 @@ namespace AIAssistant
         return MakeJsonResponse(202, responseJson);
     }
 
+#ifdef J9T_STUDIO
     crow::response WebServer::HandleScriptCheckGet(crow::request const& req)
     {
         // GET /api/scripts/check?path=scripts/runMake.sh
@@ -2803,6 +2857,7 @@ namespace AIAssistant
         responseJson["scripts"] = std::move(scriptsArray);
         return MakeJsonResponse(200, responseJson);
     }
+#endif // J9T_STUDIO
 
     crow::response WebServer::HandleLogGet(crow::request const& req)
     {
@@ -2941,6 +2996,7 @@ namespace AIAssistant
         return MakeJsonResponse(200, resp);
     }
 
+#ifdef J9T_STUDIO
     crow::response WebServer::HandleLogAnalyzeLastRunGet(crow::request const& req)
     {
         // GET /api/log/analyze-last-run?index=N
@@ -3161,6 +3217,7 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, resp);
     }
+#endif // J9T_STUDIO
 
     void WebServer::RegisterWebSocket()
     {
@@ -3321,6 +3378,7 @@ namespace AIAssistant
                                 m_PendingBroadcasts.push_back(msg.dump());
                             }
                         }
+#ifdef J9T_STUDIO
                         else if (type == "ai-explain-jcwf")
                         {
                             std::string jcwfJson = std::string(doc["jcwf"].get_string().value());
@@ -3472,6 +3530,7 @@ namespace AIAssistant
                                 m_AiJcwfService.FixFailedScriptAsync(scriptPath, stderrContent, taskType);
                             }
                         }
+#endif // J9T_STUDIO
 
                         else
                         {
@@ -3501,6 +3560,7 @@ namespace AIAssistant
                 });
     }
 
+#ifdef J9T_STUDIO
     void WebServer::ShutdownAssistantController() { m_AssistantController.Shutdown(); }
 
     void WebServer::RegisterAssistantWebSocket()
@@ -3512,6 +3572,7 @@ namespace AIAssistant
             .onmessage([this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
                        { m_AssistantController.OnMessage(conn, data); });
     }
+#endif // J9T_STUDIO
 
     bool WebServer::Start()
     {
@@ -3588,12 +3649,14 @@ namespace AIAssistant
 
         m_Running = false;
 
+#ifdef J9T_STUDIO
         // Shut down the AI JCWF service so background threads are joined.
         m_AiJcwfService.Shutdown();
 
         // Assistant controller is shut down early via ShutdownAssistantController().
         // The call here is a no-op safety net (Shutdown() is idempotent).
         m_AssistantController.Shutdown();
+#endif
 
         // Force-close all WebSocket connections before stopping.
         // Crow's I/O loop won't exit while connections are open.
@@ -3830,6 +3893,7 @@ namespace AIAssistant
         BroadcastJSON(msg.dump());
     }
 
+#ifdef J9T_STUDIO
     // =========================================================================
     // AI interfaces API handlers (config.json "API interfaces")
     // =========================================================================
@@ -4980,5 +5044,6 @@ namespace AIAssistant
         responseJson["path"] = keysFilePath.string();
         return MakeJsonResponse(200, responseJson);
     }
+#endif // J9T_STUDIO
 
 } // namespace AIAssistant

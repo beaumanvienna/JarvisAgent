@@ -4,7 +4,9 @@
       "Bash(make config=release)",
       "Bash(chmod:*)",
       "Bash(premake5 gmake:*)",
-      "Bash(ls /home/beaumanvienna/dev/jarvisAgent/scripts/*.sh)"
+      "Bash(ls /home/beaumanvienna/dev/jarvisAgent/scripts/*.sh)",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

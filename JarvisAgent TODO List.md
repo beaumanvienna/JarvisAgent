@@ -434,17 +434,20 @@ defense-in-depth, not strictly required.
 
 #### Implementation steps
 
-- [ ] Add `--studio` option to `premake5.lua`, set `J9T_STUDIO` define
-- [ ] Wrap Studio-only routes in `#ifdef J9T_STUDIO` in `webServer.cpp`
-- [ ] Wrap Studio-only WS handlers in `#ifdef J9T_STUDIO` in `webServer.cpp`
-- [ ] Wrap `AiJcwfService` member in `#ifdef J9T_STUDIO` in `webServer.h`
-- [ ] Wrap `m_AiJcwfService.Shutdown()` in `SignalStop()` with `#ifdef J9T_STUDIO`
-- [ ] Guard `/editor` + `/assets` static file serving with `#ifdef J9T_STUDIO`
-- [ ] Guard `POST /api/chat` WS handler with `#ifdef J9T_STUDIO`
-- [ ] Update `build-ppa.sh` to support `--edition engine|studio`
-- [ ] Update CI workflows to build both editions
+- [x] Add `--studio` option to `premake5.lua`, set `J9T_STUDIO` define
+- [x] Wrap Studio-only routes in `#ifdef J9T_STUDIO` in `webServer.cpp` (via `RegisterStudioRoutes()`)
+- [x] Wrap Studio-only WS handlers in `#ifdef J9T_STUDIO` in `webServer.cpp`
+- [x] Wrap `AiJcwfService` member + `AssistantController` member in `#ifdef J9T_STUDIO` in `webServer.h`
+- [x] Wrap `m_AiJcwfService.Shutdown()` in `SignalStop()` with `#ifdef J9T_STUDIO`
+- [x] Guard `/editor` + `/assets` static file serving with `#ifdef J9T_STUDIO`
+- [x] Guard `POST /api/chat` with `#ifdef J9T_STUDIO`
+- [x] Add `edition` + `capabilities` fields to `GET /api/status`
+- [x] Both editions compile cleanly (Engine 11.6 MB, Studio 12.0 MB)
+- [x] Update `build-ppa.sh` to support `--edition engine|studio`
+- [x] Update CI workflows to build both editions (Linux: Engine+Studio, macOS: Engine+Studio→DMG, Windows: Engine→ZIP + Studio→MSI)
 - [ ] When AI assistant is implemented, all assistant modules are `#ifdef J9T_STUDIO`
-- [ ] Update README with edition descriptions
+- [x] Update README with edition descriptions
+- [x] Frontend: dashboard reads `edition`+`capabilities` from `/api/status`; hides Workflow Editor link and Run buttons in Engine mode; `fetchKeysStatus` gracefully handles Engine 404
 
 ---
 

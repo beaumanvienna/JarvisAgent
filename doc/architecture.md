@@ -60,6 +60,36 @@ This document describes the **software architecture**, **communication layers**,
 
 ---
 
+## 🏗️ Editions — Engine vs Studio
+
+JarvisAgent ships as two compile-time editions controlled by the `--studio` Premake5 flag:
+
+| Edition | Binary | Define | Purpose |
+|---------|--------|--------|---------|
+| **j9t Engine** (default) | `jarvisAgent` | *(none)* | Lean production server — runs workflows via cron, file-watch, and HMAC-authenticated webhooks. No workflow CRUD, no AI tooling, no unauthenticated run trigger. |
+| **j9t Studio** | `jarvisAgent` | `J9T_STUDIO` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, provider and config management. |
+
+### Compile-time gating
+
+Studio-only code is controlled at two levels:
+
+1. **File exclusions** (`premake5.lua`): Entire modules (`application/assistant/**`, `application/web/aiJcwfService.*`) are excluded from Engine builds via `removefiles`.
+2. **Preprocessor guards** (`#ifdef J9T_STUDIO`): Code within shared files (`webServer.cpp`, `webServer.h`, `jarvisAgent.cpp`) is gated at call sites.
+
+### Route architecture
+
+The web server uses a three-method route split:
+
+- `RegisterCommonRoutes()` — shared by both editions (status, workflow list, run monitoring, log, shutdown, dashboard UI, WebSocket)
+- `RegisterEngineRoutes()` — present in both editions (webhook trigger, n8n integration)
+- `RegisterStudioRoutes()` — Studio only, wrapped in `#ifdef J9T_STUDIO` (workflow CRUD, validation, run trigger, settings, AI interfaces, editor UI)
+
+### Runtime edition detection
+
+`GET /api/status` returns `edition` (`"engine"` or `"studio"`) and a `capabilities` boolean map. The frontend reads these to hide Studio-only UI elements at runtime — no separate frontend build required.
+
+---
+
 ## ARCHITECTURE DETAILS
 
 <br>

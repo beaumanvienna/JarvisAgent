@@ -10,24 +10,34 @@ JarvisAgent is a C++ backend + React frontend application for parallel AI-driven
 
 The project uses **Premake5** to generate platform-specific build files.
 
+Two editions are available, selected at build time via the `--studio` flag:
+
+| Edition | Flag | Purpose |
+|---------|------|---------|
+| **j9t Engine** (default) | *(none)* | Lean production server — no workflow CRUD, no AI tooling, no script writing |
+| **j9t Studio** | `--studio` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, config editing |
+
 ```bash
-# Generate build files (Linux/macOS)
+# Engine edition (default — production server)
 premake5 gmake
+make config=release
 
-# Build
-export MAKEFLAGS=-j8
-make config=release verbose=1
-make config=debug verbose=1
+# Studio edition (developer IDE — full features)
+premake5 gmake --studio
+make config=release
 
-# Outputs
+# Outputs (both → same binary name, different sizes)
 bin/Release/jarvisAgent
-bin/Debug/jarvisAgent
 
 # Optional: Enable Tracy profiler
-premake5 gmake --tracy
+premake5 gmake --tracy          # Engine + Tracy
+premake5 gmake --studio --tracy # Studio + Tracy
+
+# Debug build
+make config=debug verbose=1
 ```
 
-For Windows, use `premake5 vs2022` to generate a Visual Studio 2022 solution. Shell tasks in workflows require bash — launch from MSYS2 or Git Bash, not PowerShell/cmd.exe.
+For Windows, use `premake5 vs2022` (Engine) or `premake5 vs2022 --studio` (Studio) to generate a Visual Studio 2022 solution.
 
 ## React UIs
 

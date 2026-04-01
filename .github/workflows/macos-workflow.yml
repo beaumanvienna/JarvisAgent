@@ -50,28 +50,41 @@ jobs:
           echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
           echo "Package version: $PKG_VERSION"
 
-      - name: Generate Makefiles
+      - name: Generate Makefiles (Engine edition)
         run: premake5 gmake
 
-      - name: Build Release (parallel)
+      - name: Build Engine Release (parallel)
         run: |
           CORES=$(sysctl -n hw.ncpu)
           echo "Using ${CORES} cores"
           make -j${CORES} config=release verbose=1
 
-      - name: Build Debug (parallel)
+      - name: Build Engine Debug (parallel)
         run: |
           CORES=$(sysctl -n hw.ncpu)
           echo "Using ${CORES} cores"
           make -j${CORES} config=debug verbose=1
 
-      - name: Smoke test (Release)
+      - name: Smoke test Engine (Release)
         run: |
           ./bin/Release/jarvisAgent --help || true
 
-      - name: Smoke test (Debug)
+      - name: Smoke test Engine (Debug)
         run: |
           ./bin/Debug/jarvisAgent --help || true
+
+      - name: Generate Makefiles (Studio edition)
+        run: premake5 gmake --studio
+
+      - name: Build Studio Release (parallel)
+        run: |
+          CORES=$(sysctl -n hw.ncpu)
+          echo "Using ${CORES} cores"
+          make -j${CORES} config=release verbose=1
+
+      - name: Smoke test Studio (Release)
+        run: |
+          ./bin/Release/jarvisAgent --help || true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

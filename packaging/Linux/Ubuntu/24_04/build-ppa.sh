@@ -3,9 +3,11 @@
 #
 # Usage:
 #   cd packaging/Linux/Ubuntu/24_04
-#   ./build-ppa.sh              # build source package + upload
-#   ./build-ppa.sh --no-upload  # build source package only (skip dput)
-#   ./build-ppa.sh --test-build # also do a local binary test build
+#   ./build-ppa.sh                          # Engine edition, build + upload
+#   ./build-ppa.sh --edition studio         # Studio edition, build + upload
+#   ./build-ppa.sh --no-upload              # build source package only (skip dput)
+#   ./build-ppa.sh --test-build             # also do a local binary test build
+#   ./build-ppa.sh --edition studio --no-upload
 #
 # Prerequisites:
 #   sudo apt install devscripts debhelper dput gpg
@@ -23,13 +25,21 @@ GPG_KEY_ID="9A427F3969A3439AA6E836475C742F9C0115D544"
 # ---- Parse options ----
 UPLOAD=true
 TEST_BUILD=false
+EDITION="engine"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-upload)  UPLOAD=false; shift ;;
         --test-build) TEST_BUILD=true; shift ;;
+        --edition)
+            if [[ -z "${2:-}" || ("$2" != "engine" && "$2" != "studio") ]]; then
+                echo "ERROR: --edition requires 'engine' or 'studio'"
+                exit 1
+            fi
+            EDITION="$2"; shift 2 ;;
         *)            echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+echo "==> Edition: $EDITION"
 
 # ---- Extract version from premake5.lua ----
 PKG_VERSION=$(grep 'JARVIS_AGENT_VERSION' "$REPO_ROOT/premake5.lua" | sed 's/.*\\"\(.*\)\\".*$/\1/')
@@ -39,7 +49,11 @@ if [[ -z "$PKG_VERSION" ]]; then
 fi
 echo "==> Version: $PKG_VERSION"
 
-PKG_NAME="jarvisagent"
+if [[ "$EDITION" == "studio" ]]; then
+    PKG_NAME="jarvisagent-studio"
+else
+    PKG_NAME="jarvisagent"
+fi
 WORK_DIR="/tmp/${PKG_NAME}-ppa-build"
 SRC_DIR="${WORK_DIR}/${PKG_NAME}-${PKG_VERSION}"
 
@@ -129,6 +143,13 @@ cp -r "$REPO_ROOT/workflow-editor/ui/dist"  "$SRC_DIR/workflow-editor/ui/dist"
 echo "==> Copying debian/ directory ..."
 rm -rf "$SRC_DIR/debian"
 cp -r "$SCRIPT_DIR/debian" "$SRC_DIR/debian"
+
+# For Studio edition: patch debian/rules to pass --studio to premake5
+if [[ "$EDITION" == "studio" ]]; then
+    echo "==> Patching debian/rules for Studio edition ..."
+    sed -i 's|vendor/premake-core/bin/release/premake5 gmake$|vendor/premake-core/bin/release/premake5 gmake --studio|' \
+        "$SRC_DIR/debian/rules"
+fi
 
 # ---- Step 7: Verify changelog version matches ----
 CHANGELOG_VER=$(head -1 "$SRC_DIR/debian/changelog" | sed 's/.*(\(.*\)).*/\1/')

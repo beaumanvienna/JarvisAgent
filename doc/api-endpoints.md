@@ -7,20 +7,24 @@ All JSON endpoints return `application/json`. Errors follow the shape:
 { "ok": false, "error": "<code>", "message": "<human-readable>" }
 ```
 
----
+### Edition availability
 
-## Static / UI
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Serves the main chat UI (`web/index.html`). |
-| GET | `/editor` | Serves the Workflow Editor (React SPA from `workflow-editor/ui/dist`). |
-| GET | `/assets/<path>` | Serves Vite-built static assets for the editor. |
-| GET | `/editor/<path>` | SPA fallback — serves the editor index for any sub-route. |
+JarvisAgent ships in two editions: **Engine** (lean production server) and **Studio** (full developer IDE). Each endpoint section is annotated with its edition availability. Studio-only endpoints return 404 in Engine mode.
 
 ---
 
-## Chat
+## Static / UI — Both editions (dashboard); Studio only (editor)
+
+| Method | Path | Edition | Description |
+|--------|------|---------|-------------|
+| GET | `/` | Both | Serves the dashboard (React SPA from `dashboard/ui/dist`). |
+| GET | `/editor` | Studio | Serves the Workflow Editor (React SPA from `workflow-editor/ui/dist`). |
+| GET | `/assets/<path>` | Studio | Serves Vite-built static assets for the editor. |
+| GET | `/editor/<path>` | Studio | SPA fallback — serves the editor index for any sub-route. |
+
+---
+
+## Chat — Studio only
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -38,7 +42,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 ---
 
-## Status
+## Status — Both editions
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -48,6 +52,14 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 ```json
 {
   "ok": true,
+  "edition": "engine",
+  "capabilities": {
+    "workflow_crud": false,
+    "workflow_run_endpoint": false,
+    "ai_assistant": false,
+    "ai_jcwf": false,
+    "settings_api": false
+  },
   "workflows_registered": 1,
   "workflow_runs_active": 0,
   "session_managers_total": 12,
@@ -59,6 +71,8 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 | Field | Description |
 |-------|-------------|
+| `edition` | `"engine"` or `"studio"`. Used by the frontend to gate UI elements. |
+| `capabilities` | Boolean map of feature availability. Engine: all `false`. Studio: all `true`. |
 | `workflows_registered` | Number of JCWF workflows loaded in the registry. |
 | `workflow_runs_active` | Number of currently running or queued workflow runs. |
 | `session_managers_total` | Total number of session managers (one per queue subdirectory). |
@@ -68,16 +82,16 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 ---
 
-## Workflows — CRUD
+## Workflows — CRUD — read-only (Both), mutating (Studio only)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/workflows` | List all registered workflows. |
-| POST | `/api/workflows` | Create a new workflow from a JCWF JSON body. |
-| POST | `/api/workflows/reload` | Reload all workflows from the `workflows/` directory. |
-| GET | `/api/workflows/<id>` | Get the raw JCWF JSON for a specific workflow. |
-| PUT | `/api/workflows/<id>` | Update (overwrite) a workflow's JCWF file. |
-| DELETE | `/api/workflows/<id>` | Delete a workflow's JCWF file from disk. |
+| Method | Path | Edition | Description |
+|--------|------|---------|-------------|
+| GET | `/api/workflows` | Both | List all registered workflows. |
+| POST | `/api/workflows` | Studio | Create a new workflow from a JCWF JSON body. |
+| POST | `/api/workflows/reload` | Studio | Reload all workflows from the `workflows/` directory. |
+| GET | `/api/workflows/<id>` | Both | Get the raw JCWF JSON for a specific workflow. |
+| PUT | `/api/workflows/<id>` | Studio | Update (overwrite) a workflow's JCWF file. |
+| DELETE | `/api/workflows/<id>` | Studio | Delete a workflow's JCWF file from disk. |
 
 ### GET /api/workflows
 **Response (200):**
@@ -122,7 +136,7 @@ Returns 409 if a workflow with that id already exists.
 
 ---
 
-## Workflows — Validation
+## Workflows — Validation — Studio only
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -143,7 +157,7 @@ Each finding has: `code`, `message`, `path` (JSON pointer), `taskId`, `tier`.
 
 ---
 
-## Scripts — Validation
+## Scripts — Validation — Studio only
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -193,7 +207,7 @@ Security: the raw path must start with `scripts/` and the lexically-normalized p
 
 ---
 
-## File Existence Check (Workflow Editor)
+## File Existence Check (Workflow Editor) — Studio only
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -238,19 +252,19 @@ Security: only relative paths are accepted. The resolved path must remain inside
 
 ---
 
-## Workflows — Run Control & Monitoring
+## Workflows — Run Control & Monitoring — monitoring (Both), run trigger + clean (Studio only)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/workflows/<id>/run` | Start a workflow run. Requires `manual_start: true`. |
-| DELETE | `/api/workflows/<id>/clean` | Clean a workflow's queue output directory. |
-| GET | `/api/workflow-runs/active` | List all currently active (running/queued) runs. |
-| GET | `/api/workflow-runs/last` | Get the last completed run for each workflow. |
-| GET | `/api/workflow-runs/<runId>` | Get detailed status of a specific run (including per-task state). |
-| POST | `/api/workflow-runs/<runId>/cancel` | Request cancellation of an active run. |
-| POST | `/api/workflow-runs/<runId>/pause` | Pause an active run (suspend new task dispatch). |
-| POST | `/api/workflow-runs/<runId>/resume` | Resume a paused run. |
-| POST | `/api/workflow-runs/<runId>/stop` | Graceful stop: finish in-flight tasks, no new dispatch. |
+| Method | Path | Edition | Description |
+|--------|------|---------|-------------|
+| POST | `/api/workflows/<id>/run` | Studio | Start a workflow run. Requires `manual_start: true`. |
+| DELETE | `/api/workflows/<id>/clean` | Studio | Clean a workflow's queue output directory. |
+| GET | `/api/workflow-runs/active` | Both | List all currently active (running/queued) runs. |
+| GET | `/api/workflow-runs/last` | Both | Get the last completed run for each workflow. |
+| GET | `/api/workflow-runs/<runId>` | Both | Get detailed status of a specific run (including per-task state). |
+| POST | `/api/workflow-runs/<runId>/cancel` | Both | Request cancellation of an active run. |
+| POST | `/api/workflow-runs/<runId>/pause` | Both | Pause an active run (suspend new task dispatch). |
+| POST | `/api/workflow-runs/<runId>/resume` | Both | Resume a paused run. |
+| POST | `/api/workflow-runs/<runId>/stop` | Both | Graceful stop: finish in-flight tasks, no new dispatch. |
 
 ### POST /api/workflows/\<id\>/run
 
@@ -336,7 +350,7 @@ Graceful stop: finishes all in-flight tasks but does not dispatch any new ones. 
 
 ---
 
-## Integrations — n8n
+## Integrations — n8n — Both editions
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -362,7 +376,7 @@ Persists the request JSON to disk for traceability. Context fields are passed to
 
 ---
 
-## Settings — AI Interfaces
+## Settings — AI Interfaces — Studio only
 
 Manage the `"API interfaces"` array in `config.json` (in-memory + persist to disk).
 
@@ -447,7 +461,7 @@ Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
 
 ---
 
-## Settings — Config
+## Settings — Config — Studio only
 
 Read and update the scalar runtime configuration fields stored in `config.json`.
 
@@ -518,7 +532,7 @@ Returns 400 if a required field is missing or malformed. Validation errors (e.g.
 
 ---
 
-## Settings — Key Management
+## Settings — Key Management — Studio only
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -544,7 +558,7 @@ Returns 401 on wrong password.
 
 ---
 
-## Settings — Providers
+## Settings — Providers — Studio only
 
 Manage AI provider configurations (name, endpoint, API key, model, type).
 
@@ -590,7 +604,7 @@ Falls back to `JARVIS_MASTER_PASSWORD` environment variable if not provided in b
 
 ---
 
-## Task Heartbeat
+## Task Heartbeat — Both editions
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -612,12 +626,12 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 ---
 
-## Log Viewer
+## Log Viewer — `GET /api/log` (Both), `analyze-last-run` (Studio only)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/log` | Fetch log lines (tail or delta mode). |
-| GET | `/api/log/analyze-last-run` | Log-based analysis of a workflow run. |
+| Method | Path | Edition | Description |
+|--------|------|---------|-------------|
+| GET | `/api/log` | Both | Fetch log lines (tail or delta mode). |
+| GET | `/api/log/analyze-last-run` | Studio | Log-based analysis of a workflow run (requires AI). |
 
 ### GET /api/log
 
@@ -687,7 +701,7 @@ Scans `log/log.txt` for `[workflow] run '...' started/completed/failed/cancelled
 
 ---
 
-## Shutdown
+## Shutdown — Both editions
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -701,7 +715,7 @@ Triggers the same shutdown sequence as pressing `q` or Ctrl+C: global shutdown s
 
 ---
 
-## WebSocket — `/ws`
+## WebSocket — `/ws` — Both editions (core messages); Studio only (AI messages)
 
 A persistent WebSocket connection for real-time communication.
 

@@ -17,6 +17,19 @@
 
 <br>
 
+## Editions
+
+JarvisAgent ships in two editions, selected at build time:
+
+| Edition | Purpose | Packaging |
+|---------|---------|-----------|
+| **j9t Engine** (default) | Lean production server — runs workflows, exposes monitoring API, no editing or AI tooling | ZIP (Windows), DEB/RPM/AppImage/Flatpak (Linux) |
+| **j9t Studio** | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, provider & config management | MSI (Windows), DMG (macOS) |
+
+Both editions share the same binary name (`jarvisAgent`). Engine is the default build; Studio requires the `--studio` flag at configure time (see [Building from Source](#building-from-source) below). The React dashboard adapts automatically — Studio-only UI elements (Workflow Editor link, Run buttons) are hidden in Engine mode based on the `/api/status` capabilities response.
+
+<br>
+
 JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** for two reasons: hundreds of AI calls run at the same time rather than one after another, and all outgoing requests share a single HTTP/2 connection per provider — so network overhead stays minimal no matter how many tasks are in flight.  <br>
 <br>
 Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When something goes wrong the **fix-it** button sends the error to the AI for a suggested repair; the **explain** button summarises what a workflow does in plain language; and the **generate** button drafts an entirely new workflow from a natural language description.  <br>

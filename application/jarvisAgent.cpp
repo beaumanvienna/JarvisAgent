@@ -632,6 +632,7 @@ namespace AIAssistant
             m_CurlMultiDispatcher->SignalStop();
         }
 
+#ifdef J9T_STUDIO
         // Shut down assistant controller early: its background threads hold pointers
         // to WRM and WorkflowRegistry, so it must be joined before those are reset.
         RAW_ONSHUTDOWN("[OnShutdown] AssistantController::Shutdown...\n");
@@ -640,6 +641,7 @@ namespace AIAssistant
             m_WebServer->ShutdownAssistantController();
         }
         RAW_ONSHUTDOWN("[OnShutdown] AssistantController stopped\n");
+#endif
 
         LOG_APP_INFO("[shutdown] phase 1: signalling all subsystems...");
         RAW_ONSHUTDOWN("[OnShutdown] WRM::SignalStop...\n");
