@@ -13,13 +13,13 @@
 
 # JarvisAgent (j9t)
 
-**Current version: 0.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
 
-Ships as two editions: **j9t Studio** — a full developer IDE with visual workflow editor, AI assistant, and config management — and **j9t Engine** — a hardened, lean production server with no editing surface, ready for public deployment. Both are included in every package.
 
 JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** for two reasons: hundreds of AI calls run at the same time rather than one after another, and all outgoing requests share a single HTTP/2 connection per provider — so network overhead stays minimal no matter how many tasks are in flight.  <br>
 <br>
-Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When something goes wrong the **fix-it** button sends the error to the AI for a suggested repair; the **explain** button summarises what a workflow does in plain language; and the **generate** button drafts an entirely new workflow from a natural language description.  <br>
+Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs (directed acyclic graphs) in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When something goes wrong the **fix-it** button sends the error to the AI for a suggested repair; the **explain** button summarises what a workflow does in plain language; and the **generate** button drafts an entirely new workflow from a natural language description.  <br>
+<br>
+The project ships as two editions: **j9t Studio** — a full developer IDE with visual workflow editor, AI assistant, and config management — and **j9t Engine** — a hardened, lean production server with no editing surface, ready for public deployment. Both are included in every package.<br>
 <br>
 The **React dashboard** gives an overview of active workflow runs, AI session counts, and completed/failed counters. Its **log viewer** streams up to 100,000 lines live with color-coded severity, and the **Run Analyzer** overlay (press `1`) maps every run to its log region, lists all warnings and errors with one-click navigation, and lets you step through issues with ▲ / ▼.  <br>
 <br>
@@ -27,7 +27,8 @@ Tasks can be AI calls, shell commands, **Python scripts** (executed by the embed
 <br>
 Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk.  <br>
 <br>
-
+**Current version: 0.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.<br>
+<br>
 | Terminal UI | Dashboard | Workflow Editor |
 |:-----------:|:---------:|:---------------:|
 | ![Terminal UI](example/screenshot.png) | ![Dashboard](example/screenshot_dashboard.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) |
