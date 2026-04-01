@@ -59,23 +59,38 @@ jobs:
       - name: Set parallel build flags
         run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
 
-      - name: Build Release (parallel)
+      - name: Build Engine Release (parallel)
         run: |
           echo "Using $(nproc) cores"
           make -j$(nproc) config=release verbose=1
 
-      - name: Build Debug (parallel)
+      - name: Build Engine Debug (parallel)
         run: |
           echo "Using $(nproc) cores"
           make -j$(nproc) config=debug verbose=1
 
-      - name: Smoke test (Release)
+      - name: Smoke test Engine (Release)
         run: |
           ./bin/Release/jarvisAgent --help || true
 
-      - name: Smoke test (Debug)
+      - name: Smoke test Engine (Debug)
         run: |
           ./bin/Debug/jarvisAgent --help || true
+
+      - name: Save Engine binary
+        run: cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+      - name: Generate Makefiles (Studio edition)
+        run: premake5 gmake --studio
+
+      - name: Build Studio Release (parallel)
+        run: |
+          echo "Using $(nproc) cores"
+          make -j$(nproc) config=release verbose=1
+
+      - name: Smoke test Studio (Release)
+        run: |
+          ./bin/Release/jarvisAgent --help || true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -100,26 +115,9 @@ jobs:
           name: linux-build-outputs
           path: |
             bin/Release/jarvisAgent
+            bin/Release/jarvisAgent-engine
             dashboard/ui/dist/
             workflow-editor/ui/dist/
-
-      - name: Generate Makefiles (Studio edition)
-        run: premake5 gmake --studio
-
-      - name: Build Studio Release (parallel)
-        run: |
-          echo "Using $(nproc) cores"
-          make -j$(nproc) config=release verbose=1
-
-      - name: Smoke test Studio (Release)
-        run: |
-          ./bin/Release/jarvisAgent --help || true
-
-      - name: Upload Studio build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-build-outputs-studio
-          path: bin/Release/jarvisAgent
 
   package-deb:
     needs: build-linux

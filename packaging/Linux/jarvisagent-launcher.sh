@@ -2,11 +2,15 @@
 # jarvisagent-launcher.sh — User-space launcher for system-wide JarvisAgent installs.
 #
 # Installed to /usr/bin/jarvisagent by deb/rpm/Arch packages.
+# Symlinks: jarvisagent-studio → jarvisagent, j9t → jarvisagent
+# Engine:   jarvisagent-engine (separate copy of this script, or symlink detected by name)
+#
 # Creates a per-user working directory with symlinks to read-only assets
 # in /opt/jarvisagent/ and writable directories for user data.
 #
 # Usage:
-#   jarvisagent                          # default: ~/JarvisAgent
+#   jarvisagent                          # Studio edition (default: ~/JarvisAgent)
+#   jarvisagent-engine                   # Engine edition
 #   jarvisagent --home /path/to/dir      # custom working directory
 #   JARVISAGENT_HOME=/tmp/ja jarvisagent # via environment variable
 #   jarvisagent --help                   # pass-through to binary
@@ -18,6 +22,16 @@ set -euo pipefail
 INSTALL_DIR="/opt/jarvisagent"
 OPEN_BROWSER=true
 USER_HOME=""
+
+# Detect edition from script name (jarvisagent-engine → Engine, everything else → Studio)
+SCRIPT_NAME="$(basename "$0")"
+if [[ "$SCRIPT_NAME" == *"-engine"* ]]; then
+    BINARY_NAME="jarvisAgent-engine"
+    EDITION_LABEL="Engine"
+else
+    BINARY_NAME="jarvisAgent"
+    EDITION_LABEL="Studio"
+fi
 
 # ---- Parse launcher-specific arguments ----
 PASSTHROUGH_ARGS=()
@@ -36,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h|--version|-v)
-            exec "$INSTALL_DIR/bin/jarvisAgent" "$1"
+            exec "$INSTALL_DIR/bin/$BINARY_NAME" "$1"
             ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
@@ -57,8 +71,8 @@ if [[ ! -d "$INSTALL_DIR" ]]; then
     exit 1
 fi
 
-if [[ ! -x "$INSTALL_DIR/bin/jarvisAgent" ]]; then
-    echo "Error: $INSTALL_DIR/bin/jarvisAgent not found or not executable."
+if [[ ! -x "$INSTALL_DIR/bin/$BINARY_NAME" ]]; then
+    echo "Error: $INSTALL_DIR/bin/$BINARY_NAME not found or not executable."
     exit 1
 fi
 
@@ -79,10 +93,14 @@ for asset in bin dashboard workflow-editor scripts doc; do
     fi
 done
 
-# Ensure bin/jarvisAgent is reachable even if bin/ is a real directory
+# Ensure binaries are reachable even if bin/ is a real directory
 # (e.g. git clone has bin/Release/ but no bin/jarvisAgent)
-if [[ -d "$USER_HOME/bin" && ! -L "$USER_HOME/bin" && ! -e "$USER_HOME/bin/jarvisAgent" ]]; then
-    ln -sfn "$INSTALL_DIR/bin/jarvisAgent" "$USER_HOME/bin/jarvisAgent"
+if [[ -d "$USER_HOME/bin" && ! -L "$USER_HOME/bin" ]]; then
+    for bin in jarvisAgent jarvisAgent-engine; do
+        if [[ -f "$INSTALL_DIR/bin/$bin" && ! -e "$USER_HOME/bin/$bin" ]]; then
+            ln -sfn "$INSTALL_DIR/bin/$bin" "$USER_HOME/bin/$bin"
+        fi
+    done
 fi
 
 # If dashboard/workflow-editor dist/ folders are real directories, offer to
@@ -151,9 +169,11 @@ if [[ "$OPEN_BROWSER" == true ]]; then
 fi
 
 # ---- Launch ----
-echo "==> Starting JarvisAgent in $USER_HOME"
+echo "==> Starting JarvisAgent ($EDITION_LABEL edition) in $USER_HOME"
 echo "    Dashboard: http://localhost:8080"
-echo "    Editor:    http://localhost:8080/editor"
+if [[ "$EDITION_LABEL" == "Studio" ]]; then
+    echo "    Editor:    http://localhost:8080/editor"
+fi
 echo ""
 cd "$USER_HOME"
-exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"
+exec "$USER_HOME/bin/$BINARY_NAME" "${PASSTHROUGH_ARGS[@]}"

@@ -39,8 +39,12 @@ RUN cd /tmp && \
 WORKDIR /app
 COPY . .
 
-RUN premake5 gmake
-RUN make -j$(nproc) config=release verbose=1
+# Build Engine edition
+RUN premake5 gmake && make -j$(nproc) config=release verbose=1
+RUN cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+# Build Studio edition
+RUN premake5 gmake --studio && make -j$(nproc) config=release verbose=1
 
 # ---- Runtime stage ----
 FROM ubuntu:24.04
@@ -103,8 +107,9 @@ ENV PATH="/opt/pipx/bin:$PATH"
 # These survive the volume mount at /app. The entrypoint creates symlinks
 # from /app back to these so the binary finds them relative to CWD.
 
-# Binary
+# Binaries (Studio + Engine)
 COPY --from=builder /app/bin/Release/jarvisAgent /opt/jarvisagent/jarvisAgent
+COPY --from=builder /app/bin/Release/jarvisAgent-engine /opt/jarvisagent/jarvisAgent-engine
 
 # React UIs
 COPY --from=dashboard-builder /ui/dist /opt/jarvisagent/dashboard/ui/dist

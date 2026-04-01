@@ -33,10 +33,13 @@ prepare() {
 build() {
     cd "$srcdir/JarvisAgent"
 
-    # Generate Makefiles
+    # Build Engine edition
     premake5 gmake
+    make -j$(nproc) config=release
+    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
 
-    # Build C++ release binary
+    # Build Studio edition
+    premake5 gmake --studio
     make -j$(nproc) config=release
 
     # Build React dashboard
@@ -56,8 +59,9 @@ package() {
     local _instdir="$pkgdir/opt/jarvisagent"
     install -dm755 "$_instdir"
 
-    # ---- Binary ----
+    # ---- Binaries (Studio + Engine) ----
     install -Dm755 bin/Release/jarvisAgent "$_instdir/bin/jarvisAgent"
+    install -Dm755 bin/Release/jarvisAgent-engine "$_instdir/bin/jarvisAgent-engine"
 
     # ---- React UIs (pre-built dist/) ----
     install -dm755 "$_instdir/dashboard/ui"
@@ -103,6 +107,9 @@ package() {
     install -Dm644 doc/jarvisagent.1 "$pkgdir/usr/share/man/man1/jarvisagent.1"
     gzip -9 "$pkgdir/usr/share/man/man1/jarvisagent.1"
 
-    # ---- Launcher script (shared across deb/rpm/arch) ----
+    # ---- Launcher scripts (shared across deb/rpm/arch — detects edition from script name) ----
     install -Dm755 "$srcdir/JarvisAgent/packaging/Linux/jarvisagent-launcher.sh" "$pkgdir/usr/bin/jarvisagent"
+    install -Dm755 "$srcdir/JarvisAgent/packaging/Linux/jarvisagent-launcher.sh" "$pkgdir/usr/bin/jarvisagent-engine"
+    ln -sf jarvisagent "$pkgdir/usr/bin/jarvisagent-studio"
+    ln -sf jarvisagent "$pkgdir/usr/bin/j9t"
 }

@@ -38,11 +38,15 @@ mkdir -p "$BUILD_DIR"
 
 # ---- Build from source (unless dry-run) ----
 if [[ "$DRY_RUN" == false ]]; then
-    echo "==> Generating Makefiles ..."
     cd "$REPO_ROOT"
-    premake5 gmake
 
-    echo "==> Building C++ release binary ..."
+    echo "==> Building Engine edition ..."
+    premake5 gmake
+    make -j"$(nproc)" config=release
+    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+    echo "==> Building Studio edition ..."
+    premake5 gmake --studio
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
@@ -69,13 +73,15 @@ mkdir -p "$INST/log"
 mkdir -p "$BUILD_DIR/usr/bin"
 mkdir -p "$BUILD_DIR/DEBIAN"
 
-# Binary
-if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
-    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$INST/bin/jarvisAgent"
-    chmod 755 "$INST/bin/jarvisAgent"
-else
-    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
-fi
+# Binaries (Studio + Engine)
+for bin in jarvisAgent jarvisAgent-engine; do
+    if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
+        cp "$REPO_ROOT/bin/Release/$bin" "$INST/bin/$bin"
+        chmod 755 "$INST/bin/$bin"
+    else
+        echo "WARNING: bin/Release/$bin not found (expected in dry-run)"
+    fi
+done
 
 # React UIs
 if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
@@ -130,8 +136,11 @@ cp "$SCRIPT_DIR/DEBIAN/postrm" "$BUILD_DIR/DEBIAN/postrm"
 chmod 755 "$BUILD_DIR/DEBIAN/postinst"
 chmod 755 "$BUILD_DIR/DEBIAN/postrm"
 
-# Launcher script (shared across deb/rpm/arch)
+# Launcher scripts (shared across deb/rpm/arch — detects edition from script name)
 install -m755 "$SCRIPT_DIR/../../jarvisagent-launcher.sh" "$BUILD_DIR/usr/bin/jarvisagent"
+install -m755 "$SCRIPT_DIR/../../jarvisagent-launcher.sh" "$BUILD_DIR/usr/bin/jarvisagent-engine"
+ln -sf jarvisagent "$BUILD_DIR/usr/bin/jarvisagent-studio"
+ln -sf jarvisagent "$BUILD_DIR/usr/bin/j9t"
 
 # ---- Build .deb ----
 echo "==> Building .deb package ..."

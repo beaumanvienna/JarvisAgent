@@ -15,20 +15,7 @@
 
 **Current version: 0.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
 
-<br>
-
-## Editions
-
-JarvisAgent ships in two editions, selected at build time:
-
-| Edition | Purpose | Packaging |
-|---------|---------|-----------|
-| **j9t Engine** (default) | Lean production server — runs workflows, exposes monitoring API, no editing or AI tooling | ZIP (Windows), DEB/RPM/AppImage/Flatpak (Linux) |
-| **j9t Studio** | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, provider & config management | MSI (Windows), DMG (macOS) |
-
-Both editions share the same binary name (`jarvisAgent`). Engine is the default build; Studio requires the `--studio` flag at configure time (see [Building from Source](#building-from-source) below). The React dashboard adapts automatically — Studio-only UI elements (Workflow Editor link, Run buttons) are hidden in Engine mode based on the `/api/status` capabilities response.
-
-<br>
+Ships as two editions: **j9t Studio** — a full developer IDE with visual workflow editor, AI assistant, and config management — and **j9t Engine** — a hardened, lean production server with no editing surface, ready for public deployment. Both are included in every package.
 
 JarvisAgent is a **modern** C++ orchestration engine with a React frontend for parallel AI-driven automation. It is **fast** for two reasons: hundreds of AI calls run at the same time rather than one after another, and all outgoing requests share a single HTTP/2 connection per provider — so network overhead stays minimal no matter how many tasks are in flight.  <br>
 <br>

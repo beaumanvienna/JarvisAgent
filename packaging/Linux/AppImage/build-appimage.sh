@@ -36,11 +36,15 @@ mkdir -p "$APPDIR/usr/share/jarvisagent"
 
 # ---- Build from source (unless dry-run) ----
 if [[ "$DRY_RUN" == false ]]; then
-    echo "==> Generating Makefiles ..."
     cd "$REPO_ROOT"
-    premake5 gmake
 
-    echo "==> Building C++ release binary ..."
+    echo "==> Building Engine edition ..."
+    premake5 gmake
+    make -j"$(nproc)" config=release
+    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+    echo "==> Building Studio edition ..."
+    premake5 gmake --studio
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
@@ -59,14 +63,16 @@ echo "==> Assembling AppDir ..."
 
 SHARE="$APPDIR/usr/share/jarvisagent"
 
-# Binary
+# Binaries (Studio + Engine)
 mkdir -p "$SHARE/bin"
-if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
-    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$SHARE/bin/jarvisAgent"
-    chmod 755 "$SHARE/bin/jarvisAgent"
-else
-    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
-fi
+for bin in jarvisAgent jarvisAgent-engine; do
+    if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
+        cp "$REPO_ROOT/bin/Release/$bin" "$SHARE/bin/$bin"
+        chmod 755 "$SHARE/bin/$bin"
+    else
+        echo "WARNING: bin/Release/$bin not found (expected in dry-run)"
+    fi
+done
 
 # React UIs
 if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then

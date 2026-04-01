@@ -6,7 +6,11 @@
       "Bash(premake5 gmake:*)",
       "Bash(ls /home/beaumanvienna/dev/jarvisAgent/scripts/*.sh)",
       "Bash(npm run:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(ln -sf jarvisagent.sh /tmp/jarvisagent-engine.sh)",
+      "Bash(bash -c 'SCRIPT_NAME=\"\"jarvisagent-engine.sh\"\"; if [[ \"\"$SCRIPT_NAME\"\" == *\"\"-engine\"\"* ]]; then echo \"\"Engine detected\"\"; else echo \"\"Studio detected\"\"; fi')",
+      "Bash(bash -c 'SCRIPT_NAME=\"\"jarvisagent.sh\"\"; if [[ \"\"$SCRIPT_NAME\"\" == *\"\"-engine\"\"* ]]; then echo \"\"Engine detected\"\"; else echo \"\"Studio detected\"\"; fi')",
+      "Bash(rm /tmp/jarvisagent-engine.sh)"
     ]
   }
 }

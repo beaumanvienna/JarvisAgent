@@ -73,6 +73,9 @@ jobs:
         run: |
           ./bin/Debug/jarvisAgent --help || true
 
+      - name: Save Engine binary
+        run: cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
       - name: Generate Makefiles (Studio edition)
         run: premake5 gmake --studio
 

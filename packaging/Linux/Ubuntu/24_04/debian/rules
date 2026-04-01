@@ -11,16 +11,21 @@ INSTDIR  = $(DESTDIR)/opt/jarvisagent
 override_dh_auto_configure:
 	# Build premake5 from bundled source (no network on Launchpad)
 	cd vendor/premake-core && ./Bootstrap.sh
-	# Generate Makefiles with correct Python paths for this build environment
-	vendor/premake-core/bin/release/premake5 gmake
 
 override_dh_auto_build:
+	# Build Engine edition first
+	vendor/premake-core/bin/release/premake5 gmake
+	$(MAKE) -j$$(nproc) config=release
+	cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+	# Build Studio edition
+	vendor/premake-core/bin/release/premake5 gmake --studio
 	$(MAKE) -j$$(nproc) config=release
 
 override_dh_auto_install:
-	# Binary
+	# Binaries (Studio + Engine)
 	install -dm755 $(INSTDIR)/bin
 	install -Dm755 bin/Release/jarvisAgent $(INSTDIR)/bin/jarvisAgent
+	install -Dm755 bin/Release/jarvisAgent-engine $(INSTDIR)/bin/jarvisAgent-engine
 
 	# Pre-built React UIs (included in source tarball — no npm on Launchpad)
 	install -dm755 $(INSTDIR)/dashboard/ui
@@ -59,9 +64,12 @@ override_dh_auto_install:
 	install -dm755 $(INSTDIR)/queue
 	install -dm755 $(INSTDIR)/log
 
-	# Launcher script (shared across deb/rpm/arch — creates ~/JarvisAgent on first run)
+	# Launcher scripts (shared across deb/rpm/arch — creates ~/JarvisAgent on first run)
 	install -dm755 $(DESTDIR)/usr/bin
 	install -Dm755 packaging/Linux/jarvisagent-launcher.sh $(DESTDIR)/usr/bin/jarvisagent
+	install -Dm755 packaging/Linux/jarvisagent-launcher.sh $(DESTDIR)/usr/bin/jarvisagent-engine
+	ln -sf jarvisagent $(DESTDIR)/usr/bin/jarvisagent-studio
+	ln -sf jarvisagent $(DESTDIR)/usr/bin/j9t
 
 override_dh_auto_test:
 	# Skip tests

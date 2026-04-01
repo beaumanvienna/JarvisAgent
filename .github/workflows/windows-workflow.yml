@@ -116,24 +116,17 @@ jobs:
           }
           exit 0
 
+      - name: Save Engine binary
+        shell: pwsh
+        run: |
+          Copy-Item "bin\Release\jarvisAgent.exe" "bin\Release\jarvisAgent-engine.exe"
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Package ZIP (Engine)
-        shell: pwsh
-        run: |
-          packaging\Windows\11\build-zip.ps1
-
-      - name: Upload ZIP artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-zip
-          path: packaging/Windows/11/build/*.zip
-          if-no-files-found: warn
-
-      # ---- Studio edition: MSI installer ----
+      # ---- Studio edition ----
 
       - name: Generate Visual Studio solution (Studio edition)
         shell: pwsh
@@ -171,6 +164,20 @@ jobs:
           }
           exit 0
 
+      # ---- Packaging (both editions in each package) ----
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          packaging\Windows\11\build-zip.ps1
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-zip
+          path: packaging/Windows/11/build/*.zip
+          if-no-files-found: warn
+
       - name: Install WiX v3
         shell: pwsh
         run: |
@@ -184,7 +191,7 @@ jobs:
           $env:PATH = "$wixDir;$env:PATH"
           Write-Host "WiX installed: $(& heat.exe 2>&1 | Select-Object -First 1)"
 
-      - name: Package MSI (Studio)
+      - name: Package MSI
         shell: pwsh
         run: |
           packaging\Windows\11\build-msi.ps1

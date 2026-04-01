@@ -36,17 +36,24 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
 # ---- Build from source (unless dry-run) ----
 if (-not $DryRun) {
-    Write-Host "==> Generating Visual Studio solution ..."
     Push-Location $RepoRoot
-    premake5 vs2022
-    Pop-Location
 
-    Write-Host "==> Building C++ Release binary ..."
+    Write-Host "==> Building Engine edition ..."
+    premake5 vs2022
     $slnFiles = Get-ChildItem -Path $RepoRoot -Recurse -Filter *.sln
     foreach ($sln in $slnFiles) {
-        Write-Host "    Building: $($sln.FullName)"
         msbuild "$($sln.FullName)" /m /p:Configuration=Release /p:Platform=x64
     }
+    Copy-Item "bin\Release\jarvisAgent.exe" "bin\Release\jarvisAgent-engine.exe"
+
+    Write-Host "==> Building Studio edition ..."
+    premake5 vs2022 --studio
+    $slnFiles = Get-ChildItem -Path $RepoRoot -Recurse -Filter *.sln
+    foreach ($sln in $slnFiles) {
+        msbuild "$($sln.FullName)" /m /p:Configuration=Release /p:Platform=x64
+    }
+
+    Pop-Location
 
     Write-Host "==> Building React dashboard ..."
     Push-Location "$RepoRoot\dashboard\ui"
@@ -64,13 +71,15 @@ if (-not $DryRun) {
 # ---- Assemble package tree ----
 Write-Host "==> Assembling package tree ..."
 
-# Binary
-$binSrc = "$RepoRoot\bin\Release\jarvisAgent.exe"
+# Binaries (Studio + Engine)
 New-Item -ItemType Directory -Force -Path "$StageDir\bin" | Out-Null
-if (Test-Path $binSrc) {
-    Copy-Item $binSrc "$StageDir\bin\jarvisAgent.exe"
-} else {
-    Write-Host "WARNING: bin\Release\jarvisAgent.exe not found (expected in dry-run)"
+foreach ($bin in @("jarvisAgent.exe", "jarvisAgent-engine.exe")) {
+    $binSrc = "$RepoRoot\bin\Release\$bin"
+    if (Test-Path $binSrc) {
+        Copy-Item $binSrc "$StageDir\bin\$bin"
+    } else {
+        Write-Host "WARNING: bin\Release\$bin not found (expected in dry-run)"
+    }
 }
 
 # React UIs
@@ -138,6 +147,10 @@ REM jarvisagent.bat — User-space launcher for JarvisAgent on Windows.
 REM Creates a per-user working directory with junctions to read-only assets.
 REM Junctions (mklink /J) do not require admin on Windows 10+.
 REM
+REM Edition is detected from the script name:
+REM   jarvisagent.bat / jarvisagent-studio.bat / j9t.bat  → Studio edition
+REM   jarvisagent-engine.bat                              → Engine edition
+REM
 REM Usage:
 REM   jarvisagent                          default: %USERPROFILE%\JarvisAgent
 REM   jarvisagent --home C:\path\to\dir    custom working directory
@@ -148,6 +161,16 @@ set "INSTALL_DIR=%~dp0"
 if "!INSTALL_DIR:~-1!"=="\" set "INSTALL_DIR=!INSTALL_DIR:~0,-1!"
 set "OPEN_BROWSER=1"
 set "USER_HOME="
+
+REM ---- Detect edition from script name ----
+set "BINARY_NAME=jarvisAgent.exe"
+set "EDITION_LABEL=Studio"
+set "SCRIPT_NAME=%~n0"
+echo !SCRIPT_NAME! | findstr /i "engine" >nul 2>&1
+if not errorlevel 1 (
+    set "BINARY_NAME=jarvisAgent-engine.exe"
+    set "EDITION_LABEL=Engine"
+)
 
 REM ---- Parse arguments ----
 :parse
@@ -171,7 +194,7 @@ shift
 goto :parse
 
 :passthrough
-"!INSTALL_DIR!\bin\jarvisAgent.exe" %*
+"!INSTALL_DIR!\bin\!BINARY_NAME!" %*
 exit /b
 
 :main
@@ -184,8 +207,8 @@ if "!USER_HOME!"=="" (
 )
 
 REM ---- Verify install directory ----
-if not exist "!INSTALL_DIR!\bin\jarvisAgent.exe" (
-    echo ERROR: !INSTALL_DIR!\bin\jarvisAgent.exe not found.
+if not exist "!INSTALL_DIR!\bin\!BINARY_NAME!" (
+    echo ERROR: !INSTALL_DIR!\bin\!BINARY_NAME! not found.
     exit /b 1
 )
 
@@ -252,14 +275,18 @@ if "!OPEN_BROWSER!"=="1" (
 )
 
 REM ---- Launch ----
-echo ==^> Starting JarvisAgent in !USER_HOME!
+echo ==^> Starting JarvisAgent (!EDITION_LABEL! edition) in !USER_HOME!
 echo     Dashboard: http://localhost:8080
-echo     Editor:    http://localhost:8080/editor
+if /i "!EDITION_LABEL!"=="Studio" echo     Editor:    http://localhost:8080/editor
 echo.
 cd /d "!USER_HOME!"
-"!INSTALL_DIR!\bin\jarvisAgent.exe"
+"!INSTALL_DIR!\bin\!BINARY_NAME!"
 '@
 Set-Content -Path "$StageDir\jarvisagent.bat" -Value $launcherContent -Encoding ASCII
+# Edition-specific launcher copies (same script, edition detected from filename)
+Copy-Item "$StageDir\jarvisagent.bat" "$StageDir\jarvisagent-engine.bat"
+Copy-Item "$StageDir\jarvisagent.bat" "$StageDir\jarvisagent-studio.bat"
+Copy-Item "$StageDir\jarvisagent.bat" "$StageDir\j9t.bat"
 
 # Setup-venv helper script (standalone, for manual venv recreation)
 $venvContent = @'

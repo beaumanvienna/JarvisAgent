@@ -3,11 +3,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
-BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent"
+
+# Detect edition from script name (jarvisagent-engine → Engine, everything else → Studio)
+SCRIPT_NAME="$(basename "$0")"
+if [[ "$SCRIPT_NAME" == *"-engine"* ]]; then
+    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent-engine"
+    EDITION_LABEL="Engine"
+else
+    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent"
+    EDITION_LABEL="Studio"
+fi
 
 # ── Check release binary exists ──────────────────────────────────────────────
 if [ ! -f "$BINARY" ]; then
-    echo "[jarvisagent.sh] ERROR: Release binary not found at $BINARY"
+    echo "[jarvisagent.sh] ERROR: $EDITION_LABEL binary not found at $BINARY"
     echo "  JarvisAgent must be compiled first. See README.md for build instructions."
     exit 1
 fi

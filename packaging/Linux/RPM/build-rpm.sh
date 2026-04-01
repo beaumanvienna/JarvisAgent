@@ -46,11 +46,15 @@ mkdir -p "$STAGING/usr/bin"
 
 # ---- Build from source (unless dry-run) ----
 if [[ "$DRY_RUN" == false ]]; then
-    echo "==> Generating Makefiles ..."
     cd "$REPO_ROOT"
-    premake5 gmake
 
-    echo "==> Building C++ release binary ..."
+    echo "==> Building Engine edition ..."
+    premake5 gmake
+    make -j"$(nproc)" config=release
+    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+    echo "==> Building Studio edition ..."
+    premake5 gmake --studio
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
@@ -67,13 +71,15 @@ fi
 # ---- Assemble package tree ----
 echo "==> Assembling package tree ..."
 
-# Binary
-if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
-    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$STAGING/opt/jarvisagent/bin/jarvisAgent"
-    chmod 755 "$STAGING/opt/jarvisagent/bin/jarvisAgent"
-else
-    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
-fi
+# Binaries (Studio + Engine)
+for bin in jarvisAgent jarvisAgent-engine; do
+    if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
+        cp "$REPO_ROOT/bin/Release/$bin" "$STAGING/opt/jarvisagent/bin/$bin"
+        chmod 755 "$STAGING/opt/jarvisagent/bin/$bin"
+    else
+        echo "WARNING: bin/Release/$bin not found (expected in dry-run)"
+    fi
+done
 
 # React UIs
 if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
@@ -119,8 +125,11 @@ mkdir -p "$STAGING/usr/share/man/man1"
 cp "$REPO_ROOT/doc/jarvisagent.1" "$STAGING/usr/share/man/man1/jarvisagent.1"
 gzip -9 "$STAGING/usr/share/man/man1/jarvisagent.1"
 
-# Launcher script (shared across deb/rpm/arch)
+# Launcher scripts (shared across deb/rpm/arch — detects edition from script name)
 install -m755 "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$STAGING/usr/bin/jarvisagent"
+install -m755 "$SCRIPT_DIR/../jarvisagent-launcher.sh" "$STAGING/usr/bin/jarvisagent-engine"
+ln -sf jarvisagent "$STAGING/usr/bin/jarvisagent-studio"
+ln -sf jarvisagent "$STAGING/usr/bin/j9t"
 
 # ---- Build RPM using rpmbuild (if available) or fpm ----
 if command -v rpmbuild &>/dev/null; then
@@ -139,11 +148,13 @@ if command -v rpmbuild &>/dev/null; then
     SRCDIR="$RPMBUILD_DIR/BUILD/JarvisAgent"
     mkdir -p "$SRCDIR"
 
-    # Binary
+    # Binaries (Studio + Engine)
     mkdir -p "$SRCDIR/bin/Release"
-    if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
-        cp "$REPO_ROOT/bin/Release/jarvisAgent" "$SRCDIR/bin/Release/jarvisAgent"
-    fi
+    for bin in jarvisAgent jarvisAgent-engine; do
+        if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
+            cp "$REPO_ROOT/bin/Release/$bin" "$SRCDIR/bin/Release/$bin"
+        fi
+    done
 
     # React UIs
     if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then

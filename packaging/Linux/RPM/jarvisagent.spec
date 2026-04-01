@@ -48,8 +48,9 @@ rm -rf %{buildroot}
 
 %define _instdir %{buildroot}/opt/jarvisagent
 
-# Binary
+# Binaries (Studio + Engine)
 install -Dm755 bin/Release/jarvisAgent %{_instdir}/bin/jarvisAgent
+install -Dm755 bin/Release/jarvisAgent-engine %{_instdir}/bin/jarvisAgent-engine
 
 # React UIs
 install -dm755 %{_instdir}/dashboard/ui
@@ -95,8 +96,11 @@ install -m644 doc/JC_Workflow_Specification.md %{_instdir}/doc/JC_Workflow_Speci
 install -Dm644 doc/jarvisagent.1 %{buildroot}/usr/share/man/man1/jarvisagent.1
 gzip -9 %{buildroot}/usr/share/man/man1/jarvisagent.1
 
-# Launcher script (shared across deb/rpm/arch)
+# Launcher scripts (shared across deb/rpm/arch — detects edition from script name)
 install -Dm755 jarvisagent-launcher.sh %{buildroot}/usr/bin/jarvisagent
+install -Dm755 jarvisagent-launcher.sh %{buildroot}/usr/bin/jarvisagent-engine
+ln -sf jarvisagent %{buildroot}/usr/bin/jarvisagent-studio
+ln -sf jarvisagent %{buildroot}/usr/bin/j9t
 
 %post
 echo ""
@@ -124,6 +128,9 @@ fi
 %files
 /opt/jarvisagent/
 /usr/bin/jarvisagent
+/usr/bin/jarvisagent-engine
+/usr/bin/jarvisagent-studio
+/usr/bin/j9t
 /usr/share/man/man1/jarvisagent.1.gz
 
 %changelog

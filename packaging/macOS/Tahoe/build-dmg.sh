@@ -37,13 +37,16 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/share"
 
 # ---- Build from source (unless dry-run) ----
 if [[ "$DRY_RUN" == false ]]; then
-    echo "==> Generating Makefiles ..."
     cd "$REPO_ROOT"
-    premake5 gmake
-
     CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-    echo "==> Building C++ release binary ($CORES cores) ..."
+    echo "==> Building Engine edition ($CORES cores) ..."
+    premake5 gmake
+    make -j"$CORES" config=release
+    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+
+    echo "==> Building Studio edition ($CORES cores) ..."
+    premake5 gmake --studio
     make -j"$CORES" config=release
 
     echo "==> Building React dashboard ..."
@@ -62,13 +65,15 @@ echo "==> Assembling ${APP_NAME}.app ..."
 
 SHARE="$APP_BUNDLE/Contents/Resources/share"
 
-# Binary
-if [[ -f "$REPO_ROOT/bin/Release/jarvisAgent" ]]; then
-    cp "$REPO_ROOT/bin/Release/jarvisAgent" "$SHARE/jarvisAgent"
-    chmod 755 "$SHARE/jarvisAgent"
-else
-    echo "WARNING: bin/Release/jarvisAgent not found (expected in dry-run)"
-fi
+# Binaries (Studio + Engine)
+for bin in jarvisAgent jarvisAgent-engine; do
+    if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
+        cp "$REPO_ROOT/bin/Release/$bin" "$SHARE/$bin"
+        chmod 755 "$SHARE/$bin"
+    else
+        echo "WARNING: bin/Release/$bin not found (expected in dry-run)"
+    fi
+done
 
 # React UIs
 if [[ -d "$REPO_ROOT/dashboard/ui/dist" ]]; then
@@ -172,11 +177,13 @@ for asset in dashboard workflow-editor scripts doc; do
     fi
 done
 
-# Binary symlink
+# Binary symlinks (Studio + Engine)
 mkdir -p "$USER_HOME/bin"
-if [[ -L "$USER_HOME/bin/jarvisAgent" ]] || [[ ! -e "$USER_HOME/bin/jarvisAgent" ]]; then
-    ln -sfn "$SHARE/jarvisAgent" "$USER_HOME/bin/jarvisAgent"
-fi
+for bin in jarvisAgent jarvisAgent-engine; do
+    if [[ -f "$SHARE/$bin" ]] && { [[ -L "$USER_HOME/bin/$bin" ]] || [[ ! -e "$USER_HOME/bin/$bin" ]]; }; then
+        ln -sfn "$SHARE/$bin" "$USER_HOME/bin/$bin"
+    fi
+done
 
 # Writable directories
 mkdir -p "$USER_HOME/queue"
