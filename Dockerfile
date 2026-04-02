@@ -40,11 +40,10 @@ WORKDIR /app
 COPY . .
 
 # Build Engine edition
-RUN premake5 gmake && make -j$(nproc) config=release verbose=1
-RUN cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
+RUN premake5 gmake --engine && make -j$(nproc) config=release verbose=1
 
-# Build Studio edition
-RUN premake5 gmake --studio && make -j$(nproc) config=release verbose=1
+# Build Studio edition (default)
+RUN premake5 gmake && make -j$(nproc) config=release verbose=1
 
 # ---- Runtime stage ----
 FROM ubuntu:24.04
@@ -108,7 +107,7 @@ ENV PATH="/opt/pipx/bin:$PATH"
 # from /app back to these so the binary finds them relative to CWD.
 
 # Binaries (Studio + Engine)
-COPY --from=builder /app/bin/Release/jarvisAgent /opt/jarvisagent/jarvisAgent
+COPY --from=builder /app/bin/Release/jarvisAgent-studio /opt/jarvisagent/jarvisAgent-studio
 COPY --from=builder /app/bin/Release/jarvisAgent-engine /opt/jarvisagent/jarvisAgent-engine
 
 # React UIs

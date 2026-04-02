@@ -20,7 +20,12 @@ newoption {
 
 newoption {
     trigger = "studio",
-    description = "Build the Studio edition (workflow editor, AI pipeline, AI assistant). Default builds the Engine edition."
+    description = "Build the Studio edition (explicit — same as default)."
+}
+
+newoption {
+    trigger = "engine",
+    description = "Build the Engine edition (lean production server, no editor/AI tooling)."
 }
 
 project "jarvisAgent"
@@ -29,7 +34,13 @@ project "jarvisAgent"
     cppdialect "C++20"
 
     targetdir "bin/%{cfg.buildcfg}"
-    objdir ("bin-int/%{cfg.buildcfg}")
+
+    -- Each edition gets its own objdir so switching editions triggers a full rebuild.
+    if _OPTIONS["engine"] then
+        objdir ("bin-int/engine/%{cfg.buildcfg}")
+    else
+        objdir ("bin-int/studio/%{cfg.buildcfg}")
+    end
 
     defines
     {
@@ -50,11 +61,11 @@ project "jarvisAgent"
 
     ------------------------------------
     -- Edition toggle
+    -- Default = Studio.  --engine opts into the lean build.
+    -- --studio is accepted for clarity but is a no-op.
     ------------------------------------
-    if _OPTIONS["studio"] then
-        defines { "J9T_STUDIO" }
-        print(">>> Edition: Studio")
-    else
+    if _OPTIONS["engine"] then
+        targetname "jarvisAgent-engine"
         -- Engine edition: remove Studio-only modules so they don't compile.
         removefiles {
             "application/assistant/**",
@@ -62,7 +73,11 @@ project "jarvisAgent"
             "application/web/aiJcwfService.cpp",
             "application/web/webServerStudio.cpp",
         }
-        print(">>> Edition: Engine")
+        print(">>> Edition: Engine  ->  jarvisAgent-engine")
+    else
+        targetname "jarvisAgent-studio"
+        defines { "J9T_STUDIO" }
+        print(">>> Edition: Studio  ->  jarvisAgent-studio")
     end
 
     files
@@ -353,6 +368,8 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         ----------------------------------------------------
         os.rmdir("bin")
         os.rmdir("bin-int")
+        os.rmdir("bin-int/engine")
+        os.rmdir("bin-int/studio")
 
         ----------------------------------------------------
         -- Remove all generated Makefiles (.make)

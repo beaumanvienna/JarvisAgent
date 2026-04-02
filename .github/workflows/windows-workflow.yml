@@ -63,12 +63,12 @@ jobs:
           echo "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "Package version: $v"
 
-      # ---- Engine edition: ZIP distribution ----
+      # ---- Engine edition ----
 
       - name: Generate Visual Studio solution (Engine edition)
         shell: pwsh
         run: |
-          premake5 vs2022
+          premake5 vs2022 --engine
 
       - name: Build Engine (Release)
         shell: pwsh
@@ -85,25 +85,10 @@ jobs:
             msbuild "$($solutionFile.FullName)" /m /p:Configuration=Release /p:Platform=x64
           }
 
-      - name: Build Engine (Debug)
-        shell: pwsh
-        run: |
-          $solutionFiles = Get-ChildItem -Path . -Recurse -Filter *.sln
-          if ($solutionFiles.Count -eq 0)
-          {
-            throw "No .sln found after running premake5."
-          }
-
-          foreach ($solutionFile in $solutionFiles)
-          {
-            Write-Host "Building solution: $($solutionFile.FullName)"
-            msbuild "$($solutionFile.FullName)" /m /p:Configuration=Debug /p:Platform=x64
-          }
-
       - name: Smoke test Engine
         shell: pwsh
         run: |
-          $exe = "bin\Release\jarvisAgent.exe"
+          $exe = "bin\Release\jarvisAgent-engine.exe"
           if (Test-Path $exe)
           {
             Write-Host "Running: $exe --help"
@@ -112,26 +97,21 @@ jobs:
           }
           else
           {
-            Write-Host "No jarvisAgent.exe found for smoke test."
+            Write-Host "No jarvisAgent-engine.exe found for smoke test."
           }
           exit 0
-
-      - name: Save Engine binary
-        shell: pwsh
-        run: |
-          Copy-Item "bin\Release\jarvisAgent.exe" "bin\Release\jarvisAgent-engine.exe"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      # ---- Studio edition ----
+      # ---- Studio edition (default) ----
 
       - name: Generate Visual Studio solution (Studio edition)
         shell: pwsh
         run: |
-          premake5 vs2022 --studio
+          premake5 vs2022
 
       - name: Build Studio (Release)
         shell: pwsh
@@ -151,7 +131,7 @@ jobs:
       - name: Smoke test Studio
         shell: pwsh
         run: |
-          $exe = "bin\Release\jarvisAgent.exe"
+          $exe = "bin\Release\jarvisAgent-studio.exe"
           if (Test-Path $exe)
           {
             Write-Host "Running: $exe --help"
@@ -160,7 +140,7 @@ jobs:
           }
           else
           {
-            Write-Host "No jarvisAgent.exe found for smoke test."
+            Write-Host "No jarvisAgent-studio.exe found for smoke test."
           }
           exit 0
 

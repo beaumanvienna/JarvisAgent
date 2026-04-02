@@ -4,15 +4,29 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-# Detect edition from script name (jarvisagent-engine → Engine, everything else → Studio)
+# Detect edition: --engine flag or script name containing "-engine"
+EDITION="studio"
+PASSTHROUGH_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--engine" ]]; then
+        EDITION="engine"
+    else
+        PASSTHROUGH_ARGS+=("$arg")
+    fi
+done
 SCRIPT_NAME="$(basename "$0")"
 if [[ "$SCRIPT_NAME" == *"-engine"* ]]; then
+    EDITION="engine"
+fi
+
+if [[ "$EDITION" == "engine" ]]; then
     BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent-engine"
     EDITION_LABEL="Engine"
 else
-    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent"
+    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent-studio"
     EDITION_LABEL="Studio"
 fi
+set -- "${PASSTHROUGH_ARGS[@]}"
 
 # ── Check release binary exists ──────────────────────────────────────────────
 if [ ! -f "$BINARY" ]; then

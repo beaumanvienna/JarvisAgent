@@ -34,12 +34,11 @@ build() {
     cd "$srcdir/JarvisAgent"
 
     # Build Engine edition
-    premake5 gmake
+    premake5 gmake --engine
     make -j$(nproc) config=release
-    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
 
-    # Build Studio edition
-    premake5 gmake --studio
+    # Build Studio edition (default)
+    premake5 gmake
     make -j$(nproc) config=release
 
     # Build React dashboard
@@ -60,7 +59,7 @@ package() {
     install -dm755 "$_instdir"
 
     # ---- Binaries (Studio + Engine) ----
-    install -Dm755 bin/Release/jarvisAgent "$_instdir/bin/jarvisAgent"
+    install -Dm755 bin/Release/jarvisAgent-studio "$_instdir/bin/jarvisAgent-studio"
     install -Dm755 bin/Release/jarvisAgent-engine "$_instdir/bin/jarvisAgent-engine"
 
     # ---- React UIs (pre-built dist/) ----

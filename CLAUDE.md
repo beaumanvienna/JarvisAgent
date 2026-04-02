@@ -10,34 +10,33 @@ JarvisAgent is a C++ backend + React frontend application for parallel AI-driven
 
 The project uses **Premake5** to generate platform-specific build files.
 
-Two editions are available, selected at build time via the `--studio` flag:
+Two editions are available, selected at build time:
 
-| Edition | Flag | Purpose |
-|---------|------|---------|
-| **j9t Engine** (default) | *(none)* | Lean production server — no workflow CRUD, no AI tooling, no script writing |
-| **j9t Studio** | `--studio` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, config editing |
+| Edition | Flag | Output | Purpose |
+|---------|------|--------|---------|
+| **j9t Studio** (default) | *(none)* or `--studio` | `bin/Release/jarvisAgent-studio` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, config editing |
+| **j9t Engine** | `--engine` | `bin/Release/jarvisAgent-engine` | Lean production server — no workflow CRUD, no AI tooling, no script writing |
 
 ```bash
-# Engine edition (default — production server)
+# Studio edition (default — full developer IDE)
 premake5 gmake
-make config=release
+make config=release    # → bin/Release/jarvisAgent-studio
 
-# Studio edition (developer IDE — full features)
-premake5 gmake --studio
-make config=release
-
-# Outputs (both → same binary name, different sizes)
-bin/Release/jarvisAgent
+# Engine edition (lean production server)
+premake5 gmake --engine
+make config=release    # → bin/Release/jarvisAgent-engine
 
 # Optional: Enable Tracy profiler
-premake5 gmake --tracy          # Engine + Tracy
-premake5 gmake --studio --tracy # Studio + Tracy
+premake5 gmake --tracy            # Studio + Tracy
+premake5 gmake --engine --tracy   # Engine + Tracy
 
 # Debug build
 make config=debug verbose=1
 ```
 
-For Windows, use `premake5 vs2022` (Engine) or `premake5 vs2022 --studio` (Studio) to generate a Visual Studio 2022 solution.
+Each edition has its own objdir (`bin-int/studio/` vs `bin-int/engine/`) so switching editions triggers a full rebuild automatically.
+
+For Windows, use `premake5 vs2022` (Studio) or `premake5 vs2022 --engine` (Engine) to generate a Visual Studio 2022 solution.
 
 ## React UIs
 
@@ -51,7 +50,7 @@ cd workflow-editor/ui && npm install && npm run build
 ## Running
 
 ```bash
-./bin/Release/jarvisAgent
+./bin/Release/jarvisAgent-studio
 # Dashboard: http://localhost:8080
 # Workflow Editor: http://localhost:8080/editor
 
@@ -65,7 +64,7 @@ Tests are Python scripts that hit the REST API of a running JarvisAgent instance
 
 ```bash
 # Terminal 1: start the server
-./bin/Release/jarvisAgent
+./bin/Release/jarvisAgent-studio
 
 # Terminal 2: run tests
 python test/run_tests.py --all             # all workflows

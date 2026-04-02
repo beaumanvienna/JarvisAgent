@@ -13,18 +13,17 @@ override_dh_auto_configure:
 	cd vendor/premake-core && ./Bootstrap.sh
 
 override_dh_auto_build:
-	# Build Engine edition first
-	vendor/premake-core/bin/release/premake5 gmake
+	# Build Engine edition
+	vendor/premake-core/bin/release/premake5 gmake --engine
 	$(MAKE) -j$$(nproc) config=release
-	cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
-	# Build Studio edition
-	vendor/premake-core/bin/release/premake5 gmake --studio
+	# Build Studio edition (default)
+	vendor/premake-core/bin/release/premake5 gmake
 	$(MAKE) -j$$(nproc) config=release
 
 override_dh_auto_install:
 	# Binaries (Studio + Engine)
 	install -dm755 $(INSTDIR)/bin
-	install -Dm755 bin/Release/jarvisAgent $(INSTDIR)/bin/jarvisAgent
+	install -Dm755 bin/Release/jarvisAgent-studio $(INSTDIR)/bin/jarvisAgent-studio
 	install -Dm755 bin/Release/jarvisAgent-engine $(INSTDIR)/bin/jarvisAgent-engine
 
 	# Pre-built React UIs (included in source tarball — no npm on Launchpad)

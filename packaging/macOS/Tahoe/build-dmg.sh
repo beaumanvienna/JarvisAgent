@@ -41,12 +41,11 @@ if [[ "$DRY_RUN" == false ]]; then
     CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
     echo "==> Building Engine edition ($CORES cores) ..."
-    premake5 gmake
+    premake5 gmake --engine
     make -j"$CORES" config=release
-    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
 
     echo "==> Building Studio edition ($CORES cores) ..."
-    premake5 gmake --studio
+    premake5 gmake
     make -j"$CORES" config=release
 
     echo "==> Building React dashboard ..."
@@ -66,7 +65,7 @@ echo "==> Assembling ${APP_NAME}.app ..."
 SHARE="$APP_BUNDLE/Contents/Resources/share"
 
 # Binaries (Studio + Engine)
-for bin in jarvisAgent jarvisAgent-engine; do
+for bin in jarvisAgent-studio jarvisAgent-engine; do
     if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
         cp "$REPO_ROOT/bin/Release/$bin" "$SHARE/$bin"
         chmod 755 "$SHARE/$bin"
@@ -150,7 +149,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h|--version|-v)
-            exec "$SHARE/jarvisAgent" "$1"
+            exec "$SHARE/jarvisAgent-studio" "$1"
             ;;
         *)
             PASSTHROUGH_ARGS+=("$1")
@@ -179,7 +178,7 @@ done
 
 # Binary symlinks (Studio + Engine)
 mkdir -p "$USER_HOME/bin"
-for bin in jarvisAgent jarvisAgent-engine; do
+for bin in jarvisAgent-studio jarvisAgent-engine; do
     if [[ -f "$SHARE/$bin" ]] && { [[ -L "$USER_HOME/bin/$bin" ]] || [[ ! -e "$USER_HOME/bin/$bin" ]]; }; then
         ln -sfn "$SHARE/$bin" "$USER_HOME/bin/$bin"
     fi
@@ -236,7 +235,7 @@ echo "    Dashboard: http://localhost:8080"
 echo "    Editor:    http://localhost:8080/editor"
 echo ""
 cd "$USER_HOME"
-exec "$USER_HOME/bin/jarvisAgent" "${PASSTHROUGH_ARGS[@]}"
+exec "$USER_HOME/bin/jarvisAgent-studio" "${PASSTHROUGH_ARGS[@]}"
 LAUNCHER
 chmod 755 "$APP_BUNDLE/Contents/MacOS/JarvisAgent"
 

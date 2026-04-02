@@ -39,12 +39,11 @@ if [[ "$DRY_RUN" == false ]]; then
     cd "$REPO_ROOT"
 
     echo "==> Building Engine edition ..."
-    premake5 gmake
+    premake5 gmake --engine
     make -j"$(nproc)" config=release
-    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
 
     echo "==> Building Studio edition ..."
-    premake5 gmake --studio
+    premake5 gmake
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
@@ -65,7 +64,7 @@ SHARE="$APPDIR/usr/share/jarvisagent"
 
 # Binaries (Studio + Engine)
 mkdir -p "$SHARE/bin"
-for bin in jarvisAgent jarvisAgent-engine; do
+for bin in jarvisAgent-studio jarvisAgent-engine; do
     if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
         cp "$REPO_ROOT/bin/Release/$bin" "$SHARE/bin/$bin"
         chmod 755 "$SHARE/bin/$bin"
@@ -140,7 +139,7 @@ fi
 if command -v linuxdeploy &>/dev/null; then
     echo "==> Bundling shared libraries with linuxdeploy ..."
     linuxdeploy --appdir "$APPDIR" \
-        --executable "$SHARE/bin/jarvisAgent" \
+        --executable "$SHARE/bin/jarvisAgent-studio" \
         --desktop-file "$APPDIR/jarvisagent.desktop" \
         --icon-file "$APPDIR/jarvisagent.png" \
         --output appimage

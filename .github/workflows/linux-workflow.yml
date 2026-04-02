@@ -53,44 +53,28 @@ jobs:
         with:
           version: "5.0.0-beta2"
 
-      - name: Generate Makefiles
-        run: premake5 gmake
-
       - name: Set parallel build flags
         run: echo "MAKEFLAGS=-j$(nproc)" >> $GITHUB_ENV
 
-      - name: Build Engine Release (parallel)
+      - name: Build Engine Release
         run: |
+          premake5 gmake --engine
           echo "Using $(nproc) cores"
           make -j$(nproc) config=release verbose=1
 
-      - name: Build Engine Debug (parallel)
-        run: |
-          echo "Using $(nproc) cores"
-          make -j$(nproc) config=debug verbose=1
-
       - name: Smoke test Engine (Release)
         run: |
-          ./bin/Release/jarvisAgent --help || true
+          ./bin/Release/jarvisAgent-engine --help || true
 
-      - name: Smoke test Engine (Debug)
+      - name: Build Studio Release (default)
         run: |
-          ./bin/Debug/jarvisAgent --help || true
-
-      - name: Save Engine binary
-        run: cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
-
-      - name: Generate Makefiles (Studio edition)
-        run: premake5 gmake --studio
-
-      - name: Build Studio Release (parallel)
-        run: |
+          premake5 gmake
           echo "Using $(nproc) cores"
           make -j$(nproc) config=release verbose=1
 
       - name: Smoke test Studio (Release)
         run: |
-          ./bin/Release/jarvisAgent --help || true
+          ./bin/Release/jarvisAgent-studio --help || true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -114,7 +98,7 @@ jobs:
         with:
           name: linux-build-outputs
           path: |
-            bin/Release/jarvisAgent
+            bin/Release/jarvisAgent-studio
             bin/Release/jarvisAgent-engine
             dashboard/ui/dist/
             workflow-editor/ui/dist/

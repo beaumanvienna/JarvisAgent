@@ -65,4 +65,4 @@ fi
 
 # ---- Launch ----
 cd "$DATA_DIR"
-exec "$DATA_DIR/bin/jarvisAgent" "$@"
+exec "$DATA_DIR/bin/jarvisAgent-studio" "$@"

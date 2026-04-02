@@ -29,7 +29,7 @@ if [[ "$SCRIPT_NAME" == *"-engine"* ]]; then
     BINARY_NAME="jarvisAgent-engine"
     EDITION_LABEL="Engine"
 else
-    BINARY_NAME="jarvisAgent"
+    BINARY_NAME="jarvisAgent-studio"
     EDITION_LABEL="Studio"
 fi
 
@@ -96,7 +96,7 @@ done
 # Ensure binaries are reachable even if bin/ is a real directory
 # (e.g. git clone has bin/Release/ but no bin/jarvisAgent)
 if [[ -d "$USER_HOME/bin" && ! -L "$USER_HOME/bin" ]]; then
-    for bin in jarvisAgent jarvisAgent-engine; do
+    for bin in jarvisAgent-studio jarvisAgent-engine; do
         if [[ -f "$INSTALL_DIR/bin/$bin" && ! -e "$USER_HOME/bin/$bin" ]]; then
             ln -sfn "$INSTALL_DIR/bin/$bin" "$USER_HOME/bin/$bin"
         fi

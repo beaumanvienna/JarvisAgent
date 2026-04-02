@@ -62,12 +62,14 @@ This document describes the **software architecture**, **communication layers**,
 
 ## 🏗️ Editions — Engine vs Studio
 
-JarvisAgent ships as two compile-time editions controlled by the `--studio` Premake5 flag:
+JarvisAgent ships as two compile-time editions controlled by the `--engine` Premake5 flag:
 
-| Edition | Binary | Define | Purpose |
-|---------|--------|--------|---------|
-| **j9t Engine** (default) | `jarvisAgent` | *(none)* | Lean production server — runs workflows via cron, file-watch, and HMAC-authenticated webhooks. No workflow CRUD, no AI tooling, no unauthenticated run trigger. |
-| **j9t Studio** | `jarvisAgent` | `J9T_STUDIO` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, provider and config management. |
+| Edition | Flag | Binary | Define | Purpose |
+|---------|------|--------|--------|---------|
+| **j9t Studio** (default) | *(none)* or `--studio` | `jarvisAgent-studio` | `J9T_STUDIO` | Full developer IDE — workflow editor, AI JCWF generation, AI assistant, provider and config management. |
+| **j9t Engine** | `--engine` | `jarvisAgent-engine` | *(none)* | Lean production server — runs workflows via cron, file-watch, and HMAC-authenticated webhooks. No workflow CRUD, no AI tooling, no unauthenticated run trigger. |
+
+Each edition produces a distinctly named binary and uses its own objdir (`bin-int/studio/` vs `bin-int/engine/`), so switching editions triggers a full rebuild automatically.
 
 ### Compile-time gating
 

@@ -29,6 +29,9 @@ an ncurses terminal UI and a browser-based React dashboard.
 if [ ! -f premake5.lua ]; then
     echo "==> Pre-built tree detected — skipping %%build (build-rpm.sh already compiled)"
 else
+premake5 gmake --engine
+make -j%{?_smp_mflags} config=release
+
 premake5 gmake
 make -j%{?_smp_mflags} config=release
 
@@ -49,7 +52,7 @@ rm -rf %{buildroot}
 %define _instdir %{buildroot}/opt/jarvisagent
 
 # Binaries (Studio + Engine)
-install -Dm755 bin/Release/jarvisAgent %{_instdir}/bin/jarvisAgent
+install -Dm755 bin/Release/jarvisAgent-studio %{_instdir}/bin/jarvisAgent-studio
 install -Dm755 bin/Release/jarvisAgent-engine %{_instdir}/bin/jarvisAgent-engine
 
 # React UIs

@@ -54,7 +54,7 @@ echo ""
 # Drop privileges to match the host user's UID/GID so all runtime-created
 # files (keys.json.enc, workflow outputs, logs) are owned by the host user.
 if [ "$MOUNT_UID" != "0" ]; then
-    exec gosu "$MOUNT_UID:$MOUNT_GID" "$IMAGE_DIR/jarvisAgent" "$@"
+    exec gosu "$MOUNT_UID:$MOUNT_GID" "$IMAGE_DIR/jarvisAgent-studio" "$@"
 else
-    exec "$IMAGE_DIR/jarvisAgent" "$@"
+    exec "$IMAGE_DIR/jarvisAgent-studio" "$@"
 fi

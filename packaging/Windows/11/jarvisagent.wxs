@@ -34,7 +34,8 @@
                     <!-- Binary -->
                     <Directory Id="BinDir" Name="bin">
                         <Component Id="MainBinary" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
-                            <File Source="JarvisAgent-x64\bin\jarvisAgent.exe" KeyPath="yes" />
+                            <File Source="JarvisAgent-x64\bin\jarvisAgent-studio.exe" KeyPath="yes" />
+                            <File Source="JarvisAgent-x64\bin\jarvisAgent-engine.exe" />
                         </Component>
                     </Directory>
 

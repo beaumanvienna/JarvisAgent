@@ -39,15 +39,14 @@ if (-not $DryRun) {
     Push-Location $RepoRoot
 
     Write-Host "==> Building Engine edition ..."
-    premake5 vs2022
+    premake5 vs2022 --engine
     $slnFiles = Get-ChildItem -Path $RepoRoot -Recurse -Filter *.sln
     foreach ($sln in $slnFiles) {
         msbuild "$($sln.FullName)" /m /p:Configuration=Release /p:Platform=x64
     }
-    Copy-Item "bin\Release\jarvisAgent.exe" "bin\Release\jarvisAgent-engine.exe"
 
     Write-Host "==> Building Studio edition ..."
-    premake5 vs2022 --studio
+    premake5 vs2022
     $slnFiles = Get-ChildItem -Path $RepoRoot -Recurse -Filter *.sln
     foreach ($sln in $slnFiles) {
         msbuild "$($sln.FullName)" /m /p:Configuration=Release /p:Platform=x64
@@ -73,7 +72,7 @@ Write-Host "==> Assembling package tree ..."
 
 # Binaries (Studio + Engine)
 New-Item -ItemType Directory -Force -Path "$StageDir\bin" | Out-Null
-foreach ($bin in @("jarvisAgent.exe", "jarvisAgent-engine.exe")) {
+foreach ($bin in @("jarvisAgent-studio.exe", "jarvisAgent-engine.exe")) {
     $binSrc = "$RepoRoot\bin\Release\$bin"
     if (Test-Path $binSrc) {
         Copy-Item $binSrc "$StageDir\bin\$bin"
@@ -163,7 +162,7 @@ set "OPEN_BROWSER=1"
 set "USER_HOME="
 
 REM ---- Detect edition from script name ----
-set "BINARY_NAME=jarvisAgent.exe"
+set "BINARY_NAME=jarvisAgent-studio.exe"
 set "EDITION_LABEL=Studio"
 set "SCRIPT_NAME=%~n0"
 echo !SCRIPT_NAME! | findstr /i "engine" >nul 2>&1

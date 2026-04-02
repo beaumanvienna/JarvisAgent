@@ -49,12 +49,11 @@ if [[ "$DRY_RUN" == false ]]; then
     cd "$REPO_ROOT"
 
     echo "==> Building Engine edition ..."
-    premake5 gmake
+    premake5 gmake --engine
     make -j"$(nproc)" config=release
-    cp bin/Release/jarvisAgent bin/Release/jarvisAgent-engine
 
     echo "==> Building Studio edition ..."
-    premake5 gmake --studio
+    premake5 gmake
     make -j"$(nproc)" config=release
 
     echo "==> Building React dashboard ..."
@@ -72,7 +71,7 @@ fi
 echo "==> Assembling package tree ..."
 
 # Binaries (Studio + Engine)
-for bin in jarvisAgent jarvisAgent-engine; do
+for bin in jarvisAgent-studio jarvisAgent-engine; do
     if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
         cp "$REPO_ROOT/bin/Release/$bin" "$STAGING/opt/jarvisagent/bin/$bin"
         chmod 755 "$STAGING/opt/jarvisagent/bin/$bin"
@@ -150,7 +149,7 @@ if command -v rpmbuild &>/dev/null; then
 
     # Binaries (Studio + Engine)
     mkdir -p "$SRCDIR/bin/Release"
-    for bin in jarvisAgent jarvisAgent-engine; do
+    for bin in jarvisAgent-studio jarvisAgent-engine; do
         if [[ -f "$REPO_ROOT/bin/Release/$bin" ]]; then
             cp "$REPO_ROOT/bin/Release/$bin" "$SRCDIR/bin/Release/$bin"
         fi
