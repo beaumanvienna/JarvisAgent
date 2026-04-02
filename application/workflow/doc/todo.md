@@ -339,3 +339,16 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 - [x] ~~**Example JCWF auto-triggers disabled for fresh install**~~ — `aiCarMaintenancePipeline`, `aiZipDemo`, `vehicleTroubleshootingGuide` auto triggers set to `enabled: false`; `make-example` kept enabled (scripts fall back to mock files when g++ absent). `vehicleTroubleshootingGuide` removed from all packaging scripts (DEB, RPM, DMG, Homebrew, Windows ZIP, Flatpak) — fragile chrome dependency not worth shipping.
 - [x] ~~**`jarvisCppDocu` JCWF updated for AI assistant classes**~~ — 6 new tasks added for `application/assistant/` headers (`assistantController`, `assistantMemory`, `assistantSession`, `assistantTools`, `contextAssembler`, `workspaceIndexer`); engine tasks renumbered 44→50 through 67→73; `combineDocumentation` at 74. All 6 new tasks in `depends_on`. Total AI tasks: 73.
 - [x] ~~**Dashboard log analyzer panel background**~~ — `.log-analyze-panel` was nearly transparent (`rgba(255,255,255,0.03)`); changed to solid `#1e1e1e` matching editor modals.
+
+---
+
+## Security audit logging
+
+- [ ] Add `security` spdlog logger writing to `log/security.log` (separate from application log)
+- [ ] Add `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN` macros (same pattern as `LOG_APP_*` / `LOG_CORE_*`)
+- [ ] Log at each `CheckAdminAuth` call site: IP, endpoint, outcome (success / missing token / wrong token)
+- [ ] Log at rate limit trigger: IP, endpoint, request count
+- [ ] Log at webhook handler: IP, workflow ID, outcome (accepted / rejected with reason)
+- [ ] Log at shutdown endpoint: IP
+- [ ] Log at run control endpoints (cancel/pause/resume/stop): IP, run ID
+- [ ] Ensure security log is rotated (spdlog rotating file sink, e.g. 10 MB x 5 files)

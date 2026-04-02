@@ -11,6 +11,7 @@ build
 /config.json
 /keys.json
 /keys.json.enc
+/engine_api_token.txt
 
 # Python cache
 __pycache__/
@@ -50,3 +51,4 @@ vendor/openssl/bin-int
 vendor/pdcursesmod/bin
 vendor/pdcursesmod/bin-int
 .venv
+.claude/

@@ -13,6 +13,7 @@ interface Props {
   activeTab: Tab;
   onTabChange: (tab: Tab) => void;
   isStudio: boolean;
+  onLogout?: () => void;
 }
 
 function Led({ color, label }: { color: string; label: string }) {
@@ -41,6 +42,7 @@ export default function StatusBar({
   activeTab,
   onTabChange,
   isStudio,
+  onLogout,
 }: Props) {
   const anyInflight = Array.from(sessions.values()).some(
     (s) => s.inflight > 0
@@ -117,6 +119,11 @@ export default function StatusBar({
         <button className="btn btn-quit" onClick={onQuit}>
           Quit
         </button>
+        {onLogout && (
+          <button className="btn btn-quit" onClick={onLogout} title="Clear admin token">
+            Logout
+          </button>
+        )}
       </div>
     </header>
   );

@@ -90,6 +90,17 @@ The web server uses a three-method route split:
 
 `GET /api/status` returns `edition` (`"engine"` or `"studio"`) and a `capabilities` boolean map. The frontend reads these to hide Studio-only UI elements at runtime — no separate frontend build required.
 
+### Authentication
+
+Engine mode has Bearer token authentication for all admin endpoints. Studio mode has no authentication.
+
+- **Token lifecycle:** Auto-generated (256-bit random hex) on first Engine start, stored in `engine_api_token.txt` (file permissions `600`), logged to stdout once at startup.
+- **REST endpoints:** Protected via `Authorization: Bearer <token>` header. `CheckAdminAuth()` validates with constant-time comparison. Returns 401 (missing/malformed) or 403 (wrong token).
+- **WebSocket:** Token sent as first message `{"type":"auth","token":"..."}`. Unauthenticated connections can only send auth messages.
+- **Webhooks:** HMAC-SHA256 via `X-Webhook-Signature` header. In Engine mode, a webhook secret is mandatory per-workflow.
+- **Rate limiting:** Per-IP token bucket (100 req/min, burst of 20). Returns 429 with `Retry-After` header.
+- **Public endpoints:** `GET /api/status`, `GET /`, `/dash-assets/*` — no auth required (health checks, dashboard SPA shell).
+
 ---
 
 ## ARCHITECTURE DETAILS

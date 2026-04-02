@@ -1,34 +1,36 @@
 import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse, KeysUnlockResponse } from "./types";
+import { authFetch } from "./auth";
 
 const BASE = window.location.origin;
 
+// /api/status is public — no auth needed.
 export async function fetchStatus(): Promise<StatusResponse> {
   const res = await fetch(`${BASE}/api/status`);
   return res.json();
 }
 
 export async function fetchWorkflows(): Promise<WorkflowsListResponse> {
-  const res = await fetch(`${BASE}/api/workflows`);
+  const res = await authFetch(`${BASE}/api/workflows`);
   return res.json();
 }
 
 export async function runWorkflow(workflowId: string): Promise<void> {
-  await fetch(`${BASE}/api/workflows/${encodeURIComponent(workflowId)}/run`, {
+  await authFetch(`${BASE}/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     method: "POST",
   });
 }
 
 export async function reloadWorkflows(): Promise<void> {
-  await fetch(`${BASE}/api/workflows/reload`, { method: "POST" });
+  await authFetch(`${BASE}/api/workflows/reload`, { method: "POST" });
 }
 
 export async function fetchLastRuns(): Promise<LastRunsResponse> {
-  const res = await fetch(`${BASE}/api/workflow-runs/last`);
+  const res = await authFetch(`${BASE}/api/workflow-runs/last`);
   return res.json();
 }
 
 export async function shutdown(): Promise<void> {
-  await fetch(`${BASE}/api/shutdown`, { method: "POST" });
+  await authFetch(`${BASE}/api/shutdown`, { method: "POST" });
 }
 
 export async function fetchLog(opts: { tail?: number; offset?: number }): Promise<LogResponse> {
@@ -38,17 +40,17 @@ export async function fetchLog(opts: { tail?: number; offset?: number }): Promis
   } else if (opts.tail !== undefined) {
     params.set("tail", String(opts.tail));
   }
-  const res = await fetch(`${BASE}/api/log?${params.toString()}`);
+  const res = await authFetch(`${BASE}/api/log?${params.toString()}`);
   return res.json();
 }
 
 export async function fetchKeysStatus(): Promise<KeysStatusResponse> {
-  const res = await fetch(`${BASE}/api/settings/keys/status`);
+  const res = await authFetch(`${BASE}/api/settings/keys/status`);
   return res.json();
 }
 
 export async function unlockKeys(masterPassword: string): Promise<KeysUnlockResponse> {
-  const res = await fetch(`${BASE}/api/settings/keys/unlock`, {
+  const res = await authFetch(`${BASE}/api/settings/keys/unlock`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ master_password: masterPassword }),
@@ -58,6 +60,6 @@ export async function unlockKeys(masterPassword: string): Promise<KeysUnlockResp
 
 export async function fetchLogAnalyzeLastRun(index?: number): Promise<AnalyzeLastRunResponse> {
   const params = index !== undefined && index > 0 ? `?index=${index}` : "";
-  const res = await fetch(`${BASE}/api/log/analyze-last-run${params}`);
+  const res = await authFetch(`${BASE}/api/log/analyze-last-run${params}`);
   return res.json();
 }

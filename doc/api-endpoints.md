@@ -11,6 +11,21 @@ All JSON endpoints return `application/json`. Errors follow the shape:
 
 JarvisAgent ships in two editions: **Engine** (lean production server) and **Studio** (full developer IDE). Each endpoint section is annotated with its edition availability. Studio-only endpoints return 404 in Engine mode.
 
+### Authentication (Engine edition)
+
+Engine mode protects all endpoints except health checks and static assets with Bearer token authentication. Studio mode has no authentication (developer workstation).
+
+| Tier | Endpoints | Engine Auth | Studio Auth |
+|------|-----------|-------------|-------------|
+| Public | `GET /api/status`, `GET /`, `/dash-assets/*` | None | None |
+| Webhook | `POST /api/webhook/<id>` | HMAC-SHA256 (required) | HMAC-SHA256 (optional) |
+| Admin | All other endpoints | `Authorization: Bearer <token>` | None |
+| WebSocket | `WS /ws` | Token-as-first-message | None |
+
+On first Engine start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600`), and logged to stdout.
+
+Unauthenticated admin requests return `401 Unauthorized` with `WWW-Authenticate: Bearer` header. Wrong tokens return `403 Forbidden`. Rate-limited requests return `429 Too Many Requests` with `Retry-After` header.
+
 ---
 
 ## Static / UI — Both editions (dashboard); Studio only (editor)
@@ -712,6 +727,20 @@ Scans `log/log.txt` for `[workflow] run '...' started/completed/failed/cancelled
 { "message": "Shutdown initiated." }
 ```
 Triggers the same shutdown sequence as pressing `q` or Ctrl+C: global shutdown signal → two-phase parallel subsystem shutdown → watchdog safety net (6s).
+
+---
+
+## Security considerations — Engine edition
+
+j9t currently has **no general authentication layer**. The following endpoints are available in Engine mode and are security-sensitive when exposed publicly. Protect them at the **deployment level** (firewall, reverse proxy with IP allowlist, or VPN):
+
+| Endpoint | Risk |
+|----------|------|
+| `POST /api/shutdown` | Anyone who can reach it can kill the process |
+| `GET /api/log` | Can leak prompt content, output data, file paths, and provider details |
+| `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop` | Unauthenticated run-control; an attacker can disrupt running workflows |
+
+These are accepted trade-offs for the first edition split.
 
 ---
 

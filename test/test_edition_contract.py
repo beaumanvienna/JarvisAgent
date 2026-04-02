@@ -15,6 +15,9 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 try:
     import requests
@@ -50,8 +53,9 @@ def header(msg): print(f"\n{C.BOLD}{C.CYAN}{'\u2500'*60}\n  {msg}\n{'\u2500'*60}
 # Test framework
 # ---------------------------------------------------------------------------
 class TestRunner:
-    def __init__(self, base_url):
+    def __init__(self, base_url, token=None):
         self.base_url = base_url.rstrip("/")
+        self.token = token
         self.passed = 0
         self.failed = 0
         self.skipped = 0
@@ -62,17 +66,34 @@ class TestRunner:
     def _ws_url(self, path):
         return self._url(path).replace("http://", "ws://").replace("https://", "wss://")
 
+    def _auth_headers(self):
+        if self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        return {}
+
     def get(self, path, **kwargs):
-        return requests.get(self._url(path), timeout=10, **kwargs)
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+        return requests.get(self._url(path), timeout=10, headers=headers, **kwargs)
 
     def post(self, path, **kwargs):
-        return requests.post(self._url(path), timeout=10, **kwargs)
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+        return requests.post(self._url(path), timeout=10, headers=headers, **kwargs)
 
     def put(self, path, **kwargs):
-        return requests.put(self._url(path), timeout=10, **kwargs)
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+        return requests.put(self._url(path), timeout=10, headers=headers, **kwargs)
 
     def delete(self, path, **kwargs):
-        return requests.delete(self._url(path), timeout=10, **kwargs)
+        headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
+        return requests.delete(self._url(path), timeout=10, headers=headers, **kwargs)
+
+    def get_no_auth(self, path, **kwargs):
+        """GET without auth token (for testing unauthenticated access)."""
+        return requests.get(self._url(path), timeout=10, **kwargs)
+
+    def post_no_auth(self, path, **kwargs):
+        """POST without auth token (for testing unauthenticated access)."""
+        return requests.post(self._url(path), timeout=10, **kwargs)
 
     def assert_status(self, method, path, expected_status, label=None, **kwargs):
         """Assert that a request returns the expected HTTP status code.
@@ -189,12 +210,12 @@ def test_common(t, status_data):
         fail("status.capabilities missing or not an object")
         t.failed += 1
 
-    # Common routes should return 200
+    # Common routes should return 200 (with auth token if Engine)
     t.assert_status("get", "/api/workflows", 200)
     t.assert_status("get", "/api/workflow-runs/active", 200)
     t.assert_status("get", "/api/workflow-runs/last", 200)
     t.assert_status("get", "/api/log", 200)
-    t.assert_status("get", "/", 200, label="GET / (dashboard)")
+    t.assert_status("get", "/", 200, label="GET / (dashboard, public)")
 
     # Main WebSocket
     t.assert_ws_connectable("/ws", True, "WS /ws (main)")
@@ -258,6 +279,60 @@ def test_engine(t, status_data):
 
     # Assistant WebSocket → refused
     t.assert_ws_connectable("/ws/assistant", False, "WS /ws/assistant (should be absent)")
+
+
+# ---------------------------------------------------------------------------
+# Engine auth tests
+# ---------------------------------------------------------------------------
+def test_engine_auth(t):
+    header("Engine — admin auth (bearer token)")
+
+    if not t.token:
+        warn("No admin token available — skipping auth tests")
+        t.skipped += 1
+        return
+
+    # Public endpoints should work without token.
+    r = t.get_no_auth("/api/status")
+    if r.status_code == 200:
+        ok("GET /api/status -> 200 (no token, public)")
+        t.passed += 1
+    else:
+        fail(f"GET /api/status -> {r.status_code} (expected 200, public)")
+        t.failed += 1
+
+    # Admin endpoints should return 401 without token.
+    for path in ["/api/workflows", "/api/workflow-runs/active", "/api/log"]:
+        r = t.get_no_auth(path)
+        if r.status_code == 401:
+            ok(f"GET {path} -> 401 (no token)")
+            t.passed += 1
+        else:
+            fail(f"GET {path} -> {r.status_code} (expected 401)")
+            t.failed += 1
+
+    r = t.post_no_auth("/api/shutdown")
+    if r.status_code == 401:
+        ok("POST /api/shutdown -> 401 (no token)")
+        t.passed += 1
+    else:
+        fail(f"POST /api/shutdown -> {r.status_code} (expected 401)")
+        t.failed += 1
+
+    # Wrong token should return 403.
+    r = requests.get(t._url("/api/workflows"), timeout=10,
+                     headers={"Authorization": "Bearer wrong_token_value"})
+    if r.status_code == 403:
+        ok("GET /api/workflows -> 403 (wrong token)")
+        t.passed += 1
+    else:
+        fail(f"GET /api/workflows -> {r.status_code} (expected 403)")
+        t.failed += 1
+
+    # Valid token should return 200.
+    t.assert_status("get", "/api/workflows", 200, label="GET /api/workflows (valid token)")
+    t.assert_status("get", "/api/workflow-runs/active", 200, label="GET /api/workflow-runs/active (valid token)")
+    t.assert_status("get", "/api/log", 200, label="GET /api/log (valid token)")
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +410,23 @@ def main():
                         help="Assert specific edition (default: auto-detect)")
     parser.add_argument("--base-url", default="http://localhost:8080",
                         help="JarvisAgent base URL")
+    parser.add_argument("--token", default=None,
+                        help="Admin API token for Engine auth (default: read from config.json)")
     args = parser.parse_args()
 
-    t = TestRunner(args.base_url)
+    # Auto-load token from config.json if not provided.
+    token = args.token
+    if not token:
+        config_path = SCRIPT_DIR.parent / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    cfg = json.load(f)
+                token = cfg.get("engine_api_token")
+            except Exception:
+                pass
+
+    t = TestRunner(args.base_url, token=token)
 
     print(f"\n{C.BOLD}Edition Contract Tests{C.RESET}")
     info(f"Base URL: {args.base_url}")
@@ -369,6 +458,7 @@ def main():
 
     if edition == "engine":
         test_engine(t, status_data)
+        test_engine_auth(t)
     elif edition == "studio":
         test_studio(t, status_data)
     else:

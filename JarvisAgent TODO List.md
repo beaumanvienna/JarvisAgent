@@ -451,3 +451,19 @@ defense-in-depth, not strictly required.
 
 ---
 
+### 12. Security audit logging
+
+Dedicated security log for all auth-related events. Required for incident response and compliance sign-off.
+
+Events to log (all with IP, timestamp, endpoint):
+- Auth success / failure (wrong token, missing token)
+- Rate limit triggered
+- Webhook accepted / rejected (bad HMAC, missing secret)
+- Shutdown requested
+- Run control actions (cancel, pause, resume, stop) with run ID
+
+Backend: new spdlog category, `LOG_SECURITY_*` macro, log calls at each auth check point in `webServer.cpp`. Separate log file (`log/security.log`).
+Frontend: security events visible in dashboard log viewer with `[security]` filter (Engine mode).
+
+See `doc/cyber security.md` for the full threat model.
+

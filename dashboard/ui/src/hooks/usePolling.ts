@@ -21,7 +21,8 @@ export function usePolling(intervalMs: number = 3000) {
     try {
       const [status, wfResponse, keysResponse] = await Promise.all([
         fetchStatus(),
-        fetchWorkflows(),
+        // Workflows endpoint requires auth in Engine mode; default to empty on 401
+        fetchWorkflows().catch(() => ({ workflows: [] })),
         // Keys endpoint is Studio-only; gracefully default in Engine mode
         fetchKeysStatus().catch(() => KEYS_DEFAULT),
       ]);

@@ -74,7 +74,7 @@ If the webhook trigger's JCWF has `"params": { "secret": "my-shared-secret" }`, 
 X-Webhook-Signature: sha256=<hex-encoded HMAC-SHA256 of the raw request body>
 ```
 
-Requests with a missing or invalid signature are rejected with HTTP 401. If no secret is configured (empty `params` or no `secret` key), the webhook is **open** — no signature check.
+Requests with a missing or invalid signature are rejected with HTTP 401. In **Engine mode**, a webhook secret is **mandatory** — webhooks without a configured secret are rejected with HTTP 403. In **Studio mode**, if no secret is configured the webhook is open (no signature check).
 
 **Example with HMAC (bash):**
 
@@ -191,22 +191,30 @@ The run context automatically includes:
 
 ## Monitoring Runs
 
+> **Engine mode:** All monitoring and control endpoints require bearer token authentication. Add `-H "Authorization: Bearer <token>"` to every request. See the README for details on token setup.
+
 ### REST polling
 
 ```bash
 # Active runs (all workflows)
-curl -s http://localhost:8080/api/workflow-runs/active | jq .
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/workflow-runs/active | jq .
 
 # Specific run
-curl -s http://localhost:8080/api/workflow-runs/<runId> | jq .
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/workflow-runs/<runId> | jq .
 
 # Last completed run per workflow
-curl -s http://localhost:8080/api/workflow-runs/last | jq .
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/workflow-runs/last | jq .
 ```
 
 ### WebSocket (real-time)
 
-Connect to `ws://localhost:8080/ws` and send:
+Connect to `ws://localhost:8080/ws`. In **Engine mode**, send an auth message first:
+
+```json
+{ "type": "auth", "token": "<admin-token>" }
+```
+
+Then request run snapshots:
 
 ```json
 { "type": "workflow-runs-request" }

@@ -489,13 +489,13 @@ On subsequent runs it simply activates the existing venv and starts JarvisAgent.
 Linux / macOS:
 ```bash
 $ source .venv/bin/activate
-(.venv) $ ./bin/Release/jarvisAgent
+(.venv) $ ./bin/Release/jarvisAgent-studio
 ```
 
 Windows (MSYS2 / Git Bash):
 ```bash
 $ source .venv/Scripts/activate
-(.venv) $ ./bin/x64/Release/jarvisAgent.exe
+(.venv) $ ./bin/x64/Release/jarvisAgent-studio.exe
 ```
 
 > **Note:** Always activate the venv before running JarvisAgent so that `markitdown` is on the PATH.
@@ -539,45 +539,95 @@ To clone the project, use:
 ```bash
 git clone --recurse-submodules https://github.com/beaumanvienna/JarvisAgent
 ```
-<br>
-JarvisAgent is cross-platform. The project is defined in a Lua file for permake5.<br>
-<br>
-Run 
+
+### Editions
+
+JarvisAgent builds as two editions from the same source tree. Each produces a distinctly named binary:
+
+| Edition | Flag | Binary | Use case |
+|---------|------|--------|----------|
+| **j9t Studio** (default) | *(none)* or `--studio` | `jarvisAgent-studio` | Developer workstation — workflow editor, AI assistant, config management |
+| **j9t Engine** | `--engine` | `jarvisAgent-engine` | Production server — lean, no editing surface, bearer token auth |
+
+### Building
+
+Generate build files with premake5, then build:
 
 ```bash
-premake5 gmake 
+# Studio edition (default — full developer IDE)
+premake5 gmake
+make config=release          # → bin/Release/jarvisAgent-studio
+
+# Engine edition (lean production server)
+premake5 gmake --engine
+make config=release          # → bin/Release/jarvisAgent-engine
 ```
-to get a Makefile.<br><br>
-Run
+
+On Windows, replace `gmake` with `vs2022` to generate a Visual Studio solution. On macOS, `xcode4` generates an Xcode project.
+
+Each edition has its own intermediate directory (`bin-int/studio/` vs `bin-int/engine/`), so switching editions triggers a clean rebuild automatically.
+
+Set parallel build flags for faster compilation:
+```bash
+export MAKEFLAGS=-j$(nproc)   # Linux
+export MAKEFLAGS=-j$(sysctl -n hw.ncpu)   # macOS
+```
+
+### Running
+
+**Launcher script** (handles Python venv automatically):
+```bash
+./jarvisagent.sh              # Studio edition (default)
+./jarvisagent.sh --engine     # Engine edition
+```
+
+**Direct binary** (requires an active Python venv):
+```bash
+./bin/Release/jarvisAgent-studio    # Studio
+./bin/Release/jarvisAgent-engine    # Engine
+```
+
+- Dashboard: http://localhost:8080
+- Workflow Editor: http://localhost:8080/editor (Studio only)
+
+### Engine Authentication
+
+Engine edition protects all admin endpoints with **bearer token authentication**. Studio has no auth (developer workstation — localhost only).
+
+On first Engine start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600` — owner read/write only), and printed to stdout:
+
+```
+Engine API Token (use this for admin access):
+dcc74bab...598f
+Stored in: engine_api_token.txt
+```
+
+**When to use Engine + auth:**
+- Production servers exposed to the network
+- Multi-user environments where only admins should control workflows
+- Integration scenarios (e.g. a chatbot backend triggers workflows via HMAC webhook; only the operator has the admin token)
+
+**REST API:** include the token in every request:
+```bash
+curl -H "Authorization: Bearer <token>" http://host:8080/api/workflows
+```
+
+**Dashboard:** on first load, the dashboard prompts for the admin token. It stores the token in the browser's localStorage for subsequent visits. A **Logout** button in the header clears it.
+
+**WebSocket:** the dashboard sends the token as the first message after connecting. Direct WebSocket clients must send `{"type":"auth","token":"<token>"}` before any other messages.
+
+**Public endpoints** (no auth required): `GET /api/status` (health checks), `GET /` (dashboard HTML shell).
+
+**Webhook endpoints** use per-workflow HMAC-SHA256 signatures (separate from the admin token). In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected.
+
+### Updating
 
 ```bash
-premake5 vs2022
+git pull && git submodule update --init --recursive
 ```
-to get a VS solution.<br><br>
-Run 
 
-```bash
-premake5 xcode4
-```
-for Xcode on MacOS.<br>
-<br>
-<br>
-If you created a Makefile, build the project with<br>
-`export MAKEFLAGS=-j8` or however many CPU cores you want to use<br>
-`make config=release verbose=1 && make config=debug verbose=1`<br>
-<br>
-Run with the launcher script (handles venv automatically):<br>
-`./jarvisagent.sh`<br>
-<br>
-Or run the executable directly (requires an active venv):<br>
-`./bin/Release/jarvisAgent` or `./bin/Debug/jarvisAgent`<br>
-<br>
-To update the source code, use<br>
-`git pull && git submodule update --init --recursive`<br>
-<br>
-Use `premake5 clean` to clean the project from build artifacts.<br>
-<br>
-<br>
-<br>
+Use `premake5 clean` to clean the project from build artifacts.
+
+---
 
 GPL-3.0  License © 2026 JC Technolabs

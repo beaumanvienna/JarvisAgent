@@ -1,0 +1,232 @@
+# Cyber Security
+
+JarvisAgent ships as two editions with different security profiles. This document describes the safety measures in place, the remaining threats, and the responsibilities of operators and end users.
+
+---
+
+## Abbreviations
+
+| Term | Meaning |
+|------|---------|
+| **AI** | Artificial Intelligence — refers to cloud language models (e.g. GPT, Sonnet, Opus) that generate text from prompts |
+| **API** | Application Programming Interface — a set of URLs that software uses to communicate with j9t |
+| **Bearer token** | A secret string sent in an HTTP header to prove identity (like a password for API access) |
+| **CRUD** | Create, Read, Update, Delete — the four basic operations on data |
+| **DAG** | Directed Acyclic Graph — a workflow structure where tasks have dependencies but no circular loops |
+| **DoS / DDoS** | Denial of Service / Distributed Denial of Service — an attack that floods a server with requests to make it unavailable |
+| **HMAC-SHA256** | Hash-based Message Authentication Code using SHA-256 — a way to sign a message so the receiver can verify it was not tampered with and came from a trusted sender |
+| **HTTP / HTTPS** | HyperText Transfer Protocol (/ Secure) — the protocol web browsers and APIs use to communicate. HTTPS adds encryption via TLS |
+| **JCWF** | JC Workflow Format — j9t's JSON-based file format for defining workflows |
+| **j9t** | Short name for JarvisAgent |
+| **Ops team** | Operations team — the people responsible for deploying, monitoring, and maintaining servers in production |
+| **PII** | Personally Identifiable Information — data that can identify an individual (name, email, address, etc.) |
+| **SIEM** | Security Information and Event Management — software that collects and analyzes security logs from multiple systems to detect threats (e.g. Splunk, Microsoft Sentinel) |
+| **SPA** | Single-Page Application — a web app that loads once and updates dynamically (the j9t dashboard) |
+| **TLS** | Transport Layer Security — encryption for network traffic (the "S" in HTTPS) |
+| **WebSocket (WS)** | A persistent two-way connection between browser and server for real-time updates |
+
+---
+
+## Editions at a Glance
+
+| | j9t Studio | j9t Engine |
+|-|-----------|-----------|
+| **Purpose** | Developer workstation | Production server |
+| **Network exposure** | Localhost only | LAN / internet |
+| **Authentication** | None | Bearer token (admin), HMAC-SHA256 (webhooks) |
+| **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
+| **Webhook secrets** | Optional | Mandatory |
+| **Workflow CRUD** | Open | Not available (compile-time removed) |
+| **AI assistant** | Open | Not available (compile-time removed) |
+| **Attack surface** | Full feature set | Minimal — runtime + monitoring only |
+
+---
+
+## j9t Studio — Developer Workstation
+
+### Safety measures
+
+- **Compile-time feature gating.** Studio-only code (workflow CRUD, AI assistant, AI JCWF generation, settings API) is included only when built with `J9T_STUDIO`. Engine builds physically exclude these modules.
+- **Script path policy.** Shell tasks must reference scripts under the `scripts/` directory. Path traversal (`..`) is rejected by both the validator and the shell task executor.
+- **Validation tiers.** The backend validator enforces schema correctness (Tier A), runtime policy (Tier B), feasibility checks (Tier C), and informational warnings (Tier D) before a workflow runs.
+- **Disk-first design.** All inputs, outputs, and intermediate results are written to disk. Nothing is held only in memory, making post-incident forensics straightforward.
+
+### Remaining threats
+
+- **No authentication.** Studio has no login, no token, no access control. Anyone who can reach port 8080 can read workflows, trigger runs, modify config, and shut down the server.
+- **AI-generated scripts.** The Generate and Fix Script features produce shell and Python scripts from AI output. A malicious or buggy prompt can produce scripts that delete files, exfiltrate data, or consume disk space. The script review panel lets the developer inspect before accepting, but there is no sandbox.
+- **AI assistant tool access.** The assistant can read files, write files, edit files, and run shell commands (with user approval). A compromised or manipulated conversation could lead to unintended file modifications.
+- **No TLS.** Studio serves HTTP on localhost. If exposed beyond localhost (e.g. via SSH tunnel or Docker port mapping), traffic is unencrypted.
+
+### Operator responsibility
+
+Studio is designed for **single-developer use on a local machine**. The operator is responsible for:
+
+- Not exposing port 8080 beyond localhost.
+- Reviewing AI-generated scripts before accepting them.
+- Approving or rejecting assistant tool calls (mutating tools require explicit approval).
+- Keeping API keys secure (stored encrypted in `keys.json.enc` with a master password).
+
+---
+
+## j9t Engine — Production Server
+
+### Safety measures
+
+- **Bearer token authentication.** All admin endpoints (workflow monitoring, run control, log viewer, shutdown) require an `Authorization: Bearer <token>` header. The token is a 256-bit cryptographically random hex string, auto-generated on first start and stored in a dedicated file (`engine_api_token.txt`) with restrictive file permissions (`600` — owner read/write only). The token is kept separate from `config.json` to prevent accidental commits. Token comparison uses constant-time logic to prevent timing attacks.
+- **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. The caller must include an `X-Webhook-Signature: sha256=<hex>` header computed over the raw request body. Signature verification uses constant-time comparison. In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected with HTTP 403.
+- **WebSocket authentication.** WebSocket clients must send `{"type":"auth","token":"<token>"}` as the first message. Unauthenticated connections cannot receive data or send commands.
+- **Per-IP rate limiting.** Token bucket algorithm (100 requests/minute per IP, burst of 20) protects against brute-force token guessing and request flooding. Rate-limited requests receive HTTP 429 with a `Retry-After` header.
+- **Reduced attack surface.** Studio-only modules (workflow editor, AI assistant, AI JCWF generation, settings API, script management) are excluded at compile time. The Engine binary is physically smaller and exposes fewer endpoints.
+- **Public endpoints are read-only and non-sensitive.** Only `GET /api/status` (health check) and the dashboard HTML shell (`GET /`, `/dash-assets/*`) are served without authentication.
+
+### Remaining threats
+
+- **No TLS.** Engine serves plain HTTP. Deploy behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik, cloud load balancer) for encrypted transport. Without TLS, bearer tokens and webhook secrets are transmitted in cleartext.
+- **No per-user access control.** There is a single admin token. All token holders have identical privileges. There is no role separation (e.g. read-only monitoring vs full control).
+- **Token is static.** The admin token does not expire or rotate automatically. If leaked, it remains valid until the operator manually replaces `engine_api_token.txt` and restarts the server.
+- **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. Access is token-protected but the log content itself is not redacted.
+- **Unauthenticated shutdown via process signal.** The bearer token protects the `POST /api/shutdown` endpoint, but an attacker with OS-level access can still kill the process via signals (SIGTERM, SIGKILL). This is outside j9t's control.
+- **Denial of service.** Rate limiting mitigates request flooding but does not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a firewall or cloud-level DDoS protection for internet-facing deployments.
+
+### Admin responsibility
+
+The admin (operator) is responsible for:
+
+- **TLS termination.** Deploy Engine behind a reverse proxy with TLS. Never expose plain HTTP to the internet.
+- **Token security.** Treat the admin token like a password. The token is stored in `engine_api_token.txt` (gitignored, file permissions `600`), not in `config.json`. Rotate it periodically by replacing the file contents and restarting.
+- **Webhook secret management.** Configure a strong, unique secret for every webhook trigger. Share secrets with integration partners over a secure channel.
+- **Network segmentation.** Restrict access to the Engine port (default 8080) using firewall rules. Only the reverse proxy, webhook callers, and admin workstations should be able to reach it.
+- **Log access.** Logs may contain sensitive data. Restrict who has the admin token and consider log rotation / redaction for compliance-sensitive environments.
+- **Keeping j9t up to date.** Apply updates promptly to pick up security fixes.
+
+### End user responsibility
+
+End users interact with j9t **indirectly** through a frontend application (e.g. a chatbot, a web portal) that calls j9t's webhook API on their behalf. End users never see the admin token, the dashboard, or the log viewer. Their responsibilities are:
+
+- **Use the frontend application as intended.** Do not attempt to access j9t endpoints directly.
+- **Report unexpected behavior.** If the frontend application returns errors or unexpected results, report them to the application operator — not to j9t directly.
+- **Understand AI limitations.** AI-generated answers are based on the context provided by the workflow (e.g. a repair manual). They may be incomplete, outdated, or incorrect. Verify critical information through official channels.
+
+---
+
+## Cloud AI Backend Safety
+
+JarvisAgent sends prompts to cloud AI providers (OpenAI, Google Gemini, etc.) via their public APIs. These providers have their own built-in safety layers:
+
+- **Content filtering.** Providers reject or flag prompts and responses that violate their usage policies (hate speech, illegal content, personal data extraction attempts).
+- **Rate limiting and abuse detection.** Providers enforce per-key rate limits and monitor for abuse patterns.
+- **Data handling policies.** API data is subject to each provider's data processing agreement. Most providers do not use API inputs for model training (check your provider's terms).
+- **Model guardrails.** Models are trained with safety alignment to refuse harmful instructions.
+
+These protections apply automatically to every AI call j9t makes. However, they are controlled by the provider — j9t cannot override or extend them. The operator should:
+
+- Review the provider's terms of service and data processing agreement.
+- Use API keys with appropriate rate limits and spending caps.
+- Avoid sending personally identifiable information (PII) in prompts unless the provider's terms permit it and the deployment's privacy policy allows it.
+
+### Self-hosted AI models for confidential data
+
+For organizations handling sensitive or classified information, the recommended approach is to run **in-house AI models on self-hosted machines** without public internet access. j9t supports any OpenAI-compatible API endpoint — simply point the AI interface URL in `config.json` to an internal server (e.g. running Ollama, vLLM, or llama.cpp).
+
+When j9t and the AI model both run on the same private network (or the same machine), no prompt data ever leaves the organization's infrastructure. Combined with encrypted storage on the AI server, this achieves a data classification level up to **"confidential"**, provided the server-side encryption and network segmentation meet the organization's security standards.
+
+| Deployment | Data leaves organization? | Suitable classification |
+|-----------|--------------------------|------------------------|
+| Cloud AI providers (OpenAI, Google, etc.) | Yes — prompts sent to external servers | Public / internal use only |
+| Self-hosted AI on private network | No — all data stays in-house | Up to confidential (depending on server-side encryption and access controls) |
+
+---
+
+## Are Credentials Sent Unencrypted?
+
+**j9t itself does not provide TLS (HTTPS).** All communication between the browser/client and j9t travels over plain HTTP. This means:
+
+| What is transmitted | Encrypted in transit? | Risk |
+|--------------------|-----------------------|------|
+| Admin bearer token (`Authorization: Bearer ...`) | **No** — unless a reverse proxy adds TLS | An attacker on the same network can intercept the token |
+| Webhook HMAC signatures (`X-Webhook-Signature`) | **No** — unless a reverse proxy adds TLS | The signature itself is not secret (it proves authenticity, not confidentiality), but the request body is visible |
+| AI API keys (sent to OpenAI, Google, etc.) | **Yes** — j9t connects to cloud providers via HTTPS | These never travel unencrypted |
+| Master password for `keys.json.enc` | **No** — sent from browser to j9t over HTTP | Same network interception risk as the bearer token |
+| Workflow data, prompts, AI responses | **No** — unless a reverse proxy adds TLS | Visible to anyone who can observe network traffic |
+
+**For Studio (localhost):** This is not a concern. Traffic stays on the local machine and never crosses a network.
+
+**For Engine (production):** This is a real risk. The admin bearer token and all API traffic are visible to anyone who can observe the network path between the client and the server. The solution is to place a **TLS-terminating reverse proxy** in front of j9t. A reverse proxy is a server (such as nginx, Caddy, Traefik, or a cloud load balancer) that sits between the internet and j9t. It receives incoming connections from clients, handles TLS encryption (the "HTTPS" part — scrambling all traffic so eavesdroppers see only gibberish), and then forwards the decrypted request to j9t over a short localhost connection that never leaves the machine. This is standard practice for web services and adds no complexity to j9t itself.
+
+**Bottom line:** Deploy Engine behind a reverse proxy with TLS. Without it, the admin token travels in cleartext and can be intercepted.
+
+---
+
+## Docker as an Additional Security Layer
+
+Docker runs j9t inside an isolated container — a lightweight virtual environment with its own filesystem, network, and process space. This adds defense-in-depth on top of the measures described above.
+
+### What the container can and cannot access
+
+When j9t runs in Docker, the run command (`scripts/run-docker.sh`) mounts exactly **one host directory** into the container:
+
+```
+Host:       ~/JarvisAgent/     →     Container:  /app/
+```
+
+This is the only folder on the host computer that the container can read or write. Everything else — the user's home directory, emails, documents, desktop files, SSH keys, browser profiles, other applications — is **completely invisible** to j9t inside the container.
+
+The mounted `~/JarvisAgent/` directory contains only j9t working data:
+
+| Folder | Contents |
+|--------|----------|
+| `workflows/` | Workflow definitions (`.jcwf` files) and supporting data files (e.g. repair manuals, CSV files) |
+| `queue/` | Runtime task inputs and AI outputs |
+| `log/` | Application logs |
+| `config.json` | Server configuration (AI provider URLs, thread count — no credentials) |
+| `engine_api_token.txt` | Admin bearer token (auto-generated, file permissions `600`) |
+| `keys.json.enc` | Encrypted AI API keys |
+
+The j9t binary itself, the dashboard UI, the workflow editor UI, and all scripts are baked into the Docker image at `/opt/jarvisagent/` and are **read-only**. The container cannot modify its own executable or inject code into the installation.
+
+### Engine in Docker (production)
+
+Running Engine in Docker provides:
+
+- **Filesystem isolation.** The container can only access `~/JarvisAgent/`. A compromised workflow cannot read confidential files anywhere else on the host (emails, documents, credentials, other projects).
+- **Process isolation.** Processes inside the container cannot see or interact with host processes. Even if an attacker gains code execution inside j9t, they are confined to the container.
+- **Read-only installation.** The j9t binary, scripts, and UI assets are baked into the image. An attacker cannot modify the server binary or inject malicious scripts into the installation directory.
+- **Resource limits.** Docker supports CPU and memory limits (`--memory`, `--cpus`), preventing a runaway workflow from consuming all host resources.
+- **Network isolation.** The container only exposes port 8080. It cannot initiate connections to other services on the host unless explicitly configured. Combined with a reverse proxy on the host, this creates a clean network boundary.
+- **Reproducible environment.** The Docker image is a known-good snapshot. Restarting the container resets everything except `~/JarvisAgent/`, making recovery from compromise straightforward.
+
+Docker does **not** replace bearer token auth, HMAC verification, or TLS. It adds a containment layer: even if the application-level defenses fail, the blast radius is limited to the container and the `~/JarvisAgent/` data directory.
+
+### Studio in Docker (development)
+
+Docker provides the **same filesystem isolation** for Studio developers. The developer creates a `~/JarvisAgent/` folder with copies of the data files needed for their workflows (repair manuals, CSV data, etc.). The container can only see that folder — the rest of the developer's machine (emails, documents, source code for other projects, browser profiles) is unreachable.
+
+This is relevant for organizations evaluating j9t as a new application:
+
+- **What is exposed:** Only the contents of `~/JarvisAgent/` — workflow definitions and their supporting data files. These are working copies placed there intentionally by the developer.
+- **What is not exposed:** Everything else on the developer's computer. The container has no access to the home directory, other project folders, the desktop, email clients, or any system files.
+- **AI-generated scripts** run inside the container. If a generated script misbehaves (deletes files, writes garbage), the damage is contained to `~/JarvisAgent/`. The developer can delete the folder and start fresh.
+
+Additional benefits for Studio in Docker:
+
+- **Untrusted workflow testing.** Testing a workflow from an external source in Docker means it cannot access anything outside `~/JarvisAgent/`.
+- **Team onboarding.** A pre-built Docker image ensures every developer has the same environment (Python version, dependencies, tools) without manual setup.
+- **CI/CD.** Automated testing of workflows in Docker provides a clean, reproducible environment for each test run.
+
+**Recommendation:** Use Docker for both Engine production deployments and Studio development when filesystem isolation matters. 
+
+---
+
+## Summary
+
+| Concern | Studio | Engine |
+|---------|--------|--------|
+| Who should run it | Developer, on localhost | Ops team, behind reverse proxy + TLS |
+| Authentication | None | Bearer token + HMAC webhooks |
+| Rate limiting | None | Per-IP token bucket |
+| AI script execution | Yes (review before accept) | No (AI tooling removed at compile time) |
+| AI assistant | Yes (approval required for mutations) | No (removed at compile time) |
+| TLS | Not needed (localhost) | Required (deploy behind reverse proxy) |
+| Log sensitivity | Developer sees own logs | Token-protected, consider redaction |
+| Cloud AI safety | Provider-managed content filtering, rate limits, and data policies apply to all AI calls |

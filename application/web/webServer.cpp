@@ -64,6 +64,7 @@
 
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 
 namespace fs = std::filesystem;
 namespace AIAssistant
@@ -133,6 +134,38 @@ namespace AIAssistant
             crow::response response(httpStatus, json.dump());
             SetJsonHeaders(response);
             return response;
+        }
+
+        crow::response MakeAuthErrorResponse(std::string const& error)
+        {
+            crow::json::wvalue body;
+            body["ok"] = false;
+            if (error == "rate_limited")
+            {
+                body["error"] = "rate_limited";
+                body["message"] = "Too many requests. Try again later.";
+                crow::response resp(429, body.dump());
+                SetJsonHeaders(resp);
+                resp.add_header("Retry-After", "5");
+                return resp;
+            }
+            else if (error == "missing" || error == "malformed")
+            {
+                body["error"] = "unauthorized";
+                body["message"] = "Authorization header required. Use: Authorization: Bearer <token>";
+                crow::response resp(401, body.dump());
+                SetJsonHeaders(resp);
+                resp.add_header("WWW-Authenticate", "Bearer");
+                return resp;
+            }
+            else
+            {
+                body["error"] = "forbidden";
+                body["message"] = "Invalid API token.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
+                return resp;
+            }
         }
 
         crow::response MakeJsonTextResponse(int const httpStatus, std::string const& jsonText)
@@ -865,8 +898,204 @@ namespace AIAssistant
     }
 #endif // J9T_STUDIO
 
+    // =========================================================================
+    // Admin authentication (Engine edition only)
+    // =========================================================================
+
+    std::string WebServer::CheckAdminAuth(crow::request const& req) const
+    {
+#ifdef J9T_STUDIO
+        // Studio edition: no auth required.
+        (void)req;
+        return {};
+#else
+        // Rate limit check (cast away const — rate limit state is mutable).
+        if (const_cast<WebServer*>(this)->IsRateLimited(req))
+        {
+            return "rate_limited";
+        }
+
+        if (m_AdminToken.empty())
+        {
+            // No token configured — auth disabled (backward compat during migration).
+            return {};
+        }
+
+        std::string const& authHeader = req.get_header_value("Authorization");
+        if (authHeader.empty())
+        {
+            return "missing";
+        }
+
+        static constexpr std::string_view kBearerPrefix = "Bearer ";
+        if (authHeader.size() <= kBearerPrefix.size() ||
+            authHeader.compare(0, kBearerPrefix.size(), kBearerPrefix) != 0)
+        {
+            return "malformed";
+        }
+
+        std::string const providedToken = authHeader.substr(kBearerPrefix.size());
+
+        // Constant-time comparison to prevent timing attacks.
+        if (providedToken.size() != m_AdminToken.size())
+        {
+            return "forbidden";
+        }
+        unsigned char result = 0;
+        for (size_t i = 0; i < providedToken.size(); ++i)
+        {
+            result |= static_cast<unsigned char>(providedToken[i]) ^
+                       static_cast<unsigned char>(m_AdminToken[i]);
+        }
+        if (result != 0)
+        {
+            return "forbidden";
+        }
+
+        return {};
+#endif
+    }
+
+    bool WebServer::IsRateLimited(crow::request const& req)
+    {
+#ifdef J9T_STUDIO
+        (void)req;
+        return false;
+#else
+        if (m_AdminToken.empty())
+        {
+            return false; // auth disabled → rate limiting disabled
+        }
+
+        std::string const ip = req.remote_ip_address;
+        auto const now = std::chrono::steady_clock::now();
+
+        static constexpr double kMaxTokens = 20.0;       // burst capacity
+        static constexpr double kRefillRate = 100.0 / 60.0; // tokens per second (100/min)
+
+        std::lock_guard<std::mutex> lock(m_RateLimitMutex);
+
+        // Periodic cleanup: evict buckets older than 10 minutes.
+        auto const sinceCleanup = std::chrono::duration_cast<std::chrono::minutes>(now - m_LastRateLimitCleanup);
+        if (sinceCleanup.count() >= 5)
+        {
+            for (auto it = m_RateLimitBuckets.begin(); it != m_RateLimitBuckets.end();)
+            {
+                auto const age = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.m_LastRefill);
+                if (age.count() >= 10)
+                {
+                    it = m_RateLimitBuckets.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+            m_LastRateLimitCleanup = now;
+        }
+
+        auto& bucket = m_RateLimitBuckets[ip];
+        double const elapsed = std::chrono::duration<double>(now - bucket.m_LastRefill).count();
+        bucket.m_Tokens = std::min(kMaxTokens, bucket.m_Tokens + elapsed * kRefillRate);
+        bucket.m_LastRefill = now;
+
+        if (bucket.m_Tokens >= 1.0)
+        {
+            bucket.m_Tokens -= 1.0;
+            return false;
+        }
+
+        return true;
+#endif
+    }
+
+    static constexpr char kTokenFileName[] = "engine_api_token.txt";
+
+    void WebServer::GenerateAndPersistApiToken()
+    {
+        // Generate 32 random bytes → 64-char hex string.
+        unsigned char randomBytes[32];
+        if (RAND_bytes(randomBytes, sizeof(randomBytes)) != 1)
+        {
+            LOG_APP_CRITICAL("[web] Failed to generate random API token — OpenSSL RAND_bytes failed");
+            return;
+        }
+
+        static constexpr char hexDigits[] = "0123456789abcdef";
+        std::string token;
+        token.reserve(64);
+        for (unsigned char b : randomBytes)
+        {
+            token.push_back(hexDigits[(b >> 4) & 0x0F]);
+            token.push_back(hexDigits[b & 0x0F]);
+        }
+
+        m_AdminToken = token;
+
+        // Persist to engine_api_token.txt (separate from config.json — credentials stay out of config).
+        std::ofstream ofs(kTokenFileName, std::ios::binary | std::ios::trunc);
+        if (ofs)
+        {
+            ofs << token;
+            LOG_APP_INFO("[web] Generated and saved engine API token to '{}'", kTokenFileName);
+
+            // Set restrictive file permissions (owner read/write only).
+#ifndef _WIN32
+            std::filesystem::permissions(kTokenFileName,
+                                         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                         std::filesystem::perm_options::replace);
+#endif
+        }
+        else
+        {
+            LOG_APP_CRITICAL("[web] Failed to write engine API token to '{}'", kTokenFileName);
+        }
+
+        LOG_APP_INFO("[web] ╔══════════════════════════════════════════════════════════════════╗");
+        LOG_APP_INFO("[web] ║  Engine API Token (use this for admin access):                  ║");
+        LOG_APP_INFO("[web] ║  {}  ║", token);
+        LOG_APP_INFO("[web] ║  Stored in: {}                            ║", kTokenFileName);
+        LOG_APP_INFO("[web] ╚══════════════════════════════════════════════════════════════════╝");
+    }
+
     void WebServer::RegisterRoutes()
     {
+        // ---- Initialize admin auth token (Engine only) ----
+        // Token is stored in engine_api_token.txt, not in config.json (credentials stay separate).
+#ifndef J9T_STUDIO
+        if (std::filesystem::exists(kTokenFileName))
+        {
+            std::ifstream ifs(kTokenFileName, std::ios::binary);
+            if (ifs)
+            {
+                std::string token;
+                std::getline(ifs, token);
+                // Trim whitespace/newlines
+                while (!token.empty() && (token.back() == '\n' || token.back() == '\r' || token.back() == ' '))
+                {
+                    token.pop_back();
+                }
+                if (!token.empty())
+                {
+                    m_AdminToken = token;
+                    LOG_APP_INFO("[web] Engine API token loaded from {} ({} chars)", kTokenFileName, m_AdminToken.size());
+                }
+                else
+                {
+                    GenerateAndPersistApiToken();
+                }
+            }
+            else
+            {
+                GenerateAndPersistApiToken();
+            }
+        }
+        else
+        {
+            GenerateAndPersistApiToken();
+        }
+#endif
+
         RegisterCommonRoutes();
         RegisterEngineRoutes();
 #ifdef J9T_STUDIO
@@ -876,51 +1105,126 @@ namespace AIAssistant
 
     void WebServer::RegisterCommonRoutes()
     {
-        // ---- Dashboard UI (React) — both editions ----
+        // ---- Public: Dashboard UI (React) — no auth ----
         CROW_ROUTE(m_Server, "/")([this]() { return ServeDashboardIndex(); });
         CROW_ROUTE(m_Server, "/dash-assets/<path>")
         ([this](std::string const& path) { return ServeDashboardStatic(std::string("/dash-assets/") + path); });
 
-        // ---- GET /api/status ----
+        // ---- Public: GET /api/status — no auth (health checks, load balancers) ----
         CROW_ROUTE(m_Server, "/api/status")([this]() { return HandleStatusGet(); });
 
-        // ---- Workflow list + detail (read-only) ----
-        CROW_ROUTE(m_Server, "/api/workflows").methods("GET"_method)([this]() { return HandleWorkflowsListGet(); });
+        // ---- Admin: Workflow list + detail (read-only but exposes internal logic) ----
+        CROW_ROUTE(m_Server, "/api/workflows")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowsListGet();
+                });
 
         CROW_ROUTE(m_Server, "/api/workflows/<string>")
-            .methods("GET"_method)([this](std::string const& workflowId) { return HandleWorkflowGet(workflowId); });
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& workflowId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowGet(workflowId);
+                });
 
-        // ---- Run monitoring + control ----
+        // ---- Admin: Run monitoring + control ----
         CROW_ROUTE(m_Server, "/api/workflow-runs/active")
-            .methods("GET"_method)([this]() { return HandleWorkflowRunsActiveGet(); });
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunsActiveGet();
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/last")
-            .methods("GET"_method)([this]() { return HandleWorkflowRunsLastGet(); });
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunsLastGet();
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>")
-            .methods("GET"_method)([this](std::string const& runId) { return HandleWorkflowRunGet(runId); });
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunGet(runId);
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/cancel")
-            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunCancelPost(runId); });
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunCancelPost(runId);
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/pause")
-            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunPausePost(runId); });
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunPausePost(runId);
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/resume")
-            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunResumePost(runId); });
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunResumePost(runId);
+                });
 
         CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/stop")
-            .methods("POST"_method)([this](std::string const& runId) { return HandleWorkflowRunStopPost(runId); });
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunStopPost(runId);
+                });
 
-        // ---- Log viewer ----
+        // ---- Admin: Log viewer ----
         CROW_ROUTE(m_Server, "/api/log")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleLogGet(req); });
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleLogGet(req);
+                });
 
-        // ---- POST /api/task/<taskId>/heartbeat ----
+        // ---- Admin: POST /api/task/<taskId>/heartbeat ----
         CROW_ROUTE(m_Server, "/api/task/<string>/heartbeat")
             .methods("POST"_method)(
-                [](std::string const& taskId)
+                [this](crow::request const& req, std::string const& taskId)
                 {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+
                     JarvisAgent* app = App::g_App;
                     if (app == nullptr || app->GetWorkflowRuntimeManager() == nullptr)
                     {
@@ -944,11 +1248,15 @@ namespace AIAssistant
                     }
                 });
 
-        // ---- POST /api/shutdown ----
+        // ---- Admin: POST /api/shutdown ----
         CROW_ROUTE(m_Server, "/api/shutdown")
             .methods("POST"_method)(
-                []()
+                [this](crow::request const& req)
                 {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+
                     Core::g_Core->RequestQuit();
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                     Core::g_Core->PushEvent(event);
@@ -961,13 +1269,21 @@ namespace AIAssistant
 
     void WebServer::RegisterEngineRoutes()
     {
-        // ---- Authenticated external triggers ----
+        // ---- Webhook: has its own HMAC auth ----
         CROW_ROUTE(m_Server, "/api/webhook/<string>")
             .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
                                     { return HandleWebhookPost(req, workflowId); });
 
+        // ---- Admin: n8n integration ----
         CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleN8nStartPost(req); });
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleN8nStartPost(req);
+                });
     }
 
 #ifdef J9T_STUDIO
@@ -2501,6 +2817,19 @@ namespace AIAssistant
         }
 
         // ---- HMAC-SHA256 signature verification ----
+#ifndef J9T_STUDIO
+        // Engine mode: webhook secret is mandatory.
+        if (webhookTrigger->m_Secret.empty())
+        {
+            LOG_APP_WARN("WebServer::HandleWebhookPost: webhook secret not configured for workflow '{}' "
+                         "(required in Engine mode)",
+                         workflowId);
+            return MakeWorkflowJsonError(403, "secret_required",
+                                         "Webhook secret is required in Engine mode. "
+                                         "Configure a secret in the workflow trigger.",
+                                         kEndpoint, workflowId);
+        }
+#endif
         if (!webhookTrigger->m_Secret.empty())
         {
             std::string signatureHeader;
@@ -3267,6 +3596,7 @@ namespace AIAssistant
                 {
                     std::lock_guard<std::mutex> lock(m_Mutex);
                     m_Clients.erase(&conn);
+                    m_AuthenticatedClients.erase(&conn);
                     m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
                     ++m_WsTotalDisconnects;
                     LOG_APP_INFO("WebSocket client disconnected ({}, code {}) (remaining: {}, lifetime disconnects: {})",
@@ -3282,6 +3612,58 @@ namespace AIAssistant
                         auto doc = parser.iterate(json);
 
                         std::string type = std::string(doc["type"].get_string().value());
+
+#ifndef J9T_STUDIO
+                        // Engine mode: require auth before processing any other message.
+                        if (type == "auth")
+                        {
+                            auto tokenResult = doc["token"].get_string();
+                            if (tokenResult.error() == simdjson::SUCCESS)
+                            {
+                                std::string token = std::string(tokenResult.value());
+                                bool valid = false;
+                                if (!m_AdminToken.empty() && token.size() == m_AdminToken.size())
+                                {
+                                    unsigned char result = 0;
+                                    for (size_t i = 0; i < token.size(); ++i)
+                                    {
+                                        result |= static_cast<unsigned char>(token[i]) ^
+                                                   static_cast<unsigned char>(m_AdminToken[i]);
+                                    }
+                                    valid = (result == 0);
+                                }
+                                else if (m_AdminToken.empty())
+                                {
+                                    valid = true; // no token configured — auth disabled
+                                }
+
+                                if (valid)
+                                {
+                                    std::lock_guard<std::mutex> lock(m_Mutex);
+                                    m_AuthenticatedClients.insert(&conn);
+                                    conn.send_text(R"({"type":"auth","ok":true})");
+                                    LOG_APP_INFO("[ws] WebSocket client authenticated");
+                                }
+                                else
+                                {
+                                    conn.send_text(R"({"type":"auth","ok":false,"error":"invalid_token"})");
+                                    conn.close("Unauthorized", 4001);
+                                }
+                            }
+                            return;
+                        }
+
+                        // Check if this connection is authenticated.
+                        if (!m_AdminToken.empty())
+                        {
+                            std::lock_guard<std::mutex> lock(m_Mutex);
+                            if (m_AuthenticatedClients.find(&conn) == m_AuthenticatedClients.end())
+                            {
+                                conn.send_text(R"({"type":"auth","ok":false,"error":"not_authenticated"})");
+                                return;
+                            }
+                        }
+#endif
 
                         // Heartbeat from dashboard — no response needed, but must
                         // NOT return early so DrainPendingBroadcasts() at the end

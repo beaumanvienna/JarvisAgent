@@ -8,10 +8,7 @@ workspace "AIAssistant"
     startproject "jarvisAgent"
 
 -- ================================================================
--- TRACY TOGGLE (OFF by default)
--- Usage:
---   premake5 gmake2 --tracy
---   make config=release
+-- Options
 -- ================================================================
 newoption {
     trigger = "tracy",

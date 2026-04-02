@@ -31,6 +31,7 @@
 #include <mutex>
 #include <thread>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace AIAssistant
@@ -84,6 +85,26 @@ namespace AIAssistant
         void RegisterStudioRoutes();
         void RegisterAssistantWebSocket();
 #endif
+
+        // ---- Admin auth (Engine edition only) ----
+        // Returns empty string on success, error message on failure.
+        std::string CheckAdminAuth(crow::request const& req) const;
+        // Generate a cryptographically random hex token and persist it to config.json.
+        void GenerateAndPersistApiToken();
+        // Returns true if the request should be rate-limited (429).
+        bool IsRateLimited(crow::request const& req);
+        // Cached token for constant-time comparison (loaded from config at startup).
+        std::string m_AdminToken;
+
+        // ---- Rate limiting (Engine edition only) ----
+        struct TokenBucket
+        {
+            double m_Tokens{20.0};
+            std::chrono::steady_clock::time_point m_LastRefill{std::chrono::steady_clock::now()};
+        };
+        std::mutex m_RateLimitMutex;
+        std::unordered_map<std::string, TokenBucket> m_RateLimitBuckets;
+        std::chrono::steady_clock::time_point m_LastRateLimitCleanup{std::chrono::steady_clock::now()};
 
         // Static file serving — Dashboard (both editions)
         crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
@@ -173,6 +194,7 @@ namespace AIAssistant
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
+        std::unordered_set<crow::websocket::connection*> m_AuthenticatedClients; // Engine: WS clients that sent valid auth
         std::atomic<size_t> m_ClientCount{0}; // lock-free mirror of m_Clients.size() for EnqueueLogLine
 
         // WebSocket accumulation statistics (all guarded by m_Mutex)
