@@ -39,7 +39,7 @@ Last reviewed: 2026-03-23
 ## Remaining Work
 
 ### ~~Disclaimer~~ ✅
-- [x] ~~Add a disclaimer/about section somewhere in the UI~~ — Added to `SettingsModal.tsx` footer: logo + "JarvisAgent v0.8.2 · MIT License · © 2026 JC Technolabs · GitHub (link)".
+- [x] ~~Add a disclaimer/about section somewhere in the UI~~ — Added to `SettingsModal.tsx` footer: logo + "JarvisAgent v0.8.5 · MIT License · © 2026 JC Technolabs · GitHub (link)".
 
 ### ~~Unify look & feel~~ ✅
 - [x] ~~Dashboard updated to match editor: sans-serif font, `#0b0f14` background, `#e8eef5` text, blue glassmorphic buttons/panels/borders, blue active tab accent~~

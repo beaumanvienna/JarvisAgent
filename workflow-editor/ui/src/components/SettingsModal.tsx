@@ -283,7 +283,7 @@ export default function SettingsModal({
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <img src={logoUrl} alt="JarvisAgent" style={{ width: 36, height: 36, borderRadius: "50%", opacity: 0.85, flexShrink: 0 }} />
             <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-              <div style={{ fontWeight: 600 }}>JarvisAgent v0.8.2</div>
+              <div style={{ fontWeight: 600 }}>JarvisAgent v0.8.5</div>
               <div style={{ opacity: 0.55 }}>
                 MIT License &middot; &#169; 2026 JC Technolabs &middot;{" "}
                 <a

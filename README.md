@@ -27,7 +27,7 @@ Tasks can be AI calls, shell commands, **Python scripts** (executed by the embed
 <br>
 Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk.  <br>
 <br>
-**Current version: 0.8** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.<br>
+**Current version: 0.8.5** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.<br>
 <br>
 | Terminal UI | Dashboard | Workflow Editor |
 |:-----------:|:---------:|:---------------:|

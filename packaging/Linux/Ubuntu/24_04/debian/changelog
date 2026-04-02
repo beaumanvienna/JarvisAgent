@@ -1,3 +1,14 @@
+jarvisagent (0.8.5) noble; urgency=medium
+
+  * Dual-edition build: --engine flag produces jarvisAgent-engine,
+    default produces jarvisAgent-studio (no manual copy step)
+  * Separate objdirs per edition (bin-int/engine/ vs bin-int/studio/)
+  * Edition contract tests (test/test_edition_contract.py)
+  * All 10 packaging targets updated for new binary naming
+  * Frontend capability-gating via /api/status edition + capabilities
+
+ -- JC <beaumanvienna@gmail.com>  Tue, 01 Apr 2026 20:00:00 +0000
+
 jarvisagent (0.8.2) noble; urgency=medium
 
   * Use shared jarvisagent-launcher.sh instead of old jarvisagent.wrapper
