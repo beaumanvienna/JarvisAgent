@@ -314,6 +314,46 @@ body {
   font-weight: 700;
 }
 
+.log-tab-group {
+  display: flex;
+  gap: 0;
+}
+
+.log-tab-btn {
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #888;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.log-tab-btn:first-child {
+  border-radius: 8px 0 0 8px;
+}
+
+.log-tab-btn:last-child {
+  border-radius: 0 8px 8px 0;
+  border-left: none;
+}
+
+.log-tab-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.log-tab-btn-active {
+  background: rgba(120, 180, 255, 0.10);
+  border-color: rgba(120, 180, 255, 0.55);
+  color: rgba(160, 210, 255, 0.95);
+}
+
+.log-tab-btn-active + .log-tab-btn {
+  border-left-color: rgba(120, 180, 255, 0.55);
+}
+
 .log-stats {
   font-size: 0.7rem;
   color: #555;

@@ -641,11 +641,12 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 ---
 
-## Log Viewer — `GET /api/log` (Both), `analyze-last-run` (Studio only)
+## Log Viewer — `GET /api/log` (Both), `GET /api/log/security` (Both), `analyze-last-run` (Studio only)
 
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
-| GET | `/api/log` | Both | Fetch log lines (tail or delta mode). |
+| GET | `/api/log` | Both | Fetch application log lines (tail or delta mode). |
+| GET | `/api/log/security` | Both | Fetch security log lines (tail or delta mode). |
 | GET | `/api/log/analyze-last-run` | Studio | Log-based analysis of a workflow run (requires AI). |
 
 ### GET /api/log
@@ -670,6 +671,18 @@ Provide either `tail` or `offset`, not both. If `offset` is given, only new line
   "totalSize": 123456
 }
 ```
+
+### GET /api/log/security
+
+Reads the security audit log (`log/security.log`). Supports the same `tail` and `offset` query parameters as `GET /api/log`. The security log records authentication successes/failures, rate limit events, webhook accept/reject decisions, lockout triggers, shutdown requests, and run control actions — all with IP addresses and timestamps.
+
+The security log is a rotating file (10 MB x 5 files), so older entries are automatically pruned. The dashboard Log Viewer exposes this via a "Security" tab with 3-second delta polling.
+
+**Query parameters:** Same as `GET /api/log` (see above).
+
+**Response (200):** Same format as `GET /api/log`.
+
+**Response (404):** If `log/security.log` does not exist yet (no security events have been logged).
 
 ### GET /api/log/analyze-last-run
 
@@ -732,15 +745,27 @@ Triggers the same shutdown sequence as pressing `q` or Ctrl+C: global shutdown s
 
 ## Security considerations — Engine edition
 
-j9t currently has **no general authentication layer**. The following endpoints are available in Engine mode and are security-sensitive when exposed publicly. Protect them at the **deployment level** (firewall, reverse proxy with IP allowlist, or VPN):
+All admin endpoints in Engine mode require **Bearer token authentication** (`Authorization: Bearer <token>`). The token is auto-generated on first run and stored in `engine_api_token.txt` (permissions `0600`).
+
+**Security features:**
+- **Rate limiting:** 100 req/min per IP, burst of 20 (token bucket)
+- **Failed auth lockout:** 10 failures in 5 minutes = 15-minute IP lockout (403 + `Retry-After: 900`)
+- **Token expiration:** Tokens older than 90 days are auto-rotated; 7-day expiry warning at startup
+- **Audit logging:** All auth events logged to `log/security.log` (viewable via `GET /api/log/security`)
+- **Built-in TLS:** Optional `TlsCert`/`TlsKey` in config.json serves HTTPS on port 8443
+- **WebSocket auth:** First message must be `{"type":"auth","token":"..."}` (constant-time comparison)
+- **Webhook HMAC:** Per-workflow HMAC-SHA256 signature verification (mandatory in Engine mode)
+
+**Data-sensitive endpoints** (protected by auth but contain sensitive information when exposed):
 
 | Endpoint | Risk |
 |----------|------|
-| `POST /api/shutdown` | Anyone who can reach it can kill the process |
 | `GET /api/log` | Can leak prompt content, output data, file paths, and provider details |
-| `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop` | Unauthenticated run-control; an attacker can disrupt running workflows |
+| `GET /api/log/security` | Exposes IP addresses, auth outcomes, and security event history |
+| `POST /api/shutdown` | Shuts down the server process |
+| `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop` | Run-control: can disrupt running workflows |
 
-These are accepted trade-offs for the first edition split.
+Deploy behind a reverse proxy with IP allowlists for additional defense-in-depth.
 
 ---
 

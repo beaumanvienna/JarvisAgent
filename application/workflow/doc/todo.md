@@ -342,13 +342,37 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 
 ---
 
-## Security audit logging
+## ~~Security audit logging~~ ✅
 
-- [ ] Add `security` spdlog logger writing to `log/security.log` (separate from application log)
-- [ ] Add `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN` macros (same pattern as `LOG_APP_*` / `LOG_CORE_*`)
-- [ ] Log at each `CheckAdminAuth` call site: IP, endpoint, outcome (success / missing token / wrong token)
-- [ ] Log at rate limit trigger: IP, endpoint, request count
-- [ ] Log at webhook handler: IP, workflow ID, outcome (accepted / rejected with reason)
-- [ ] Log at shutdown endpoint: IP
-- [ ] Log at run control endpoints (cancel/pause/resume/stop): IP, run ID
-- [ ] Ensure security log is rotated (spdlog rotating file sink, e.g. 10 MB x 5 files)
+- [x] ~~Add `security` spdlog logger writing to `log/security.log` (separate from application log)~~ ✅ `Security` logger in `log.cpp` with rotating file sink (10 MB x 5) + ostream sink (TUI/console)
+- [x] ~~Add `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN` macros (same pattern as `LOG_APP_*` / `LOG_CORE_*`)~~ ✅ in `engine.h`, no-op in `DISTRIBUTION_BUILD`
+- [x] ~~Log at each `CheckAdminAuth` call site: IP, endpoint, outcome (success / missing token / wrong token)~~ ✅
+- [x] ~~Log at rate limit trigger: IP, endpoint, request count~~ ✅
+- [x] ~~Log at webhook handler: IP, workflow ID, outcome (accepted / rejected with reason)~~ ✅
+- [x] ~~Log at shutdown endpoint: IP~~ ✅
+- [x] ~~Log at run control endpoints (cancel/pause/resume/stop): IP, run ID~~ ✅
+- [x] ~~Ensure security log is rotated (spdlog rotating file sink, e.g. 10 MB x 5 files)~~ ✅
+
+## ~~Built-in TLS (HTTPS)~~ ✅
+
+- [x] ~~Add `TlsCert` and `TlsKey` string fields to `EngineConfig` + `configParser.cpp`~~ ✅
+- [x] ~~In `WebServer::Start()`: if both paths are set and files exist, call `m_Server.ssl_file(cert, key)` and bind to port 8443~~ ✅ `CROW_ENABLE_SSL` defined globally in `premake5.lua`
+- [x] ~~If only one is set or files don't exist, log error and refuse to start (don't silently fall back to HTTP)~~ ✅
+- [x] ~~Update `HandleStatusGet` to include `"tls": true/false` so dashboard and tests can detect it~~ ✅
+
+## ~~Token expiration and rotation~~ ✅
+
+- [x] ~~Extend `engine_api_token.txt` format: first line = token, second line = `issued_at=<ISO-8601>`~~ ✅ backward-compatible: legacy files get stamped on load
+- [x] ~~On `GenerateAndPersistApiToken`: write both lines~~ ✅
+- [x] ~~On token load in `RegisterRoutes`: parse `issued_at`, compute age~~ ✅
+- [x] ~~In `CheckAdminAuth`: if token age > max (default 90 days), reject with 403 + `"token_expired"` message~~ ✅ auto-rotates on expiry
+- [x] ~~Log warning at startup if token expires within 7 days~~ ✅
+- [x] ~~On expiry, auto-generate new token and log to stdout~~ ✅
+
+## ~~Failed auth lockout~~ ✅
+
+- [x] ~~Add `m_AuthFailures` map: IP → {count, first_failure_time} (guarded by `m_RateLimitMutex`)~~ ✅ `AuthFailureRecord` struct
+- [x] ~~In `CheckAdminAuth`: on failure, increment count for IP; if count >= 10 within 5 minutes, return `"locked_out"`~~ ✅ lockout checked before rate limiting
+- [x] ~~`MakeAuthErrorResponse`: handle `"locked_out"` → 403 with lockout message and `Retry-After: 900`~~ ✅
+- [x] ~~Auto-clear lockout entries after 15 minutes~~ ✅ piggybacks on rate limit cleanup cycle
+- [x] ~~Log lockout events to security log~~ ✅

@@ -19,6 +19,7 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <filesystem>
 #include <iostream>
 #include <vector>
 
@@ -26,6 +27,7 @@
 
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 
 namespace AIAssistant
 {
@@ -66,6 +68,27 @@ namespace AIAssistant
             spdlog::register_logger(m_AppLogger);
             m_AppLogger->set_level(spdlog::level::trace);
             m_AppLogger->flush_on(spdlog::level::trace);
+        }
+
+        // ============================================================
+        // SECURITY LOGGER
+        // Writes to both the ostream (TUI/console) and a dedicated
+        // rotating file: log/security.log (10 MB x 5 files).
+        // ============================================================
+        std::filesystem::create_directories("log");
+
+        std::vector<spdlog::sink_ptr> securitySinks;
+        securitySinks.emplace_back(ostreamSink);
+        securitySinks.emplace_back(
+            std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log/security.log", 10 * 1024 * 1024, 5));
+        securitySinks.back()->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [Security] [%l] %v");
+
+        m_SecurityLogger = std::make_shared<spdlog::logger>("Security", begin(securitySinks), end(securitySinks));
+        if (m_SecurityLogger)
+        {
+            spdlog::register_logger(m_SecurityLogger);
+            m_SecurityLogger->set_level(spdlog::level::trace);
+            m_SecurityLogger->flush_on(spdlog::level::trace);
         }
     }
 } // namespace AIAssistant

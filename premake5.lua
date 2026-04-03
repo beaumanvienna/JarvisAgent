@@ -43,6 +43,7 @@ project "jarvisAgent"
     {
         "JARVIS_AGENT_VERSION=\"0.8.5\"",
         "CROW_ENFORCE_WS_SPEC",
+        "CROW_ENABLE_SSL",
         "PDC_WIDE"
     }
 

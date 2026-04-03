@@ -451,19 +451,19 @@ defense-in-depth, not strictly required.
 
 ---
 
-### 12. Security audit logging
+### ~~12. Security audit logging~~ ✅
 
-Dedicated security log for all auth-related events. Required for incident response and compliance sign-off.
+Dedicated security log for all auth-related events. `Security` spdlog logger writing to `log/security.log` (rotating, 10 MB x 5 files) + ostream sink for TUI/console. `LOG_SECURITY_INFO`/`LOG_SECURITY_WARN` macros in `engine.h`. Logged events: auth success/failure (IP, endpoint, reason), rate limit triggered, webhook accepted/rejected (IP, workflowId, reason), shutdown requested, run control actions (cancel/pause/resume/stop with runId). All events include IP address and timestamp.
 
-Events to log (all with IP, timestamp, endpoint):
-- Auth success / failure (wrong token, missing token)
-- Rate limit triggered
-- Webhook accepted / rejected (bad HMAC, missing secret)
-- Shutdown requested
-- Run control actions (cancel, pause, resume, stop) with run ID
+### ~~13. Built-in TLS (HTTPS)~~ ✅
 
-Backend: new spdlog category, `LOG_SECURITY_*` macro, log calls at each auth check point in `webServer.cpp`. Separate log file (`log/security.log`).
-Frontend: security events visible in dashboard log viewer with `[security]` filter (Engine mode).
+`CROW_ENABLE_SSL` defined in `premake5.lua` (OpenSSL already linked). `TlsCert`/`TlsKey` fields in `EngineConfig` + `configParser.cpp`. When both set and files exist, `m_Server.ssl_file(cert, key)` serves HTTPS on port 8443. Missing/invalid files refuse to start. `GET /api/status` includes `"tls": true/false`. Both editions supported.
 
-See `doc/cyber security.md` for the full threat model.
+### ~~14. Token expiration and rotation~~ ✅
+
+`engine_api_token.txt` extended: line 1 = token, line 2 = `issued_at=<ISO-8601>`. Backward compatible (legacy files get timestamped on load). `CheckAdminAuth` rejects tokens > 90 days old with `"token_expired"` (403). Auto-generates new token on expiry. Startup warning logged if token expires within 7 days.
+
+### ~~15. Failed auth lockout~~ ✅
+
+`AuthFailureRecord` struct + `m_AuthFailures` map (IP → {count, first_failure}), guarded by `m_RateLimitMutex`. After 10 failed auth attempts within 5 minutes, IP locked out for 15 minutes (403 + `Retry-After: 900`). Lockout checked before rate limiting. Successful auth clears failure count. Cleanup piggybacks on rate limit cleanup cycle. Lockout events logged to security log.
 

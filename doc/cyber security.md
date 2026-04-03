@@ -35,6 +35,10 @@ JarvisAgent ships as two editions with different security profiles. This documen
 | **Network exposure** | Localhost only | LAN / internet |
 | **Authentication** | None | Bearer token (admin), HMAC-SHA256 (webhooks) |
 | **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
+| **Failed auth lockout** | None | 10 failures / 5 min → 15-min IP lockout |
+| **Token expiration** | N/A | 90-day max age, auto-rotation on expiry |
+| **Audit logging** | None | `log/security.log` (rotating, 10 MB x 5) |
+| **Built-in TLS** | Optional | Optional (`TlsCert`/`TlsKey` in config.json) |
 | **Webhook secrets** | Optional | Mandatory |
 | **Workflow CRUD** | Open | Not available (compile-time removed) |
 | **AI assistant** | Open | Not available (compile-time removed) |
@@ -74,30 +78,33 @@ Studio is designed for **single-developer use on a local machine**. The operator
 ### Safety measures
 
 - **Bearer token authentication.** All admin endpoints (workflow monitoring, run control, log viewer, shutdown) require an `Authorization: Bearer <token>` header. The token is a 256-bit cryptographically random hex string, auto-generated on first start and stored in a dedicated file (`engine_api_token.txt`) with restrictive file permissions (`600` — owner read/write only). The token is kept separate from `config.json` to prevent accidental commits. Token comparison uses constant-time logic to prevent timing attacks.
+- **Token expiration and auto-rotation.** Each token carries an `issued_at` timestamp (stored as the second line in `engine_api_token.txt`). Tokens older than 90 days are rejected with HTTP 403 (`token_expired`). On expiry, a new token is auto-generated, persisted, and logged to stdout. A startup warning is logged 7 days before expiry. Legacy token files (without `issued_at`) are automatically upgraded on load.
+- **Failed auth lockout.** After 10 failed authentication attempts from the same IP within 5 minutes, that IP is blocked for 15 minutes. Locked-out requests receive HTTP 403 with a `Retry-After: 900` header. The lockout is checked before rate limiting (locked IPs don't consume rate-limit tokens). Successful authentication clears the failure count. Lockout entries are cleaned up automatically.
 - **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. The caller must include an `X-Webhook-Signature: sha256=<hex>` header computed over the raw request body. Signature verification uses constant-time comparison. In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected with HTTP 403.
 - **WebSocket authentication.** WebSocket clients must send `{"type":"auth","token":"<token>"}` as the first message. Unauthenticated connections cannot receive data or send commands.
 - **Per-IP rate limiting.** Token bucket algorithm (100 requests/minute per IP, burst of 20) protects against brute-force token guessing and request flooding. Rate-limited requests receive HTTP 429 with a `Retry-After` header.
+- **Security audit logging.** All auth-related events are logged to a dedicated rotating log file (`log/security.log`, 10 MB x 5 files) as well as the application log (TUI/console). Logged events include: auth success/failure with IP and endpoint, rate limit triggers, lockout triggers, webhook accept/reject with workflow ID, shutdown requests, and run control actions (cancel/pause/resume/stop) with run ID. The security log is accessible via `GET /api/log/security` (admin-auth required) and visible in the dashboard Log Viewer's "Security" tab with 3-second polling. Log macros: `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN`.
+- **Built-in TLS (HTTPS).** Optional native TLS via Crow's SSL support. Set `"TlsCert"` and `"TlsKey"` in `config.json` to point to PEM certificate and key files. When configured, j9t serves HTTPS on port 8443 instead of HTTP on 8080. If only one field is set or the files don't exist, j9t refuses to start (no silent fallback). `GET /api/status` includes `"tls": true/false`. This eliminates the cleartext last-mile between a reverse proxy and j9t, and can replace the reverse proxy entirely for simpler deployments.
 - **Reduced attack surface.** Studio-only modules (workflow editor, AI assistant, AI JCWF generation, settings API, script management) are excluded at compile time. The Engine binary is physically smaller and exposes fewer endpoints.
 - **Public endpoints are read-only and non-sensitive.** Only `GET /api/status` (health check) and the dashboard HTML shell (`GET /`, `/dash-assets/*`) are served without authentication.
 
 ### Remaining threats
 
-- **No TLS.** Engine serves plain HTTP. Deploy behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik, cloud load balancer) for encrypted transport. Without TLS, bearer tokens and webhook secrets are transmitted in cleartext.
 - **No per-user access control.** There is a single admin token. All token holders have identical privileges. There is no role separation (e.g. read-only monitoring vs full control).
-- **Token is static.** The admin token does not expire or rotate automatically. If leaked, it remains valid until the operator manually replaces `engine_api_token.txt` and restarts the server.
-- **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. Access is token-protected but the log content itself is not redacted.
+- **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. `GET /api/log/security` exposes IP addresses and auth event history. Both are token-protected but log content is not redacted.
 - **Unauthenticated shutdown via process signal.** The bearer token protects the `POST /api/shutdown` endpoint, but an attacker with OS-level access can still kill the process via signals (SIGTERM, SIGKILL). This is outside j9t's control.
-- **Denial of service.** Rate limiting mitigates request flooding but does not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a firewall or cloud-level DDoS protection for internet-facing deployments.
+- **Denial of service.** Rate limiting and auth lockout mitigate request flooding and brute-force attacks, but do not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a firewall or cloud-level DDoS protection for internet-facing deployments.
 
 ### Admin responsibility
 
 The admin (operator) is responsible for:
 
-- **TLS termination.** Deploy Engine behind a reverse proxy with TLS. Never expose plain HTTP to the internet.
-- **Token security.** Treat the admin token like a password. The token is stored in `engine_api_token.txt` (gitignored, file permissions `600`), not in `config.json`. Rotate it periodically by replacing the file contents and restarting.
+- **TLS configuration.** Either enable built-in TLS (`TlsCert`/`TlsKey` in config.json → HTTPS on port 8443) or deploy behind a TLS-terminating reverse proxy. Never expose plain HTTP to the internet.
+- **Token security.** Treat the admin token like a password. The token is stored in `engine_api_token.txt` (gitignored, file permissions `600`), not in `config.json`. Tokens auto-expire after 90 days and auto-rotate, but can also be manually rotated by deleting the file and restarting.
 - **Webhook secret management.** Configure a strong, unique secret for every webhook trigger. Share secrets with integration partners over a secure channel.
-- **Network segmentation.** Restrict access to the Engine port (default 8080) using firewall rules. Only the reverse proxy, webhook callers, and admin workstations should be able to reach it.
-- **Log access.** Logs may contain sensitive data. Restrict who has the admin token and consider log rotation / redaction for compliance-sensitive environments.
+- **Network segmentation.** Restrict access to the Engine port (default 8080, or 8443 with TLS) using firewall rules. Only the reverse proxy, webhook callers, and admin workstations should be able to reach it.
+- **Security log monitoring.** Review `log/security.log` regularly or forward it to a SIEM. The security log records all auth decisions, lockouts, webhook events, and run control actions. The dashboard's "Security" tab provides a quick view.
+- **Log access.** Application and security logs may contain sensitive data (prompts, IP addresses, file paths). Restrict who has the admin token and consider log rotation / redaction for compliance-sensitive environments. Security log rotation is automatic (10 MB x 5 files).
 - **Keeping j9t up to date.** Apply updates promptly to pick up security fixes.
 
 ### End user responsibility
@@ -140,21 +147,32 @@ When j9t and the AI model both run on the same private network (or the same mach
 
 ## Are Credentials Sent Unencrypted?
 
-**j9t itself does not provide TLS (HTTPS).** All communication between the browser/client and j9t travels over plain HTTP. This means:
+j9t supports **built-in TLS (HTTPS)** via the `TlsCert` and `TlsKey` fields in `config.json`. When configured, j9t serves HTTPS on port 8443 and all traffic is encrypted. Without TLS enabled, all communication between the browser/client and j9t travels over plain HTTP.
 
 | What is transmitted | Encrypted in transit? | Risk |
 |--------------------|-----------------------|------|
-| Admin bearer token (`Authorization: Bearer ...`) | **No** — unless a reverse proxy adds TLS | An attacker on the same network can intercept the token |
-| Webhook HMAC signatures (`X-Webhook-Signature`) | **No** — unless a reverse proxy adds TLS | The signature itself is not secret (it proves authenticity, not confidentiality), but the request body is visible |
+| Admin bearer token (`Authorization: Bearer ...`) | **Yes** with built-in TLS or reverse proxy; **No** otherwise | An attacker on the same network can intercept the token if unencrypted |
+| Webhook HMAC signatures (`X-Webhook-Signature`) | **Yes** with built-in TLS or reverse proxy; **No** otherwise | The signature itself is not secret (it proves authenticity, not confidentiality), but the request body is visible if unencrypted |
 | AI API keys (sent to OpenAI, Google, etc.) | **Yes** — j9t connects to cloud providers via HTTPS | These never travel unencrypted |
-| Master password for `keys.json.enc` | **No** — sent from browser to j9t over HTTP | Same network interception risk as the bearer token |
-| Workflow data, prompts, AI responses | **No** — unless a reverse proxy adds TLS | Visible to anyone who can observe network traffic |
+| Master password for `keys.json.enc` | **Yes** with built-in TLS or reverse proxy; **No** otherwise | Same network interception risk as the bearer token |
+| Workflow data, prompts, AI responses | **Yes** with built-in TLS or reverse proxy; **No** otherwise | Visible to anyone who can observe network traffic if unencrypted |
 
 **For Studio (localhost):** This is not a concern. Traffic stays on the local machine and never crosses a network.
 
-**For Engine (production):** This is a real risk. The admin bearer token and all API traffic are visible to anyone who can observe the network path between the client and the server. The solution is to place a **TLS-terminating reverse proxy** in front of j9t. A reverse proxy is a server (such as nginx, Caddy, Traefik, or a cloud load balancer) that sits between the internet and j9t. It receives incoming connections from clients, handles TLS encryption (the "HTTPS" part — scrambling all traffic so eavesdroppers see only gibberish), and then forwards the decrypted request to j9t over a short localhost connection that never leaves the machine. This is standard practice for web services and adds no complexity to j9t itself.
+**For Engine (production):** Enable built-in TLS by adding certificate and key paths to `config.json`:
 
-**Bottom line:** Deploy Engine behind a reverse proxy with TLS. Without it, the admin token travels in cleartext and can be intercepted.
+```json
+{
+  "TlsCert": "/path/to/cert.pem",
+  "TlsKey": "/path/to/key.pem"
+}
+```
+
+j9t will serve HTTPS on port 8443. If either file is missing or only one field is set, j9t refuses to start (no silent fallback to HTTP).
+
+Alternatively, deploy behind a **TLS-terminating reverse proxy** (nginx, Caddy, Traefik, or a cloud load balancer) that handles encryption and forwards decrypted requests to j9t over a short localhost connection.
+
+**Bottom line:** Either enable built-in TLS or deploy behind a reverse proxy. Without TLS, the admin token travels in cleartext and can be intercepted.
 
 ---
 
@@ -178,7 +196,7 @@ The mounted `~/JarvisAgent/` directory contains only j9t working data:
 |--------|----------|
 | `workflows/` | Workflow definitions (`.jcwf` files) and supporting data files (e.g. repair manuals, CSV files) |
 | `queue/` | Runtime task inputs and AI outputs |
-| `log/` | Application logs |
+| `log/` | Application logs (`log.txt`) and security audit logs (`security.log`) |
 | `config.json` | Server configuration (AI provider URLs, thread count — no credentials) |
 | `engine_api_token.txt` | Admin bearer token (auto-generated, file permissions `600`) |
 | `keys.json.enc` | Encrypted AI API keys |
@@ -222,11 +240,14 @@ Additional benefits for Studio in Docker:
 
 | Concern | Studio | Engine |
 |---------|--------|--------|
-| Who should run it | Developer, on localhost | Ops team, behind reverse proxy + TLS |
-| Authentication | None | Bearer token + HMAC webhooks |
-| Rate limiting | None | Per-IP token bucket |
+| Who should run it | Developer, on localhost | Ops team, with TLS enabled or behind reverse proxy |
+| Authentication | None | Bearer token + HMAC webhooks + WebSocket auth |
+| Rate limiting | None | Per-IP token bucket (100 req/min, burst 20) |
+| Auth lockout | None | 10 failures / 5 min → 15-min IP lockout |
+| Token lifecycle | N/A | 90-day expiry, auto-rotation, 7-day warning |
+| Audit logging | None | `log/security.log` (rotating, 10 MB x 5) + dashboard viewer |
 | AI script execution | Yes (review before accept) | No (AI tooling removed at compile time) |
 | AI assistant | Yes (approval required for mutations) | No (removed at compile time) |
-| TLS | Not needed (localhost) | Required (deploy behind reverse proxy) |
-| Log sensitivity | Developer sees own logs | Token-protected, consider redaction |
+| TLS | Optional (built-in or not needed on localhost) | Built-in (`TlsCert`/`TlsKey`) or reverse proxy |
+| Log sensitivity | Developer sees own logs | Token-protected; security log exposes IPs and auth events |
 | Cloud AI safety | Provider-managed content filtering, rate limits, and data policies apply to all AI calls |

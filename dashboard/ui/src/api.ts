@@ -44,6 +44,17 @@ export async function fetchLog(opts: { tail?: number; offset?: number }): Promis
   return res.json();
 }
 
+export async function fetchSecurityLog(opts: { tail?: number; offset?: number }): Promise<LogResponse> {
+  const params = new URLSearchParams();
+  if (opts.offset !== undefined) {
+    params.set("offset", String(opts.offset));
+  } else if (opts.tail !== undefined) {
+    params.set("tail", String(opts.tail));
+  }
+  const res = await authFetch(`${BASE}/api/log/security?${params.toString()}`);
+  return res.json();
+}
+
 export async function fetchKeysStatus(): Promise<KeysStatusResponse> {
   const res = await authFetch(`${BASE}/api/settings/keys/status`);
   return res.json();

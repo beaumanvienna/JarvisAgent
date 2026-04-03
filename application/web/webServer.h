@@ -91,10 +91,14 @@ namespace AIAssistant
         std::string CheckAdminAuth(crow::request const& req) const;
         // Generate a cryptographically random hex token and persist it to config.json.
         void GenerateAndPersistApiToken();
+        // Record a failed auth attempt for lockout tracking.
+        void RecordAuthFailure(std::string const& ip);
         // Returns true if the request should be rate-limited (429).
         bool IsRateLimited(crow::request const& req);
         // Cached token for constant-time comparison (loaded from config at startup).
         std::string m_AdminToken;
+        // When the current token was issued (for expiry checks).
+        std::chrono::system_clock::time_point m_TokenIssuedAt{};
 
         // ---- Rate limiting (Engine edition only) ----
         struct TokenBucket
@@ -105,6 +109,14 @@ namespace AIAssistant
         std::mutex m_RateLimitMutex;
         std::unordered_map<std::string, TokenBucket> m_RateLimitBuckets;
         std::chrono::steady_clock::time_point m_LastRateLimitCleanup{std::chrono::steady_clock::now()};
+
+        // ---- Failed auth lockout (Engine edition only) ----
+        struct AuthFailureRecord
+        {
+            size_t m_Count{0};
+            std::chrono::steady_clock::time_point m_FirstFailure{std::chrono::steady_clock::now()};
+        };
+        std::unordered_map<std::string, AuthFailureRecord> m_AuthFailures; // guarded by m_RateLimitMutex
 
         // Static file serving — Dashboard (both editions)
         crow::response ServeStaticFile(std::filesystem::path const& filePath) const;
@@ -124,7 +136,9 @@ namespace AIAssistant
         crow::response HandleWorkflowRunStopPost(std::string const& runId);
         crow::response HandleN8nStartPost(crow::request const& req);
         crow::response HandleWebhookPost(crow::request const& req, std::string const& workflowId);
+        crow::response ReadLogFile(crow::request const& req, std::string const& logPath);
         crow::response HandleLogGet(crow::request const& req);
+        crow::response HandleSecurityLogGet(crow::request const& req);
 
 #ifdef J9T_STUDIO
         // ---- Studio handlers (Studio edition only) ----
@@ -190,6 +204,7 @@ namespace AIAssistant
     private:
         crow::SimpleApp m_Server;
         std::atomic<bool> m_Running{false};
+        bool m_TlsEnabled{false};
         std::thread m_ServerThread;
         std::mutex m_Mutex;
 

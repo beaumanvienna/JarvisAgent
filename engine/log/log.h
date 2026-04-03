@@ -37,8 +37,11 @@ namespace AIAssistant
 
         spdlog::logger& GetAppLogger() { return *m_AppLogger; }
 
+        spdlog::logger& GetSecurityLogger() { return *m_SecurityLogger; }
+
     private:
         std::shared_ptr<spdlog::logger> m_Logger;
         std::shared_ptr<spdlog::logger> m_AppLogger;
+        std::shared_ptr<spdlog::logger> m_SecurityLogger;
     };
 } // namespace AIAssistant

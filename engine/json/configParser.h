@@ -72,6 +72,8 @@ namespace AIAssistant
             size_t m_JcwfBatchSize{10};
             int m_JcwfAiInterfaceIndex{-1}; // -1 = use global default (m_ApiIndex)
             std::string m_KeysFilePath{"keys.json.enc"};
+            std::string m_TlsCert;
+            std::string m_TlsKey;
             bool m_UseBashOnWindows{false};
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
@@ -102,6 +104,8 @@ namespace AIAssistant
             JcwfBatchSize,
             JcwfAiInterface,
             UseBashOnWindows,
+            TlsCert,
+            TlsKey,
             NumConfigFields
         };
 
@@ -128,7 +132,9 @@ namespace AIAssistant
                 "InterfaceKeyName",     //
                 "JcwfBatchSize",        //
                 "JcwfAiInterface",      //
-                "UseBashOnWindows"      //
+                "UseBashOnWindows",     //
+                "TlsCert",              //
+                "TlsKey"                //
         };
 
     public:

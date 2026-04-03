@@ -20,9 +20,11 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <algorithm>
 #include <chrono>
+#include <iomanip>
 #include <sstream>
 #include <string_view>
 #include <optional>
@@ -140,7 +142,16 @@ namespace AIAssistant
         {
             crow::json::wvalue body;
             body["ok"] = false;
-            if (error == "rate_limited")
+            if (error == "locked_out")
+            {
+                body["error"] = "locked_out";
+                body["message"] = "Too many failed authentication attempts. Try again in 15 minutes.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
+                resp.add_header("Retry-After", "900");
+                return resp;
+            }
+            else if (error == "rate_limited")
             {
                 body["error"] = "rate_limited";
                 body["message"] = "Too many requests. Try again later.";
@@ -156,6 +167,14 @@ namespace AIAssistant
                 crow::response resp(401, body.dump());
                 SetJsonHeaders(resp);
                 resp.add_header("WWW-Authenticate", "Bearer");
+                return resp;
+            }
+            else if (error == "token_expired")
+            {
+                body["error"] = "token_expired";
+                body["message"] = "API token has expired. A new token has been generated — check server logs.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
                 return resp;
             }
             else
@@ -902,6 +921,16 @@ namespace AIAssistant
     // Admin authentication (Engine edition only)
     // =========================================================================
 
+    // Token file and expiry constants.
+    static constexpr char kTokenFileName[] = "engine_api_token.txt";
+    static constexpr int kTokenMaxAgeDays = 90;
+    static constexpr int kTokenExpiryWarningDays = 7;
+
+    // Failed auth lockout constants.
+    static constexpr size_t kMaxAuthFailures = 10;
+    static constexpr auto kAuthFailureWindow = std::chrono::minutes(5);
+    static constexpr auto kLockoutDuration = std::chrono::minutes(15);
+
     std::string WebServer::CheckAdminAuth(crow::request const& req) const
     {
 #ifdef J9T_STUDIO
@@ -909,9 +938,29 @@ namespace AIAssistant
         (void)req;
         return {};
 #else
+        std::string const& ip = req.remote_ip_address;
+        std::string const& endpoint = req.url;
+
+        // ---- Lockout check (before rate limiting — locked IPs should not consume tokens) ----
+        {
+            auto* self = const_cast<WebServer*>(this);
+            std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
+            auto it = self->m_AuthFailures.find(ip);
+            if (it != self->m_AuthFailures.end())
+            {
+                auto const elapsed = std::chrono::steady_clock::now() - it->second.m_FirstFailure;
+                if (it->second.m_Count >= kMaxAuthFailures && elapsed < kLockoutDuration)
+                {
+                    LOG_SECURITY_WARN("[security] locked_out ip={} endpoint={}", ip, endpoint);
+                    return "locked_out";
+                }
+            }
+        }
+
         // Rate limit check (cast away const — rate limit state is mutable).
         if (const_cast<WebServer*>(this)->IsRateLimited(req))
         {
+            LOG_SECURITY_WARN("[security] rate_limited ip={} endpoint={}", ip, endpoint);
             return "rate_limited";
         }
 
@@ -924,6 +973,8 @@ namespace AIAssistant
         std::string const& authHeader = req.get_header_value("Authorization");
         if (authHeader.empty())
         {
+            LOG_SECURITY_WARN("[security] auth_failure reason=missing_token ip={} endpoint={}", ip, endpoint);
+            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
             return "missing";
         }
 
@@ -931,6 +982,8 @@ namespace AIAssistant
         if (authHeader.size() <= kBearerPrefix.size() ||
             authHeader.compare(0, kBearerPrefix.size(), kBearerPrefix) != 0)
         {
+            LOG_SECURITY_WARN("[security] auth_failure reason=malformed_header ip={} endpoint={}", ip, endpoint);
+            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
             return "malformed";
         }
 
@@ -939,6 +992,8 @@ namespace AIAssistant
         // Constant-time comparison to prevent timing attacks.
         if (providedToken.size() != m_AdminToken.size())
         {
+            LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
+            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
             return "forbidden";
         }
         unsigned char result = 0;
@@ -949,11 +1004,57 @@ namespace AIAssistant
         }
         if (result != 0)
         {
+            LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
+            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
             return "forbidden";
         }
 
+        // Check token age — reject if expired, auto-rotate.
+        if (m_TokenIssuedAt.time_since_epoch().count() > 0)
+        {
+            auto const age = std::chrono::system_clock::now() - m_TokenIssuedAt;
+            auto const ageDays = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
+            if (ageDays > kTokenMaxAgeDays)
+            {
+                LOG_SECURITY_WARN("[security] token_expired ip={} endpoint={} age_days={}", ip, endpoint, ageDays);
+                const_cast<WebServer*>(this)->GenerateAndPersistApiToken();
+                return "token_expired";
+            }
+        }
+
+        // Successful auth — clear any failure record for this IP.
+        {
+            auto* self = const_cast<WebServer*>(this);
+            std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
+            self->m_AuthFailures.erase(ip);
+        }
+
+        LOG_SECURITY_INFO("[security] auth_success ip={} endpoint={}", ip, endpoint);
         return {};
 #endif
+    }
+
+    void WebServer::RecordAuthFailure(std::string const& ip)
+    {
+        auto const now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(m_RateLimitMutex);
+
+        auto& record = m_AuthFailures[ip];
+        if (record.m_Count == 0 || (now - record.m_FirstFailure) > kAuthFailureWindow)
+        {
+            // First failure or window expired — reset.
+            record.m_Count = 1;
+            record.m_FirstFailure = now;
+        }
+        else
+        {
+            record.m_Count++;
+        }
+
+        if (record.m_Count == kMaxAuthFailures)
+        {
+            LOG_SECURITY_WARN("[security] lockout_triggered ip={} failures={}", ip, record.m_Count);
+        }
     }
 
     bool WebServer::IsRateLimited(crow::request const& req)
@@ -991,6 +1092,20 @@ namespace AIAssistant
                     ++it;
                 }
             }
+            // Also evict expired lockout entries (older than 15 minutes).
+            for (auto it = m_AuthFailures.begin(); it != m_AuthFailures.end();)
+            {
+                auto const age = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.m_FirstFailure);
+                if (age > kLockoutDuration)
+                {
+                    it = m_AuthFailures.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+
             m_LastRateLimitCleanup = now;
         }
 
@@ -1009,7 +1124,41 @@ namespace AIAssistant
 #endif
     }
 
-    static constexpr char kTokenFileName[] = "engine_api_token.txt";
+    // Format a system_clock::time_point as ISO-8601 UTC string.
+    static std::string FormatIssuedAt(std::chrono::system_clock::time_point tp)
+    {
+        std::time_t t = std::chrono::system_clock::to_time_t(tp);
+        std::tm utc{};
+#ifdef _WIN32
+        gmtime_s(&utc, &t);
+#else
+        gmtime_r(&t, &utc);
+#endif
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc);
+        return buf;
+    }
+
+#ifndef J9T_STUDIO
+    // Parse an ISO-8601 UTC string back to system_clock::time_point.
+    // Returns epoch (time_t=0) on failure.
+    static std::chrono::system_clock::time_point ParseIssuedAt(std::string const& str)
+    {
+        std::tm tm{};
+        std::istringstream ss(str);
+        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        if (ss.fail())
+        {
+            return {};
+        }
+#ifdef _WIN32
+        std::time_t t = _mkgmtime(&tm);
+#else
+        std::time_t t = timegm(&tm);
+#endif
+        return std::chrono::system_clock::from_time_t(t);
+    }
+#endif // !J9T_STUDIO
 
     void WebServer::GenerateAndPersistApiToken()
     {
@@ -1031,12 +1180,15 @@ namespace AIAssistant
         }
 
         m_AdminToken = token;
+        m_TokenIssuedAt = std::chrono::system_clock::now();
+
+        std::string const issuedAtStr = FormatIssuedAt(m_TokenIssuedAt);
 
         // Persist to engine_api_token.txt (separate from config.json — credentials stay out of config).
         std::ofstream ofs(kTokenFileName, std::ios::binary | std::ios::trunc);
         if (ofs)
         {
-            ofs << token;
+            ofs << token << "\nissued_at=" << issuedAtStr << "\n";
             LOG_APP_INFO("[web] Generated and saved engine API token to '{}'", kTokenFileName);
 
             // Set restrictive file permissions (owner read/write only).
@@ -1078,7 +1230,56 @@ namespace AIAssistant
                 if (!token.empty())
                 {
                     m_AdminToken = token;
+
+                    // Parse optional issued_at timestamp (line 2).
+                    std::string issuedAtLine;
+                    bool hasIssuedAt = false;
+                    if (std::getline(ifs, issuedAtLine))
+                    {
+                        static constexpr std::string_view kPrefix = "issued_at=";
+                        if (issuedAtLine.size() > kPrefix.size() &&
+                            issuedAtLine.compare(0, kPrefix.size(), kPrefix) == 0)
+                        {
+                            m_TokenIssuedAt = ParseIssuedAt(issuedAtLine.substr(kPrefix.size()));
+                            if (m_TokenIssuedAt.time_since_epoch().count() > 0)
+                            {
+                                hasIssuedAt = true;
+                            }
+                        }
+                    }
+
+                    if (!hasIssuedAt)
+                    {
+                        // Legacy file without timestamp — stamp it now and rewrite.
+                        m_TokenIssuedAt = std::chrono::system_clock::now();
+                        std::ofstream ofs2(kTokenFileName, std::ios::binary | std::ios::trunc);
+                        if (ofs2)
+                        {
+                            ofs2 << m_AdminToken << "\nissued_at=" << FormatIssuedAt(m_TokenIssuedAt) << "\n";
+                        }
+                        LOG_APP_INFO("[web] Added issued_at timestamp to legacy token file");
+                    }
+
                     LOG_APP_INFO("[web] Engine API token loaded from {} ({} chars)", kTokenFileName, m_AdminToken.size());
+
+                    // Check token age and warn if near expiry.
+                    auto const age = std::chrono::system_clock::now() - m_TokenIssuedAt;
+                    auto const ageDays = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
+                    auto const daysRemaining = kTokenMaxAgeDays - ageDays;
+
+                    if (daysRemaining <= 0)
+                    {
+                        LOG_APP_WARN("[web] Engine API token has expired ({} days old, max {} days) — "
+                                     "auto-generating new token",
+                                     ageDays, kTokenMaxAgeDays);
+                        LOG_SECURITY_WARN("[security] token_expired age_days={} max_days={}", ageDays, kTokenMaxAgeDays);
+                        GenerateAndPersistApiToken();
+                    }
+                    else if (daysRemaining <= kTokenExpiryWarningDays)
+                    {
+                        LOG_APP_WARN("[web] Engine API token expires in {} day(s) — consider rotating", daysRemaining);
+                        LOG_SECURITY_INFO("[security] token_expiry_warning days_remaining={}", daysRemaining);
+                    }
                 }
                 else
                 {
@@ -1172,6 +1373,7 @@ namespace AIAssistant
                     auto err = CheckAdminAuth(req);
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
+                    LOG_SECURITY_INFO("[security] run_cancel ip={} runId={}", req.remote_ip_address, runId);
                     return HandleWorkflowRunCancelPost(runId);
                 });
 
@@ -1182,6 +1384,7 @@ namespace AIAssistant
                     auto err = CheckAdminAuth(req);
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
+                    LOG_SECURITY_INFO("[security] run_pause ip={} runId={}", req.remote_ip_address, runId);
                     return HandleWorkflowRunPausePost(runId);
                 });
 
@@ -1192,6 +1395,7 @@ namespace AIAssistant
                     auto err = CheckAdminAuth(req);
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
+                    LOG_SECURITY_INFO("[security] run_resume ip={} runId={}", req.remote_ip_address, runId);
                     return HandleWorkflowRunResumePost(runId);
                 });
 
@@ -1202,6 +1406,7 @@ namespace AIAssistant
                     auto err = CheckAdminAuth(req);
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
+                    LOG_SECURITY_INFO("[security] run_stop ip={} runId={}", req.remote_ip_address, runId);
                     return HandleWorkflowRunStopPost(runId);
                 });
 
@@ -1214,6 +1419,17 @@ namespace AIAssistant
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleLogGet(req);
+                });
+
+        // ---- Admin: Security log ----
+        CROW_ROUTE(m_Server, "/api/log/security")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty())
+                        return MakeAuthErrorResponse(err);
+                    return HandleSecurityLogGet(req);
                 });
 
         // ---- Admin: POST /api/task/<taskId>/heartbeat ----
@@ -1257,6 +1473,7 @@ namespace AIAssistant
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
 
+                    LOG_SECURITY_INFO("[security] shutdown_requested ip={}", req.remote_ip_address);
                     Core::g_Core->RequestQuit();
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                     Core::g_Core->PushEvent(event);
@@ -1479,6 +1696,8 @@ namespace AIAssistant
         status["capabilities"]["ai_jcwf"] = false;
         status["capabilities"]["settings_api"] = false;
 #endif
+
+        status["tls"] = m_TlsEnabled;
 
         // Workflows
         size_t registeredWorkflows = 0;
@@ -2821,6 +3040,8 @@ namespace AIAssistant
         // Engine mode: webhook secret is mandatory.
         if (webhookTrigger->m_Secret.empty())
         {
+            LOG_SECURITY_WARN("[security] webhook_rejected reason=secret_not_configured ip={} workflowId={}",
+                              req.remote_ip_address, workflowId);
             LOG_APP_WARN("WebServer::HandleWebhookPost: webhook secret not configured for workflow '{}' "
                          "(required in Engine mode)",
                          workflowId);
@@ -2841,6 +3062,8 @@ namespace AIAssistant
 
             if (signatureHeader.empty())
             {
+                LOG_SECURITY_WARN("[security] webhook_rejected reason=missing_signature ip={} workflowId={}",
+                                  req.remote_ip_address, workflowId);
                 LOG_APP_WARN("WebServer::HandleWebhookPost: missing X-Webhook-Signature header for workflow '{}'",
                              workflowId);
                 return MakeWorkflowJsonError(401, "missing_signature",
@@ -2850,6 +3073,8 @@ namespace AIAssistant
 
             if (!VerifyHmacSignature(webhookTrigger->m_Secret, req.body, signatureHeader))
             {
+                LOG_SECURITY_WARN("[security] webhook_rejected reason=hmac_mismatch ip={} workflowId={}",
+                                  req.remote_ip_address, workflowId);
                 LOG_APP_WARN("WebServer::HandleWebhookPost: HMAC signature mismatch for workflow '{}'", workflowId);
                 return MakeWorkflowJsonError(401, "invalid_signature", "HMAC signature verification failed", kEndpoint,
                                              workflowId);
@@ -2978,6 +3203,8 @@ namespace AIAssistant
         std::string const enqueuedRunId =
             workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, runId, context);
 
+        LOG_SECURITY_INFO("[security] webhook_accepted ip={} workflowId={} runId={}", req.remote_ip_address, workflowId,
+                          enqueuedRunId);
         LOG_APP_INFO("WebServer::HandleWebhookPost: enqueued run '{}' for workflow '{}' (trigger '{}')", enqueuedRunId,
                      workflowId, webhookTrigger->m_TriggerId);
 
@@ -3188,10 +3415,10 @@ namespace AIAssistant
     }
 #endif // J9T_STUDIO
 
-    crow::response WebServer::HandleLogGet(crow::request const& req)
+    crow::response WebServer::ReadLogFile(crow::request const& req, std::string const& logPath)
     {
-        // GET /api/log?tail=N        — return last N lines (initial load)
-        // GET /api/log?offset=N      — return lines appended since byte offset N (delta polling)
+        // GET ...?tail=N        — return last N lines (initial load)
+        // GET ...?offset=N      — return lines appended since byte offset N (delta polling)
         // Returns: { ok, lines[], byteOffset, totalSize }
 
         int tailLines = 5000;
@@ -3208,7 +3435,6 @@ namespace AIAssistant
             fromOffset = std::atoll(offsetParam);
         }
 
-        std::string const logPath = "log/log.txt";
         std::ifstream file(logPath, std::ios::binary | std::ios::ate);
         if (!file.is_open())
         {
@@ -3323,6 +3549,16 @@ namespace AIAssistant
         resp["byteOffset"] = fileSize;
         resp["totalSize"] = fileSize;
         return MakeJsonResponse(200, resp);
+    }
+
+    crow::response WebServer::HandleLogGet(crow::request const& req)
+    {
+        return ReadLogFile(req, "log/log.txt");
+    }
+
+    crow::response WebServer::HandleSecurityLogGet(crow::request const& req)
+    {
+        return ReadLogFile(req, "log/security.log");
     }
 
 #ifdef J9T_STUDIO
@@ -3963,6 +4199,35 @@ namespace AIAssistant
             return true;
         }
 
+        // ---- Determine TLS mode from config ----
+        auto const& config = Core::g_Core->GetConfig();
+        bool const hasCert = !config.m_TlsCert.empty();
+        bool const hasKey = !config.m_TlsKey.empty();
+
+        if (hasCert != hasKey)
+        {
+            LOG_APP_CRITICAL("[web] TLS misconfigured: both TlsCert and TlsKey must be set (got cert={}, key={})",
+                             hasCert ? "yes" : "no", hasKey ? "yes" : "no");
+            return false;
+        }
+
+        m_TlsEnabled = hasCert && hasKey;
+        uint16_t const port = m_TlsEnabled ? 8443 : 8080;
+
+        if (m_TlsEnabled)
+        {
+            if (!std::filesystem::exists(config.m_TlsCert))
+            {
+                LOG_APP_CRITICAL("[web] TLS certificate file not found: {}", config.m_TlsCert);
+                return false;
+            }
+            if (!std::filesystem::exists(config.m_TlsKey))
+            {
+                LOG_APP_CRITICAL("[web] TLS key file not found: {}", config.m_TlsKey);
+                return false;
+            }
+        }
+
         // Pre-test port availability to detect a second JA instance.
         {
 #if defined(_WIN32)
@@ -3989,7 +4254,7 @@ namespace AIAssistant
             };
             addr.sin_family = AF_INET;
             addr.sin_addr.s_addr = INADDR_ANY;
-            addr.sin_port = htons(8080);
+            addr.sin_port = htons(port);
 
             bool const portAvailable = (::bind(testSocket, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
 #if defined(_WIN32)
@@ -4000,17 +4265,29 @@ namespace AIAssistant
 
             if (!portAvailable)
             {
-                LOG_APP_CRITICAL("[web] Port 8080 is already in use — is another JarvisAgent running? Exiting.");
+                LOG_APP_CRITICAL("[web] Port {} is already in use — is another JarvisAgent running? Exiting.", port);
                 return false;
             }
         }
 
+        if (m_TlsEnabled)
+        {
+            m_Server.ssl_file(config.m_TlsCert, config.m_TlsKey);
+        }
+
         m_Running = true;
         m_ServerThread = std::thread(
-            [this]()
+            [this, port]()
             {
-                LOG_APP_INFO("Crow web server started at http://localhost:8080");
-                m_Server.port(8080).multithreaded().signal_clear().run();
+                if (m_TlsEnabled)
+                {
+                    LOG_APP_INFO("Crow web server started at https://localhost:{}", port);
+                }
+                else
+                {
+                    LOG_APP_INFO("Crow web server started at http://localhost:{}", port);
+                }
+                m_Server.port(port).multithreaded().signal_clear().run();
             });
 
         return true;

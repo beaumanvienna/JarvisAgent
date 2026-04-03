@@ -185,6 +185,20 @@ namespace AIAssistant
 #endif
                 ++fieldOccurances[ConfigFields::UseBashOnWindows];
             }
+            else if (jsonObjectKey == "TlsCert")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                engineConfig.m_TlsCert = std::string(jsonObject.value().get_string().value());
+                LOG_CORE_INFO("TlsCert: {}", engineConfig.m_TlsCert);
+                ++fieldOccurances[ConfigFields::TlsCert];
+            }
+            else if (jsonObjectKey == "TlsKey")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                engineConfig.m_TlsKey = std::string(jsonObject.value().get_string().value());
+                LOG_CORE_INFO("TlsKey: {}", engineConfig.m_TlsKey);
+                ++fieldOccurances[ConfigFields::TlsKey];
+            }
             else
             {
                 // Try to get the value as a string for display

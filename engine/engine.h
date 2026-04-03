@@ -49,6 +49,9 @@ int engine(int argc, char* argv[]);
 #define LOG_APP_ERROR(...) Core::g_Logger->GetAppLogger().error(__VA_ARGS__)
 #define LOG_APP_CRITICAL(...) Core::g_Logger->GetAppLogger().critical(__VA_ARGS__)
 
+#define LOG_SECURITY_INFO(...) Core::g_Logger->GetSecurityLogger().info(__VA_ARGS__)
+#define LOG_SECURITY_WARN(...) Core::g_Logger->GetSecurityLogger().warn(__VA_ARGS__)
+
 #define CORE_ASSERT(x, str) \
     if (!(x))               \
     LOG_CORE_CRITICAL("ASSERT on line number {0} in file {1}: {2} (error)", __LINE__, __FILE__, str)
@@ -101,5 +104,11 @@ int engine(int argc, char* argv[]);
     }
 #define LOG_APP_CRITICAL(...) \
     {                         \
+    }
+#define LOG_SECURITY_INFO(...) \
+    {                          \
+    }
+#define LOG_SECURITY_WARN(...) \
+    {                          \
     }
 #endif

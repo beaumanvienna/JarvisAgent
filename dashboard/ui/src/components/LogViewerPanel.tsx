@@ -1,17 +1,21 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { fetchLog, fetchLogAnalyzeLastRun } from "../api";
+import { fetchLog, fetchSecurityLog, fetchLogAnalyzeLastRun } from "../api";
 import type { AnalyzeLastRunResponse } from "../types";
 
 const LINE_HEIGHT = 18;
 const OVERSCAN = 40;
 const MAX_LINES = 100_000;
 const INITIAL_TAIL = 10_000;
+const SECURITY_POLL_MS = 3000;
+
+type LogTab = "application" | "security";
 
 interface LogViewerPanelProps {
   registerLogCallback: (cb: ((lines: string[]) => void) | null) => void;
 }
 
 export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelProps) {
+  const [logTab, setLogTab] = useState<LogTab>("application");
   const [lines, setLines] = useState<string[]>([]);
   const [byteOffset, setByteOffset] = useState<number>(0);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -25,6 +29,13 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Security log state (separate from app log)
+  const [secLines, setSecLines] = useState<string[]>([]);
+  const [secByteOffset, setSecByteOffset] = useState<number>(0);
+  const [secLoading, setSecLoading] = useState(true);
+  const [secErrorMsg, setSecErrorMsg] = useState<string | null>(null);
+  const secOffsetRef = useRef(0);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(600);
@@ -36,13 +47,19 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
   useEffect(() => { offsetRef.current = byteOffset; }, [byteOffset]);
   useEffect(() => { linesRef.current = lines; }, [lines]);
   useEffect(() => { autoScrollRef.current = autoScroll; }, [autoScroll]);
+  useEffect(() => { secOffsetRef.current = secByteOffset; }, [secByteOffset]);
+
+  // Active lines for rendering (switches between app and security)
+  const activeLines = logTab === "application" ? lines : secLines;
+  const activeLoading = logTab === "application" ? loading : secLoading;
+  const activeErrorMsg = logTab === "application" ? errorMsg : secErrorMsg;
 
   // Scroll to bottom when auto-scroll is on and lines change
   useEffect(() => {
     if (autoScroll && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [lines, autoScroll]);
+  }, [activeLines, autoScroll]);
 
   // Measure container height
   useEffect(() => {
@@ -57,7 +74,7 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     return () => ro.disconnect();
   }, []);
 
-  // Initial load
+  // Initial load — application log
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -80,7 +97,7 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     return () => { cancelled = true; };
   }, []);
 
-  // Live log streaming via WebSocket
+  // Live log streaming via WebSocket (application log only)
   useEffect(() => {
     if (loading) return;
     registerLogCallback((newLines: string[]) => {
@@ -92,7 +109,48 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     return () => registerLogCallback(null);
   }, [loading, registerLogCallback]);
 
-  // Search: compute match indices when searchTerm or lines change
+  // Security log: initial load + delta polling
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchSecurityLog({ tail: INITIAL_TAIL });
+        if (cancelled) return;
+        if (!data.ok) {
+          setSecErrorMsg(data.error || "Security log not available");
+          setSecLoading(false);
+          return;
+        }
+        setSecLines(data.lines);
+        setSecByteOffset(data.byteOffset);
+        setSecLoading(false);
+      } catch {
+        setSecErrorMsg("Could not connect to security log API");
+        setSecLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Security log delta polling (only when security tab is active)
+  useEffect(() => {
+    if (logTab !== "security" || secLoading) return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await fetchSecurityLog({ offset: secOffsetRef.current });
+        if (data.ok && data.lines.length > 0) {
+          setSecLines((prev) => {
+            const next = [...prev, ...data.lines];
+            return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+          });
+          setSecByteOffset(data.byteOffset);
+        }
+      } catch { /* ignore polling errors */ }
+    }, SECURITY_POLL_MS);
+    return () => clearInterval(interval);
+  }, [logTab, secLoading]);
+
+  // Search: compute match indices when searchTerm or activeLines change
   useEffect(() => {
     if (!searchTerm) {
       setSearchMatchIndices([]);
@@ -101,14 +159,14 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     }
     const lower = searchTerm.toLowerCase();
     const matches: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().includes(lower)) {
+    for (let i = 0; i < activeLines.length; i++) {
+      if (activeLines[i].toLowerCase().includes(lower)) {
         matches.push(i);
       }
     }
     setSearchMatchIndices(matches);
     setCurrentMatchIdx(matches.length > 0 ? 0 : -1);
-  }, [searchTerm, lines]);
+  }, [searchTerm, activeLines]);
 
   // Scroll to current match
   useEffect(() => {
@@ -213,9 +271,9 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
   }, []);
 
   // Virtual scroll computation
-  const totalHeight = lines.length * LINE_HEIGHT;
+  const totalHeight = activeLines.length * LINE_HEIGHT;
   const startIdx = Math.max(0, Math.floor(scrollTop / LINE_HEIGHT) - OVERSCAN);
-  const endIdx = Math.min(lines.length, Math.ceil((scrollTop + containerHeight) / LINE_HEIGHT) + OVERSCAN);
+  const endIdx = Math.min(activeLines.length, Math.ceil((scrollTop + containerHeight) / LINE_HEIGHT) + OVERSCAN);
 
   const visibleLines = useMemo(() => {
     const searchLower = searchTerm.toLowerCase();
@@ -223,13 +281,13 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     const result: JSX.Element[] = [];
 
     for (let i = startIdx; i < endIdx; i++) {
-      const line = lines[i];
+      const line = activeLines[i];
       const isCurrentMatch = i === currentHighlightLine;
       const isMatchLine = searchTerm && searchMatchIndices.includes(i);
 
       // Determine log level color
       let levelClass = "";
-      if (line.includes("[error]")) levelClass = "log-error";
+      if (line.includes("[error]") || line.includes("[critical]")) levelClass = "log-error";
       else if (line.includes("[warning]") || line.includes("[warn]")) levelClass = "log-warn";
 
       let content: React.ReactNode = line;
@@ -255,16 +313,43 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
       );
     }
     return result;
-  }, [startIdx, endIdx, lines, searchTerm, currentMatchIdx, searchMatchIndices]);
+  }, [startIdx, endIdx, activeLines, searchTerm, currentMatchIdx, searchMatchIndices]);
+
+  const handleTabChange = useCallback((tab: LogTab) => {
+    setLogTab(tab);
+    setSearchTerm("");
+    setShowAnalyze(false);
+    setAutoScroll(true);
+    // Reset scroll to top on tab switch
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0;
+    }
+    setScrollTop(0);
+  }, []);
+
+  const activeByteOffset = logTab === "application" ? byteOffset : secByteOffset;
 
   return (
     <div className="log-viewer">
       {/* Toolbar */}
       <div className="log-toolbar">
         <div className="log-toolbar-left">
-          <span className="log-title">Log Viewer</span>
+          <span className="log-tab-group">
+            <button
+              className={`log-tab-btn ${logTab === "application" ? "log-tab-btn-active" : ""}`}
+              onClick={() => handleTabChange("application")}
+            >
+              Application
+            </button>
+            <button
+              className={`log-tab-btn ${logTab === "security" ? "log-tab-btn-active" : ""}`}
+              onClick={() => handleTabChange("security")}
+            >
+              Security
+            </button>
+          </span>
           <span className="log-stats">
-            {lines.length.toLocaleString()} lines | {(byteOffset / 1024).toFixed(0)} KB
+            {activeLines.length.toLocaleString()} lines | {(activeByteOffset / 1024).toFixed(0)} KB
           </span>
         </div>
         <div className="log-toolbar-center">
@@ -289,13 +374,15 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
           )}
         </div>
         <div className="log-toolbar-right">
-          <button
-            className={`log-btn ${showAnalyze ? "log-btn-active" : ""}`}
-            onClick={() => { if (showAnalyze) { setShowAnalyze(false); } else { handleAnalyze(); } }}
-            title="keyboard shortcut: 1"
-          >
-            ⓘ Analyze
-          </button>
+          {logTab === "application" && (
+            <button
+              className={`log-btn ${showAnalyze ? "log-btn-active" : ""}`}
+              onClick={() => { if (showAnalyze) { setShowAnalyze(false); } else { handleAnalyze(); } }}
+              title="keyboard shortcut: 1"
+            >
+              Analyze
+            </button>
+          )}
           <button
             className={`log-btn ${autoScroll ? "log-btn-active" : ""}`}
             onClick={() => {
@@ -306,13 +393,13 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
             }}
             title="Auto-scroll to bottom"
           >
-            {autoScroll ? "⏬ Follow" : "⏸ Paused"}
+            {autoScroll ? "Follow" : "Paused"}
           </button>
         </div>
       </div>
 
-      {/* Analyze overlay */}
-      {showAnalyze && (
+      {/* Analyze overlay (application log only) */}
+      {showAnalyze && logTab === "application" && (
         <div className="log-analyze-overlay">
           <div className="log-analyze-panel">
             <div className="log-analyze-header">
@@ -414,14 +501,15 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
         className="log-content"
         onScroll={handleScroll}
       >
-        {loading ? (
+        {activeLoading ? (
           <div className="log-loading">Loading log...</div>
-        ) : errorMsg ? (
+        ) : activeErrorMsg ? (
           <div className="log-loading" style={{ color: "#f87171", padding: 24, textAlign: "center" }}>
-            <div style={{ fontSize: 16, marginBottom: 8 }}>{errorMsg}</div>
+            <div style={{ fontSize: 16, marginBottom: 8 }}>{activeErrorMsg}</div>
             <div style={{ color: "#9ca3af", fontSize: 13 }}>
-              The log file (log/log.txt) may not exist yet. Start a workflow or check that
-              JarvisAgent has write access to its log directory.
+              {logTab === "application"
+                ? "The log file (log/log.txt) may not exist yet. Start a workflow or check that JarvisAgent has write access to its log directory."
+                : "The security log (log/security.log) may not exist yet. Security events are logged in Engine edition when authentication is active."}
             </div>
           </div>
         ) : (

@@ -156,8 +156,8 @@ namespace AIAssistant
         m_WebServer = std::make_unique<WebServer>();
         if (!m_WebServer->Start())
         {
-            LOG_APP_CRITICAL("WebServer failed to start (port already in use?). Shutting down.");
-            m_FatalStartupMessage = "[FATAL] Port 8080 is already in use — is another JarvisAgent running? Exiting.";
+            LOG_APP_CRITICAL("WebServer failed to start (port in use or TLS misconfigured?). Shutting down.");
+            m_FatalStartupMessage = "[FATAL] WebServer failed to start — check port availability and TLS config.";
             m_IsFinished = true;
             return;
         }
