@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-Edition Contract Tests — verifies the Engine/Studio route split.
+Edition Contract Tests — verifies the Engine/Studio route split and security features.
+
+Tests cover:
+  - Edition detection and capability flags
+  - Route availability per edition (Engine vs Studio)
+  - Bearer token authentication (Engine)
+  - Security response headers (CSP, X-Frame-Options, Referrer-Policy, etc.)
+  - Security audit log endpoint (GET /api/log/security)
+  - Auth lockout response format, RBAC, TLS status field (Engine)
 
 Usage:
     python3 test/test_edition_contract.py                  # auto-detect edition
@@ -21,6 +29,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 try:
     import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except ImportError:
     print("ERROR: 'requests' package not found. Install with: pip install requests")
     sys.exit(1)
@@ -56,6 +66,7 @@ class TestRunner:
     def __init__(self, base_url, token=None):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.verify_ssl = not base_url.startswith("https://localhost")
         self.passed = 0
         self.failed = 0
         self.skipped = 0
@@ -73,27 +84,27 @@ class TestRunner:
 
     def get(self, path, **kwargs):
         headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
-        return requests.get(self._url(path), timeout=10, headers=headers, **kwargs)
+        return requests.get(self._url(path), timeout=10, headers=headers, verify=self.verify_ssl, **kwargs)
 
     def post(self, path, **kwargs):
         headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
-        return requests.post(self._url(path), timeout=10, headers=headers, **kwargs)
+        return requests.post(self._url(path), timeout=10, headers=headers, verify=self.verify_ssl, **kwargs)
 
     def put(self, path, **kwargs):
         headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
-        return requests.put(self._url(path), timeout=10, headers=headers, **kwargs)
+        return requests.put(self._url(path), timeout=10, headers=headers, verify=self.verify_ssl, **kwargs)
 
     def delete(self, path, **kwargs):
         headers = {**self._auth_headers(), **kwargs.pop("headers", {})}
-        return requests.delete(self._url(path), timeout=10, headers=headers, **kwargs)
+        return requests.delete(self._url(path), timeout=10, headers=headers, verify=self.verify_ssl, **kwargs)
 
     def get_no_auth(self, path, **kwargs):
         """GET without auth token (for testing unauthenticated access)."""
-        return requests.get(self._url(path), timeout=10, **kwargs)
+        return requests.get(self._url(path), timeout=10, verify=self.verify_ssl, **kwargs)
 
     def post_no_auth(self, path, **kwargs):
         """POST without auth token (for testing unauthenticated access)."""
-        return requests.post(self._url(path), timeout=10, **kwargs)
+        return requests.post(self._url(path), timeout=10, verify=self.verify_ssl, **kwargs)
 
     def assert_status(self, method, path, expected_status, label=None, **kwargs):
         """Assert that a request returns the expected HTTP status code.
@@ -153,7 +164,11 @@ class TestRunner:
 
         url = self._ws_url(path)
         try:
-            sock = ws_client.create_connection(url, timeout=5)
+            ws_opts = {}
+            if not self.verify_ssl:
+                import ssl
+                ws_opts["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
+            sock = ws_client.create_connection(url, timeout=5, **ws_opts)
             sock.close()
             if expect_connectable:
                 ok(f"{tag} -> connected")
@@ -292,6 +307,11 @@ def test_engine_auth(t):
         t.skipped += 1
         return
 
+    # ---- Valid token tests FIRST (before any failed attempts) ----
+    t.assert_status("get", "/api/workflows", 200, label="GET /api/workflows (valid token)")
+    t.assert_status("get", "/api/workflow-runs/active", 200, label="GET /api/workflow-runs/active (valid token)")
+    t.assert_status("get", "/api/log", 200, label="GET /api/log (valid token)")
+
     # Public endpoints should work without token.
     r = t.get_no_auth("/api/status")
     if r.status_code == 200:
@@ -301,26 +321,27 @@ def test_engine_auth(t):
         fail(f"GET /api/status -> {r.status_code} (expected 200, public)")
         t.failed += 1
 
-    # Admin endpoints should return 401 without token.
+    # Admin endpoints should return 401 or 403 without token.
+    # (403 can occur if the IP has prior failures from dashboard polling.)
     for path in ["/api/workflows", "/api/workflow-runs/active", "/api/log"]:
         r = t.get_no_auth(path)
-        if r.status_code == 401:
-            ok(f"GET {path} -> 401 (no token)")
+        if r.status_code in (401, 403):
+            ok(f"GET {path} -> {r.status_code} (no token, rejected)")
             t.passed += 1
         else:
-            fail(f"GET {path} -> {r.status_code} (expected 401)")
+            fail(f"GET {path} -> {r.status_code} (expected 401 or 403)")
             t.failed += 1
 
     r = t.post_no_auth("/api/shutdown")
-    if r.status_code == 401:
-        ok("POST /api/shutdown -> 401 (no token)")
+    if r.status_code in (401, 403):
+        ok(f"POST /api/shutdown -> {r.status_code} (no token, rejected)")
         t.passed += 1
     else:
-        fail(f"POST /api/shutdown -> {r.status_code} (expected 401)")
+        fail(f"POST /api/shutdown -> {r.status_code} (expected 401 or 403)")
         t.failed += 1
 
     # Wrong token should return 403.
-    r = requests.get(t._url("/api/workflows"), timeout=10,
+    r = requests.get(t._url("/api/workflows"), timeout=10, verify=t.verify_ssl,
                      headers={"Authorization": "Bearer wrong_token_value"})
     if r.status_code == 403:
         ok("GET /api/workflows -> 403 (wrong token)")
@@ -329,10 +350,168 @@ def test_engine_auth(t):
         fail(f"GET /api/workflows -> {r.status_code} (expected 403)")
         t.failed += 1
 
-    # Valid token should return 200.
-    t.assert_status("get", "/api/workflows", 200, label="GET /api/workflows (valid token)")
-    t.assert_status("get", "/api/workflow-runs/active", 200, label="GET /api/workflow-runs/active (valid token)")
-    t.assert_status("get", "/api/log", 200, label="GET /api/log (valid token)")
+    # Valid token should still work after wrong-token attempt
+    # (successful auth clears the failure count for this IP).
+    t.assert_status("get", "/api/workflows", 200, label="GET /api/workflows (valid token, after bad attempt)")
+
+
+# ---------------------------------------------------------------------------
+# Security tests (both editions, but auth features only active on Engine)
+# ---------------------------------------------------------------------------
+def test_security_headers(t):
+    """Verify security headers are present on all responses."""
+    header("Security — response headers")
+
+    r = t.get_no_auth("/api/status")
+    h = r.headers
+
+    expected_headers = {
+        "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": None,  # just check presence
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": None,  # just check presence
+    }
+
+    for name, expected_value in expected_headers.items():
+        actual = h.get(name)
+        if actual is None:
+            fail(f"Header '{name}' missing")
+            t.failed += 1
+        elif expected_value is None:
+            ok(f"Header '{name}' present: {actual[:60]}...")
+            t.passed += 1
+        elif actual == expected_value:
+            ok(f"Header '{name}': {actual}")
+            t.passed += 1
+        else:
+            fail(f"Header '{name}': {actual!r} (expected {expected_value!r})")
+            t.failed += 1
+
+    # CSP should contain key directives
+    csp = h.get("Content-Security-Policy", "")
+    for directive in ["default-src 'self'", "script-src 'self'", "connect-src 'self' ws: wss:"]:
+        if directive in csp:
+            ok(f"CSP contains: {directive}")
+            t.passed += 1
+        else:
+            fail(f"CSP missing directive: {directive}")
+            t.failed += 1
+
+    # JSON endpoints should also have security headers
+    r2 = t.get("/api/status")
+    if r2.headers.get("X-Frame-Options") == "DENY":
+        ok("JSON endpoint has X-Frame-Options")
+        t.passed += 1
+    else:
+        fail("JSON endpoint missing X-Frame-Options")
+        t.failed += 1
+
+
+def test_security_log_endpoint(t):
+    """Verify the security log endpoint exists and is accessible."""
+    header("Security — audit log endpoint")
+
+    # GET /api/log/security should return 200 or 404 (no log yet), not 401/500
+    r = t.get("/api/log/security")
+    if r.status_code in (200, 404):
+        ok(f"GET /api/log/security -> {r.status_code}")
+        t.passed += 1
+    else:
+        fail(f"GET /api/log/security -> {r.status_code} (expected 200 or 404)")
+        t.failed += 1
+
+    if r.status_code == 200:
+        data = r.json()
+        if data.get("ok") is True and "lines" in data and "byteOffset" in data:
+            ok("Security log response has correct structure (ok, lines, byteOffset)")
+            t.passed += 1
+        else:
+            fail(f"Security log response structure incorrect: {list(data.keys())}")
+            t.failed += 1
+
+
+def test_engine_security(t):
+    """Engine-specific security tests: RBAC, security log, TLS status, auth error format."""
+    header("Engine — security features")
+
+    if not t.token:
+        warn("No admin token — skipping Engine security tests")
+        t.skipped += 1
+        return
+
+    # ---- First: ensure valid token works (clears any prior lockout) ----
+    r = t.get("/api/workflows")
+    if r.status_code == 200:
+        ok("Valid token works (lockout cleared)")
+        t.passed += 1
+    else:
+        fail(f"Valid token -> {r.status_code} (IP may be locked out — restart Engine to reset)")
+        t.failed += 1
+        warn("Remaining security tests may fail due to lockout")
+
+    # ---- Auth error response format ----
+    r = requests.get(t._url("/api/workflows"), timeout=10, verify=t.verify_ssl,
+                     headers={"Authorization": "Bearer wrong_token_12345"})
+    if r.status_code == 403:
+        data = r.json()
+        if data.get("ok") is False and data.get("error") in ("forbidden", "locked_out"):
+            ok(f"Wrong token -> 403 with {{ok:false, error:'{data['error']}'}}")
+            t.passed += 1
+        else:
+            fail(f"Wrong token response format unexpected: {data}")
+            t.failed += 1
+    else:
+        fail(f"Wrong token -> {r.status_code} (expected 403)")
+        t.failed += 1
+
+    # Clear lockout by authenticating with valid token
+    t.get("/api/workflows")
+
+    # ---- Security log endpoint is admin-only ----
+    r = t.get("/api/log/security")
+    if r.status_code in (200, 404):
+        ok(f"GET /api/log/security with admin token -> {r.status_code}")
+        t.passed += 1
+    else:
+        fail(f"GET /api/log/security with admin token -> {r.status_code}")
+        t.failed += 1
+
+    # Without token, should be 401 or 403 (403 if prior failures accumulated)
+    r = t.get_no_auth("/api/log/security")
+    if r.status_code in (401, 403):
+        ok(f"GET /api/log/security without token -> {r.status_code} (rejected)")
+        t.passed += 1
+    else:
+        fail(f"GET /api/log/security without token -> {r.status_code} (expected 401 or 403)")
+        t.failed += 1
+
+    # Clear lockout again
+    t.get("/api/workflows")
+
+    # ---- Status includes tls field ----
+    r = t.get_no_auth("/api/status")
+    if r.status_code == 200:
+        data = r.json()
+        if "tls" in data and isinstance(data["tls"], bool):
+            ok(f"status.tls present: {data['tls']}")
+            t.passed += 1
+        else:
+            fail("status.tls missing or not boolean")
+            t.failed += 1
+
+    # ---- Shutdown without token -> rejected ----
+    r = t.post_no_auth("/api/shutdown")
+    if r.status_code in (401, 403, 429):
+        ok(f"POST /api/shutdown without token -> {r.status_code} (rejected)")
+        t.passed += 1
+    else:
+        fail(f"POST /api/shutdown without token -> {r.status_code} (expected 401, 403, or 429)")
+        t.failed += 1
+
+    # Brief pause to let rate limit tokens refill, then confirm valid token still works.
+    time.sleep(1)
+    t.assert_status("get", "/api/workflows", 200, label="GET /api/workflows (valid token, end of security tests)")
 
 
 # ---------------------------------------------------------------------------
@@ -414,8 +593,16 @@ def main():
                         help="Admin API token for Engine auth (default: read from config.json)")
     args = parser.parse_args()
 
-    # Auto-load token from config.json if not provided.
+    # Auto-load token: try engine_api_token.txt first, then config.json fallback.
     token = args.token
+    if not token:
+        token_file = SCRIPT_DIR.parent / "engine_api_token.txt"
+        if token_file.exists():
+            try:
+                with open(token_file) as f:
+                    token = f.readline().strip()
+            except Exception:
+                pass
     if not token:
         config_path = SCRIPT_DIR.parent / "config.json"
         if config_path.exists():
@@ -455,12 +642,16 @@ def main():
 
     # Run tests
     test_common(t, status_data)
+    test_security_headers(t)
 
     if edition == "engine":
         test_engine(t, status_data)
         test_engine_auth(t)
+        test_security_log_endpoint(t)
+        test_engine_security(t)
     elif edition == "studio":
         test_studio(t, status_data)
+        test_security_log_endpoint(t)
     else:
         fail(f"Unknown edition: {edition!r}")
         sys.exit(1)

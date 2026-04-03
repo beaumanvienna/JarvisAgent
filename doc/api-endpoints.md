@@ -674,7 +674,7 @@ Provide either `tail` or `offset`, not both. If `offset` is given, only new line
 
 ### GET /api/log/security
 
-Reads the security audit log (`log/security.log`). Supports the same `tail` and `offset` query parameters as `GET /api/log`. The security log records authentication successes/failures, rate limit events, webhook accept/reject decisions, lockout triggers, shutdown requests, and run control actions — all with IP addresses and timestamps.
+Reads the security audit log (`log/security.txt`). Supports the same `tail` and `offset` query parameters as `GET /api/log`. The security log records authentication successes/failures, rate limit events, webhook accept/reject decisions, lockout triggers, shutdown requests, and run control actions — all with IP addresses and timestamps.
 
 The security log is a rotating file (10 MB x 5 files), so older entries are automatically pruned. The dashboard Log Viewer exposes this via a "Security" tab with 3-second delta polling.
 
@@ -682,7 +682,7 @@ The security log is a rotating file (10 MB x 5 files), so older entries are auto
 
 **Response (200):** Same format as `GET /api/log`.
 
-**Response (404):** If `log/security.log` does not exist yet (no security events have been logged).
+**Response (404):** If `log/security.txt` does not exist yet (no security events have been logged).
 
 ### GET /api/log/analyze-last-run
 
@@ -751,21 +751,32 @@ All admin endpoints in Engine mode require **Bearer token authentication** (`Aut
 - **Rate limiting:** 100 req/min per IP, burst of 20 (token bucket)
 - **Failed auth lockout:** 10 failures in 5 minutes = 15-minute IP lockout (403 + `Retry-After: 900`)
 - **Token expiration:** Tokens older than 90 days are auto-rotated; 7-day expiry warning at startup
-- **Audit logging:** All auth events logged to `log/security.log` (viewable via `GET /api/log/security`)
+- **Audit logging:** All auth events logged to `log/security.txt` (viewable via `GET /api/log/security`)
 - **Built-in TLS:** Optional `TlsCert`/`TlsKey` in config.json serves HTTPS on port 8443
 - **WebSocket auth:** First message must be `{"type":"auth","token":"..."}` (constant-time comparison)
 - **Webhook HMAC:** Per-workflow HMAC-SHA256 signature verification (mandatory in Engine mode)
+- **RBAC (Role-Based Access Control):** Three roles — `admin`, `operator`, `viewer`. In gateway mode (`TrustedProxyHeader`/`TrustedRoleHeader` config), role comes from gateway-injected header. Bearer token grants `admin`. Routes enforce minimum role.
+- **Request body limit:** `MaxRequestBodyMB` config field (default 10 MB). Oversized requests → 413.
+- **Security headers:** CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy on all responses. HSTS when TLS enabled.
 
-**Data-sensitive endpoints** (protected by auth but contain sensitive information when exposed):
+**Endpoint role requirements** (Engine mode with RBAC):
 
-| Endpoint | Risk |
-|----------|------|
-| `GET /api/log` | Can leak prompt content, output data, file paths, and provider details |
-| `GET /api/log/security` | Exposes IP addresses, auth outcomes, and security event history |
-| `POST /api/shutdown` | Shuts down the server process |
-| `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop` | Run-control: can disrupt running workflows |
+| Minimum role | Endpoints |
+|-------------|-----------|
+| `viewer` | `GET /api/workflows`, `GET /api/workflows/<id>`, `GET /api/workflow-runs/*` |
+| `operator` | `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop`, `GET /api/log` |
+| `admin` | `POST /api/shutdown`, `GET /api/log/security` |
 
-Deploy behind a reverse proxy with IP allowlists for additional defense-in-depth.
+**Data-sensitive endpoints** (protected by auth + RBAC but contain sensitive information when exposed):
+
+| Endpoint | Risk | Min role |
+|----------|------|----------|
+| `GET /api/log` | Can leak prompt content, output data, file paths, and provider details | operator |
+| `GET /api/log/security` | Exposes IP addresses, user identities, and auth event history | admin |
+| `POST /api/shutdown` | Shuts down the server process | admin |
+| `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop` | Run-control: can disrupt running workflows | operator |
+
+Deploy behind an API gateway on a private subnet. See `doc/cyber security.md` for the recommended architecture.
 
 ---
 

@@ -72,5 +72,7 @@
     "max file size in kB": 24,
     "jcwf batch size": 1,
     "jcwf AI interface": 3,
-    "use_bash": false
+    "use_bash": false,
+    "TlsCert": "certs/j9t-cert.pem",
+    "TlsKey": "certs/j9t-key.pem"
 }

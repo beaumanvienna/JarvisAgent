@@ -9,6 +9,7 @@ export default function AdminLoginDialog({ onAuthenticated }: Props) {
   const [token, setTokenInput] = useState("");
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
+  const [showToken, setShowToken] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,25 +70,50 @@ export default function AdminLoginDialog({ onAuthenticated }: Props) {
         </div>
         <div style={{ fontSize: 13, color: "rgba(255,255,255,0.5)", lineHeight: 1.5 }}>
           This JarvisAgent instance requires authentication.
-          Enter the admin API token from config.json.
+          Enter the admin API token from engine_api_token.txt.
         </div>
-        <input
-          type="password"
-          placeholder="API token"
-          value={token}
-          onChange={(e) => setTokenInput(e.target.value)}
-          autoFocus
-          style={{
-            background: "#2a2a2a",
-            border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 4,
-            padding: "10px 12px",
-            color: "#e8eef5",
-            fontSize: 14,
-            fontFamily: "monospace",
-            outline: "none",
-          }}
-        />
+        <div style={{ position: "relative" }}>
+          <input
+            type={showToken ? "text" : "password"}
+            placeholder="API token"
+            value={token}
+            onChange={(e) => setTokenInput(e.target.value)}
+            autoFocus
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              background: "#2a2a2a",
+              border: "1px solid rgba(255,255,255,0.15)",
+              borderRadius: 4,
+              padding: "10px 36px 10px 12px",
+              color: "#e8eef5",
+              fontSize: 14,
+              fontFamily: "monospace",
+              outline: "none",
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setShowToken(!showToken)}
+            tabIndex={-1}
+            style={{
+              position: "absolute",
+              right: 8,
+              top: "50%",
+              transform: "translateY(-50%)",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: 4,
+              fontSize: 16,
+              color: "rgba(255,255,255,0.45)",
+              lineHeight: 1,
+            }}
+            title={showToken ? "Hide token" : "Show token"}
+          >
+            {showToken ? "\u{1F441}" : "\u{1F441}\u{200D}\u{1F5E8}"}
+          </button>
+        </div>
         {error && (
           <div style={{ color: "#ff6b6b", fontSize: 13 }}>{error}</div>
         )}

@@ -453,7 +453,7 @@ defense-in-depth, not strictly required.
 
 ### ~~12. Security audit logging~~ ✅
 
-Dedicated security log for all auth-related events. `Security` spdlog logger writing to `log/security.log` (rotating, 10 MB x 5 files) + ostream sink for TUI/console. `LOG_SECURITY_INFO`/`LOG_SECURITY_WARN` macros in `engine.h`. Logged events: auth success/failure (IP, endpoint, reason), rate limit triggered, webhook accepted/rejected (IP, workflowId, reason), shutdown requested, run control actions (cancel/pause/resume/stop with runId). All events include IP address and timestamp.
+Dedicated security log for all auth-related events. `Security` spdlog logger writing to `log/security.txt` (rotating, 10 MB x 5 files) + ostream sink for TUI/console. `LOG_SECURITY_INFO`/`LOG_SECURITY_WARN` macros in `engine.h`. Logged events: auth success/failure (IP, endpoint, reason), rate limit triggered, webhook accepted/rejected (IP, workflowId, reason), shutdown requested, run control actions (cancel/pause/resume/stop with runId). All events include IP address and timestamp.
 
 ### ~~13. Built-in TLS (HTTPS)~~ ✅
 
@@ -466,4 +466,16 @@ Dedicated security log for all auth-related events. `Security` spdlog logger wri
 ### ~~15. Failed auth lockout~~ ✅
 
 `AuthFailureRecord` struct + `m_AuthFailures` map (IP → {count, first_failure}), guarded by `m_RateLimitMutex`. After 10 failed auth attempts within 5 minutes, IP locked out for 15 minutes (403 + `Retry-After: 900`). Lockout checked before rate limiting. Successful auth clears failure count. Cleanup piggybacks on rate limit cleanup cycle. Lockout events logged to security log.
+
+### ~~16. Enterprise security hardening~~ ✅
+
+**Security headers:** `SetSecurityHeaders` adds CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy to all responses. HSTS added when TLS enabled.
+
+**Request body size limit:** `MaxRequestBodyMB` config field (default 10 MB). Oversized requests rejected with 413 before parsing. Applied to webhook and n8n endpoints.
+
+**Gateway-trusted identity headers:** `TrustedProxyHeader` / `TrustedRoleHeader` config fields. When set, `Authenticate()` trusts gateway-injected user/role headers. Falls back to bearer token. Security log includes user identity and auth method.
+
+**RBAC:** Three roles (admin > operator > viewer). Admin-only: shutdown, security log. Operator+: run control, app log. Viewer+: workflow list, run monitoring. Bearer token grants admin (backward compatible). Gateway mode defaults to viewer (least privilege). `insufficient_role` → 403.
+
+**Documentation:** `doc/cyber security.md` updated with 11 new abbreviations (RBAC, MFA, WAF, OIDC, JWT, etc.), recommended deployment architecture (Internet → WAF → API Gateway → j9t), explicit "Direct Public Internet Exposure — Not Supported" section, multi-tenant guidance.
 

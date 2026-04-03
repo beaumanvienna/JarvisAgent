@@ -125,10 +125,38 @@ namespace AIAssistant
             return result == 0;
         }
 
+        void SetSecurityHeaders(crow::response& response)
+        {
+            response.set_header("X-Frame-Options", "DENY");
+            response.set_header("X-Content-Type-Options", "nosniff");
+            response.set_header("Referrer-Policy", "strict-origin-when-cross-origin");
+            response.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+            response.set_header("Content-Security-Policy",
+                                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "connect-src 'self' ws: wss:; img-src 'self' data:");
+        }
+
         void SetJsonHeaders(crow::response& response)
         {
             response.add_header("Content-Type", "application/json");
             response.add_header("Cache-Control", "no-store");
+            SetSecurityHeaders(response);
+        }
+
+        bool IsBodyTooLarge(crow::request const& req, size_t maxMB)
+        {
+            return maxMB > 0 && req.body.size() > maxMB * 1024 * 1024;
+        }
+
+        crow::response MakePayloadTooLargeResponse(size_t maxMB)
+        {
+            crow::json::wvalue body;
+            body["ok"] = false;
+            body["error"] = "payload_too_large";
+            body["message"] = "Request body exceeds " + std::to_string(maxMB) + " MB limit";
+            crow::response resp(413, body.dump());
+            SetJsonHeaders(resp);
+            return resp;
         }
 
         crow::response MakeJsonResponse(int const httpStatus, crow::json::wvalue const& json)
@@ -173,6 +201,14 @@ namespace AIAssistant
             {
                 body["error"] = "token_expired";
                 body["message"] = "API token has expired. A new token has been generated — check server logs.";
+                crow::response resp(403, body.dump());
+                SetJsonHeaders(resp);
+                return resp;
+            }
+            else if (error == "insufficient_role")
+            {
+                body["error"] = "insufficient_role";
+                body["message"] = "Your role does not have permission for this endpoint.";
                 crow::response resp(403, body.dump());
                 SetJsonHeaders(resp);
                 return resp;
@@ -826,7 +862,7 @@ namespace AIAssistant
 
         crow::response response(200);
         response.set_header("Content-Type", GetMimeType(filePath));
-        response.set_header("X-Content-Type-Options", "nosniff");
+        SetSecurityHeaders(response);
 
         std::string const fileName = filePath.filename().string();
         bool const isIndexHtml = fileName == "index.html";
@@ -837,6 +873,11 @@ namespace AIAssistant
         else
         {
             response.set_header("Cache-Control", "public, max-age=31536000, immutable");
+        }
+
+        if (m_TlsEnabled)
+        {
+            response.set_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
         }
 
         response.body = std::move(content);
@@ -931,12 +972,26 @@ namespace AIAssistant
     static constexpr auto kAuthFailureWindow = std::chrono::minutes(5);
     static constexpr auto kLockoutDuration = std::chrono::minutes(15);
 
-    std::string WebServer::CheckAdminAuth(crow::request const& req) const
+    // Role hierarchy: admin > operator > viewer.
+    static int RoleLevel(std::string_view role)
+    {
+        if (role == "admin") return 3;
+        if (role == "operator") return 2;
+        if (role == "viewer") return 1;
+        return 0; // unknown → no access
+    }
+
+    bool WebServer::HasRole(AuthResult const& auth, std::string_view requiredRole)
+    {
+        return RoleLevel(auth.m_Role) >= RoleLevel(requiredRole);
+    }
+
+    WebServer::AuthResult WebServer::Authenticate(crow::request const& req) const
     {
 #ifdef J9T_STUDIO
-        // Studio edition: no auth required.
+        // Studio edition: no auth required — full admin.
         (void)req;
-        return {};
+        return {"", "studio", "admin"};
 #else
         std::string const& ip = req.remote_ip_address;
         std::string const& endpoint = req.url;
@@ -952,7 +1007,7 @@ namespace AIAssistant
                 if (it->second.m_Count >= kMaxAuthFailures && elapsed < kLockoutDuration)
                 {
                     LOG_SECURITY_WARN("[security] locked_out ip={} endpoint={}", ip, endpoint);
-                    return "locked_out";
+                    return {"locked_out", "", ""};
                 }
             }
         }
@@ -961,30 +1016,57 @@ namespace AIAssistant
         if (const_cast<WebServer*>(this)->IsRateLimited(req))
         {
             LOG_SECURITY_WARN("[security] rate_limited ip={} endpoint={}", ip, endpoint);
-            return "rate_limited";
+            return {"rate_limited", "", ""};
         }
 
+        // ---- Gateway-trusted identity headers (opt-in via TrustedProxyHeader config) ----
+        auto const& config = Core::g_Core->GetConfig();
+        if (!config.m_TrustedProxyHeader.empty())
+        {
+            std::string const& userHeader = req.get_header_value(config.m_TrustedProxyHeader);
+            if (!userHeader.empty())
+            {
+                // Gateway authenticated this request. Extract role from role header.
+                std::string role = "viewer"; // default: least privilege
+                if (!config.m_TrustedRoleHeader.empty())
+                {
+                    std::string const& roleHeader = req.get_header_value(config.m_TrustedRoleHeader);
+                    if (roleHeader == "admin" || roleHeader == "operator" || roleHeader == "viewer")
+                    {
+                        role = roleHeader;
+                    }
+                }
+
+                LOG_SECURITY_INFO("[security] auth_success ip={} user={} role={} method=gateway endpoint={}", ip,
+                                  userHeader, role, endpoint);
+                return {"", userHeader, role};
+            }
+            // Gateway header not present — fall through to bearer token check.
+        }
+
+        // ---- Bearer token authentication ----
         if (m_AdminToken.empty())
         {
             // No token configured — auth disabled (backward compat during migration).
-            return {};
+            return {"", "anonymous", "admin"};
         }
 
         std::string const& authHeader = req.get_header_value("Authorization");
         if (authHeader.empty())
         {
+            // Missing token = no auth attempt (e.g. dashboard polling before login).
+            // Do NOT count toward lockout — only wrong tokens should trigger lockout.
             LOG_SECURITY_WARN("[security] auth_failure reason=missing_token ip={} endpoint={}", ip, endpoint);
-            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return "missing";
+            return {"missing", "", ""};
         }
 
         static constexpr std::string_view kBearerPrefix = "Bearer ";
         if (authHeader.size() <= kBearerPrefix.size() ||
             authHeader.compare(0, kBearerPrefix.size(), kBearerPrefix) != 0)
         {
+            // Malformed header = not a real auth attempt.
             LOG_SECURITY_WARN("[security] auth_failure reason=malformed_header ip={} endpoint={}", ip, endpoint);
-            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return "malformed";
+            return {"malformed", "", ""};
         }
 
         std::string const providedToken = authHeader.substr(kBearerPrefix.size());
@@ -994,7 +1076,7 @@ namespace AIAssistant
         {
             LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
             const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return "forbidden";
+            return {"forbidden", "", ""};
         }
         unsigned char result = 0;
         for (size_t i = 0; i < providedToken.size(); ++i)
@@ -1006,7 +1088,7 @@ namespace AIAssistant
         {
             LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
             const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return "forbidden";
+            return {"forbidden", "", ""};
         }
 
         // Check token age — reject if expired, auto-rotate.
@@ -1018,20 +1100,29 @@ namespace AIAssistant
             {
                 LOG_SECURITY_WARN("[security] token_expired ip={} endpoint={} age_days={}", ip, endpoint, ageDays);
                 const_cast<WebServer*>(this)->GenerateAndPersistApiToken();
-                return "token_expired";
+                return {"token_expired", "", ""};
             }
         }
 
-        // Successful auth — clear any failure record for this IP.
+        // Successful bearer auth — clear any failure record for this IP.
         {
             auto* self = const_cast<WebServer*>(this);
             std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
             self->m_AuthFailures.erase(ip);
         }
 
-        LOG_SECURITY_INFO("[security] auth_success ip={} endpoint={}", ip, endpoint);
-        return {};
+        // Bearer token always grants admin role.
+        // Note: successful bearer auth is NOT logged to avoid flooding the security log
+        // with routine dashboard polling. Failures, lockouts, and gateway auth are logged.
+        return {"", "token", "admin"};
 #endif
+    }
+
+    // Legacy wrapper — used by existing route lambdas.
+    std::string WebServer::CheckAdminAuth(crow::request const& req) const
+    {
+        auto auth = Authenticate(req);
+        return auth.m_Error;
     }
 
     void WebServer::RecordAuthFailure(std::string const& ip)
@@ -1370,10 +1461,13 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
-                    LOG_SECURITY_INFO("[security] run_cancel ip={} runId={}", req.remote_ip_address, runId);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "operator"))
+                        return MakeAuthErrorResponse("insufficient_role");
+                    LOG_SECURITY_INFO("[security] run_cancel ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
+                                      runId);
                     return HandleWorkflowRunCancelPost(runId);
                 });
 
@@ -1381,10 +1475,13 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
-                    LOG_SECURITY_INFO("[security] run_pause ip={} runId={}", req.remote_ip_address, runId);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "operator"))
+                        return MakeAuthErrorResponse("insufficient_role");
+                    LOG_SECURITY_INFO("[security] run_pause ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
+                                      runId);
                     return HandleWorkflowRunPausePost(runId);
                 });
 
@@ -1392,10 +1489,13 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
-                    LOG_SECURITY_INFO("[security] run_resume ip={} runId={}", req.remote_ip_address, runId);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "operator"))
+                        return MakeAuthErrorResponse("insufficient_role");
+                    LOG_SECURITY_INFO("[security] run_resume ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
+                                      runId);
                     return HandleWorkflowRunResumePost(runId);
                 });
 
@@ -1403,10 +1503,13 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
-                    LOG_SECURITY_INFO("[security] run_stop ip={} runId={}", req.remote_ip_address, runId);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "operator"))
+                        return MakeAuthErrorResponse("insufficient_role");
+                    LOG_SECURITY_INFO("[security] run_stop ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
+                                      runId);
                     return HandleWorkflowRunStopPost(runId);
                 });
 
@@ -1415,20 +1518,24 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "operator"))
+                        return MakeAuthErrorResponse("insufficient_role");
                     return HandleLogGet(req);
                 });
 
-        // ---- Admin: Security log ----
+        // ---- Admin: Security log (admin only) ----
         CROW_ROUTE(m_Server, "/api/log/security")
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "admin"))
+                        return MakeAuthErrorResponse("insufficient_role");
                     return HandleSecurityLogGet(req);
                 });
 
@@ -1464,16 +1571,18 @@ namespace AIAssistant
                     }
                 });
 
-        // ---- Admin: POST /api/shutdown ----
+        // ---- Admin: POST /api/shutdown (admin only) ----
         CROW_ROUTE(m_Server, "/api/shutdown")
             .methods("POST"_method)(
                 [this](crow::request const& req)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                        return MakeAuthErrorResponse(auth.m_Error);
+                    if (!HasRole(auth, "admin"))
+                        return MakeAuthErrorResponse("insufficient_role");
 
-                    LOG_SECURITY_INFO("[security] shutdown_requested ip={}", req.remote_ip_address);
+                    LOG_SECURITY_INFO("[security] shutdown_requested ip={} user={}", req.remote_ip_address, auth.m_User);
                     Core::g_Core->RequestQuit();
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
                     Core::g_Core->PushEvent(event);
@@ -2838,6 +2947,15 @@ namespace AIAssistant
 
     crow::response WebServer::HandleN8nStartPost(crow::request const& req)
     {
+        // Body size check.
+        auto const maxBodyMB = Core::g_Core->GetConfig().m_MaxRequestBodyMB;
+        if (IsBodyTooLarge(req, maxBodyMB))
+        {
+            LOG_SECURITY_WARN("[security] payload_too_large ip={} endpoint=POST /api/integrations/n8n/start size={}",
+                              req.remote_ip_address, req.body.size());
+            return MakePayloadTooLargeResponse(maxBodyMB);
+        }
+
         // Expected body:
         // {
         //   "workflowId": "...",
@@ -3001,6 +3119,15 @@ namespace AIAssistant
     crow::response WebServer::HandleWebhookPost(crow::request const& req, std::string const& workflowId)
     {
         static constexpr char const* kEndpoint = "POST /api/webhook/{id}";
+
+        // Body size check.
+        auto const maxBodyMB = Core::g_Core->GetConfig().m_MaxRequestBodyMB;
+        if (IsBodyTooLarge(req, maxBodyMB))
+        {
+            LOG_SECURITY_WARN("[security] payload_too_large ip={} endpoint={} size={}", req.remote_ip_address, kEndpoint,
+                              req.body.size());
+            return MakePayloadTooLargeResponse(maxBodyMB);
+        }
 
         if (!IsValidWorkflowId(workflowId))
         {
@@ -3558,7 +3685,7 @@ namespace AIAssistant
 
     crow::response WebServer::HandleSecurityLogGet(crow::request const& req)
     {
-        return ReadLogFile(req, "log/security.log");
+        return ReadLogFile(req, "log/security.txt");
     }
 
 #ifdef J9T_STUDIO

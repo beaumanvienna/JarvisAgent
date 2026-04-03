@@ -344,7 +344,7 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 
 ## ~~Security audit logging~~ ✅
 
-- [x] ~~Add `security` spdlog logger writing to `log/security.log` (separate from application log)~~ ✅ `Security` logger in `log.cpp` with rotating file sink (10 MB x 5) + ostream sink (TUI/console)
+- [x] ~~Add `security` spdlog logger writing to `log/security.txt` (separate from application log)~~ ✅ `Security` logger in `log.cpp` with rotating file sink (10 MB x 5) + ostream sink (TUI/console)
 - [x] ~~Add `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN` macros (same pattern as `LOG_APP_*` / `LOG_CORE_*`)~~ ✅ in `engine.h`, no-op in `DISTRIBUTION_BUILD`
 - [x] ~~Log at each `CheckAdminAuth` call site: IP, endpoint, outcome (success / missing token / wrong token)~~ ✅
 - [x] ~~Log at rate limit trigger: IP, endpoint, request count~~ ✅
@@ -376,3 +376,31 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 - [x] ~~`MakeAuthErrorResponse`: handle `"locked_out"` → 403 with lockout message and `Retry-After: 900`~~ ✅
 - [x] ~~Auto-clear lockout entries after 15 minutes~~ ✅ piggybacks on rate limit cleanup cycle
 - [x] ~~Log lockout events to security log~~ ✅
+
+## ~~Security headers~~ ✅
+
+- [x] ~~`SetSecurityHeaders` function: CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy~~ ✅
+- [x] ~~Wired into `SetJsonHeaders` (all JSON responses) and `ServeStaticFile` (all static assets)~~ ✅
+- [x] ~~HSTS (`Strict-Transport-Security`) set only when TLS is enabled~~ ✅
+
+## ~~Request body size limit~~ ✅
+
+- [x] ~~`MaxRequestBodyMB` config field (default 10)~~ ✅ in `EngineConfig` + `configParser.cpp`
+- [x] ~~`IsBodyTooLarge` check in webhook and n8n handlers~~ ✅ returns 413 `payload_too_large`
+- [x] ~~Logged to security log~~ ✅
+
+## ~~Gateway-trusted identity headers~~ ✅
+
+- [x] ~~`TrustedProxyHeader` / `TrustedRoleHeader` config fields~~ ✅
+- [x] ~~`Authenticate()` method returns `AuthResult{error, user, role}`~~ ✅ replaces `CheckAdminAuth` internally
+- [x] ~~Gateway mode: trust header identity, extract role, default to `viewer`~~ ✅
+- [x] ~~Bearer token mode: always grants `admin` (backward compatible)~~ ✅
+- [x] ~~Security log includes user identity and auth method (gateway/bearer)~~ ✅
+
+## ~~Role-Based Access Control (RBAC)~~ ✅
+
+- [x] ~~Three roles: admin > operator > viewer~~ ✅ `HasRole()` with `RoleLevel()` hierarchy
+- [x] ~~`admin` only: shutdown, security log~~ ✅
+- [x] ~~`operator`+: run cancel/pause/resume/stop, application log~~ ✅
+- [x] ~~`viewer`+: workflow list, workflow detail, run monitoring~~ ✅
+- [x] ~~`insufficient_role` → 403 error response~~ ✅

@@ -509,7 +509,7 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
             <div style={{ color: "#9ca3af", fontSize: 13 }}>
               {logTab === "application"
                 ? "The log file (log/log.txt) may not exist yet. Start a workflow or check that JarvisAgent has write access to its log directory."
-                : "The security log (log/security.log) may not exist yet. Security events are logged in Engine edition when authentication is active."}
+                : "The security log (log/security.txt) may not exist yet. Security events are logged in Engine edition when authentication is active."}
             </div>
           </div>
         ) : (

@@ -87,7 +87,22 @@ namespace AIAssistant
 #endif
 
         // ---- Admin auth (Engine edition only) ----
-        // Returns empty string on success, error message on failure.
+        // Authentication result — returned by Authenticate().
+        struct AuthResult
+        {
+            std::string m_Error; // empty on success
+            std::string m_User;  // identity from gateway header or "token" for bearer auth
+            std::string m_Role;  // "admin", "operator", or "viewer"
+
+            bool Ok() const { return m_Error.empty(); }
+        };
+
+        // Authenticate the request. Returns AuthResult with error/user/role.
+        AuthResult Authenticate(crow::request const& req) const;
+        // Check if the auth result's role meets the minimum required level.
+        static bool HasRole(AuthResult const& auth, std::string_view requiredRole);
+
+        // Legacy wrapper — returns empty string on success, error code on failure.
         std::string CheckAdminAuth(crow::request const& req) const;
         // Generate a cryptographically random hex token and persist it to config.json.
         void GenerateAndPersistApiToken();

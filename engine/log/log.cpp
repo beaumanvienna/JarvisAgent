@@ -73,14 +73,14 @@ namespace AIAssistant
         // ============================================================
         // SECURITY LOGGER
         // Writes to both the ostream (TUI/console) and a dedicated
-        // rotating file: log/security.log (10 MB x 5 files).
+        // rotating file: log/security.txt (10 MB x 5 files).
         // ============================================================
         std::filesystem::create_directories("log");
 
         std::vector<spdlog::sink_ptr> securitySinks;
         securitySinks.emplace_back(ostreamSink);
         securitySinks.emplace_back(
-            std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log/security.log", 10 * 1024 * 1024, 5));
+            std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log/security.txt", 10 * 1024 * 1024, 5));
         securitySinks.back()->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [Security] [%l] %v");
 
         m_SecurityLogger = std::make_shared<spdlog::logger>("Security", begin(securitySinks), end(securitySinks));

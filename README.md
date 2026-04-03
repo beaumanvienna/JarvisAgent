@@ -19,7 +19,7 @@ JarvisAgent is a **modern** C++ orchestration engine with a React frontend for p
 <br>
 Choose your platform — Linux (DEB, RPM, Arch, AppImage, Flatpak), macOS (DMG, Homebrew), or Windows (MSI) — or run the published Docker image if you need an isolated, reproducible environment. Workflows are defined as visual DAGs (directed acyclic graphs) in the **workflow editor**: drag-and-drop nodes, draw dependency and dataflow edges, and watch tasks animate through running → succeeded / failed states in real time with stdout/stderr surfaced directly on each node. When something goes wrong the **fix-it** button sends the error to the AI for a suggested repair; the **explain** button summarises what a workflow does in plain language; and the **generate** button drafts an entirely new workflow from a natural language description.  <br>
 <br>
-The project ships as two editions: **j9t Studio** — a full developer IDE with visual workflow editor, AI assistant, and config management — and **j9t Engine** — a hardened, lean production server with no editing surface, ready for public deployment. Both are included in every package.<br>
+JarvisAgent (j9t) comes in two editions: **j9t Studio**, an easy-to-use workspace for designing and managing AI workflows with a visual editor and built-in AI assistant, and **j9t Engine**, a streamlined production edition built for secure enterprise deployment. Studio is designed for teams who create and refine workflows, while Engine is optimized to run them reliably and securely at scale in production environments. Both editions are included in every package. Engine includes enterprise-grade security features such as secure login access, encrypted communication, role-based permissions, protection against unauthorized access attempts, and detailed security audit trails — making it ready for deployment in a private cloud or behind a company's secure network gateway.<br>
 <br>
 The **React dashboard** gives an overview of active workflow runs, AI session counts, and completed/failed counters. Its **log viewer** streams up to 100,000 lines live with color-coded severity, and the **Run Analyzer** overlay (press `1`) maps every run to its log region, lists all warnings and errors with one-click navigation, and lets you step through issues with ▲ / ▼.  <br>
 <br>
@@ -48,6 +48,7 @@ Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before
 | **Config** | `config.json` with folder paths, thread count, AI backend model, and other settings | ✅ |
 | **I/O** | File watcher, categorizer, environment assembly (STNG/CNTX/TASK), automatic binary detection and MarkItDown-based document conversion | ✅ |
 | **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) with multi-model selection | ✅ |
+| **Security** | Bearer token auth, RBAC (admin/operator/viewer), gateway identity headers, rate limiting, auth lockout, token expiry/rotation, HMAC webhooks, TLS, security audit log, CSP/security headers | ✅ |
 | **Frontend** | React workflow editor (ReactFlow graph UI), AI workflow generator, workflow versioning, live run monitoring via WebSocket | ✅ |
 
 ---
@@ -162,7 +163,7 @@ queue/
 
 ---
 
-## Planned Features
+## Completed Features
 
 - [x] Docker deployment & CI/CD — 3-stage build, pushed to GHCR ([AhmetErenLacinbala](https://github.com/AhmetErenLacinbala))  
 - [x] Native Google Gemini reply parser (API3 — `x-goog-api-key` auth, `/models/{model}:generateContent` URL scheme)  
@@ -170,9 +171,14 @@ queue/
 - [x] AI workflow generation — natural language → JCWF + scripts (decompose → generate → validate → fix)  
 - [x] Error branching & controlflow — branch nodes, error-signal edges, automatic retry/recovery  
 - [x] Workflow versioning — auto-backup on save, browse & restore from editor  
+- [x] Browser-based AI assistant — 31 tools, multi-step reasoning, file I/O, shell execution, workspace memory  
+- [x] HTTP/2 multiplexing — all concurrent AI requests share a single TLS connection per provider via a dedicated I/O thread  
+- [x] Engine security hardening — bearer token auth, HMAC webhooks, rate limiting, auth lockout, token auto-expiry/rotation, security audit logging, built-in TLS, RBAC (admin/operator/viewer), gateway identity headers, request body limits, security response headers (CSP, X-Frame-Options, HSTS)  
+
+### Remaining
+
 - [ ] Python Engine parallelization (sub-interpreters / multiprocessing)  
-- [ ] Browser-based AI chat terminal  
-- [x] HTTP/2 multiplexing — all concurrent AI requests share a single TLS connection per provider via a dedicated I/O thread; no thread-pool threads blocked on network I/O
+- [ ] Sub-workflows / workflow-call node
 
 ---
 
@@ -547,7 +553,7 @@ JarvisAgent builds as two editions from the same source tree. Each produces a di
 | Edition | Flag | Binary | Use case |
 |---------|------|--------|----------|
 | **j9t Studio** (default) | *(none)* or `--studio` | `jarvisAgent-studio` | Developer workstation — workflow editor, AI assistant, config management |
-| **j9t Engine** | `--engine` | `jarvisAgent-engine` | Production server — lean, no editing surface, bearer token auth |
+| **j9t Engine** | `--engine` | `jarvisAgent-engine` | Production server — lean, no editing surface, full security stack (auth, RBAC, TLS, audit log) |
 
 ### Building
 
@@ -590,35 +596,34 @@ export MAKEFLAGS=-j$(sysctl -n hw.ncpu)   # macOS
 - Dashboard: http://localhost:8080
 - Workflow Editor: http://localhost:8080/editor (Studio only)
 
-### Engine Authentication
+### Engine Security
 
-Engine edition protects all admin endpoints with **bearer token authentication**. Studio has no auth (developer workstation — localhost only).
+Engine edition includes a full security stack. Studio has no auth (developer workstation — localhost only).
 
-On first Engine start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600` — owner read/write only), and printed to stdout:
-
-```
-Engine API Token (use this for admin access):
-dcc74bab...598f
-Stored in: engine_api_token.txt
-```
-
-**When to use Engine + auth:**
-- Production servers exposed to the network
-- Multi-user environments where only admins should control workflows
-- Integration scenarios (e.g. a chatbot backend triggers workflows via HMAC webhook; only the operator has the admin token)
-
-**REST API:** include the token in every request:
+**Authentication:** On first start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600`), and printed to stdout. Tokens auto-expire after 90 days and auto-rotate. Include the token in every request:
 ```bash
 curl -H "Authorization: Bearer <token>" http://host:8080/api/workflows
 ```
 
-**Dashboard:** on first load, the dashboard prompts for the admin token. It stores the token in the browser's localStorage for subsequent visits. A **Logout** button in the header clears it.
+**Gateway integration:** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik), configure `TrustedProxyHeader` and `TrustedRoleHeader` in `config.json` so j9t reads the authenticated user identity and role from gateway-injected headers.
 
-**WebSocket:** the dashboard sends the token as the first message after connecting. Direct WebSocket clients must send `{"type":"auth","token":"<token>"}` before any other messages.
+**RBAC:** Three roles — `admin` (full access incl. shutdown, security logs), `operator` (run control, app logs), `viewer` (read-only monitoring). Gateway mode maps roles from headers; bearer token grants admin.
 
-**Public endpoints** (no auth required): `GET /api/status` (health checks), `GET /` (dashboard HTML shell).
+**Defense layers:** Per-IP rate limiting (100 req/min, burst 20), failed auth lockout (10 failures → 15-min IP ban), request body size limit (configurable, default 10 MB), security response headers (CSP, X-Frame-Options, HSTS, Referrer-Policy).
 
-**Webhook endpoints** use per-workflow HMAC-SHA256 signatures (separate from the admin token). In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected.
+**Audit logging:** All auth events, webhook decisions, and run control actions logged to `log/security.txt` with IP, user identity, role, and endpoint. Viewable in the dashboard's Security tab.
+
+**TLS:** Built-in HTTPS via `TlsCert`/`TlsKey` in config.json (port 8443), or deploy behind a TLS-terminating reverse proxy.
+
+**Dashboard:** prompts for the admin token on first load, stores it in localStorage. A **Logout** button clears it.
+
+**WebSocket:** clients must send `{"type":"auth","token":"<token>"}` as the first message.
+
+**Public endpoints** (no auth): `GET /api/status`, `GET /` (dashboard HTML shell).
+
+**Webhook endpoints** use per-workflow HMAC-SHA256 signatures (separate from the admin token). In Engine mode, a webhook secret is mandatory.
+
+See [doc/cyber security.md](doc/cyber%20security.md) for the full threat model, deployment architecture, and operator responsibilities.
 
 ### Updating
 

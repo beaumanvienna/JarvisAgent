@@ -199,6 +199,27 @@ namespace AIAssistant
                 LOG_CORE_INFO("TlsKey: {}", engineConfig.m_TlsKey);
                 ++fieldOccurances[ConfigFields::TlsKey];
             }
+            else if (jsonObjectKey == "TrustedProxyHeader")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                engineConfig.m_TrustedProxyHeader = std::string(jsonObject.value().get_string().value());
+                LOG_CORE_INFO("TrustedProxyHeader: {}", engineConfig.m_TrustedProxyHeader);
+                ++fieldOccurances[ConfigFields::TrustedProxyHeader];
+            }
+            else if (jsonObjectKey == "TrustedRoleHeader")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                engineConfig.m_TrustedRoleHeader = std::string(jsonObject.value().get_string().value());
+                LOG_CORE_INFO("TrustedRoleHeader: {}", engineConfig.m_TrustedRoleHeader);
+                ++fieldOccurances[ConfigFields::TrustedRoleHeader];
+            }
+            else if (jsonObjectKey == "MaxRequestBodyMB")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                engineConfig.m_MaxRequestBodyMB = static_cast<size_t>(jsonObject.value().get_uint64().value());
+                LOG_CORE_INFO("MaxRequestBodyMB: {}", engineConfig.m_MaxRequestBodyMB);
+                ++fieldOccurances[ConfigFields::MaxRequestBodyMB];
+            }
             else
             {
                 // Try to get the value as a string for display

@@ -12,17 +12,28 @@ JarvisAgent ships as two editions with different security profiles. This documen
 | **API** | Application Programming Interface — a set of URLs that software uses to communicate with j9t |
 | **Bearer token** | A secret string sent in an HTTP header to prove identity (like a password for API access) |
 | **CRUD** | Create, Read, Update, Delete — the four basic operations on data |
+| **CSP** | Content-Security-Policy — an HTTP header that controls which scripts, styles, and connections a web page is allowed to use |
 | **DAG** | Directed Acyclic Graph — a workflow structure where tasks have dependencies but no circular loops |
 | **DoS / DDoS** | Denial of Service / Distributed Denial of Service — an attack that floods a server with requests to make it unavailable |
 | **HMAC-SHA256** | Hash-based Message Authentication Code using SHA-256 — a way to sign a message so the receiver can verify it was not tampered with and came from a trusted sender |
+| **HSTS** | HTTP Strict-Transport-Security — an HTTP header that tells browsers to only connect via HTTPS, preventing downgrade attacks |
 | **HTTP / HTTPS** | HyperText Transfer Protocol (/ Secure) — the protocol web browsers and APIs use to communicate. HTTPS adds encryption via TLS |
 | **JCWF** | JC Workflow Format — j9t's JSON-based file format for defining workflows |
 | **j9t** | Short name for JarvisAgent |
+| **JWT** | JSON Web Token — a compact, self-contained token format used to pass identity claims between services |
+| **KMS** | Key Management Service — a cloud service (e.g. AWS KMS, Azure Key Vault) that stores and manages encryption keys |
+| **LDAP** | Lightweight Directory Access Protocol — a protocol for querying a corporate user directory (e.g. Active Directory) |
+| **MFA** | Multi-Factor Authentication — requiring two or more verification methods (e.g. password + phone code) to prove identity |
+| **OIDC** | OpenID Connect — an identity layer on top of OAuth 2.0 that lets applications verify user identity via an external provider (e.g. Google, Azure AD, Okta) |
 | **Ops team** | Operations team — the people responsible for deploying, monitoring, and maintaining servers in production |
 | **PII** | Personally Identifiable Information — data that can identify an individual (name, email, address, etc.) |
+| **RBAC** | Role-Based Access Control — restricting system access based on a user's assigned role (e.g. admin, operator, viewer) |
+| **SAML** | Security Assertion Markup Language — an XML-based standard for exchanging authentication data between an identity provider and a service |
 | **SIEM** | Security Information and Event Management — software that collects and analyzes security logs from multiple systems to detect threats (e.g. Splunk, Microsoft Sentinel) |
 | **SPA** | Single-Page Application — a web app that loads once and updates dynamically (the j9t dashboard) |
+| **SSO** | Single Sign-On — allowing a user to log in once and access multiple systems without re-authenticating |
 | **TLS** | Transport Layer Security — encryption for network traffic (the "S" in HTTPS) |
+| **WAF** | Web Application Firewall — a security layer that filters, monitors, and blocks malicious HTTP traffic before it reaches the application |
 | **WebSocket (WS)** | A persistent two-way connection between browser and server for real-time updates |
 
 ---
@@ -37,7 +48,11 @@ JarvisAgent ships as two editions with different security profiles. This documen
 | **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
 | **Failed auth lockout** | None | 10 failures / 5 min → 15-min IP lockout |
 | **Token expiration** | N/A | 90-day max age, auto-rotation on expiry |
-| **Audit logging** | None | `log/security.log` (rotating, 10 MB x 5) |
+| **RBAC** | N/A (no auth) | 3 roles: admin, operator, viewer (via gateway headers or bearer token) |
+| **Gateway identity** | N/A | Trusts `X-Forwarded-User` / `X-Forwarded-Role` from API gateway |
+| **Audit logging** | None | `log/security.txt` (rotating, 10 MB x 5), includes user identity |
+| **Security headers** | CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy | Same + HSTS when TLS enabled |
+| **Request body limit** | None | Configurable `MaxRequestBodyMB` (default 10 MB) |
 | **Built-in TLS** | Optional | Optional (`TlsCert`/`TlsKey` in config.json) |
 | **Webhook secrets** | Optional | Mandatory |
 | **Workflow CRUD** | Open | Not available (compile-time removed) |
@@ -83,28 +98,37 @@ Studio is designed for **single-developer use on a local machine**. The operator
 - **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. The caller must include an `X-Webhook-Signature: sha256=<hex>` header computed over the raw request body. Signature verification uses constant-time comparison. In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected with HTTP 403.
 - **WebSocket authentication.** WebSocket clients must send `{"type":"auth","token":"<token>"}` as the first message. Unauthenticated connections cannot receive data or send commands.
 - **Per-IP rate limiting.** Token bucket algorithm (100 requests/minute per IP, burst of 20) protects against brute-force token guessing and request flooding. Rate-limited requests receive HTTP 429 with a `Retry-After` header.
-- **Security audit logging.** All auth-related events are logged to a dedicated rotating log file (`log/security.log`, 10 MB x 5 files) as well as the application log (TUI/console). Logged events include: auth success/failure with IP and endpoint, rate limit triggers, lockout triggers, webhook accept/reject with workflow ID, shutdown requests, and run control actions (cancel/pause/resume/stop) with run ID. The security log is accessible via `GET /api/log/security` (admin-auth required) and visible in the dashboard Log Viewer's "Security" tab with 3-second polling. Log macros: `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN`.
+- **Security audit logging.** All auth-related events are logged to a dedicated rotating log file (`log/security.txt`, 10 MB x 5 files) as well as the application log (TUI/console). Logged events include: auth success/failure with IP and endpoint, rate limit triggers, lockout triggers, webhook accept/reject with workflow ID, shutdown requests, and run control actions (cancel/pause/resume/stop) with run ID. The security log is accessible via `GET /api/log/security` (admin-auth required) and visible in the dashboard Log Viewer's "Security" tab with 3-second polling. Log macros: `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN`.
 - **Built-in TLS (HTTPS).** Optional native TLS via Crow's SSL support. Set `"TlsCert"` and `"TlsKey"` in `config.json` to point to PEM certificate and key files. When configured, j9t serves HTTPS on port 8443 instead of HTTP on 8080. If only one field is set or the files don't exist, j9t refuses to start (no silent fallback). `GET /api/status` includes `"tls": true/false`. This eliminates the cleartext last-mile between a reverse proxy and j9t, and can replace the reverse proxy entirely for simpler deployments.
+- **Gateway-trusted identity headers.** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), j9t trusts identity headers injected by the gateway. Configure `"TrustedProxyHeader": "X-Forwarded-User"` and `"TrustedRoleHeader": "X-Forwarded-Role"` in `config.json`. The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the authenticated user and role from the headers. This allows per-user identity in audit logs without j9t implementing its own identity provider integration.
+- **Role-Based Access Control (RBAC).** Three roles with descending privilege: **admin** (full access including shutdown and security logs), **operator** (run control, workflow monitoring, application logs), **viewer** (read-only dashboard, workflow list, run status). In gateway mode, the role comes from the `X-Forwarded-Role` header (default: `viewer` if missing). In bearer-token mode, the token grants `admin` (backward compatible). Routes enforce minimum required role — a viewer attempting to stop a run or access security logs receives HTTP 403 `insufficient_role`.
+- **Request body size limit.** Configurable maximum HTTP body size (`"MaxRequestBodyMB": 10` in `config.json`, default 10 MB). Oversized requests are rejected with HTTP 413 `payload_too_large` before parsing. Protects against memory exhaustion attacks via large webhook payloads.
+- **Security response headers.** All HTTP responses include: `Content-Security-Policy` (restricts script/style/connection sources to `'self'`), `X-Frame-Options: DENY` (prevents clickjacking), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`. When TLS is enabled, `Strict-Transport-Security` (HSTS) is also set.
 - **Reduced attack surface.** Studio-only modules (workflow editor, AI assistant, AI JCWF generation, settings API, script management) are excluded at compile time. The Engine binary is physically smaller and exposes fewer endpoints.
 - **Public endpoints are read-only and non-sensitive.** Only `GET /api/status` (health check) and the dashboard HTML shell (`GET /`, `/dash-assets/*`) are served without authentication.
 
 ### Remaining threats
 
-- **No per-user access control.** There is a single admin token. All token holders have identical privileges. There is no role separation (e.g. read-only monitoring vs full control).
-- **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. `GET /api/log/security` exposes IP addresses and auth event history. Both are token-protected but log content is not redacted.
+- **Gateway header spoofing.** When `TrustedProxyHeader` is configured, j9t trusts the identity header unconditionally. If j9t is accidentally exposed without a gateway in front, any client can inject a fake `X-Forwarded-User` header and impersonate any user. **Mitigation:** always deploy behind the gateway on a private subnet; never expose j9t directly to the internet when gateway trust is enabled.
+- **No encryption at rest.** Workflow data, AI outputs, and logs are stored as plaintext files on disk. If the server's storage is compromised (stolen disk, leaked snapshot, improper decommissioning), all data is exposed. **The operator must deploy j9t on encrypted storage** — see "Admin responsibility" below.
+- **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. `GET /api/log/security` exposes IP addresses, user identities, and auth event history. Both are role-protected (operator+ for app log, admin for security log) but log content is not redacted.
 - **Unauthenticated shutdown via process signal.** The bearer token protects the `POST /api/shutdown` endpoint, but an attacker with OS-level access can still kill the process via signals (SIGTERM, SIGKILL). This is outside j9t's control.
-- **Denial of service.** Rate limiting and auth lockout mitigate request flooding and brute-force attacks, but do not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a firewall or cloud-level DDoS protection for internet-facing deployments.
+- **Denial of service.** Rate limiting, auth lockout, and request body size limits mitigate application-level attacks, but do not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a WAF or cloud-level DDoS protection for internet-facing deployments.
 
 ### Admin responsibility
 
 The admin (operator) is responsible for:
 
+- **Encrypted storage.** j9t does not encrypt data at rest. All workflow data, AI outputs, and logs (`queue/`, `workflows/`, `log/`) are plaintext on disk. **The operator must deploy j9t on encrypted storage** — full-disk encryption (LUKS, BitLocker), encrypted cloud volumes (AWS EBS encryption, Azure Disk Encryption, GCP CMEK), or encrypted Docker volumes. This is the same requirement as PostgreSQL, Elasticsearch, and other backend services that rely on infrastructure-level encryption.
 - **TLS configuration.** Either enable built-in TLS (`TlsCert`/`TlsKey` in config.json → HTTPS on port 8443) or deploy behind a TLS-terminating reverse proxy. Never expose plain HTTP to the internet.
-- **Token security.** Treat the admin token like a password. The token is stored in `engine_api_token.txt` (gitignored, file permissions `600`), not in `config.json`. Tokens auto-expire after 90 days and auto-rotate, but can also be manually rotated by deleting the file and restarting.
+- **API gateway.** Deploy j9t behind an API gateway (Kong, AWS API Gateway, Traefik) that handles OIDC/SAML authentication and MFA. Configure `TrustedProxyHeader` and `TrustedRoleHeader` so j9t receives per-user identity and role from the gateway.
+- **Private subnet.** Place j9t on a private subnet with no direct internet access. Only the API gateway should be able to reach j9t's port.
+- **Token security.** Treat the admin token like a password. The token is stored in `engine_api_token.txt` (gitignored, file permissions `600`), not in `config.json`. Tokens auto-expire after 90 days and auto-rotate, but can also be manually rotated by deleting the file and restarting. In gateway deployments, the bearer token serves as a service-to-service credential between gateway and j9t.
 - **Webhook secret management.** Configure a strong, unique secret for every webhook trigger. Share secrets with integration partners over a secure channel.
-- **Network segmentation.** Restrict access to the Engine port (default 8080, or 8443 with TLS) using firewall rules. Only the reverse proxy, webhook callers, and admin workstations should be able to reach it.
-- **Security log monitoring.** Review `log/security.log` regularly or forward it to a SIEM. The security log records all auth decisions, lockouts, webhook events, and run control actions. The dashboard's "Security" tab provides a quick view.
-- **Log access.** Application and security logs may contain sensitive data (prompts, IP addresses, file paths). Restrict who has the admin token and consider log rotation / redaction for compliance-sensitive environments. Security log rotation is automatic (10 MB x 5 files).
+- **Network segmentation.** Restrict access to the Engine port (default 8080, or 8443 with TLS) using firewall rules. Only the API gateway, webhook callers, and admin workstations should be able to reach it.
+- **SIEM integration.** Forward `log/security.txt` to your organization's SIEM (Splunk, Elastic, Microsoft Sentinel, Datadog) for centralized monitoring, alerting, and compliance retention. Each event includes IP, user identity, role, endpoint, and outcome.
+- **Multi-tenant isolation.** For deployments serving multiple teams or customers, run one j9t instance per tenant with separate data directories. Route traffic via the API gateway based on tenant identity.
+- **Log access.** Application and security logs may contain sensitive data (prompts, IP addresses, user identities, file paths). Security log access is restricted to admin role. Consider log redaction for compliance-sensitive environments. Security log rotation is automatic (10 MB x 5 files).
 - **Keeping j9t up to date.** Apply updates promptly to pick up security fixes.
 
 ### End user responsibility
@@ -196,7 +220,7 @@ The mounted `~/JarvisAgent/` directory contains only j9t working data:
 |--------|----------|
 | `workflows/` | Workflow definitions (`.jcwf` files) and supporting data files (e.g. repair manuals, CSV files) |
 | `queue/` | Runtime task inputs and AI outputs |
-| `log/` | Application logs (`log.txt`) and security audit logs (`security.log`) |
+| `log/` | Application logs (`log.txt`) and security audit logs (`security.txt`) |
 | `config.json` | Server configuration (AI provider URLs, thread count — no credentials) |
 | `engine_api_token.txt` | Admin bearer token (auto-generated, file permissions `600`) |
 | `keys.json.enc` | Encrypted AI API keys |
@@ -236,18 +260,90 @@ Additional benefits for Studio in Docker:
 
 ---
 
+## Direct Public Internet Exposure — Not Supported
+
+**j9t Engine must NOT be exposed directly to the public internet.**
+
+j9t is designed as an **execution backend** that sits behind an infrastructure layer (API gateway, reverse proxy, load balancer). It is not a public-facing web application and lacks the following protections required for direct internet exposure:
+
+- **No WAF** (Web Application Firewall) — j9t cannot inspect or block malicious HTTP traffic patterns (SQL injection, XSS payloads, bot signatures)
+- **No DDoS protection** — rate limiting handles application-level flooding but not network-level attacks (SYN floods, amplification attacks, bandwidth exhaustion)
+- **No session management** — there are no login sessions, session cookies, or session timeouts
+- **No CSRF protection** — no anti-forgery tokens on state-changing requests (the bearer token acts as an implicit CSRF defense, but only if not stored in a cookie)
+- **No automated certificate management** — TLS certificates must be manually configured; there is no ACME / Let's Encrypt integration
+
+**The supported deployment model is: API gateway → j9t Engine.** See the next section.
+
+---
+
+## Recommended Deployment Architecture
+
+### Reference architecture
+
+```
+┌──────────┐    ┌─────────────────┐    ┌───────────────────────────────┐    ┌──────────────────┐
+│ Internet │───▶│ WAF / DDoS      │───▶│ API Gateway                   │───▶│ j9t Engine       │
+│          │    │ (CloudFlare,    │    │ (Kong, AWS API GW, Traefik)   │    │ (private subnet) │
+│          │    │  AWS Shield)    │    │                               │    │                  │
+│          │    │                 │    │ • OIDC / SAML authentication  │    │ • TLS enabled    │
+│          │    │ • L3/L4 filter  │    │ • MFA enforcement             │    │ • Bearer token   │
+│          │    │ • Rate limiting │    │ • Role mapping → headers      │    │ • RBAC enforced  │
+│          │    │ • Bot detection │    │ • X-Forwarded-User            │    │ • Audit logging  │
+│          │    │                 │    │ • X-Forwarded-Role            │    │ • Body size limit│
+└──────────┘    └─────────────────┘    └───────────────────────────────┘    └──────────────────┘
+```
+
+### Step-by-step deployment
+
+1. **Place j9t on a private subnet** with no direct internet access. Only the API gateway can reach j9t's port (8080 or 8443).
+
+2. **Configure the API gateway** with your organization's identity provider (OIDC via Azure AD, Okta, Google Workspace; or SAML). Enable MFA at the identity provider level.
+
+3. **Map identity to headers.** Configure the gateway to inject:
+   - `X-Forwarded-User` — the authenticated user's identity (email or subject claim)
+   - `X-Forwarded-Role` — the user's role: `admin`, `operator`, or `viewer`
+
+4. **Configure j9t.** Add to `config.json`:
+   ```json
+   {
+     "TrustedProxyHeader": "X-Forwarded-User",
+     "TrustedRoleHeader": "X-Forwarded-Role",
+     "TlsCert": "/etc/j9t/cert.pem",
+     "TlsKey": "/etc/j9t/key.pem",
+     "MaxRequestBodyMB": 10
+   }
+   ```
+
+5. **Bearer token as service credential.** The auto-generated bearer token in `engine_api_token.txt` is now a service-to-service credential between the gateway and j9t, not a user-facing password. Store it in the gateway's upstream configuration.
+
+6. **Forward security logs to SIEM.** Configure your log aggregator (Splunk, Elastic, Datadog) to ingest `log/security.txt`. Each event includes IP, user identity, role, endpoint, and outcome.
+
+### Multi-tenant deployment
+
+j9t does not have built-in tenant isolation at the data level (all workflows share one filesystem). For multi-tenant deployments:
+
+- **Recommended: one j9t instance per tenant.** Each tenant gets its own j9t Engine container with its own `workflows/`, `queue/`, and `log/` directories. The API gateway routes requests to the correct instance based on the tenant's identity. This provides full data isolation.
+- **Alternative: shared instance with role-based scoping.** A single j9t instance serves multiple teams. The gateway maps each team to a role (`admin` for the platform team, `operator` for workflow runners, `viewer` for stakeholders). All teams share the same workflow pool. This is simpler but does not isolate data between teams.
+
+---
+
 ## Summary
 
 | Concern | Studio | Engine |
 |---------|--------|--------|
-| Who should run it | Developer, on localhost | Ops team, with TLS enabled or behind reverse proxy |
-| Authentication | None | Bearer token + HMAC webhooks + WebSocket auth |
+| Who should run it | Developer, on localhost | Ops team, behind API gateway on private subnet |
+| Authentication | None | Bearer token + HMAC webhooks + gateway identity headers |
+| RBAC | N/A | 3 roles: admin, operator, viewer (gateway or bearer token) |
 | Rate limiting | None | Per-IP token bucket (100 req/min, burst 20) |
 | Auth lockout | None | 10 failures / 5 min → 15-min IP lockout |
 | Token lifecycle | N/A | 90-day expiry, auto-rotation, 7-day warning |
-| Audit logging | None | `log/security.log` (rotating, 10 MB x 5) + dashboard viewer |
+| Audit logging | None | `log/security.txt` with user identity, rotating, dashboard viewer |
+| Security headers | CSP, X-Frame-Options, Referrer-Policy | Same + HSTS when TLS enabled |
+| Request body limit | None | Configurable `MaxRequestBodyMB` (default 10 MB) |
 | AI script execution | Yes (review before accept) | No (AI tooling removed at compile time) |
 | AI assistant | Yes (approval required for mutations) | No (removed at compile time) |
 | TLS | Optional (built-in or not needed on localhost) | Built-in (`TlsCert`/`TlsKey`) or reverse proxy |
-| Log sensitivity | Developer sees own logs | Token-protected; security log exposes IPs and auth events |
+| Encryption at rest | N/A (localhost) | **Operator must deploy on encrypted storage** (LUKS, EBS, Azure Disk) |
+| Log sensitivity | Developer sees own logs | Role-protected; security log admin-only |
+| Direct internet exposure | Not applicable (localhost) | **Not supported** — deploy behind API gateway |
 | Cloud AI safety | Provider-managed content filtering, rate limits, and data policies apply to all AI calls |

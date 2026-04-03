@@ -74,6 +74,9 @@ namespace AIAssistant
             std::string m_KeysFilePath{"keys.json.enc"};
             std::string m_TlsCert;
             std::string m_TlsKey;
+            std::string m_TrustedProxyHeader;
+            std::string m_TrustedRoleHeader;
+            size_t m_MaxRequestBodyMB{10};
             bool m_UseBashOnWindows{false};
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
@@ -106,6 +109,9 @@ namespace AIAssistant
             UseBashOnWindows,
             TlsCert,
             TlsKey,
+            TrustedProxyHeader,
+            TrustedRoleHeader,
+            MaxRequestBodyMB,
             NumConfigFields
         };
 
@@ -134,7 +140,10 @@ namespace AIAssistant
                 "JcwfAiInterface",      //
                 "UseBashOnWindows",     //
                 "TlsCert",              //
-                "TlsKey"                //
+                "TlsKey",               //
+                "TrustedProxyHeader",   //
+                "TrustedRoleHeader",    //
+                "MaxRequestBodyMB"      //
         };
 
     public:
