@@ -281,16 +281,16 @@ j9t is designed as an **execution backend** that sits behind an infrastructure l
 ### Reference architecture
 
 ```
-┌──────────┐    ┌─────────────────┐    ┌───────────────────────────────┐    ┌──────────────────┐
+┌──────────┐    ┌─────────────────┐     ┌───────────────────────────────┐    ┌──────────────────┐
 │ Internet │───▶│ WAF / DDoS      │───▶│ API Gateway                   │───▶│ j9t Engine       │
-│          │    │ (CloudFlare,    │    │ (Kong, AWS API GW, Traefik)   │    │ (private subnet) │
-│          │    │  AWS Shield)    │    │                               │    │                  │
-│          │    │                 │    │ • OIDC / SAML authentication  │    │ • TLS enabled    │
-│          │    │ • L3/L4 filter  │    │ • MFA enforcement             │    │ • Bearer token   │
-│          │    │ • Rate limiting │    │ • Role mapping → headers      │    │ • RBAC enforced  │
-│          │    │ • Bot detection │    │ • X-Forwarded-User            │    │ • Audit logging  │
-│          │    │                 │    │ • X-Forwarded-Role            │    │ • Body size limit│
-└──────────┘    └─────────────────┘    └───────────────────────────────┘    └──────────────────┘
+│          │    │ (CloudFlare,    │     │ (Kong, AWS API GW, Traefik)   │    │ (private subnet) │
+│          │    │  AWS Shield)    │     │                               │    │                  │
+│          │    │                 │     │ • OIDC / SAML authentication  │    │ • TLS enabled    │
+│          │    │ • L3/L4 filter  │     │ • MFA enforcement             │    │ • Bearer token   │
+│          │    │ • Rate limiting │     │ • Role mapping → headers      │    │ • RBAC enforced  │
+│          │    │ • Bot detection │     │ • X-Forwarded-User            │    │ • Audit logging  │
+│          │    │                 │     │ • X-Forwarded-Role            │    │ • Body size limit│
+└──────────┘    └─────────────────┘     └───────────────────────────────┘    └──────────────────┘
 ```
 
 ### Step-by-step deployment
