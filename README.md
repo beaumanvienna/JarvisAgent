@@ -174,10 +174,10 @@ queue/
 - [x] Browser-based AI assistant — 31 tools, multi-step reasoning, file I/O, shell execution, workspace memory  
 - [x] HTTP/2 multiplexing — all concurrent AI requests share a single TLS connection per provider via a dedicated I/O thread  
 - [x] Engine security hardening — bearer token auth, HMAC webhooks, rate limiting, auth lockout, token auto-expiry/rotation, security audit logging, built-in TLS, RBAC (admin/operator/viewer), gateway identity headers, request body limits, security response headers (CSP, X-Frame-Options, HSTS)  
+- [x] Python engine parallelization — N sub-interpreters with per-engine worker threads and load-balanced task dispatch (Python 3.12+; graceful fallback to single engine on older Python)  
 
 ### Remaining
 
-- [ ] Python Engine parallelization (sub-interpreters / multiprocessing)  
 - [ ] Sub-workflows / workflow-call node
 
 ---
@@ -186,6 +186,16 @@ queue/
 
 You are welcome to contribute!  
 Please enable **clang-format** in your IDE. The coding style is **Allman**, and member fields of structs and classes use the `m_` + PascalCase convention.
+
+---
+
+## User Manual
+
+The full user manual is available as:
+- **Man page** (Linux/macOS): `man jarvisagent` (installed with DEB, RPM, Arch, Homebrew packages)
+- **Online / all platforms**: [doc/jarvisagent.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/jarvisagent.md#jarvisagent1--jarvisagent-user-manual)
+
+It covers editions (Studio vs Engine), CLI options, `config.json` fields, environment variables, AI key setup, security, workflow concepts, and the workflow editor.
 
 ---
 
@@ -356,17 +366,12 @@ See [packaging/packaging.md](packaging/packaging.md) for build scripts and detai
 
 ---
 
-## User Manual
-
-The full user manual is available as:
-- **Man page** (Linux/macOS): `man jarvisagent` (installed with DEB, RPM, Arch, Homebrew packages)
-- **Online / all platforms**: [doc/jarvisagent.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/jarvisagent.md#jarvisagent1--jarvisagent-user-manual)
-
-It covers CLI options, `config.json` fields, environment variables, AI key setup, workflow concepts, and the workflow editor.
-
----
-
 ## Building from Source
+
+```bash
+git clone https://github.com/beaumanvienna/JarvisAgent
+cd JarvisAgent
+```
 
 JarvisAgent depends on
 * Python 3 and development headers (on Ubuntu/Debian the packages are called `python3`, `python3-dev`)
@@ -410,7 +415,7 @@ sudo cp bin/release/premake5 /usr/bin/
 ### macOS
 
 ```bash
-brew install python3
+brew install python3 node
 ```
 
 Premake5: download from [premake.github.io](https://premake.github.io/download) or build from source as above.
@@ -539,12 +544,6 @@ The build output lands in `dashboard/ui/dist/` and `workflow-editor/ui/dist/` re
 JarvisAgent serves these automatically at `http://localhost:8080` (dashboard) and `http://localhost:8080/editor` (workflow editor). With TLS enabled (`"TlsCert"` and `"TlsKey"` in config.json), the default port changes to `8443` — configurable via `"port"` in config.json.
 
 ---
-
-To clone the project, use:
-
-```bash
-git clone --recurse-submodules https://github.com/beaumanvienna/JarvisAgent
-```
 
 ### Editions
 
