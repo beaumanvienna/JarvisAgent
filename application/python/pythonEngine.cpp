@@ -305,6 +305,7 @@ namespace AIAssistant
                     if (task.m_WorkflowRequest)
                     {
                         ExecuteWorkflowTaskOnWorker(task.m_WorkflowRequest);
+                        ++m_TasksCompleted;
                     }
                     break;
                 }

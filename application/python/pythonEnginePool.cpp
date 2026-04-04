@@ -81,6 +81,21 @@ namespace AIAssistant
             return false;
         }
 
+        // Python 3.12+ provides Py_NewInterpreterFromConfig (PEP 684) for
+        // sub-interpreters with configurable GIL sharing.  Older versions only
+        // offer Py_NewInterpreter which creates sub-interpreters that all share
+        // the main GIL with no configuration options.  On < 3.12 we clamp to a
+        // single engine to avoid the pitfalls of legacy sub-interpreters.
+#if PY_VERSION_HEX < 0x030C0000
+        if (engineCount > 1)
+        {
+            LOG_APP_WARN("PythonEnginePool: Python {}.{} detected — sub-interpreter parallelization requires "
+                         "Python 3.12+; clamping engine count from {} to 1",
+                         PY_MAJOR_VERSION, PY_MINOR_VERSION, engineCount);
+            engineCount = 1;
+        }
+#endif
+
         LOG_APP_INFO("PythonEnginePool: initializing {} engine(s) with script '{}'", engineCount, scriptPath);
 
         // ---- Global Python initialization (once per process) ----
@@ -99,7 +114,11 @@ namespace AIAssistant
         {
             auto engine = std::make_unique<PythonEngine>(i);
 
-            // Configure sub-interpreter with its own GIL (PEP 684)
+            PyThreadState* subTS = nullptr;
+
+#if PY_VERSION_HEX >= 0x030C0000
+            // Python 3.12+: Py_NewInterpreterFromConfig (PEP 684)
+            //
             // Create sub-interpreter with shared GIL and shared obmalloc.
             // use_main_obmalloc=1 is essential: it shares the main allocator
             // so that single-phase C extension modules (builtins like _abc,
@@ -128,17 +147,27 @@ namespace AIAssistant
             config.check_multi_interp_extensions = 0;
             config.gil = PyInterpreterConfig_SHARED_GIL;
 
-            PyThreadState* subTS = nullptr;
             PyStatus status = Py_NewInterpreterFromConfig(&subTS, &config);
 
             if (PyStatus_IsError(status) || subTS == nullptr)
             {
                 LOG_APP_ERROR("PythonEnginePool: failed to create sub-interpreter {}: {}", i,
                               status.err_msg ? status.err_msg : "unknown error");
-                // Switch back to main interpreter for next attempt
                 PyThreadState_Swap(mainTS);
                 continue;
             }
+#else
+            // Python < 3.12: legacy Py_NewInterpreter (shared GIL, no config).
+            // engineCount is already clamped to 1 above.
+            subTS = Py_NewInterpreter();
+
+            if (subTS == nullptr)
+            {
+                LOG_APP_ERROR("PythonEnginePool: Py_NewInterpreter() failed for engine {}", i);
+                PyThreadState_Swap(mainTS);
+                continue;
+            }
+#endif
             // Sub-interpreter is active on this thread; GIL is held.
 
             // Set up the sub-interpreter (redirect stdout, sys.path, import hooks for primary)
@@ -256,6 +285,15 @@ namespace AIAssistant
         {
             m_Engines[0]->OnEvent(std::move(eventPtr));
         }
+    }
+
+    size_t PythonEnginePool::GetTasksCompleted(size_t engineIndex) const
+    {
+        if (engineIndex < m_Engines.size())
+        {
+            return m_Engines[engineIndex]->GetTasksCompleted();
+        }
+        return 0;
     }
 
     // ============================================================================

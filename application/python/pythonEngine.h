@@ -101,6 +101,7 @@ namespace AIAssistant
         bool IsRunning() const { return m_Running; }
         size_t GetQueueDepth() const;
         size_t GetEngineIndex() const { return m_EngineIndex; }
+        size_t GetTasksCompleted() const { return m_TasksCompleted; }
 
         bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
                                  std::unordered_map<std::string, std::string> const& inputValues,
@@ -123,6 +124,7 @@ namespace AIAssistant
         bool m_Running{false};
         bool m_StopRequested{false};
         size_t m_EngineIndex{0};
+        size_t m_TasksCompleted{0};
 
         std::string m_ScriptDir;
         std::string m_ModuleName;

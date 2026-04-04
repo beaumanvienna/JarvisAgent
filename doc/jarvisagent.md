@@ -1,11 +1,12 @@
 # jarvisagent(1) — JarvisAgent User Manual
 
-**Version 0.8** — March 2026
+**Version 0.9** — April 2026
 
 **Contents:**
 [Name](#name) ·
 [Synopsis](#synopsis) ·
 [Description](#description) ·
+[Editions](#editions) ·
 [Options](#options) ·
 [Installation](#installation) ·
 [Configuration](#configuration) ·
@@ -14,6 +15,7 @@
 [Workflows](#workflows) ·
 [Workflow Editor](#workflow-editor) ·
 [Dashboard](#dashboard) ·
+[Security](#security) ·
 [Files](#files) ·
 [See Also](#see-also)
 
@@ -26,7 +28,9 @@
 ## SYNOPSIS
 
 ```
-jarvisAgent [--help] [--version]
+jarvisagent.sh [--studio | --engine] [--help]
+jarvisAgent-studio [--help] [--version]
+jarvisAgent-engine [--help] [--version]
 ```
 
 ## DESCRIPTION
@@ -44,11 +48,45 @@ a natural fit for engineering environments with large file landscapes.
 Workflows let you chain serial and parallel tasks — AI calls, Python scripts, shell commands,
 or native C++ — in a visual graph editor with various trigger types (manual, cron, file_watch).
 
+The application ships in two editions — **Studio** (full developer IDE) and **Engine** (lean
+production server) — each with its own binary and security profile. See [Editions](#editions)
+below.
+
 The application ships with an ncurses terminal UI for local or SSH sessions, a browser-based
 React dashboard for remote monitoring, and a visual workflow editor. It compiles and runs on
 Linux, macOS, and Windows.
 
+## EDITIONS
+
+JarvisAgent builds as two distinct binaries selected at build time (see [Installation](#installation)):
+
+| | j9t Studio (default) | j9t Engine |
+|-|----------------------|------------|
+| **Binary** | `jarvisAgent-studio` | `jarvisAgent-engine` |
+| **Purpose** | Developer workstation | Production server |
+| **Network exposure** | Localhost only | LAN / internet |
+| **Authentication** | None | Bearer token (admin), HMAC-SHA256 (webhooks) |
+| **RBAC** | N/A | 3 roles: admin, operator, viewer |
+| **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
+| **Audit logging** | None | `log/security.txt` (rotating, 10 MB x 5) |
+| **Request body limit** | None | Configurable (default 10 MB) |
+| **Workflow CRUD** | Full | Not available (compile-time removed) |
+| **AI assistant** | Full | Not available (compile-time removed) |
+| **AI JCWF generation** | Full | Not available (compile-time removed) |
+| **Attack surface** | Full feature set | Minimal — runtime + monitoring only |
+
+Studio is designed for single-developer use on a local machine. Engine is designed for
+production deployments behind an API gateway. See [Security](#security) for details.
+
 ## OPTIONS
+
+**Launcher flags** (for `jarvisagent.sh`):
+
+- **`--studio`** — Launch the Studio edition (default).
+- **`--engine`** — Launch the Engine edition.
+- **`--help`** — Show usage information.
+
+**Binary flags** (for `jarvisAgent-studio` / `jarvisAgent-engine`):
 
 - **`--help`**, **`-h`** — Show a help message and exit.
 - **`--version`**, **`-v`** — Print the version number and exit.
@@ -69,6 +107,17 @@ JarvisAgent is available as pre-built packages for all major platforms:
 For building from source and detailed install/uninstall instructions for each package format,
 see the project **README.md** and **packaging/packaging.md**.
 
+### Shell completions
+
+Shell completion scripts for the launcher are included in `integration/completions/`:
+
+- **Bash:** `source /path/to/jarvisAgent/integration/completions/jarvisagent.bash` (or add to `~/.bashrc`)
+- **Zsh:** Add the completions directory to `fpath` and run `compinit`:
+  ```bash
+  fpath=(/path/to/jarvisAgent/integration/completions $fpath)
+  compinit
+  ```
+
 GitHub repository: https://github.com/beaumanvienna/JarvisAgent
 
 ## CONFIGURATION
@@ -83,12 +132,21 @@ The following fields are recognized:
 - **`"author"`** — (string) Author or owner of this configuration.
 - **`"queue folder"`** — (string, **required**) Relative or absolute path to the queue directory. JarvisAgent monitors this folder for incoming files that trigger AI requests.
 - **`"workflows folder"`** — (string) Relative or absolute path to the directory containing `.jcwf` workflow definition files. Defaults to `workflows/`.
-- **`"max threads"`** — (number) Maximum number of concurrent AI request threads.
-- **`"engine sleep time in run loop in ms"`** — (number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness.
-- **`"max file size in kB"`** — (number) Maximum input file size in kilobytes. Files larger than this are chunked before being sent to the AI. Default: 20.
+- **`"port"`** — (number) Web server listen port. `0` = auto-select (8080 for HTTP, 8443 for HTTPS). Valid range: 1–65535. Default: `0`.
+- **`"max threads"`** — (number) Worker-thread pool size. Default: 16. Valid range: 1–256.
+- **`"max inflight ai calls"`** — (number) Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from thread pool size since requests are multiplexed on a single I/O thread. Default: 100. Valid range: 1–1000.
+- **`"python engines"`** — (number) Number of Python sub-interpreters (each with its own GIL) for parallel Python task execution. Requires Python 3.12+. Default: 4. Valid range: 1–16.
+- **`"engine sleep time in run loop in ms"`** — (number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness. Default: 10. Valid range: 1–256.
+- **`"max file size in kB"`** — (number) Maximum input file size in kilobytes. Files larger than this are chunked before being sent to the AI. Default: 20. Valid range: 1–256.
 - **`"jcwf batch size"`** — (number) Number of tasks per batch when the AI JCWF generator fans out to multiple parallel calls for large workflows. Workflows with fewer tasks than this threshold are generated in a single call. Default: 10.
 - **`"verbose"`** — (boolean) Enable verbose logging output.
 - **`"keys_file"`** — (string) Path to the encrypted API keys file. Default: `keys.json.enc`.
+- **`"use_bash"`** — (boolean) Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. Default: `false`. Ignored on Linux/macOS.
+- **`"TlsCert"`** — (string) Path to a PEM-format TLS certificate file. Both `TlsCert` and `TlsKey` must be set to enable HTTPS. See [Security](#security).
+- **`"TlsKey"`** — (string) Path to a PEM-format TLS private key file.
+- **`"TrustedProxyHeader"`** — (string) HTTP header name for gateway-injected user identity (e.g. `X-Forwarded-User`). Engine edition only. See [Security](#security).
+- **`"TrustedRoleHeader"`** — (string) HTTP header name for gateway-injected user role (e.g. `X-Forwarded-Role`). Engine edition only.
+- **`"MaxRequestBodyMB"`** — (number) Maximum HTTP request body size in megabytes. Oversized requests are rejected with HTTP 413 before parsing. Engine edition only. Default: 10.
 - **`"API index"`** — (number) Zero-based index of the default AI interface to use from the `"API interfaces"` array.
 - **`"API interfaces"`** — (array) List of AI provider configurations. Each entry is an object with:
   - **`"url"`** — (string, **required**) The API endpoint URL (e.g. `https://api.openai.com/v1/chat/completions`).
@@ -205,14 +263,47 @@ A full-screen, virtual-scrolling log display (up to 100,000 lines).
   - **Issues list** — all warnings and errors within the run, color-coded by severity (red for errors, yellow for warnings).
   - **▲ / ▼** arrows to step through issues one by one; clicking an issue jumps to its log line.
 
+## SECURITY
+
+### Studio edition
+
+Studio has **no authentication**. It is designed for single-developer use on localhost. The operator is responsible for not exposing the port beyond localhost, reviewing AI-generated scripts before accepting them, and keeping API keys secure.
+
+### Engine edition
+
+Engine is designed for production deployments and includes comprehensive security:
+
+- **Bearer token authentication.** All admin endpoints require an `Authorization: Bearer <token>` header. The token is a 256-bit cryptographically random hex string, auto-generated on first start and stored in `engine_api_token.txt` (file permissions `600`). Token comparison uses constant-time logic.
+- **Token expiration and auto-rotation.** Tokens expire after 90 days and are auto-rotated. A startup warning is logged 7 days before expiry. Manual rotation: delete `engine_api_token.txt` and restart.
+- **Failed auth lockout.** 10 failed attempts from the same IP within 5 minutes triggers a 15-minute lockout (HTTP 403 with `Retry-After: 900`).
+- **RBAC (Role-Based Access Control).** Three roles with descending privilege:
+  - **admin** — full access including shutdown, security logs, and all operations.
+  - **operator** — run control, workflow monitoring, application logs.
+  - **viewer** — read-only dashboard, workflow list, run status.
+
+  In gateway mode, the role comes from the `TrustedRoleHeader` (default: `viewer` if missing). In bearer-token mode, the token grants `admin`.
+- **Per-IP rate limiting.** Token bucket algorithm: 100 requests/minute per IP, burst of 20. Rate-limited requests receive HTTP 429 with `Retry-After`.
+- **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. Callers must include `X-Webhook-Signature: sha256=<hex>` computed over the raw request body. In Engine mode, webhooks without a configured secret are rejected.
+- **WebSocket authentication.** Clients must send `{"type":"auth","token":"<token>"}` as the first message.
+- **Built-in TLS (HTTPS).** Set `"TlsCert"` and `"TlsKey"` in `config.json` to serve HTTPS (default port 8443). If only one field is set or the files don't exist, j9t refuses to start. When TLS is enabled, HSTS headers are added.
+- **Gateway-trusted identity headers.** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), configure `"TrustedProxyHeader"` and `"TrustedRoleHeader"` in `config.json`. The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the authenticated user and role from the injected headers.
+- **Security audit logging.** All auth events are logged to `log/security.txt` (rotating, 10 MB x 5 files). Logged events: auth success/failure, rate limit triggers, lockout triggers, webhook accept/reject, shutdown requests, and run control actions — all with IP, user identity, and timestamps. Accessible via `GET /api/log/security` (admin role required) and the dashboard's Security tab.
+- **Security response headers.** All responses include `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and `Permissions-Policy`.
+- **Request body size limit.** Configurable via `"MaxRequestBodyMB"` (default 10 MB). Oversized requests are rejected with HTTP 413 before parsing.
+
+For the complete security model, threat analysis, and operator responsibilities, see **doc/cyber security.md**.
+
 ## FILES
 
 - **`config.json`** — Main configuration file (must exist in the working directory).
 - **`keys.json.enc`** — Encrypted API keys (AES-256, master-password protected).
 - **`keys.json`** — Plaintext API keys (development fallback, gitignored).
+- **`engine_api_token.txt`** — Auto-generated admin bearer token (Engine edition only, file permissions `600`). Contains the token on line 1 and `issued_at=<ISO-8601>` on line 2.
 - **`workflows/`** — Directory containing `.jcwf` workflow definition files.
 - **`queue/`** — Monitored directory for incoming files.
 - **`log/log.txt`** — Application log file.
+- **`log/security.txt`** — Security audit log (Engine edition only, rotating 10 MB x 5 files).
+- **`integration/completions/`** — Shell completion scripts for bash and zsh.
 - **`.venv/`** — Python virtual environment (auto-created by launcher scripts). Contains markitdown. PDF workflows additionally require `pandoc` (system package) and `mmdc` (`npm install -g @mermaid-js/mermaid-cli@10.x`).
 
 ## SEE ALSO
@@ -221,6 +312,7 @@ A full-screen, virtual-scrolling log display (up to 100,000 lines).
 - **Packaging and installation** — [packaging/packaging.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/packaging/packaging.md)
 - **JC Workflow Specification** — [doc/JC_Workflow_Specification.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md)
 - **REST API reference** — [doc/api-endpoints.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md)
+- **Cyber security model** — [doc/cyber security.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/cyber%20security.md)
 - **Key management internals** — [engine/keys.md](https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md)
 
 ---

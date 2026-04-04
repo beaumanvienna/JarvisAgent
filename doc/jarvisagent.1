@@ -1,12 +1,20 @@
 .\" jarvisagent(1) — JarvisAgent user manual
-.\" Generated for JarvisAgent 0.8
-.TH JARVISAGENT 1 "March 2026" "JarvisAgent 0.8" "User Commands"
+.\" Generated for JarvisAgent 0.9
+.TH JARVISAGENT 1 "April 2026" "JarvisAgent 0.9" "User Commands"
 .
 .SH NAME
 jarvisAgent \- parallel AI\-driven automation engine with visual workflow editor
 .
 .SH SYNOPSIS
-.B jarvisAgent
+.B jarvisagent.sh
+.RB [ \-\-studio " | " \-\-engine ]
+.RB [ \-\-help ]
+.br
+.B jarvisAgent\-studio
+.RB [ \-\-help ]
+.RB [ \-\-version ]
+.br
+.B jarvisAgent\-engine
 .RB [ \-\-help ]
 .RB [ \-\-version ]
 .
@@ -28,12 +36,57 @@ Workflows let you chain serial and parallel tasks \(em AI calls, Python scripts,
 shell commands, or native C++ \(em in a visual graph editor with various trigger
 types (manual, cron, file_watch).
 .PP
+The application ships in two editions \(em \fBStudio\fR (full developer IDE)
+and \fBEngine\fR (lean production server) \(em each with its own binary and
+security profile.
+See
+.B EDITIONS
+below.
+.PP
 The application ships with an ncurses terminal UI for local or SSH sessions,
 a browser\-based React dashboard for remote monitoring, and a visual workflow
 editor.
 It compiles and runs on Linux, macOS, and Windows.
 .
+.SH EDITIONS
+JarvisAgent builds as two distinct binaries selected at build time:
+.PP
+.TS
+l l l
+l l l.
+	\fBj9t Studio (default)\fR	\fBj9t Engine\fR
+Binary	jarvisAgent\-studio	jarvisAgent\-engine
+Purpose	Developer workstation	Production server
+Network	Localhost only	LAN / internet
+Auth	None	Bearer token, HMAC\-SHA256
+RBAC	N/A	admin, operator, viewer
+Rate limit	None	100 req/min per IP, burst 20
+Audit log	None	log/security.txt (10 MB x 5)
+Body limit	None	Configurable (default 10 MB)
+Workflow CRUD	Full	Not available (compile\-time removed)
+AI assistant	Full	Not available (compile\-time removed)
+AI JCWF gen	Full	Not available (compile\-time removed)
+Attack surface	Full feature set	Minimal \(em runtime + monitoring
+.TE
+.PP
+Studio is designed for single\-developer use on a local machine.
+Engine is designed for production deployments behind an API gateway.
+See
+.B SECURITY
+for details.
+.
 .SH OPTIONS
+.SS Launcher flags (for jarvisagent.sh)
+.TP
+.B \-\-studio
+Launch the Studio edition (default).
+.TP
+.B \-\-engine
+Launch the Engine edition.
+.TP
+.B \-\-help
+Show usage information.
+.SS Binary flags (for jarvisAgent\-studio / jarvisAgent\-engine)
 .TP
 .BR \-\-help ", " \-h
 Show a help message and exit.
@@ -58,6 +111,22 @@ package format, see the project
 .B README.md
 and
 .BR packaging/packaging.md .
+.SS Shell completions
+Shell completion scripts for the launcher are included in
+.BR integration/completions/ :
+.PP
+\fBBash:\fR
+.RS
+source /path/to/jarvisAgent/integration/completions/jarvisagent.bash
+.RE
+.PP
+\fBZsh:\fR add the completions directory to \fBfpath\fR and run \fBcompinit\fR:
+.RS
+.nf
+fpath=(/path/to/jarvisAgent/integration/completions $fpath)
+compinit
+.fi
+.RE
 .PP
 The GitHub repository is:
 .UR https://github.com/beaumanvienna/JarvisAgent
@@ -91,17 +160,43 @@ workflow definition files.
 Defaults to
 .IR workflows/ .
 .TP
+.B "port"
+(number) Web server listen port.
+.I 0
+= auto\-select (8080 for HTTP, 8443 for HTTPS).
+Valid range: 1\(en65535.
+Default: 0.
+.TP
 .B "max threads"
-(number) Maximum number of concurrent AI request threads.
+(number) Worker\-thread pool size.
+Default: 16.
+Valid range: 1\(en256.
+.TP
+.B "max inflight ai calls"
+(number) Maximum concurrent AI requests dispatched via HTTP/2.
+Decoupled from thread pool size since requests are multiplexed on a single
+I/O thread.
+Default: 100.
+Valid range: 1\(en1000.
+.TP
+.B "python engines"
+(number) Number of Python sub\-interpreters (each with its own GIL) for
+parallel Python task execution.
+Requires Python 3.12+.
+Default: 4.
+Valid range: 1\(en16.
 .TP
 .B "engine sleep time in run loop in ms"
 (number) Main loop sleep duration in milliseconds.
 Controls CPU usage vs. responsiveness.
+Default: 10.
+Valid range: 1\(en256.
 .TP
 .B "max file size in kB"
 (number) Maximum input file size in kilobytes.
 Files larger than this are chunked before being sent to the AI.
 Default: 20.
+Valid range: 1\(en256.
 .TP
 .B "jcwf batch size"
 (number) Number of tasks per batch when the AI JCWF generator fans out to
@@ -119,6 +214,39 @@ Default:
 See
 .B ENVIRONMENT
 below.
+.TP
+.B "use_bash"
+(boolean) Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for
+shell tasks.
+Default: false.
+Ignored on Linux/macOS.
+.TP
+.B "TlsCert"
+(string) Path to a PEM\-format TLS certificate file.
+Both \fBTlsCert\fR and \fBTlsKey\fR must be set to enable HTTPS.
+See
+.BR SECURITY .
+.TP
+.B "TlsKey"
+(string) Path to a PEM\-format TLS private key file.
+.TP
+.B "TrustedProxyHeader"
+(string) HTTP header name for gateway\-injected user identity
+(e.g. \fIX\-Forwarded\-User\fR).
+Engine edition only.
+See
+.BR SECURITY .
+.TP
+.B "TrustedRoleHeader"
+(string) HTTP header name for gateway\-injected user role
+(e.g. \fIX\-Forwarded\-Role\fR).
+Engine edition only.
+.TP
+.B "MaxRequestBodyMB"
+(number) Maximum HTTP request body size in megabytes.
+Oversized requests are rejected with HTTP 413 before parsing.
+Engine edition only.
+Default: 10.
 .TP
 .B "API index"
 (number) Zero\-based index of the default AI interface to use from the
@@ -355,6 +483,88 @@ by severity (red for errors, yellow for warnings).
 an issue jumps to its log line.
 .RE
 .
+.SH SECURITY
+.SS Studio edition
+Studio has \fBno authentication\fR.
+It is designed for single\-developer use on localhost.
+The operator is responsible for not exposing the port beyond localhost,
+reviewing AI\-generated scripts before accepting them, and keeping API keys
+secure.
+.SS Engine edition
+Engine is designed for production deployments and includes comprehensive
+security:
+.IP \(bu 3
+\fBBearer token authentication.\fR
+All admin endpoints require an \fIAuthorization: Bearer <token>\fR header.
+The token is a 256\-bit cryptographically random hex string, auto\-generated on
+first start and stored in \fBengine_api_token.txt\fR (file permissions 600).
+Token comparison uses constant\-time logic.
+.IP \(bu
+\fBToken expiration and auto\-rotation.\fR
+Tokens expire after 90 days and are auto\-rotated.
+A startup warning is logged 7 days before expiry.
+Manual rotation: delete \fBengine_api_token.txt\fR and restart.
+.IP \(bu
+\fBFailed auth lockout.\fR
+10 failed attempts from the same IP within 5 minutes triggers a 15\-minute
+lockout (HTTP 403 with Retry\-After: 900).
+.IP \(bu
+\fBRBAC (Role\-Based Access Control).\fR
+Three roles with descending privilege:
+\fBadmin\fR \(em full access including shutdown, security logs, and all
+operations;
+\fBoperator\fR \(em run control, workflow monitoring, application logs;
+\fBviewer\fR \(em read\-only dashboard, workflow list, run status.
+In gateway mode, the role comes from the \fBTrustedRoleHeader\fR (default:
+viewer if missing).
+In bearer\-token mode, the token grants admin.
+.IP \(bu
+\fBPer\-IP rate limiting.\fR
+Token bucket algorithm: 100 requests/minute per IP, burst of 20.
+Rate\-limited requests receive HTTP 429 with Retry\-After.
+.IP \(bu
+\fBHMAC\-SHA256 webhook authentication.\fR
+Webhook triggers require a per\-workflow secret.
+Callers must include \fIX\-Webhook\-Signature: sha256=<hex>\fR computed over
+the raw request body.
+In Engine mode, webhooks without a configured secret are rejected.
+.IP \(bu
+\fBWebSocket authentication.\fR
+Clients must send \fI{"type":"auth","token":"<token>"}\fR as the first message.
+.IP \(bu
+\fBBuilt\-in TLS (HTTPS).\fR
+Set \fBTlsCert\fR and \fBTlsKey\fR in config.json to serve HTTPS (default
+port 8443).
+If only one field is set or the files don\(aqt exist, j9t refuses to start.
+When TLS is enabled, HSTS headers are added.
+.IP \(bu
+\fBGateway\-trusted identity headers.\fR
+When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx),
+configure \fBTrustedProxyHeader\fR and \fBTrustedRoleHeader\fR in config.json.
+The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the
+authenticated user and role from the injected headers.
+.IP \(bu
+\fBSecurity audit logging.\fR
+All auth events are logged to \fBlog/security.txt\fR (rotating, 10 MB x 5
+files).
+Logged events: auth success/failure, rate limit triggers, lockout triggers,
+webhook accept/reject, shutdown requests, and run control actions \(em all
+with IP, user identity, and timestamps.
+Accessible via \fIGET /api/log/security\fR (admin role required) and the
+dashboard\(aqs Security tab.
+.IP \(bu
+\fBSecurity response headers.\fR
+All responses include Content\-Security\-Policy, X\-Frame\-Options: DENY,
+X\-Content\-Type\-Options: nosniff, Referrer\-Policy, and Permissions\-Policy.
+.IP \(bu
+\fBRequest body size limit.\fR
+Configurable via \fBMaxRequestBodyMB\fR (default 10 MB).
+Oversized requests are rejected with HTTP 413 before parsing.
+.PP
+For the complete security model, threat analysis, and operator
+responsibilities, see
+.BR "doc/cyber security.md" .
+.
 .SH FILES
 .TP
 .B config.json
@@ -365,6 +575,10 @@ Encrypted API keys (AES\-256, master\-password protected).
 .TP
 .B keys.json
 Plaintext API keys (development fallback, gitignored).
+.TP
+.B engine_api_token.txt
+Auto\-generated admin bearer token (Engine edition only, file permissions 600).
+Contains the token on line 1 and \fIissued_at=<ISO\-8601>\fR on line 2.
 .TP
 .B workflows/
 Directory containing
@@ -377,9 +591,20 @@ Monitored directory for incoming files.
 .B log/log.txt
 Application log file.
 .TP
+.B log/security.txt
+Security audit log (Engine edition only, rotating 10 MB x 5 files).
+.TP
+.B integration/completions/
+Shell completion scripts for bash and zsh.
+.TP
 .B .venv/
 Python virtual environment (auto\-created by launcher scripts).
-Contains markitdown, md2pdf\-mermaid, and playwright.
+Contains markitdown.
+PDF workflows additionally require
+.B pandoc
+(system package) and
+.B mmdc
+.RB ( "npm install \-g @mermaid\-js/mermaid\-cli@10.x" ).
 .
 .SH SEE ALSO
 .TP
@@ -394,6 +619,9 @@ JC Workflow Specification:
 .TP
 REST API reference:
 .B doc/api\-endpoints.md
+.TP
+Cyber security model:
+.B doc/cyber\e security.md
 .TP
 Key management internals:
 .B engine/keys.md

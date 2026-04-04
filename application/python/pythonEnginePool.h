@@ -37,6 +37,9 @@ namespace AIAssistant
     // to the engine with the smallest queue depth (load balancing).  Hook
     // callbacks (OnStart/OnUpdate/OnEvent/OnShutdown) are routed to the primary
     // engine (index 0) only.
+    //
+    // On Python < 3.12, the pool falls back to a single engine using the legacy
+    // Py_NewInterpreter API (shared GIL, no configuration options).
     class PythonEnginePool
     {
     public:
@@ -54,6 +57,7 @@ namespace AIAssistant
 
         bool IsRunning() const { return m_Running; }
         size_t GetEngineCount() const { return m_Engines.size(); }
+        size_t GetTasksCompleted(size_t engineIndex) const;
 
         bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
                                  std::unordered_map<std::string, std::string> const& inputValues,

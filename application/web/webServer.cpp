@@ -46,6 +46,7 @@
 #include "core.h"
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "python/pythonEnginePool.h"
 #include "web/webServer.h"
 #include "web/chatMessages.h"
 #include "file/scriptRegistry.h"
@@ -1844,6 +1845,21 @@ namespace AIAssistant
             status["websocket_peak_clients"] = static_cast<int64_t>(m_WsPeakClients);
             status["websocket_peak_pending_broadcasts"] = static_cast<int64_t>(m_WsPeakPendingBroadcasts);
             status["websocket_pending_broadcasts"] = static_cast<int64_t>(m_PendingBroadcasts.size());
+        }
+
+        // Python engine pool
+        if (app)
+        {
+            PythonEnginePool* pyPool = app->GetPythonEnginePool();
+            if (pyPool)
+            {
+                status["python_engines"] = static_cast<int64_t>(pyPool->GetEngineCount());
+                for (size_t i = 0; i < pyPool->GetEngineCount(); ++i)
+                {
+                    status["python_engine_tasks_completed"][i] =
+                        static_cast<int64_t>(pyPool->GetTasksCompleted(i));
+                }
+            }
         }
 
         return MakeJsonResponse(200, status);
