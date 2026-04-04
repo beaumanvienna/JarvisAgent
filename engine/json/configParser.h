@@ -62,6 +62,8 @@ namespace AIAssistant
                                                      std::string const& apiType);
 
             size_t m_MaxThreads{0};
+            size_t m_MaxInflightAiCalls{100};
+            size_t m_PythonEngines{4};
             std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
             std::string m_WorkflowsFolderFilepath;
@@ -77,6 +79,7 @@ namespace AIAssistant
             std::string m_TrustedProxyHeader;
             std::string m_TrustedRoleHeader;
             size_t m_MaxRequestBodyMB{10};
+            uint16_t m_Port{0}; // 0 = auto (8080 HTTP, 8443 HTTPS)
             bool m_UseBashOnWindows{false};
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
@@ -112,6 +115,9 @@ namespace AIAssistant
             TrustedProxyHeader,
             TrustedRoleHeader,
             MaxRequestBodyMB,
+            MaxInflightAiCalls,
+            PythonEngines,
+            Port,
             NumConfigFields
         };
 
@@ -143,7 +149,10 @@ namespace AIAssistant
                 "TlsKey",               //
                 "TrustedProxyHeader",   //
                 "TrustedRoleHeader",    //
-                "MaxRequestBodyMB"      //
+                "MaxRequestBodyMB",     //
+                "MaxInflightAiCalls",   //
+                "PythonEngines",        //
+                "Port"                  //
         };
 
     public:

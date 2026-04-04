@@ -1425,6 +1425,12 @@ namespace AIAssistant
             return;
         }
 
+        // Re-aggregate per-item results after harvesting worker completions.
+        // Children that were dispatched and completed within the same tick
+        // (e.g. fast Python tasks) are only in terminal state after harvest,
+        // so the parent must be checked again before the dispatch phase.
+        AggregatePerItemResults(activeRun);
+
         // ---------------------------------------------------------
         // 2) Dispatch newly-ready tasks (no waiting)
         // ---------------------------------------------------------

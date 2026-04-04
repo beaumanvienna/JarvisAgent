@@ -4339,7 +4339,8 @@ namespace AIAssistant
         }
 
         m_TlsEnabled = hasCert && hasKey;
-        uint16_t const port = m_TlsEnabled ? 8443 : 8080;
+        uint16_t const defaultPort = m_TlsEnabled ? 8443 : 8080;
+        uint16_t const port = (config.m_Port != 0) ? config.m_Port : defaultPort;
 
         if (m_TlsEnabled)
         {

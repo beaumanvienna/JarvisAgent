@@ -86,6 +86,9 @@ Last reviewed: 2026-03-23
       safety-net fallback for `pendingRunId`. Verified real-time badge updates on both
       simple (cyber2) and large (jarvisCppDocu) workflows.
 
+### Broken JCWF visibility
+- [ ] Show broken JCWFs (parse failures) in the workflow editor with an error badge and the parse error message, so the user can fix them visually instead of digging through `log/log.txt`
+
 ### Future (n8n integration)
 - [x] ~~Seamless n8n integration~~ — `POST /api/webhook/<workflowId>` with HMAC-SHA256, completion callback POST to `callbackUrl`, n8n custom node v2 (webhook/legacy toggle + HMAC signing). Legacy `POST /api/integrations/n8n/start` retained for backward compat.
 - [ ] Sub-workflows / workflow-call node (Remaining TODO #3)

@@ -139,6 +139,30 @@ namespace AIAssistant
                               "similar to '\"max file size in kB\": 20'");
                 engineConfig.m_MaxFileSizekB = 20;
             }
+
+            // max inflight ai calls: clamp to [1, 1000]
+            if (engineConfig.m_MaxInflightAiCalls == 0 || engineConfig.m_MaxInflightAiCalls > 1000)
+            {
+                LOG_APP_ERROR("Max inflight AI calls out of range. Fixing to 100. The config file should have a field "
+                              "similar to '\"max inflight ai calls\": 100'");
+                engineConfig.m_MaxInflightAiCalls = 100;
+            }
+
+            // port: clamp to valid range [1, 65535], 0 = auto
+            if (engineConfig.m_Port > 65535)
+            {
+                LOG_APP_ERROR("Port out of range. Fixing to 0 (auto). The config file should have a field "
+                              "similar to '\"port\": 8080'");
+                engineConfig.m_Port = 0;
+            }
+
+            // python engines: clamp to [1, 16]
+            if (engineConfig.m_PythonEngines == 0 || engineConfig.m_PythonEngines > 16)
+            {
+                LOG_APP_ERROR("Python engines out of range. Fixing to 4. The config file should have a field "
+                              "similar to '\"python engines\": 4'");
+                engineConfig.m_PythonEngines = 4;
+            }
         }
 
         // all checks completed

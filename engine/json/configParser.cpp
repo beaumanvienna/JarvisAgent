@@ -220,6 +220,30 @@ namespace AIAssistant
                 LOG_CORE_INFO("MaxRequestBodyMB: {}", engineConfig.m_MaxRequestBodyMB);
                 ++fieldOccurances[ConfigFields::MaxRequestBodyMB];
             }
+            else if (jsonObjectKey == "max inflight ai calls")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto maxInflight = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("max inflight ai calls: {}", maxInflight);
+                engineConfig.m_MaxInflightAiCalls = static_cast<size_t>(maxInflight);
+                ++fieldOccurances[ConfigFields::MaxInflightAiCalls];
+            }
+            else if (jsonObjectKey == "python engines")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto count = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("python engines: {}", count);
+                engineConfig.m_PythonEngines = static_cast<size_t>(count);
+                ++fieldOccurances[ConfigFields::PythonEngines];
+            }
+            else if (jsonObjectKey == "port")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto port = static_cast<int64_t>(jsonObject.value().get_int64());
+                LOG_CORE_INFO("port: {}", port);
+                engineConfig.m_Port = static_cast<uint16_t>(port);
+                ++fieldOccurances[ConfigFields::Port];
+            }
             else
             {
                 // Try to get the value as a string for display

@@ -6,7 +6,10 @@
     "queue folder": "queue",
     "workflows folder": "workflows",
     "max threads": 20,
+    "max inflight ai calls": 100,
+    "python engines": 4,
     "engine sleep time in run loop in ms": 16,
+    "port": 8443,
     "verbose": false,
 
     "API interfaces": [

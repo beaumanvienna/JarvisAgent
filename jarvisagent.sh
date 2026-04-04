@@ -4,12 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-# Detect edition: --engine flag or script name containing "-engine"
+# Detect edition: --engine or --studio flag, or script name containing "-engine"
 EDITION="studio"
 PASSTHROUGH_ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--engine" ]]; then
         EDITION="engine"
+    elif [[ "$arg" == "--studio" ]]; then
+        EDITION="studio"
     else
         PASSTHROUGH_ARGS+=("$arg")
     fi

@@ -342,13 +342,13 @@ docker run -it --rm \
   ghcr.io/beaumanvienna/jarvisagent:latest
 ```
 
-- Dashboard: http://localhost:8080
-- Workflow Editor: http://localhost:8080/editor
+- Dashboard: http://localhost:8080 (or https://localhost:8443 with TLS)
+- Workflow Editor: http://localhost:8080/editor (or https://localhost:8443/editor with TLS)
 - The `-v` flag mounts `~/JarvisAgent` on the host so workflows, AI keys, and outputs persist across container restarts.
 
 **Setting up AI providers** (first run):
 
-1. Open the Workflow Editor at http://localhost:8080/editor
+1. Open the Workflow Editor at http://localhost:8080/editor (or https://localhost:8443/editor with TLS)
 2. Go to **AI Keys** → **+ Add Key** — enter a name (e.g. `openai`) and paste your API key, then click **Create**. Click **Save Encrypted** to persist the key.
 3. Go to **AI Manager** — select your key from the **Key** dropdown for each provider interface, then click **Save to config.json**.
 
@@ -536,7 +536,7 @@ npm run build
 ```
 
 The build output lands in `dashboard/ui/dist/` and `workflow-editor/ui/dist/` respectively.  
-JarvisAgent serves these automatically at `http://localhost:8080` (dashboard) and `http://localhost:8080/editor` (workflow editor).
+JarvisAgent serves these automatically at `http://localhost:8080` (dashboard) and `http://localhost:8080/editor` (workflow editor). With TLS enabled (`"TlsCert"` and `"TlsKey"` in config.json), the default port changes to `8443` — configurable via `"port"` in config.json.
 
 ---
 
@@ -593,8 +593,9 @@ export MAKEFLAGS=-j$(sysctl -n hw.ncpu)   # macOS
 ./bin/Release/jarvisAgent-engine    # Engine
 ```
 
-- Dashboard: http://localhost:8080
-- Workflow Editor: http://localhost:8080/editor (Studio only)
+- Dashboard: http://localhost:8080 (or https://localhost:8443 with TLS)
+- Workflow Editor: http://localhost:8080/editor (Studio only; https://localhost:8443/editor with TLS)
+- The listen port is configurable via `"port"` in config.json (default: 8080 HTTP, 8443 HTTPS)
 
 ### Engine Security
 

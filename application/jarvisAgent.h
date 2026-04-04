@@ -35,7 +35,7 @@ namespace AIAssistant
     class FileWatcher;
     class WebServer;
     class ChatMessagePool;
-    class PythonEngine;
+    class PythonEnginePool;
     class WorkflowRegistry;
     class TriggerEngine;
     class ScriptRegistry;
@@ -64,7 +64,7 @@ namespace AIAssistant
         std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
         int64_t GetStartupTimestamp() const;
         StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
-        PythonEngine* GetPythonEngine() { return m_PythonEngine.get(); }
+        PythonEnginePool* GetPythonEnginePool() { return m_PythonEnginePool.get(); }
         WorkflowRegistry* GetWorkflowRegistry() { return m_WorkflowRegistry.get(); }
         ScriptRegistry* GetScriptRegistry() { return m_ScriptRegistry.get(); }
         WorkflowFileIndex* GetWorkflowFileIndex() { return m_WorkflowFileIndex.get(); }
@@ -105,7 +105,7 @@ namespace AIAssistant
         std::unique_ptr<ScriptRegistry> m_ScriptRegistry;
         std::unique_ptr<WebServer> m_WebServer;
         std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
-        std::unique_ptr<PythonEngine> m_PythonEngine;
+        std::unique_ptr<PythonEnginePool> m_PythonEnginePool;
 
         std::unique_ptr<WorkflowRegistry> m_WorkflowRegistry;
         std::unique_ptr<TriggerEngine> m_TriggerEngine;

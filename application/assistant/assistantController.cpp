@@ -23,7 +23,7 @@
 #include "assistant/contextAssembler.h"
 #include "engine.h"
 #include "jarvisAgent.h"
-#include "python/pythonEngine.h"
+#include "python/pythonEnginePool.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowRuntimeManager.h"
@@ -1341,8 +1341,9 @@ namespace AIAssistant
         }
 
         // Python
-        PythonEngine* python = app->GetPythonEngine();
-        oss << "Python engine:      " << (python ? "ready" : "not available") << "\n";
+        PythonEnginePool* pyPool = app->GetPythonEnginePool();
+        oss << "Python engine pool: "
+            << (pyPool ? std::to_string(pyPool->GetEngineCount()) + " engine(s)" : "not available") << "\n";
 
         // Uptime
         auto now = std::chrono::system_clock::now();

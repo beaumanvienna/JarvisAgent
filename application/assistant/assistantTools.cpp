@@ -24,7 +24,7 @@
 #include "assistant/workspaceIndexer.h"
 #include "engine.h"
 #include "jarvisAgent.h"
-#include "python/pythonEngine.h"
+#include "python/pythonEnginePool.h"
 #include "web/aiJcwfService.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowRuntimeManager.h"
@@ -748,9 +748,10 @@ namespace AIAssistant
             oss << "  Failed runs: " << failed << "\n";
         }
 
-        // Python engine
-        PythonEngine* py = app->GetPythonEngine();
-        oss << "  Python engine: " << (py ? "ready" : "not available") << "\n";
+        // Python engine pool
+        PythonEnginePool* pyPool = app->GetPythonEnginePool();
+        oss << "  Python engine pool: " << (pyPool ? std::to_string(pyPool->GetEngineCount()) + " engine(s)" : "not available")
+            << "\n";
 
         return {"get_system_status", true, oss.str()};
     }
@@ -2107,9 +2108,10 @@ namespace AIAssistant
             oss << "\n";
         }
 
-        // Python engine
-        PythonEngine* py = app->GetPythonEngine();
-        oss << "Python engine: " << (py ? "ready" : "not available") << "\n";
+        // Python engine pool
+        PythonEnginePool* pyPool = app->GetPythonEnginePool();
+        oss << "Python engine pool: " << (pyPool ? std::to_string(pyPool->GetEngineCount()) + " engine(s)" : "not available")
+            << "\n";
 
         return {"get_dashboard_status", true, TruncateOutput(oss.str(), 8192)};
     }

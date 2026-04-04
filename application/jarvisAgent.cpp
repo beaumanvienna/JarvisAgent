@@ -37,7 +37,7 @@
 #include "file/probUtils.h"
 #include "file/scriptRegistry.h"
 #include "web/chatMessages.h"
-#include "python/pythonEngine.h"
+#include "python/pythonEnginePool.h"
 #include "task/carMaintenanceTask.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowTriggerBinder.h"
@@ -171,19 +171,20 @@ namespace AIAssistant
 
         m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
-        { // initialize Python
-            m_PythonEngine = std::make_unique<PythonEngine>();
+        { // initialize Python engine pool (N sub-interpreters, each with own GIL)
+            m_PythonEnginePool = std::make_unique<PythonEnginePool>();
 
             std::string const scriptPath = "scripts/main.py";
-            bool pythonOk = m_PythonEngine->Initialize(scriptPath);
+            size_t const engineCount = Core::g_Core->GetConfig().m_PythonEngines;
+            bool pythonOk = m_PythonEnginePool->Initialize(scriptPath, engineCount);
 
             if (!pythonOk)
             {
-                LOG_APP_CRITICAL("PythonEngine failed to initialize. Continuing without Python scripting.");
+                LOG_APP_CRITICAL("PythonEnginePool failed to initialize. Continuing without Python scripting.");
             }
             else
             {
-                m_PythonEngine->OnStart();
+                m_PythonEnginePool->OnStart();
             }
         }
 
@@ -340,7 +341,7 @@ namespace AIAssistant
         m_ChatMessagePool->RemoveExpired();
 
         // --- Python OnUpdate disabled ---
-        // m_PythonEngine->OnUpdate();
+        // m_PythonEnginePool->OnUpdate();
 
         if (m_AiRequestPool != nullptr)
         {
@@ -432,7 +433,7 @@ namespace AIAssistant
             [&](PythonCrashedEvent& evt)
             {
                 LOG_APP_CRITICAL("Python crashed: {}", evt.GetMessage());
-                m_PythonEngine->Stop();
+                m_PythonEnginePool->Stop();
                 return true;
             });
 
@@ -594,8 +595,8 @@ namespace AIAssistant
         }
 
         // Forward event to Python
-        if (m_PythonEngine)
-            m_PythonEngine->OnEvent(eventPtr);
+        if (m_PythonEnginePool)
+            m_PythonEnginePool->OnEvent(eventPtr);
     }
 
     //--------------------------------------------------------------------
@@ -649,10 +650,10 @@ namespace AIAssistant
         {
             m_WorkflowRuntimeManager->SignalStop();
         }
-        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine::SignalStop...\n");
-        if (m_PythonEngine != nullptr)
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool::SignalStop...\n");
+        if (m_PythonEnginePool != nullptr)
         {
-            m_PythonEngine->SignalStop();
+            m_PythonEnginePool->SignalStop();
         }
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::SignalStop...\n");
         if (m_FileWatcher != nullptr)
@@ -703,14 +704,14 @@ namespace AIAssistant
         RAW_ONSHUTDOWN("[OnShutdown] session managers stopped\n");
         LOG_APP_INFO("[shutdown] session managers stopped");
 
-        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine::WaitStop...\n");
-        if (m_PythonEngine != nullptr)
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool::WaitStop...\n");
+        if (m_PythonEnginePool != nullptr)
         {
-            m_PythonEngine->WaitStop();
-            m_PythonEngine.reset();
+            m_PythonEnginePool->WaitStop();
+            m_PythonEnginePool.reset();
         }
-        RAW_ONSHUTDOWN("[OnShutdown] PythonEngine stopped\n");
-        LOG_APP_INFO("[shutdown] PythonEngine stopped");
+        RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool stopped\n");
+        LOG_APP_INFO("[shutdown] PythonEnginePool stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::WaitStop...\n");
         if (m_FileWatcher != nullptr)

@@ -57,6 +57,16 @@ Last reviewed: 2026-03-23
 
 ---
 
+## Multi-tasking / concurrency
+
+- [x] ~~**Decouple AI inflight throttle from thread pool size**~~ — new `"max inflight ai calls"` config field (default 100, range [1,1000]). SessionManager throttles against this value instead of `MaxThreads * 1.5`. Aligns with `CURLMOPT_MAX_CONCURRENT_STREAMS = 100` in `CurlMultiDispatcher`.
+- [x] ~~**Python Engine parallelization**~~ — `PythonEnginePool` manages N sub-interpreters via `Py_NewInterpreterFromConfig()` with shared GIL. Load-balanced dispatch to engine with smallest queue depth. Hooks route to engine[0] only. Configurable via `"python engines"` in config.json (default 4). Verified end-to-end with 60 parallel Python tasks.
+- [x] ~~**Per-item aggregation race fix**~~ — `AggregatePerItemResults()` now runs both before AND after the worker task harvest phase. Fixes false deadlock detection when per_item children complete within the same tick they were dispatched (common with fast Python tasks).
+- [ ] **Adaptive rate limit throttling** — read `x-ratelimit-*` / `Retry-After` headers from AI API responses. `RateLimitTracker` per-host state, `CURLOPT_HEADERFUNCTION` callback, auto-retry on 429. See `multi-tasking-analysis.md` §3.3.
+- [ ] **Configurable web server port** — implemented: `"port"` field in config.json (default 0 = auto: 8080 HTTP, 8443 HTTPS).
+
+---
+
 ## Refactor cleanup / safety
 
 - [x] ~~**Unify template substitution syntax: `${...}` → `{{...}}`**~~ — created shared `templateEngine.h/.cpp` with `ExpandTemplate()` supporting strict (shell) and lenient (ai_call) modes. Migrated `ShellTaskExecutor`, `AiCallTaskExecutor`, and `DataflowResolver` to use the shared engine. Updated all 5 example JCWF files and 3 documentation files. No `${...}` template references remain in the codebase.

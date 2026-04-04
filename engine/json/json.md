@@ -53,7 +53,10 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 | `author` | string | Human-readable author/copyright string. | Logged; not stored. |
 | `queue folder` | string | Path to the queue folder directory. | Stored as `EngineConfig::m_QueueFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
 | `workflows folder` | string | Path to the workflows folder directory. | Stored as `EngineConfig::m_WorkflowsFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
+| `port` | number | Web server listen port. `0` = auto (8080 for HTTP, 8443 for HTTPS). | Stored as `EngineConfig::m_Port`. Valid range `[1, 65535]`, defaults to `0` (auto). |
 | `max threads` | number | Worker-thread pool size. | Stored as `EngineConfig::m_MaxThreads`. `ConfigChecker` clamps via defaults if out of range. |
+| `max inflight ai calls` | number | Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from thread pool size since requests are multiplexed on a single I/O thread. | Stored as `EngineConfig::m_MaxInflightAiCalls`. `ConfigChecker` clamps to `[1, 1000]`, defaults to `100`. |
+| `python engines` | number | Number of Python sub-interpreters (each with its own GIL) for parallel Python task execution. Requires Python 3.12+. | Stored as `EngineConfig::m_PythonEngines`. `ConfigChecker` clamps to `[1, 16]`, defaults to `4`. |
 | `engine sleep time in run loop in ms` | number | Sleep interval in the main run loop. | Stored as `EngineConfig::m_SleepDuration` (ms). Defaults applied if out of range. |
 | `verbose` | boolean | Enables verbose logging. | Stored as `EngineConfig::m_Verbose`. |
 | `API interfaces` | array | List of API endpoints/models. | Parsed by `ConfigParser::ParseInterfaces()`. |
@@ -102,6 +105,8 @@ struct EngineConfig
                                              std::string const& apiType);
 
     size_t m_MaxThreads{0};
+    size_t m_MaxInflightAiCalls{100};
+    size_t m_PythonEngines{4};
     std::chrono::milliseconds m_SleepDuration{0};
     std::string m_QueueFolderFilepath;
     std::string m_WorkflowsFolderFilepath;
@@ -122,6 +127,8 @@ struct EngineConfig
 - `m_QueueFolderFilepath` from `"queue folder"`
 - `m_WorkflowsFolderFilepath` from `"workflows folder"`
 - `m_MaxThreads` from `"max threads"`
+- `m_MaxInflightAiCalls` from `"max inflight ai calls"`
+- `m_PythonEngines` from `"python engines"`
 - `m_SleepDuration` from `"engine sleep time in run loop in ms"`
 - `m_Verbose` from `"verbose"`
 - `m_ApiInterfaces` from `"API interfaces"` (via `ParseInterfaces`)
@@ -260,6 +267,8 @@ private:
 4. If validation succeeds:
    - Applies defaults for out-of-range values:
      - `m_MaxThreads`: if `<= 0` or `> 256` → set to `16`.
+     - `m_MaxInflightAiCalls`: if `== 0` or `> 1000` → set to `100`.
+     - `m_PythonEngines`: if `== 0` or `> 16` → set to `4`.
      - `m_SleepDuration`: if `<= 0ms` or `> 256ms` → set to `10ms`.
      - `m_MaxFileSizekB`: if `<= 0` or `> 256` → set to `20`.
    - Sets `engineConfig.m_ConfigValid = true`.

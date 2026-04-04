@@ -81,150 +81,97 @@ JARVIS_PY_EXPORT void JarvisPyStatus(char const* message)
 namespace AIAssistant
 {
 
-    PythonEngine::PythonEngine() = default;
+    PythonEngine::PythonEngine(size_t engineIndex) : m_EngineIndex(engineIndex) {}
     PythonEngine::~PythonEngine() {}
 
-    void PythonEngine::Reset()
-    {
-        m_Running = false;
-
-        m_ScriptPath.clear();
-        m_ScriptDir.clear();
-        m_ModuleName.clear();
-
-        Py_XDECREF(m_OnStartFunc);
-        Py_XDECREF(m_OnUpdateFunc);
-        Py_XDECREF(m_OnEventFunc);
-        Py_XDECREF(m_OnShutdownFunc);
-
-        Py_XDECREF(m_MainModule);
-        m_MainModule = nullptr;
-
-        m_MainDict = nullptr;
-    }
-
     // ============================================================================
-    //   Initialize()
+    //   SetupSubInterpreter — called by PythonEnginePool on the main thread
+    //   while the sub-interpreter's GIL is held.
     // ============================================================================
-    bool PythonEngine::Initialize(std::string const& scriptPath)
+    bool PythonEngine::SetupSubInterpreter(std::string const& scriptDir, std::string const& moduleName, bool loadHooks)
     {
-        if (m_Running)
+        m_ScriptDir = scriptDir;
+        m_ModuleName = moduleName;
+
+        // NOTE: Caller (PythonEnginePool) holds this sub-interpreter's GIL.
+
+        // -----------------------------------------------------------------
+        // Install stdout/stderr redirection
+        // -----------------------------------------------------------------
+        char const* redirectCode = "import sys\n"
+                                   "import ctypes\n"
+                                   "def _jarvis_cdll():\n"
+                                   "    if sys.platform == 'win32':\n"
+                                   "        return ctypes.CDLL(sys.executable)\n"
+                                   "    return ctypes.CDLL(None)\n"
+                                   "_jarvis_C = _jarvis_cdll()\n"
+                                   "class _JarvisRedirect:\n"
+                                   "    def write(self, msg):\n"
+                                   "        try:\n"
+                                   "            _jarvis_C.JarvisRedirectPython(msg.encode('utf-8'))\n"
+                                   "        except Exception:\n"
+                                   "            pass\n"
+                                   "    def flush(self):\n"
+                                   "        pass\n"
+                                   "r = _JarvisRedirect()\n"
+                                   "sys.stdout = r\n"
+                                   "sys.stderr = r\n";
+
+        if (PyRun_SimpleString(redirectCode) != 0)
         {
-            return true;
+            LOG_APP_ERROR("PythonEngine[{}]: failed to install stdout/stderr redirect", m_EngineIndex);
         }
 
-        Reset();
-        m_StopRequested = false;
-        m_ScriptPath = scriptPath;
-
-        // Resolve script directory + module name
-        try
+        // -----------------------------------------------------------------
+        // Add script directory to sys.path
+        // -----------------------------------------------------------------
+        PyObject* sysModule = PyImport_ImportModule("sys");
+        if (!sysModule)
         {
-            fs::path pythonScriptPath(scriptPath);
-            m_ScriptDir = pythonScriptPath.parent_path().string();
-            m_ModuleName = pythonScriptPath.stem().string();
-        }
-        catch (std::exception const& exception)
-        {
-            LOG_APP_ERROR("PythonEngine: invalid script path '{}': {}", scriptPath, exception.what());
+            PyErr_Print();
+            LOG_APP_ERROR("PythonEngine[{}]: failed to import 'sys'", m_EngineIndex);
             return false;
         }
 
-        LOG_APP_INFO("Initializing PythonEngine with script '{}'", m_ScriptPath);
-
-        Py_Initialize();
-
-        if (!Py_IsInitialized())
+        PyObject* sysPathList = PyObject_GetAttrString(sysModule, "path");
+        if (!sysPathList || !PyList_Check(sysPathList))
         {
-            LOG_APP_ERROR("PythonEngine: Py_Initialize() failed");
-            return false;
-        }
-
-        // IMPORTANT:
-        // All interpreter setup must happen BEFORE releasing GIL.
-        {
-            PyGILState_STATE gilState = PyGILState_Ensure();
-            std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
-
-            // -------------------------------------------------------------
-            // Install stdout/stderr redirection *before* importing module
-            // -------------------------------------------------------------
-            char const* redirectCode = "import sys\n"
-                                       "import ctypes\n"
-                                       "def _jarvis_cdll():\n"
-                                       "    if sys.platform == 'win32':\n"
-                                       "        return ctypes.CDLL(sys.executable)\n"
-                                       "    return ctypes.CDLL(None)\n"
-                                       "_jarvis_C = _jarvis_cdll()\n"
-                                       "class _JarvisRedirect:\n"
-                                       "    def write(self, msg):\n"
-                                       "        try:\n"
-                                       "            _jarvis_C.JarvisRedirectPython(msg.encode('utf-8'))\n"
-                                       "        except Exception:\n"
-                                       "            pass\n"
-                                       "    def flush(self):\n"
-                                       "        pass\n"
-                                       "r = _JarvisRedirect()\n"
-                                       "sys.stdout = r\n"
-                                       "sys.stderr = r\n";
-
-            if (PyRun_SimpleString(redirectCode) != 0)
-            {
-                LOG_APP_ERROR("PythonEngine: failed to install stdout/stderr redirect");
-            }
-
-            // -------------------------------------------------------------
-            // Add script directory to sys.path
-            // -------------------------------------------------------------
-            PyObject* sysModule = PyImport_ImportModule("sys");
-            if (!sysModule)
-            {
-                PyErr_Print();
-                LOG_APP_ERROR("PythonEngine: failed to import 'sys'");
-                PyGILState_Release(gilState);
-                return false;
-            }
-
-            PyObject* sysPathList = PyObject_GetAttrString(sysModule, "path");
-            if (!sysPathList || !PyList_Check(sysPathList))
-            {
-                Py_XDECREF(sysPathList);
-                Py_DECREF(sysModule);
-                LOG_APP_ERROR("PythonEngine: sys.path is not a list");
-                PyGILState_Release(gilState);
-                return false;
-            }
-
-            PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
-            PyList_Append(sysPathList, directoryString);
-            Py_DECREF(directoryString);
-
-            // Also add the parent of m_ScriptDir (i.e. the launch CWD) so that
-            // dotted package imports like "scripts.parseOpenSSHLog" work.
-            // (scripts/ must contain __init__.py to be a package.)
-            {
-                fs::path const scriptDirAbsolute = fs::absolute(fs::path(m_ScriptDir)).lexically_normal();
-                std::string const parentDir = scriptDirAbsolute.parent_path().string();
-                if (!parentDir.empty())
-                {
-                    PyObject* parentDirString = PyUnicode_FromString(parentDir.c_str());
-                    PyList_Append(sysPathList, parentDirString);
-                    Py_DECREF(parentDirString);
-                    LOG_APP_INFO("PythonEngine: added '{}' to sys.path (package imports)", parentDir);
-                }
-            }
-
-            Py_DECREF(sysPathList);
+            Py_XDECREF(sysPathList);
             Py_DECREF(sysModule);
+            LOG_APP_ERROR("PythonEngine[{}]: sys.path is not a list", m_EngineIndex);
+            return false;
+        }
 
-            // -------------------------------------------------------------
-            // Import main Python module
-            // -------------------------------------------------------------
+        PyObject* directoryString = PyUnicode_FromString(m_ScriptDir.c_str());
+        PyList_Append(sysPathList, directoryString);
+        Py_DECREF(directoryString);
+
+        // Also add the parent of m_ScriptDir (i.e. the launch CWD) so that
+        // dotted package imports like "scripts.parseOpenSSHLog" work.
+        {
+            fs::path const scriptDirAbsolute = fs::absolute(fs::path(m_ScriptDir)).lexically_normal();
+            std::string const parentDir = scriptDirAbsolute.parent_path().string();
+            if (!parentDir.empty())
+            {
+                PyObject* parentDirString = PyUnicode_FromString(parentDir.c_str());
+                PyList_Append(sysPathList, parentDirString);
+                Py_DECREF(parentDirString);
+                LOG_APP_INFO("PythonEngine[{}]: added '{}' to sys.path (package imports)", m_EngineIndex, parentDir);
+            }
+        }
+
+        Py_DECREF(sysPathList);
+        Py_DECREF(sysModule);
+
+        // -----------------------------------------------------------------
+        // Import hook module (primary engine only)
+        // -----------------------------------------------------------------
+        if (loadHooks)
+        {
             PyObject* moduleNameObj = PyUnicode_FromString(m_ModuleName.c_str());
             if (!moduleNameObj)
             {
-                LOG_APP_ERROR("PythonEngine: failed to allocate module name '{}'", m_ModuleName);
-                PyGILState_Release(gilState);
+                LOG_APP_ERROR("PythonEngine[{}]: failed to allocate module name '{}'", m_EngineIndex, m_ModuleName);
                 return false;
             }
 
@@ -234,25 +181,20 @@ namespace AIAssistant
             if (!m_MainModule)
             {
                 PyErr_Print();
-                LOG_APP_ERROR("PythonEngine: failed to import module '{}'", m_ModuleName);
-                PyGILState_Release(gilState);
+                LOG_APP_ERROR("PythonEngine[{}]: failed to import module '{}'", m_EngineIndex, m_ModuleName);
                 return false;
             }
 
             m_MainDict = PyModule_GetDict(m_MainModule);
             if (!m_MainDict)
             {
-                LOG_APP_ERROR("PythonEngine: failed to retrieve module dict");
+                LOG_APP_ERROR("PythonEngine[{}]: failed to retrieve module dict", m_EngineIndex);
                 Py_DECREF(m_MainModule);
                 m_MainModule = nullptr;
-                PyGILState_Release(gilState);
                 return false;
             }
 
-            // -------------------------------------------------------------
-            // Load hook functions
-            // -------------------------------------------------------------
-            auto loadHook = [&](char const* hookName, PyObject*& outFunc)
+            auto loadHookFunc = [&](char const* hookName, PyObject*& outFunc)
             {
                 outFunc = nullptr;
 
@@ -261,38 +203,45 @@ namespace AIAssistant
                 {
                     Py_INCREF(functionObject);
                     outFunc = functionObject;
-                    LOG_APP_INFO("PythonEngine: found hook '{}()'", hookName);
+                    LOG_APP_INFO("PythonEngine[{}]: found hook '{}()'", m_EngineIndex, hookName);
                 }
                 else
                 {
-                    LOG_APP_INFO("PythonEngine: hook '{}()' not defined", hookName);
+                    LOG_APP_INFO("PythonEngine[{}]: hook '{}()' not defined", m_EngineIndex, hookName);
                 }
             };
 
-            loadHook("OnStart", m_OnStartFunc);
-            loadHook("OnUpdate", m_OnUpdateFunc);
-            loadHook("OnEvent", m_OnEventFunc);
-            loadHook("OnShutdown", m_OnShutdownFunc);
-
-            PyGILState_Release(gilState);
+            loadHookFunc("OnStart", m_OnStartFunc);
+            loadHookFunc("OnUpdate", m_OnUpdateFunc);
+            loadHookFunc("OnEvent", m_OnEventFunc);
+            loadHookFunc("OnShutdown", m_OnShutdownFunc);
         }
 
-        // Release GIL so worker thread can reacquire it
-        PyEval_SaveThread();
-
-        m_Running = true;
-        StartWorkerThread();
-
-        LOG_APP_INFO("PythonEngine initialized successfully");
+        LOG_APP_INFO("PythonEngine[{}]: sub-interpreter setup complete (hooks={})", m_EngineIndex, loadHooks);
         return true;
     }
+
     // ============================================================================
     //   Worker thread
     // ============================================================================
-    void PythonEngine::StartWorkerThread() { m_WorkerThread = std::thread(&PythonEngine::WorkerLoop, this); }
+    void PythonEngine::StartWorkerThread()
+    {
+        m_Running = true;
+        m_WorkerThread = std::thread(&PythonEngine::WorkerLoop, this);
+    }
 
     void PythonEngine::WorkerLoop()
     {
+        // Create this thread's state for our sub-interpreter.
+        // Each sub-interpreter has its own GIL, so worker threads on different
+        // engines can execute Python code truly in parallel.
+        PyThreadState* threadState = PyThreadState_New(m_InterpreterState);
+        if (threadState == nullptr)
+        {
+            LOG_APP_ERROR("PythonEngine[{}]: failed to create thread state", m_EngineIndex);
+            return;
+        }
+
         while (true)
         {
             PythonTask task;
@@ -310,8 +259,8 @@ namespace AIAssistant
                 m_TaskQueue.pop();
             }
 
-            PyGILState_STATE gilState = PyGILState_Ensure();
-            std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
+            // Acquire this sub-interpreter's GIL
+            PyEval_RestoreThread(threadState);
 
             switch (task.m_Type)
             {
@@ -361,7 +310,8 @@ namespace AIAssistant
                 }
             }
 
-            PyGILState_Release(gilState);
+            // Release this sub-interpreter's GIL
+            threadState = PyEval_SaveThread();
 
             // Check stop request between tasks so we don't block on a backlog
             // of queued OnEvent tasks during shutdown.
@@ -391,6 +341,39 @@ namespace AIAssistant
                 }
             }
         }
+
+        // Clean up Python references under the GIL
+        PyEval_RestoreThread(threadState);
+
+        Py_XDECREF(m_OnStartFunc);
+        Py_XDECREF(m_OnUpdateFunc);
+        Py_XDECREF(m_OnEventFunc);
+        Py_XDECREF(m_OnShutdownFunc);
+        Py_XDECREF(m_MainModule);
+
+        m_OnStartFunc = nullptr;
+        m_OnUpdateFunc = nullptr;
+        m_OnEventFunc = nullptr;
+        m_OnShutdownFunc = nullptr;
+        m_MainModule = nullptr;
+        m_MainDict = nullptr;
+
+        // Release GIL and delete this thread's state.
+        // We do NOT call Py_EndInterpreter here — the sub-interpreter's main-thread
+        // state (created during PythonEnginePool::Initialize) is still alive, and
+        // Py_EndInterpreter requires it to be the only thread state.  The sub-
+        // interpreter will be cleaned up when Py_Finalize runs at process exit.
+        PyThreadState_Clear(threadState);
+        PyThreadState_DeleteCurrent(); // releases GIL and deletes thread state
+    }
+
+    // ============================================================================
+    //   Queue depth (for load balancing)
+    // ============================================================================
+    size_t PythonEngine::GetQueueDepth() const
+    {
+        std::lock_guard<std::mutex> lock(m_QueueMutex);
+        return m_TaskQueue.size();
     }
 
     // ============================================================================
@@ -412,7 +395,7 @@ namespace AIAssistant
 
         if (!result)
         {
-            LOG_APP_ERROR("PythonEngine: exception in hook '{}()'", hookName);
+            LOG_APP_ERROR("PythonEngine[{}]: exception in hook '{}()'", m_EngineIndex, hookName);
             PyErr_Print();
         }
         else
@@ -427,7 +410,7 @@ namespace AIAssistant
 
         if (!eventDict)
         {
-            LOG_APP_ERROR("PythonEngine: failed to build event dictionary for '{}'", hookName);
+            LOG_APP_ERROR("PythonEngine[{}]: failed to build event dictionary for '{}'", m_EngineIndex, hookName);
             return;
         }
 
@@ -440,7 +423,7 @@ namespace AIAssistant
 
         if (!result)
         {
-            LOG_APP_ERROR("PythonEngine: exception in hook '{}(event)'", hookName);
+            LOG_APP_ERROR("PythonEngine[{}]: exception in hook '{}(event)'", m_EngineIndex, hookName);
             PyErr_Print();
         }
         else
@@ -517,12 +500,6 @@ namespace AIAssistant
     // ============================================================================
     //   Shutdown
     // ============================================================================
-    void PythonEngine::Stop()
-    {
-        SignalStop();
-        WaitStop();
-    }
-
     void PythonEngine::SignalStop()
     {
         if (!m_Running)
@@ -539,7 +516,10 @@ namespace AIAssistant
         }
 
         // tell the worker thread to stop
-        m_StopRequested = true;
+        {
+            std::lock_guard<std::mutex> lock(m_QueueMutex);
+            m_StopRequested = true;
+        }
         m_QueueCondition.notify_all();
     }
 
@@ -550,42 +530,16 @@ namespace AIAssistant
             m_WorkerThread.join();
         }
 
-        if (!m_Running)
-        {
-            return;
-        }
-
-        // clean up Python references safely under the GIL
-        PyGILState_STATE gilState = PyGILState_Ensure();
-
-        std::lock_guard<std::mutex> interpreterLock(m_InterpreterMutex);
-
-        Py_XDECREF(m_OnStartFunc);
-        Py_XDECREF(m_OnUpdateFunc);
-        Py_XDECREF(m_OnEventFunc);
-        Py_XDECREF(m_OnShutdownFunc);
-
-        Py_XDECREF(m_MainModule);
-
-        m_OnStartFunc = nullptr;
-        m_OnUpdateFunc = nullptr;
-        m_OnEventFunc = nullptr;
-        m_OnShutdownFunc = nullptr;
-        m_MainModule = nullptr;
-
-        PyGILState_Release(gilState);
-
         m_Running = false;
-
-        LOG_APP_INFO("Python engine stopped");
+        LOG_APP_INFO("PythonEngine[{}] stopped", m_EngineIndex);
     }
 
     // ============================================================================
     //   ExecuteWorkflowTask — public API (called from thread pool worker)
     //
     //   Enqueues work onto the PythonEngine worker thread and blocks until
-    //   completion.  This avoids a GIL deadlock where the thread pool worker
-    //   and the PythonEngine worker thread both compete for GIL + m_InterpreterMutex.
+    //   completion.  Each engine has its own sub-interpreter with its own GIL,
+    //   so multiple engines can execute Python code truly in parallel.
     // ============================================================================
     bool PythonEngine::ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
                                            std::unordered_map<std::string, std::string> const& inputValues,
@@ -768,7 +722,8 @@ namespace AIAssistant
                     if (PyDict_Contains(sysModules, key))
                     {
                         PyDict_DelItem(sysModules, key);
-                        LOG_APP_INFO("PythonEngine: evicted '{}' from sys.modules (hot-reload)", moduleName);
+                        LOG_APP_INFO("PythonEngine[{}]: evicted '{}' from sys.modules (hot-reload)", m_EngineIndex,
+                                     moduleName);
                     }
                     Py_DECREF(key);
                 }
@@ -786,7 +741,8 @@ namespace AIAssistant
                         if (PyDict_Contains(sysModules, parentKey))
                         {
                             PyDict_DelItem(sysModules, parentKey);
-                            LOG_APP_INFO("PythonEngine: evicted '{}' from sys.modules (hot-reload parent)", parentPackage);
+                            LOG_APP_INFO("PythonEngine[{}]: evicted '{}' from sys.modules (hot-reload parent)",
+                                         m_EngineIndex, parentPackage);
                         }
                         Py_DECREF(parentKey);
                     }

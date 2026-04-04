@@ -26,7 +26,7 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "pythonTaskExecutor.h"
-#include "python/pythonEngine.h"
+#include "python/pythonEnginePool.h"
 #include "taskPathResolver.h"
 
 #include <filesystem>
@@ -70,11 +70,11 @@ namespace AIAssistant
     {
         LOG_APP_INFO("[python] Executing Python task '{}'", taskDefinition.m_Id);
 
-        PythonEngine* pythonEngine = App::g_App->GetPythonEngine();
+        PythonEnginePool* pythonEnginePool = App::g_App->GetPythonEnginePool();
 
-        if (pythonEngine == nullptr)
+        if (pythonEnginePool == nullptr)
         {
-            taskState.m_LastErrorMessage = "PythonTaskExecutor: PythonEngine not initialized";
+            taskState.m_LastErrorMessage = "PythonTaskExecutor: PythonEnginePool not initialized";
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
@@ -251,8 +251,9 @@ namespace AIAssistant
         std::string capturedStdout;
         std::string capturedStderr;
         bool const ok =
-            pythonEngine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
-                                              contextValues, pythonOutputs, errorMessage, capturedStdout, capturedStderr);
+            pythonEnginePool->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
+                                                  contextValues, pythonOutputs, errorMessage, capturedStdout,
+                                                  capturedStderr);
 
         // Store first 1024 characters for the frontend tooltip.
         static constexpr size_t kMaxCaptureChars = 1024;

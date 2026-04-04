@@ -90,9 +90,9 @@ namespace AIAssistant
             m_StateMachine.OnUpdate(stateInfo);
         }
 
-        // limit queued queries to 1½ the number of configured threads
-        // thread pool has queue but we can limit it here to safe queue memory
-        if ((m_InFlightCount.load() < Core::g_Core->GetConfig().m_MaxThreads * 1.5f) &&
+        // limit queued queries to the configured max inflight AI calls (default 100)
+        // decoupled from thread pool size since HTTP/2 multiplexes on a single I/O thread
+        if ((m_InFlightCount.load() < Core::g_Core->GetConfig().m_MaxInflightAiCalls) &&
             m_Environment.GetEnvironmentComplete())
         {
             bool anyQueryDispatched = false;

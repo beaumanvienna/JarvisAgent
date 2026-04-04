@@ -180,21 +180,27 @@ See also:
 
 ## Remaining TODOs
 
-### 1. Python Engine parallelization
-- Add support for multiple independent PythonEngine instances
-- Ensure each interpreter instance owns its own GIL
-- Store PythonEngine instances in std::vector
-- Default engine count: 4
-- Allow override via config.json
-- Expose internal task-queue size for load balancing
-- Dispatch OnEvent() to the PythonEngine with the lowest queued workload
-- Ensure isolated interpreter state per engine
-- **Complexity note:** CPython sub-interpreters + per-interpreter GIL (PEP 684, Python 3.12+) is the cleanest path but has restrictions on C extension modules. Alternative: multiprocessing with IPC.
+### ~~1. Python Engine parallelization~~ ✅
+- ~~Add support for multiple independent PythonEngine instances~~
+- ~~Ensure each interpreter instance owns its own GIL~~
+- ~~Store PythonEngine instances in std::vector~~
+- ~~Default engine count: 4~~
+- ~~Allow override via config.json~~
+- ~~Expose internal task-queue size for load balancing~~
+- ~~Dispatch OnEvent() to the PythonEngine with the lowest queued workload~~
+- ~~Ensure isolated interpreter state per engine~~
+- **Done:** `PythonEnginePool` manages N sub-interpreters via `Py_NewInterpreterFromConfig()`. Load-balanced dispatch to engine with smallest queue depth. Hooks route to engine[0] only. Configurable via `"python engines"` in config.json (default 4, range [1,16]). Currently uses shared GIL (`PyInterpreterConfig_SHARED_GIL`) for C extension compatibility on Python 3.12; true per-interpreter GIL available when Python 3.13+ is the minimum. Verified end-to-end with 60 parallel Python tasks in `portfolioPythonAnalysis` workflow.
 
 ### ~~2. Browser-based AI chat terminal~~ ✅
 - ~~Implemented (Phases 1–4).~~ See item #12 above and `application/assistant/ai-assistant.md`.
 
-### 3. Sub-workflows / workflow-call node
+### 3. Show broken JCWFs in the workflow editor
+- JCWFs that fail to parse are silently dropped from the WorkflowRegistry
+- The editor never shows them, so the user cannot fix the error visually
+- Instead they must dig through `log/log.txt` and edit JSON by hand
+- **Goal:** Show broken JCWFs in the editor with an error badge and the parse error message so the user can fix them in place
+
+### 4. Sub-workflows / workflow-call node
 - Invoke one JCWF from another as a task
 - Enables modular composition of complex pipelines
 
