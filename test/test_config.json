@@ -32,7 +32,7 @@
       "timeout_sec": 180,
       "context": {},
       "prerequisites": [
-        "workflows/message.txt"
+        "workflows/aiCarMaintenancePipeline/message.txt"
       ],
       "expected_artifacts": [
         {
@@ -120,12 +120,24 @@
         }
       ]
     },
+    "make-example-subwf": {
+      "label": "Makefile test with sub-workflow (archive step)",
+      "timeout_sec": 60,
+      "context": {},
+      "prerequisites": [],
+      "expected_artifacts": [
+        {
+          "glob": "workflows/myapp",
+          "min_bytes": 1
+        }
+      ]
+    },
     "portfolioDividendAnalysis": {
       "label": "Portfolio Dividend Analysis",
       "timeout_sec": 600,
       "context": {},
       "prerequisites": [
-        "workflows/port62pos.csv"
+        "workflows/portfolioDividendAnalysis.jcwf"
       ],
       "expected_artifacts": [
         {
@@ -170,6 +182,7 @@
   },
   "run_order": [
     "make-example",
+    "make-example-subwf",
     "inputResolutionTest",
     "ai-zip-demo",
     "aiCarMaintenancePipeline",

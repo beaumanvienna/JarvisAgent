@@ -459,7 +459,7 @@ Each task has:
 ```jsonc
 {
   "id": "summarize",
-  "type": "python | shell | ai_call | internal",
+  "type": "python | shell | ai_call | internal | sub_workflow",
   "label": "Summarize report with AI",
   "doc": "Sends the prepared text to an AI assistant and stores the answer.",
   "mode": "single | per_item",
@@ -650,6 +650,38 @@ make
 
 - `internal`  
   Built-in C++ actions, such as updating status, writing to ChatMessagePool, or coordinating queue artifacts.
+
+- `sub_workflow`  
+  Executes a referenced child JCWF workflow as a nested run. The parent task enters
+  `WaitingExternal` state until the child workflow completes. If the child succeeds,
+  the parent task succeeds; if the child fails or is cancelled, the parent task fails.
+
+  **Required field:** `workflow_file` (string) — path to the child `.jcwf` file,
+  relative to the parent workflow's file directory (or absolute).
+
+  ```jsonc
+  {
+    "id": "run_cleanup",
+    "type": "sub_workflow",
+    "label": "Run cleanup sub-workflow",
+    "workflow_file": "subworkflows/cleanup.jcwf",
+    "depends_on": ["prepare_data"]
+  }
+  ```
+
+  Sub-workflows are standalone JCWF files with their own `id`, `tasks`, and structure.
+  They are loaded from the workflow registry (the `workflows/` directory is scanned
+  recursively). Sub-workflows may themselves contain `sub_workflow` tasks (nested
+  sub-workflows), subject to a maximum nesting depth of 10.
+
+  Sub-workflows do **not** have triggers — they are always invoked by a parent workflow.
+  The child workflow runs as an independent `WorkflowRun` with its own task states.
+
+  **Cancellation:** If the parent run is cancelled, all active child sub-workflow runs
+  are cancelled as well.
+
+  **Reuse:** Multiple parent workflows (or multiple tasks within the same workflow) can
+  reference the same sub-workflow file.
 
 #### 3.3.2 Mode: `single` vs `per_item`
 
@@ -2351,6 +2383,70 @@ pipeline so the AI knows which scripts already exist and can reuse them instead 
 requesting new ones.
 
 ---
+
+---
+
+## JCWF Container Format (zip)
+
+Starting with the sub-workflow feature, the `.jcwf` file extension denotes a **zip container**
+that bundles workflow JSON files and sub-workflow folders into a single portable package.
+Individual workflow definitions use the `.json` extension.
+
+### Container Structure
+
+```
+my-pipeline.jcwf   (zip file)
+├── global.json                           ← workflow-level metadata (entire tree)
+├── my-pipeline.json                      ← root canvas task DAG
+├── code validation/                      ← sub-workflow folder
+│   └── code validation.json              ← sub-workflow task DAG
+└── report generation/
+    ├── report generation.json
+    └── data cleanup/                     ← nested sub-workflow
+        └── data cleanup.json
+```
+
+### `global.json` (root level only)
+
+Contains workflow-wide metadata. Never contains tasks.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | JCWF version (`"1.0"` or `"1.1"`). |
+| `id` | string | Workflow identifier. |
+| `label` | string | Human-friendly name. |
+| `doc` | string | Documentation. |
+| `manual_start` | boolean | Default `true`. |
+| `triggers` | array | Trigger definitions (auto, cron, file_watch, webhook, manual). |
+| `defaults` | object | Default timeout, retries, AI provider settings. |
+
+### Canvas JSON files
+
+Each canvas JSON contains the task DAG for one level of the hierarchy:
+`tasks`, `dataflow`, `filters`, `control_nodes`, `controlflow`.
+
+- The root canvas JSON is named after the workflow (e.g., `my-pipeline.json`), or any
+  name that is not `global.json`.
+- Sub-workflow canvas JSONs are named after their folder (e.g., `code validation/code validation.json`).
+- Canvas JSONs do NOT contain triggers, `manual_start`, or other root-level metadata.
+
+### Sub-workflow folders
+
+- Each subfolder represents a sub-workflow. The folder name is the sub-workflow's display name.
+- The folder name is shown in the editor's tree view on the left panel.
+- A `sub_workflow` task references a sub-workflow by folder name (relative path).
+- Sub-workflow folders may be nested to any depth (max 10 levels enforced by the validator).
+
+### Extraction model
+
+When a `.jcwf` container is loaded or run:
+
+1. The zip is extracted to `workflows/<workflow-name>/` (sibling of the `.jcwf` file).
+2. The extracted folder becomes the **workflow root directory**.
+3. All `working_directory` fields on tasks are relative to this folder.
+4. Build artifacts are written inside the extracted folder.
+5. Deleting `workflows/<workflow-name>/` cleans all artifacts for that workflow.
+6. Re-extraction occurs when the zip is newer than the extracted folder.
 
 *End of JC Workflow File (JCWF) Specification v1.1*
 ---

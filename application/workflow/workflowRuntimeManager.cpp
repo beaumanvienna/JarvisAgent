@@ -37,6 +37,7 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "workflow/dataflowResolver.h"
+#include "workflow/jcwfContainer.h"
 #include "workflow/taskExecutorRegistry.h"
 #include "workflow/taskFreshnessChecker.h"
 #include "workflow/taskPathResolver.h"
@@ -1065,6 +1066,7 @@ namespace AIAssistant
         }
 
         DrainAiRequestCompletions();
+        PropagateSubWorkflowCompletions();
 
         for (size_t index = 0; index < m_ActiveRuns.size();)
         {
@@ -1151,6 +1153,25 @@ namespace AIAssistant
                     "WorkflowRuntimeManager::StartPendingRuns: workflow '{}' not found in registry, skipping run '{}'",
                     pendingRun.m_WorkflowId, pendingRun.m_RunId);
                 continue;
+            }
+
+            // If this workflow was loaded from a .jcwf container, ensure it's extracted.
+            if (!workflowDefinition->m_ContainerPath.empty())
+            {
+                std::filesystem::path const containerPath(workflowDefinition->m_ContainerPath);
+                std::filesystem::path const extractedDir =
+                    containerPath.parent_path() / containerPath.stem();
+
+                if (JcwfContainer::IsExtractedStale(containerPath, extractedDir))
+                {
+                    std::string extractError;
+                    if (!JcwfContainer::Extract(containerPath, extractedDir, extractError))
+                    {
+                        LOG_APP_ERROR("[workflow] failed to extract container '{}' before run: {}",
+                                      containerPath.string(), extractError);
+                        continue;
+                    }
+                }
             }
 
             std::string const runId =
@@ -2097,6 +2118,7 @@ namespace AIAssistant
             if (activeRun.m_Run.m_RunId == runId)
             {
                 activeRun.m_CancelRequested = true;
+                CancelChildSubWorkflowRuns(runId);
                 return true;
             }
         }
@@ -2673,16 +2695,20 @@ namespace AIAssistant
             }
             catch (std::exception const& e)
             {
+                std::string const errorMsg = std::string("filter evaluation threw: ") + e.what();
+                LOG_APP_ERROR("[per_item] task '{}' in run '{}': {}", parentTaskId, workflowRun.m_RunId, errorMsg);
                 auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
                 if (stateIt != workflowRun.m_TaskStates.end())
                 {
                     stateIt->second.m_State = TaskInstanceStateKind::Failed;
-                    stateIt->second.m_LastErrorMessage = std::string("filter evaluation threw: ") + e.what();
+                    stateIt->second.m_LastErrorMessage = errorMsg;
                 }
                 workflowRun.m_HasFailed = true;
             }
             catch (...)
             {
+                LOG_APP_ERROR("[per_item] task '{}' in run '{}': filter evaluation threw unknown exception",
+                              parentTaskId, workflowRun.m_RunId);
                 auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
                 if (stateIt != workflowRun.m_TaskStates.end())
                 {
@@ -2696,6 +2722,8 @@ namespace AIAssistant
             {
                 if (!evalResult.m_Success)
                 {
+                    LOG_APP_WARN("[per_item] filter evaluation failed for task '{}' in run '{}': {}",
+                                 parentTaskId, workflowRun.m_RunId, evalResult.m_ErrorMessage);
                     auto stateIt = workflowRun.m_TaskStates.find(parentTaskId);
                     if (stateIt != workflowRun.m_TaskStates.end())
                     {
@@ -2915,6 +2943,145 @@ namespace AIAssistant
 
             LOG_APP_INFO("[per_item] parent '{}' completed: {} children, {} succeeded, {} skipped", parentTaskId,
                          childIds.size(), succeededCount, skippedCount);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Sub-workflow support
+    // -----------------------------------------------------------------
+
+    void WorkflowRuntimeManager::RegisterSubWorkflowLink(std::string const& childRunId, std::string const& parentRunId,
+                                                         std::string const& parentTaskInstanceId)
+    {
+        m_SubWorkflowLinks[childRunId] = SubWorkflowLink{parentRunId, parentTaskInstanceId};
+
+        LOG_APP_INFO("[sub-workflow] registered link: child run '{}' → parent run '{}' task '{}'", childRunId,
+                     parentRunId, parentTaskInstanceId);
+    }
+
+    void WorkflowRuntimeManager::PropagateSubWorkflowCompletions()
+    {
+        if (m_SubWorkflowLinks.empty())
+        {
+            return;
+        }
+
+        // Collect completed child runs that have a parent link.
+        // We iterate the link map and check last-runs for completion.
+        std::vector<std::string> completedChildRunIds;
+
+        for (auto const& [childRunId, link] : m_SubWorkflowLinks)
+        {
+            // Check if the child run is still active (not yet completed).
+            bool childStillActive = false;
+            for (ActiveRun const& activeRun : m_ActiveRuns)
+            {
+                if (activeRun.m_Run.m_RunId == childRunId)
+                {
+                    childStillActive = true;
+                    break;
+                }
+            }
+
+            if (childStillActive)
+            {
+                continue;
+            }
+
+            // Child is no longer active — it must have completed.
+            // Look it up in last-runs by run ID.
+            WorkflowRun childRun;
+            bool found = false;
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                for (auto const& [workflowId, lastRun] : m_LastRuns)
+                {
+                    if (lastRun.m_RunId == childRunId)
+                    {
+                        childRun = lastRun;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found)
+            {
+                continue;
+            }
+
+            // Propagate to the parent task.
+            for (ActiveRun& parentActiveRun : m_ActiveRuns)
+            {
+                if (parentActiveRun.m_Run.m_RunId != link.m_ParentRunId)
+                {
+                    continue;
+                }
+
+                auto taskIt = parentActiveRun.m_Run.m_TaskStates.find(link.m_ParentTaskInstanceId);
+                if (taskIt == parentActiveRun.m_Run.m_TaskStates.end())
+                {
+                    continue;
+                }
+
+                if (taskIt->second.m_State != TaskInstanceStateKind::WaitingExternal)
+                {
+                    continue;
+                }
+
+                bool const childSucceeded = (childRun.m_State == WorkflowRunState::Succeeded);
+
+                if (childSucceeded)
+                {
+                    taskIt->second.m_State = TaskInstanceStateKind::Succeeded;
+                    taskIt->second.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                    taskIt->second.m_LastErrorMessage.clear();
+                    LOG_APP_INFO("[sub-workflow] child run '{}' succeeded → parent task '{}' succeeded", childRunId,
+                                 link.m_ParentTaskInstanceId);
+                }
+                else
+                {
+                    taskIt->second.m_State = TaskInstanceStateKind::Failed;
+                    taskIt->second.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                    taskIt->second.m_LastErrorMessage =
+                        "Child workflow run '" + childRunId + "' " +
+                        (childRun.m_State == WorkflowRunState::Cancelled ? "was cancelled" : "failed");
+                    LOG_APP_ERROR("[sub-workflow] child run '{}' {} → parent task '{}' failed", childRunId,
+                                 (childRun.m_State == WorkflowRunState::Cancelled ? "cancelled" : "failed"),
+                                 link.m_ParentTaskInstanceId);
+                }
+
+                break;
+            }
+
+            completedChildRunIds.push_back(childRunId);
+        }
+
+        // Clean up completed links.
+        for (std::string const& childRunId : completedChildRunIds)
+        {
+            m_SubWorkflowLinks.erase(childRunId);
+        }
+    }
+
+    void WorkflowRuntimeManager::CancelChildSubWorkflowRuns(std::string const& parentRunId)
+    {
+        for (auto const& [childRunId, link] : m_SubWorkflowLinks)
+        {
+            if (link.m_ParentRunId != parentRunId)
+            {
+                continue;
+            }
+
+            for (ActiveRun& activeRun : m_ActiveRuns)
+            {
+                if (activeRun.m_Run.m_RunId == childRunId)
+                {
+                    activeRun.m_CancelRequested = true;
+                    LOG_APP_INFO("[sub-workflow] propagating cancellation to child run '{}'", childRunId);
+                    break;
+                }
+            }
         }
     }
 

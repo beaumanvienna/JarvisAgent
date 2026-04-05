@@ -18,6 +18,7 @@ import "reactflow/dist/style.css";
 import TaskNode from "./TaskNode";
 import FilterNode from "./FilterNode";
 import BranchNode from "./BranchNode";
+import WorkflowTreeView from "./WorkflowTreeView";
 import { FILE_INPUT_COLORS } from "./constants";
 import FilterBuilderDialog from "./FilterBuilderDialog";
 import QueueBindingEditor from "./QueueBindingEditor";
@@ -33,6 +34,7 @@ import {
   checkFileExists,
   checkScript,
   fetchRunDetails,
+  listWorkflows,
   loadWorkflow,
   pauseRun,
   resumeRun,
@@ -172,12 +174,19 @@ function computeNodeSnapshot(nodes: EditorTaskNode[]): NodeSnapshot
 
 function buildDefaultTask(taskId: string, taskType: JcwfTaskType): JcwfTask
 {
-  return {
+  const task: JcwfTask = {
     id: taskId,
     type: taskType,
     label: taskId,
     params: {},
   };
+
+  if (taskType === "sub_workflow")
+  {
+    task.workflow_file = "";
+  }
+
+  return task;
 }
 
 function nodeTitleFromTask(task: JcwfTask): { title: string; subtitle?: string }
@@ -236,6 +245,7 @@ export default function WorkflowEditorView(props: {
   const [clientInfos, setClientInfos] = useState<{ taskId: string; message: string }[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [loadedWorkflowId, setLoadedWorkflowId] = useState<string | null>(null);
+  const [workflowNavStack, setWorkflowNavStack] = useState<string[]>([]);
   const [lastSavedSignature, setLastSavedSignature] = useState<string>("");
   const [lastSavedNodeSnapshot, setLastSavedNodeSnapshot] = useState<NodeSnapshot>({});
   const [isDirty, setIsDirty] = useState<boolean>(false);
@@ -719,8 +729,8 @@ export default function WorkflowEditorView(props: {
           // Skip template bindings like {{input[0]}}
           if (filePath.includes("{{")) continue;
           if (filePath.length === 0) continue;
-          const resolvedKey = resolveFileInputPath(filePath, wd);
-          const cached = fileCheckCacheRef.current[resolvedKey];
+          const cacheKey = fileInputCacheKey(filePath, wd);
+          const cached = fileCheckCacheRef.current[cacheKey];
           if (cached && !cached.exists)
           {
             fileInputWarnings.push(`Input file '${filePath}' not found.`);
@@ -840,20 +850,10 @@ export default function WorkflowEditorView(props: {
     return () => { cancelled = true; };
   }, [shellCommandsFingerprint, nodes, edges, scriptCheckTick]);
 
-  // Resolve a file_input path relative to workflows/<working_directory>/ (matching runtime).
-  // Returns a normalized relative path suitable for /api/files/check.
-  const resolveFileInputPath = (fileInput: string, workingDirectory: string): string => {
-    const combined = workingDirectory
-      ? `workflows/${workingDirectory}/${fileInput}`
-      : `workflows/${fileInput}`;
-    const parts = combined.split("/");
-    const resolved: string[] = [];
-    for (const part of parts)
-    {
-      if (part === "..") { resolved.pop(); }
-      else if (part !== "." && part !== "") { resolved.push(part); }
-    }
-    return resolved.join("/");
+  // Build a cache key for file_input checks. The backend resolves the actual path
+  // using TaskPathResolver (same code as the runtime), so we just need a unique key.
+  const fileInputCacheKey = (fileInput: string, workingDirectory: string): string => {
+    return `${loadedWorkflowId ?? props.workflowId ?? ""}|${workingDirectory}|${fileInput}`;
   };
 
   // Async file_input existence check — fires when static file_input paths change.
@@ -870,8 +870,8 @@ export default function WorkflowEditorView(props: {
       for (const fp of fileInputs)
       {
         if (fp.length === 0 || fp.includes("{{")) continue;
-        const resolved = resolveFileInputPath(fp, wd);
-        paths.push(`${node.id}:${resolved}`);
+        const cacheKey = fileInputCacheKey(fp, wd);
+        paths.push(`${node.id}:${cacheKey}`);
       }
     }
     return paths.sort().join("|");
@@ -882,11 +882,11 @@ export default function WorkflowEditorView(props: {
 
     const entries = fileInputsFingerprint.split("|").map((s) => {
       const idx = s.indexOf(":");
-      return { nodeId: s.slice(0, idx), filePath: s.slice(idx + 1) };
+      return { nodeId: s.slice(0, idx), cacheKey: s.slice(idx + 1) };
     });
 
-    const uncached = [...new Set(entries.map((e) => e.filePath))].filter(
-      (fp) => !(fp in fileCheckCacheRef.current)
+    const uncached = [...new Set(entries.map((e) => e.cacheKey))].filter(
+      (key) => !(key in fileCheckCacheRef.current)
     );
     if (uncached.length === 0) return;
 
@@ -895,11 +895,16 @@ export default function WorkflowEditorView(props: {
     (async () => {
       const results: Record<string, { exists: boolean }> = {};
       await Promise.all(
-        uncached.map(async (fp) => {
+        uncached.map(async (key) => {
           try
           {
-            const res = await checkFileExists(fp);
-            results[fp] = { exists: res.exists };
+            // Cache key format: "workflowId|wd|filePath"
+            const parts = key.split("|");
+            const wfId = parts[0] || undefined;
+            const wd = parts[1] || undefined;
+            const filePath = parts.slice(2).join("|");
+            const res = await checkFileExists(filePath, wfId, wd);
+            results[key] = { exists: res.exists };
           }
           catch
           {
@@ -1047,6 +1052,92 @@ export default function WorkflowEditorView(props: {
   useEffect(() => {
     loadFromJcwfRef.current = loadFromJcwf;
   }, [loadFromJcwf]);
+
+  // Sub-workflow navigation: enter a child workflow canvas
+  const navigateToSubWorkflow = useCallback(async (workflowFile: string) => {
+    if (!workflowFile)
+    {
+      setErrorText("Sub-workflow has no workflow_file set.");
+      return;
+    }
+
+    // If dirty, warn the user before navigating away.
+    if (isDirty)
+    {
+      const proceed = window.confirm("You have unsaved changes. Navigate to sub-workflow anyway?");
+      if (!proceed) return;
+    }
+
+    try
+    {
+      // Resolve workflow_file to a workflow ID via the workflow list.
+      const list = await listWorkflows();
+      const match = list.workflows.find((w) =>
+        w.path && w.path.endsWith("/" + workflowFile)
+      );
+
+      if (!match)
+      {
+        setErrorText(`Sub-workflow not found in registry for file '${workflowFile}'.`);
+        return;
+      }
+
+      // Push current workflow onto the nav stack.
+      const currentId = loadedWorkflowId;
+      if (currentId)
+      {
+        setWorkflowNavStack((prev) => [...prev, currentId]);
+      }
+
+      // Load the child workflow.
+      const jcwf = await loadWorkflow(match.id);
+      if (jcwf !== null)
+      {
+        loadFromJcwfRef.current(match.id, jcwf);
+        setStatusText(`Navigated into sub-workflow '${match.id}'.`);
+      }
+      else
+      {
+        setErrorText(`Failed to load sub-workflow '${match.id}'.`);
+      }
+    }
+    catch (e)
+    {
+      setErrorText(`Navigation error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [isDirty, loadedWorkflowId]);
+
+  // Sub-workflow navigation: go back to parent workflow
+  const navigateBack = useCallback(async () => {
+    if (workflowNavStack.length === 0) return;
+
+    if (isDirty)
+    {
+      const proceed = window.confirm("You have unsaved changes. Navigate back anyway?");
+      if (!proceed) return;
+    }
+
+    const parentId = workflowNavStack[workflowNavStack.length - 1];
+    setWorkflowNavStack((prev) => prev.slice(0, -1));
+
+    try
+    {
+      const jcwf = await loadWorkflow(parentId);
+      if (jcwf !== null)
+      {
+        loadFromJcwfRef.current(parentId, jcwf);
+        setStatusText(`Returned to workflow '${parentId}'.`);
+      }
+      else
+      {
+        setErrorText(`Failed to load parent workflow '${parentId}'.`);
+      }
+    }
+    catch (e)
+    {
+      setErrorText(`Navigation error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [workflowNavStack, isDirty]);
 
   const getCurrentJcwf = useCallback((): JcwfFile | null => {
     const workflowId = loadedWorkflowId ?? props.workflowId ?? "workflow";
@@ -2652,7 +2743,39 @@ export default function WorkflowEditorView(props: {
             <button className="btn" type="button" style={{ borderColor: "rgba(255,180,80,0.35)", color: "rgba(255,200,140,0.95)" }} onClick={addBranchNode}>+ Branch</button>
             <hr style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.08)", margin: "4px 0" }} />
             <button className="btn" type="button" style={{ borderColor: "rgba(180,140,255,0.35)", color: "rgba(200,170,255,0.95)" }} onClick={addFilterNode}>+ Filter</button>
+            <button className="btn" type="button" style={{ borderColor: "rgba(100,200,255,0.35)", color: "rgba(140,220,255,0.95)" }} onClick={() => { addTaskNode("sub_workflow"); }}>{"\u29C9"} + Sub-Workflow</button>
           </div>
+        </div>
+
+        <div className="card">
+          <WorkflowTreeView
+            currentWorkflowId={loadedWorkflowId}
+            rootWorkflowId={workflowNavStack.length > 0 ? workflowNavStack[0] : loadedWorkflowId}
+            onNavigate={async (workflowId) => {
+              if (isDirty)
+              {
+                const proceed = window.confirm("You have unsaved changes. Navigate anyway?");
+                if (!proceed) return;
+              }
+              if (loadedWorkflowId && loadedWorkflowId !== workflowId)
+              {
+                setWorkflowNavStack((prev) => [...prev, loadedWorkflowId]);
+              }
+              try
+              {
+                const jcwf = await loadWorkflow(workflowId);
+                if (jcwf !== null)
+                {
+                  loadFromJcwfRef.current(workflowId, jcwf);
+                  setStatusText(`Navigated to '${workflowId}'.`);
+                }
+              }
+              catch (e)
+              {
+                setErrorText(`Navigation error: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }}
+          />
         </div>
 
         <div className="card">
@@ -3022,6 +3145,48 @@ export default function WorkflowEditorView(props: {
       </aside>
 
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+        {workflowNavStack.length > 0 && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "4px 10px",
+            background: "rgba(100,200,255,0.06)", borderBottom: "1px solid rgba(100,200,255,0.15)",
+            fontSize: 12, color: "rgba(140,220,255,0.9)", flexShrink: 0,
+          }}>
+            <button
+              className="btn"
+              type="button"
+              style={{ fontSize: 11, padding: "2px 8px", borderColor: "rgba(100,200,255,0.3)" }}
+              onClick={navigateBack}
+            >
+              {"\u2190"} Back
+            </button>
+            {workflowNavStack.map((wfId, idx) => (
+              <React.Fragment key={idx}>
+                <span style={{ opacity: 0.5 }}>{"\u203A"}</span>
+                <span
+                  style={{ cursor: "pointer", textDecoration: "underline", opacity: 0.7 }}
+                  onClick={async () => {
+                    if (isDirty)
+                    {
+                      const proceed = window.confirm("You have unsaved changes. Navigate anyway?");
+                      if (!proceed) return;
+                    }
+                    setWorkflowNavStack(workflowNavStack.slice(0, idx));
+                    try
+                    {
+                      const jcwf = await loadWorkflow(wfId);
+                      if (jcwf !== null) loadFromJcwfRef.current(wfId, jcwf);
+                    }
+                    catch { /* ignore */ }
+                  }}
+                >
+                  {wfId}
+                </span>
+              </React.Fragment>
+            ))}
+            <span style={{ opacity: 0.5 }}>{"\u203A"}</span>
+            <span style={{ fontWeight: 700 }}>{loadedWorkflowId ?? "?"}</span>
+          </div>
+        )}
         <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
           <ReactFlow
             key={`rf-${props.hideTierDWarnings ? "hide" : "show"}`}
@@ -3034,6 +3199,16 @@ export default function WorkflowEditorView(props: {
             onEdgesChange={onEdgesChangeWithUndo}
             onConnect={onConnect}
             onSelectionChange={onSelectionChange}
+            onNodeDoubleClick={(_event, node) => {
+              if (node.type === "task")
+              {
+                const taskData = (node as EditorTaskNode).data;
+                if (taskData.task.type === "sub_workflow" && taskData.task.workflow_file)
+                {
+                  navigateToSubWorkflow(taskData.task.workflow_file);
+                }
+              }
+            }}
             selectionOnDrag={shiftHeld}
             panOnDrag={!shiftHeld}
             selectionMode={SelectionMode.Partial}
@@ -3215,6 +3390,7 @@ export default function WorkflowEditorView(props: {
                       <option value="python">python</option>
                       <option value="shell">shell</option>
                       <option value="internal">internal</option>
+                      <option value="sub_workflow">sub_workflow</option>
                     </select>
                   </label>
 
@@ -3240,6 +3416,30 @@ export default function WorkflowEditorView(props: {
                         placeholder="filter id (e.g. work_items)"
                       />
                     </label>
+                  )}
+
+                  {selectedNode.data.task.type === "sub_workflow" && (
+                    <>
+                      <label className="field">
+                        <div className="small" style={{ color: "rgba(100,200,255,0.95)" }}>workflow_file</div>
+                        <input
+                          className="input"
+                          value={(selectedNode.data.task.workflow_file ?? "") as string}
+                          onChange={(e) => { updateSelectedTaskField({ workflow_file: e.target.value || undefined } as Partial<JcwfTask>); }}
+                          placeholder="e.g. subworkflows/cleanup.jcwf"
+                        />
+                      </label>
+                      {selectedNode.data.task.workflow_file && (
+                        <button
+                          className="btn"
+                          type="button"
+                          style={{ borderColor: "rgba(100,200,255,0.35)", color: "rgba(140,220,255,0.95)", fontSize: 12 }}
+                          onClick={() => { navigateToSubWorkflow(selectedNode.data.task.workflow_file!); }}
+                        >
+                          Open Sub-Workflow
+                        </button>
+                      )}
+                    </>
                   )}
 
                   {selectedNode.data.task.type === "ai_call" && (

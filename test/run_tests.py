@@ -86,6 +86,11 @@ def load_config():
 class JarvisAPI:
     def __init__(self, base_url):
         self.base_url = base_url.rstrip("/")
+        self._session = requests.Session()
+        if self.base_url.startswith("https"):
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            self._session.verify = False
 
     def _url(self, path):
         return f"{self.base_url}{path}"
@@ -93,46 +98,46 @@ class JarvisAPI:
     def health_check(self):
         """Returns True if JA is reachable."""
         try:
-            r = requests.get(self._url("/api/status"), timeout=5)
+            r = self._session.get(self._url("/api/status"), timeout=5)
             return r.status_code == 200
         except requests.ConnectionError:
             return False
 
     def get_status(self):
-        r = requests.get(self._url("/api/status"), timeout=5)
+        r = self._session.get(self._url("/api/status"), timeout=5)
         r.raise_for_status()
         return r.json()
 
     def clean_workflow(self, workflow_id):
-        r = requests.delete(self._url(f"/api/workflows/{workflow_id}/clean"), timeout=60)
+        r = self._session.delete(self._url(f"/api/workflows/{workflow_id}/clean"), timeout=60)
         return r.status_code, r.json()
 
     def run_workflow(self, workflow_id, context=None):
         body = {}
         if context:
             body["context"] = context
-        r = requests.post(self._url(f"/api/workflows/{workflow_id}/run"),
-                          json=body, timeout=10)
+        r = self._session.post(self._url(f"/api/workflows/{workflow_id}/run"),
+                               json=body, timeout=10)
         return r.status_code, r.json()
 
     def get_active_runs(self):
-        r = requests.get(self._url("/api/workflow-runs/active"), timeout=5)
+        r = self._session.get(self._url("/api/workflow-runs/active"), timeout=5)
         r.raise_for_status()
         return r.json()
 
     def get_last_runs(self):
-        r = requests.get(self._url("/api/workflow-runs/last"), timeout=5)
+        r = self._session.get(self._url("/api/workflow-runs/last"), timeout=5)
         r.raise_for_status()
         return r.json()
 
     def get_run_detail(self, run_id):
-        r = requests.get(self._url(f"/api/workflow-runs/{run_id}"), timeout=5)
+        r = self._session.get(self._url(f"/api/workflow-runs/{run_id}"), timeout=5)
         r.raise_for_status()
         return r.json()
 
     def get_registered_workflow_ids(self):
         """Returns a set of workflow IDs currently registered in JarvisAgent."""
-        r = requests.get(self._url("/api/workflows"), timeout=5)
+        r = self._session.get(self._url("/api/workflows"), timeout=5)
         r.raise_for_status()
         data = r.json()
         return {w["id"] for w in data.get("workflows", [])}
@@ -397,7 +402,7 @@ def main():
     # Reload workflows from disk so any JCWF edits are picked up
     info("Reloading workflows from disk...")
     try:
-        r = requests.post(api._url("/api/workflows/reload"), timeout=10)
+        r = api._session.post(api._url("/api/workflows/reload"), timeout=10)
         if r.status_code == 200:
             data = r.json()
             ok(f"Workflows reloaded ({data.get('workflowCount', '?')} workflows)")
@@ -423,7 +428,7 @@ def main():
                 ok(f"Copied {src.name} → workflows/")
                 info("Reloading workflows in JA...")
                 try:
-                    r = requests.post(api._url("/api/workflows/reload"), timeout=10)
+                    r = api._session.post(api._url("/api/workflows/reload"), timeout=10)
                     if r.status_code == 200:
                         ok(f"Workflows reloaded: {r.json()}")
                     else:

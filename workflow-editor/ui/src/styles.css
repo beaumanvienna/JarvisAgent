@@ -414,6 +414,32 @@ select.input option {
   box-shadow: 0 0 0 2px rgba(120, 180, 255, 0.35), 0 0 18px rgba(120, 180, 255, 0.12);
 }
 
+/* Sub-workflow node */
+.taskNode.taskNodeSubWorkflow {
+  border-color: rgba(100, 200, 255, 0.45);
+  background: rgba(100, 200, 255, 0.06);
+  border-style: dashed;
+  border-width: 2px;
+}
+
+.taskNode.taskNodeSubWorkflow.taskNodeSelected {
+  border-color: rgba(100, 200, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(100, 200, 255, 0.35), 0 0 18px rgba(100, 200, 255, 0.12);
+}
+
+.taskNodeSubWorkflowIcon {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+
+.taskNodeSubWorkflowHint {
+  font-size: 0.7em;
+  color: rgba(100, 200, 255, 0.6);
+  margin-top: 2px;
+}
+
 /* Modal */
 .modalBackdrop,
 .modalOverlay {

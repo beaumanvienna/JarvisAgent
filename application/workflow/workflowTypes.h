@@ -83,7 +83,8 @@ namespace AIAssistant
         Python,
         Shell,
         AiCall,
-        Internal
+        Internal,
+        SubWorkflow
     };
 
     enum class TaskMode
@@ -335,6 +336,10 @@ namespace AIAssistant
 
         // JCWF: "expose_error_signal" (optional)
         bool m_ExposeErrorSignal{false};
+
+        // JCWF: "workflow_file" — for SubWorkflow tasks, path to child .jcwf file
+        // (relative to the workflow file directory or absolute).
+        std::string m_WorkflowFile;
     };
 
     // Compatibility alias for code that used TaskDefinition naming today
@@ -453,6 +458,18 @@ namespace AIAssistant
         // JCWF: "defaults" – raw JSON kept for serialization; parsed fields in m_Defaults.
         std::string m_DefaultsJson;
         WorkflowDefaults m_Defaults;
+
+        // Container format: path to the .jcwf zip container (if loaded from one).
+        std::string m_ContainerPath;
+
+        // Container format: true if this is a sub-workflow within a container (not the root level).
+        bool m_IsSubWorkflow{false};
+
+        // Container format: parent workflow ID (for sub-workflows loaded from a container).
+        std::string m_ParentWorkflowId;
+
+        // Container format: relative folder path within the container (e.g. "code validation").
+        std::string m_ContainerFolderPath;
 
         // Computed at load time: true if any task in the workflow is an ai_call.
         bool m_HasAiCallTasks{false};

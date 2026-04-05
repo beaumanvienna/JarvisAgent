@@ -195,14 +195,15 @@ See also:
 - ~~Implemented (Phases 1–4).~~ See item #12 above and `application/assistant/ai-assistant.md`.
 
 ### 3. Show broken JCWFs in the workflow editor
-- JCWFs that fail to parse are silently dropped from the WorkflowRegistry
+- JCWF containers that fail to parse are silently dropped from the WorkflowRegistry
 - The editor never shows them, so the user cannot fix the error visually
 - Instead they must dig through `log/log.txt` and edit JSON by hand
 - **Goal:** Show broken JCWFs in the editor with an error badge and the parse error message so the user can fix them in place
 
-### 4. Sub-workflows / workflow-call node
-- Invoke one JCWF from another as a task
-- Enables modular composition of complex pipelines
+### ~~4. Sub-workflows / workflow-call node~~ ✅
+- ~~Invoke one JCWF from another as a task~~ ✅
+- ~~Enables modular composition of complex pipelines~~ ✅
+- **Done:** `sub_workflow` task type with `workflow_file` field. `SubWorkflowTaskExecutor` enqueues child `WorkflowRun` and returns `WaitingExternal`; `PropagateSubWorkflowCompletions()` in runtime manager propagates child completion/failure back to parent. Cancellation propagates to child runs. DFS cycle detection + depth limit (max 10) in validator. `.jcwf` is now a zip container format: `global.json` (workflow-wide metadata) + canvas JSONs + sub-workflow folders (folder name = display name). `JcwfContainer` utility wraps miniz for Extract/Pack/ReadFile. Registry extracts and loads containers recursively. Editor: dashed-border sub-workflow nodes, "+ Sub-Workflow" button, inspector with workflow_file input, double-click navigation, breadcrumb bar, collapsible tree view in left sidebar. AI assistant tools updated for zip format. All example workflows converted. Packaging scripts updated.
 
 ### 4. ~~Launchpad PPA~~ ✅
 - ~~Upload source-code DEB package to Launchpad PPA: https://launchpad.net/~beauman/+archive/ubuntu/marley~~

@@ -44,6 +44,7 @@ namespace AIAssistant
     class CurlMultiDispatcher;
     class WorkflowFileIndex;
     class WorkflowRuntimeManager;
+    class SubWorkflowTaskExecutor;
 
     class JarvisAgent : public Application
     {
@@ -116,6 +117,8 @@ namespace AIAssistant
         std::unique_ptr<CurlMultiDispatcher> m_CurlMultiDispatcher;
         std::unique_ptr<WorkflowRuntimeManager> m_WorkflowRuntimeManager;
         std::unique_ptr<WorkflowFileIndex> m_WorkflowFileIndex;
+
+        std::shared_ptr<SubWorkflowTaskExecutor> m_SubWorkflowExecutor;
     };
 
     class App

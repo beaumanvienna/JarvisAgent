@@ -44,7 +44,8 @@ project "jarvisAgent"
         "JARVIS_AGENT_VERSION=\"0.8.5\"",
         "CROW_ENFORCE_WS_SPEC",
         "CROW_ENABLE_SSL",
-        "PDC_WIDE"
+        "PDC_WIDE",
+        "MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
     }
 
     ------------------------------------
@@ -103,7 +104,8 @@ project "jarvisAgent"
         "vendor/crow/include/crow",
         "vendor/asio/asio/include",
         "vendor/pdcursesmod",
-        "vendor/date/include"
+        "vendor/date/include",
+        "vendor/miniz"
     }
 
     defines { "NGHTTP2_STATICLIB" }
@@ -157,7 +159,8 @@ project "jarvisAgent"
                 "z",
                 "m",
                 py_link,
-                "pdcursesmod"
+                "pdcursesmod",
+                "miniz"
             }
         end
 
@@ -268,7 +271,8 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
                 "ssl",
                 "crypto",
                 "z",
-                "pdcursesmod"
+                "pdcursesmod",
+                "miniz"
             }
 
         end
@@ -301,7 +305,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         --
         -- Windows system libs (always).
         --
-        links { "wldap32", "advapi32", "crypt32", "secur32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "nghttp2", "ssl", "crypto" }
+        links { "wldap32", "advapi32", "crypt32", "secur32", "ws2_32", "normaliz", "pdcursesmod", "winmm", "curl", "nghttp2", "ssl", "crypto", "miniz" }
 
         --
         -- Robust Python discovery on Windows:
@@ -407,6 +411,12 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         os.rmdir("vendor/pdcursesmod/bin-int")
         os.remove("vendor/pdcursesmod/Makefile")
 
+        ----------------------------------------------------
+        -- miniz build folders
+        ----------------------------------------------------
+        os.rmdir("vendor/miniz/bin")
+        os.rmdir("vendor/miniz/bin-int")
+
         print("done.")
     end
 
@@ -415,3 +425,4 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
     include "vendor/openssl/crypto.lua"
     include "vendor/openssl/ssl.lua"
     include "vendor/pdcursesmod/pdcursesmod.lua"
+    include "vendor/miniz/miniz.lua"

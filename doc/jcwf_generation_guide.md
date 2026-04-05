@@ -1,14 +1,20 @@
 # JCWF Generation Guide
 
-This is a condensed reference for generating valid JC Workflow Files (JCWF).
+This is a condensed reference for generating valid JC Workflow JSON files.
 It covers the JSON structure, task types, dependencies, data flow, controlflow,
 and common patterns. For the full specification, see `JC_Workflow_Specification.md`.
+
+**Note:** `.jcwf` files are now zip containers. The JSON files inside use `.json` extension.
+This guide covers the root canvas JSON content. For sub-workflow canvases, see
+`sub-jcwf_generation_guide.md`.
 
 ---
 
 ## 1. Root Object
 
-A JCWF file is valid JSON with extension `.jcwf`.
+A workflow canvas is valid JSON with extension `.json` (inside a `.jcwf` container).
+For the root canvas, global metadata (version, id, triggers, defaults) comes from
+`global.json` in the container. The canvas JSON itself focuses on tasks and dataflow.
 
 ```jsonc
 {
@@ -266,6 +272,28 @@ The runtime copies the file into the ai_call's queue folder as `CNTX_parsed_stat
 ```
 
 Used for built-in operations like status updates or queue coordination.
+
+### 3.5 `sub_workflow` — Execute a child workflow
+
+```jsonc
+{
+  "id": "run_cleanup",
+  "type": "sub_workflow",
+  "label": "Run cleanup sub-workflow",
+  "workflow_file": "subworkflows/cleanup.jcwf",
+  "depends_on": ["prepare_data"]
+}
+```
+
+- `workflow_file` (REQUIRED): Path to a child `.jcwf` file, relative to the parent workflow's file directory.
+- The child workflow is a standalone JCWF file loaded from the `workflows/` directory (scanned recursively).
+- The parent task enters `WaitingExternal` state until the child workflow completes.
+- If the child succeeds, the parent task succeeds; if the child fails or is cancelled, the parent task fails.
+- Sub-workflows do **not** have triggers — they are always invoked by a parent.
+- Multiple parents can reference the same sub-workflow file (reuse).
+- Sub-workflows may contain nested `sub_workflow` tasks (max depth: 10).
+
+**When to generate a `sub_workflow` node:** When the user's prompt describes a group of tasks that should be encapsulated as a reusable unit. Generate the `sub_workflow` node at the parent canvas level — the child workflow content is generated separately when the user edits that canvas.
 
 ---
 

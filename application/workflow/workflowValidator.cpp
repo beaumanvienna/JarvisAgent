@@ -369,6 +369,35 @@ namespace
                          taskPath + ".queue_binding.prob_files", taskId);
             }
         }
+        else if (task.m_Type == TaskType::SubWorkflow)
+        {
+            if (task.m_WorkflowFile.empty())
+            {
+                AddIssue(issues, WorkflowValidationSeverity::Error, "missing_workflow_file",
+                         "sub_workflow task requires a non-empty 'workflow_file' field", taskPath + ".workflow_file",
+                         taskId);
+            }
+            else
+            {
+                // Tier-C warning: check if the referenced file exists on disk.
+                std::filesystem::path const resolvedPath = [&]()
+                {
+                    std::filesystem::path const raw(task.m_WorkflowFile);
+                    if (raw.is_absolute())
+                    {
+                        return raw;
+                    }
+                    return std::filesystem::path(workflow.m_WorkflowFileDirectoryAbsolute) / raw;
+                }();
+
+                if (!std::filesystem::exists(resolvedPath))
+                {
+                    AddIssue(issues, WorkflowValidationSeverity::Warning, "workflow_file_not_found",
+                             "sub_workflow file not found: " + resolvedPath.string(), taskPath + ".workflow_file",
+                             taskId);
+                }
+            }
+        }
 
         (void)workflow;
     }
@@ -1749,6 +1778,115 @@ namespace AIAssistant
 
         // ---- Tier D: cross-task file chain (output collision) ----
         ValidateCrossTaskFileChains(issues, workflow);
+    }
+
+    void WorkflowValidator::ValidateSubWorkflowGraph(
+        std::unordered_map<std::string, std::vector<std::string>> const& dependencyGraph,
+        std::vector<WorkflowValidationIssue>& issues, uint32_t maxDepth)
+    {
+        // DFS-based cycle detection and depth check.
+        enum class Color
+        {
+            White,
+            Gray,
+            Black
+        };
+
+        std::unordered_map<std::string, Color> color;
+        std::unordered_map<std::string, uint32_t> depth;
+
+        // Initialize all nodes.
+        for (auto const& [node, children] : dependencyGraph)
+        {
+            color[node] = Color::White;
+            for (auto const& child : children)
+            {
+                if (color.find(child) == color.end())
+                {
+                    color[child] = Color::White;
+                }
+            }
+        }
+
+        // Track the DFS path for cycle reporting.
+        std::vector<std::string> path;
+
+        std::function<void(std::string const&, uint32_t)> dfs = [&](std::string const& node, uint32_t currentDepth)
+        {
+            color[node] = Color::Gray;
+            depth[node] = currentDepth;
+            path.push_back(node);
+
+            if (currentDepth > maxDepth)
+            {
+                std::string chain;
+                for (auto const& p : path)
+                {
+                    if (!chain.empty())
+                    {
+                        chain += " -> ";
+                    }
+                    chain += p;
+                }
+
+                AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A,
+                         "sub_workflow_depth_exceeded",
+                         "Sub-workflow nesting depth exceeds maximum of " + std::to_string(maxDepth) + ": " + chain,
+                         "$.sub_workflow_graph");
+                path.pop_back();
+                color[node] = Color::Black;
+                return;
+            }
+
+            auto it = dependencyGraph.find(node);
+            if (it != dependencyGraph.end())
+            {
+                for (auto const& child : it->second)
+                {
+                    if (color[child] == Color::Gray)
+                    {
+                        // Cycle detected — build the cycle path.
+                        std::string cycle;
+                        bool inCycle = false;
+                        for (auto const& p : path)
+                        {
+                            if (p == child)
+                            {
+                                inCycle = true;
+                            }
+                            if (inCycle)
+                            {
+                                if (!cycle.empty())
+                                {
+                                    cycle += " -> ";
+                                }
+                                cycle += p;
+                            }
+                        }
+                        cycle += " -> " + child;
+
+                        AddIssue(issues, WorkflowValidationSeverity::Error, WorkflowValidationTier::A,
+                                 "sub_workflow_cycle", "Circular sub-workflow reference: " + cycle,
+                                 "$.sub_workflow_graph");
+                    }
+                    else if (color[child] == Color::White)
+                    {
+                        dfs(child, currentDepth + 1);
+                    }
+                }
+            }
+
+            path.pop_back();
+            color[node] = Color::Black;
+        };
+
+        for (auto const& [node, c] : color)
+        {
+            if (c == Color::White)
+            {
+                dfs(node, 0);
+            }
+        }
     }
 
 } // namespace AIAssistant

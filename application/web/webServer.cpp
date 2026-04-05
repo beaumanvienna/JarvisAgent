@@ -50,8 +50,10 @@
 #include "web/webServer.h"
 #include "web/chatMessages.h"
 #include "file/scriptRegistry.h"
+#include "workflow/taskPathResolver.h"
 
 #include "session/sessionManager.h"
+#include "workflow/jcwfContainer.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowJsonParser.h"
 
@@ -1655,6 +1657,100 @@ namespace AIAssistant
             .methods("POST"_method)([this](std::string const& workflowId, std::string const& timestamp)
                                     { return HandleWorkflowVersionRestorePost(workflowId, timestamp); });
 
+        // ---- Sub-workflow dependency graph ----
+        CROW_ROUTE(m_Server, "/api/workflows/dependency-graph")
+            .methods("GET"_method)([this]()
+            {
+                WorkflowRegistry const* registry = nullptr;
+                {
+                    std::scoped_lock<std::mutex> const lock(m_Mutex);
+                    registry = m_WorkflowRegistry;
+                }
+
+                if (registry == nullptr)
+                {
+                    return crow::response(503, "application/json", R"({"ok":false,"error":"registry_unavailable"})");
+                }
+
+                auto const graph = registry->GetSubWorkflowDependencyGraph();
+
+                crow::json::wvalue edgesArray(crow::json::wvalue::list{});
+                size_t idx = 0;
+                for (auto const& [parentId, children] : graph)
+                {
+                    for (auto const& childId : children)
+                    {
+                        crow::json::wvalue edge;
+                        edge["parent"] = parentId;
+                        edge["child"] = childId;
+                        edgesArray[idx++] = std::move(edge);
+                    }
+                }
+
+                crow::json::wvalue body;
+                body["ok"] = true;
+                body["edges"] = std::move(edgesArray);
+                return crow::response(200, "application/json", body.dump());
+            });
+
+        // ---- Sub-workflow tree structure ----
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/tree")
+            .methods("GET"_method)([this](std::string const& workflowId)
+            {
+                WorkflowRegistry const* registry = nullptr;
+                {
+                    std::scoped_lock<std::mutex> const lock(m_Mutex);
+                    registry = m_WorkflowRegistry;
+                }
+
+                if (registry == nullptr)
+                {
+                    return crow::response(503, "application/json", R"({"ok":false,"error":"registry_unavailable"})");
+                }
+
+                auto const workflowOpt = registry->GetWorkflow(workflowId);
+                if (!workflowOpt.has_value())
+                {
+                    return crow::response(404, "application/json", R"({"ok":false,"error":"not_found"})");
+                }
+
+                // Build a tree of sub-workflows by scanning the registry for children.
+                auto const allIds = registry->GetWorkflowIds();
+                std::string const prefix = workflowId + "__";
+
+                crow::json::wvalue childrenArray(crow::json::wvalue::list{});
+                size_t idx = 0;
+
+                for (auto const& id : allIds)
+                {
+                    auto const childOpt = registry->GetWorkflow(id);
+                    if (!childOpt.has_value() || !childOpt->m_IsSubWorkflow)
+                    {
+                        continue;
+                    }
+                    if (childOpt->m_ParentWorkflowId != workflowId &&
+                        id.rfind(prefix, 0) != 0)
+                    {
+                        continue;
+                    }
+
+                    crow::json::wvalue child;
+                    child["id"] = id;
+                    child["label"] = childOpt->m_Label;
+                    child["folderPath"] = childOpt->m_ContainerFolderPath;
+                    child["parentId"] = childOpt->m_ParentWorkflowId;
+                    childrenArray[idx++] = std::move(child);
+                }
+
+                crow::json::wvalue body;
+                body["ok"] = true;
+                body["workflowId"] = workflowId;
+                body["label"] = workflowOpt->m_Label;
+                body["isContainer"] = !workflowOpt->m_ContainerPath.empty();
+                body["children"] = std::move(childrenArray);
+                return crow::response(200, "application/json", body.dump());
+            });
+
         // ---- Workflow validation + run trigger ----
         CROW_ROUTE(m_Server, "/api/workflows/validate")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
@@ -1908,6 +2004,22 @@ namespace AIAssistant
 
                 workflowEntry["manual_start"] = workflowDefinition->m_ManualStart;
                 workflowEntry["has_ai_call"] = workflowDefinition->m_HasAiCallTasks;
+                workflowEntry["is_sub_workflow"] = workflowDefinition->m_IsSubWorkflow;
+
+                if (!workflowDefinition->m_ContainerPath.empty())
+                {
+                    workflowEntry["container_path"] = workflowDefinition->m_ContainerPath;
+                }
+
+                if (!workflowDefinition->m_ContainerFolderPath.empty())
+                {
+                    workflowEntry["container_folder"] = workflowDefinition->m_ContainerFolderPath;
+                }
+
+                if (!workflowDefinition->m_ParentWorkflowId.empty())
+                {
+                    workflowEntry["parent_workflow_id"] = workflowDefinition->m_ParentWorkflowId;
+                }
             }
 
             workflowsList.emplace_back(std::move(workflowEntry));
@@ -2056,20 +2168,17 @@ namespace AIAssistant
                                          parsedWorkflow.m_Id);
         }
 
-        std::string writeErrorMessage;
-        if (!WriteTextFileAtomic(targetPath, req.body, writeErrorMessage))
-        {
-            return MakeWorkflowJsonError(500, "workflow_write_failed", writeErrorMessage, "POST /api/workflows",
-                                         parsedWorkflow.m_Id);
-        }
-
-        // Update the main registry so the orchestrator can run this workflow
+        // Create the .jcwf zip container via the registry (handles extracted dir + pack).
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage))
+                {
+                    return MakeWorkflowJsonError(500, "workflow_write_failed", upsertErrorMessage, "POST /api/workflows",
+                                                 parsedWorkflow.m_Id);
+                }
             }
         }
 
@@ -2139,20 +2248,17 @@ namespace AIAssistant
             }
         }
 
-        std::string writeErrorMessage;
-        if (!WriteTextFileAtomic(targetPath, req.body, writeErrorMessage))
-        {
-            return MakeWorkflowJsonError(500, "workflow_write_failed", writeErrorMessage, "PUT /api/workflows/{id}",
-                                         workflowId);
-        }
-
-        // Update the main registry so the orchestrator can run this workflow
+        // Update the .jcwf zip container via the registry (handles extracted dir + repack).
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage);
+                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage))
+                {
+                    return MakeWorkflowJsonError(500, "workflow_write_failed", upsertErrorMessage,
+                                                 "PUT /api/workflows/{id}", workflowId);
+                }
             }
         }
 
@@ -2200,20 +2306,50 @@ namespace AIAssistant
         }
 
         std::error_code errorCode;
-        bool const removed = fs::remove(workflowFilePath, errorCode);
-        if (errorCode)
+
+        // Delete the .jcwf zip container.
+        fs::path const containerPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
+        bool removed = false;
+        if (fs::exists(containerPath, errorCode))
         {
-            return MakeWorkflowJsonError(500, "workflow_delete_failed",
-                                         "Failed to delete workflow file: " + workflowFilePath.string() +
-                                             " error=" + errorCode.message(),
-                                         "DELETE /api/workflows/{id}", workflowId);
+            removed = fs::remove(containerPath, errorCode);
+            if (errorCode)
+            {
+                return MakeWorkflowJsonError(500, "workflow_delete_failed",
+                                             "Failed to delete container: " + containerPath.string() +
+                                                 " error=" + errorCode.message(),
+                                             "DELETE /api/workflows/{id}", workflowId);
+            }
+        }
+
+        // Delete the extracted directory.
+        fs::path const extractedDir = (workflowsDirectoryAbsolute / workflowId).lexically_normal();
+        if (fs::is_directory(extractedDir, errorCode))
+        {
+            fs::remove_all(extractedDir, errorCode);
+        }
+
+        // Also try the old plain-file path (for any leftover files).
+        if (!removed && fs::exists(workflowFilePath, errorCode))
+        {
+            removed = fs::remove(workflowFilePath, errorCode);
         }
 
         if (!removed)
         {
             return MakeWorkflowJsonError(404, "workflow_not_found",
-                                         "Workflow file did not exist: " + workflowFilePath.string(),
+                                         "Workflow files did not exist for: " + workflowId,
                                          "DELETE /api/workflows/{id}", workflowId);
+        }
+
+        // Remove from the main registry.
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRegistry != nullptr)
+            {
+                std::string removeError;
+                m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError);
+            }
         }
 
         crow::json::wvalue responseJson;
@@ -2396,21 +2532,17 @@ namespace AIAssistant
             }
         }
 
-        // Write the restored version
-        std::string writeErrorMessage;
-        if (!WriteTextFileAtomic(targetPath, versionContent, writeErrorMessage))
-        {
-            return MakeWorkflowJsonError(500, "restore_failed", writeErrorMessage,
-                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
-        }
-
-        // Update registry
+        // Write the restored version via registry (handles zip container).
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string upsertErrorMessage;
-                m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(versionContent, targetPath, upsertErrorMessage);
+                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(versionContent, targetPath, upsertErrorMessage))
+                {
+                    return MakeWorkflowJsonError(500, "restore_failed", upsertErrorMessage,
+                                                 "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
+                }
             }
         }
 
@@ -3447,14 +3579,28 @@ namespace AIAssistant
 
     crow::response WebServer::HandleFileCheckGet(crow::request const& req)
     {
-        // GET /api/files/check?path=OpenSSH_2k.log
-        // Returns: { ok, path, exists }
+        // GET /api/files/check?path=<fileInput>&workflowId=<id>&wd=<working_directory>
+        // Uses TaskPathResolver (same as runtime) to resolve the file path.
+        // Returns: { ok, path, exists, resolved }
 
         std::string filePath;
+        std::string workflowId;
+        std::string workingDirectory;
+
         auto pathParam = req.url_params.get("path");
         if (pathParam != nullptr)
         {
             filePath = std::string(pathParam);
+        }
+        auto wfParam = req.url_params.get("workflowId");
+        if (wfParam != nullptr)
+        {
+            workflowId = std::string(wfParam);
+        }
+        auto wdParam = req.url_params.get("wd");
+        if (wdParam != nullptr)
+        {
+            workingDirectory = std::string(wdParam);
         }
 
         if (filePath.empty())
@@ -3477,7 +3623,6 @@ namespace AIAssistant
             return MakeJsonResponse(400, responseJson);
         }
 
-        // Resolve and verify it stays within CWD
         fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
         if (launchCWD.empty())
         {
@@ -3488,7 +3633,36 @@ namespace AIAssistant
             return MakeJsonResponse(500, responseJson);
         }
 
-        fs::path const absolutePath = (launchCWD / fs::path(filePath)).lexically_normal();
+        // Resolve using TaskPathResolver — same code path as the runtime.
+        fs::path absolutePath;
+
+        if (!workflowId.empty())
+        {
+            WorkflowRegistry const* registry = nullptr;
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                registry = m_WorkflowRegistry;
+            }
+
+            if (registry != nullptr)
+            {
+                auto const workflowOpt = registry->GetWorkflow(workflowId);
+                if (workflowOpt.has_value())
+                {
+                    fs::path const baseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowOpt.value());
+                    fs::path const taskDir = TaskPathResolver::ResolveTaskWorkingDirectoryPath(baseDir, workingDirectory);
+                    absolutePath = TaskPathResolver::ResolvePath(taskDir, fs::path(filePath));
+                }
+            }
+        }
+
+        // Fallback: resolve relative to launchCWD (backward compatibility).
+        if (absolutePath.empty())
+        {
+            absolutePath = (launchCWD / fs::path(filePath)).lexically_normal();
+        }
+
+        // Security: verify resolved path stays within CWD
         std::string const absStr = absolutePath.string();
         std::string const cwdStr = launchCWD.string();
         if (absStr.rfind(cwdStr, 0) != 0)
@@ -3507,6 +3681,7 @@ namespace AIAssistant
         responseJson["ok"] = true;
         responseJson["path"] = filePath;
         responseJson["exists"] = exists;
+        responseJson["resolved"] = absolutePath.string();
         return MakeJsonResponse(200, responseJson);
     }
 

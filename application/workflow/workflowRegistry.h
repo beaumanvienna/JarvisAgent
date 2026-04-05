@@ -45,6 +45,13 @@ namespace AIAssistant
         // Returns the absolute (normalized) file path for the workflow if known.
         std::optional<std::string> TryGetWorkflowFilePathAbsolute(std::string const& workflowId) const;
 
+        // Reverse lookup: find a workflow ID by its absolute file path.
+        std::optional<std::string> TryGetWorkflowIdByFilePath(std::string const& absoluteFilePath) const;
+
+        // Returns the sub-workflow dependency graph: workflowId → list of child workflowIds
+        // referenced by sub_workflow tasks.
+        std::unordered_map<std::string, std::vector<std::string>> GetSubWorkflowDependencyGraph() const;
+
         // Save or update a workflow by parsing provided JCWF JSON (canonical format) and storing it on disk.
         // The caller provides the target absolute path (including filename).
         // On success, the registry contains the parsed workflow keyed by its id.
@@ -59,6 +66,15 @@ namespace AIAssistant
 
     private:
         bool LoadWorkflowFile(std::filesystem::path const& workflowFilePath);
+
+        // Load a .jcwf zip container: extract, parse global.json + canvas JSONs,
+        // register root workflow and all sub-workflows.
+        bool LoadContainer(std::filesystem::path const& jcwfContainerPath);
+
+        // Recursively discover and register sub-workflows within an extracted container folder.
+        bool LoadContainerSubWorkflows(std::filesystem::path const& folderPath, std::string const& parentWorkflowId,
+                                       std::string const& containerPath, std::string const& relativeFolderPath,
+                                       WorkflowDefinition const& globalMetadata);
 
         std::unordered_map<std::string, WorkflowDefinition> m_Workflows;
     };

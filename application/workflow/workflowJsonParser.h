@@ -38,6 +38,16 @@ namespace AIAssistant
         bool ParseWorkflowJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
                                std::string& errorMessage) const;
 
+        // Parse a global.json file (container metadata only: version, id, label, doc,
+        // triggers, manual_start, defaults). Does NOT parse tasks/dataflow/etc.
+        bool ParseGlobalJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
+                             std::string& errorMessage) const;
+
+        // Parse a canvas JSON file (tasks, dataflow, filters, control_nodes, controlflow).
+        // Metadata fields (version, id, label, etc.) are optional and ignored if present.
+        bool ParseCanvasJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
+                             std::string& errorMessage) const;
+
     private:
         // Root object parser (top-level workflow object).
         bool ParseRootObject(simdjson::ondemand::object rootObject, WorkflowDefinition& workflowOut,

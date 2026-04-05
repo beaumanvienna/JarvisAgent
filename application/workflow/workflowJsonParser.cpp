@@ -334,6 +334,11 @@ namespace AIAssistant
             return TaskType::Internal;
         }
 
+        if (rawType == "sub_workflow")
+        {
+            return TaskType::SubWorkflow;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }
@@ -551,6 +556,14 @@ namespace AIAssistant
                 }
 
                 taskOut.m_ExposeErrorSignal = boolResult.value();
+            }
+            else if (key == "workflow_file")
+            {
+                if (!ElementToString(value, taskOut.m_WorkflowFile))
+                {
+                    errorMessage = "task field 'workflow_file' must be a string";
+                    return false;
+                }
             }
             else if (key == "file_inputs")
             {
@@ -1173,6 +1186,216 @@ namespace AIAssistant
                      IsRelativePathString(outputDefinition.m_WorkflowBaseDirectory), outputDefinition.m_Triggers.size(),
                      outputDefinition.m_Tasks.size(), outputDefinition.m_Dataflows.size(), outputDefinition.m_Filters.size(),
                      outputDefinition.m_ControlNodes.size(), outputDefinition.m_ControlflowEdges.size());
+
+        return true;
+    }
+
+    bool WorkflowJsonParser::ParseGlobalJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
+                                             std::string& errorMessage) const
+    {
+        if (jsonContent.empty())
+        {
+            errorMessage = "global.json content is empty";
+            return false;
+        }
+
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(jsonContent);
+        simdjson::ondemand::document document;
+
+        simdjson::error_code ec = parser.iterate(paddedJson).get(document);
+        if (ec)
+        {
+            errorMessage = "Failed to parse global.json: ";
+            errorMessage += simdjson::error_message(ec);
+            return false;
+        }
+
+        simdjson::ondemand::object root = document.get_object();
+
+        for (auto field : root)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                continue;
+            }
+
+            std::string_view keyView = keyResult.value();
+            std::string key(keyView.begin(), keyView.end());
+            simdjson::ondemand::value value = field.value();
+
+            if (key == "version")
+            {
+                ElementToString(value, workflowOut.m_Version);
+            }
+            else if (key == "id")
+            {
+                ElementToString(value, workflowOut.m_Id);
+            }
+            else if (key == "label")
+            {
+                ElementToString(value, workflowOut.m_Label);
+            }
+            else if (key == "doc")
+            {
+                ExtractRawJson(value, workflowOut.m_Doc);
+            }
+            else if (key == "base_directory")
+            {
+                ElementToString(value, workflowOut.m_WorkflowBaseDirectory);
+            }
+            else if (key == "manual_start")
+            {
+                if (value.type() == simdjson::ondemand::json_type::boolean)
+                {
+                    workflowOut.m_ManualStart = value.get_bool().value();
+                }
+            }
+            else if (key == "triggers")
+            {
+                ParseTriggers(value, workflowOut.m_Triggers, errorMessage);
+            }
+            else if (key == "defaults")
+            {
+                ExtractRawJson(value, workflowOut.m_DefaultsJson);
+                simdjson::ondemand::parser defaultsParser;
+                simdjson::padded_string paddedDefaults(workflowOut.m_DefaultsJson);
+                simdjson::ondemand::document defaultsDoc;
+                simdjson::error_code defaultsEc = defaultsParser.iterate(paddedDefaults).get(defaultsDoc);
+                if (!defaultsEc)
+                {
+                    simdjson::ondemand::object defaultsObj = defaultsDoc.get_object();
+                    ParseDefaults(defaultsObj, workflowOut.m_Defaults, errorMessage);
+                }
+            }
+            // Silently ignore tasks, dataflow, etc. — those belong in canvas JSONs.
+        }
+
+        LOG_APP_INFO("[JcwfContainer] parsed global.json: id='{}' version='{}' label='{}'", workflowOut.m_Id,
+                     workflowOut.m_Version, workflowOut.m_Label);
+        return true;
+    }
+
+    bool WorkflowJsonParser::ParseCanvasJson(std::string const& jsonContent, WorkflowDefinition& workflowOut,
+                                             std::string& errorMessage) const
+    {
+        if (jsonContent.empty())
+        {
+            errorMessage = "Canvas JSON content is empty";
+            return false;
+        }
+
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(jsonContent);
+        simdjson::ondemand::document document;
+
+        simdjson::error_code ec = parser.iterate(paddedJson).get(document);
+        if (ec)
+        {
+            errorMessage = "Failed to parse canvas JSON: ";
+            errorMessage += simdjson::error_message(ec);
+            return false;
+        }
+
+        simdjson::ondemand::object root = document.get_object();
+
+        bool hasTasks = false;
+
+        for (auto field : root)
+        {
+            auto keyResult = field.unescaped_key();
+            if (keyResult.error() != simdjson::SUCCESS)
+            {
+                continue;
+            }
+
+            std::string_view keyView = keyResult.value();
+            std::string key(keyView.begin(), keyView.end());
+            simdjson::ondemand::value value = field.value();
+
+            if (key == "tasks")
+            {
+                if (!ParseTasks(value, workflowOut.m_Tasks, errorMessage))
+                {
+                    return false;
+                }
+                hasTasks = true;
+            }
+            else if (key == "dataflow")
+            {
+                if (!ParseDataflow(value, workflowOut.m_Dataflows, errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (key == "filters")
+            {
+                if (!ParseFilters(value, workflowOut.m_Filters, errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (key == "control_nodes")
+            {
+                if (!ParseControlNodes(value, workflowOut.m_ControlNodes, errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (key == "controlflow")
+            {
+                if (!ParseControlflow(value, workflowOut.m_ControlflowEdges, errorMessage))
+                {
+                    return false;
+                }
+            }
+            // Silently ignore metadata fields (version, id, label, triggers, etc.)
+            // — those come from global.json for container workflows.
+        }
+
+        if (!hasTasks)
+        {
+            errorMessage = "canvas JSON missing required field: tasks";
+            return false;
+        }
+
+        // Apply defaults to tasks.
+        {
+            WorkflowDefaults const& defaults = workflowOut.m_Defaults;
+            for (auto& [taskId, task] : workflowOut.m_Tasks)
+            {
+                if (task.m_TimeoutMs == 0 && defaults.m_TimeoutMs != 0)
+                {
+                    task.m_TimeoutMs = defaults.m_TimeoutMs;
+                }
+                if (task.m_RetryPolicy.m_MaxAttempts == 0 && defaults.m_RetryPolicy.m_MaxAttempts != 0)
+                {
+                    task.m_RetryPolicy.m_MaxAttempts = defaults.m_RetryPolicy.m_MaxAttempts;
+                }
+                if (task.m_RetryPolicy.m_BackoffMs == 0 && defaults.m_RetryPolicy.m_BackoffMs != 0)
+                {
+                    task.m_RetryPolicy.m_BackoffMs = defaults.m_RetryPolicy.m_BackoffMs;
+                }
+            }
+        }
+
+        // Validate filter references.
+        {
+            std::unordered_set<std::string> filterIds;
+            for (auto const& filter : workflowOut.m_Filters)
+            {
+                filterIds.insert(filter.m_Id);
+            }
+            for (auto const& [taskId, task] : workflowOut.m_Tasks)
+            {
+                if (!task.m_Filter.empty() && filterIds.find(task.m_Filter) == filterIds.end())
+                {
+                    errorMessage = "task '" + taskId + "' references unknown filter '" + task.m_Filter + "'";
+                    return false;
+                }
+            }
+        }
 
         return true;
     }

@@ -106,6 +106,11 @@ namespace AIAssistant
         // Returns true if the task was found and kicked.
         bool Heartbeat(std::string const& taskInstanceId);
 
+        // Sub-workflow support: register a parent-child link so the runtime manager
+        // can propagate child run completion back to the parent task.
+        void RegisterSubWorkflowLink(std::string const& childRunId, std::string const& parentRunId,
+                                     std::string const& parentTaskInstanceId);
+
     private:
         struct TaskExecutionResult
         {
@@ -227,5 +232,17 @@ namespace AIAssistant
 
         void RegisterWatchdog(std::string const& taskInstanceId, std::shared_ptr<TaskWatchdog> const& watchdog);
         void UnregisterWatchdog(std::string const& taskInstanceId);
+
+        // Sub-workflow parent-child tracking.
+        struct SubWorkflowLink
+        {
+            std::string m_ParentRunId;
+            std::string m_ParentTaskInstanceId;
+        };
+
+        std::unordered_map<std::string, SubWorkflowLink> m_SubWorkflowLinks; // childRunId → link
+
+        void PropagateSubWorkflowCompletions();
+        void CancelChildSubWorkflowRuns(std::string const& parentRunId);
     };
 } // namespace AIAssistant

@@ -46,6 +46,7 @@
 #include "workflow/aiCallTaskExecutor.h"
 #include "workflow/internalTaskExecutor.h"
 #include "workflow/pythonTaskExecutor.h"
+#include "workflow/subWorkflowTaskExecutor.h"
 #include "workflow/triggerEngine.h"
 #include "workflow/aiRequestPool.h"
 #include "curlWrapper/curlMultiDispatcher.h"
@@ -253,6 +254,13 @@ namespace AIAssistant
 
                 executorRegistry.RegisterExecutor(TaskType::Internal, internalExecutor);
             }
+
+            // SubWorkflow executor (TaskType::SubWorkflow)
+            // Note: runtime manager is set below after construction via late-binding setter.
+            {
+                m_SubWorkflowExecutor = std::make_shared<SubWorkflowTaskExecutor>(m_WorkflowRegistry.get());
+                executorRegistry.RegisterExecutor(TaskType::SubWorkflow, m_SubWorkflowExecutor);
+            }
         }
 
         m_WebServer->SetWorkflowRegistry(m_WorkflowRegistry.get());
@@ -260,6 +268,12 @@ namespace AIAssistant
         m_WorkflowRuntimeManager = std::make_unique<WorkflowRuntimeManager>();
         m_WorkflowRuntimeManager->SetRegistry(m_WorkflowRegistry.get());
         m_WorkflowRuntimeManager->Start();
+
+        // Late-bind the runtime manager to the sub-workflow executor.
+        if (m_SubWorkflowExecutor)
+        {
+            m_SubWorkflowExecutor->SetRuntimeManager(m_WorkflowRuntimeManager.get());
+        }
 
         m_WebServer->SetWorkflowRuntimeManager(m_WorkflowRuntimeManager.get());
 

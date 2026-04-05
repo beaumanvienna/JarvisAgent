@@ -3,6 +3,10 @@ export type WorkflowListItem = {
   label?: string;
   path?: string;
   manual_start?: boolean;
+  is_sub_workflow?: boolean;
+  container_path?: string;
+  container_folder?: string;
+  parent_workflow_id?: string;
 };
 
 export type WorkflowListResponse = {
@@ -269,9 +273,12 @@ export type FileCheckResponse = {
   message?: string;
 };
 
-export async function checkFileExists(filePath: string): Promise<FileCheckResponse>
+export async function checkFileExists(filePath: string, workflowId?: string, wd?: string): Promise<FileCheckResponse>
 {
-  const response = await fetch(`/api/files/check?path=${encodeURIComponent(filePath)}`);
+  let url = `/api/files/check?path=${encodeURIComponent(filePath)}`;
+  if (workflowId) url += `&workflowId=${encodeURIComponent(workflowId)}`;
+  if (wd) url += `&wd=${encodeURIComponent(wd)}`;
+  const response = await fetch(url);
   return (await response.json()) as FileCheckResponse;
 }
 

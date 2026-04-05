@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+#include <unordered_map>
+
 #include "workflowTypes.h"
 
 namespace AIAssistant
@@ -92,6 +94,12 @@ namespace AIAssistant
                              WorkflowFileIndex const* workflowFileIndex = nullptr);
 
         static bool HasErrors(std::vector<WorkflowValidationIssue> const& issues);
+
+        // Cross-workflow cycle detection: checks the sub-workflow dependency graph for cycles
+        // and excessive nesting depth. Adds Tier-A errors for any cycles or depth > maxDepth.
+        static void ValidateSubWorkflowGraph(
+            std::unordered_map<std::string, std::vector<std::string>> const& dependencyGraph,
+            std::vector<WorkflowValidationIssue>& issues, uint32_t maxDepth = 10);
     };
 
 } // namespace AIAssistant

@@ -30,6 +30,7 @@
 #include "workflow/workflowRuntimeManager.h"
 #include "workflow/workflowTypes.h"
 #include "workflow/workflowValidator.h"
+#include "workflow/jcwfContainer.h"
 #include "workflow/shellTaskExecutor.h"
 
 #include <algorithm>
@@ -654,6 +655,8 @@ namespace AIAssistant
                     return "ai_call";
                 case TaskType::Internal:
                     return "internal";
+                case TaskType::SubWorkflow:
+                    return "sub_workflow";
                 default:
                     return "unknown";
             }
@@ -1064,7 +1067,7 @@ namespace AIAssistant
         }
         cmd += " -- '" + query + "' . 2>/dev/null || grep -rn --max-count=30 '" + query +
                "' --include='*.cpp' --include='*.h' --include='*.ts' --include='*.tsx' --include='*.py' --include='*.md' "
-               "--include='*.jcwf' . 2>/dev/null";
+               "--include='*.json' . 2>/dev/null";
 
         // Execute via popen (routed through bash on Windows).
         std::string const shellCmd = WrapForBash(cmd);
@@ -2147,6 +2150,88 @@ namespace AIAssistant
         return {};
     }
 
+    // Helper: Read the root canvas JSON content from a .jcwf zip container.
+    static bool ReadJcwfContent(std::string const& filePath, std::string& outContent, std::string& outError)
+    {
+        // List entries to find the root canvas JSON (any .json that isn't global.json).
+        auto entries = JcwfContainer::ListEntries(filePath);
+        std::string rootCanvasEntry;
+
+        for (auto const& entry : entries)
+        {
+            // Skip directories, global.json, and files in subdirectories.
+            if (entry.back() == '/')
+                continue;
+            if (entry == "global.json")
+                continue;
+            if (entry.find('/') != std::string::npos)
+                continue;
+            if (entry.size() > 5 && entry.substr(entry.size() - 5) == ".json")
+            {
+                rootCanvasEntry = entry;
+                break;
+            }
+        }
+
+        if (rootCanvasEntry.empty())
+        {
+            outError = "No root canvas JSON found in container: " + filePath;
+            return false;
+        }
+
+        return JcwfContainer::ReadFile(filePath, rootCanvasEntry, outContent, outError);
+    }
+
+    // Helper: Write JSON content back to a .jcwf zip container.
+    // Updates the root canvas JSON in the extracted directory and repacks.
+    static bool WriteJcwfContent(std::string const& filePath, std::string const& jsonContent, std::string& outError)
+    {
+        fs::path const jcwfPath(filePath);
+        fs::path const extractedDir = jcwfPath.parent_path() / jcwfPath.stem();
+
+        std::error_code ec;
+
+        // Ensure the extracted directory exists (extract the zip if needed).
+        if (!fs::is_directory(extractedDir, ec))
+        {
+            if (!JcwfContainer::Extract(jcwfPath, extractedDir, outError))
+                return false;
+        }
+
+        // Find the root canvas JSON file in the extracted dir.
+        fs::path rootCanvasPath;
+        for (auto const& entry : fs::directory_iterator(extractedDir, ec))
+        {
+            if (!entry.is_regular_file())
+                continue;
+            if (entry.path().extension().string() != ".json")
+                continue;
+            if (entry.path().filename().string() == "global.json")
+                continue;
+            rootCanvasPath = entry.path();
+            break;
+        }
+
+        if (rootCanvasPath.empty())
+        {
+            rootCanvasPath = extractedDir / (jcwfPath.stem().string() + ".json");
+        }
+
+        // Write the canvas JSON.
+        {
+            std::ofstream ofs(rootCanvasPath, std::ios::out | std::ios::binary);
+            if (!ofs)
+            {
+                outError = "Cannot write: " + rootCanvasPath.string();
+                return false;
+            }
+            ofs << jsonContent;
+        }
+
+        // Repack the container.
+        return JcwfContainer::Pack(extractedDir, jcwfPath, outError);
+    }
+
     // -----------------------------------------------------------------
     // jcwf_read
     // -----------------------------------------------------------------
@@ -2162,11 +2247,10 @@ namespace AIAssistant
         if (filePath.empty())
             return {"jcwf_read", false, error};
 
-        std::ifstream ifs(filePath);
-        if (!ifs)
-            return {"jcwf_read", false, "Cannot open file: " + filePath};
+        std::string content;
+        if (!ReadJcwfContent(filePath, content, error))
+            return {"jcwf_read", false, error};
 
-        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         if (content.empty())
             return {"jcwf_read", true, "File is empty: " + filePath};
 
@@ -2310,12 +2394,10 @@ namespace AIAssistant
         if (filePath.empty())
             return {"jcwf_validate", false, error};
 
-        // Read the file content.
-        std::ifstream ifs(filePath);
-        if (!ifs)
-            return {"jcwf_validate", false, "Cannot open file: " + filePath};
-
-        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        // Read the canvas JSON content (handles zip containers and legacy JSON).
+        std::string content;
+        if (!ReadJcwfContent(filePath, content, error))
+            return {"jcwf_validate", false, error};
 
         // Get script registry for validation.
         JarvisAgent* app = App::g_App;
@@ -2484,8 +2566,9 @@ namespace AIAssistant
         std::string validationSummary;
         AiJcwfService::ValidateJcwf(response, validationSummary);
 
-        // Write the JCWF file.
+        // Write the JCWF container (zip) with global.json + canvas JSON.
         fs::path jcwfPath = fs::path("workflows") / (workflowId + ".jcwf");
+        fs::path extractedDir = fs::path("workflows") / workflowId;
 
         // Backup existing.
         if (fs::exists(jcwfPath, ec))
@@ -2495,21 +2578,31 @@ namespace AIAssistant
             fs::copy_file(jcwfPath, bakPath, fs::copy_options::overwrite_existing, ec);
         }
 
-        // Atomic write.
-        fs::path tmpPath = jcwfPath;
-        tmpPath += ".tmp";
+        // Create the extracted directory structure.
+        fs::create_directories(extractedDir, ec);
+
+        // Write global.json (minimal metadata).
         {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
+            std::ofstream ofs(extractedDir / "global.json", std::ios::out | std::ios::binary);
+            if (ofs)
+            {
+                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << workflowId
+                    << "\",\n  \"manual_start\": true\n}";
+            }
+        }
+
+        // Write the root canvas JSON.
+        {
+            std::ofstream ofs(extractedDir / (workflowId + ".json"), std::ios::out | std::ios::binary);
             if (!ofs)
-                return {"jcwf_generate", false, "Cannot write: " + tmpPath.string()};
+                return {"jcwf_generate", false, "Cannot write canvas JSON to: " + extractedDir.string()};
             ofs << response;
         }
-        fs::rename(tmpPath, jcwfPath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"jcwf_generate", false, "Rename failed: " + ec.message()};
-        }
+
+        // Pack into zip container.
+        std::string packError;
+        if (!JcwfContainer::Pack(extractedDir, jcwfPath, packError))
+            return {"jcwf_generate", false, "Failed to pack container: " + packError};
 
         std::ostringstream oss;
         oss << "Generated: " << jcwfPath.string() << " (" << response.size() << " bytes)\n";
@@ -2544,19 +2637,15 @@ namespace AIAssistant
         std::string const& taskId = taskIt->second;
         std::string const& instructions = instrIt->second;
 
-        // Read the JCWF file.
+        // Read the JCWF canvas JSON (handles zip containers and legacy JSON).
         std::string resolveError;
         std::string filePath = ResolveWorkflowPath(workflowId, resolveError);
         if (filePath.empty())
             return {"jcwf_fix_task", false, resolveError};
 
         std::string jcwfContent;
-        {
-            std::ifstream ifs(filePath, std::ios::binary);
-            if (!ifs)
-                return {"jcwf_fix_task", false, "Cannot open: " + filePath};
-            jcwfContent.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
-        }
+        if (!ReadJcwfContent(filePath, jcwfContent, resolveError))
+            return {"jcwf_fix_task", false, resolveError};
 
         // Verify the task_id exists in the JSON.
         if (jcwfContent.find("\"" + taskId + "\"") == std::string::npos)
@@ -2605,7 +2694,7 @@ namespace AIAssistant
         std::string validationSummary;
         AiJcwfService::ValidateJcwf(response, validationSummary);
 
-        // Backup and write.
+        // Backup and write (handles zip containers and legacy JSON).
         fs::path jcwfPath(filePath);
         std::error_code ec;
         {
@@ -2614,20 +2703,9 @@ namespace AIAssistant
             fs::copy_file(jcwfPath, bakPath, fs::copy_options::overwrite_existing, ec);
         }
 
-        fs::path tmpPath = jcwfPath;
-        tmpPath += ".tmp";
-        {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"jcwf_fix_task", false, "Cannot write: " + tmpPath.string()};
-            ofs << response;
-        }
-        fs::rename(tmpPath, jcwfPath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"jcwf_fix_task", false, "Rename failed: " + ec.message()};
-        }
+        std::string writeError;
+        if (!WriteJcwfContent(filePath, response, writeError))
+            return {"jcwf_fix_task", false, "Write failed: " + writeError};
 
         std::ostringstream oss;
         oss << "Fixed task \"" << taskId << "\" in " << workflowId << "\n";

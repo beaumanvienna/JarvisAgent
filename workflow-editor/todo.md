@@ -91,8 +91,8 @@ Last reviewed: 2026-03-23
 
 ### Future (n8n integration)
 - [x] ~~Seamless n8n integration~~ — `POST /api/webhook/<workflowId>` with HMAC-SHA256, completion callback POST to `callbackUrl`, n8n custom node v2 (webhook/legacy toggle + HMAC signing). Legacy `POST /api/integrations/n8n/start` retained for backward compat.
-- [ ] Sub-workflows / workflow-call node (Remaining TODO #3)
-- [ ] Persist editor layout (node positions) in JCWF — do after sub-workflows since sub-workflow nodes need layout too
+- [x] ~~Sub-workflows / workflow-call node~~ ✅ `sub_workflow` task type with `workflow_file` field. Dashed-border node rendering in `TaskNode.tsx`, "+ Sub-Workflow" button, inspector with `workflow_file` input + "Open Sub-Workflow" button. Double-click to navigate into child canvas. Breadcrumb navigation bar above canvas with clickable parent chain + Back button (`workflowNavStack` state). `WorkflowTreeView` component in left sidebar showing collapsible sub-workflow hierarchy from `GET /api/workflows/{id}/tree`. `.jcwf` files are now zip containers: `global.json` (metadata) + canvas JSONs + sub-workflow folders. `JcwfContainer` utility (miniz) for Extract/Pack/ReadFile. Registry loads containers recursively. All example workflows converted.
+- [ ] Persist editor layout (node positions) in JCWF
 - [x] ~~Security log viewer in dashboard~~ — `GET /api/log/security` endpoint (both editions, admin-auth). Dashboard LogViewerPanel has Application/Security tab toggle with 3s delta polling for security log. Security log shows auth events, rate limits, lockouts, webhook decisions, run control actions.
 - [x] ~~JCWF assistant provider override~~ — "JCWF AI Interface" dropdown in Settings modal selects a non-default AI interface for the Generate / Explain / Fix Script pipeline. Stored as `jcwf_ai_interface` in `config.json`. Backend resolves selected interface and writes `PROV_provider.json` sidecar files. E2E verified.
 - [x] ~~Python task stdout/stderr capture~~ — inline `_JarvisTee` in `PythonEngine` tees output to real-time terminal + `StringIO` buffer. `PythonTaskExecutor` writes `stdout.txt`/`stderr.txt` + stores in `TaskInstanceState`. Tooltip shows captured output.
@@ -199,7 +199,6 @@ Last reviewed: 2026-03-23
 - JarvisAgent running (`bin/Release/jarvisAgent` or `bin/Debug/jarvisAgent`)
 - Editor at `http://localhost:8080/editor`
 - At least one AI provider key configured
-- `workflows/port62pos.csv` exists
 
 ### Test Workflows
 

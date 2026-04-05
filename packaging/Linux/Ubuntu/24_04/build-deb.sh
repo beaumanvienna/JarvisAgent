@@ -106,14 +106,7 @@ for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$INST/workflows/" 2>/dev/null || true
 done
-# Loose input files needed by the example workflows
-for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
-         message_engine_question.txt message_tire_question.txt \
-         message_unclear_question.txt port62pos.csv; do
-    cp "$REPO_ROOT/example/workflows/$f" "$INST/workflows/" 2>/dev/null || true
-done
-# Symlink used by aiCarMaintenancePipeline
-ln -sf message_engine_question.txt "$INST/workflows/message.txt"
+# Loose input files are now bundled inside the .jcwf zip containers.
 
 # Example config
 cp "$REPO_ROOT/packaging/config.json.example" "$INST/config.json.example"

@@ -44,12 +44,7 @@ override_dh_auto_install:
 	            vehicleTroubleshootingGuide; do \
 	    cp example/workflows/$${jcwf}.jcwf $(INSTDIR)/workflows/ 2>/dev/null || true; \
 	done
-	for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
-	         message_engine_question.txt message_tire_question.txt \
-	         message_unclear_question.txt port62pos.csv; do \
-	    cp example/workflows/$$f $(INSTDIR)/workflows/ 2>/dev/null || true; \
-	done
-	ln -sf message_engine_question.txt $(INSTDIR)/workflows/message.txt
+	# Loose input files are now bundled inside the .jcwf zip containers.
 
 	# Config example
 	install -m644 packaging/config.json.example $(INSTDIR)/config.json.example

@@ -62,6 +62,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
   const depIds: string[] = Array.isArray(props.data.task.depends_on) ? props.data.task.depends_on as string[] : [];
   const materializeMap = (props.data.task.materialize ?? {}) as Record<string, string>;
 
+  const isSubWorkflow = props.data.task.type === "sub_workflow";
   const exposeErrorSignal = props.data.task.expose_error_signal === true;
 
   const fileOutputs: string[] = Array.isArray(props.data.task.file_outputs) ? props.data.task.file_outputs as string[] : [];
@@ -161,6 +162,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
     <div
       className={
         "taskNode"
+        + (isSubWorkflow ? " taskNodeSubWorkflow" : "")
         + (isSelected ? " taskNodeSelected" : "")
         + (firstError ? " taskNodeError" : "")
         + (!firstError && firstWarning ? " taskNodeWarning" : "")
@@ -205,6 +207,7 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
       ))}
       <div className="taskNodeBody">
         <div className="taskNodeTitle">
+          {isSubWorkflow && <span className="taskNodeSubWorkflowIcon">{"\u29C9"}</span>}
           {props.data.title}
           <span className="taskNodeBadges">
             {runtimeBadge ? (<span className={`taskNodeBadge ${runtimeBadge.className}`}>{runtimeBadge.label}</span>) : null}
@@ -215,6 +218,9 @@ export default function TaskNode(props: NodeProps<EditorTaskNodeData>): JSX.Elem
           </span>
         </div>
         {subtitle.length > 0 ? <div className="taskNodeSubtitle">{subtitle}</div> : null}
+        {isSubWorkflow && (
+          <div className="taskNodeSubWorkflowHint">double-click to enter</div>
+        )}
         {hasDepHandles && (
           <div className="taskNodeFileInputs">
             {handleEntries.map((entry, idx) => (

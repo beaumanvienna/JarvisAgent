@@ -240,6 +240,11 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
                 auto port = static_cast<int64_t>(jsonObject.value().get_int64());
+                if (port < 0 || port > 65535)
+                {
+                    LOG_CORE_WARN("port {} out of range [0, 65535], defaulting to 0 (auto)", port);
+                    port = 0;
+                }
                 LOG_CORE_INFO("port: {}", port);
                 engineConfig.m_Port = static_cast<uint16_t>(port);
                 ++fieldOccurances[ConfigFields::Port];

@@ -114,13 +114,21 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 {
   "ok": true,
   "workflows": [
-    { "id": "jarvisCppDocu", "label": "JarvisAgent C++ Docu Generator", "path": "/abs/path.jcwf", "manual_start": true }
+    {
+      "id": "jarvisCppDocu",
+      "label": "JarvisAgent C++ Docu Generator",
+      "path": "/abs/path/jarvisCppDocu.json",
+      "manual_start": true,
+      "is_sub_workflow": false,
+      "container_path": "/abs/path/jarvisCppDocu.jcwf"
+    }
   ]
 }
 ```
+Sub-workflows loaded from a container also appear in the list with `is_sub_workflow: true`, `parent_workflow_id`, and `container_folder`.
 
 ### POST /api/workflows
-**Request body:** Raw JCWF JSON.
+**Request body:** Raw JCWF JSON (canvas with tasks/dataflow). The backend creates a `.jcwf` zip container with `global.json` and canvas JSON.
 **Response (201):**
 ```json
 { "ok": true, "id": "myWorkflow", "savedPath": "/abs/path/myWorkflow.jcwf" }
@@ -134,19 +142,41 @@ Returns 409 if a workflow with that id already exists.
 ```
 
 ### GET /api/workflows/\<id\>
-**Response (200):** Raw JCWF JSON content (Content-Type: application/json).
+**Response (200):** Canvas JSON content (Content-Type: application/json). For container workflows, returns the canvas JSON from the extracted folder.
 
 ### PUT /api/workflows/\<id\>
-**Request body:** Raw JCWF JSON. The `id` in the body must match the URL parameter.
+**Request body:** Raw JCWF JSON. The `id` in the body must match the URL parameter. The backend updates the canvas JSON in the extracted folder and repacks the `.jcwf` container.
 **Response (200):**
 ```json
 { "ok": true, "id": "myWorkflow", "savedPath": "/abs/path/myWorkflow.jcwf" }
 ```
 
 ### DELETE /api/workflows/\<id\>
+Deletes both the `.jcwf` zip container and the extracted directory.
 **Response (200):**
 ```json
 { "ok": true, "id": "myWorkflow" }
+
+### GET /api/workflows/\<id\>/tree
+Returns the sub-workflow hierarchy for a container workflow.
+**Response (200):**
+```json
+{
+  "ok": true,
+  "workflowId": "myPipeline",
+  "label": "My Pipeline",
+  "isContainer": true,
+  "children": [
+    { "id": "myPipeline__cleanup", "label": "cleanup", "folderPath": "cleanup", "parentId": "myPipeline" }
+  ]
+}
+```
+
+### GET /api/workflows/dependency-graph
+Returns the cross-workflow sub-workflow dependency graph.
+**Response (200):**
+```json
+{ "ok": true, "edges": [{ "parent": "parentId", "child": "childId" }] }
 ```
 
 ---

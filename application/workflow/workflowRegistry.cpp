@@ -25,9 +25,35 @@
 
 #include "engine.h"
 #include "core.h"
+#include "workflow/jcwfContainer.h"
 #include "workflow/workflowJsonParser.h"
 
 #include <algorithm>
+#include <fstream>
+
+static bool ReadFileToStringStatic(std::filesystem::path const& filePath, std::string& outText)
+{
+    std::ifstream fileStream(filePath, std::ios::binary);
+    if (!fileStream.is_open())
+    {
+        return false;
+    }
+
+    fileStream.seekg(0, std::ios::end);
+    std::streamoff const size = fileStream.tellg();
+    if (size < 0)
+    {
+        return false;
+    }
+
+    outText.clear();
+    outText.resize(static_cast<size_t>(size));
+
+    fileStream.seekg(0, std::ios::beg);
+    fileStream.read(outText.data(), static_cast<std::streamsize>(outText.size()));
+
+    return fileStream.good() || fileStream.eof();
+}
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -37,158 +63,9 @@ namespace AIAssistant
 {
     namespace
     {
-        bool ReadFileToString(std::filesystem::path const& filePath, std::string& outText)
-        {
-            std::ifstream fileStream(filePath, std::ios::binary);
-            if (!fileStream.is_open())
-            {
-                return false;
-            }
-
-            fileStream.seekg(0, std::ios::end);
-            std::streamoff const size = fileStream.tellg();
-            if (size < 0)
-            {
-                return false;
-            }
-
-            outText.clear();
-            outText.resize(static_cast<size_t>(size));
-
-            fileStream.seekg(0, std::ios::beg);
-            fileStream.read(outText.data(), static_cast<std::streamsize>(outText.size()));
-
-            return fileStream.good() || fileStream.eof();
-        }
-
-        bool HasSupportedWorkflowExtension(std::filesystem::path const& filePath)
-        {
-            std::string const extension = filePath.extension().string();
-            if (extension == ".jcwf")
-            {
-                return true;
-            }
-
-            // Many projects still store workflows as .json during transition.
-            if (extension == ".json")
-            {
-                return true;
-            }
-
-            return false;
-        }
-
         // -----------------------------------------------------------------
         // AI provider availability helpers
         // -----------------------------------------------------------------
-
-        bool WorkflowHasAiCallTasks(WorkflowDefinition const& workflow)
-        {
-            for (auto const& [taskId, task] : workflow.m_Tasks)
-            {
-                if (task.m_Type == TaskType::AiCall)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        // Extract a string field from a raw JSON object (best-effort, single field).
-        std::optional<std::string> TryExtractJsonString(std::string const& json, std::string const& fieldName)
-        {
-            if (json.empty())
-            {
-                return std::nullopt;
-            }
-
-            try
-            {
-                simdjson::ondemand::parser parser;
-                simdjson::padded_string padded(json);
-                simdjson::ondemand::document doc = parser.iterate(padded);
-                simdjson::ondemand::object root = doc.get_object().value();
-
-                std::string_view sv;
-                if (root[fieldName].get_string().get(sv) == simdjson::SUCCESS)
-                {
-                    return std::string(sv);
-                }
-            }
-            catch (...)
-            {
-            }
-
-            return std::nullopt;
-        }
-
-        // Extract defaults.ai.provider from the workflow's raw defaults JSON.
-        std::optional<std::string> TryExtractDefaultAiProvider(std::string const& defaultsJson)
-        {
-            if (defaultsJson.empty())
-            {
-                return std::nullopt;
-            }
-
-            try
-            {
-                simdjson::ondemand::parser parser;
-                simdjson::padded_string padded(defaultsJson);
-                simdjson::ondemand::document doc = parser.iterate(padded);
-                simdjson::ondemand::object root = doc.get_object().value();
-
-                simdjson::ondemand::object aiObj;
-                if (root["ai"].get_object().get(aiObj) == simdjson::SUCCESS)
-                {
-                    std::string_view sv;
-                    if (aiObj["provider"].get_string().get(sv) == simdjson::SUCCESS)
-                    {
-                        return std::string(sv);
-                    }
-                }
-            }
-            catch (...)
-            {
-            }
-
-            return std::nullopt;
-        }
-
-        // Resolve which provider name an ai_call task will use.
-        // Resolution order: task params.provider → defaults.ai.provider → "" (system default).
-        std::string ResolveAiCallProviderName(TaskDef const& task, std::string const& defaultsJson)
-        {
-            // 1. Task-level params.provider
-            auto taskProvider = TryExtractJsonString(task.m_ParamsJson, "provider");
-            if (taskProvider.has_value() && !taskProvider->empty())
-            {
-                std::string const& raw = *taskProvider;
-
-                // If it contains a {{defaults.*}} template, resolve from the defaults JSON.
-                if (raw.find("{{defaults.") != std::string::npos)
-                {
-                    auto defaultProvider = TryExtractDefaultAiProvider(defaultsJson);
-                    if (defaultProvider.has_value() && !defaultProvider->empty())
-                    {
-                        return *defaultProvider;
-                    }
-                    // Template couldn't be resolved — fall through to system default.
-                    return {};
-                }
-
-                return raw;
-            }
-
-            // 2. Workflow-level defaults.ai.provider
-            auto defaultProvider = TryExtractDefaultAiProvider(defaultsJson);
-            if (defaultProvider.has_value() && !defaultProvider->empty())
-            {
-                return *defaultProvider;
-            }
-
-            // 3. System default — return empty to signal "use system default".
-            return {};
-        }
     } // namespace
 
     void WorkflowRegistry::Clear() { m_Workflows.clear(); }
@@ -216,6 +93,7 @@ namespace AIAssistant
             return false;
         }
 
+        // First pass: load .jcwf zip containers (non-recursive — containers are at the top level).
         for (std::filesystem::directory_entry const& entry :
              std::filesystem::directory_iterator(workflowsDirectoryPath, errorCode))
         {
@@ -232,12 +110,12 @@ namespace AIAssistant
             }
 
             std::filesystem::path const filePath = entry.path();
-            if (!HasSupportedWorkflowExtension(filePath))
-            {
-                continue;
-            }
+            std::string const extension = filePath.extension().string();
 
-            LoadWorkflowFile(filePath);
+            if (extension == ".jcwf")
+            {
+                LoadContainer(filePath);
+            }
         }
 
         // Empty directories are valid - no workflows is not an error
@@ -269,135 +147,14 @@ namespace AIAssistant
         return iterator->second; // copy (keeps call sites simple)
     }
 
+    // LoadWorkflowFile is deprecated — .jcwf files are always zip containers now.
+    // All loading goes through LoadContainer(). Kept as a stub for the header declaration.
     bool WorkflowRegistry::LoadWorkflowFile(std::filesystem::path const& workflowFilePath)
     {
-        std::string const launchCWDAbsoluteText =
-            (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
-        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=loadWorkflow "
-                     "workflowFilePathRelative='{}' isRelative={} launchCWDAbsolute='{}'",
-                     workflowFilePath.string(), workflowFilePath.is_relative(), launchCWDAbsoluteText);
-
-        std::filesystem::path workflowFilePathAbsolute = workflowFilePath;
-        if (workflowFilePathAbsolute.is_relative())
-        {
-            if (Core::g_Core != nullptr)
-            {
-                workflowFilePathAbsolute =
-                    std::filesystem::path(Core::g_Core->GetLaunchCWDAbsolute()) / workflowFilePathAbsolute;
-            }
-        }
-
-        workflowFilePathAbsolute = std::filesystem::absolute(workflowFilePathAbsolute).lexically_normal();
-
-        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=resolveWorkflowFilePath "
-                     "workflowFilePathRelative='{}' workflowFilePathAbsolute='{}'",
-                     workflowFilePath.string(), workflowFilePathAbsolute.string());
-
-        std::string fileText;
-        if (!ReadFileToString(workflowFilePathAbsolute, fileText))
-        {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: failed to read '{}'", workflowFilePathAbsolute.string());
-            return false;
-        }
-
-        WorkflowJsonParser parser;
-        WorkflowDefinition workflowDefinition;
-        std::string errorMessage;
-
-        if (!parser.ParseWorkflowJson(fileText, workflowDefinition, errorMessage))
-        {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: parse failed for '{}': {}", workflowFilePathAbsolute.string(),
-                         errorMessage);
-            return false;
-        }
-
-        workflowDefinition.m_WorkflowFilePath = workflowFilePathAbsolute.lexically_normal().string();
-        workflowDefinition.m_WorkflowFilePathAbsolute = workflowFilePathAbsolute.lexically_normal().string();
-
-        std::filesystem::path const workflowFileDirectoryPathAbsolute =
-            workflowFilePathAbsolute.parent_path().lexically_normal();
-        workflowDefinition.m_WorkflowFileDirectory = workflowFileDirectoryPathAbsolute.string();
-        workflowDefinition.m_WorkflowFileDirectoryAbsolute = workflowFileDirectoryPathAbsolute.string();
-
-        std::string const workflowBaseDirectoryRaw = workflowDefinition.m_WorkflowBaseDirectory;
-        bool workflowBaseDirectoryIsRelative = false;
-
-        std::filesystem::path workflowBaseDirectoryPathAbsolute;
-        if (workflowDefinition.m_WorkflowBaseDirectory.empty())
-        {
-            workflowBaseDirectoryPathAbsolute = workflowFileDirectoryPathAbsolute;
-        }
-        else
-        {
-            std::filesystem::path baseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-            workflowBaseDirectoryIsRelative = baseDirectoryPath.is_relative();
-            if (workflowBaseDirectoryIsRelative)
-            {
-                baseDirectoryPath = workflowFileDirectoryPathAbsolute / baseDirectoryPath;
-            }
-
-            workflowBaseDirectoryPathAbsolute = std::filesystem::absolute(baseDirectoryPath).lexically_normal();
-        }
-
-        workflowDefinition.m_WorkflowBaseDirectory = workflowBaseDirectoryPathAbsolute.string();
-        workflowDefinition.m_WorkflowBaseDirectoryAbsolute = workflowBaseDirectoryPathAbsolute.string();
-
-        LOG_APP_INFO("[paths debug] WorkflowRegistry::LoadWorkf...DirectoryAbsolute='{}' workflowBaseDirectoryRelative='{}' "
-                     "workflowBaseDirectoryIsRelative={} workflowBaseDirectoryAbsolute='{}'",
-                     workflowDefinition.m_WorkflowFileDirectoryAbsolute, workflowBaseDirectoryRaw,
-                     workflowBaseDirectoryIsRelative, workflowDefinition.m_WorkflowBaseDirectoryAbsolute);
-
-        LOG_APP_WARN(
-            "[paths debug] WorkflowRegistry::LoadWorkflowFile debug: reason=workflowParsed workflowId='{}' taskCount={}",
-            workflowDefinition.m_Id, workflowDefinition.m_Tasks.size());
-
-        if (workflowDefinition.m_Id.empty())
-        {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: workflow in '{}' has empty id",
-                         workflowFilePathAbsolute.string());
-            return false;
-        }
-
-        // -----------------------------------------------------------------
-        // Tag workflows that contain ai_call tasks and precompute the
-        // list of required AI provider names (for runtime prerequisite
-        // checks before a workflow run is enqueued).
-        // -----------------------------------------------------------------
-        workflowDefinition.m_HasAiCallTasks = WorkflowHasAiCallTasks(workflowDefinition);
-
-        if (workflowDefinition.m_HasAiCallTasks)
-        {
-            for (auto const& [taskId, task] : workflowDefinition.m_Tasks)
-            {
-                if (task.m_Type != TaskType::AiCall)
-                {
-                    continue;
-                }
-
-                std::string const providerName = ResolveAiCallProviderName(task, workflowDefinition.m_DefaultsJson);
-                workflowDefinition.m_RequiredAiProviders.push_back(providerName);
-            }
-
-            if (Core::g_Core != nullptr)
-            {
-                auto const& keyManager = Core::g_Core->GetKeyManager();
-                if (!keyManager.HasProviders())
-                {
-                    LOG_APP_WARN("Workflow '{}' contains ai_call tasks but no AI providers are configured",
-                                 workflowDefinition.m_Id);
-                }
-            }
-        }
-
-        auto const [iterator, inserted] = m_Workflows.emplace(workflowDefinition.m_Id, workflowDefinition);
-        if (!inserted)
-        {
-            LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile: duplicate workflow id '{}' (file '{}')",
-                         workflowDefinition.m_Id, workflowFilePathAbsolute.string());
-            return false;
-        }
-
-        return true;
+        LOG_APP_WARN("WorkflowRegistry::LoadWorkflowFile is deprecated. "
+                     ".jcwf files are zip containers — use LoadContainer(). File: '{}'",
+                     workflowFilePath.string());
+        return false;
     }
 
     bool WorkflowRegistry::ValidateAll() const
@@ -471,63 +228,40 @@ std::optional<std::string> WorkflowRegistry::TryGetWorkflowFilePathAbsolute(std:
     return workflowFilePathAbsolute;
 }
 
-static bool ValidateWorkflowDefinition(std::string const& workflowIdKey, WorkflowDefinition const& workflowDefinition,
-                                       std::string& errorMessage)
+std::optional<std::string> WorkflowRegistry::TryGetWorkflowIdByFilePath(std::string const& absoluteFilePath) const
 {
-    if (workflowDefinition.m_Id.empty())
-    {
-        errorMessage = "Workflow id is empty";
-        return false;
-    }
+    std::filesystem::path const normalizedTarget = std::filesystem::weakly_canonical(absoluteFilePath);
 
-    if (workflowDefinition.m_Id != workflowIdKey)
+    for (auto const& [workflowId, workflowDef] : m_Workflows)
     {
-        errorMessage = "Workflow map key does not match workflow id in definition";
-        return false;
-    }
-
-    // Validate tasks
-    for (auto const& taskPair : workflowDefinition.m_Tasks)
-    {
-        std::string const& taskKey = taskPair.first;
-        TaskDef const& taskDefinition = taskPair.second;
-
-        if (taskDefinition.m_Id.empty())
+        if (workflowDef.m_WorkflowFilePathAbsolute.empty())
         {
-            errorMessage = "Task id is empty for task key '" + taskKey + "'";
-            return false;
+            continue;
         }
 
-        if (taskDefinition.m_Id != taskKey)
+        std::filesystem::path const normalizedCandidate =
+            std::filesystem::weakly_canonical(workflowDef.m_WorkflowFilePathAbsolute);
+
+        if (normalizedTarget == normalizedCandidate)
         {
-            errorMessage = "Task map key '" + taskKey + "' != task id '" + taskDefinition.m_Id + "'";
-            return false;
+            return workflowId;
         }
 
-        if (taskDefinition.m_Type == TaskType::Unknown)
+        // For sub-workflows inside containers, workflow_file points to the folder,
+        // not the canvas JSON inside it. Match against the directory path as well.
+        if (workflowDef.m_IsSubWorkflow && !workflowDef.m_WorkflowFileDirectoryAbsolute.empty())
         {
-            errorMessage = "Task '" + taskKey + "' has unknown type";
-            return false;
+            std::filesystem::path const normalizedDir =
+                std::filesystem::weakly_canonical(workflowDef.m_WorkflowFileDirectoryAbsolute);
+
+            if (normalizedTarget == normalizedDir)
+            {
+                return workflowId;
+            }
         }
     }
 
-    // Validate triggers
-    for (WorkflowTrigger const& trigger : workflowDefinition.m_Triggers)
-    {
-        if (trigger.m_Id.empty())
-        {
-            errorMessage = "Trigger id is empty";
-            return false;
-        }
-
-        if (trigger.m_Type == WorkflowTriggerType::Unknown)
-        {
-            errorMessage = "Trigger '" + trigger.m_Id + "' has unknown type";
-            return false;
-        }
-    }
-
-    return true;
+    return std::nullopt;
 }
 
 bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJson,
@@ -542,9 +276,12 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
         return false;
     }
 
-    std::filesystem::path const normalizedWorkflowFilePathAbsolute =
+    std::filesystem::path const jcwfPath =
         std::filesystem::absolute(workflowFilePathAbsolute).lexically_normal();
 
+    // Parse the incoming JSON to extract the workflow ID.
+    // The editor sends a full JCWF JSON (tasks + metadata merged).
+    // We split it: metadata → global.json, tasks/dataflow → canvas JSON.
     WorkflowJsonParser parser;
     WorkflowDefinition workflowDefinition;
     if (!parser.ParseWorkflowJson(workflowJson, workflowDefinition, errorMessage))
@@ -558,79 +295,87 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
         return false;
     }
 
-    workflowDefinition.m_WorkflowFilePath = normalizedWorkflowFilePathAbsolute.string();
-    workflowDefinition.m_WorkflowFilePathAbsolute = normalizedWorkflowFilePathAbsolute.string();
+    std::string const& workflowId = workflowDefinition.m_Id;
+    std::filesystem::path const extractedDir = jcwfPath.parent_path() / jcwfPath.stem();
 
-    std::filesystem::path const workflowFileDirectoryPathAbsolute =
-        normalizedWorkflowFilePathAbsolute.parent_path().lexically_normal();
-    workflowDefinition.m_WorkflowFileDirectory = workflowFileDirectoryPathAbsolute.string();
-    workflowDefinition.m_WorkflowFileDirectoryAbsolute = workflowFileDirectoryPathAbsolute.string();
-
-    // Resolve workflow base directory (empty → workflow file directory).
-    std::string const workflowBaseDirectoryRaw = workflowDefinition.m_WorkflowBaseDirectory;
-    bool workflowBaseDirectoryIsRelative = false;
-
-    std::filesystem::path workflowBaseDirectoryPathAbsolute;
-    if (workflowDefinition.m_WorkflowBaseDirectory.empty())
+    // Create the extracted directory.
+    std::error_code ec;
+    std::filesystem::create_directories(extractedDir, ec);
+    if (ec)
     {
-        workflowBaseDirectoryPathAbsolute = workflowFileDirectoryPathAbsolute;
+        errorMessage = "Failed to create directory: " + extractedDir.string() + " (" + ec.message() + ")";
+        return false;
+    }
+
+    // Read existing global.json to preserve metadata the editor may not send (label, doc, triggers).
+    std::filesystem::path const globalJsonPath = extractedDir / "global.json";
+    if (std::filesystem::exists(globalJsonPath))
+    {
+        std::string existingGlobalContent;
+        if (ReadFileToStringStatic(globalJsonPath, existingGlobalContent))
+        {
+            WorkflowJsonParser globalParser;
+            WorkflowDefinition existingGlobal;
+            std::string globalParseError;
+            if (globalParser.ParseGlobalJson(existingGlobalContent, existingGlobal, globalParseError))
+            {
+                if (workflowDefinition.m_Label.empty() && !existingGlobal.m_Label.empty())
+                {
+                    workflowDefinition.m_Label = existingGlobal.m_Label;
+                }
+                if (workflowDefinition.m_Doc.empty() && !existingGlobal.m_Doc.empty())
+                {
+                    workflowDefinition.m_Doc = existingGlobal.m_Doc;
+                }
+            }
+        }
     }
     else
     {
-        std::filesystem::path baseDirectoryPath(workflowDefinition.m_WorkflowBaseDirectory);
-        workflowBaseDirectoryIsRelative = baseDirectoryPath.is_relative();
-        if (workflowBaseDirectoryIsRelative)
+        std::ofstream globalStream(globalJsonPath, std::ios::binary | std::ios::trunc);
+        if (globalStream.is_open())
         {
-            baseDirectoryPath = workflowFileDirectoryPathAbsolute / baseDirectoryPath;
+            // Build a minimal global.json from the parsed metadata.
+            globalStream << "{\n"
+                         << "  \"version\": \"" << workflowDefinition.m_Version << "\",\n"
+                         << "  \"id\": \"" << workflowId << "\",\n"
+                         << "  \"manual_start\": " << (workflowDefinition.m_ManualStart ? "true" : "false") << "\n"
+                         << "}\n";
         }
-
-        workflowBaseDirectoryPathAbsolute = std::filesystem::absolute(baseDirectoryPath).lexically_normal();
     }
 
-    workflowDefinition.m_WorkflowBaseDirectory = workflowBaseDirectoryPathAbsolute.string();
-    workflowDefinition.m_WorkflowBaseDirectoryAbsolute = workflowBaseDirectoryPathAbsolute.string();
-
-    // Validate with the same rules as ValidateAll, but for the incoming workflow only.
+    // Write the canvas JSON (the full body — the editor sends tasks + metadata merged,
+    // and ParseCanvasJson tolerates extra metadata fields).
+    std::filesystem::path const canvasJsonPath = extractedDir / (workflowId + ".json");
     {
-        std::string validationError;
-        if (!ValidateWorkflowDefinition(workflowDefinition.m_Id, workflowDefinition, validationError))
+        std::ofstream canvasStream(canvasJsonPath, std::ios::binary | std::ios::trunc);
+        if (!canvasStream.is_open())
         {
-            errorMessage = validationError;
+            errorMessage = "Failed to write canvas JSON: " + canvasJsonPath.string();
             return false;
         }
+        canvasStream.write(workflowJson.data(), static_cast<std::streamsize>(workflowJson.size()));
     }
 
-    // Ensure parent directory exists, then write.
-    std::filesystem::path const parentPath = normalizedWorkflowFilePathAbsolute.parent_path();
-    if (!parentPath.empty())
+    // Pack the extracted directory into a .jcwf zip container.
+    if (!JcwfContainer::Pack(extractedDir, jcwfPath, errorMessage))
     {
-        std::error_code errorCode;
-        std::filesystem::create_directories(parentPath, errorCode);
-        if (errorCode)
-        {
-            errorMessage = "Failed to create directories for '" + parentPath.string() + "': " + errorCode.message();
-            return false;
-        }
+        return false;
     }
 
-    {
-        std::ofstream fileStream(normalizedWorkflowFilePathAbsolute, std::ios::binary | std::ios::trunc);
-        if (!fileStream.is_open())
-        {
-            errorMessage = "Failed to open '" + normalizedWorkflowFilePathAbsolute.string() + "' for writing";
-            return false;
-        }
-
-        fileStream.write(workflowJson.data(), static_cast<std::streamsize>(workflowJson.size()));
-        if (!fileStream.good())
-        {
-            errorMessage = "Failed to write '" + normalizedWorkflowFilePathAbsolute.string() + "'";
-            return false;
-        }
-    }
+    // Set path information on the definition.
+    std::filesystem::path const absoluteExtracted = std::filesystem::weakly_canonical(extractedDir);
+    workflowDefinition.m_WorkflowFilePath = canvasJsonPath.string();
+    workflowDefinition.m_WorkflowFilePathAbsolute = std::filesystem::weakly_canonical(canvasJsonPath).string();
+    workflowDefinition.m_WorkflowFileDirectory = extractedDir.string();
+    workflowDefinition.m_WorkflowFileDirectoryAbsolute = absoluteExtracted.string();
+    workflowDefinition.m_WorkflowBaseDirectoryAbsolute = absoluteExtracted.string();
+    workflowDefinition.m_ContainerPath = jcwfPath.string();
 
     // Insert or replace in registry.
-    m_Workflows[workflowDefinition.m_Id] = workflowDefinition;
+    m_Workflows[workflowId] = workflowDefinition;
+
+    LOG_APP_INFO("WorkflowRegistry: saved workflow '{}' as container '{}'", workflowId, jcwfPath.string());
     return true;
 }
 
@@ -662,4 +407,293 @@ bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool delete
 
     return true;
 }
+
+std::unordered_map<std::string, std::vector<std::string>> WorkflowRegistry::GetSubWorkflowDependencyGraph() const
+{
+    std::unordered_map<std::string, std::vector<std::string>> graph;
+
+    for (auto const& [parentId, parentDef] : m_Workflows)
+    {
+        for (auto const& [taskId, taskDef] : parentDef.m_Tasks)
+        {
+            if (taskDef.m_Type != TaskType::SubWorkflow || taskDef.m_WorkflowFile.empty())
+            {
+                continue;
+            }
+
+            // Resolve the workflow file path to an absolute path.
+            std::filesystem::path const resolvedPath = [&]()
+            {
+                std::filesystem::path const raw(taskDef.m_WorkflowFile);
+                if (raw.is_absolute())
+                {
+                    return raw;
+                }
+                return std::filesystem::path(parentDef.m_WorkflowFileDirectoryAbsolute) / raw;
+            }();
+
+            std::string const absolutePath = std::filesystem::weakly_canonical(resolvedPath).string();
+            std::optional<std::string> const childId = TryGetWorkflowIdByFilePath(absolutePath);
+
+            if (childId.has_value())
+            {
+                graph[parentId].push_back(childId.value());
+            }
+        }
+    }
+
+    return graph;
+}
+
+bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerPath)
+{
+    std::string const stem = jcwfContainerPath.stem().string();
+    std::filesystem::path const extractedDir = jcwfContainerPath.parent_path() / stem;
+
+    // Extract if stale or missing.
+    if (JcwfContainer::IsExtractedStale(jcwfContainerPath, extractedDir))
+    {
+        std::string extractError;
+        if (!JcwfContainer::Extract(jcwfContainerPath, extractedDir, extractError))
+        {
+            LOG_APP_ERROR("WorkflowRegistry: failed to extract container '{}': {}", jcwfContainerPath.string(),
+                          extractError);
+            return false;
+        }
+    }
+
+    // Read global.json for metadata.
+    std::filesystem::path const globalJsonPath = extractedDir / "global.json";
+    WorkflowDefinition globalMetadata;
+
+    if (std::filesystem::exists(globalJsonPath))
+    {
+        std::string globalContent;
+        if (ReadFileToStringStatic(globalJsonPath, globalContent))
+        {
+            WorkflowJsonParser parser;
+            std::string parseError;
+            if (!parser.ParseGlobalJson(globalContent, globalMetadata, parseError))
+            {
+                LOG_APP_WARN("WorkflowRegistry: failed to parse global.json in '{}': {}", stem, parseError);
+            }
+        }
+    }
+
+    // Find the root canvas JSON (any .json that is NOT global.json).
+    std::filesystem::path rootCanvasPath;
+    std::error_code ec;
+
+    for (auto const& entry : std::filesystem::directory_iterator(extractedDir, ec))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+        if (entry.path().extension().string() != ".json")
+        {
+            continue;
+        }
+        if (entry.path().filename().string() == "global.json")
+        {
+            continue;
+        }
+
+        rootCanvasPath = entry.path();
+        break;
+    }
+
+    if (rootCanvasPath.empty())
+    {
+        LOG_APP_ERROR("WorkflowRegistry: no root canvas JSON found in container '{}'", stem);
+        return false;
+    }
+
+    // Parse the root canvas.
+    std::string canvasContent;
+    if (!ReadFileToStringStatic(rootCanvasPath, canvasContent))
+    {
+        LOG_APP_ERROR("WorkflowRegistry: failed to read root canvas '{}'", rootCanvasPath.string());
+        return false;
+    }
+
+    WorkflowDefinition rootDef = globalMetadata; // Start with global metadata.
+    WorkflowJsonParser parser;
+    std::string parseError;
+
+    if (!parser.ParseCanvasJson(canvasContent, rootDef, parseError))
+    {
+        LOG_APP_ERROR("WorkflowRegistry: failed to parse root canvas '{}': {}", rootCanvasPath.string(), parseError);
+        return false;
+    }
+
+    // If global.json didn't provide an id, use the stem.
+    if (rootDef.m_Id.empty())
+    {
+        rootDef.m_Id = stem;
+    }
+
+    // Set path information.
+    std::filesystem::path const absoluteExtracted = std::filesystem::weakly_canonical(extractedDir);
+    rootDef.m_WorkflowFilePath = rootCanvasPath.string();
+    rootDef.m_WorkflowFileDirectory = extractedDir.string();
+    rootDef.m_WorkflowFilePathAbsolute = std::filesystem::weakly_canonical(rootCanvasPath).string();
+    rootDef.m_WorkflowFileDirectoryAbsolute = absoluteExtracted.string();
+    rootDef.m_WorkflowBaseDirectoryAbsolute = absoluteExtracted.string();
+    rootDef.m_ContainerPath = std::filesystem::weakly_canonical(jcwfContainerPath).string();
+    rootDef.m_IsSubWorkflow = false;
+
+    // Default trigger if none provided.
+    if (rootDef.m_Triggers.empty())
+    {
+        WorkflowTrigger autoTrigger;
+        autoTrigger.m_Type = WorkflowTriggerType::Auto;
+        autoTrigger.m_Id = "auto";
+        autoTrigger.m_IsEnabled = true;
+        autoTrigger.m_ParamsJson = "{}";
+        rootDef.m_Triggers.push_back(autoTrigger);
+    }
+
+    // Check for AI call tasks.
+    for (auto const& [taskId, task] : rootDef.m_Tasks)
+    {
+        if (task.m_Type == TaskType::AiCall)
+        {
+            rootDef.m_HasAiCallTasks = true;
+            break;
+        }
+    }
+
+    std::string const rootId = rootDef.m_Id;
+    m_Workflows[rootId] = std::move(rootDef);
+
+    LOG_APP_INFO("WorkflowRegistry: loaded container '{}' as workflow '{}' from '{}'", stem, rootId,
+                 jcwfContainerPath.string());
+
+    // Recursively load sub-workflows from subfolders.
+    LoadContainerSubWorkflows(extractedDir, rootId, m_Workflows[rootId].m_ContainerPath, "", globalMetadata);
+
+    return true;
+}
+
+bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& folderPath,
+                                                  std::string const& parentWorkflowId,
+                                                  std::string const& containerPath,
+                                                  std::string const& relativeFolderPath,
+                                                  WorkflowDefinition const& globalMetadata)
+{
+    std::error_code ec;
+
+    for (auto const& entry : std::filesystem::directory_iterator(folderPath, ec))
+    {
+        if (!entry.is_directory())
+        {
+            continue;
+        }
+
+        std::string const folderName = entry.path().filename().string();
+        std::string const subRelPath = relativeFolderPath.empty() ? folderName : (relativeFolderPath + "/" + folderName);
+
+        // Look for a .json file inside this subfolder (named after the folder, or any non-global .json).
+        std::filesystem::path canvasPath;
+        std::filesystem::path preferredPath = entry.path() / (folderName + ".json");
+
+        if (std::filesystem::exists(preferredPath))
+        {
+            canvasPath = preferredPath;
+        }
+        else
+        {
+            // Fall back to any .json file that isn't global.json.
+            for (auto const& subEntry : std::filesystem::directory_iterator(entry.path(), ec))
+            {
+                if (!subEntry.is_regular_file())
+                {
+                    continue;
+                }
+                if (subEntry.path().extension().string() != ".json")
+                {
+                    continue;
+                }
+                if (subEntry.path().filename().string() == "global.json")
+                {
+                    continue;
+                }
+
+                canvasPath = subEntry.path();
+                break;
+            }
+        }
+
+        if (canvasPath.empty())
+        {
+            LOG_APP_WARN("WorkflowRegistry: sub-workflow folder '{}' has no canvas JSON, skipping", subRelPath);
+            continue;
+        }
+
+        // Parse the sub-workflow canvas.
+        std::string canvasContent;
+        if (!ReadFileToStringStatic(canvasPath, canvasContent))
+        {
+            LOG_APP_WARN("WorkflowRegistry: failed to read sub-workflow canvas '{}'", canvasPath.string());
+            continue;
+        }
+
+        // Start with global defaults (version, defaults) but NOT triggers/manual_start.
+        WorkflowDefinition subDef;
+        subDef.m_Version = globalMetadata.m_Version;
+        subDef.m_Defaults = globalMetadata.m_Defaults;
+        subDef.m_DefaultsJson = globalMetadata.m_DefaultsJson;
+
+        WorkflowJsonParser parser;
+        std::string parseError;
+
+        if (!parser.ParseCanvasJson(canvasContent, subDef, parseError))
+        {
+            LOG_APP_WARN("WorkflowRegistry: failed to parse sub-workflow '{}': {}", subRelPath, parseError);
+            continue;
+        }
+
+        // Generate a stable ID: parent__subfolder (double underscore separator).
+        subDef.m_Id = parentWorkflowId + "__" + folderName;
+        subDef.m_Label = folderName;
+
+        // Set path information.
+        std::filesystem::path const absoluteFolder = std::filesystem::weakly_canonical(entry.path());
+        subDef.m_WorkflowFilePath = canvasPath.string();
+        subDef.m_WorkflowFileDirectory = entry.path().string();
+        subDef.m_WorkflowFilePathAbsolute = std::filesystem::weakly_canonical(canvasPath).string();
+        subDef.m_WorkflowFileDirectoryAbsolute = absoluteFolder.string();
+        subDef.m_WorkflowBaseDirectoryAbsolute = absoluteFolder.string();
+        subDef.m_ContainerPath = containerPath;
+        subDef.m_IsSubWorkflow = true;
+        subDef.m_ParentWorkflowId = parentWorkflowId;
+        subDef.m_ContainerFolderPath = subRelPath;
+
+        // Sub-workflows have no triggers — they are invoked by parent.
+        subDef.m_ManualStart = true;
+        subDef.m_Triggers.clear();
+
+        // Check for AI call tasks.
+        for (auto const& [taskId, task] : subDef.m_Tasks)
+        {
+            if (task.m_Type == TaskType::AiCall)
+            {
+                subDef.m_HasAiCallTasks = true;
+                break;
+            }
+        }
+
+        std::string const subId = subDef.m_Id;
+        m_Workflows[subId] = std::move(subDef);
+
+        LOG_APP_INFO("WorkflowRegistry: loaded sub-workflow '{}' (folder '{}') from container", subId, subRelPath);
+
+        // Recurse into nested sub-workflows.
+        LoadContainerSubWorkflows(entry.path(), subId, containerPath, subRelPath, globalMetadata);
+    }
+
+    return true;
+}
+
 // namespace AIAssistant

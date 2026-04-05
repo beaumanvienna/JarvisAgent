@@ -1063,17 +1063,19 @@ def test_ai_write_file_denied(c: AssistantClient):
 _TEST_WORKFLOW_ID = "j9t_test_workflow_auto"
 
 def _ensure_test_workflow(c: AssistantClient) -> bool:
-    """Create a minimal test workflow if it doesn't exist. Returns True if ready."""
-    import pathlib, json as _json
+    """Create a minimal test workflow (.jcwf zip container) if it doesn't exist. Returns True if ready."""
+    import pathlib, json as _json, zipfile, io
     wf_path = pathlib.Path(f"workflows/{_TEST_WORKFLOW_ID}.jcwf")
     if wf_path.exists():
         return True
-    # Write a minimal valid JCWF directly (no AI needed).
-    wf = {
+    # Build a minimal valid JCWF zip container directly (no AI needed).
+    global_json = {
         "version": "1.0",
         "id": _TEST_WORKFLOW_ID,
         "label": "Auto-test workflow",
         "triggers": [{"type": "manual", "id": "manual", "enabled": True}],
+    }
+    canvas_json = {
         "tasks": {
             "hello": {
                 "id": "hello",
@@ -1085,7 +1087,9 @@ def _ensure_test_workflow(c: AssistantClient) -> bool:
         },
     }
     wf_path.parent.mkdir(parents=True, exist_ok=True)
-    wf_path.write_text(_json.dumps(wf, indent=2))
+    with zipfile.ZipFile(wf_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("global.json", _json.dumps(global_json, indent=2))
+        zf.writestr(f"{_TEST_WORKFLOW_ID}.json", _json.dumps(canvas_json, indent=2))
     return wf_path.exists()
 
 @suite.test("AI: tool call — jcwf_generate", requires_ai=True)

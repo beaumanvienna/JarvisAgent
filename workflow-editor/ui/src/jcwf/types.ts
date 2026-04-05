@@ -1,6 +1,6 @@
 export type JcwfVersion = "1.0" | "1.1";
 export type JcwfDoc = string | string[];
-export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal";
+export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal" | "sub_workflow";
 export type JcwfTaskMode = "single" | "per_item";
 export type JcwfFilterSourceKind = "csv" | "text_lines" | "query" | "polarion_query";
 export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual" | "webhook";
@@ -52,6 +52,9 @@ export type JcwfTask = {
   expose_error_signal?: boolean;
 
   params?: Record<string, unknown>;
+
+  // sub_workflow tasks: path to child .jcwf file (relative to parent workflow directory)
+  workflow_file?: string;
 
   // editor must preserve extra fields for round-trips
   [key: string]: unknown;

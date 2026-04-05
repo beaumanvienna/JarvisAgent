@@ -102,7 +102,7 @@ def run(**kwargs):
     ai_output_glob = ""
     if workflow_id:
         ai_output_glob = os.path.normpath(
-            os.path.join(base_dir, "..", "queue", workflow_id, "03_summarizeChapter", "PROB_*.output.txt")
+            os.path.join(base_dir, "..", "..", "queue", workflow_id, "03_summarizeChapter", "PROB_*.output.txt")
         )
 
     return {

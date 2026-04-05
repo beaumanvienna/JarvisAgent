@@ -148,13 +148,7 @@ namespace AIAssistant
                 engineConfig.m_MaxInflightAiCalls = 100;
             }
 
-            // port: clamp to valid range [1, 65535], 0 = auto
-            if (engineConfig.m_Port > 65535)
-            {
-                LOG_APP_ERROR("Port out of range. Fixing to 0 (auto). The config file should have a field "
-                              "similar to '\"port\": 8080'");
-                engineConfig.m_Port = 0;
-            }
+            // port: range validation is done at parse time in configParser.cpp
 
             // python engines: clamp to [1, 16]
             if (engineConfig.m_PythonEngines == 0 || engineConfig.m_PythonEngines > 16)

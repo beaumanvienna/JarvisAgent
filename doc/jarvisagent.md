@@ -194,14 +194,25 @@ The OpenAI Responses API (GPT-5+) uses API2.
 
 ## WORKFLOWS
 
-JarvisAgent uses **JC Workflow** definition files (`.jcwf`) to describe automation pipelines as directed acyclic graphs (DAGs).
+JarvisAgent uses **JC Workflow** files (`.jcwf`) to describe automation pipelines as directed acyclic graphs (DAGs). A `.jcwf` file is a **zip container** that bundles JSON workflow definitions and any input data files into a single portable package.
 
 A workflow consists of:
 
-- **Tasks** — individual units of work: AI calls, shell commands, Python scripts, or internal actions. Tasks can run in parallel when their dependencies allow it.
+- **Tasks** — individual units of work: AI calls, shell commands, Python scripts, internal actions, or sub-workflow invocations. Tasks can run in parallel when their dependencies allow it.
 - **Edges** — dependency and dataflow connections between tasks. A task only runs after all its upstream dependencies have completed.
 - **Triggers** — how a workflow is started: manually, on a cron schedule, or when a file appears in a watched directory.
 - **Filters** — per-item expansion from CSV files, text line lists, or queries. A single task definition can fan out into many parallel instances.
+- **Sub-workflows** — nested workflow canvases that group tasks into reusable units. Each sub-workflow is a folder inside the `.jcwf` container with its own JSON task DAG.
+
+### Container format
+
+A `.jcwf` file is a zip archive containing:
+
+- `global.json` — workflow-wide metadata (version, id, label, triggers, defaults).
+- `<workflow-name>.json` — the root canvas task DAG.
+- Sub-workflow folders — each folder represents a sub-workflow (folder name = display name), containing its own `.json` task DAG.
+
+When loaded, the container is extracted to `workflows/<workflow-name>/`. All task `working_directory` paths are relative to this extracted folder.
 
 ### Task types
 
@@ -209,8 +220,9 @@ A workflow consists of:
 - **`shell`** — Run a shell command or script. Stdout and stderr are captured.
 - **`python`** — Call a Python function with structured inputs/outputs.
 - **`internal`** — Built-in actions (e.g. file operations).
+- **`sub_workflow`** — Execute a child workflow from a sub-folder within the container. The parent task waits for the child to complete.
 
-For the full specification including JSON schema, dataflow mapping, template syntax, filter types, and per-item expansion, see: **doc/JC_Workflow_Specification.md**
+For the full specification including JSON schema, dataflow mapping, template syntax, filter types, per-item expansion, and container format, see: **doc/JC_Workflow_Specification.md**
 
 ## WORKFLOW EDITOR
 
@@ -224,7 +236,10 @@ Key features:
 
 - **Visual DAG editor** — drag-and-drop nodes, draw dependency and dataflow edges between tasks.
 - **Task inspector** — configure task type, parameters, file inputs/outputs, working directory, timeout, and per-task AI interface override.
-- **Workflow CRUD** — open, save, validate, run, and clean workflows.
+- **Sub-workflow support** — add sub-workflow nodes that reference nested canvases. Double-click a sub-workflow node to navigate into it.
+- **Workflow tree** — the left sidebar shows the sub-workflow hierarchy as a collapsible tree. Click any node in the tree to navigate directly to that canvas.
+- **Breadcrumb navigation** — when inside a sub-workflow, a breadcrumb bar above the canvas shows the navigation path. Click any parent in the chain to jump back.
+- **Workflow CRUD** — open, save, validate, run, and clean workflows. Workflows are saved as `.jcwf` zip containers.
 - **Live run monitoring** — task state badges update in real time via WebSocket (running, succeeded, failed, skipped).
 - **Run controls** — start, stop, pause, and resume workflow runs.
 - **Template browser** — start from pre-built workflow templates.

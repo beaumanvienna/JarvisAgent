@@ -70,8 +70,7 @@ modules:
       # Example workflows (curated list — no subdirs, no build artifacts)
       - mkdir -p /app/share/jarvisagent/example-workflows
       - for jcwf in aiCarMaintenancePipeline aiZipDemo make-example portfolioDividendAnalysis; do cp example/workflows/${jcwf}.jcwf /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
-      - for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h message_engine_question.txt message_tire_question.txt message_unclear_question.txt port62pos.csv; do cp example/workflows/$f /app/share/jarvisagent/example-workflows/ 2>/dev/null || true; done
-      - ln -sf message_engine_question.txt /app/share/jarvisagent/example-workflows/message.txt
+      # Loose input files are now bundled inside the .jcwf zip containers.
 
       # Example config
       - cp packaging/config.json.example /app/share/jarvisagent/config.json.example
