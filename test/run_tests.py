@@ -341,6 +341,7 @@ def main():
     group.add_argument("--all", "-a", action="store_true", help="Test all workflows in run_order")
     group.add_argument("--list", "-l", action="store_true", help="List available workflows")
     parser.add_argument("--base-url", default=None, help="JA base URL (overrides config)")
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip interactive prompts (auto-clean + auto-start)")
     args = parser.parse_args()
 
     # Tee all output to test/log.txt
@@ -460,7 +461,10 @@ def main():
 
     # Prompt to clean all workflows before testing
     print()
-    answer = input(f"  {C.YELLOW}Clean all workflow outputs before testing? [y/N]: {C.RESET}").strip().lower()
+    if args.yes:
+        answer = "y"
+    else:
+        answer = input(f"  {C.YELLOW}Clean all workflow outputs before testing? [y/N]: {C.RESET}").strip().lower()
     if answer in ("y", "yes"):
         info("Cleaning all workflows...")
         for wf_id in to_test:
@@ -493,7 +497,8 @@ def main():
         wf = workflows.get(wf_id, {})
         print(f"      {C.CYAN}{i:>2}. {wf_id:<30}{C.RESET} {wf.get('label', '')}")
     print()
-    input(f"  {C.YELLOW}Press Enter to start testing...{C.RESET}")
+    if not args.yes:
+        input(f"  {C.YELLOW}Press Enter to start testing...{C.RESET}")
 
     # Run tests
     results = {}

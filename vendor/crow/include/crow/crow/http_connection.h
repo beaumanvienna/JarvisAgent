@@ -104,7 +104,13 @@ namespace crow
                 }
                 else
                 {
-                    CROW_LOG_ERROR << "Could not start adaptor: " << ec.message();
+                    // [J9T_SSL_DEBUG] — extra diagnostics for SSL handshake failures
+                    CROW_LOG_ERROR << "Could not start adaptor: " << ec.message()
+                                   << " (category=" << ec.category().name()
+                                   << ", code=" << ec.value() << ")";
+                    // Close the underlying socket to prevent use-after-free / segfault
+                    // during Connection destruction when ssl_socket_ is torn down.
+                    self->adaptor_.close();
                 }
             });
         }

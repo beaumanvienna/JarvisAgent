@@ -115,7 +115,7 @@
       "prerequisites": [],
       "expected_artifacts": [
         {
-          "glob": "workflows/myapp",
+          "glob": "workflows/make-example/myapp",
           "min_bytes": 1
         }
       ]
@@ -127,7 +127,7 @@
       "prerequisites": [],
       "expected_artifacts": [
         {
-          "glob": "workflows/myapp",
+          "glob": "workflows/make-example-subwf/myapp",
           "min_bytes": 1
         }
       ]

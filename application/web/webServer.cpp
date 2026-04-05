@@ -3861,11 +3861,38 @@ namespace AIAssistant
             linesJson.push_back(std::move(allLines[i]));
         }
 
+        // Count total lines in the file so the frontend can compute absolute line numbers.
+        // Re-scan from the beginning up to readPos (the part we didn't read for the tail).
+        int64_t skippedLines = 0;
+        if (readPos > 0)
+        {
+            // readPos is where our tail buffer starts; count newlines before that.
+            file.clear();
+            file.seekg(0);
+            static constexpr int64_t kCountChunk = 65536;
+            int64_t remaining = readPos;
+            std::string buf(static_cast<size_t>(std::min(remaining, kCountChunk)), '\0');
+            while (remaining > 0)
+            {
+                int64_t const toRead = std::min(remaining, kCountChunk);
+                buf.resize(static_cast<size_t>(toRead));
+                file.read(buf.data(), toRead);
+                for (char c : buf)
+                {
+                    if (c == '\n')
+                        ++skippedLines;
+                }
+                remaining -= toRead;
+            }
+        }
+        int64_t const totalLines = skippedLines + static_cast<int64_t>(allLines.size());
+
         crow::json::wvalue resp;
         resp["ok"] = true;
         resp["lines"] = std::move(linesJson);
         resp["byteOffset"] = fileSize;
         resp["totalSize"] = fileSize;
+        resp["totalLines"] = totalLines;
         return MakeJsonResponse(200, resp);
     }
 

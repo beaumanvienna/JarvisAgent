@@ -87,6 +87,7 @@ export interface LogResponse {
   lines: string[];
   byteOffset: number;
   totalSize: number;
+  totalLines?: number;
   error?: string;
 }
 

@@ -43,6 +43,11 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
   const linesRef = useRef<string[]>([]);
   const autoScrollRef = useRef(true);
 
+  // Absolute line offset: the 1-indexed line number of the first loaded line.
+  // e.g. if the file has 41000 lines and we loaded the last 10000,
+  // lineNumOffset = 31001 (first loaded line is file line 31001).
+  const [lineNumOffset, setLineNumOffset] = useState(1);
+
   // Keep refs in sync
   useEffect(() => { offsetRef.current = byteOffset; }, [byteOffset]);
   useEffect(() => { linesRef.current = lines; }, [lines]);
@@ -88,6 +93,10 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
         }
         setLines(data.lines);
         setByteOffset(data.byteOffset);
+        if (data.totalLines !== undefined)
+        {
+          setLineNumOffset(data.totalLines - data.lines.length + 1);
+        }
         setLoading(false);
       } catch {
         setErrorMsg("Could not connect to log API");
@@ -223,10 +232,12 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
   const scrollToLine = useCallback((lineNum: number) => {
     const el = containerRef.current;
     if (!el) return;
-    const idx = lineNum - 1; // convert 1-indexed to 0-indexed
+    // Convert absolute 1-indexed file line number to array index.
+    const idx = lineNum - lineNumOffset;
+    if (idx < 0 || idx >= activeLines.length) return;
     el.scrollTop = Math.max(0, idx * LINE_HEIGHT - containerHeight / 3);
     setAutoScroll(false);
-  }, [containerHeight]);
+  }, [containerHeight, lineNumOffset, activeLines.length]);
 
   const handleAnalyze = useCallback(async (index = 0) => {
     try {
@@ -307,13 +318,13 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
             right: 0,
           }}
         >
-          <span className="log-line-num">{i + 1}</span>
+          <span className="log-line-num">{i + lineNumOffset}</span>
           <span className="log-line-text">{content}</span>
         </div>
       );
     }
     return result;
-  }, [startIdx, endIdx, activeLines, searchTerm, currentMatchIdx, searchMatchIndices]);
+  }, [startIdx, endIdx, activeLines, searchTerm, currentMatchIdx, searchMatchIndices, lineNumOffset]);
 
   const handleTabChange = useCallback((tab: LogTab) => {
     setLogTab(tab);

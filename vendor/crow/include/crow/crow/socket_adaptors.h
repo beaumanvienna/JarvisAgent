@@ -188,6 +188,20 @@ namespace crow
           ssl_socket_(new ssl_socket_t(io_context, *ctx))
         {}
 
+        // [J9T_SSL_DEBUG] — ensure the raw socket is closed before ssl_socket_ is destroyed,
+        // preventing segfaults when an SSL handshake failed and left the stream in a bad state.
+        ~SSLAdaptor()
+        {
+            if (ssl_socket_ && raw_socket().is_open())
+            {
+                error_code ec;
+                raw_socket().close(ec);
+            }
+        }
+
+        SSLAdaptor(SSLAdaptor&&) = default;
+        SSLAdaptor& operator=(SSLAdaptor&&) = default;
+
         asio::ssl::stream<tcp::socket>& socket()
         {
             return *ssl_socket_;
