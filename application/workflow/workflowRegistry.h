@@ -42,6 +42,15 @@ namespace AIAssistant
         std::vector<std::string> GetWorkflowIds() const;
         std::optional<WorkflowDefinition> GetWorkflow(std::string const& workflowId) const;
 
+        // Broken .jcwf files that failed to parse. Keyed by container path.
+        struct BrokenWorkflow
+        {
+            std::string m_ContainerPath; // absolute path to the .jcwf file
+            std::string m_Stem;          // filename without extension (display id)
+            std::string m_Error;         // parse error message
+        };
+        std::vector<BrokenWorkflow> const& GetBrokenWorkflows() const { return m_BrokenWorkflows; }
+
         // Returns the absolute (normalized) file path for the workflow if known.
         std::optional<std::string> TryGetWorkflowFilePathAbsolute(std::string const& workflowId) const;
 
@@ -77,5 +86,7 @@ namespace AIAssistant
                                        WorkflowDefinition const& globalMetadata);
 
         std::unordered_map<std::string, WorkflowDefinition> m_Workflows;
+        std::vector<BrokenWorkflow> m_BrokenWorkflows;
+        std::string m_LastContainerError; // set by LoadContainer on failure
     };
 } // namespace AIAssistant

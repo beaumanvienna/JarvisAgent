@@ -44,6 +44,7 @@ project "jarvisAgent"
         "JARVIS_AGENT_VERSION=\"0.8.5\"",
         "CROW_ENFORCE_WS_SPEC",
         "CROW_ENABLE_SSL",
+        "CROW_USE_LOCALTIMEZONE",
         "PDC_WIDE",
         "MINIZ_NO_ZLIB_COMPATIBLE_NAMES"
     }

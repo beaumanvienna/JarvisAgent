@@ -258,6 +258,13 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     orderedTasks[taskId] = tasks[taskId];
   }
 
+  // Persist node positions so the layout survives save/reload.
+  const editor_layout: Record<string, { x: number; y: number }> = {};
+  for (const node of graph.nodes as EditorNode[])
+  {
+    editor_layout[node.id] = { x: Math.round(node.position.x), y: Math.round(node.position.y) };
+  }
+
   const needsV11 = filters.length > 0 || control_nodes.length > 0 || controlflow.length > 0;
 
   const jcwf: JcwfFile = {
@@ -268,6 +275,7 @@ export function graphToJcwf(graph: EditorGraph, workflowId: string): Ok | CycleE
     ...(dataflow.length > 0 ? { dataflow } : {}),
     ...(control_nodes.length > 0 ? { control_nodes } : {}),
     ...(controlflow.length > 0 ? { controlflow } : {}),
+    editor_layout,
   };
 
   return { ok: true, jcwf };

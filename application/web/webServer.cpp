@@ -2026,6 +2026,24 @@ namespace AIAssistant
         }
 
         responseJson["workflows"] = std::move(workflowsList);
+
+        // Include broken .jcwf files so the editor can show them with error badges.
+        auto const& broken = workflowRegistryPtr->GetBrokenWorkflows();
+        if (!broken.empty())
+        {
+            crow::json::wvalue::list brokenList;
+            brokenList.reserve(broken.size());
+            for (auto const& b : broken)
+            {
+                crow::json::wvalue entry;
+                entry["id"] = b.m_Stem;
+                entry["path"] = b.m_ContainerPath;
+                entry["error"] = b.m_Error;
+                brokenList.emplace_back(std::move(entry));
+            }
+            responseJson["broken"] = std::move(brokenList);
+        }
+
         return MakeJsonResponse(200, responseJson);
     }
 
@@ -4877,8 +4895,29 @@ namespace AIAssistant
         // batch to prevent "Invalid UTF-8 in text frame" disconnects (code 1002).
         std::string const safeBatch = SanitizeUtf8(batch);
 
+        // [J9T_SSL_DEBUG] Log if sanitization changed anything (indicates bad UTF-8 source)
+        if (safeBatch.size() != batch.size())
+        {
+            LOG_APP_WARN("[ws] [J9T_SSL_DEBUG] SanitizeUtf8 changed batch: {}B -> {}B", batch.size(), safeBatch.size());
+        }
+        // [J9T_SSL_DEBUG] Log batch size and first 200 chars for diagnostics
+        if (!safeBatch.empty())
+        {
+            LOG_APP_INFO("[ws] [J9T_SSL_DEBUG] sending batch to {} clients, size={}B, preview: {}",
+                         clients.size(), safeBatch.size(),
+                         safeBatch.substr(0, std::min(safeBatch.size(), size_t(200))));
+        }
+
         for (auto* client : clients)
         {
+            // [J9T_SSL_DEBUG] Re-check that the client is still alive under the lock.
+            // Between the snapshot and here, onclose may have fired on another ASIO
+            // thread, destroying the connection and leaving a dangling pointer.
+            {
+                std::lock_guard<std::mutex> lock(m_Mutex);
+                if (m_Clients.find(client) == m_Clients.end())
+                    continue;
+            }
             try
             {
                 client->send_text(safeBatch);

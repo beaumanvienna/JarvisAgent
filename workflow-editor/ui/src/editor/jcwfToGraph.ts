@@ -28,6 +28,10 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
   const BASE_NODE_HEIGHT = 60;
   const DEP_ROW_HEIGHT = 15;
 
+  // Persisted editor layout from the JCWF (if present).
+  const savedLayout = (jcwf as Record<string, unknown>).editor_layout as
+    Record<string, { x: number; y: number }> | undefined;
+
   // Simple layout: assign a "level" per task based on depends_on depth (DAG). If cycles exist,
   // we fall back to a stable insertion order layout.
   const depsByTaskId = new Map<string, string[]>();
@@ -124,7 +128,8 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
   const taskNodes: EditorTaskNode[] = taskEntries.map(([taskId, taskValue]) => {
     const task = taskValue as JcwfTask;
     const { title, subtitle } = displayTitle(task);
-    const position = positionByTaskId.get(taskId) ?? { x: 0, y: 0 };
+    const saved = savedLayout?.[taskId];
+    const position = saved ? { x: saved.x, y: saved.y } : (positionByTaskId.get(taskId) ?? { x: 0, y: 0 });
     return {
       id: taskId,
       type: "task" as const,
@@ -174,10 +179,11 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
     const cnLevel = controlNodeLevels.get(cn.id) ?? 0;
     const row = levelRowCount.get(cnLevel) ?? 0;
     levelRowCount.set(cnLevel, row + 1);
+    const saved = savedLayout?.[cn.id];
     return {
       id: cn.id,
       type: "branch" as const,
-      position: { x: cnLevel * cellW, y: row * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
+      position: saved ? { x: saved.x, y: saved.y } : { x: cnLevel * cellW, y: row * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
       data: {
         controlNode: cn,
         title: cn.label && cn.label.length > 0 ? cn.label : cn.id,
@@ -191,10 +197,12 @@ export function jcwfToGraph(jcwf: JcwfFile): EditorGraph
   const filterNodes: EditorFilterNode[] = filters.map((filter, index) => {
     const { title, subtitle } = filterDisplayTitle(filter);
     const minX = sortedLevels.length > 0 ? (sortedLevels[0] * cellW) : 0;
+    const filterId = `filter:${filter.id}`;
+    const saved = savedLayout?.[filterId];
     return {
-      id: `filter:${filter.id}`,
+      id: filterId,
       type: "filter" as const,
-      position: { x: minX - cellW, y: index * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
+      position: saved ? { x: saved.x, y: saved.y } : { x: minX - cellW, y: index * (BASE_NODE_HEIGHT + VERTICAL_GAP) },
       data: { filter, title, subtitle },
     };
   });

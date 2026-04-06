@@ -9,8 +9,15 @@ export type WorkflowListItem = {
   parent_workflow_id?: string;
 };
 
+export type BrokenWorkflowItem = {
+  id: string;
+  path?: string;
+  error: string;
+};
+
 export type WorkflowListResponse = {
   workflows: WorkflowListItem[];
+  broken?: BrokenWorkflowItem[];
 };
 
 export type WorkflowValidationFinding = {

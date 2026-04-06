@@ -68,7 +68,7 @@ namespace AIAssistant
         // -----------------------------------------------------------------
     } // namespace
 
-    void WorkflowRegistry::Clear() { m_Workflows.clear(); }
+    void WorkflowRegistry::Clear() { m_Workflows.clear(); m_BrokenWorkflows.clear(); }
 
     bool WorkflowRegistry::LoadDirectory(std::filesystem::path const& workflowsDirectoryPath)
     {
@@ -114,7 +114,16 @@ namespace AIAssistant
 
             if (extension == ".jcwf")
             {
-                LoadContainer(filePath);
+                if (!LoadContainer(filePath))
+                {
+                    BrokenWorkflow broken;
+                    broken.m_ContainerPath = filePath.string();
+                    broken.m_Stem = filePath.stem().string();
+                    broken.m_Error = m_LastContainerError.empty()
+                        ? "Failed to parse .jcwf container (see application log for details)"
+                        : m_LastContainerError;
+                    m_BrokenWorkflows.push_back(std::move(broken));
+                }
             }
         }
 
@@ -447,6 +456,7 @@ std::unordered_map<std::string, std::vector<std::string>> WorkflowRegistry::GetS
 
 bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerPath)
 {
+    m_LastContainerError.clear();
     std::string const stem = jcwfContainerPath.stem().string();
     std::filesystem::path const extractedDir = jcwfContainerPath.parent_path() / stem;
 
@@ -456,6 +466,7 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
         std::string extractError;
         if (!JcwfContainer::Extract(jcwfContainerPath, extractedDir, extractError))
         {
+            m_LastContainerError = "Failed to extract: " + extractError;
             LOG_APP_ERROR("WorkflowRegistry: failed to extract container '{}': {}", jcwfContainerPath.string(),
                           extractError);
             return false;
@@ -505,6 +516,7 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
 
     if (rootCanvasPath.empty())
     {
+        m_LastContainerError = "No root canvas JSON found in container";
         LOG_APP_ERROR("WorkflowRegistry: no root canvas JSON found in container '{}'", stem);
         return false;
     }
@@ -513,6 +525,7 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
     std::string canvasContent;
     if (!ReadFileToStringStatic(rootCanvasPath, canvasContent))
     {
+        m_LastContainerError = "Failed to read root canvas: " + rootCanvasPath.string();
         LOG_APP_ERROR("WorkflowRegistry: failed to read root canvas '{}'", rootCanvasPath.string());
         return false;
     }
@@ -523,6 +536,7 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
 
     if (!parser.ParseCanvasJson(canvasContent, rootDef, parseError))
     {
+        m_LastContainerError = parseError;
         LOG_APP_ERROR("WorkflowRegistry: failed to parse root canvas '{}': {}", rootCanvasPath.string(), parseError);
         return false;
     }

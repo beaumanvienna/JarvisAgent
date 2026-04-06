@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { deleteWorkflow, listWorkflows, reloadWorkflowRegistry, type WorkflowListResponse } from "../api/workflows";
+import { deleteWorkflow, listWorkflows, reloadWorkflowRegistry, type WorkflowListResponse, type BrokenWorkflowItem } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import TemplateBrowser from "../components/TemplateBrowser";
 import type { JcwfFile } from "../jcwf/types";
@@ -165,6 +165,21 @@ export default function WorkflowListView(props: {
           );
         })}
       </div>
+
+      {(response?.broken ?? []).length > 0 ? (
+        <div style={{ maxWidth: 860, marginTop: 16 }}>
+          <h3 style={{ color: "#f87171", marginBottom: 8 }}>Broken Workflows</h3>
+          {(response?.broken ?? []).map((b: BrokenWorkflowItem) => (
+            <div key={b.id} className="card" style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", borderLeft: "3px solid #f87171" }}>
+              <div>
+                <div style={{ fontWeight: 700, color: "#f87171" }}>{b.id}</div>
+                <div className="small">{b.path ?? "path unknown"}</div>
+                <div className="small" style={{ color: "#fbbf24", marginTop: 4 }}>{b.error}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {props.onCreateFromTemplate
         ? (

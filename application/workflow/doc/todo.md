@@ -66,8 +66,8 @@ Last reviewed: 2026-03-23
 - [x] ~~**Decouple AI inflight throttle from thread pool size**~~ — new `"max inflight ai calls"` config field (default 100, range [1,1000]). SessionManager throttles against this value instead of `MaxThreads * 1.5`. Aligns with `CURLMOPT_MAX_CONCURRENT_STREAMS = 100` in `CurlMultiDispatcher`.
 - [x] ~~**Python Engine parallelization**~~ — `PythonEnginePool` manages N sub-interpreters via `Py_NewInterpreterFromConfig()` with shared GIL. Load-balanced dispatch to engine with smallest queue depth. Hooks route to engine[0] only. Configurable via `"python engines"` in config.json (default 4). Verified end-to-end with 60 parallel Python tasks.
 - [x] ~~**Per-item aggregation race fix**~~ — `AggregatePerItemResults()` now runs both before AND after the worker task harvest phase. Fixes false deadlock detection when per_item children complete within the same tick they were dispatched (common with fast Python tasks).
-- [ ] **Adaptive rate limit throttling** — read `x-ratelimit-*` / `Retry-After` headers from AI API responses. `RateLimitTracker` per-host state, `CURLOPT_HEADERFUNCTION` callback, auto-retry on 429. See `multi-tasking-analysis.md` §3.3.
-- [ ] **Configurable web server port** — implemented: `"port"` field in config.json (default 0 = auto: 8080 HTTP, 8443 HTTPS).
+- [x] ~~**Adaptive rate limit throttling**~~ — `CURLOPT_HEADERFUNCTION` captures `x-ratelimit-remaining-requests`, `x-ratelimit-remaining-tokens`, `x-ratelimit-reset-requests` headers per host. On HTTP 429: auto-retry with exponential backoff (1s, 2s, 4s, 8s, 16s) up to 5 attempts, preferring `x-ratelimit-reset-requests` delay when available. Per-host `HostRateLimitState` tracked in `CurlMultiDispatcher`. Retry queue with delayed re-submission on I/O thread.
+- [x] ~~**Configurable web server port**~~ — `"port"` field in config.json (default 0 = auto: 8080 HTTP, 8443 HTTPS). Already implemented in config parser + webServer.cpp.
 
 ---
 

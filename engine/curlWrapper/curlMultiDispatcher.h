@@ -21,6 +21,7 @@
 
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -28,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "curlWrapper.h"
 
@@ -77,16 +79,44 @@ namespace AIAssistant
         {
             CurlWrapper::QueryData m_QueryData;
             Callback m_Callback;
-            std::string m_ReadBuffer; // response body accumulates here
-            std::string m_Url;        // stable storage — CURLOPT_URL pointer target
-            std::string m_PostData;   // stable storage — CURLOPT_POSTFIELDS pointer target
+            std::string m_ReadBuffer;   // response body accumulates here
+            std::string m_HeaderBuffer; // response headers accumulate here
+            std::string m_Url;          // stable storage — CURLOPT_URL pointer target
+            std::string m_PostData;     // stable storage — CURLOPT_POSTFIELDS pointer target
             struct curl_slist* m_Headers{nullptr};
+            int m_RetryCount{0};        // number of 429 retries already attempted
+        };
+
+        // A request waiting for its retry delay to expire (I/O thread only).
+        struct RetryEntry
+        {
+            std::chrono::steady_clock::time_point m_ReadyAt;
+            PendingRequest m_Request;
+            int m_RetryCount;
+        };
+
+        // Per-host adaptive rate limit state (I/O thread only).
+        struct HostRateLimitState
+        {
+            int m_RemainingRequests{-1};  // -1 = unknown
+            int m_RemainingTokens{-1};    // -1 = unknown
+            std::chrono::steady_clock::time_point m_ResetAt;
+            std::chrono::steady_clock::time_point m_LastUpdated;
         };
 
         void IoThreadFunc();
         void DrainInbox();
         void DrainCompleted();
+        void DrainRetryQueue();
         CURL* SetupEasyHandle(ActiveRequest& req);
+
+        // Parse rate limit headers from the accumulated header buffer.
+        void ParseRateLimitHeaders(ActiveRequest const& req, std::string& host);
+        // Extract host from URL (e.g. "api.openai.com" from "https://api.openai.com/v1/...").
+        static std::string ExtractHost(std::string const& url);
+
+        static constexpr int kMaxRetries = 5;
+        static constexpr int kBaseRetryMs = 1000; // 1 second base for exponential backoff
 
         CURLM* m_MultiHandle{nullptr};
         std::thread m_IoThread;
@@ -97,5 +127,11 @@ namespace AIAssistant
 
         // Keyed by CURL* easy handle. Accessed only from the I/O thread.
         std::unordered_map<CURL*, std::unique_ptr<ActiveRequest>> m_Active;
+
+        // Retry queue — sorted by ready-at time (I/O thread only).
+        std::vector<RetryEntry> m_RetryQueue;
+
+        // Per-host rate limit tracking (I/O thread only).
+        std::unordered_map<std::string, HostRateLimitState> m_HostRateLimits;
     };
 } // namespace AIAssistant

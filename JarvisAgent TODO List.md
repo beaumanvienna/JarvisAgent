@@ -194,11 +194,9 @@ See also:
 ### ~~2. Browser-based AI chat terminal~~ ✅
 - ~~Implemented (Phases 1–4).~~ See item #12 above and `application/assistant/ai-assistant.md`.
 
-### 3. Show broken JCWFs in the workflow editor
-- JCWF containers that fail to parse are silently dropped from the WorkflowRegistry
-- The editor never shows them, so the user cannot fix the error visually
-- Instead they must dig through `log/log.txt` and edit JSON by hand
-- **Goal:** Show broken JCWFs in the editor with an error badge and the parse error message so the user can fix them in place
+### ~~3. Show broken JCWFs in the workflow editor~~ ✅
+- ~~JCWF containers that fail to parse are silently dropped from the WorkflowRegistry~~ ✅
+- **Done:** Registry tracks `m_BrokenWorkflows` (container path + stem + error message). `/api/workflows` includes `broken[]` array in response. Workflow editor list view shows broken workflows with red left border, red title, and yellow error message. Users can see which `.jcwf` files are broken and why without digging through logs.
 
 ### ~~4. Sub-workflows / workflow-call node~~ ✅
 - ~~Invoke one JCWF from another as a task~~ ✅
@@ -452,7 +450,7 @@ defense-in-depth, not strictly required.
 - [x] Both editions compile cleanly (Engine 11.6 MB, Studio 12.0 MB)
 - [x] Update `build-ppa.sh` to support `--edition engine|studio`
 - [x] Update CI workflows to build both editions (Linux: Engine+Studio, macOS: Engine+Studio→DMG, Windows: Engine→ZIP + Studio→MSI)
-- [ ] When AI assistant is implemented, all assistant modules are `#ifdef J9T_STUDIO`
+- [x] ~~When AI assistant is implemented, all assistant modules are `#ifdef J9T_STUDIO`~~ — `AssistantController` member + `ShutdownAssistantController()` + `/ws/assistant` route all guarded
 - [x] Update README with edition descriptions
 - [x] Frontend: dashboard reads `edition`+`capabilities` from `/api/status`; hides Workflow Editor link and Run buttons in Engine mode; `fetchKeysStatus` gracefully handles Engine 404
 

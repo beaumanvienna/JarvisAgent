@@ -223,7 +223,7 @@ namespace AIAssistant
                 case 404:
                     return "404 Not Found";
                 case 429:
-                    return "429 Too Many Requests";
+                    return "429 Too Many Requests — AI provider rate limit exceeded (check your plan's quota or billing balance)";
                 case 500:
                     return "500 Internal Server Error";
                 case 502:
@@ -382,7 +382,14 @@ namespace AIAssistant
         if (httpCode >= 400)
         {
             std::string msg = QueryErrorCode::Describe(static_cast<int>(httpCode));
-            LOG_CORE_ERROR("HTTP error {} for query {}", httpCode, m_QueryCounter.load());
+            if (httpCode == 429)
+            {
+                LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request (too many requests or insufficient credits)", m_QueryCounter.load());
+            }
+            else
+            {
+                LOG_CORE_ERROR("HTTP error {} for query {}", httpCode, m_QueryCounter.load());
+            }
             return QueryResult::Fail(static_cast<int>(httpCode), std::move(msg));
         }
 
