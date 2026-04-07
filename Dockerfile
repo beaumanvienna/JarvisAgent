@@ -125,17 +125,7 @@ COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/
-COPY example/workflows/message_engine_question.txt \
-     example/workflows/message_tire_question.txt \
-     example/workflows/message_unclear_question.txt \
-     example/workflows/port62pos.csv \
-     example/workflows/app.cpp \
-     example/workflows/lib1.cpp \
-     example/workflows/lib2.cpp \
-     example/workflows/main.cpp \
-     example/workflows/mylib.h \
-     /opt/jarvisagent/.image-defaults/workflows/
-RUN ln -sf message_engine_question.txt /opt/jarvisagent/.image-defaults/workflows/message.txt
+# (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Default config for first-run seeding
 COPY config.json /opt/jarvisagent/.image-defaults/config.json

@@ -103,14 +103,7 @@ for jcwf in aiCarMaintenancePipeline aiZipDemo \
             make-example portfolioDividendAnalysis; do
     cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
 done
-# Loose input files needed by the example workflows
-for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
-         message_engine_question.txt message_tire_question.txt \
-         message_unclear_question.txt port62pos.csv; do
-    cp "$REPO_ROOT/example/workflows/$f" "$STAGING/opt/jarvisagent/workflows/" 2>/dev/null || true
-done
-# Symlink used by aiCarMaintenancePipeline
-ln -sf message_engine_question.txt "$STAGING/opt/jarvisagent/workflows/message.txt"
+# (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Example config
 cp "$REPO_ROOT/packaging/config.json.example" "$STAGING/opt/jarvisagent/config.json.example"
@@ -169,16 +162,11 @@ if command -v rpmbuild &>/dev/null; then
     cp -r "$REPO_ROOT/scripts" "$SRCDIR/scripts"
     find "$SRCDIR/scripts" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
-    # Example workflows + loose input files
+    # Example workflows (input files are bundled inside each .jcwf zip)
     mkdir -p "$SRCDIR/example/workflows"
     for jcwf in aiCarMaintenancePipeline aiZipDemo \
                 make-example portfolioDividendAnalysis; do
         cp "$REPO_ROOT/example/workflows/${jcwf}.jcwf" "$SRCDIR/example/workflows/" 2>/dev/null || true
-    done
-    for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
-             message_engine_question.txt message_tire_question.txt \
-             message_unclear_question.txt port62pos.csv; do
-        cp "$REPO_ROOT/example/workflows/$f" "$SRCDIR/example/workflows/" 2>/dev/null || true
     done
 
     # Config + docs

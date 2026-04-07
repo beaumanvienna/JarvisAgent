@@ -47,14 +47,7 @@ class Jarvisagent < Formula
       aiCarMaintenancePipeline aiZipDemo
       make-example portfolioDividendAnalysis
     ].each { |w| (prefix/"workflows").install "example/workflows/#{w}.jcwf" }
-    # Loose input files needed by the example workflows
-    %w[
-      app.cpp lib1.cpp lib2.cpp main.cpp mylib.h
-      message_engine_question.txt message_tire_question.txt
-      message_unclear_question.txt port62pos.csv
-    ].each { |f| (prefix/"workflows").install "example/workflows/#{f}" if File.exist?("example/workflows/#{f}") }
-    # Symlink used by aiCarMaintenancePipeline
-    ln_sf "message_engine_question.txt", prefix/"workflows/message.txt"
+    # (Input files are bundled inside each .jcwf zip — no loose files to install)
 
     # Example config
     prefix.install "packaging/config.json.example" => "config.json.example"

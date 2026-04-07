@@ -30,7 +30,7 @@ mkdir -p "$DATA_DIR/queue"
 mkdir -p "$DATA_DIR/log"
 mkdir -p "$DATA_DIR/workflows"
 
-# Copy example workflows on first run (jcwf + loose input files + symlink)
+# Copy example workflows on first run
 if [[ -d "$SHARE/example-workflows" ]] && [[ -z "$(ls -A "$DATA_DIR/workflows" 2>/dev/null)" ]]; then
     cp -a "$SHARE/example-workflows/"* "$DATA_DIR/workflows/" 2>/dev/null || true
     echo "==> Copied example workflows to $DATA_DIR/workflows/"

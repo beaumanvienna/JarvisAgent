@@ -111,18 +111,7 @@ foreach ($jcwf in $jcwfFiles) {
     $src = "$RepoRoot\example\workflows\$jcwf.jcwf"
     if (Test-Path $src) { Copy-Item $src "$StageDir\workflows\" }
 }
-# Loose input files needed by the example workflows
-$looseFiles = @(
-    "app.cpp", "lib1.cpp", "lib2.cpp", "main.cpp", "mylib.h",
-    "message_engine_question.txt", "message_tire_question.txt",
-    "message_unclear_question.txt", "port62pos.csv"
-)
-foreach ($f in $looseFiles) {
-    $src = "$RepoRoot\example\workflows\$f"
-    if (Test-Path $src) { Copy-Item $src "$StageDir\workflows\" }
-}
-# message.txt — copy as regular file on Windows (no symlinks)
-Copy-Item "$RepoRoot\example\workflows\message_engine_question.txt" "$StageDir\workflows\message.txt"
+# (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Example config
 Copy-Item "$RepoRoot\packaging\config.json.example" "$StageDir\config.json.example"

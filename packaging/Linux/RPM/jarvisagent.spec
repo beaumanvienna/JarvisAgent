@@ -74,14 +74,7 @@ for jcwf in aiCarMaintenancePipeline aiZipDemo \
             vehicleTroubleshootingGuide; do
     install -m644 "example/workflows/${jcwf}.jcwf" %{_instdir}/workflows/
 done
-# Loose input files needed by the example workflows
-for f in app.cpp lib1.cpp lib2.cpp main.cpp mylib.h \
-         message_engine_question.txt message_tire_question.txt \
-         message_unclear_question.txt port62pos.csv; do
-    install -m644 "example/workflows/$f" %{_instdir}/workflows/ 2>/dev/null || true
-done
-# Symlink used by aiCarMaintenancePipeline
-ln -sf message_engine_question.txt %{_instdir}/workflows/message.txt
+# (Input files are bundled inside each .jcwf zip — no loose files to install)
 
 # Example config
 install -m644 packaging/config.json.example %{_instdir}/config.json.example
