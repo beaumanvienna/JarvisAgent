@@ -726,13 +726,38 @@ namespace AIAssistant
                 task["state"] = ToStringTaskInstanceStateKind(taskState.m_State);
                 task["attemptCount"] = taskState.m_AttemptCount;
                 task["lastErrorMessage"] = SanitizeUtf8(taskState.m_LastErrorMessage);
+
+                // Cap captured output at 512 KB per stream to prevent multi-MB WebSocket frames.
+                static constexpr size_t kMaxCapturedBytes = 512 * 1024;
                 if (!taskState.m_CapturedStdout.empty())
                 {
-                    task["capturedStdout"] = SanitizeUtf8(taskState.m_CapturedStdout);
+                    if (taskState.m_CapturedStdout.size() <= kMaxCapturedBytes)
+                    {
+                        task["capturedStdout"] = SanitizeUtf8(taskState.m_CapturedStdout);
+                    }
+                    else
+                    {
+                        std::string truncated = taskState.m_CapturedStdout.substr(0, kMaxCapturedBytes);
+                        truncated += "\n\n--- truncated (";
+                        truncated += std::to_string(taskState.m_CapturedStdout.size());
+                        truncated += " bytes total) ---";
+                        task["capturedStdout"] = SanitizeUtf8(truncated);
+                    }
                 }
                 if (!taskState.m_CapturedStderr.empty())
                 {
-                    task["capturedStderr"] = SanitizeUtf8(taskState.m_CapturedStderr);
+                    if (taskState.m_CapturedStderr.size() <= kMaxCapturedBytes)
+                    {
+                        task["capturedStderr"] = SanitizeUtf8(taskState.m_CapturedStderr);
+                    }
+                    else
+                    {
+                        std::string truncated = taskState.m_CapturedStderr.substr(0, kMaxCapturedBytes);
+                        truncated += "\n\n--- truncated (";
+                        truncated += std::to_string(taskState.m_CapturedStderr.size());
+                        truncated += " bytes total) ---";
+                        task["capturedStderr"] = SanitizeUtf8(truncated);
+                    }
                 }
 
                 tasks.push_back(std::move(task));
@@ -4895,22 +4920,13 @@ namespace AIAssistant
         // batch to prevent "Invalid UTF-8 in text frame" disconnects (code 1002).
         std::string const safeBatch = SanitizeUtf8(batch);
 
-        // [J9T_SSL_DEBUG] Log if sanitization changed anything (indicates bad UTF-8 source)
         if (safeBatch.size() != batch.size())
         {
-            LOG_APP_WARN("[ws] [J9T_SSL_DEBUG] SanitizeUtf8 changed batch: {}B -> {}B", batch.size(), safeBatch.size());
+            LOG_APP_WARN("[ws] SanitizeUtf8 changed batch: {}B -> {}B", batch.size(), safeBatch.size());
         }
-        // [J9T_SSL_DEBUG] Log batch size and first 200 chars for diagnostics
-        if (!safeBatch.empty())
-        {
-            LOG_APP_INFO("[ws] [J9T_SSL_DEBUG] sending batch to {} clients, size={}B, preview: {}",
-                         clients.size(), safeBatch.size(),
-                         safeBatch.substr(0, std::min(safeBatch.size(), size_t(200))));
-        }
-
         for (auto* client : clients)
         {
-            // [J9T_SSL_DEBUG] Re-check that the client is still alive under the lock.
+            // Re-check that the client is still alive under the lock.
             // Between the snapshot and here, onclose may have fired on another ASIO
             // thread, destroying the connection and leaving a dangling pointer.
             {

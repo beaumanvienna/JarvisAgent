@@ -115,8 +115,10 @@ namespace AIAssistant
         // Extract host from URL (e.g. "api.openai.com" from "https://api.openai.com/v1/...").
         static std::string ExtractHost(std::string const& url);
 
-        static constexpr int kMaxRetries = 5;
-        static constexpr int kBaseRetryMs = 1000; // 1 second base for exponential backoff
+        static constexpr int kMaxRetries = 5;            // max retries for 429 rate limit
+        static constexpr int kMaxRetriesTransient = 2;  // max retries for transient HTTP errors (400, 500, 502, 503)
+        static constexpr int kBaseRetryMs = 1000;       // 1 second base for exponential backoff
+        static constexpr size_t kMaxActivePerHost = 48; // max concurrent HTTP/2 streams per host
 
         CURLM* m_MultiHandle{nullptr};
         std::thread m_IoThread;

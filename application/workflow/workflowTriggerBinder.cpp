@@ -369,6 +369,12 @@ namespace AIAssistant
 
             WorkflowDefinition const& workflowDefinition = optionalWorkflowDefinition.value();
 
+            // Sub-workflows are invoked by their parent — never auto-trigger them.
+            if (workflowDefinition.m_IsSubWorkflow)
+            {
+                continue;
+            }
+
             if (workflowDefinition.m_Triggers.empty())
             {
                 triggerEngine.AddAutoTrigger(workflowDefinition.m_Id, "auto", true, fireAutoTriggers);

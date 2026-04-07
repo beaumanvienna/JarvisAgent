@@ -226,6 +226,11 @@ body {
   font-weight: bold;
 }
 
+.state-warning {
+  color: #f59e0b;
+  font-weight: bold;
+}
+
 .state-queued {
   color: #8a8a8a;
 }

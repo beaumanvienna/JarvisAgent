@@ -85,6 +85,7 @@ namespace AIAssistant
                 .m_QueriesChanged = queriesChanged,                              //
                 .m_AllQueriesSent = allQueriesSent,                              //
                 .m_AllResponsesReceived = (m_InFlightCount.load() == 0),          // idle when no requests are in-flight
+                .m_HasSuccesses = (m_CompletedQueriesThisRun > 0),               //
                 .m_HasFailures = (m_FailedQueriesThisRun > 0)                    //
             };
             m_StateMachine.OnUpdate(stateInfo);
@@ -133,22 +134,40 @@ namespace AIAssistant
             }
         }
 
-        { // remote status display via web server
-            auto& webServer = *App::g_App->GetWebServer();
-            crow::json::wvalue msg;
-            msg["type"] = "status";
-            msg["name"] = m_Name;
-            msg["state"] = std::string(SessionManager::StateMachine::StateNames[m_StateMachine.GetState()]);
-            msg["outputs"] = m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size();
-            msg["inflight"] = m_InFlightCount.load();
-            msg["completed"] = m_CompletedQueriesThisRun.load();
-            msg["failed"] = m_FailedQueriesThisRun.load();
-            if (m_LastErrorCode != 0)
+        { // remote status display via web server — only broadcast when state actually changes
+            auto const currentState = m_StateMachine.GetState();
+            auto const outputs = m_FileCategorizer.GetCategorizedFiles().m_Requirements.m_Map.size();
+            auto const inflight = m_InFlightCount.load();
+            auto const completed = m_CompletedQueriesThisRun.load();
+            auto const failed = m_FailedQueriesThisRun.load();
+
+            if (currentState != m_LastBroadcast.m_State || outputs != m_LastBroadcast.m_Outputs ||
+                inflight != m_LastBroadcast.m_Inflight || completed != m_LastBroadcast.m_Completed ||
+                failed != m_LastBroadcast.m_Failed || m_LastErrorCode != m_LastBroadcast.m_ErrorCode)
             {
-                msg["last_error_code"] = m_LastErrorCode;
-                msg["last_error_message"] = m_LastErrorMessage;
+                m_LastBroadcast.m_State = currentState;
+                m_LastBroadcast.m_Outputs = outputs;
+                m_LastBroadcast.m_Inflight = inflight;
+                m_LastBroadcast.m_Completed = completed;
+                m_LastBroadcast.m_Failed = failed;
+                m_LastBroadcast.m_ErrorCode = m_LastErrorCode;
+
+                auto& webServer = *App::g_App->GetWebServer();
+                crow::json::wvalue msg;
+                msg["type"] = "status";
+                msg["name"] = m_Name;
+                msg["state"] = std::string(SessionManager::StateMachine::StateNames[currentState]);
+                msg["outputs"] = outputs;
+                msg["inflight"] = inflight;
+                msg["completed"] = completed;
+                msg["failed"] = failed;
+                if (m_LastErrorCode != 0)
+                {
+                    msg["last_error_code"] = m_LastErrorCode;
+                    msg["last_error_message"] = m_LastErrorMessage;
+                }
+                webServer.BroadcastJSON(msg.dump());
             }
-            webServer.BroadcastJSON(msg.dump());
         }
     }
 
@@ -239,7 +258,8 @@ namespace AIAssistant
     bool SessionManager::IsIdle() const
     {
         auto const state = m_StateMachine.GetState();
-        return state == StateMachine::State::AllResponsesReceived || state == StateMachine::State::Failed;
+        return state == StateMachine::State::AllResponsesReceived || state == StateMachine::State::PartiallyCompleted ||
+               state == StateMachine::State::Failed;
     }
 
     bool SessionManager::HasTrackedFiles() const
@@ -805,11 +825,28 @@ namespace AIAssistant
             {
                 if (stateInfo.m_AllResponsesReceived)
                 {
-                    m_State = stateInfo.m_HasFailures ? State::Failed : State::AllResponsesReceived;
+                    if (!stateInfo.m_HasFailures)
+                        m_State = State::AllResponsesReceived;
+                    else if (stateInfo.m_HasSuccesses)
+                        m_State = State::PartiallyCompleted;
+                    else
+                        m_State = State::Failed;
                 }
                 break;
             }
             case State::AllResponsesReceived:
+            {
+                if (stateInfo.m_EnvironmentChanged)
+                {
+                    m_State = State::CompilingEnvironment;
+                }
+                else if (stateInfo.m_QueriesChanged)
+                {
+                    m_State = State::SendingQueries;
+                }
+                break;
+            }
+            case State::PartiallyCompleted:
             {
                 if (stateInfo.m_EnvironmentChanged)
                 {

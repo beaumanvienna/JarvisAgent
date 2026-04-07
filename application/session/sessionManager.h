@@ -45,6 +45,7 @@ namespace AIAssistant
                 SendingQueries,
                 AllQueriesSent,
                 AllResponsesReceived,
+                PartiallyCompleted,
                 Failed,
                 NumStates
             };
@@ -54,6 +55,7 @@ namespace AIAssistant
                 "SendingQueries",       //
                 "AllQueriesSent",       //
                 "AllResponsesReceived", //
+                "PartiallyCompleted",   //
                 "Failed"                //
             };
 
@@ -64,6 +66,7 @@ namespace AIAssistant
                 bool m_QueriesChanged{false};
                 bool m_AllQueriesSent{false};
                 bool m_AllResponsesReceived{false};
+                bool m_HasSuccesses{false};
                 bool m_HasFailures{false};
             };
 
@@ -155,5 +158,17 @@ namespace AIAssistant
         std::mutex m_ResultMutex; // protects m_LastErrorCode + m_LastErrorMessage
         int m_LastErrorCode{0};
         std::string m_LastErrorMessage;
+
+        // Previous-broadcast state for change detection (avoids broadcasting every 10ms)
+        struct BroadcastState
+        {
+            StateMachine::State m_State{StateMachine::State::CompilingEnvironment};
+            size_t m_Outputs{0};
+            size_t m_Inflight{0};
+            size_t m_Completed{0};
+            size_t m_Failed{0};
+            int m_ErrorCode{0};
+        };
+        BroadcastState m_LastBroadcast;
     };
 } // namespace AIAssistant

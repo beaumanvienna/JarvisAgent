@@ -178,9 +178,32 @@ namespace AIAssistant
             local.swap(m_Inbox);
         }
 
+        // Count active requests per host so we can enforce kMaxActivePerHost.
+        std::unordered_map<std::string, size_t> activePerHost;
+        for (auto const& [handle, req] : m_Active)
+        {
+            std::string host = ExtractHost(req->m_Url);
+            if (!host.empty())
+                ++activePerHost[host];
+        }
+
         while (!local.empty())
         {
             auto& pending = local.front();
+            std::string host = ExtractHost(pending.m_QueryData.m_Url);
+
+            // If this host already has kMaxActivePerHost streams in flight,
+            // push remaining requests back into the inbox for the next cycle.
+            if (!host.empty() && activePerHost[host] >= kMaxActivePerHost)
+            {
+                std::lock_guard<std::mutex> lock(m_InboxMutex);
+                while (!local.empty())
+                {
+                    m_Inbox.push(std::move(local.front()));
+                    local.pop();
+                }
+                break;
+            }
 
             auto req = std::make_unique<ActiveRequest>();
             req->m_QueryData = pending.m_QueryData;
@@ -193,6 +216,8 @@ namespace AIAssistant
             {
                 curl_multi_add_handle(m_MultiHandle, easy);
                 m_Active[easy] = std::move(req);
+                if (!host.empty())
+                    ++activePerHost[host];
             }
             else
             {
@@ -447,6 +472,34 @@ namespace AIAssistant
                 m_RetryQueue.push_back(std::move(entry));
 
                 // Clean up the completed easy handle.
+                curl_multi_remove_handle(m_MultiHandle, easy);
+                curl_slist_free_all(req.m_Headers);
+                curl_easy_cleanup(easy);
+                m_Active.erase(it);
+                continue; // do NOT invoke callback — retry is pending
+            }
+
+            // --- Handle transient HTTP errors (400, 500, 502, 503) with limited auto-retry ---
+            bool const isTransientError = (httpCode == 400 || httpCode == 500 || httpCode == 502 || httpCode == 503);
+            if (res == CURLE_OK && isTransientError && req.m_RetryCount < kMaxRetriesTransient && !m_Stopping.load())
+            {
+                int retryCount = req.m_RetryCount + 1;
+                int delayMs = kBaseRetryMs * (1 << (retryCount - 1)); // 1s, 2s
+
+                LOG_CORE_WARN("HTTP {} for query {} — transient error, auto-retrying in {}ms (attempt {}/{})",
+                              httpCode, qnum, delayMs, retryCount, kMaxRetriesTransient);
+
+                PendingRequest pendingRetry;
+                pendingRetry.m_QueryData = std::move(req.m_QueryData);
+                pendingRetry.m_Callback  = std::move(req.m_Callback);
+
+                RetryEntry entry;
+                entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+                entry.m_Request    = std::move(pendingRetry);
+                entry.m_RetryCount = retryCount;
+
+                m_RetryQueue.push_back(std::move(entry));
+
                 curl_multi_remove_handle(m_MultiHandle, easy);
                 curl_slist_free_all(req.m_Headers);
                 curl_easy_cleanup(easy);

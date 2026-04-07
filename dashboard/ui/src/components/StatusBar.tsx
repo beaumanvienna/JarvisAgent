@@ -47,7 +47,9 @@ export default function StatusBar({
   const anyInflight = Array.from(sessions.values()).some(
     (s) => s.inflight > 0
   );
-  const anyRunning = runs.some((r) => r.state === "running");
+  const anyRunning = runs.some(
+    (r) => r.state === "running" || r.state === "queued" || r.state === "pending"
+  );
 
   const connectionColor = connected ? "#22c55e" : "#ef4444";
   const inflightColor = anyInflight ? "#eab308" : "#334155";

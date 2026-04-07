@@ -229,14 +229,34 @@ export default function LogViewerPanel({ registerLogCallback }: LogViewerPanelPr
     return () => window.removeEventListener("keydown", handler);
   }, [navigateMatch]);
 
-  const scrollToLine = useCallback((lineNum: number) => {
+  const scrollToLine = useCallback(async (lineNum: number) => {
     const el = containerRef.current;
     if (!el) return;
     // Convert absolute 1-indexed file line number to array index.
-    const idx = lineNum - lineNumOffset;
-    if (idx < 0 || idx >= activeLines.length) return;
-    el.scrollTop = Math.max(0, idx * LINE_HEIGHT - containerHeight / 3);
-    setAutoScroll(false);
+    let idx = lineNum - lineNumOffset;
+    let lineCount = activeLines.length;
+    if (idx < 0) {
+      // Target line is before the loaded window — re-fetch with a larger tail.
+      const totalLines = lineNumOffset + activeLines.length - 1;
+      const needed = Math.min(totalLines - lineNum + 1000, 200000);
+      try {
+        const data = await fetchLog({ tail: needed });
+        if (data.ok) {
+          setLines(data.lines);
+          setByteOffset(data.byteOffset);
+          const newOffset = (data.totalLines ?? data.lines.length) - data.lines.length + 1;
+          setLineNumOffset(newOffset);
+          idx = lineNum - newOffset;
+          lineCount = data.lines.length;
+        }
+      } catch { /* ignore */ }
+    }
+    if (idx < 0 || idx >= lineCount) return;
+    // Use requestAnimationFrame to let React render the new lines before scrolling.
+    requestAnimationFrame(() => {
+      el.scrollTop = Math.max(0, idx * LINE_HEIGHT - containerHeight / 3);
+      setAutoScroll(false);
+    });
   }, [containerHeight, lineNumOffset, activeLines.length]);
 
   const handleAnalyze = useCallback(async (index = 0) => {

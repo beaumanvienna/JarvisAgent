@@ -35,8 +35,9 @@ export default function SessionManagersPanel({ sessions }: Props) {
         <tbody>
           {entries.map((s) => {
             const isFailed = s.state === "Failed";
+            const isPartial = s.state === "PartiallyCompleted";
             const errorTooltip =
-              isFailed && s.last_error_code
+              (isFailed || isPartial) && s.last_error_code
                 ? `Error ${s.last_error_code}: ${s.last_error_message ?? "unknown"}`
                 : undefined;
             return (
@@ -45,6 +46,10 @@ export default function SessionManagersPanel({ sessions }: Props) {
                 <td>
                   {isFailed ? (
                     <span className="state-failed" title={errorTooltip}>
+                      {s.state}
+                    </span>
+                  ) : isPartial ? (
+                    <span className="state-warning" title={errorTooltip}>
                       {s.state}
                     </span>
                   ) : (
