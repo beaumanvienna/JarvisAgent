@@ -125,6 +125,7 @@ namespace AIAssistant
         ToolResult ExecWorkflowPause(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecWorkflowResume(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecWorkflowStop(std::unordered_map<std::string, std::string> const& args);
+        ToolResult ExecWorkflowClean(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecGetDashboardStatus(std::unordered_map<std::string, std::string> const& args);
 
         // L3 JCWF development tools

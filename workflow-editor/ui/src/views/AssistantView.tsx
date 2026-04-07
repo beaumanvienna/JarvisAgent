@@ -48,6 +48,10 @@ export default function AssistantView(): JSX.Element {
   const historyRef = useRef<string[]>([]);
   const historyFetchedRef = useRef<boolean>(false);
 
+  // Arrow-key history navigation (Up/Down)
+  const historyIndexRef = useRef<number>(-1); // -1 = not browsing history
+  const savedInputBeforeHistoryRef = useRef<string>(""); // saves current input when entering history
+
   // Initialize xterm.js
   useEffect(() => {
     if (!termRef.current || xtermRef.current) return;
@@ -402,6 +406,38 @@ export default function AssistantView(): JSX.Element {
               cursorPosRef.current--;
               redrawInputLine(term);
             }
+          } else if (code === "A") {
+            // Up arrow — previous history entry
+            clearGhost();
+            const history = historyRef.current;
+            if (history.length > 0) {
+              if (historyIndexRef.current === -1) {
+                // Entering history — save current input
+                savedInputBeforeHistoryRef.current = inputBufferRef.current;
+                historyIndexRef.current = history.length - 1;
+              } else if (historyIndexRef.current > 0) {
+                historyIndexRef.current--;
+              }
+              inputBufferRef.current = history[historyIndexRef.current];
+              cursorPosRef.current = inputBufferRef.current.length;
+              redrawInputLine(term);
+            }
+          } else if (code === "B") {
+            // Down arrow — next history entry
+            clearGhost();
+            if (historyIndexRef.current !== -1) {
+              const history = historyRef.current;
+              if (historyIndexRef.current < history.length - 1) {
+                historyIndexRef.current++;
+                inputBufferRef.current = history[historyIndexRef.current];
+              } else {
+                // Past the end — restore saved input
+                historyIndexRef.current = -1;
+                inputBufferRef.current = savedInputBeforeHistoryRef.current;
+              }
+              cursorPosRef.current = inputBufferRef.current.length;
+              redrawInputLine(term);
+            }
           } else if (code === "C") {
             // Right arrow
             if (
@@ -463,6 +499,8 @@ export default function AssistantView(): JSX.Element {
         } else if (ch === "\r" || ch === "\n") {
           // Enter
           clearGhost();
+          historyIndexRef.current = -1; // reset history navigation
+          redrawInputLine(term); // remove ghost text from terminal buffer
           const input = inputBufferRef.current.trim();
           term.writeln("");
 

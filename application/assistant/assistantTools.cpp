@@ -187,20 +187,21 @@ namespace AIAssistant
 
         // --- L3 mutating tools (all require approval) ---
         m_ToolDefs.push_back({"run_shell",
-                              "Executes a shell command and returns stdout/stderr. The user will be shown the exact "
-                              "command and must approve it before execution. Timeout: 30 seconds.",
+                              "Executes a shell command and returns stdout/stderr. Just call this tool — the system "
+                              "automatically shows an approval dialog to the user. Do NOT ask for permission yourself. "
+                              "Timeout: 30 seconds.",
                               "Args: command (string, required), cwd (string, optional, working directory)", true});
         m_ToolFns["run_shell"] = [this](auto const& a) { return ExecRunShell(a); };
 
         m_ToolDefs.push_back({"write_file",
                               "Writes content to a file. Creates parent directories if needed. Overwrites existing "
-                              "files. The user must approve the operation.",
+                              "files. Just call this tool — the system handles approval automatically.",
                               "Args: path (string, required, relative to project root), content (string, required)", true});
         m_ToolFns["write_file"] = [this](auto const& a) { return ExecWriteFile(a); };
 
         m_ToolDefs.push_back({"edit_file",
                               "Replaces a specific text span in a file with new content. The old_text must match "
-                              "exactly once in the file. The user must approve the operation.",
+                              "exactly once in the file. Just call this tool — the system handles approval automatically.",
                               "Args: path (string, required), old_text (string, required), new_text (string, required)",
                               true});
         m_ToolFns["edit_file"] = [this](auto const& a) { return ExecEditFile(a); };
@@ -216,6 +217,13 @@ namespace AIAssistant
         m_ToolDefs.push_back({"workflow_stop", "Stops/cancels a running or paused workflow run. This cannot be undone.",
                               "Args: run_id (string, required)", true});
         m_ToolFns["workflow_stop"] = [this](auto const& a) { return ExecWorkflowStop(a); };
+
+        m_ToolDefs.push_back({"workflow_clean",
+                              "Removes intermediate and output files from a workflow's working directory (e.g. .o files, "
+                              "compiled artifacts). The workflow must not have an active run. Just call this tool — "
+                              "the system handles approval.",
+                              "Args: workflow_id (string, required)", true});
+        m_ToolFns["workflow_clean"] = [this](auto const& a) { return ExecWorkflowClean(a); };
 
         m_ToolDefs.push_back({"get_dashboard_status",
                               "Returns a comprehensive system status report: registered workflows, active/completed/"
@@ -247,20 +255,20 @@ namespace AIAssistant
 
         m_ToolDefs.push_back({"jcwf_write_plan",
                               "Creates or updates the development plan (.plan.md) for a workflow. The plan "
-                              "guides JCWF generation. Requires approval.",
+                              "guides JCWF generation. Just call this tool — the system handles approval.",
                               "Args: workflow_id (string, required), content (string, required)", true});
         m_ToolFns["jcwf_write_plan"] = [this](auto const& a) { return ExecJcwfWritePlan(a); };
 
         m_ToolDefs.push_back({"jcwf_generate",
                               "Generates or regenerates a JCWF workflow from its development plan using AI. "
-                              "The plan must exist (use jcwf_write_plan first). Requires approval.",
+                              "The plan must exist (use jcwf_write_plan first). Just call this tool — the system handles approval.",
                               "Args: workflow_id (string, required)", true});
         m_ToolFns["jcwf_generate"] = [this](auto const& a) { return ExecJcwfGenerate(a); };
 
         m_ToolDefs.push_back({"jcwf_fix_task",
                               "Fixes a specific task in a JCWF workflow based on instructions. Reads the "
                               "current task definition, applies the fix via AI, and updates the workflow file. "
-                              "Requires approval.",
+                              "Just call this tool — the system handles approval.",
                               "Args: workflow_id (string, required), task_id (string, required), "
                               "instructions (string, required)",
                               true});
@@ -268,7 +276,7 @@ namespace AIAssistant
 
         m_ToolDefs.push_back({"jcwf_write_script",
                               "Writes a Python or shell script file to the scripts/ directory. Validates "
-                              "that shell scripts have proper shebang and set -euo pipefail. Requires approval.",
+                              "that shell scripts have proper shebang and set -euo pipefail. Just call this tool — the system handles approval.",
                               "Args: path (string, required, e.g. \"scripts/myscript.sh\"), "
                               "content (string, required), type (string, required, \"shell\" or \"python\")",
                               true});
@@ -287,7 +295,7 @@ namespace AIAssistant
         {
             oss << "- " << tool.name;
             if (tool.requiresApproval)
-                oss << " [REQUIRES APPROVAL]";
+                oss << " [APPROVAL HANDLED BY SYSTEM]";
             oss << "\n  " << tool.description << "\n  " << tool.argsDescription << "\n\n";
         }
         return oss.str();
@@ -2039,6 +2047,29 @@ namespace AIAssistant
     }
 
     // -----------------------------------------------------------------
+    // workflow_clean
+    // -----------------------------------------------------------------
+
+    ToolResult ToolRegistry::ExecWorkflowClean(std::unordered_map<std::string, std::string> const& args)
+    {
+        if (!m_RuntimeManager)
+            return {"workflow_clean", false, "Runtime manager not available"};
+
+        auto it = args.find("workflow_id");
+        if (it == args.end() || it->second.empty())
+            return {"workflow_clean", false, "Missing required argument: workflow_id"};
+
+        std::string const& workflowId = it->second;
+        std::string errorMessage;
+        bool const ok = m_RuntimeManager->CleanWorkflow(workflowId, errorMessage);
+
+        if (!ok)
+            return {"workflow_clean", false, "Failed to clean workflow '" + workflowId + "': " + errorMessage};
+
+        return {"workflow_clean", true, "Workflow '" + workflowId + "' cleaned successfully."};
+    }
+
+    // -----------------------------------------------------------------
     // get_dashboard_status
     // -----------------------------------------------------------------
 
@@ -2531,13 +2562,17 @@ namespace AIAssistant
             "You are a JCWF workflow generator. Given a development plan, produce a valid JC Workflow "
             "JSON file. Output ONLY the raw JSON — no markdown fences, no explanations, no preamble.\n\n"
             "Key rules:\n"
-            "- The JSON must have: id, version, label, trigger, tasks[], edges[]\n"
+            "- The root JSON object has: \"tasks\" (an OBJECT keyed by task ID, NOT an array)\n"
+            "- Example structure:\n"
+            "  {\"tasks\": {\"my_task\": {\"id\": \"my_task\", \"type\": \"shell\", ...}}}\n"
+            "- WRONG: \"tasks\": [{...}]  — NEVER use an array for tasks\n"
             "- Each task needs: id, type (\"shell\" or \"python\" or \"ai_call\"), label\n"
-            "- Shell tasks need: script (path starting with \"scripts/\")\n"
-            "- Python tasks need: script (path starting with \"scripts/\")\n"
+            "- Shell tasks need: params.command (path starting with \"scripts/\")\n"
+            "- Python tasks need: params.command (path starting with \"scripts/\")\n"
             "- ai_call tasks need: stng_files, prob_files or prob_inline\n"
-            "- Edges define execution order: {from, to}\n"
+            "- Task dependencies use \"depends_on\": [\"other_task_id\"]\n"
             "- file_inputs are relative to working_directory\n"
+            "- working_directory must be present (use \"\" for workflow root)\n"
             "- Use version \"1.0\" unless using filters/control_nodes (then \"1.1\")\n";
 
         std::string userPrompt =
