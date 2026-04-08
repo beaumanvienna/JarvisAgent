@@ -162,6 +162,30 @@ if [[ -f "$USER_HOME/.venv/bin/activate" ]]; then
     source "$USER_HOME/.venv/bin/activate"
 fi
 
+# ── Install mmdc (mermaid-cli) if missing ───────────────────────────────────
+if ! command -v mmdc &>/dev/null; then
+    echo "==> Installing mmdc (mermaid-cli) for PDF workflows ..."
+    npm install --prefix "$USER_HOME/.npm-tools" @mermaid-js/mermaid-cli@10.x 2>/dev/null \
+        || echo "WARNING: mmdc install failed (npm required)"
+fi
+
+# Add local npm-tools bin to PATH (mmdc lives here)
+if [[ -d "$USER_HOME/.npm-tools/node_modules/.bin" ]]; then
+    export PATH="$USER_HOME/.npm-tools/node_modules/.bin:$PATH"
+fi
+
+# ── Hint about pandoc if missing ────────────────────────────────────────────
+if ! command -v pandoc &>/dev/null; then
+    echo ""
+    echo "==> WARNING: 'pandoc' is not installed."
+    echo "    PDF workflows will fail without it. Please install pandoc and a LaTeX distribution:"
+    echo ""
+    echo "    Ubuntu/Debian:  sudo apt install pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended"
+    echo "    Fedora/RHEL:    sudo dnf install pandoc texlive-latex"
+    echo "    Arch:           sudo pacman -S pandoc texlive-bin"
+    echo ""
+fi
+
 # ---- Open dashboard in default browser ----
 if [[ "$OPEN_BROWSER" == true ]]; then
     # Delay slightly so the server has time to start

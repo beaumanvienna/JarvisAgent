@@ -378,8 +378,8 @@ JarvisAgent depends on
 * libz (Linux — linked at build time; vendored on Windows, included in Xcode SDK on macOS)
 * premake5
 * markitdown (document conversion)
-* pandoc + pdflatex (Markdown → PDF; `apt install pandoc texlive-latex-base texlive-latex-extra`)
-* mmdc — @mermaid-js/mermaid-cli (Mermaid diagram rendering; `npm install -g @mermaid-js/mermaid-cli@10.x`)
+* pandoc + pdflatex (Markdown → PDF — required for PDF workflows; see platform-specific install commands below)
+* mmdc — @mermaid-js/mermaid-cli (Mermaid diagram rendering — installed automatically by the launcher script)
 
 > OpenSSL and libcurl are vendored in the repository and built from source on all platforms.
 
@@ -441,7 +441,7 @@ If you prefer **MSYS2 / Git Bash**, set `"use_bash": true` in `config.json` (or 
 
 ### Python Virtual Environment
 
-JarvisAgent's shell-based workflows call Python tools (`markitdown`) and system tools (`pandoc`, `mmdc`). The Python tools should be installed in a **virtual environment** and activated before starting JarvisAgent. `pandoc` and `mmdc` are system/npm dependencies installed separately.
+JarvisAgent's shell-based workflows call Python tools (`markitdown`) and system tools (`pandoc`, `mmdc`). The Python tools are installed in a **virtual environment** managed automatically by the launcher script. `mmdc` (mermaid-cli) is also installed automatically by the launcher on first run. Only `pandoc` and texlive require manual installation (see below).
 
 **Create and activate the venv** (one-time setup):
 
@@ -469,20 +469,23 @@ source .venv/Scripts/activate
 pip install "markitdown[all]"
 ```
 
-For PDF workflows (`vehicleTroubleshootingGuide`), also install system deps once:
+For PDF workflows (`vehicleTroubleshootingGuide`), install pandoc and a LaTeX distribution once. The launcher script installs `mmdc` (mermaid-cli) automatically.
 
 ```bash
-# Linux
+# Linux (Ubuntu / Debian)
 sudo apt install pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended
-npm install -g @mermaid-js/mermaid-cli@10.x
+
+# Linux (Fedora / RHEL)
+sudo dnf install pandoc texlive-latex
+
+# Linux (Arch)
+sudo pacman -S pandoc texlive-bin
 
 # macOS
 brew install pandoc basictex
-npm install -g @mermaid-js/mermaid-cli@10.x
 
 # Windows
 choco install pandoc miktex
-npm install -g @mermaid-js/mermaid-cli@10.x
 ```
 
 **Quick start** — use the launcher script (creates the venv automatically on first run):

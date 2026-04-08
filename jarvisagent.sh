@@ -45,9 +45,31 @@ if [ ! -d "$VENV_DIR" ]; then
     "$VENV_DIR/bin/pip" install --upgrade pip
     "$VENV_DIR/bin/pip" install "markitdown[all]"
     echo "[jarvisagent.sh] Virtual environment ready."
-    echo "[jarvisagent.sh] NOTE: PDF workflows (vehicleTroubleshootingGuide) also require:"
-    echo "  mmdc:   npm install -g @mermaid-js/mermaid-cli@10.x"
-    echo "  pandoc: apt install pandoc texlive-latex-base texlive-latex-extra"
+fi
+
+# ── Install mmdc (mermaid-cli) if missing ───────────────────────────────────
+if ! command -v mmdc &>/dev/null; then
+    echo "[jarvisagent.sh] Installing mmdc (mermaid-cli) for PDF workflows ..."
+    npm install --prefix "$SCRIPT_DIR/.npm-tools" @mermaid-js/mermaid-cli@10.x 2>/dev/null \
+        || echo "[jarvisagent.sh] WARNING: mmdc install failed (npm required)"
+fi
+
+# Add local npm-tools bin to PATH (mmdc lives here)
+if [[ -d "$SCRIPT_DIR/.npm-tools/node_modules/.bin" ]]; then
+    export PATH="$SCRIPT_DIR/.npm-tools/node_modules/.bin:$PATH"
+fi
+
+# ── Hint about pandoc if missing ────────────────────────────────────────────
+if ! command -v pandoc &>/dev/null; then
+    echo ""
+    echo "[jarvisagent.sh] WARNING: 'pandoc' is not installed."
+    echo "  PDF workflows will fail without it. Please install pandoc and a LaTeX distribution:"
+    echo ""
+    echo "  Ubuntu/Debian:  sudo apt install pandoc texlive-latex-base texlive-latex-extra texlive-fonts-recommended"
+    echo "  Fedora/RHEL:    sudo dnf install pandoc texlive-latex"
+    echo "  Arch:           sudo pacman -S pandoc texlive-bin"
+    echo "  macOS:          brew install pandoc basictex"
+    echo ""
 fi
 
 # ── Activate venv ────────────────────────────────────────────────────────────

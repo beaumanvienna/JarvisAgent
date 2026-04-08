@@ -9,6 +9,7 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  gcc-c++ make premake nodejs npm
 BuildRequires:  python3-devel python3-pip zlib-devel
 Requires:       python3 python3-pip zlib bash
+Suggests:       pandoc texlive-latex nodejs npm
 
 %global debug_package %{nil}
 
