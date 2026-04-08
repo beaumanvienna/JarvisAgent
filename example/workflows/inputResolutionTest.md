@@ -119,6 +119,11 @@ curl -s -X POST http://localhost:8080/api/workflows/inputResolutionTest/run \
   -H "Content-Type: application/json" \
   -d '{"context": {"user_name": "JarvisTester"}}'
 
+# Or with TLS enabled (default port 8443):
+curl -sk -X POST https://localhost:8443/api/workflows/inputResolutionTest/run \
+  -H 'Content-Type: application/json' \
+  -d '{"context": {"user_name": "JarvisTester"}}' | jq .
+
 # 4. Check the log for resolution results
 grep "echoInput.sh" log/log.txt
 ```
