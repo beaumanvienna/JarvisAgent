@@ -27,7 +27,7 @@ __pycache__/
 # React UI build artifacts
 node_modules/
 **/ui/dist/
-**/ui/package-lock.json
+**/package-lock.json
 
 compile_commands.json
 .cache/
