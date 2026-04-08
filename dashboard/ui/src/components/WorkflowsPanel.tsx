@@ -41,6 +41,8 @@ function stateClass(state: string): string {
 }
 
 export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh, canRunWorkflows }: Props) {
+  const topLevelWorkflows = workflows.filter((wf) => !wf.is_sub_workflow);
+
   const runsByWorkflow = new Map<string, RunSnapshot>();
   for (const run of runs) {
     runsByWorkflow.set(run.workflowId, run);
@@ -63,7 +65,7 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
   return (
     <section className="panel">
       <h2>Workflows</h2>
-      {!hasProviders && workflows.some((wf) => wf.has_ai_call) && (
+      {!hasProviders && topLevelWorkflows.some((wf) => wf.has_ai_call) && (
         <div className="no-keys-banner">
           No AI providers configured — workflows with ai_call tasks have been
           skipped. Set <code>OPENAI_API_KEY</code> or{" "}
@@ -71,7 +73,7 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
           UI in the workflow editor, then reload workflows.
         </div>
       )}
-      {workflows.length === 0 ? (
+      {topLevelWorkflows.length === 0 ? (
         <p className="muted">No workflows loaded.</p>
       ) : (
         <table className="data-table">
@@ -85,7 +87,7 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
             </tr>
           </thead>
           <tbody>
-            {workflows.map((wf) => {
+            {topLevelWorkflows.map((wf) => {
               const activeRun = runsByWorkflow.get(wf.id);
               const lastRun = lastRunByWorkflow.get(wf.id);
               const displayState = activeRun?.state ?? lastRun?.state ?? null;

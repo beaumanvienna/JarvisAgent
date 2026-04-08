@@ -24,6 +24,7 @@ export interface WorkflowEntry {
   path?: string;
   manual_start?: boolean;
   has_ai_call?: boolean;
+  is_sub_workflow?: boolean;
 }
 
 export interface WorkflowsListResponse {
