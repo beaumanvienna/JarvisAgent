@@ -31,8 +31,6 @@ node_modules/
 compile_commands.json
 .cache/
 vendor/curl/lib/curl_config.h
-queue/*
-!queue/.gitignore
 log/*
 test/log.txt
 *.tsbuildinfo
