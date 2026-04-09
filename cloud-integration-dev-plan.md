@@ -29,31 +29,31 @@ The existing AI interface code (`CurlMultiDispatcher`, `aiRequestPool`, `aiCallT
 
 ### Phase 0 — Foundation
 
-- [ ] Implement `ICloudConnector` abstract base class and `CloudConnectorRegistry`
-- [ ] Implement `CloudConnection` config model (backend + REST API CRUD)
-- [ ] Implement `ICredential` class hierarchy (`ApiKeyCredential`, `OAuthCredential`, `KeyPairCredential`, `BasicAuthCredential`) — replaces flat `key_type` string discriminator with type-safe polymorphism
-- [ ] Extend `KeyManager` to store and resolve `ICredential` subtypes
-- [ ] Implement `OAuthTokenManager` (token refresh loop, expiry tracking)
-- [ ] Implement `JwtGenerator` (RSA RS256 via OpenSSL, reusable for Snowflake and others)
-- [ ] Implement `CloudRetryPolicy` (shared exponential backoff with jitter, provider-specific retry codes, Retry-After header support)
-- [ ] Implement `SecretRedactor` utility for log output (scrub Bearer tokens, JWT payloads, OAuth refresh tokens, SigV4 signatures, SQL query parameters from log messages)
-- [ ] Add `ICloudTaskExecutor` base class and register in `TaskExecutorRegistry`
-- [ ] Frontend: Add "Connections" tab and `ConnectionsView.tsx`
-- [ ] Frontend: Rename "AI Keys" to "Keys", add credential type support to `ProvidersSettingsView.tsx`
-- [ ] Frontend: Add `api/connections.ts` REST client
-- [ ] Add `GET/POST/PUT/DELETE /api/connections` REST endpoints in `webServer.cpp`
-- [ ] Add `POST /api/connections/<name>/test` endpoint
+- [x] Implement `ICloudConnector` abstract base class and `CloudConnectorRegistry`
+- [x] Implement `CloudConnection` config model (backend + REST API CRUD)
+- [x] Implement `ICredential` class hierarchy (`ApiKeyCredential`, `OAuthCredential`, `KeyPairCredential`, `BasicAuthCredential`) — replaces flat `key_type` string discriminator with type-safe polymorphism
+- [x] Extend `KeyManager` to store and resolve `ICredential` subtypes
+- [x] Implement `OAuthTokenManager` (token refresh loop, expiry tracking)
+- [x] Implement `JwtGenerator` (RSA RS256 via OpenSSL, reusable for Snowflake and others)
+- [x] Implement `CloudRetryPolicy` (shared exponential backoff with jitter, provider-specific retry codes, Retry-After header support)
+- [x] Implement `SecretRedactor` utility for log output (scrub Bearer tokens, JWT payloads, OAuth refresh tokens, SigV4 signatures, SQL query parameters from log messages)
+- [x] Add `ICloudTaskExecutor` base class and register in `TaskExecutorRegistry`
+- [x] Frontend: Add "Connections" tab and `ConnectionsView.tsx`
+- [x] Frontend: Rename "AI Keys" to "Keys", add credential type support to `ProvidersSettingsView.tsx`
+- [x] Frontend: Add `api/connections.ts` REST client
+- [x] Add `GET/POST/PUT/DELETE /api/connections` REST endpoints in `webServer.cpp`
+- [x] Add `POST /api/connections/<name>/test` endpoint
 
 ### Phase 1 — MCP Interface
 
 MCP is a standalone TypeScript sidecar with zero C++ changes. It unlocks Claude Desktop, Claude Code, and other MCP client integrations immediately — highest ecosystem impact per effort.
 
-- [ ] Create standalone MCP server (TypeScript, `@modelcontextprotocol/sdk`, MIT)
-- [ ] Implement tools: `list_workflows`, `run_workflow`, `get_run_status`, `get_run_output`, `list_active_runs`, `cancel_run`
-- [ ] Implement resources: `workflow://<id>`, `run://<runId>`
-- [ ] Bearer token passthrough from MCP server to j9t REST API
-- [ ] Add `mcp/` directory with `package.json`, `tsconfig.json`, `src/index.ts`
-- [ ] Docker: add MCP sidecar to `docker-compose.example.yml`
+- [x] Create standalone MCP server (TypeScript, `@modelcontextprotocol/sdk`, MIT)
+- [x] Implement tools: `list_workflows`, `run_workflow`, `get_run_status`, `get_run_output`, `list_active_runs`, `cancel_run`
+- [x] Implement resources: `workflow://list` (workflow listing)
+- [x] Bearer token passthrough from MCP server to j9t REST API
+- [x] Add `mcp/` directory with `package.json`, `tsconfig.json`, `src/index.ts`
+- [x] Docker: add MCP sidecar to `docker-compose.example.yml`
 - [ ] Dashboard: add MCP status indicator
 
 ### Phase 2 — Polarion Enhancements

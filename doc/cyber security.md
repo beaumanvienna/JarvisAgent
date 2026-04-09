@@ -347,3 +347,62 @@ j9t does not have built-in tenant isolation at the data level (all workflows sha
 | Log sensitivity | Developer sees own logs | Role-protected; security log admin-only |
 | Direct internet exposure | Not applicable (localhost) | **Not supported** — deploy behind API gateway |
 | Cloud AI safety | Provider-managed content filtering, rate limits, and data policies apply to all AI calls |
+| Cloud connections | Configurable (no audit) | Configurable + audit logged |
+| Credential types | API key, OAuth, key pair, basic auth | Same, encrypted at rest |
+| Secret redaction | Log output scrubbed | Log output scrubbed |
+| MCP interface | Works (dev/test) | Production target (RBAC enforced) |
+
+---
+
+## Cloud Integration Security
+
+### Credential Hierarchy
+
+Cloud credentials are stored in the encrypted key store (`keys.json.enc`, AES-256-GCM with PBKDF2 key derivation). Four credential types are supported:
+
+| Type | Stored fields | Use case |
+|------|--------------|----------|
+| `api_key` | API key / PAT | Polarion, Slack, GitHub |
+| `oauth` | Access token, refresh token, expiry, scopes | OneDrive, Google |
+| `key_pair` | RSA private key (PEM) | Snowflake JWT |
+| `credentials` | Username + password | PostgreSQL, SMTP |
+
+Credentials are referenced by name in connection configs — secrets never appear in JCWF workflow files.
+
+### SecretRedactor
+
+All cloud-related secrets (Bearer tokens, JWTs, OAuth tokens, SigV4 signatures) are registered with the `SecretRedactor` singleton on acquisition. The redactor scrubs these values from all log output, replacing them with `[REDACTED]`. This prevents accidental secret leakage in `log/security.txt` and the application log.
+
+### Cloud Connection Security
+
+- All cloud API calls use HTTPS via libcurl (TLS 1.2+ enforced)
+- `CURLOPT_SSL_VERIFYPEER` and `CURLOPT_SSL_VERIFYHOST` remain enabled
+- Connection configurations do not contain secrets — they reference credentials by `key_name`
+- Connection CRUD events are logged to the security log
+
+### MCP Security
+
+The MCP server is a standalone TypeScript sidecar communicating with j9t over localhost HTTP:
+- Bearer token passthrough: MCP server reads the j9t API token from `engine_api_token.txt` or environment variable
+- RBAC: MCP tools respect j9t roles — viewers can list/get, operators can run/cancel
+- SSE transport should only be exposed when TLS is configured
+- The MCP sidecar targets Engine edition for production (Studio exposes workflow CRUD and AI tooling that MCP clients should not access)
+
+### JwtGenerator Security
+
+- Minimum 2048-bit RSA key enforcement
+- Generated JWTs are auto-registered with `SecretRedactor`
+- Private key material is freed via `EVP_PKEY_free()` after signing
+
+### Remaining Threats (Cloud-Specific)
+
+- **Credential exposure if encrypted key file is compromised** — mitigated by AES-256-GCM + PBKDF2 (100k iterations), but ultimately depends on master password strength
+- **OAuth token theft if master password is weak** — operator responsibility to use a strong master password
+- **Outbound data exfiltration via misconfigured cloud tasks** — operator should review cloud connections and restrict OAuth scopes to minimum needed
+
+### Admin Responsibility (Cloud-Specific)
+
+- Review and audit cloud connection configurations
+- Restrict OAuth scopes to the minimum required
+- Configure egress firewall rules for cloud endpoints
+- Monitor cloud task execution in `log/security.txt`

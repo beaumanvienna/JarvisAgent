@@ -1,3 +1,5 @@
+export type CredentialType = "api_key" | "oauth" | "key_pair" | "credentials";
+
 export type ProviderEntry = {
   name: string;
   display_name: string;
@@ -5,6 +7,13 @@ export type ProviderEntry = {
   default_model: string;
   api_type: string;
   has_key: boolean;
+  credential_type: CredentialType;
+  // OAuth fields
+  has_refresh_token?: boolean;
+  expires_at?: number;
+  scopes?: string;
+  // Basic auth fields
+  username?: string;
 };
 
 export type ProvidersListResponse = {
@@ -50,6 +59,14 @@ export type ProviderCreateInput = {
   api_key?: string;
   default_model?: string;
   api_type?: string;
+  credential_type?: CredentialType;
+  // OAuth fields
+  scopes?: string;
+  // Key pair fields
+  private_key_pem?: string;
+  // Basic auth fields
+  username?: string;
+  password?: string;
 };
 
 export async function createProvider(input: ProviderCreateInput): Promise<ProviderMutationResponse>
@@ -68,6 +85,11 @@ export type ProviderUpdateInput = {
   api_key?: string;
   default_model?: string;
   api_type?: string;
+  credential_type?: CredentialType;
+  scopes?: string;
+  private_key_pem?: string;
+  username?: string;
+  password?: string;
 };
 
 export async function updateProvider(name: string, input: ProviderUpdateInput): Promise<ProviderMutationResponse>

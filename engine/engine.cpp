@@ -223,6 +223,35 @@ int engine(int argc, char* argv[])
         }
     }
 
+    // Load cloud connections from connections.json if it exists
+    {
+        std::filesystem::path const connectionsPath =
+            Core::g_Core->GetLaunchCWDAbsolute() / "connections.json";
+
+        if (std::filesystem::exists(connectionsPath))
+        {
+            std::ifstream file(connectionsPath);
+            if (file)
+            {
+                std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                file.close();
+
+                auto& connectionManager = engine->GetCloudConnectionManager();
+                if (connectionManager.ParseConnectionsJson(json))
+                {
+                    auto names = connectionManager.GetConnectionNames();
+                    LOG_CORE_INFO("CloudConnectionManager: loaded {} connection(s) from '{}'", names.size(),
+                                  connectionsPath.string());
+                    connectionManager.ClearDirty();
+                }
+                else
+                {
+                    LOG_CORE_WARN("CloudConnectionManager: failed to parse '{}'", connectionsPath.string());
+                }
+            }
+        }
+    }
+
     engine->Start(engineConfig);
 
     // create application Jarvis

@@ -38,6 +38,25 @@ services:
       retries: 3
       start_period: 10s
 
+  # MCP sidecar — exposes j9t workflows to Claude Desktop, Claude Code, and other MCP clients
+  j9t_mcp:
+    build: ./mcp
+    container_name: j9t_mcp
+    restart: unless-stopped
+    depends_on:
+      - jarvis_agent
+    environment:
+      J9T_URL: http://jarvis_agent:8080
+      J9T_TOKEN_FILE: /app/engine_api_token.txt
+      J9T_MCP_TRANSPORT: sse
+      J9T_MCP_PORT: "3100"
+    volumes:
+      - jarvis-queue:/app:ro
+    ports:
+      - "3100:3100"
+    networks:
+      - web
+
 networks:
   web:
     external: true

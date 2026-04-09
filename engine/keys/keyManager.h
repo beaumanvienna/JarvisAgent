@@ -47,6 +47,21 @@ namespace AIAssistant
             std::string m_ApiKey;
             std::string m_DefaultModel;
             std::string m_ApiType; // "API1" or "API2"
+
+            // Credential type: "api_key" (default), "oauth", "key_pair", "credentials"
+            std::string m_CredentialType{"api_key"};
+
+            // OAuth fields (credential_type == "oauth")
+            std::string m_RefreshToken;
+            int64_t m_ExpiresAt{0}; // Unix timestamp (seconds)
+            std::string m_Scopes;
+
+            // Key pair fields (credential_type == "key_pair")
+            std::string m_PrivateKeyPem;
+
+            // Basic auth fields (credential_type == "credentials")
+            std::string m_Username;
+            std::string m_Password;
         };
 
         KeyManager() = default;

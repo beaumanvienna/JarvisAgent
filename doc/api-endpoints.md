@@ -830,3 +830,69 @@ A persistent WebSocket connection for real-time communication.
 | `python-status` | Broadcast when Python engine status changes (`{ "running": true/false }`). |
 | `log` | Live log lines streamed from the server. `{ "type": "log", "lines": ["...", ...] }`. Replaces 500ms REST polling for the Log Viewer page. |
 | *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on next `onmessage`. |
+
+---
+
+## Cloud Connections — Studio only
+
+Manage named cloud connections for external service integrations. Connections reference a key from the Keys page and carry type-specific parameters.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/connections` | List all connections with status. |
+| POST | `/api/connections` | Create a new connection. |
+| PUT | `/api/connections/<name>` | Update an existing connection (merge semantics). |
+| DELETE | `/api/connections/<name>` | Delete a connection. |
+| POST | `/api/connections/<name>/test` | Test connectivity via the registered connector. |
+| POST | `/api/connections/save` | Persist connections to `connections.json`. |
+
+### GET /api/connections
+**Response (200):**
+```json
+{
+  "ok": true,
+  "dirty": false,
+  "connections": [
+    {
+      "name": "my-polarion",
+      "type": "polarion",
+      "endpoint": "https://polarion.company.com",
+      "key_name": "polarion-pat",
+      "auth_type": "bearer",
+      "params": { "project_id": "GoKartProcurement" }
+    }
+  ]
+}
+```
+
+### POST /api/connections
+**Request body:**
+```json
+{
+  "name": "my-s3",
+  "type": "s3",
+  "endpoint": "https://s3.amazonaws.com",
+  "key_name": "aws-creds",
+  "auth_type": "sigv4",
+  "params": { "region": "us-east-1", "bucket": "workflow-outputs" }
+}
+```
+**Response (201):** `{ "ok": true, "name": "my-s3" }`
+Returns 409 if a connection with that name already exists.
+
+### PUT /api/connections/\<name\>
+Overlays provided fields on the existing connection. Only specified fields are updated; `params` replaces the entire params map if provided.
+**Response (200):** `{ "ok": true, "name": "my-s3" }`
+
+### DELETE /api/connections/\<name\>
+**Response (200):** `{ "ok": true }`
+
+### POST /api/connections/\<name\>/test
+Tests the connection using the `ICloudConnector::TestConnection()` method for the connection's type.
+**Response (200):** `{ "ok": true }`
+**Response (400):** `{ "ok": false, "error": "test_failed", "message": "Connection refused" }`
+**Response (400):** `{ "ok": false, "error": "no_connector", "message": "No connector registered for type 'xyz'" }`
+
+### POST /api/connections/save
+Serializes all connections to `connections.json` in the launch directory.
+**Response (200):** `{ "ok": true, "path": "/abs/path/connections.json" }`

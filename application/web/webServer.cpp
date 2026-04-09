@@ -64,6 +64,9 @@
 
 #include "event/events.h"
 #include "keys/keyEncryption.h"
+#include "cloud/cloudConnector.h"
+#include "cloud/cloudConnectorRegistry.h"
+#include "cloud/cloudConnectionManager.h"
 #include "workflow/triggerEngine.h"
 #include "workflow/workflowTriggerBinder.h"
 
@@ -1865,6 +1868,28 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/settings/providers/save")
             .methods("POST"_method)([this](crow::request const& req) { return HandleProvidersSavePost(req); });
+
+        // ---- Cloud connections API ----
+        CROW_ROUTE(m_Server, "/api/connections")
+            .methods("GET"_method)([this]() { return HandleConnectionsListGet(); });
+
+        CROW_ROUTE(m_Server, "/api/connections")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleConnectionCreatePost(req); });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>")
+            .methods("PUT"_method)([this](crow::request const& req, std::string const& connectionName)
+                                   { return HandleConnectionUpdatePut(req, connectionName); });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>")
+            .methods("DELETE"_method)(
+                [this](std::string const& connectionName) { return HandleConnectionDelete(connectionName); });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>/test")
+            .methods("POST"_method)(
+                [this](std::string const& connectionName) { return HandleConnectionTestPost(connectionName); });
+
+        CROW_ROUTE(m_Server, "/api/connections/save")
+            .methods("POST"_method)([this]() { return HandleConnectionsSavePost(); });
     }
 #endif // J9T_STUDIO
 
@@ -5842,7 +5867,20 @@ namespace AIAssistant
             entry["default_model"] = provider->m_DefaultModel;
             entry["api_type"] = provider->m_ApiType;
             entry["has_key"] = !provider->m_ApiKey.empty();
-            // API key is intentionally NOT returned for security.
+            entry["credential_type"] = provider->m_CredentialType;
+
+            // Type-specific metadata (secrets NOT returned)
+            if (provider->m_CredentialType == "oauth")
+            {
+                entry["has_refresh_token"] = !provider->m_RefreshToken.empty();
+                entry["expires_at"] = provider->m_ExpiresAt;
+                entry["scopes"] = provider->m_Scopes;
+            }
+            else if (provider->m_CredentialType == "credentials")
+            {
+                entry["username"] = provider->m_Username;
+            }
+            // API key and private_key_pem are intentionally NOT returned for security.
             providersList.push_back(std::move(entry));
         }
 
@@ -5890,6 +5928,26 @@ namespace AIAssistant
             if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
             {
                 config.m_ApiType = std::string(sv);
+            }
+            if (doc["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_CredentialType = std::string(sv);
+            }
+            if (doc["scopes"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Scopes = std::string(sv);
+            }
+            if (doc["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_PrivateKeyPem = std::string(sv);
+            }
+            if (doc["username"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Username = std::string(sv);
+            }
+            if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Password = std::string(sv);
             }
 
             auto& keyManager = Core::g_Core->GetKeyManager();
@@ -5960,6 +6018,26 @@ namespace AIAssistant
             if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
             {
                 config.m_ApiType = std::string(sv);
+            }
+            if (doc["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_CredentialType = std::string(sv);
+            }
+            if (doc["scopes"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Scopes = std::string(sv);
+            }
+            if (doc["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_PrivateKeyPem = std::string(sv);
+            }
+            if (doc["username"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Username = std::string(sv);
+            }
+            if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Password = std::string(sv);
             }
 
             keyManager.UpdateProvider(providerName, std::move(config));
@@ -6102,6 +6180,292 @@ namespace AIAssistant
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["path"] = keysFilePath.string();
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    // ================================================================
+    // Cloud connections API
+    // ================================================================
+
+    crow::response WebServer::HandleConnectionsListGet()
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["dirty"] = connectionManager.IsDirty();
+
+        auto connections = connectionManager.GetAllConnections();
+        std::vector<crow::json::wvalue> connList;
+        connList.reserve(connections.size());
+
+        for (auto const& conn : connections)
+        {
+            crow::json::wvalue c;
+            c["name"] = conn.m_Name;
+            c["type"] = conn.m_Type;
+            c["endpoint"] = conn.m_Endpoint;
+            c["key_name"] = conn.m_KeyName;
+            c["auth_type"] = AuthTypeToString(conn.m_AuthType);
+
+            crow::json::wvalue params;
+            for (auto const& [key, val] : conn.m_Params)
+            {
+                params[key] = val;
+            }
+            c["params"] = std::move(params);
+
+            connList.push_back(std::move(c));
+        }
+        responseJson["connections"] = std::move(connList);
+
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConnectionCreatePost(crow::request const& req)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string json(req.body);
+            auto doc = parser.iterate(json);
+
+            CloudConnection conn;
+            std::string_view sv;
+
+            if (doc["name"].get_string().get(sv) != simdjson::SUCCESS || sv.empty())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "missing_name";
+                err["message"] = "Connection name is required";
+                return MakeJsonResponse(400, err);
+            }
+            conn.m_Name = std::string(sv);
+
+            if (doc["type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                conn.m_Type = std::string(sv);
+            }
+            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                conn.m_Endpoint = std::string(sv);
+            }
+            if (doc["key_name"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                conn.m_KeyName = std::string(sv);
+            }
+            if (doc["auth_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                conn.m_AuthType = StringToAuthType(sv);
+            }
+
+            // Parse type-specific params
+            simdjson::ondemand::object params;
+            if (doc["params"].get_object().get(params) == simdjson::SUCCESS)
+            {
+                for (auto field : params)
+                {
+                    std::string_view key = field.unescaped_key();
+                    std::string_view val;
+                    if (field.value().get_string().get(val) == simdjson::SUCCESS)
+                    {
+                        conn.m_Params[std::string(key)] = std::string(val);
+                    }
+                }
+            }
+
+            if (!connectionManager.AddConnection(std::move(conn)))
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "already_exists";
+                err["message"] = "Connection with this name already exists";
+                return MakeJsonResponse(409, err);
+            }
+
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["name"] = std::string(conn.m_Name);
+            return MakeJsonResponse(201, responseJson);
+        }
+        catch (simdjson::simdjson_error const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_json";
+            err["message"] = std::string("JSON parse error: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+    }
+
+    crow::response WebServer::HandleConnectionUpdatePut(crow::request const& req, std::string const& connectionName)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        CloudConnection const* existing = connectionManager.GetConnection(connectionName);
+        if (!existing)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Connection '" + connectionName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        // Start with existing config and overlay provided fields
+        CloudConnection updated = *existing;
+
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string json(req.body);
+            auto doc = parser.iterate(json);
+
+            std::string_view sv;
+            if (doc["type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                updated.m_Type = std::string(sv);
+            }
+            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                updated.m_Endpoint = std::string(sv);
+            }
+            if (doc["key_name"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                updated.m_KeyName = std::string(sv);
+            }
+            if (doc["auth_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                updated.m_AuthType = StringToAuthType(sv);
+            }
+
+            simdjson::ondemand::object params;
+            if (doc["params"].get_object().get(params) == simdjson::SUCCESS)
+            {
+                updated.m_Params.clear();
+                for (auto field : params)
+                {
+                    std::string_view key = field.unescaped_key();
+                    std::string_view val;
+                    if (field.value().get_string().get(val) == simdjson::SUCCESS)
+                    {
+                        updated.m_Params[std::string(key)] = std::string(val);
+                    }
+                }
+            }
+        }
+        catch (simdjson::simdjson_error const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_json";
+            err["message"] = std::string("JSON parse error: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+
+        if (!connectionManager.UpdateConnection(connectionName, std::move(updated)))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "update_failed";
+            err["message"] = "Failed to update connection";
+            return MakeJsonResponse(500, err);
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["name"] = connectionName;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConnectionDelete(std::string const& connectionName)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        if (!connectionManager.RemoveConnection(connectionName))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Connection '" + connectionName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleConnectionTestPost(std::string const& connectionName)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+        auto& connectorRegistry = Core::g_Core->GetCloudConnectorRegistry();
+
+        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        if (!connection)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Connection '" + connectionName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        ICloudConnector* connector = connectorRegistry.GetConnector(connection->m_Type);
+        if (!connector)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_connector";
+            err["message"] = "No connector registered for type '" + connection->m_Type + "'";
+            return MakeJsonResponse(400, err);
+        }
+
+        std::string errorMessage;
+        bool success = connector->TestConnection(*connection, errorMessage);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = success;
+        if (!success)
+        {
+            responseJson["error"] = "test_failed";
+            responseJson["message"] = errorMessage;
+        }
+        return MakeJsonResponse(success ? 200 : 400, responseJson);
+    }
+
+    crow::response WebServer::HandleConnectionsSavePost()
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        std::string json = connectionManager.SerializeToJson();
+
+        // Save to connections.json in the launch directory
+        std::filesystem::path const connectionsFilePath =
+            Core::g_Core->GetLaunchCWDAbsolute() / "connections.json";
+
+        std::ofstream file(connectionsFilePath);
+        if (!file)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "save_failed";
+            err["message"] = "Failed to open '" + connectionsFilePath.string() + "' for writing";
+            return MakeJsonResponse(500, err);
+        }
+
+        file << json;
+        file.close();
+        connectionManager.ClearDirty();
+
+        LOG_SECURITY_INFO("[security] cloud_connections saved to {}", connectionsFilePath.string());
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["path"] = connectionsFilePath.string();
         return MakeJsonResponse(200, responseJson);
     }
 #endif // J9T_STUDIO

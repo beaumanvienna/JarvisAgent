@@ -34,6 +34,8 @@
 #include "log/terminalManager.h"
 #include "log/terminalLogStreamBuf.h"
 #include "keys/keyManager.h"
+#include "cloud/cloudConnectionManager.h"
+#include "cloud/cloudConnectorRegistry.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -62,6 +64,10 @@ namespace AIAssistant
         TerminalLogStreamBuf* GetTerminalLogStreamBuf() { return m_TerminalBuf.get(); }
         KeyManager& GetKeyManager() { return m_KeyManager; }
         KeyManager const& GetKeyManager() const { return m_KeyManager; }
+        CloudConnectionManager& GetCloudConnectionManager() { return m_CloudConnectionManager; }
+        CloudConnectionManager const& GetCloudConnectionManager() const { return m_CloudConnectionManager; }
+        CloudConnectorRegistry& GetCloudConnectorRegistry() { return m_CloudConnectorRegistry; }
+        CloudConnectorRegistry const& GetCloudConnectorRegistry() const { return m_CloudConnectorRegistry; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
 
         // event API
@@ -104,5 +110,9 @@ namespace AIAssistant
 
         // key management
         KeyManager m_KeyManager;
+
+        // cloud integration
+        CloudConnectionManager m_CloudConnectionManager;
+        CloudConnectorRegistry m_CloudConnectorRegistry;
     };
 } // namespace AIAssistant

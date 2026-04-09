@@ -6,17 +6,23 @@ import {
   deleteProvider,
   saveProviders,
   type ProviderEntry,
+  type CredentialType,
 } from "../api/providers";
 
 type EditingKey = {
   name: string;
   api_key: string;
+  credential_type: CredentialType;
+  scopes: string;
+  private_key_pem: string;
+  username: string;
+  password: string;
   isNew: boolean;
 };
 
 function emptyKey(): EditingKey
 {
-  return { name: "", api_key: "", isNew: true };
+  return { name: "", api_key: "", credential_type: "api_key", scopes: "", private_key_pem: "", username: "", password: "", isNew: true };
 }
 
 type ProvidersSettingsViewProps = {
@@ -93,7 +99,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
       return;
     }
 
-    if (!editing.api_key.trim() && editing.isNew)
+    if (editing.credential_type === "api_key" && !editing.api_key.trim() && editing.isNew)
     {
       setErrorMessage("API key is required");
       return;
@@ -103,7 +109,12 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
     {
       const result = await createProvider({
         name: editing.name.trim(),
-        api_key: editing.api_key,
+        api_key: editing.api_key || undefined,
+        credential_type: editing.credential_type,
+        scopes: editing.scopes || undefined,
+        private_key_pem: editing.private_key_pem || undefined,
+        username: editing.username || undefined,
+        password: editing.password || undefined,
       });
       if (result.ok)
       {
@@ -121,6 +132,11 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
     {
       const updates: Record<string, string> = {};
       if (editing.api_key) updates.api_key = editing.api_key;
+      updates.credential_type = editing.credential_type;
+      if (editing.scopes) updates.scopes = editing.scopes;
+      if (editing.private_key_pem) updates.private_key_pem = editing.private_key_pem;
+      if (editing.username) updates.username = editing.username;
+      if (editing.password) updates.password = editing.password;
 
       const result = await updateProvider(editing.name, updates);
       if (result.ok)
@@ -200,7 +216,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>AI Keys{dirty ? " *" : ""}</h2>
+        <h2 style={{ margin: 0 }}>Keys{dirty ? " *" : ""}</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyKey())}>
             + Add Key
@@ -247,7 +263,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
                   {p.name}
                 </div>
                 <div className="small muted" style={{ marginTop: 2 }}>
-                  {p.has_key ? "key set" : "no key"}
+                  {p.credential_type ?? "api_key"}{" \u2022 "}{p.has_key ? "key set" : "no key"}
                 </div>
               </div>
 
@@ -255,7 +271,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
                 <button
                   className="btn"
                   type="button"
-                  onClick={() => setEditing({ name: p.name, api_key: "", isNew: false })}
+                  onClick={() => setEditing({ name: p.name, api_key: "", credential_type: p.credential_type ?? "api_key", scopes: p.scopes ?? "", private_key_pem: "", username: p.username ?? "", password: "", isNew: false })}
                 >
                   Edit
                 </button>
@@ -367,37 +383,132 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
           )}
 
           <div className="field" style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 12, opacity: 0.8 }}>API Key</label>
-            <div style={{ position: "relative" }}>
-              <input
-                className="input"
-                type={showPassword ? "text" : "password"}
-                placeholder={editing.isNew ? "sk-..." : "(leave blank to keep current)"}
-                value={editing.api_key}
-                onChange={(e) => setEditing((prev) => prev ? { ...prev, api_key: e.target.value } : prev)}
-                style={{ paddingRight: 36 }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword((prev) => !prev)}
-                title={showPassword ? "Hide key" : "Show key"}
-                style={{
-                  position: "absolute",
-                  right: 6,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 16,
-                  padding: "2px 4px",
-                  opacity: 0.7,
-                }}
-              >
-                {showPassword ? "\u{1F441}" : "\u{1F441}\u200D\u{1F5E8}"}
-              </button>
-            </div>
+            <label style={{ fontSize: 12, opacity: 0.8 }}>Credential Type</label>
+            <select
+              className="input"
+              value={editing.credential_type}
+              onChange={(e) => setEditing((prev) => prev ? { ...prev, credential_type: e.target.value as CredentialType } : prev)}
+            >
+              <option value="api_key">API Key</option>
+              <option value="oauth">OAuth 2.0</option>
+              <option value="key_pair">Key Pair (RSA)</option>
+              <option value="credentials">Username / Password</option>
+            </select>
           </div>
+
+          {editing.credential_type === "api_key" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>API Key</label>
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showPassword ? "text" : "password"}
+                  placeholder={editing.isNew ? "sk-..." : "(leave blank to keep current)"}
+                  value={editing.api_key}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, api_key: e.target.value } : prev)}
+                  style={{ paddingRight: 36 }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  title={showPassword ? "Hide key" : "Show key"}
+                  style={{
+                    position: "absolute",
+                    right: 6,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 16,
+                    padding: "2px 4px",
+                    opacity: 0.7,
+                  }}
+                >
+                  {showPassword ? "\u{1F441}" : "\u{1F441}\u200D\u{1F5E8}"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {editing.credential_type === "oauth" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Scopes</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. Files.ReadWrite offline_access"
+                  value={editing.scopes}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, scopes: e.target.value } : prev)}
+                />
+              </div>
+              <div className="small muted" style={{ marginBottom: 10 }}>
+                OAuth tokens are managed via the Connections page. Configure the connection first, then authorize.
+              </div>
+            </>
+          )}
+
+          {editing.credential_type === "key_pair" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>Private Key (PEM)</label>
+              <textarea
+                className="input"
+                rows={6}
+                placeholder={editing.isNew ? "-----BEGIN RSA PRIVATE KEY-----\n..." : "(leave blank to keep current)"}
+                value={editing.private_key_pem}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, private_key_pem: e.target.value } : prev)}
+                style={{ fontFamily: "monospace", fontSize: 12 }}
+              />
+            </div>
+          )}
+
+          {editing.credential_type === "credentials" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Username</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="Username"
+                  value={editing.username}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, username: e.target.value } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Password</label>
+                <div style={{ position: "relative" }}>
+                  <input
+                    className="input"
+                    type={showPassword ? "text" : "password"}
+                    placeholder={editing.isNew ? "Password" : "(leave blank to keep current)"}
+                    value={editing.password}
+                    onChange={(e) => setEditing((prev) => prev ? { ...prev, password: e.target.value } : prev)}
+                    style={{ paddingRight: 36 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    title={showPassword ? "Hide" : "Show"}
+                    style={{
+                      position: "absolute",
+                      right: 6,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: 16,
+                      padding: "2px 4px",
+                      opacity: 0.7,
+                    }}
+                  >
+                    {showPassword ? "\u{1F441}" : "\u{1F441}\u200D\u{1F5E8}"}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button className="btn btnPrimary" type="button" onClick={handleSave}>

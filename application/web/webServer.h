@@ -214,6 +214,14 @@ namespace AIAssistant
         crow::response HandleProviderDelete(std::string const& providerName);
         crow::response HandleProviderSetDefaultPost(std::string const& providerName);
         crow::response HandleProvidersSavePost(crow::request const& req);
+
+        // Cloud connections API
+        crow::response HandleConnectionsListGet();
+        crow::response HandleConnectionCreatePost(crow::request const& req);
+        crow::response HandleConnectionUpdatePut(crow::request const& req, std::string const& connectionName);
+        crow::response HandleConnectionDelete(std::string const& connectionName);
+        crow::response HandleConnectionTestPost(std::string const& connectionName);
+        crow::response HandleConnectionsSavePost();
 #endif // J9T_STUDIO
 
     private:

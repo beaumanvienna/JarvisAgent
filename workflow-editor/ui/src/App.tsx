@@ -4,6 +4,7 @@ import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListVie
 import ProvidersSettingsView from "./views/ProvidersSettingsView";
 import AiManagerView from "./views/AiManagerView";
 import AssistantView from "./views/AssistantView";
+import ConnectionsView from "./views/ConnectionsView";
 import SettingsModal from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
 import StatusLeds from "./components/StatusLeds";
@@ -40,7 +41,7 @@ function saveSettings(settings: EditorSettings): void {
   }
 }
 
-type RouteKey = "workflows" | "editor" | "ai-manager" | "settings" | "assistant";
+type RouteKey = "workflows" | "editor" | "ai-manager" | "settings" | "connections" | "assistant";
 
 export default function App(): JSX.Element
 {
@@ -55,6 +56,7 @@ export default function App(): JSX.Element
   const [masterPassword, setMasterPassword] = useState<string | null>(null);
   const [aiManagerDirty, setAiManagerDirty] = useState<boolean>(false);
   const [keysDirty, setKeysDirty] = useState<boolean>(false);
+  const [connectionsDirty, setConnectionsDirty] = useState<boolean>(false);
   const [hasAiProvider, setHasAiProvider] = useState<boolean>(true);
   const statusWs = useStatusWebSocket();
 
@@ -191,6 +193,11 @@ export default function App(): JSX.Element
       return <ProvidersSettingsView appMasterPassword={masterPassword} onDirtyStateChange={setKeysDirty} />;
     }
 
+    if (route === "connections")
+    {
+      return <ConnectionsView onDirtyStateChange={setConnectionsDirty} />;
+    }
+
     return (
       <WorkflowListView
         refreshToken={workflowListRefreshToken}
@@ -199,7 +206,7 @@ export default function App(): JSX.Element
         onCreateFromTemplate={onCreateFromTemplate}
       />
     );
-  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate, settings.hideTierDWarnings]);
+  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate, settings.hideTierDWarnings, masterPassword, connectionsDirty]);
 
   return (
     <div className="appShell">
@@ -253,7 +260,15 @@ export default function App(): JSX.Element
             onClick={() => { navigate("settings"); }}
             type="button"
           >
-            AI Keys{keysDirty ? "*" : ""}
+            Keys{keysDirty ? "*" : ""}
+          </button>
+
+          <button
+            className={`btn ${route === "connections" ? "btnActive" : ""}`}
+            onClick={() => { navigate("connections"); }}
+            type="button"
+          >
+            Connections{connectionsDirty ? "*" : ""}
           </button>
 
           <button

@@ -409,6 +409,45 @@ namespace AIAssistant
                 config.m_ApiType = std::string(sv);
             }
 
+            // Credential type — backward compatible: absent means "api_key"
+            if (providerObj["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_CredentialType = std::string(sv);
+            }
+
+            // OAuth fields
+            if (providerObj["refresh_token"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_RefreshToken = std::string(sv);
+            }
+            {
+                int64_t expiresAt = 0;
+                if (providerObj["expires_at"].get_int64().get(expiresAt) == simdjson::SUCCESS)
+                {
+                    config.m_ExpiresAt = expiresAt;
+                }
+            }
+            if (providerObj["scopes"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Scopes = std::string(sv);
+            }
+
+            // Key pair fields
+            if (providerObj["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_PrivateKeyPem = std::string(sv);
+            }
+
+            // Basic auth fields
+            if (providerObj["username"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Username = std::string(sv);
+            }
+            if (providerObj["password"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_Password = std::string(sv);
+            }
+
             m_Providers[std::string(providerName)] = std::move(config);
         }
 
@@ -440,7 +479,39 @@ namespace AIAssistant
             oss << "            \"endpoint\": \"" << config.m_Endpoint << "\",\n";
             oss << "            \"api_key\": \"" << config.m_ApiKey << "\",\n";
             oss << "            \"default_model\": \"" << config.m_DefaultModel << "\",\n";
-            oss << "            \"api_type\": \"" << config.m_ApiType << "\"\n";
+            oss << "            \"api_type\": \"" << config.m_ApiType << "\",\n";
+            oss << "            \"credential_type\": \"" << config.m_CredentialType << "\"";
+
+            if (config.m_CredentialType == "oauth")
+            {
+                oss << ",\n";
+                oss << "            \"refresh_token\": \"" << config.m_RefreshToken << "\",\n";
+                oss << "            \"expires_at\": " << config.m_ExpiresAt << ",\n";
+                oss << "            \"scopes\": \"" << config.m_Scopes << "\"";
+            }
+            else if (config.m_CredentialType == "key_pair")
+            {
+                oss << ",\n";
+                // PEM keys contain newlines — escape them for JSON
+                std::string escapedPem;
+                for (char c : config.m_PrivateKeyPem)
+                {
+                    if (c == '\n') escapedPem += "\\n";
+                    else if (c == '\r') escapedPem += "\\r";
+                    else if (c == '"') escapedPem += "\\\"";
+                    else if (c == '\\') escapedPem += "\\\\";
+                    else escapedPem += c;
+                }
+                oss << "            \"private_key_pem\": \"" << escapedPem << "\"";
+            }
+            else if (config.m_CredentialType == "credentials")
+            {
+                oss << ",\n";
+                oss << "            \"username\": \"" << config.m_Username << "\",\n";
+                oss << "            \"password\": \"" << config.m_Password << "\"";
+            }
+
+            oss << "\n";
             oss << "        }";
             if (++i < m_Providers.size())
             {
