@@ -122,16 +122,29 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 
 ### Phase 9 — Hardening
 
-- [ ] Document outbound firewall rules per integration
+Split into three sub-phases to avoid a monolithic hardening bucket:
+
+#### Phase 9a — Runtime Resilience
+
+- [ ] Implement `CloudCircuitBreaker` per connection (track consecutive failures, short-circuit requests during outages, auto-recover after cooldown)
+- [ ] Implement `CloudConnectionPool` for persistent-connection providers (PostgreSQL via libpq, future IMAP keep-alive). HTTP-based connectors already benefit from libcurl connection reuse (`CURLOPT_TCP_KEEPALIVE`), so the pool is primarily for non-HTTP protocols.
+- [ ] Wire `TaskCancellationToken` into existing run cancel mechanism so long-running cloud operations (Snowflake async polling, large S3 downloads, SMTP timeouts) respond to workflow run cancellation. (Token parameter already in `ExecuteCloud()` signature from Phase 0.)
+- [ ] Implement `ProviderRateLimitPolicy` extending `CloudRetryPolicy` with provider-specific semantics (Slack `Retry-After` with secondary limits, GitHub secondary rate limits, Graph API throttling windows, Snowflake async query polling cadence)
 - [ ] Add connection health check to `/api/status` readiness probe
+- [ ] Dashboard: connection health indicators in status bar
+
+#### Phase 9b — Security & Audit
+
 - [ ] Add audit logging for cloud operations (connection CRUD, OAuth grants, cloud task execution)
 - [ ] Add OAuth state parameter CSRF protection
 - [ ] Add download size limits (`CURLOPT_MAXFILESIZE_LARGE`)
 - [ ] Add path traversal validation for cloud local_path params
 - [ ] Enforce RSA key minimum 2048 bits in `JwtGenerator`
 - [ ] Verify `CURLOPT_SSL_VERIFYPEER` enabled in all cloud connectors
-- [ ] Implement `CloudCircuitBreaker` per connection (track consecutive failures, short-circuit requests during outages, auto-recover after cooldown)
-- [ ] Dashboard: connection health indicators in status bar
+
+#### Phase 9c — Deployment & Ops
+
+- [ ] Document outbound firewall rules per integration
 - [ ] Container image signing (cosign, Apache-2.0)
 
 ---
@@ -158,6 +171,10 @@ namespace AIAssistant
     };
 
     // Resolved credentials ready for use in HTTP requests.
+    // This is a runtime transport bundle — not a persisted type. The persisted side uses
+    // the ICredential hierarchy (ApiKeyCredential, OAuthCredential, etc.). CloudCredentials
+    // is what connectors produce after resolving and refreshing stored credentials into a
+    // form ready for immediate use in HTTP headers / connection strings.
     struct CloudCredentials
     {
         CloudAuthType m_AuthType{CloudAuthType::BearerToken};
@@ -241,15 +258,21 @@ namespace AIAssistant
 
     protected:
         // Subclasses implement this with the actual cloud operation.
+        // The cancellationToken allows cooperative cancellation of long-running operations
+        // (Snowflake async polling, large S3 downloads, SMTP timeouts). Subclasses should
+        // check token.IsCancelled() between poll iterations and during chunked I/O.
         virtual bool ExecuteCloud(WorkflowDefinition const& workflowDef, WorkflowRun& run,
                                   TaskDef const& taskDef, TaskInstanceState& state,
                                   CloudConnection const& connection,
-                                  CloudCredentials const& credentials) = 0;
+                                  CloudCredentials const& credentials,
+                                  TaskCancellationToken const& cancellationToken) = 0;
     };
 }
 ```
 
 The `Execute()` base method: looks up the connection by name from `taskDef.m_Params["connection"]`, calls `ICloudConnector::ResolveCredentials()`, then delegates to `ExecuteCloud()`.
+
+**Cancellation support:** The `ExecuteCloud()` signature includes a `TaskCancellationToken` from Phase 0. The token is initially a no-op (never cancelled). Phase 9 wires it into the existing run cancel mechanism so that `POST /api/workflow-runs/{runId}/cancel` propagates to in-flight cloud tasks. Subclasses check `token.IsCancelled()` between poll iterations, during chunked downloads, and around blocking I/O.
 
 ### Concrete connectors (one per service)
 
@@ -274,6 +297,9 @@ The `Execute()` base method: looks up the connection by name from `taskDef.m_Par
 | `SigV4Signer` | `engine/keys/sigV4Signer.h/cpp` | AWS Signature V4 request signing via OpenSSL HMAC-SHA256 |
 | `CloudRetryPolicy` | `application/cloud/cloudRetryPolicy.h/cpp` | Centralized retry with exponential backoff + jitter (see below) |
 | `SecretRedactor` | `engine/log/secretRedactor.h/cpp` | Scrub sensitive values from log output (see below) |
+| `CloudConnectionPool` | `application/cloud/cloudConnectionPool.h/cpp` | Connection pooling for persistent-connection providers (Phase 9) |
+| `TaskCancellationToken` | `application/cloud/taskCancellationToken.h` | Cooperative cancellation for long-running cloud operations (Phase 9) |
+| `ProviderRateLimitPolicy` | `application/cloud/providerRateLimitPolicy.h/cpp` | Per-provider rate-limit semantics extending `CloudRetryPolicy` (Phase 9) |
 
 ### CloudRetryPolicy
 
@@ -302,6 +328,8 @@ public:
 ```
 
 All cloud connectors and task executors use this instead of hand-rolled loops. Provider-specific retry codes can be added to `m_RetryableHttpCodes` per connector.
+
+**Provider-specific rate limiting (Phase 9):** Some providers need semantics beyond simple retry-after backoff. Examples: Slack 429 with `Retry-After` header and secondary rate limits, GitHub secondary rate limits (separate from primary), Graph API throttling windows, Snowflake async query polling cadence. Phase 9 adds `ProviderRateLimitPolicy` extending `CloudRetryPolicy` with per-provider rate awareness. Each connector can register its provider's specific throttling behavior. Not required for Phase 0 — the base `CloudRetryPolicy` with `Retry-After` header support is sufficient for initial connectors.
 
 ### SecretRedactor
 
@@ -367,6 +395,11 @@ application/
     cloudRetryPolicy.cpp                    (+)
     cloudCircuitBreaker.h                   (+) CloudCircuitBreaker (Phase 9)
     cloudCircuitBreaker.cpp                 (+)
+    cloudConnectionPool.h                   (+) CloudConnectionPool (Phase 9)
+    cloudConnectionPool.cpp                 (+)
+    taskCancellationToken.h                 (+) TaskCancellationToken (Phase 9)
+    providerRateLimitPolicy.h               (+) ProviderRateLimitPolicy (Phase 9)
+    providerRateLimitPolicy.cpp             (+)
     cloudTaskExecutor.h                     (+) ICloudTaskExecutor base class
     cloudTaskExecutor.cpp                   (+)
     polarionConnector.h                     (+) PolarionConnector : ICloudConnector
@@ -497,7 +530,7 @@ Add `FetchLinkedItems(workItemId, linkRole)` to `PolarionClient`. Calls `GET /re
 
 ### Architecture
 
-Standalone TypeScript process using `@modelcontextprotocol/sdk` (MIT). Communicates with j9t Engine via REST API over localhost. Supports both stdio and SSE transports.
+Standalone TypeScript process using `@modelcontextprotocol/sdk` (MIT). Communicates with j9t via REST API over localhost. Supports both stdio and SSE transports. The MCP sidecar targets **Engine edition** for production deployment (security-hardened, RBAC-enforced, audit-logged). It also works with Studio edition during development and testing, but production MCP deployments should use Engine — Studio exposes workflow CRUD and AI tooling that MCP clients should not have access to.
 
 ```
 AI Assistant (Claude, etc.)
@@ -872,6 +905,8 @@ Task type: `db_query`
 
 Execution: `PQexecParams()` (parameterized query — template bindings are passed as query parameters, never interpolated into the SQL string, preventing SQL injection) → iterate `PQgetvalue()` → write CSV or JSON to working directory.
 
+**Connection pooling (Phase 9):** Without pooling, each workflow task pays `PQconnectdb()` setup cost (TCP + TLS handshake + auth). For workflows with many sequential `db_query` tasks this becomes significant. Phase 9 adds `CloudConnectionPool` which maintains a pool of idle libpq connections keyed by connection name, with configurable max idle time and pool size. HTTP-based connectors (S3, Slack, etc.) already benefit from libcurl's built-in connection reuse and do not need explicit pooling.
+
 ---
 
 ## 10. Additional Integrations
@@ -1178,4 +1213,6 @@ doc/
 8. **Phase 6 — Snowflake:** JWT RSA auth, SQL query executor, async polling
 9. **Phase 7 — Messaging:** Slack (REST) and Email (SMTP/IMAP via libcurl)
 10. **Phase 8 — Additional:** GitHub/GitLab, Jira, Google Sheets
-11. **Phase 9 — Hardening:** circuit breaker, firewall docs, health checks, audit logging, container signing
+11. **Phase 9a — Runtime Resilience:** circuit breaker, connection pool, cancellation wiring, provider rate limits, health checks
+12. **Phase 9b — Security & Audit:** audit logging, OAuth CSRF, download limits, path traversal, TLS verification
+13. **Phase 9c — Deployment & Ops:** firewall docs, container signing
