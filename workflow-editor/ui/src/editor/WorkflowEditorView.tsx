@@ -34,7 +34,6 @@ import {
   checkFileExists,
   checkScript,
   fetchRunDetails,
-  listWorkflows,
   loadWorkflow,
   pauseRun,
   resumeRun,
@@ -1070,35 +1069,28 @@ export default function WorkflowEditorView(props: {
 
     try
     {
-      // Resolve workflow_file to a workflow ID via the workflow list.
-      const list = await listWorkflows();
-      const match = list.workflows.find((w) =>
-        w.path && w.path.endsWith("/" + workflowFile)
-      );
+      // Build the sub-workflow ID: parentId__workflowFile
+      const subWorkflowId = loadedWorkflowId ? `${loadedWorkflowId}__${workflowFile}` : workflowFile;
 
-      if (!match)
-      {
-        setErrorText(`Sub-workflow not found in registry for file '${workflowFile}'.`);
-        return;
-      }
-
-      // Push current workflow onto the nav stack.
+      // Push current workflow onto the nav stack (avoid duplicates).
       const currentId = loadedWorkflowId;
-      if (currentId)
+      if (currentId && currentId !== subWorkflowId)
       {
-        setWorkflowNavStack((prev) => [...prev, currentId]);
+        setWorkflowNavStack((prev) =>
+          prev[prev.length - 1] === currentId ? prev : [...prev, currentId]
+        );
       }
 
       // Load the child workflow.
-      const jcwf = await loadWorkflow(match.id);
+      const jcwf = await loadWorkflow(subWorkflowId);
       if (jcwf !== null)
       {
-        loadFromJcwfRef.current(match.id, jcwf);
-        setStatusText(`Navigated into sub-workflow '${match.id}'.`);
+        loadFromJcwfRef.current(subWorkflowId, jcwf);
+        setStatusText(`Navigated into sub-workflow '${subWorkflowId}'.`);
       }
       else
       {
-        setErrorText(`Failed to load sub-workflow '${match.id}'.`);
+        setErrorText(`Failed to load sub-workflow '${subWorkflowId}'.`);
       }
     }
     catch (e)

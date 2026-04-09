@@ -89,7 +89,7 @@ export default function WorkflowListView(props: {
   }, [reload]);
 
   const workflows = useMemo(() => {
-    const all = response?.workflows ?? [];
+    const all = (response?.workflows ?? []).filter((w) => !w.is_sub_workflow);
     if (filterText.trim().length === 0)
     {
       return all;
