@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "j9t": {
+      "command": "node",
+      "args": ["/home/beaumanvienna/dev/jarvisAgent/mcp/dist/index.js"],
+      "env": {
+        "J9T_URL": "https://localhost:8443",
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0"
+      }
+    }
+  }
+}
