@@ -926,7 +926,14 @@ namespace AIAssistant
             return false;
         }
 
-        simdjson::ondemand::object rootObject = document.get_object();
+        simdjson::ondemand::object rootObject;
+        errorCode = document.get_object().get(rootObject);
+        if (errorCode)
+        {
+            errorMessage = "Workflow JSON root must be an object, got: ";
+            errorMessage += simdjson::error_message(errorCode);
+            return false;
+        }
         return ParseRootObject(rootObject, outputDefinition, errorMessage);
     }
 
@@ -1231,7 +1238,14 @@ namespace AIAssistant
             return false;
         }
 
-        simdjson::ondemand::object root = document.get_object();
+        simdjson::ondemand::object root;
+        ec = document.get_object().get(root);
+        if (ec)
+        {
+            errorMessage = "global.json root must be an object, got: ";
+            errorMessage += simdjson::error_message(ec);
+            return false;
+        }
 
         for (auto field : root)
         {
@@ -1318,7 +1332,14 @@ namespace AIAssistant
             return false;
         }
 
-        simdjson::ondemand::object root = document.get_object();
+        simdjson::ondemand::object root;
+        ec = document.get_object().get(root);
+        if (ec)
+        {
+            errorMessage = "Canvas JSON root must be an object, got: ";
+            errorMessage += simdjson::error_message(ec);
+            return false;
+        }
 
         bool hasTasks = false;
 

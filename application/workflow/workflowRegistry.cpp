@@ -114,14 +114,27 @@ namespace AIAssistant
 
             if (extension == ".jcwf")
             {
-                if (!LoadContainer(filePath))
+                try
                 {
+                    if (!LoadContainer(filePath))
+                    {
+                        BrokenWorkflow broken;
+                        broken.m_ContainerPath = filePath.string();
+                        broken.m_Stem = filePath.stem().string();
+                        broken.m_Error = m_LastContainerError.empty()
+                            ? "Failed to parse .jcwf container (see application log for details)"
+                            : m_LastContainerError;
+                        m_BrokenWorkflows.push_back(std::move(broken));
+                    }
+                }
+                catch (std::exception const& ex)
+                {
+                    LOG_APP_ERROR("WorkflowRegistry::LoadDirectory: uncaught exception loading '{}': {}",
+                                  filePath.string(), ex.what());
                     BrokenWorkflow broken;
                     broken.m_ContainerPath = filePath.string();
                     broken.m_Stem = filePath.stem().string();
-                    broken.m_Error = m_LastContainerError.empty()
-                        ? "Failed to parse .jcwf container (see application log for details)"
-                        : m_LastContainerError;
+                    broken.m_Error = std::string("Exception: ") + ex.what();
                     m_BrokenWorkflows.push_back(std::move(broken));
                 }
             }
@@ -662,7 +675,18 @@ bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& fo
         WorkflowJsonParser parser;
         std::string parseError;
 
-        if (!parser.ParseCanvasJson(canvasContent, subDef, parseError))
+        bool parsedOk = false;
+        try
+        {
+            parsedOk = parser.ParseCanvasJson(canvasContent, subDef, parseError);
+        }
+        catch (std::exception const& ex)
+        {
+            LOG_APP_WARN("WorkflowRegistry: exception parsing sub-workflow '{}': {}", subRelPath, ex.what());
+            continue;
+        }
+
+        if (!parsedOk)
         {
             LOG_APP_WARN("WorkflowRegistry: failed to parse sub-workflow '{}': {}", subRelPath, parseError);
             continue;

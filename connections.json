@@ -1,0 +1,15 @@
+{
+    "connections": [
+        {
+            "name": "local-pg",
+            "type": "postgres",
+            "endpoint": "localhost:5432",
+            "key_name": "pg-local",
+            "auth_type": "basic_auth",
+            "params": {
+                "database": "j9t_test",
+                "sslmode": "disable"
+            }
+        }
+    ]
+}

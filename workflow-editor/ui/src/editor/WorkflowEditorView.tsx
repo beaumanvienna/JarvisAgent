@@ -21,6 +21,7 @@ import BranchNode from "./BranchNode";
 import WorkflowTreeView from "./WorkflowTreeView";
 import { FILE_INPUT_COLORS } from "./constants";
 import FilterBuilderDialog from "./FilterBuilderDialog";
+import SqlFilterBuilder from "./SqlFilterBuilder";
 import QueueBindingEditor from "./QueueBindingEditor";
 import { jcwfToGraph } from "./jcwfToGraph";
 import { graphToJcwf } from "./graphToJcwf";
@@ -3564,6 +3565,30 @@ export default function WorkflowEditorView(props: {
                           <div className="small">query (SQL)</div>
                           <textarea className="input" rows={4} value={(params.query as string) ?? ""} placeholder="SELECT * FROM users LIMIT 10" onChange={(e) => { updateParams({ query: e.target.value }); }} style={{ fontFamily: "monospace", fontSize: 11 }} />
                         </label>
+                        <SqlFilterBuilder query={(params.query as string) ?? ""} onInsert={(clause) => {
+                          const current = (params.query as string) ?? "";
+                          const upper = current.toUpperCase();
+                          const whereIdx = upper.lastIndexOf("WHERE");
+                          let updated: string;
+                          if (whereIdx >= 0) {
+                            const afterWhere = upper.substring(whereIdx + 5);
+                            const orderIdx = afterWhere.search(/\b(ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET)\b/);
+                            if (orderIdx >= 0) {
+                              const insertPos = whereIdx + 5 + orderIdx;
+                              updated = current.substring(0, insertPos).trimEnd() + " AND " + clause + " " + current.substring(insertPos).trimStart();
+                            } else {
+                              updated = current.trimEnd() + " AND " + clause;
+                            }
+                          } else {
+                            const tailIdx = upper.search(/\b(ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET)\b/);
+                            if (tailIdx >= 0) {
+                              updated = current.substring(0, tailIdx).trimEnd() + " WHERE " + clause + " " + current.substring(tailIdx).trimStart();
+                            } else {
+                              updated = current.trimEnd() + " WHERE " + clause;
+                            }
+                          }
+                          updateParams({ query: updated });
+                        }} />
                         <label className="field">
                           <div className="small">format</div>
                           <select className="input" value={(params.format as string) ?? "csv"} onChange={(e) => { updateParams({ format: e.target.value }); }}>
