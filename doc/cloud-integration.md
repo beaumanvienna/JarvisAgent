@@ -258,7 +258,7 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `J9T_URL` | `http://localhost:8080` | j9t base URL |
+| `J9T_URL` | `http://localhost:8080` | j9t base URL (port 8080 is the default; check `config.json` for the configured value) |
 | `J9T_TOKEN` | *(empty)* | Bearer token for Engine auth |
 | `J9T_TOKEN_FILE` | *(empty)* | Path to file containing the token |
 | `J9T_MCP_TRANSPORT` | `stdio` | Transport: `stdio` or `sse` |
