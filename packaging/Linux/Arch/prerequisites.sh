@@ -11,7 +11,7 @@ echo "==> Installing build + runtime dependencies ..."
 pacman -Syu --noconfirm --needed \
     base-devel git wget \
     python python-pip \
-    zlib \
+    zlib postgresql-libs \
     nodejs npm \
     xdg-utils \
     premake

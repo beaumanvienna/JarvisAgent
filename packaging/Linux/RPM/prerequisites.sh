@@ -11,7 +11,7 @@ echo "==> Installing build + runtime dependencies ..."
 dnf install -y \
     gcc gcc-c++ make git wget tar \
     python3 python3-devel python3-pip \
-    zlib zlib-devel \
+    zlib zlib-devel libpq-devel \
     rpm-build \
     bash xdg-utils
 

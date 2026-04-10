@@ -150,6 +150,20 @@ project "jarvisAgent"
                 py_incdir
             }
 
+            --
+            -- Use pkg-config to discover libpq (PostgreSQL client library).
+            --
+            local pq_cflags = os.outputof("pkg-config --cflags libpq 2>/dev/null")
+            if pq_cflags and pq_cflags ~= "" then
+                local pq_incdir = pq_cflags:match("-I([^%s]+)")
+                if pq_incdir then
+                    includedirs { pq_incdir }
+                end
+                print(">>> libpq (Linux): " .. pq_cflags:gsub("%s+$", ""))
+            else
+                print(">>> libpq: not found via pkg-config — PostgreSQL connector will not be available")
+            end
+
             links {
                 "curl",
                 "nghttp2",
@@ -160,6 +174,7 @@ project "jarvisAgent"
                 "z",
                 "m",
                 py_link,
+                "pq",
                 "pdcursesmod",
                 "miniz"
             }
@@ -266,12 +281,35 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
             -- macOS frameworks needed by libcurl (SystemConfiguration/CoreFoundation)
             linkoptions { "-framework CoreFoundation", "-framework SystemConfiguration" }
 
+            --
+            -- Use pkg-config to discover libpq (PostgreSQL client library).
+            -- On macOS, brew installs libpq to a non-standard prefix; pkg-config handles this.
+            --
+            local pq_cflags = os.outputof("pkg-config --cflags libpq 2>/dev/null")
+            if pq_cflags and pq_cflags ~= "" then
+                local pq_incdir = pq_cflags:match("-I([^%s]+)")
+                if pq_incdir then
+                    includedirs { pq_incdir }
+                end
+                local pq_libs = os.outputof("pkg-config --libs-only-L libpq 2>/dev/null")
+                if pq_libs and pq_libs ~= "" then
+                    local pq_libdir = pq_libs:match("-L([^%s]+)")
+                    if pq_libdir then
+                        libdirs { pq_libdir }
+                    end
+                end
+                print(">>> libpq (macOS): " .. pq_cflags:gsub("%s+$", ""))
+            else
+                print(">>> libpq: not found via pkg-config — PostgreSQL connector will not be available")
+            end
+
             links {
                 "curl",
                 "nghttp2",
                 "ssl",
                 "crypto",
                 "z",
+                "pq",
                 "pdcursesmod",
                 "miniz"
             }
@@ -342,6 +380,21 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
             includedirs { pyIncludeDir }
             libdirs { pyLibDir }
             links { pyLibName }
+
+            --
+            -- libpq on Windows: check LIBPQ_DIR env var or default PostgreSQL install path.
+            --
+            local pqDir = os.getenv("LIBPQ_DIR") or "C:/Program Files/PostgreSQL/17"
+            local pqIncDir = path.join(pqDir, "include")
+            local pqLibDir = path.join(pqDir, "lib")
+            if os.isdir(pqIncDir) then
+                includedirs { pqIncDir }
+                libdirs { pqLibDir }
+                links { "libpq" }
+                print(">>> libpq (Windows): " .. pqDir)
+            else
+                print(">>> libpq: not found — set LIBPQ_DIR or install PostgreSQL; PostgreSQL connector will not be available")
+            end
         end
 
 

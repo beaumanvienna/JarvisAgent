@@ -298,21 +298,216 @@ mcp/
     resources.ts        — MCP resource implementations
 ```
 
+### Dashboard Status Indicator
+
+The MCP sidecar sends a periodic heartbeat (`POST /api/mcp/heartbeat`) to j9t every 15 seconds. The backend tracks the last heartbeat timestamp and exposes `mcp_connected` (boolean) and `mcp_last_heartbeat_secs_ago` (integer) in the `GET /api/status` response. The dashboard shows a purple LED labeled "MCP connected" when a heartbeat has been received within the last 35 seconds, or a gray "MCP offline" LED otherwise.
+
 ### Docker Deployment
 
 The `docker-compose.example.yml` includes a `j9t_mcp` sidecar service that connects to `jarvis_agent` over the internal Docker network.
 
 ---
 
-## 8. Next Steps
+## 8. Polarion Enhancements (Phase 2)
 
-### Phase 2 — Polarion Enhancements
-First connector to validate the abstraction layer. Wraps existing `PolarionClient` in `PolarionConnector : ICloudConnector`, adds write-back, creation, attachments, and traceability.
+### PolarionConnector
 
-### Phase 3 — S3 (Object Storage)
-First general-purpose connector. SigV4 signing via `SigV4Signer`, upload/download task executor, `s3_watch` trigger.
+`PolarionConnector : ICloudConnector` wraps the existing `PolarionClient` into the cloud abstraction layer. Registered at startup in `jarvisAgent.cpp`.
 
-### Phase 4 — PostgreSQL
-Database connector via libpq. Parameterized queries (no SQL injection), CSV/JSON output.
+- **GetType()** → `"polarion"`
+- **TestConnection()** — performs a minimal query (page 1, size 1) to validate connectivity
+- **ResolveCredentials()** — looks up the PAT from KeyManager via `m_KeyName`
+
+CloudConnection params for Polarion:
+
+| Key | Description |
+|-----|-------------|
+| `project_id` | Polarion project ID (required) |
+
+Endpoint is the Polarion server base URL (e.g. `https://polarion.example.com/polarion`).
+
+### PolarionClient Extensions
+
+The existing `PolarionClient` now supports write operations:
+
+| Method | REST Endpoint | Description |
+|--------|--------------|-------------|
+| `UpdateWorkItem()` | `PATCH /rest/v1/projects/{id}/workitems/{id}` | Update work item fields |
+| `CreateWorkItem()` | `POST /rest/v1/projects/{id}/workitems` | Create new work item |
+| `DownloadAttachment()` | `GET .../attachments/{id}/content` | Download attachment to local file |
+| `UploadAttachment()` | `POST .../attachments` | Upload file as attachment (multipart) |
+| `FetchLinkedWorkItems()` | `GET .../linkedworkitems` | Traceability traversal |
+
+All methods use JSON:API (`application/vnd.api+json`) content type and Bearer token auth.
+
+### polarion_write Task Type
+
+JCWF task type `"polarion_write"` enables write operations in workflows. Uses the `ICloudTaskExecutor` base class for automatic connection/credential resolution.
+
+**Task params:**
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `connection` | yes | Named CloudConnection |
+| `operation` | yes | `update`, `create`, `upload_attachment`, `download_attachment`, `linked_items` |
+| `work_item_id` | for update/attachment/linked_items | Target work item ID |
+| `body` | for update/create | JSON:API request body |
+| `attachment_id` | for download_attachment | Attachment ID to download |
+| `file_path` | for attachment operations | Local file path |
+| `file_name` | optional for upload | Attachment filename (defaults to basename) |
+
+Response is written to `response.json` in the task working directory and captured as stdout.
+
+### Named Connection for polarion_query Filters
+
+The `polarion_query` filter source now supports a `"connection"` field that references a named CloudConnection. When set, it overrides the inline `base_url`, `project_id`, and `key_name` fields. This centralizes Polarion server config in the Connections tab.
+
+```json
+{
+  "id": "requirements",
+  "source": {
+    "kind": "polarion_query",
+    "connection": "my-polarion",
+    "query": "type:requirement AND status:approved",
+    "fields": ["id", "title", "severity"]
+  },
+  "binding": "item"
+}
+```
+
+Inline `base_url`/`project_id`/`key_name` still works for backward compatibility.
+
+### Workflow Editor UI
+
+- Task type dropdown includes `polarion_write`
+- Inspector panel shows Polarion-specific fields (connection, operation, work_item_id, body, attachment fields) with a purple accent
+- Filter builder dialog shows `connection` field for `polarion_query` sources, with hints that it overrides inline fields
+
+---
+
+## 9. S3 Object Storage (Phase 3)
+
+### SigV4 Request Signing
+
+`SigV4Signer` implements AWS Signature Version 4 using OpenSSL HMAC-SHA256. It produces the `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256`, and `Host` headers required for S3 authentication.
+
+Key methods:
+- `Sign()` — signs an HTTP request, returns headers to add
+- `Sha256Hex()` — SHA-256 hex digest of arbitrary data
+- `EmptyPayloadHash()` — cached SHA-256 of empty string (used for GET/DELETE)
+
+### S3Connector
+
+`S3Connector : ICloudConnector` supports AWS S3 and S3-compatible services (MinIO, Wasabi, R2).
+
+CloudConnection params:
+
+| Key | Description |
+|-----|-------------|
+| `region` | AWS region, e.g. "us-east-1" (required) |
+| `bucket` | Default bucket name (can be overridden per-task) |
+
+- **Endpoint**: custom URL for S3-compatible services (empty = AWS default `https://{bucket}.s3.{region}.amazonaws.com`)
+- **Auth type**: SigV4
+- **Credentials**: stored as `username`/`password` (access key ID / secret key) or as `api_key` in `"ACCESS_KEY_ID:SECRET_KEY"` format
+
+### S3 Task Type
+
+JCWF task type `"s3"` supports four operations:
+
+| Operation | Required params | Description |
+|-----------|----------------|-------------|
+| `upload` | `key`, `file_path` | Upload local file to S3 |
+| `download` | `key`, `file_path` | Download S3 object to local file |
+| `list` | `prefix` (optional) | List objects (XML response) |
+| `delete` | `key` | Delete an S3 object |
+
+All operations accept an optional `bucket` param (falls back to connection default). Response is written to `response.json` in the task working directory.
+
+### s3_watch Trigger Type
+
+JCWF trigger type `"s3_watch"` polls an S3 bucket at a configurable interval. On each poll interval, the trigger fires and the workflow runs — the workflow itself checks for new data.
+
+```json
+{
+  "type": "s3_watch",
+  "id": "watch-uploads",
+  "params": {
+    "connection": "my-s3",
+    "bucket": "my-bucket",
+    "prefix": "inbox/",
+    "poll_interval_seconds": 300
+  }
+}
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `connection` | (required) | Named S3 CloudConnection |
+| `bucket` | connection default | Bucket to watch |
+| `prefix` | empty (all) | Key prefix filter |
+| `poll_interval_seconds` | 300 | Poll interval (minimum 60s) |
+
+### Connections UI
+
+The ConnectionsView shows dedicated fields for S3 connections (Region, Bucket) and Polarion connections (Project ID) alongside the generic parameters table.
+
+### Example Workflow
+
+`workflows/s3UploadDownloadDemo.jcwf` — creates a sample file, uploads it to S3, downloads it back, and lists the prefix. Requires an S3 connection named `my-s3`.
+
+---
+
+## 10. PostgreSQL Database (Phase 4)
+
+### System Dependency
+
+PostgreSQL support requires the `libpq` client library installed on the build system:
+
+| Platform | Install command |
+|----------|----------------|
+| Ubuntu/Debian | `sudo apt install libpq-dev` |
+| macOS (Homebrew) | `brew install libpq` |
+| Windows | Install PostgreSQL or set `LIBPQ_DIR` environment variable |
+
+The premake build uses `pkg-config` to discover libpq include paths and link flags on Linux/macOS. On Windows it checks `LIBPQ_DIR` or the default PostgreSQL install path.
+
+### PostgresConnector
+
+`PostgresConnector : ICloudConnector` uses the libpq C API directly (no C++ wrapper library).
+
+CloudConnection params:
+
+| Key | Description |
+|-----|-------------|
+| `database` | Database name (required) |
+| `sslmode` | `disable`, `prefer` (default), `require`, `verify-ca`, `verify-full` |
+
+- **Endpoint**: `host:port` (default `localhost:5432`)
+- **Auth type**: BasicAuth (username/password from KeyManager)
+- **TestConnection()**: connects and runs `SELECT 1`
+
+### db_query Task Type
+
+JCWF task type `"db_query"` executes SQL queries and writes results to disk.
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `postgres`) |
+| `query` | yes | | SQL query string |
+| `format` | no | `csv` | Output format: `csv` or `json` |
+| `output_file` | no | `result.csv`/`result.json` | Output filename |
+
+- CSV output follows RFC 4180 (proper quoting/escaping)
+- JSON output is an array of objects with column names as keys
+- NULL values produce empty CSV fields or JSON `null`
+
+### Connections UI
+
+The ConnectionsView shows dedicated fields for PostgreSQL connections: Database name and SSL Mode dropdown.
+
+---
+
+## 11. Next Steps
 
 See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 9.

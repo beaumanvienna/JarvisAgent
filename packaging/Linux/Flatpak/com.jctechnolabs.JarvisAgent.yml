@@ -19,6 +19,20 @@ finish-args:
   - --device=dri
 
 modules:
+  # ---- libpq (PostgreSQL client library) ----
+  - name: libpq
+    buildsystem: simple
+    build-commands:
+      - ./configure --prefix=/app --without-readline --without-zlib --without-icu
+      - make -C src/interfaces/libpq -j${FLATPAK_BUILDER_N_JOBS}
+      - make -C src/interfaces/libpq install
+      - make -C src/include install
+      - install -Dm644 src/include/postgres_ext.h /app/include/postgres_ext.h
+    sources:
+      - type: git
+        url: https://github.com/postgres/postgres.git
+        tag: REL_17_5
+
   # ---- premake5 (build tool, not shipped) ----
   - name: premake5
     buildsystem: simple

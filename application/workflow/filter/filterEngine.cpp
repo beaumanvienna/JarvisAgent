@@ -29,6 +29,8 @@
 #include "workflow/filter/polarionClient.h"
 #include "workflow/filter/queryParser.h"
 
+#include "cloud/cloudConnectionManager.h"
+#include "core.h"
 #include "engine.h"
 
 namespace AIAssistant
@@ -461,8 +463,36 @@ namespace AIAssistant
     std::vector<FilterItem> FilterEngine::EvaluatePolarionQuery(FilterDef const& filter, std::string const& workflowBaseDir,
                                                                 std::string& errorMessage) const
     {
+        // If a named connection is specified, resolve base_url/project_id/key_name from it
+        FilterDef resolvedFilter = filter;
+        if (!filter.m_Source.m_Connection.empty())
+        {
+            auto const* conn =
+                Core::g_Core->GetCloudConnectionManager().GetConnection(filter.m_Source.m_Connection);
+            if (!conn)
+            {
+                errorMessage = "filter '" + filter.m_Id + "': connection '" + filter.m_Source.m_Connection +
+                               "' not found";
+                return {};
+            }
+            if (conn->m_Type != "polarion")
+            {
+                errorMessage = "filter '" + filter.m_Id + "': connection '" + filter.m_Source.m_Connection +
+                               "' is type '" + conn->m_Type + "', expected 'polarion'";
+                return {};
+            }
+            resolvedFilter.m_Source.m_BaseUrl = conn->m_Endpoint;
+            resolvedFilter.m_Source.m_KeyName = conn->m_KeyName;
+
+            auto projectIt = conn->m_Params.find("project_id");
+            if (projectIt != conn->m_Params.end())
+            {
+                resolvedFilter.m_Source.m_ProjectId = projectIt->second;
+            }
+        }
+
         PolarionClient client;
-        return client.FetchAll(filter, workflowBaseDir, errorMessage);
+        return client.FetchAll(resolvedFilter, workflowBaseDir, errorMessage);
     }
 
     // -----------------------------------------------------------------

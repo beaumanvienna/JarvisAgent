@@ -7,7 +7,9 @@ class Jarvisagent < Formula
 
   depends_on "premake" => :build
   depends_on "node" => :build
+  depends_on "libpq" => :build
   depends_on "python@3"
+  depends_on "libpq"
   depends_on "pandoc"
 
   def install

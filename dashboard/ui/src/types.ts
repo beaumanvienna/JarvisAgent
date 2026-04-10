@@ -16,6 +16,8 @@ export interface StatusResponse {
   session_managers_with_inflight: number;
   session_managers_inflight_total: number;
   websocket_clients: number;
+  mcp_connected?: boolean;
+  mcp_last_heartbeat_secs_ago?: number;
 }
 
 export interface WorkflowEntry {

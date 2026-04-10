@@ -70,7 +70,8 @@ namespace AIAssistant
         FileWatch,
         Structure,
         Manual,
-        Webhook
+        Webhook,
+        S3Watch
     };
 
     // ---------------------------------------------------------------------
@@ -84,7 +85,10 @@ namespace AIAssistant
         Shell,
         AiCall,
         Internal,
-        SubWorkflow
+        SubWorkflow,
+        PolarionWrite,
+        S3,
+        DbQuery
     };
 
     enum class TaskMode
@@ -259,6 +263,7 @@ namespace AIAssistant
         std::vector<std::string> m_Fields;
 
         // polarion_query only
+        std::string m_Connection; // Named CloudConnection (preferred over inline base_url/project_id/key_name)
         std::string m_BaseUrl;
         std::string m_ProjectId;
         std::string m_KeyName; // KeyManager credential name (never stored in JCWF)

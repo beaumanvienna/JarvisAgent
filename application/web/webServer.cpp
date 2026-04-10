@@ -1436,6 +1436,10 @@ namespace AIAssistant
         // ---- Public: GET /api/status — no auth (health checks, load balancers) ----
         CROW_ROUTE(m_Server, "/api/status")([this]() { return HandleStatusGet(); });
 
+        // ---- Public: POST /api/mcp/heartbeat — MCP sidecar liveness ----
+        CROW_ROUTE(m_Server, "/api/mcp/heartbeat")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleMcpHeartbeatPost(); });
+
         // ---- Admin: Workflow list + detail (read-only but exposes internal logic) ----
         CROW_ROUTE(m_Server, "/api/workflows")
             .methods("GET"_method)(
@@ -1931,6 +1935,18 @@ namespace AIAssistant
     }
 #endif // J9T_STUDIO
 
+    crow::response WebServer::HandleMcpHeartbeatPost()
+    {
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_McpLastHeartbeat = std::chrono::steady_clock::now();
+        }
+
+        crow::json::wvalue response;
+        response["ok"] = true;
+        return MakeJsonResponse(200, response);
+    }
+
     crow::response WebServer::HandleStatusGet()
     {
         crow::json::wvalue status;
@@ -2005,6 +2021,22 @@ namespace AIAssistant
                     status["python_engine_tasks_completed"][i] =
                         static_cast<int64_t>(pyPool->GetTasksCompleted(i));
                 }
+            }
+        }
+
+        // MCP sidecar status
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            auto const elapsed = std::chrono::steady_clock::now() - m_McpLastHeartbeat;
+            bool const mcpConnected =
+                m_McpLastHeartbeat.time_since_epoch().count() > 0 &&
+                elapsed < std::chrono::seconds(35);
+            status["mcp_connected"] = mcpConnected;
+            if (mcpConnected)
+            {
+                auto const secs =
+                    std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+                status["mcp_last_heartbeat_secs_ago"] = static_cast<int64_t>(secs);
             }
         }
 

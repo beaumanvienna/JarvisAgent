@@ -48,6 +48,14 @@
 #include "workflow/pythonTaskExecutor.h"
 #include "workflow/subWorkflowTaskExecutor.h"
 #include "workflow/triggerEngine.h"
+#include "cloud/polarionConnector.h"
+#include "cloud/polarionWriteTaskExecutor.h"
+#include "cloud/s3Connector.h"
+#include "cloud/s3CloudTaskExecutor.h"
+#include "cloud/postgresConnector.h"
+#include "cloud/dbQueryCloudTaskExecutor.h"
+#include "cloud/cloudConnectorRegistry.h"
+#include "cloud/cloudConnectionManager.h"
 #include "workflow/aiRequestPool.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "workflow/workflowFileIndex.h"
@@ -260,6 +268,33 @@ namespace AIAssistant
             {
                 m_SubWorkflowExecutor = std::make_shared<SubWorkflowTaskExecutor>(m_WorkflowRegistry.get());
                 executorRegistry.RegisterExecutor(TaskType::SubWorkflow, m_SubWorkflowExecutor);
+            }
+
+            // PolarionWrite executor (TaskType::PolarionWrite)
+            {
+                auto& connectorRegistry = Core::g_Core->GetCloudConnectorRegistry();
+                auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+                // Register cloud connectors
+                connectorRegistry.Register(std::make_unique<PolarionConnector>());
+                connectorRegistry.Register(std::make_unique<S3Connector>());
+
+                // Polarion write executor
+                std::shared_ptr<ITaskExecutor> polarionWriteExecutor =
+                    std::make_shared<PolarionWriteTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::PolarionWrite, polarionWriteExecutor);
+
+                // S3 executor
+                std::shared_ptr<ITaskExecutor> s3Executor =
+                    std::make_shared<S3CloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::S3, s3Executor);
+
+                // PostgreSQL connector + db_query executor
+                connectorRegistry.Register(std::make_unique<PostgresConnector>());
+
+                std::shared_ptr<ITaskExecutor> dbQueryExecutor =
+                    std::make_shared<DbQueryCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::DbQuery, dbQueryExecutor);
             }
         }
 

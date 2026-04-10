@@ -192,7 +192,16 @@ export default function FilterBuilderDialog({ isOpen, filter, onSave, onCancel }
           {source.kind === "polarion_query" && (
             <>
               <label className="field">
-                <div className="small">Base URL</div>
+                <div className="small">Connection (named, preferred)</div>
+                <input
+                  className="input"
+                  value={source.connection ?? ""}
+                  onChange={(e) => updateSource({ connection: e.target.value || undefined })}
+                  placeholder="my-polarion (overrides base_url/project_id/key_name)"
+                />
+              </label>
+              <label className="field">
+                <div className="small">Base URL {source.connection ? <span style={{ opacity: 0.5 }}>(ignored when connection set)</span> : null}</div>
                 <input
                   className="input"
                   value={source.base_url ?? ""}
@@ -201,7 +210,7 @@ export default function FilterBuilderDialog({ isOpen, filter, onSave, onCancel }
                 />
               </label>
               <label className="field">
-                <div className="small">Project ID</div>
+                <div className="small">Project ID {source.connection ? <span style={{ opacity: 0.5 }}>(ignored when connection set)</span> : null}</div>
                 <input
                   className="input"
                   value={source.project_id ?? ""}
@@ -219,7 +228,7 @@ export default function FilterBuilderDialog({ isOpen, filter, onSave, onCancel }
                 />
               </label>
               <label className="field">
-                <div className="small">Key name (KeyManager credential)</div>
+                <div className="small">Key name {source.connection ? <span style={{ opacity: 0.5 }}>(ignored when connection set)</span> : null}</div>
                 <input
                   className="input"
                   value={source.key_name ?? ""}

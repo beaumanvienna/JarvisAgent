@@ -3,7 +3,7 @@ Version: 0.1-1
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.10), python3-pip, python3-venv, zlib1g, bash
+Depends: python3 (>= 3.10), python3-pip, python3-venv, zlib1g, libpq5, bash
 Suggests: pandoc, texlive-latex-base, texlive-latex-extra, texlive-fonts-recommended, nodejs, npm
 Maintainer: JC Technolabs <https://github.com/beaumanvienna>
 Homepage: https://github.com/beaumanvienna/JarvisAgent

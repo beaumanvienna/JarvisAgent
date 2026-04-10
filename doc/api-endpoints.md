@@ -17,7 +17,7 @@ Engine mode protects all endpoints except health checks and static assets with B
 
 | Tier | Endpoints | Engine Auth | Studio Auth |
 |------|-----------|-------------|-------------|
-| Public | `GET /api/status`, `GET /`, `/dash-assets/*` | None | None |
+| Public | `GET /api/status`, `POST /api/mcp/heartbeat`, `GET /`, `/dash-assets/*` | None | None |
 | Webhook | `POST /api/webhook/<id>` | HMAC-SHA256 (required) | HMAC-SHA256 (optional) |
 | Admin | All other endpoints | `Authorization: Bearer <token>` | None |
 | WebSocket | `WS /ws` | Token-as-first-message | None |
@@ -80,7 +80,9 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
   "session_managers_total": 12,
   "session_managers_with_inflight": 2,
   "session_managers_inflight_total": 5,
-  "websocket_clients": 1
+  "websocket_clients": 1,
+  "mcp_connected": false,
+  "mcp_last_heartbeat_secs_ago": 12
 }
 ```
 
@@ -94,6 +96,19 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 | `session_managers_with_inflight` | Session managers that currently have at least one AI query in flight. |
 | `session_managers_inflight_total` | Total number of AI queries currently in flight across all sessions. |
 | `websocket_clients` | Number of connected WebSocket clients. |
+| `mcp_connected` | `true` if the MCP sidecar has sent a heartbeat within the last 35 seconds. |
+| `mcp_last_heartbeat_secs_ago` | Seconds since last MCP heartbeat (only present when `mcp_connected` is `true`). |
+
+### MCP Heartbeat
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/mcp/heartbeat` | Records an MCP sidecar heartbeat. Called every 15 seconds by the MCP server. |
+
+**Response (200):**
+```json
+{ "ok": true }
+```
 
 ---
 

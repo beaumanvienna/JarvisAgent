@@ -138,6 +138,11 @@ namespace AIAssistant
         crow::response ServeDashboardIndex() const;
         crow::response ServeDashboardStatic(std::string const& requestPath) const;
 
+        // ---- MCP heartbeat ----
+        crow::response HandleMcpHeartbeatPost();
+        std::chrono::steady_clock::time_point m_McpLastHeartbeat{}; // guarded by m_Mutex
+        std::string m_McpVersion;                                   // guarded by m_Mutex
+
         // ---- Engine handlers (both editions) ----
         crow::response HandleStatusGet();
         crow::response HandleWorkflowsListGet();

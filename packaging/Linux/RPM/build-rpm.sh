@@ -202,7 +202,7 @@ elif command -v fpm &>/dev/null; then
         --description "Parallel AI-driven automation with C++ backend and React frontend" \
         --url "https://github.com/beaumanvienna/JarvisAgent" \
         --license "GPL-3.0-only" \
-        --depends python3 --depends bash --depends zlib \
+        --depends python3 --depends bash --depends zlib --depends libpq \
         --after-install "$SCRIPT_DIR/postinst.sh" \
         --after-remove "$SCRIPT_DIR/postrm.sh" \
         -C "$STAGING" \

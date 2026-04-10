@@ -482,6 +482,57 @@ namespace AIAssistant
                         break;
                     }
 
+                    case WorkflowTriggerType::S3Watch:
+                    {
+                        std::string connectionName;
+                        std::string bucket;
+                        std::string prefix;
+                        uint32_t pollIntervalSeconds = 300;
+
+                        // Parse s3_watch params from JSON
+                        if (!workflowTrigger.m_ParamsJson.empty())
+                        {
+                            simdjson::ondemand::parser s3Parser;
+                            simdjson::padded_string s3Padded(workflowTrigger.m_ParamsJson);
+                            simdjson::ondemand::document s3Doc;
+
+                            if (s3Parser.iterate(s3Padded).get(s3Doc) == simdjson::SUCCESS)
+                            {
+                                std::string_view sv;
+                                if (s3Doc["connection"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    connectionName = std::string(sv);
+                                }
+                                if (s3Doc["bucket"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    bucket = std::string(sv);
+                                }
+                                if (s3Doc["prefix"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    prefix = std::string(sv);
+                                }
+                                int64_t interval = 0;
+                                if (s3Doc["poll_interval_seconds"].get_int64().get(interval) == simdjson::SUCCESS)
+                                {
+                                    pollIntervalSeconds = static_cast<uint32_t>(interval);
+                                }
+                            }
+                        }
+
+                        if (connectionName.empty())
+                        {
+                            LOG_APP_ERROR(
+                                "WorkflowTriggerBinder::RegisterAll: s3_watch trigger '{}' in workflow '{}' missing "
+                                "'connection' param",
+                                workflowTrigger.m_Id, workflowDefinition.m_Id);
+                            break;
+                        }
+
+                        triggerEngine.AddS3WatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, connectionName,
+                                                        bucket, prefix, pollIntervalSeconds, workflowTrigger.m_IsEnabled);
+                        break;
+                    }
+
                     case WorkflowTriggerType::Structure:
                     {
                         LOG_APP_INFO(

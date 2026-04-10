@@ -339,6 +339,21 @@ namespace AIAssistant
             return TaskType::SubWorkflow;
         }
 
+        if (rawType == "polarion_write")
+        {
+            return TaskType::PolarionWrite;
+        }
+
+        if (rawType == "s3")
+        {
+            return TaskType::S3;
+        }
+
+        if (rawType == "db_query")
+        {
+            return TaskType::DbQuery;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }
@@ -372,6 +387,11 @@ namespace AIAssistant
         if (typeString == "webhook")
         {
             return WorkflowTriggerType::Webhook;
+        }
+
+        if (typeString == "s3_watch")
+        {
+            return WorkflowTriggerType::S3Watch;
         }
 
         LOG_CORE_WARN("Unknown trigger type '{}', defaulting to Unknown", typeString);

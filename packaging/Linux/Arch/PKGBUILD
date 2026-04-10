@@ -6,7 +6,7 @@ pkgdesc="C++ backend / React frontend application for parallel AI-driven automat
 arch=('x86_64')
 url="https://github.com/beaumanvienna/JarvisAgent"
 license=('GPL-3.0-only')
-depends=('python' 'python-pip' 'zlib' 'bash')
+depends=('python' 'python-pip' 'zlib' 'postgresql-libs' 'bash')
 optdepends=('pandoc: PDF workflow support'
             'texlive-bin: PDF workflow support (pdflatex)'
             'nodejs: mermaid diagram rendering (mmdc)'

@@ -50,6 +50,7 @@ This specification focuses on:
     - [3.2.4 Auto Triggers](#324-auto-triggers)
     - [3.2.5 Manual Triggers](#325-manual-triggers)
     - [3.2.6 Webhook Triggers](#326-webhook-triggers)
+    - [3.2.7 S3-Watch Triggers](#327-s3-watch-triggers)
   - [3.3 Tasks](#33-tasks)
     - [3.3.1 Task Types](#331-task-types)
     - [3.3.2 Mode: single vs per_item](#332-mode-single-vs-per_item)
@@ -440,6 +441,27 @@ At runtime, the engine will expand designated tasks from this iterator (see task
   The callback is fire-and-forget (15 s timeout, failures are logged but do not affect
   the run result).
 
+#### 3.2.7 S3-Watch Triggers
+
+```jsonc
+{
+  "type": "s3_watch",
+  "id": "watch-uploads",
+  "enabled": true,
+  "params": {
+    "connection": "my-s3",         // named CloudConnection (required)
+    "bucket": "my-bucket",         // optional, defaults to connection bucket
+    "prefix": "inbox/",            // optional key prefix filter
+    "poll_interval_seconds": 300   // optional, minimum 60, default 300
+  }
+}
+```
+
+- S3-watch triggers poll an S3 bucket at a configurable interval.
+- On each poll interval, the trigger fires and the workflow runs.
+- The workflow itself is responsible for detecting new or changed objects (e.g., by comparing against a previous listing stored on disk).
+- The `connection` param references a named CloudConnection of type `s3` configured in the Connections tab.
+
 ---
 
 ### 3.3 Tasks
@@ -459,7 +481,7 @@ Each task has:
 ```jsonc
 {
   "id": "summarize",
-  "type": "python | shell | ai_call | internal | sub_workflow",
+  "type": "python | shell | ai_call | internal | sub_workflow | polarion_write | s3 | db_query",
   "label": "Summarize report with AI",
   "doc": "Sends the prepared text to an AI assistant and stores the answer.",
   "mode": "single | per_item",
@@ -682,6 +704,67 @@ make
 
   **Reuse:** Multiple parent workflows (or multiple tasks within the same workflow) can
   reference the same sub-workflow file.
+
+- `polarion_write`  
+  Executes a Polarion ALM write operation (update, create, attachment upload/download, linked items).
+  Uses the `ICloudTaskExecutor` base class for automatic connection/credential resolution.
+
+  ```jsonc
+  {
+    "id": "update_status",
+    "type": "polarion_write",
+    "params": {
+      "connection": "my-polarion",
+      "operation": "update",
+      "work_item_id": "REQ-003",
+      "body": "{\"data\":{\"type\":\"workitems\",\"attributes\":{\"status\":{\"id\":\"approved\"}}}}"
+    },
+    "working_directory": "my-workflow/update_status"
+  }
+  ```
+
+  Operations: `update`, `create`, `upload_attachment`, `download_attachment`, `linked_items`.
+  See `doc/cloud-integration.md` §8 for full param reference.
+
+- `s3`  
+  Executes an S3-compatible object storage operation (upload, download, list, delete).
+  Requests are authenticated with AWS Signature V4 (HMAC-SHA256).
+
+  ```jsonc
+  {
+    "id": "upload_results",
+    "type": "s3",
+    "params": {
+      "connection": "my-s3",
+      "operation": "upload",
+      "key": "reports/output.csv",
+      "file_path": "my-workflow/output.csv"
+    },
+    "working_directory": "my-workflow/upload"
+  }
+  ```
+
+  Operations: `upload`, `download`, `list`, `delete`.
+  See `doc/cloud-integration.md` §9 for full param reference.
+
+- `db_query`  
+  Executes a SQL query against a PostgreSQL database and writes results to CSV or JSON.
+
+  ```jsonc
+  {
+    "id": "fetch_users",
+    "type": "db_query",
+    "params": {
+      "connection": "my-postgres",
+      "query": "SELECT id, name, email FROM users WHERE active = true",
+      "format": "csv",
+      "output_file": "users.csv"
+    },
+    "working_directory": "my-workflow/fetch_users"
+  }
+  ```
+
+  See `doc/cloud-integration.md` §10 for full param reference.
 
 #### 3.3.2 Mode: `single` vs `per_item`
 

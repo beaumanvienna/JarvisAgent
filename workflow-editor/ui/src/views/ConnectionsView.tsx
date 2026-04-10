@@ -320,6 +320,73 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
             </select>
           </div>
 
+          {editing.type === "s3" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Region</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. us-east-1"
+                  value={editing.params.region ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, region: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Bucket</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. my-bucket"
+                  value={editing.params.bucket ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)}
+                />
+              </div>
+            </>
+          )}
+
+          {editing.type === "polarion" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>Project ID</label>
+              <input
+                className="input"
+                type="text"
+                placeholder="e.g. GoKartProcurement"
+                value={editing.params.project_id ?? ""}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_id: e.target.value } } : prev)}
+              />
+            </div>
+          )}
+
+          {editing.type === "postgres" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Database</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. mydb"
+                  value={editing.params.database ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>SSL Mode</label>
+                <select
+                  className="input"
+                  value={editing.params.sslmode ?? "prefer"}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, sslmode: e.target.value } } : prev)}
+                >
+                  <option value="disable">disable</option>
+                  <option value="prefer">prefer</option>
+                  <option value="require">require</option>
+                  <option value="verify-ca">verify-ca</option>
+                  <option value="verify-full">verify-full</option>
+                </select>
+              </div>
+            </>
+          )}
+
           <div className="field" style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 12, opacity: 0.8 }}>Parameters</label>
             {Object.entries(editing.params).map(([k, v]) => (

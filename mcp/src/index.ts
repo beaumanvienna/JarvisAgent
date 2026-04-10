@@ -20,6 +20,28 @@ import { J9tClient } from "./j9tClient.js";
 import { registerTools } from "./tools.js";
 import { registerResources } from "./resources.js";
 
+/** Send periodic heartbeats so the j9t dashboard can show MCP status. */
+function startHeartbeat(client: J9tClient): void
+{
+    const INTERVAL_MS = 15_000; // 15 seconds
+
+    const beat = async () =>
+    {
+        try
+        {
+            await client.post("/api/mcp/heartbeat");
+        }
+        catch
+        {
+            // j9t not reachable — will retry next interval
+        }
+    };
+
+    // Fire immediately, then every INTERVAL_MS
+    beat();
+    setInterval(beat, INTERVAL_MS);
+}
+
 async function main(): Promise<void>
 {
     const config = loadConfig();
@@ -33,6 +55,9 @@ async function main(): Promise<void>
     // Register all tools and resources
     registerTools(server, client);
     registerResources(server, client);
+
+    // Start heartbeat to j9t so the dashboard can show MCP status
+    startHeartbeat(client);
 
     // Select transport
     const transportType = process.env.J9T_MCP_TRANSPORT ?? "stdio";

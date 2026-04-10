@@ -38,6 +38,11 @@ jobs:
       - name: Install MarkItDown
         run: pipx install "markitdown[all]"
 
+      - name: Install libpq
+        run: |
+          brew install libpq
+          echo "PKG_CONFIG_PATH=$(brew --prefix libpq)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
+
       - name: Install Premake5
         uses: abel0b/setup-premake@v2
         with:

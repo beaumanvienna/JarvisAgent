@@ -345,6 +345,30 @@ namespace AIAssistant
                      triggerId, workflowId, secret.empty() ? "<none>" : "<set>");
     }
 
+    void TriggerEngine::AddS3WatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                        std::string const& connectionName, std::string const& bucket,
+                                        std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        S3WatchTriggerInstance instance{};
+        instance.m_WorkflowId = workflowId;
+        instance.m_TriggerId = triggerId;
+        instance.m_ConnectionName = connectionName;
+        instance.m_Bucket = bucket;
+        instance.m_Prefix = prefix;
+        instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
+        instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
+        instance.m_IsEnabled = isEnabled;
+
+        m_S3WatchTriggers.push_back(std::move(instance));
+
+        LOG_APP_INFO(
+            "TriggerEngine::AddS3WatchTrigger: registered s3_watch trigger '{}' for workflow '{}' "
+            "(connection={}, bucket={}, prefix={}, interval={}s)",
+            triggerId, workflowId, connectionName, bucket.empty() ? "<default>" : bucket,
+            prefix.empty() ? "<all>" : prefix, pollIntervalSeconds);
+    }
+
     TriggerEngine::WebhookTriggerInstance const* TriggerEngine::GetWebhookTrigger(std::string const& workflowId) const
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -363,6 +387,7 @@ namespace AIAssistant
         m_FileWatchTriggers.clear();
         m_ManualTriggers.clear();
         m_WebhookTriggers.clear();
+        m_S3WatchTriggers.clear();
         m_FileWatchIndex.clear();
         m_WebhookIndex.clear();
         LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
@@ -377,6 +402,7 @@ namespace AIAssistant
         EraseWorkflowFromVector(m_FileWatchTriggers, workflowId);
         EraseWorkflowFromVector(m_ManualTriggers, workflowId);
         EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
+        EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
 
         // Rebuild file-watch index because indices may have changed.
         m_FileWatchIndex.clear();
@@ -400,6 +426,8 @@ namespace AIAssistant
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+            // Cron triggers
             for (CronTriggerInstance& cronTriggerInstance : m_CronTriggers)
             {
                 if (!cronTriggerInstance.m_IsEnabled)
@@ -420,6 +448,24 @@ namespace AIAssistant
                     cronTriggerInstance.m_NextFireTime =
                         cronTriggerInstance.m_Expression.ComputeNextFireTime(now, cronTriggerInstance.m_Timezone);
                 }
+            }
+
+            // S3 watch triggers (polling)
+            auto const steadyNow = std::chrono::steady_clock::now();
+            for (S3WatchTriggerInstance& s3Instance : m_S3WatchTriggers)
+            {
+                if (!s3Instance.m_IsEnabled || steadyNow < s3Instance.m_NextPollTime)
+                {
+                    continue;
+                }
+
+                s3Instance.m_NextPollTime = steadyNow + s3Instance.m_PollInterval;
+
+                // S3 polling is done outside the lock (see below)
+                // For now, we just schedule the poll check — actual S3 list is done asynchronously
+                // by the workflow run that the trigger fires. The trigger fires on every poll interval;
+                // the workflow itself decides if there's new data worth processing.
+                eventsToFire.push_back({s3Instance.m_WorkflowId, s3Instance.m_TriggerId});
             }
         }
 

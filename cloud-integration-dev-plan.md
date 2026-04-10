@@ -46,7 +46,7 @@ The existing AI interface code (`CurlMultiDispatcher`, `aiRequestPool`, `aiCallT
 
 ### Phase 1 — MCP Interface
 
-MCP is a standalone TypeScript sidecar with zero C++ changes. It unlocks Claude Desktop, Claude Code, and other MCP client integrations immediately — highest ecosystem impact per effort.
+MCP is a standalone TypeScript sidecar. It unlocks Claude Desktop, Claude Code, and other MCP client integrations immediately — highest ecosystem impact per effort.
 
 - [x] Create standalone MCP server (TypeScript, `@modelcontextprotocol/sdk`, MIT)
 - [x] Implement tools: `list_workflows`, `run_workflow`, `get_run_status`, `get_run_output`, `list_active_runs`, `cancel_run`
@@ -54,39 +54,40 @@ MCP is a standalone TypeScript sidecar with zero C++ changes. It unlocks Claude 
 - [x] Bearer token passthrough from MCP server to j9t REST API
 - [x] Add `mcp/` directory with `package.json`, `tsconfig.json`, `src/index.ts`
 - [x] Docker: add MCP sidecar to `docker-compose.example.yml`
-- [ ] Dashboard: add MCP status indicator
+- [x] Dashboard: add MCP status indicator (heartbeat approach — MCP sidecar sends periodic `POST /api/mcp/heartbeat` to j9t; backend tracks last heartbeat time and exposes `mcp_connected` + `mcp_last_heartbeat` in `/api/status`; dashboard reads status and shows LED)
 
 ### Phase 2 — Polarion Enhancements
 
 First connector to validate the abstraction layer against existing, working code.
 
-- [ ] Implement `PolarionConnector : ICloudConnector` (wraps existing `PolarionClient`)
-- [ ] Add write-back: `PATCH /rest/v1/projects/{id}/workitems/{id}` via `PolarionClient`
-- [ ] Add work item creation: `POST /rest/v1/projects/{id}/workitems`
-- [ ] Add attachment download/upload
-- [ ] Add linked items / traceability traversal
-- [ ] Migrate `polarion_query` filter to use named Connection instead of inline `base_url`/`project_id`
-- [ ] Add `polarion_write` task type and inspector UI
+- [x] Implement `PolarionConnector : ICloudConnector` (wraps existing `PolarionClient`)
+- [x] Add write-back: `PATCH /rest/v1/projects/{id}/workitems/{id}` via `PolarionClient`
+- [x] Add work item creation: `POST /rest/v1/projects/{id}/workitems`
+- [x] Add attachment download/upload
+- [x] Add linked items / traceability traversal
+- [x] Migrate `polarion_query` filter to use named Connection instead of inline `base_url`/`project_id`
+- [x] Add `polarion_write` task type and inspector UI
 
 ### Phase 3 — Object Storage (S3-compatible)
 
 First general-purpose connector. Low UI complexity, high business value.
 
-- [ ] Implement `S3Connector : ICloudConnector`
-- [ ] Implement SigV4 request signing (OpenSSL HMAC-SHA256)
-- [ ] Implement `S3CloudTaskExecutor` (upload/download)
-- [ ] Add `s3_watch` trigger type (polling via `GET /?list-type=2`)
-- [ ] Frontend: S3 connection config fields, task inspector sections
-- [ ] Add example workflow demonstrating S3 upload/download
+- [x] Implement `S3Connector : ICloudConnector`
+- [x] Implement SigV4 request signing (OpenSSL HMAC-SHA256)
+- [x] Implement `S3CloudTaskExecutor` (upload/download)
+- [x] Add `s3_watch` trigger type (polling via `GET /?list-type=2`)
+- [x] Frontend: S3 connection config fields, task inspector sections
+- [x] Add example workflow demonstrating S3 upload/download
 
 ### Phase 4 — Database (PostgreSQL)
 
 Lower auth complexity than Snowflake, easier to test locally, validates the DB abstraction before tackling JWT-based services.
 
-- [ ] Vendor libpq (PostgreSQL License, permissive, GPL-compatible)
-- [ ] Implement `PostgresConnector : ICloudConnector`
-- [ ] Implement `DbQueryCloudTaskExecutor` (query to CSV/JSON to disk)
-- [ ] Frontend: PostgreSQL connection config, `db_query` task inspector
+- [x] Link against system libpq (`libpq-dev`); use the C API directly (no libpqxx)
+- [x] Implement `PostgresConnector : ICloudConnector`
+- [x] Implement `DbQueryCloudTaskExecutor` (query to CSV/JSON to disk)
+- [x] Frontend: PostgreSQL connection config, `db_query` task inspector
+- [x] Update packaging (`packaging/`), Docker build, and README.md for the new `libpq-dev` build dependency
 
 --- Ship milestone: foundation + MCP + Polarion + S3 + PostgreSQL ---
 

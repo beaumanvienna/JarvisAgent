@@ -168,6 +168,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 | Toolchain | `build-essential` |
 | Python 3 + headers | `python3` `python3-dev` `python3-pip` `python3-venv` |
 | zlib | `zlib1g-dev` |
+| libpq (PostgreSQL) | `libpq-dev` |
 | SSL (vendored) | — |
 | premake5 | `ppa:beauman/marley` (v5.0.16.2) |
 | Node.js + npm | `nodejs` `npm` |
@@ -176,6 +177,7 @@ rm -rf ~/JarvisAgent/   # remove user data
 |-------------|---------------|
 | Python 3 | `python3` `python3-pip` `python3-venv` |
 | zlib | `zlib1g` |
+| libpq (PostgreSQL) | `libpq5` |
 | bash | `bash` |
 
 **Notes:**
@@ -337,6 +339,7 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 | Toolchain | `gcc` `gcc-c++` `make` |
 | Python 3 + headers | `python3` `python3-devel` `python3-pip` |
 | zlib | `zlib-devel` |
+| libpq (PostgreSQL) | `libpq-devel` |
 | premake5 | Not in repos — download or build from source |
 | Node.js + npm | `nodejs` `npm` |
 
@@ -344,6 +347,7 @@ dput ppa:beauman/marley ../jarvisagent_*jammy*_source.changes
 |-------------|---------------|
 | Python 3 | `python3` `python3-pip` |
 | zlib | `zlib` |
+| libpq (PostgreSQL) | `libpq` |
 | bash | `bash` |
 
 **Files:**

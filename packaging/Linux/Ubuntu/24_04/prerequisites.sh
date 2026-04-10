@@ -12,7 +12,7 @@ apt-get update
 apt-get install -y \
     build-essential git wget \
     python3 python3-dev python3-pip python3-venv \
-    zlib1g-dev \
+    zlib1g-dev libpq-dev \
     nodejs npm \
     xdg-utils
 

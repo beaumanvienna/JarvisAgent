@@ -59,26 +59,70 @@ namespace AIAssistant
         static constexpr int MAX_RETRIES = 3;
         static constexpr long TIMEOUT_SECONDS = 30;
 
+        // Perform a single HTTP GET with Bearer token auth and return the response body.
+        bool HttpGet(std::string const& url, std::string const& bearerToken, std::string& responseBody,
+                     std::string& errorMessage) const;
+
+        // Perform an HTTP request with an arbitrary method + optional JSON body.
+        // Used for PATCH (update) and POST (create) operations.
+        bool HttpRequest(std::string const& method, std::string const& url, std::string const& bearerToken,
+                         std::string const& requestBody, std::string& responseBody, std::string& errorMessage) const;
+
+        // Download a binary file from the given URL to a local path.
+        bool HttpDownloadFile(std::string const& url, std::string const& bearerToken,
+                              std::string const& outputPath, std::string& errorMessage) const;
+
+        // Upload a file as a multipart form attachment.
+        bool HttpUploadFile(std::string const& url, std::string const& bearerToken,
+                            std::string const& filePath, std::string const& fileName,
+                            std::string& responseBody, std::string& errorMessage) const;
+
+        // URL-encode a string.
+        static std::string UrlEncode(std::string const& value);
+
+        // ----- Write-back: update work item fields -----
+        // PATCH /rest/v1/projects/{project_id}/workitems/{work_item_id}
+        bool UpdateWorkItem(std::string const& baseUrl, std::string const& projectId,
+                            std::string const& workItemId, std::string const& bearerToken,
+                            std::string const& jsonApiPatchBody, std::string& responseBody,
+                            std::string& errorMessage) const;
+
+        // ----- Creation: create a new work item -----
+        // POST /rest/v1/projects/{project_id}/workitems
+        bool CreateWorkItem(std::string const& baseUrl, std::string const& projectId,
+                            std::string const& bearerToken, std::string const& jsonApiPostBody,
+                            std::string& responseBody, std::string& errorMessage) const;
+
+        // ----- Attachments -----
+        // GET /rest/v1/projects/{project_id}/workitems/{work_item_id}/attachments/{attachment_id}/content
+        bool DownloadAttachment(std::string const& baseUrl, std::string const& projectId,
+                                std::string const& workItemId, std::string const& attachmentId,
+                                std::string const& bearerToken, std::string const& outputPath,
+                                std::string& errorMessage) const;
+
+        // POST /rest/v1/projects/{project_id}/workitems/{work_item_id}/attachments
+        bool UploadAttachment(std::string const& baseUrl, std::string const& projectId,
+                              std::string const& workItemId, std::string const& bearerToken,
+                              std::string const& filePath, std::string const& fileName,
+                              std::string& responseBody, std::string& errorMessage) const;
+
+        // ----- Linked items / traceability -----
+        // GET /rest/v1/projects/{project_id}/workitems/{work_item_id}/linkedworkitems
+        bool FetchLinkedWorkItems(std::string const& baseUrl, std::string const& projectId,
+                                  std::string const& workItemId, std::string const& bearerToken,
+                                  std::string& responseBody, std::string& errorMessage) const;
+
     private:
         // Build the full URL for a single page request.
         static std::string BuildPageUrl(FilterSource const& source, uint32_t pageNumber);
 
-        // Perform a single HTTP GET with Bearer token auth and return the response body.
-        // Returns false on failure (populates errorMessage).
-        bool HttpGet(std::string const& url, std::string const& bearerToken, std::string& responseBody,
-                     std::string& errorMessage) const;
-
         // Parse a JSON:API response page, extract work items into FilterItems.
-        // startIndex is the global 0-based index for the first item on this page.
         static bool ParseJsonApiPage(std::string const& responseBody, FilterDef const& filter, size_t startIndex,
                                      std::vector<FilterItem>& itemsOut, std::string& errorMessage);
 
         // Write a single item's JSON to <workflowBaseDir>/<filterId>/<filterId>-<k>.json.
         static bool WriteItemFile(FilterItem const& item, FilterDef const& filter, std::string const& workflowBaseDir,
                                   std::string& errorMessage);
-
-        // URL-encode a string.
-        static std::string UrlEncode(std::string const& value);
     };
 
 } // namespace AIAssistant

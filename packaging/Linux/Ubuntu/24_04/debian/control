@@ -2,13 +2,13 @@ Source: jarvisagent
 Section: utils
 Priority: optional
 Maintainer: JC <beaumanvienna@gmail.com>
-Build-Depends: debhelper-compat (= 13), python3-dev, zlib1g-dev, uuid-dev
+Build-Depends: debhelper-compat (= 13), python3-dev, zlib1g-dev, libpq-dev, uuid-dev
 Standards-Version: 4.6.2
 Homepage: https://github.com/beaumanvienna/JarvisAgent
 
 Package: jarvisagent
 Architecture: amd64
-Depends: python3 (>= 3.10), python3-pip, python3-venv, zlib1g, bash, ${shlibs:Depends}, ${misc:Depends}
+Depends: python3 (>= 3.10), python3-pip, python3-venv, zlib1g, libpq5, bash, ${shlibs:Depends}, ${misc:Depends}
 Description: Parallel AI-driven automation with C++ backend and React frontend
  JarvisAgent dispatches concurrent AI requests for bulk processing,
  supports visual DAG workflow editing, and provides a terminal UI

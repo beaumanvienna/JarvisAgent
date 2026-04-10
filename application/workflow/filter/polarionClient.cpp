@@ -23,6 +23,7 @@
 
 #include "workflow/filter/polarionClient.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -285,6 +286,331 @@ namespace AIAssistant
         }
 
         return true;
+    }
+
+    // =================================================================
+    // HttpRequest — generic HTTP method with JSON body
+    // =================================================================
+
+    bool PolarionClient::HttpRequest(std::string const& method, std::string const& url,
+                                     std::string const& bearerToken, std::string const& requestBody,
+                                     std::string& responseBody, std::string& errorMessage) const
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            errorMessage = "curl_easy_init() failed";
+            return false;
+        }
+
+        responseBody.clear();
+
+        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            size_t totalSize = size * nmemb;
+            buf->append(static_cast<char*>(contents), totalSize);
+            return totalSize;
+        };
+
+        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        std::string const authHeader = "Authorization: Bearer " + bearerToken;
+        headers = curl_slist_append(headers, authHeader.c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/vnd.api+json");
+        headers = curl_slist_append(headers, "Accept: application/vnd.api+json");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        if (!requestBody.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestBody.c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(requestBody.size()));
+        }
+
+        CURLcode res = curl_easy_perform(curl);
+
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            errorMessage = std::string("curl error: ") + curl_easy_strerror(res);
+            return false;
+        }
+
+        if (httpCode >= 400)
+        {
+            errorMessage = "HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                errorMessage += ": " + responseBody;
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    // =================================================================
+    // HttpDownloadFile — download binary content to a local file
+    // =================================================================
+
+    bool PolarionClient::HttpDownloadFile(std::string const& url, std::string const& bearerToken,
+                                          std::string const& outputPath, std::string& errorMessage) const
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            errorMessage = "curl_easy_init() failed";
+            return false;
+        }
+
+        FILE* fp = std::fopen(outputPath.c_str(), "wb");
+        if (!fp)
+        {
+            curl_easy_cleanup(curl);
+            errorMessage = "Cannot open output file: " + outputPath;
+            return false;
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS * 3); // longer timeout for downloads
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        std::string const authHeader = "Authorization: Bearer " + bearerToken;
+        headers = curl_slist_append(headers, authHeader.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        CURLcode res = curl_easy_perform(curl);
+
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        std::fclose(fp);
+
+        if (res != CURLE_OK)
+        {
+            errorMessage = std::string("curl error: ") + curl_easy_strerror(res);
+            return false;
+        }
+
+        if (httpCode >= 400)
+        {
+            errorMessage = "HTTP " + std::to_string(httpCode);
+            return false;
+        }
+
+        return true;
+    }
+
+    // =================================================================
+    // HttpUploadFile — multipart form upload
+    // =================================================================
+
+    bool PolarionClient::HttpUploadFile(std::string const& url, std::string const& bearerToken,
+                                        std::string const& filePath, std::string const& fileName,
+                                        std::string& responseBody, std::string& errorMessage) const
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            errorMessage = "curl_easy_init() failed";
+            return false;
+        }
+
+        responseBody.clear();
+
+        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            size_t totalSize = size * nmemb;
+            buf->append(static_cast<char*>(contents), totalSize);
+            return totalSize;
+        };
+
+        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
+
+        curl_mime* mime = curl_mime_init(curl);
+        curl_mimepart* part = curl_mime_addpart(mime);
+        curl_mime_name(part, "file");
+        curl_mime_filedata(part, filePath.c_str());
+        curl_mime_filename(part, fileName.c_str());
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS * 3);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        std::string const authHeader = "Authorization: Bearer " + bearerToken;
+        headers = curl_slist_append(headers, authHeader.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        CURLcode res = curl_easy_perform(curl);
+
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_mime_free(mime);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            errorMessage = std::string("curl error: ") + curl_easy_strerror(res);
+            return false;
+        }
+
+        if (httpCode >= 400)
+        {
+            errorMessage = "HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                errorMessage += ": " + responseBody;
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    // =================================================================
+    // UpdateWorkItem — PATCH work item fields
+    // =================================================================
+
+    bool PolarionClient::UpdateWorkItem(std::string const& baseUrl, std::string const& projectId,
+                                        std::string const& workItemId, std::string const& bearerToken,
+                                        std::string const& jsonApiPatchBody, std::string& responseBody,
+                                        std::string& errorMessage) const
+    {
+        std::string base = baseUrl;
+        if (!base.empty() && base.back() == '/')
+        {
+            base.pop_back();
+        }
+
+        std::string url = base + "/rest/v1/projects/" + UrlEncode(projectId) +
+                          "/workitems/" + UrlEncode(workItemId);
+
+        return HttpRequest("PATCH", url, bearerToken, jsonApiPatchBody, responseBody, errorMessage);
+    }
+
+    // =================================================================
+    // CreateWorkItem — POST a new work item
+    // =================================================================
+
+    bool PolarionClient::CreateWorkItem(std::string const& baseUrl, std::string const& projectId,
+                                        std::string const& bearerToken, std::string const& jsonApiPostBody,
+                                        std::string& responseBody, std::string& errorMessage) const
+    {
+        std::string base = baseUrl;
+        if (!base.empty() && base.back() == '/')
+        {
+            base.pop_back();
+        }
+
+        std::string url = base + "/rest/v1/projects/" + UrlEncode(projectId) + "/workitems";
+
+        return HttpRequest("POST", url, bearerToken, jsonApiPostBody, responseBody, errorMessage);
+    }
+
+    // =================================================================
+    // DownloadAttachment — download attachment content to local file
+    // =================================================================
+
+    bool PolarionClient::DownloadAttachment(std::string const& baseUrl, std::string const& projectId,
+                                            std::string const& workItemId, std::string const& attachmentId,
+                                            std::string const& bearerToken, std::string const& outputPath,
+                                            std::string& errorMessage) const
+    {
+        std::string base = baseUrl;
+        if (!base.empty() && base.back() == '/')
+        {
+            base.pop_back();
+        }
+
+        std::string url = base + "/rest/v1/projects/" + UrlEncode(projectId) +
+                          "/workitems/" + UrlEncode(workItemId) +
+                          "/attachments/" + UrlEncode(attachmentId) + "/content";
+
+        return HttpDownloadFile(url, bearerToken, outputPath, errorMessage);
+    }
+
+    // =================================================================
+    // UploadAttachment — upload a file as work item attachment
+    // =================================================================
+
+    bool PolarionClient::UploadAttachment(std::string const& baseUrl, std::string const& projectId,
+                                          std::string const& workItemId, std::string const& bearerToken,
+                                          std::string const& filePath, std::string const& fileName,
+                                          std::string& responseBody, std::string& errorMessage) const
+    {
+        std::string base = baseUrl;
+        if (!base.empty() && base.back() == '/')
+        {
+            base.pop_back();
+        }
+
+        std::string url = base + "/rest/v1/projects/" + UrlEncode(projectId) +
+                          "/workitems/" + UrlEncode(workItemId) + "/attachments";
+
+        return HttpUploadFile(url, bearerToken, filePath, fileName, responseBody, errorMessage);
+    }
+
+    // =================================================================
+    // FetchLinkedWorkItems — get linked items for traceability traversal
+    // =================================================================
+
+    bool PolarionClient::FetchLinkedWorkItems(std::string const& baseUrl, std::string const& projectId,
+                                              std::string const& workItemId, std::string const& bearerToken,
+                                              std::string& responseBody, std::string& errorMessage) const
+    {
+        std::string base = baseUrl;
+        if (!base.empty() && base.back() == '/')
+        {
+            base.pop_back();
+        }
+
+        std::string url = base + "/rest/v1/projects/" + UrlEncode(projectId) +
+                          "/workitems/" + UrlEncode(workItemId) + "/linkedworkitems";
+
+        return HttpGet(url, bearerToken, responseBody, errorMessage);
     }
 
     // =================================================================

@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-dev \
     zlib1g-dev \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # premake5
@@ -58,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pipx \
     gosu \
     zlib1g \
+    libpq5 \
     ca-certificates \
     # Node.js + mmdc (Mermaid → PNG rendering)
     nodejs \

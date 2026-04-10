@@ -7,6 +7,7 @@ interface Props {
   runs: RunSnapshot[];
   sessions: Map<string, SessionStatus>;
   pythonRunning: boolean;
+  mcpConnected: boolean;
   totalCompleted: number;
   totalFailed: number;
   onQuit: () => void;
@@ -36,6 +37,7 @@ export default function StatusBar({
   runs,
   sessions,
   pythonRunning,
+  mcpConnected,
   totalCompleted,
   totalFailed,
   onQuit,
@@ -54,6 +56,7 @@ export default function StatusBar({
   const connectionColor = connected ? "#22c55e" : "#ef4444";
   const inflightColor = anyInflight ? "#eab308" : "#334155";
   const workflowColor = anyRunning ? "#3b82f6" : "#334155";
+  const mcpColor = mcpConnected ? "#a855f7" : "#334155";
 
   return (
     <header className="status-bar">
@@ -86,6 +89,10 @@ export default function StatusBar({
           <Led
             color={workflowColor}
             label={anyRunning ? "Workflow running" : "No active runs"}
+          />
+          <Led
+            color={mcpColor}
+            label={mcpConnected ? "MCP connected" : "MCP offline"}
           />
           {!pythonRunning && (
             <span className="python-warning">Python Offline</span>

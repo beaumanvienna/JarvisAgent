@@ -318,6 +318,7 @@ namespace AIAssistant
         canonical += "skip_empty=" + std::string(filterDef.m_Source.m_SkipEmpty ? "true" : "false") + ";";
         canonical += "index_path=" + filterDef.m_Source.m_IndexPath + ";";
         canonical += "query=" + filterDef.m_Source.m_Query + ";";
+        canonical += "connection=" + filterDef.m_Source.m_Connection + ";";
         canonical += "base_url=" + filterDef.m_Source.m_BaseUrl + ";";
         canonical += "project_id=" + filterDef.m_Source.m_ProjectId + ";";
 

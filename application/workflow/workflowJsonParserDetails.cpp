@@ -1171,6 +1171,14 @@ namespace AIAssistant
                     sourceOut.m_Fields.emplace_back(fieldView.begin(), fieldView.end());
                 }
             }
+            else if (key == "connection")
+            {
+                if (!ElementToString(value, sourceOut.m_Connection))
+                {
+                    errorMessage = "filter source field 'connection' must be string";
+                    return false;
+                }
+            }
             else if (key == "base_url")
             {
                 if (!ElementToString(value, sourceOut.m_BaseUrl))

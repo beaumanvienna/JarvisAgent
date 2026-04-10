@@ -3383,6 +3383,9 @@ export default function WorkflowEditorView(props: {
                       <option value="shell">shell</option>
                       <option value="internal">internal</option>
                       <option value="sub_workflow">sub_workflow</option>
+                      <option value="polarion_write">polarion_write</option>
+                      <option value="s3">s3</option>
+                      <option value="db_query">db_query</option>
                     </select>
                   </label>
 
@@ -3449,6 +3452,132 @@ export default function WorkflowEditorView(props: {
                       </select>
                     </label>
                   )}
+
+                  {selectedNode.data.task.type === "polarion_write" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(168,85,247,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(168,85,247,0.95)" }}>Polarion Write params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-polarion" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? ""} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="">select...</option>
+                            <option value="update">update</option>
+                            <option value="create">create</option>
+                            <option value="upload_attachment">upload_attachment</option>
+                            <option value="download_attachment">download_attachment</option>
+                            <option value="linked_items">linked_items</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">work_item_id</div>
+                          <input className="input" value={(params.work_item_id as string) ?? ""} placeholder="e.g. REQ-003 or {{item.work_item_id}}" onChange={(e) => { updateParams({ work_item_id: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">body (JSON:API)</div>
+                          <textarea className="input" rows={3} value={(params.body as string) ?? ""} placeholder='{"data":{"type":"workitems","attributes":{...}}}' onChange={(e) => { updateParams({ body: e.target.value }); }} style={{ fontFamily: "monospace", fontSize: 11 }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">attachment_id</div>
+                          <input className="input" value={(params.attachment_id as string) ?? ""} onChange={(e) => { updateParams({ attachment_id: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">file_path</div>
+                          <input className="input" value={(params.file_path as string) ?? ""} onChange={(e) => { updateParams({ file_path: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">file_name</div>
+                          <input className="input" value={(params.file_name as string) ?? ""} onChange={(e) => { updateParams({ file_name: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "s3" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(251,146,60,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(251,146,60,0.95)" }}>S3 params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-s3" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? ""} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="">select...</option>
+                            <option value="upload">upload</option>
+                            <option value="download">download</option>
+                            <option value="list">list</option>
+                            <option value="delete">delete</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">bucket (optional, defaults to connection)</div>
+                          <input className="input" value={(params.bucket as string) ?? ""} onChange={(e) => { updateParams({ bucket: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">key</div>
+                          <input className="input" value={(params.key as string) ?? ""} placeholder="path/to/object.txt" onChange={(e) => { updateParams({ key: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">file_path</div>
+                          <input className="input" value={(params.file_path as string) ?? ""} placeholder="local file for upload/download" onChange={(e) => { updateParams({ file_path: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">prefix (for list)</div>
+                          <input className="input" value={(params.prefix as string) ?? ""} onChange={(e) => { updateParams({ prefix: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "db_query" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(34,197,94,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(34,197,94,0.95)" }}>Database Query params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-postgres" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">query (SQL)</div>
+                          <textarea className="input" rows={4} value={(params.query as string) ?? ""} placeholder="SELECT * FROM users LIMIT 10" onChange={(e) => { updateParams({ query: e.target.value }); }} style={{ fontFamily: "monospace", fontSize: 11 }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">format</div>
+                          <select className="input" value={(params.format as string) ?? "csv"} onChange={(e) => { updateParams({ format: e.target.value }); }}>
+                            <option value="csv">csv</option>
+                            <option value="json">json</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">output_file (optional)</div>
+                          <input className="input" value={(params.output_file as string) ?? ""} placeholder="result.csv" onChange={(e) => { updateParams({ output_file: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
 
                   <label className="field">
                     <div className="small">

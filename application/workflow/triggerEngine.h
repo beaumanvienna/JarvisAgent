@@ -113,6 +113,15 @@ namespace AIAssistant
         void AddWebhookTrigger(std::string const& workflowId, std::string const& triggerId, std::string const& secret,
                                bool isEnabled);
 
+        // Register an S3-watch trigger (polls an S3 bucket for new objects).
+        // connectionName: named CloudConnection for S3 access.
+        // bucket: S3 bucket to watch (empty = use connection default).
+        // prefix: key prefix to filter (empty = watch entire bucket).
+        // pollIntervalSeconds: polling interval (minimum 60).
+        void AddS3WatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                               std::string const& connectionName, std::string const& bucket,
+                               std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled);
+
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
@@ -211,6 +220,19 @@ namespace AIAssistant
             bool m_IsEnabled{true};
         };
 
+        struct S3WatchTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_ConnectionName;
+            std::string m_Bucket;
+            std::string m_Prefix;
+            std::chrono::seconds m_PollInterval{300};
+            std::chrono::steady_clock::time_point m_NextPollTime{};
+            std::string m_LastSeenKey; // highest key from last poll (change detection)
+            bool m_IsEnabled{true};
+        };
+
     private:
         void FireTrigger(std::string const& workflowId, std::string const& triggerId) const;
 
@@ -231,6 +253,7 @@ namespace AIAssistant
         std::vector<FileWatchTriggerInstance> m_FileWatchTriggers;
         std::vector<ManualTriggerInstance> m_ManualTriggers;
         std::vector<WebhookTriggerInstance> m_WebhookTriggers;
+        std::vector<S3WatchTriggerInstance> m_S3WatchTriggers;
 
         // Optional acceleration structure for file-trigger lookups:
         // map path → indices into m_FileWatchTriggers.
