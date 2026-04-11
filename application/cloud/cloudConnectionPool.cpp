@@ -172,7 +172,6 @@ namespace AIAssistant
 
         for (auto& [name, idle] : m_Pool)
         {
-            auto callbacksIt = m_TypeCallbacks.begin(); // simplified — real impl maps name->type
             auto it = idle.begin();
             while (it != idle.end())
             {
