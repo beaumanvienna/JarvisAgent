@@ -2,14 +2,14 @@
 
 ## Executive Summary
 
-The **postgresDemo** workflow demonstrates how JarvisAgent interacts with **PostgreSQL** through the cloud integration layer using the `db_query` task type.
+The **postgresDemo** workflow demonstrates a full round-trip with **PostgreSQL** through the cloud integration layer: create schema, insert data, query statistics, use AI to analyze the results, and write the AI summary back to the database.
 
 At its core, this workflow shows:
 
 - how `db_query` tasks execute SQL statements against a PostgreSQL database via libpq,
+- how `ai_call` tasks process query results and generate insights,
 - how a named **CloudConnection** centralizes database credentials and host config,
-- how results are written to disk in CSV and JSON formats,
-- and how tasks chain via `depends_on` to build a create-insert-query pipeline.
+- how results flow through a 6-task pipeline: DDL → DML → query → AI → write-back → verify.
 
 ---
 

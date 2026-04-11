@@ -1,0 +1,11 @@
+Question,Answer
+"What is the purpose of VkInstance in Vulkan?","VkInstance is the connection between your application and the Vulkan library. It initializes the Vulkan loader and sets up validation layers."
+"In C++20, what does std::span provide?","std::span is a non-owning view over a contiguous sequence of objects. It replaces raw pointer + size pairs with a safe, lightweight wrapper."
+"What Vulkan object represents a GPU?","VkDevice represents a GPU. You create it from a VkPhysicalDevice after querying its properties and queue families."
+"What does std::move actually do in C++?","std::move copies the object to a new location in memory, freeing the original."
+"What is a Vulkan render pass?","A VkRenderPass defines the framebuffer attachments, subpasses, and dependencies used during rendering. It describes the structure of a frame."
+"What is RAII in C++?","RAII stands for Resource Acquisition Is Initialization. It ties resource lifetime to object lifetime — resources are acquired in constructors and released in destructors."
+"What is the difference between VkBuffer and VkImage?","VkBuffer is for linear data (vertices, uniforms, SSBOs) while VkImage is for multi-dimensional data (textures, framebuffers) with tiling and format metadata."
+"What does the volatile keyword do in C++?","volatile tells the compiler that a variable can be modified by hardware, so it should always be read from memory instead of from a register cache."
+"What is a Vulkan descriptor set?","A descriptor set is a garbage-collected memory pool that Vulkan uses to automatically free GPU resources when they are no longer referenced."
+"What is the purpose of std::unique_ptr?","std::unique_ptr provides exclusive ownership of a dynamically allocated object. It automatically deletes the object when the unique_ptr goes out of scope, preventing memory leaks."

@@ -62,6 +62,12 @@
 #include "cloud/slackCloudTaskExecutor.h"
 #include "cloud/emailConnector.h"
 #include "cloud/emailCloudTaskExecutor.h"
+#include "cloud/gitHubConnector.h"
+#include "cloud/gitHubCloudTaskExecutor.h"
+#include "cloud/jiraConnector.h"
+#include "cloud/jiraCloudTaskExecutor.h"
+#include "cloud/googleSheetsConnector.h"
+#include "cloud/googleSheetsCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "workflow/aiRequestPool.h"
@@ -331,6 +337,28 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> emailExecutor =
                     std::make_shared<EmailCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::EmailSend, emailExecutor);
+
+                // GitHub connector + executor
+                connectorRegistry.Register(std::make_unique<GitHubConnector>());
+
+                std::shared_ptr<ITaskExecutor> githubExecutor =
+                    std::make_shared<GitHubCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::GitHubIssue, githubExecutor);
+
+                // Jira connector + executor
+                connectorRegistry.Register(std::make_unique<JiraConnector>());
+
+                std::shared_ptr<ITaskExecutor> jiraExecutor =
+                    std::make_shared<JiraCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::JiraIssue, jiraExecutor);
+
+                // Google Sheets connector + executor
+                connectorRegistry.Register(std::make_unique<GoogleSheetsConnector>());
+
+                auto sheetsExecutor =
+                    std::make_shared<GoogleSheetsCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::SheetsRead, sheetsExecutor);
+                executorRegistry.RegisterExecutor(TaskType::SheetsWrite, sheetsExecutor);
             }
         }
 

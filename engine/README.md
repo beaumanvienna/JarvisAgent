@@ -39,6 +39,7 @@ This document describes:
   ```
 - Start keyboard input thread (`KeyboardInput::Start()`).
 - Initialize terminal UI (`TerminalManager::Initialize()`).
+- Start OAuth token refresh loop (`OAuthTokenManager::Start()`).
 
 ### 4. Main loop (`Core::Run`)
 Executed until `Application::IsFinished()` returns true:
@@ -60,10 +61,11 @@ Executed until `Application::IsFinished()` returns true:
 4. Sleep for configured duration to prevent CPU overuse.
 
 ### 5. Shutdown (`Core::Shutdown`)
+- Stop OAuth token refresh loop (`OAuthTokenManager::Stop()`).
 - Stop keyboard input.
+- Shutdown thread pool.
 - Run `CurlWrapper::GlobalCleanup()`.
 - Shutdown terminal manager.
-- Wait for all thread pool tasks (`ThreadPool::Wait()`).
 - Flush and restore `std::cout` / `std::cerr`.
 - Destroy terminal buffer and close log file.
 
@@ -155,4 +157,39 @@ The engine core:
 - Provides a clean separation between engine duties and application logic.
 
 This is the central orchestration layer of JarvisAgent.
+
+---
+
+## Core-Owned Subsystems
+
+`Core` owns and provides access to these subsystems via getter methods:
+
+| Member | Getter | Purpose |
+|--------|--------|---------|
+| `m_ThreadPool` | `GetThreadPool()` | Shared thread pool for async work |
+| `m_KeyManager` | `GetKeyManager()` | Encrypted credential storage (API keys, OAuth, key pairs) |
+| `m_OAuthTokenManager` | `GetOAuthTokenManager()` | OAuth2 token lifecycle and background refresh |
+| `m_CloudConnectionManager` | `GetCloudConnectionManager()` | In-memory CRUD for cloud connection configs |
+| `m_CloudConnectorRegistry` | `GetCloudConnectorRegistry()` | Registry of cloud connector plugins |
+| `m_CloudCircuitBreaker` | `GetCloudCircuitBreaker()` | Per-connection circuit breaker for cloud services |
+| `m_EngineConfig` | `GetConfig()` | Parsed `config.json` settings |
+| `m_TerminalManager` | `GetTerminalManager()` | Curses-based terminal UI |
+
+---
+
+## Directory Structure
+
+```
+engine/
+  core.h / core.cpp              — Core class, lifecycle, event loop
+  engine.h / engine.cpp          — Entry point, logger setup, engine() function
+  application.h                  — Application interface contract
+  event/                         — EventQueue, EventDispatcher, event types
+  log/                           — Log, TerminalManager, TerminalLogStreamBuf, SecretRedactor
+  json/                          — ConfigParser, ConfigChecker
+  keys/                          — KeyManager, KeyEncryption, OAuthTokenManager, JwtGenerator, SigV4Signer
+  auxiliary/                     — ThreadPool
+  input/                         — KeyboardInput
+  curlWrapper/                   — CurlWrapper, CurlMultiDispatcher
+```
 

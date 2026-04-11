@@ -374,6 +374,26 @@ namespace AIAssistant
             return TaskType::EmailSend;
         }
 
+        if (rawType == "github_issue")
+        {
+            return TaskType::GitHubIssue;
+        }
+
+        if (rawType == "jira_issue")
+        {
+            return TaskType::JiraIssue;
+        }
+
+        if (rawType == "sheets_read")
+        {
+            return TaskType::SheetsRead;
+        }
+
+        if (rawType == "sheets_write")
+        {
+            return TaskType::SheetsWrite;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }

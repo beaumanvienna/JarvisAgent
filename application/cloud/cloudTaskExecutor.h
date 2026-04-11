@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include "workflow/taskExecutor.h"
 #include "cloud/cloudConnector.h"
 #include "cloud/taskCancellationToken.h"
@@ -51,6 +53,11 @@ namespace AIAssistant
                                   TaskDef const& taskDefinition, TaskInstanceState& taskState,
                                   CloudConnection const& connection, CloudCredentials const& credentials,
                                   TaskCancellationToken const& cancellationToken) = 0;
+
+        // Validate that a local file path does not escape the given base directory.
+        // Returns true if path is safe. Logs and returns false on traversal attempt.
+        static bool ValidateLocalPath(std::string const& localPath, std::filesystem::path const& baseDir,
+                                      std::string const& taskId);
 
         CloudConnectorRegistry& m_ConnectorRegistry;
         CloudConnectionManager& m_ConnectionManager;

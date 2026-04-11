@@ -1,4 +1,4 @@
-import type { RunSnapshot, SessionStatus } from "../types";
+import type { RunSnapshot, SessionStatus, ConnectionHealthEntry } from "../types";
 
 type Tab = "dashboard" | "log";
 
@@ -8,6 +8,7 @@ interface Props {
   sessions: Map<string, SessionStatus>;
   pythonRunning: boolean;
   mcpConnected: boolean;
+  connectionHealth?: ConnectionHealthEntry[];
   totalCompleted: number;
   totalFailed: number;
   onQuit: () => void;
@@ -38,6 +39,7 @@ export default function StatusBar({
   sessions,
   pythonRunning,
   mcpConnected,
+  connectionHealth,
   totalCompleted,
   totalFailed,
   onQuit,
@@ -57,6 +59,10 @@ export default function StatusBar({
   const inflightColor = anyInflight ? "#eab308" : "#334155";
   const workflowColor = anyRunning ? "#3b82f6" : "#334155";
   const mcpColor = mcpConnected ? "#a855f7" : "#334155";
+  const hasOpenCircuit = connectionHealth?.some((c) => c.circuit_state === "open") ?? false;
+  const hasHalfOpen = connectionHealth?.some((c) => c.circuit_state === "half_open") ?? false;
+  const cloudHealthColor = hasOpenCircuit ? "#ef4444" : hasHalfOpen ? "#eab308" : connectionHealth?.length ? "#22c55e" : "#334155";
+  const cloudHealthLabel = hasOpenCircuit ? "Cloud: circuit open" : hasHalfOpen ? "Cloud: recovering" : connectionHealth?.length ? "Cloud: healthy" : "Cloud: no connections";
 
   return (
     <header className="status-bar">
@@ -94,6 +100,7 @@ export default function StatusBar({
             color={mcpColor}
             label={mcpConnected ? "MCP connected" : "MCP offline"}
           />
+          <Led color={cloudHealthColor} label={cloudHealthLabel} />
           {!pythonRunning && (
             <span className="python-warning">Python Offline</span>
           )}

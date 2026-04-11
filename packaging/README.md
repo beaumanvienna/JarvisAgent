@@ -1,6 +1,6 @@
 # JarvisAgent — Packaging Plan
 
-Last updated: 2026-03-25
+Last updated: 2026-04-10
 
 JarvisAgent is a cross-platform C++ application with React frontends. All central
 C++ libraries are vendored under `vendor/` so that every platform builds against the
@@ -72,6 +72,7 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 | premake5 | Generates Makefiles from `premake5.lua` |
 | Python 3 + dev headers | Embedded Python support |
 | zlib (dev) | Compression (linked at build time) |
+| libpq (dev) | PostgreSQL C client library (cloud integration) |
 | Node.js + npm | React UI builds |
 
 ### Runtime Dependencies
@@ -80,6 +81,7 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 |------------|---------|
 | Python 3 | Python task execution, markitdown |
 | zlib | Compression |
+| libpq | PostgreSQL client library (cloud integration) |
 | bash | Shell task execution |
 | pandoc + pdflatex | Markdown → PDF (PDF workflows only) |
 | mmdc (@mermaid-js/mermaid-cli) | Mermaid → PNG rendering (PDF workflows only) |
@@ -114,6 +116,7 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 | base toolchain | `base-devel` (meta-package) |
 | Python 3 + headers | `python` |
 | zlib | `zlib` |
+| libpq (PostgreSQL) | `postgresql-libs` |
 | premake5 | AUR: `premake` |
 | Node.js + npm | `nodejs` `npm` |
 | git | `git` |
@@ -122,6 +125,7 @@ All vendored in `vendor/`. OpenSSL and libcurl are intentionally vendored to avo
 |-------------|-------------|
 | Python 3 | `python` |
 | zlib | `zlib` |
+| libpq (PostgreSQL) | `postgresql-libs` |
 | bash | `bash` (part of `base`) |
 | pip | `python-pip` |
 
@@ -628,6 +632,26 @@ docker run -it --rm \
 - Dashboard: http://localhost:8080
 - Workflow Editor: http://localhost:8080/editor
 - The `-v` flag mounts `~/JarvisAgent` on the host so workflows, AI keys, and outputs persist across container restarts.
+
+**MCP sidecar (optional):**
+
+The `mcp/` directory contains a standalone MCP server that exposes j9t workflows to Claude Desktop and Claude Code. It can run as a Docker sidecar:
+
+```yaml
+# In docker-compose.example.yml
+mcp:
+  build: ./mcp
+  depends_on: [jarvisagent]
+  environment:
+    J9T_URL: http://jarvisagent:8080
+    J9T_TOKEN_FILE: /app/engine_api_token.txt
+  volumes:
+    - ./data:/app:ro
+```
+
+Note: `http://jarvisagent:8080` is the default. Check `config.json` for the actual port (`"port"` field) and whether TLS is enabled (`TlsCert`/`TlsKey`) — if TLS is configured, use `https://` and the corresponding port (default 8443).
+
+See `mcp/README.md` for full details.
 
 **Data directory:** `~/JarvisAgent` (mounted at `/app` inside the container)
 

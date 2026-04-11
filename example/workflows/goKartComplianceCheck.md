@@ -8,10 +8,11 @@ for per-item AI task fan-out.
 
 Instead of reading items from a local CSV file, this workflow:
 
-1. Queries a Polarion REST API for work items using a Lucene expression.
+1. Queries a Polarion REST API for work items using a named cloud connection.
 2. Fans out one AI call per work item (requirement).
 3. Each AI call compares the requirement against a platform specification and
    produces a structured compliance assessment.
+4. Writes the compliance status back to each Polarion work item via `polarion_write`.
 
 This is the first workflow to combine **three v1.1 features** end-to-end:
 
@@ -27,20 +28,21 @@ This is the first workflow to combine **three v1.1 features** end-to-end:
 ## 1. Big Picture
 
 ```
-+--------------------+                 +--------------------------+
-|  polarion-reqs     |    per item     |  assessRequirement       |
-|  polarion_query    | ------------->  |  ai_call (per_item)      |
-|  type:requirement  | 18 requirements |  18 parallel AI calls    |
-+--------------------+                 +--------------------------+
++--------------------+                 +--------------------------+                 +--------------------------+
+|  polarion-reqs     |    per item     |  assessRequirement       |                 |  write_status            |
+|  polarion_query    | ------------->  |  ai_call (per_item)      | ------------->  |  polarion_write          |
+|  connection:       | 18 requirements |  18 parallel AI calls    |                 |  write back to Polarion  |
+|  my-polarion       |                 +--------------------------+                 +--------------------------+
++--------------------+
 ```
 
 ![Workflow Editor — goKartComplianceCheck](../screenshot_workflow_editor2.png)
 
 ### What happens when you click Run
 
-1. **Filter evaluation** — `PolarionClient` sends a paginated GET request to
-   `http://localhost:18080/polarion/rest/v1/projects/GoKartProcurement/workitems?query=type:requirement`.
-   Bearer token is resolved from KeyManager via `key_name: "polarion"`.
+1. **Filter evaluation** — `PolarionClient` sends a paginated GET request to the
+   Polarion REST API using the named connection `my-polarion` (configured in the Connections tab).
+   The connection resolves `base_url`, `project_id`, and Bearer token from `CloudConnectionManager` + `KeyManager`.
 
 2. **Fan-out** — The runtime creates 18 child task instances
    (`assessRequirement#0` through `assessRequirement#17`), one per requirement.
@@ -57,6 +59,9 @@ This is the first workflow to combine **three v1.1 features** end-to-end:
    `PROB_REQ-018_017.output.txt` are written as AI responses arrive. The parent task
    completes when all 18 children succeed.
 
+6. **Write-back** — The `write_status` task (also `per_item`) writes the compliance
+   status back to each Polarion work item via `PATCH /rest/v1/projects/{id}/workitems/{id}`.
+
 ---
 
 ## 2. Prerequisites
@@ -67,10 +72,23 @@ The workflow targets a local Polarion mockup that ships with the project:
 
 ```bash
 cd ../polarionMockup
+premake5 gmake && make config=release
 ./bin/Release/mockup
 # → Listening on http://0.0.0.0:18080
 # → 1 project, 18 work items, 2 users
 ```
+
+### Cloud Connection
+
+A connection named `my-polarion` must be configured in the **Connections** tab:
+
+| Field | Value |
+|-------|-------|
+| Type | `polarion` |
+| Endpoint | `http://localhost:18080/polarion` |
+| Key | `polarion` (a KeyManager credential with the PAT) |
+| Auth Type | `bearer` |
+| Project ID | `GoKartProcurement` |
 
 ### Polarion PAT (Personal Access Token)
 

@@ -37,6 +37,7 @@
 #include "keys/oauthTokenManager.h"
 #include "cloud/cloudConnectionManager.h"
 #include "cloud/cloudConnectorRegistry.h"
+#include "cloud/cloudCircuitBreaker.h"
 
 using namespace std::chrono_literals;
 namespace AIAssistant
@@ -69,6 +70,7 @@ namespace AIAssistant
         CloudConnectionManager const& GetCloudConnectionManager() const { return m_CloudConnectionManager; }
         CloudConnectorRegistry& GetCloudConnectorRegistry() { return m_CloudConnectorRegistry; }
         CloudConnectorRegistry const& GetCloudConnectorRegistry() const { return m_CloudConnectorRegistry; }
+        CloudCircuitBreaker& GetCloudCircuitBreaker() { return m_CloudCircuitBreaker; }
         OAuthTokenManager& GetOAuthTokenManager() { return m_OAuthTokenManager; }
         OAuthTokenManager const& GetOAuthTokenManager() const { return m_OAuthTokenManager; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
@@ -118,5 +120,6 @@ namespace AIAssistant
         OAuthTokenManager m_OAuthTokenManager{m_KeyManager};
         CloudConnectionManager m_CloudConnectionManager;
         CloudConnectorRegistry m_CloudConnectorRegistry;
+        CloudCircuitBreaker m_CloudCircuitBreaker;
     };
 } // namespace AIAssistant

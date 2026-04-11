@@ -40,7 +40,8 @@
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
-    static constexpr long kTimeoutSeconds = 300; // 5 minutes for large objects
+    static constexpr long kTimeoutSeconds = 300;        // 5 minutes for large objects
+    static constexpr curl_off_t kMaxDownloadBytes = 256 * 1024 * 1024; // 256 MB safety limit
 
     // Helper: perform S3 HTTP request with SigV4 signing
     static bool S3Request(std::string const& method, std::string const& url, std::string const& region,
@@ -132,6 +133,7 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, kMaxDownloadBytes);
 
         auto const& caBundle = CurlWrapper::GetCaBundlePath();
         if (!caBundle.empty())

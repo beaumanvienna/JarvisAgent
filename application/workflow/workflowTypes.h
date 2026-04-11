@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "cloud/taskCancellationToken.h"
 
 namespace AIAssistant
 {
@@ -94,7 +95,11 @@ namespace AIAssistant
         OneDrive,
         SnowflakeQuery,
         SlackMessage,
-        EmailSend
+        EmailSend,
+        GitHubIssue,
+        JiraIssue,
+        SheetsRead,
+        SheetsWrite
     };
 
     enum class TaskMode
@@ -573,6 +578,10 @@ namespace AIAssistant
         // Internal orchestration flags
         bool m_IsCompleted{false};
         bool m_HasFailed{false};
+
+        // Cooperative cancellation token for cloud tasks. Shared across all tasks in the run.
+        // Set when the run is created; Cancel() called when the run is cancelled.
+        std::shared_ptr<TaskCancellationToken> m_CancellationToken;
     };
 
 } // namespace AIAssistant

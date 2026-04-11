@@ -560,6 +560,57 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
             </>
           )}
 
+          {editing.type === "github" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Owner (organization or user)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="myorg"
+                  value={editing.params.owner ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, owner: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Repository</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="myrepo"
+                  value={editing.params.repo ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, repo: e.target.value } } : prev)}
+                />
+              </div>
+            </>
+          )}
+
+          {editing.type === "jira" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>Project Key</label>
+              <input
+                className="input"
+                type="text"
+                placeholder="PROJ"
+                value={editing.params.project_key ?? ""}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_key: e.target.value } } : prev)}
+              />
+            </div>
+          )}
+
+          {editing.type === "google_sheets" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>Spreadsheet ID</label>
+              <input
+                className="input"
+                type="text"
+                placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+                value={editing.params.spreadsheet_id ?? ""}
+                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)}
+              />
+            </div>
+          )}
+
           <div className="field" style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 12, opacity: 0.8 }}>Parameters</label>
             {Object.entries(editing.params).map(([k, v]) => (

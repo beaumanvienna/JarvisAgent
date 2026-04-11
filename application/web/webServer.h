@@ -267,6 +267,7 @@ namespace AIAssistant
         // OAuth PKCE state: code_verifier per connection (short-lived, in-memory only)
         std::mutex m_OAuthStateMutex;
         std::unordered_map<std::string, std::string> m_OAuthCodeVerifiers;
+        std::unordered_map<std::string, std::string> m_OAuthStateTokens; // CSRF state param per connection
 #endif
     };
 } // namespace AIAssistant

@@ -67,6 +67,7 @@
 #include "cloud/cloudConnector.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
+#include "cloud/cloudCircuitBreaker.h"
 #include "cloud/oneDriveConnector.h"
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
@@ -2050,6 +2051,25 @@ namespace AIAssistant
                 auto const secs =
                     std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
                 status["mcp_last_heartbeat_secs_ago"] = static_cast<int64_t>(secs);
+            }
+        }
+
+        // Connection health from circuit breaker
+        {
+            auto const& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
+            auto health = circuitBreaker.GetHealthSummary();
+            if (!health.empty())
+            {
+                crow::json::wvalue::list connections;
+                for (auto const& ch : health)
+                {
+                    crow::json::wvalue entry;
+                    entry["name"] = ch.m_Name;
+                    entry["circuit_state"] = CloudCircuitBreaker::StateToString(ch.m_State);
+                    entry["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                    connections.push_back(std::move(entry));
+                }
+                status["connection_health"] = std::move(connections);
             }
         }
 
@@ -6584,11 +6604,22 @@ namespace AIAssistant
             codeChallenge += base64url[hash[i] % 64];
         }
 
-        // Store code_verifier for the callback (keyed by connection name)
+        // Generate CSRF state token
+        unsigned char stateBytes[16];
+        RAND_bytes(stateBytes, sizeof(stateBytes));
+        std::string stateToken;
+        stateToken.reserve(22);
+        for (size_t i = 0; i < sizeof(stateBytes); ++i)
+        {
+            stateToken += base64url[stateBytes[i] % 64];
+        }
+
+        // Store code_verifier and state token for the callback (keyed by connection name)
         // Using a simple in-memory map — acceptable since OAuth flows are short-lived
         {
             std::lock_guard lock(m_OAuthStateMutex);
             m_OAuthCodeVerifiers[connectionName] = codeVerifier;
+            m_OAuthStateTokens[connectionName] = stateToken;
         }
 
         std::string authorizeUrl = OneDriveConnector::GetAuthorizeUrl(tenantId);
@@ -6616,7 +6647,7 @@ namespace AIAssistant
         std::string fullUrl = authorizeUrl + "?client_id=" + clientId + "&response_type=code" +
                               "&redirect_uri=" + redirectUri + "&scope=" + encodedScopes +
                               "&code_challenge=" + codeChallenge + "&code_challenge_method=S256" +
-                              "&response_mode=query";
+                              "&state=" + stateToken + "&response_mode=query";
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -6654,6 +6685,27 @@ namespace AIAssistant
         }
 
         std::string authCode = codeParam;
+
+        // Validate CSRF state parameter
+        auto stateParam = req.url_params.get("state");
+        {
+            std::lock_guard lock(m_OAuthStateMutex);
+
+            // Verify state token
+            auto stateIt = m_OAuthStateTokens.find(connectionName);
+            if (stateIt == m_OAuthStateTokens.end())
+            {
+                LOG_CORE_ERROR("OAuth callback for '{}': no pending state token (possible CSRF)", connectionName);
+                return crow::response(400, "No pending OAuth state for connection '" + connectionName + "'");
+            }
+            if (!stateParam || stateIt->second != std::string(stateParam))
+            {
+                m_OAuthStateTokens.erase(stateIt);
+                LOG_CORE_ERROR("OAuth callback for '{}': state mismatch (possible CSRF attack)", connectionName);
+                return crow::response(400, "OAuth state mismatch — possible CSRF attack");
+            }
+            m_OAuthStateTokens.erase(stateIt);
+        }
 
         // Retrieve the code_verifier for PKCE
         std::string codeVerifier;

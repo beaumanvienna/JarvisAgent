@@ -117,9 +117,13 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 
 ### Phase 8 — Additional Integrations
 
-- [ ] GitHub/GitLab: REST API connector + webhook trigger enrichment
-- [ ] Jira/Linear: REST API connector + task types for issue CRUD
-- [ ] Google Sheets: REST API connector + read/write task types
+- [x] Implement `GitHubConnector : ICloudConnector` (Bearer PAT, REST API)
+- [x] Implement `GitHubCloudTaskExecutor` (issue create/comment/close, get_file, list_issues)
+- [x] Implement `JiraConnector : ICloudConnector` (BasicAuth or Bearer, REST API v3)
+- [x] Implement `JiraCloudTaskExecutor` (issue create/update/transition/comment/get)
+- [x] Implement `GoogleSheetsConnector : ICloudConnector` (API key or OAuth2)
+- [x] Implement `GoogleSheetsCloudTaskExecutor` (sheets_read, sheets_write)
+- [x] Frontend: GitHub, Jira, Google Sheets connection config + task inspector sections
 
 ### Phase 9 — Hardening
 
@@ -127,26 +131,206 @@ Split into three sub-phases to avoid a monolithic hardening bucket:
 
 #### Phase 9a — Runtime Resilience
 
-- [ ] Implement `CloudCircuitBreaker` per connection (track consecutive failures, short-circuit requests during outages, auto-recover after cooldown)
-- [ ] Implement `CloudConnectionPool` for persistent-connection providers (PostgreSQL via libpq, future IMAP keep-alive). HTTP-based connectors already benefit from libcurl connection reuse (`CURLOPT_TCP_KEEPALIVE`), so the pool is primarily for non-HTTP protocols.
-- [ ] Wire `TaskCancellationToken` into existing run cancel mechanism so long-running cloud operations (Snowflake async polling, large S3 downloads, SMTP timeouts) respond to workflow run cancellation. (Token parameter already in `ExecuteCloud()` signature from Phase 0.)
-- [ ] Implement `ProviderRateLimitPolicy` extending `CloudRetryPolicy` with provider-specific semantics (Slack `Retry-After` with secondary limits, GitHub secondary rate limits, Graph API throttling windows, Snowflake async query polling cadence)
-- [ ] Add connection health check to `/api/status` readiness probe
-- [ ] Dashboard: connection health indicators in status bar
+- [x] Implement `CloudCircuitBreaker` per connection (track consecutive failures, short-circuit requests during outages, auto-recover after cooldown)
+- [x] Implement `CloudConnectionPool` for persistent-connection providers (PostgreSQL via libpq, future IMAP keep-alive). HTTP-based connectors already benefit from libcurl connection reuse (`CURLOPT_TCP_KEEPALIVE`), so the pool is primarily for non-HTTP protocols.
+- [x] Wire `TaskCancellationToken` into existing run cancel mechanism so long-running cloud operations (Snowflake async polling, large S3 downloads, SMTP timeouts) respond to workflow run cancellation. (Token parameter already in `ExecuteCloud()` signature from Phase 0.)
+- [x] Implement `ProviderRateLimitPolicy` extending `CloudRetryPolicy` with provider-specific semantics (Slack `Retry-After` with secondary limits, GitHub secondary rate limits, Graph API throttling windows, Snowflake async query polling cadence)
+- [x] Add connection health check to `/api/status` readiness probe
+- [x] Dashboard: connection health indicators in status bar
 
 #### Phase 9b — Security & Audit
 
-- [ ] Add audit logging for cloud operations (connection CRUD, OAuth grants, cloud task execution)
-- [ ] Add OAuth state parameter CSRF protection
-- [ ] Add download size limits (`CURLOPT_MAXFILESIZE_LARGE`)
-- [ ] Add path traversal validation for cloud local_path params
-- [ ] Enforce RSA key minimum 2048 bits in `JwtGenerator`
-- [ ] Verify `CURLOPT_SSL_VERIFYPEER` enabled in all cloud connectors
+- [x] Add audit logging for cloud operations (connection CRUD, OAuth grants, cloud task execution)
+- [x] Add OAuth state parameter CSRF protection
+- [x] Add download size limits (`CURLOPT_MAXFILESIZE_LARGE`)
+- [x] Add path traversal validation for cloud local_path params
+- [x] Enforce RSA key minimum 2048 bits in `JwtGenerator`
+- [x] Verify `CURLOPT_SSL_VERIFYPEER` enabled in all cloud connectors
 
 #### Phase 9c — Deployment & Ops
 
-- [ ] Document outbound firewall rules per integration
-- [ ] Container image signing (cosign, Apache-2.0)
+- [x] Document outbound firewall rules per integration
+- [x] Container image signing (cosign, Apache-2.0)
+
+### Phase 10 — End-to-End Testing
+
+All demo workflows must demonstrate a meaningful **round-trip** pattern: read from cloud, process with AI, write results back (or the reverse). Each test validates the full stack from connection setup through task execution to output verification.
+
+#### Local Infrastructure Setup
+
+| Service | How to Run | Notes |
+|---------|-----------|-------|
+| **Polarion** | `cd ../polarionMockup && premake5 gmake && make config=release && ./bin/Release/mockup` | Port 18080, token `1234!@#$`, project `GoKartProcurement` with 18 requirements |
+| **PostgreSQL** | Already running | `localhost:5432`, db `j9t_test`, user `j9t_user`, pw `1234!@#$` |
+| **S3 (MinIO)** | `docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin123 minio/minio server /data --console-address ":9001"` | S3-compatible on port 9000, console on 9001. Create bucket: `docker exec minio mc mb /data/j9t-test` |
+| **Email (SMTP)** | Real: `beaumanvienna@gmail.com` with Gmail App Password. Local mock: `docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit` | Mailpit: SMTP on 1025, web UI on 8025 (no auth needed) |
+| **GitHub** | Real: use the jarvisAgent repo itself (`beaumanvienna/jarvisAgent`) with a PAT | Already on GitHub — create test issues in the real repo or a throwaway test repo |
+| **Jira** | Free tier: `https://<yourname>.atlassian.net` — create a free Jira Cloud project | Email + API token auth |
+| **Slack** | Create a free Slack workspace + Bot with `chat:write` scope | Free tier is sufficient for testing |
+| **OneDrive** | Real Microsoft account (personal or work) + Azure AD app registration | OAuth PKCE flow, no client secret needed |
+| **Snowflake** | 30-day free trial at `signup.snowflake.com` | RSA key pair auth |
+| **Google Sheets** | Google API key (free, read-only public sheets) or OAuth2 | Create a public sheet with quiz data from `sheetsQuizGrader_sample_data.csv` |
+
+#### Test Plan — Round-Trip Demo Workflows
+
+Each demo workflow must have: cloud read/write + AI processing + verifiable output.
+
+- [ ] **Polarion round-trip** (`goKartComplianceCheck`): Migrate from inline `base_url`/`project_id`/`key_name` to a named `CloudConnection`. Add `polarion_write` task to write compliance status back to each work item after AI assessment. Verify write-back in PolarionMockup. See refactor details below.
+- [ ] **PostgreSQL round-trip** (`postgresDemo`): Add AI task — query rows, AI summarizes the data, insert summary back into a new table. Verify summary row exists.
+- [ ] **S3 round-trip** (`s3UploadDownloadDemo`): Upload sample data → download → AI analyzes content → upload AI report back to S3. Verify report object exists in bucket.
+- [ ] **Email round-trip** (`emailSendDemo`): AI generates a report from workflow context → email sends it with attachment. Verify email received (Mailpit web UI or Gmail inbox).
+- [ ] **GitHub round-trip** (`gitHubIssueDemo`): List open issues → AI triages/categorizes each issue → create a summary comment on each. Verify comments created via API.
+- [ ] **Jira round-trip** (`jiraIssueDemo`): Create issue with AI-generated description from input data → get issue back → verify fields match.
+- [ ] **Google Sheets round-trip** (`sheetsQuizGrader`): Already complete — read quiz → AI grades → write grades back. Verify grades column populated.
+- [ ] **OneDrive round-trip** (`oneDriveUploadDownloadDemo`): Upload data file → download → AI processes content → upload AI output. Verify output file exists on OneDrive.
+- [ ] **Snowflake round-trip** (`snowflakeQueryDemo`): Create + insert → query → AI analyzes query results → insert AI summary row. Verify summary row via final query.
+- [ ] **Slack notification** (`slackMessageDemo`): AI generates a status report from workflow run context → Slack posts it. Verify message in channel.
+
+#### Simulatable Without Real Cloud Accounts
+
+These can be tested fully locally with Docker or existing infrastructure:
+
+1. **Polarion** — PolarionMockup (already exists at `../polarionMockup`)
+2. **PostgreSQL** — local instance (already running)
+3. **S3** — MinIO Docker container (S3-compatible, SigV4 signing works)
+4. **Email** — Mailpit Docker container (SMTP mock with web UI, no auth)
+
+#### Require Real Cloud Accounts
+
+5. **GitHub** — use the real jarvisAgent repo (or a test repo)
+6. **Email (Gmail)** — `beaumanvienna@gmail.com` with App Password
+7. **Jira** — free Jira Cloud tier
+8. **Slack** — free workspace with Bot
+9. **OneDrive** — Microsoft account + Azure AD app
+10. **Snowflake** — 30-day trial
+11. **Google Sheets** — Google API key (free) or OAuth2
+
+#### Per-Item Output Piping (Prerequisite for Full Round-Trip Testing)
+
+**Problem:** The current per_item fan-out supports chaining a per_item task after another per_item task (`depends_on`), but there is no mechanism to pipe the **output** of one per_item instance into the **params** of the corresponding downstream per_item instance. Specifically:
+
+```
+filter(N items) → per_item ai_call(N) → per_item cloud_write(N)
+                                              ↑
+                              needs AI output from matching instance
+```
+
+Each `cloud_write` instance needs the AI output text from its corresponding `ai_call` instance (same item index). Currently, per_item tasks can only template filter binding variables (`{{req.field}}`), not upstream task outputs.
+
+**Why this matters:** Every database/ALM write-back use case needs this:
+
+| Pattern | Example |
+|---------|---------|
+| Polarion: query → AI assess → write assessment back | `goKartComplianceCheck`: write compliance verdict per requirement |
+| PostgreSQL: query → AI analyze → INSERT result per row | Analytics pipelines with per-row AI enrichment |
+| Snowflake: query → AI analyze → INSERT per row | Same pattern, different DB |
+| GitHub: list issues → AI triage → comment per issue | Automated issue triage with AI-generated comments |
+| Jira: query → AI review → comment per issue | AI code review results per ticket |
+| Email: CSV filter → AI personalize → email per recipient | Personalized outreach with AI-generated content |
+| CSV filter → AI process → any cloud write-back | Generic pattern (see `portfolioDividendAnalysis`) |
+
+**Proposed solution — `{{upstream.output}}` template variable:**
+
+When a per_item task B depends on per_item task A (same filter), the runtime should make A's output available to B via a template variable. Two approaches:
+
+1. **File-based:** `{{taskId.output_file}}` resolves to the absolute path of the upstream task's output file for the same item index. The downstream task reads it.
+2. **Inline:** `{{taskId.captured_stdout}}` resolves to the captured stdout (up to 1024 chars) of the upstream task for the same item index. This is simpler but limited in size.
+
+The file-based approach is more robust since AI responses can be large. The downstream per_item task would have access to:
+- `{{req.*}}` — filter binding variables (already works)
+- `{{assessRequirement.output_file}}` — path to the upstream per_item instance's output file
+- `{{assessRequirement.captured_stdout}}` — captured stdout of the upstream instance
+
+**Implementation scope:**
+- `WorkflowRuntimeManager`: when dispatching a per_item task instance, resolve upstream per_item outputs for the same item index and inject them as template variables
+- Template engine: add `{{taskId.output_file}}` and `{{taskId.captured_stdout}}` variable resolution
+- All cloud task executors: no changes needed — they already use template-substituted params
+
+**Affected workflows (will be updated once piping is implemented):**
+- `goKartComplianceCheck` — write full AI compliance assessment back to Polarion work items
+- `postgresDemo` — INSERT AI analysis per department back to DB
+- `snowflakeQueryDemo` — INSERT AI revenue analysis per region
+- `gitHubIssueDemo` — post AI triage as comment on each issue
+- `jiraIssueDemo` — update issue with AI-generated content
+- `emailSendDemo` — personalized AI-generated email per recipient
+- `portfolioDividendAnalysis` — already works (single aggregation, not per_item write-back)
+
+**TODO:**
+- [ ] Implement per_item output piping (`{{taskId.output_file}}` and `{{taskId.captured_stdout}}` template variables)
+- [ ] Update `goKartComplianceCheck` write_status to use `{{assessRequirement.output_file}}` for the full AI assessment text
+- [ ] Update remaining demo workflows to write actual AI output back to cloud services
+- [ ] Add per_item output piping to the JCWF specification (section 3.3.2)
+- [ ] Add per_item output piping to `doc/jcwf_generation_guide.md`
+
+#### Polarion Demo Refactor Details
+
+The `goKartComplianceCheck` workflow predates the cloud abstraction layer and uses **inline Polarion config** in its filter source:
+
+```json
+"source": {
+  "kind": "polarion_query",
+  "base_url": "http://localhost:18080/polarion",
+  "project_id": "GoKartProcurement",
+  "key_name": "polarion"
+}
+```
+
+The filter engine already supports named connections — when `"connection"` is set, it resolves `base_url`, `project_id`, and `key_name` from the `CloudConnectionManager`. The refactor is JCWF-only (no C++ changes needed):
+
+**Step 1 — Migrate filter to named connection:**
+
+Replace inline fields with a `connection` reference:
+```json
+"source": {
+  "kind": "polarion_query",
+  "connection": "my-polarion",
+  "query": "type:requirement"
+}
+```
+
+The connection `my-polarion` is configured in the Connections tab:
+```json
+{
+  "name": "my-polarion",
+  "type": "polarion",
+  "endpoint": "http://localhost:18080/polarion",
+  "key_name": "polarion",
+  "auth_type": "bearer",
+  "params": { "project_id": "GoKartProcurement" }
+}
+```
+
+**Step 2 — Add `polarion_write` task to write compliance status back:**
+
+After the existing `assessRequirement` AI task (per-item fan-out), add a `polarion_write` task that updates each work item's custom compliance field:
+```json
+"write_status": {
+  "id": "write_status",
+  "type": "polarion_write",
+  "mode": "per_item",
+  "label": "write compliance status back",
+  "params": {
+    "connection": "my-polarion",
+    "operation": "update",
+    "work_item_id": "{{item.work_item_id}}",
+    "fields": {
+      "customField_complianceStatus": "{{output}}"
+    }
+  },
+  "working_directory": "goKartComplianceCheck/02_writeStatus",
+  "depends_on": ["assessRequirement"]
+}
+```
+
+**Step 3 — Verify in PolarionMockup:**
+
+After the workflow completes, query the mockup to verify work items were updated:
+```bash
+curl -s http://localhost:18080/polarion/rest/v1/projects/GoKartProcurement/workitems/REQ-001 \
+  -H "Authorization: Bearer 1234!@#\$" | python3 -m json.tool
+```
+
+The mockup supports `PATCH` on work items, so the write-back will be visible in the mock's in-memory state for the lifetime of the mockup process.
 
 ---
 
@@ -910,35 +1094,277 @@ Execution: `PQexecParams()` (parameterized query — template bindings are passe
 
 ---
 
-## 10. Additional Integrations
+## 10. Additional Integrations (Phase 8)
 
 ### GitHub / GitLab
 
-`GitConnector : ICloudConnector`. REST API via `https://api.github.com` or GitLab instance URL. Bearer token auth (PAT).
+#### GitHubConnector
 
-Task types:
-- `git_create_issue` — POST issue with title, body, labels
-- `git_comment_pr` — POST comment on a pull request
-- `git_get_file` — GET file content from a repo (useful as workflow input)
+Implements `ICloudConnector`. REST API via `https://api.github.com` (or custom endpoint for GitLab / GitHub Enterprise). Bearer token auth (Personal Access Token).
 
-Trigger: existing webhook trigger already handles GitHub/GitLab payloads. Enrich trigger metadata with event type, repo, branch for display in the dashboard.
+**Connection params:**
+```json
+{
+  "name": "my-github",
+  "type": "github",
+  "endpoint": "https://api.github.com",
+  "key_name": "github-pat",
+  "auth_type": "bearer",
+  "params": {
+    "owner": "myorg",
+    "repo": "myrepo"
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `owner` | Default repository owner / organization (can be overridden per-task) |
+| `repo` | Default repository name (can be overridden per-task) |
+
+- **Endpoint**: GitHub API base URL (default: `https://api.github.com`, or GitLab `https://gitlab.com/api/v4`)
+- **Auth type**: BearerToken (Personal Access Token from KeyManager)
+- **TestConnection()**: `GET /user` — verifies token validity and returns user info
+
+#### GitHubCloudTaskExecutor
+
+Task type: `github_issue`
+
+Supports creating issues, commenting, and retrieving file content from repositories.
+
+```json
+{
+  "type": "github_issue",
+  "params": {
+    "connection": "my-github",
+    "operation": "create",
+    "owner": "myorg",
+    "repo": "myrepo",
+    "title": "Bug: {{item.title}}",
+    "body": "Automated issue from j9t workflow.\n\n{{output}}",
+    "labels": ["bug", "automated"]
+  }
+}
+```
+
+**Supported operations:**
+
+| Operation | Required Params | API Call | Description |
+|-----------|----------------|----------|-------------|
+| `create` | `title`, `body` | `POST /repos/{owner}/{repo}/issues` | Create a new issue |
+| `comment` | `issue_number`, `body` | `POST /repos/{owner}/{repo}/issues/{number}/comments` | Add comment to issue/PR |
+| `close` | `issue_number` | `PATCH /repos/{owner}/{repo}/issues/{number}` | Close an issue |
+| `get_file` | `path`, `ref` (opt) | `GET /repos/{owner}/{repo}/contents/{path}` | Get file content (base64 decoded to disk) |
+| `list_issues` | | `GET /repos/{owner}/{repo}/issues` | List open issues to JSON |
+
+**Common params:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `github`) |
+| `operation` | yes | | One of: `create`, `comment`, `close`, `get_file`, `list_issues` |
+| `owner` | no | connection default | Repository owner/org |
+| `repo` | no | connection default | Repository name |
+| `title` | create | | Issue title |
+| `body` | create, comment | | Issue body or comment text |
+| `labels` | no | | JSON array of label names (create only) |
+| `issue_number` | comment, close | | Issue or PR number |
+| `path` | get_file | | File path in repo |
+| `ref` | no | default branch | Git ref for get_file (branch, tag, SHA) |
+
+**Webhook enrichment:** The existing webhook trigger already handles GitHub/GitLab payloads. Phase 8 enriches webhook trigger metadata with event type (`push`, `pull_request`, `issues`), repository, and branch for display in the dashboard.
+
+**Files:** `application/cloud/gitHubConnector.h/cpp`, `application/cloud/gitHubCloudTaskExecutor.h/cpp`
 
 ### Jira / Linear
 
-`JiraConnector : ICloudConnector`. REST API with Bearer token or OAuth.
+#### JiraConnector
 
-Task types:
-- `jira_create_issue` — POST issue with summary, description, type, priority
-- `jira_update_issue` — PATCH fields on existing issue
-- `jira_query` — JQL query → per-item fan-out (similar to Polarion filter)
+Implements `ICloudConnector`. REST API with Bearer token auth (API token or PAT) or BasicAuth (email + API token for Jira Cloud).
+
+**Connection params:**
+```json
+{
+  "name": "my-jira",
+  "type": "jira",
+  "endpoint": "https://mycompany.atlassian.net",
+  "key_name": "jira-creds",
+  "auth_type": "basic_auth",
+  "params": {
+    "project_key": "PROJ"
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `project_key` | Default Jira project key (can be overridden per-task) |
+
+- **Endpoint**: Jira instance base URL (e.g. `https://mycompany.atlassian.net`)
+- **Auth type**: BasicAuth (email + API token) for Jira Cloud, or BearerToken (PAT) for Jira Data Center
+- **TestConnection()**: `GET /rest/api/3/myself` — verifies credentials and returns user info
+
+#### JiraCloudTaskExecutor
+
+Task type: `jira_issue`
+
+Supports creating, updating, transitioning, and commenting on Jira issues.
+
+```json
+{
+  "type": "jira_issue",
+  "params": {
+    "connection": "my-jira",
+    "operation": "create",
+    "project_key": "PROJ",
+    "summary": "{{item.title}}",
+    "description": "Automated issue from j9t.\n\n{{output}}",
+    "issue_type": "Bug",
+    "priority": "High",
+    "labels": ["automated"]
+  }
+}
+```
+
+**Supported operations:**
+
+| Operation | Required Params | API Call | Description |
+|-----------|----------------|----------|-------------|
+| `create` | `summary`, `issue_type` | `POST /rest/api/3/issue` | Create a new issue |
+| `update` | `issue_key`, `fields` | `PUT /rest/api/3/issue/{key}` | Update issue fields |
+| `transition` | `issue_key`, `transition_id` | `POST /rest/api/3/issue/{key}/transitions` | Transition issue status |
+| `comment` | `issue_key`, `body` | `POST /rest/api/3/issue/{key}/comment` | Add comment |
+| `get` | `issue_key` | `GET /rest/api/3/issue/{key}` | Get issue details to JSON |
+
+**Common params:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `jira`) |
+| `operation` | yes | | One of: `create`, `update`, `transition`, `comment`, `get` |
+| `project_key` | create | connection default | Jira project key |
+| `summary` | create | | Issue summary |
+| `description` | no | | Issue description (ADF or plain text) |
+| `issue_type` | create | `Task` | Issue type name (Bug, Story, Task, etc.) |
+| `priority` | no | | Priority name (High, Medium, Low, etc.) |
+| `labels` | no | | JSON array of label strings |
+| `issue_key` | update, transition, comment, get | | Issue key (e.g. `PROJ-123`) |
+| `fields` | update | | JSON object of field key-value pairs to update |
+| `transition_id` | transition | | Transition ID (get valid IDs via `GET /rest/api/3/issue/{key}/transitions`) |
+| `body` | comment | | Comment body text |
+
+**Files:** `application/cloud/jiraConnector.h/cpp`, `application/cloud/jiraCloudTaskExecutor.h/cpp`
 
 ### Google Sheets
 
-REST API via `https://sheets.googleapis.com/v4/spreadsheets/`. OAuth 2.0 auth via `OAuthTokenManager`.
+#### GoogleSheetsConnector
 
-Task types:
-- `sheets_read` — GET range → CSV/JSON to disk
-- `sheets_write` — PUT range from workflow output
+Implements `ICloudConnector`. REST API via `https://sheets.googleapis.com/v4/spreadsheets/`. Supports API key auth (read-only public sheets) or OAuth 2.0 via `OAuthTokenManager` (read/write private sheets).
+
+**Connection params:**
+```json
+{
+  "name": "my-sheets",
+  "type": "google_sheets",
+  "endpoint": "https://sheets.googleapis.com/v4/spreadsheets",
+  "key_name": "google-api-key",
+  "auth_type": "bearer",
+  "params": {
+    "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `spreadsheet_id` | Default Google Sheets spreadsheet ID (can be overridden per-task) |
+
+- **Endpoint**: Sheets API base URL (default: `https://sheets.googleapis.com/v4/spreadsheets`)
+- **Auth type**: BearerToken (API key for public sheets) or OAuth2 (for private sheets via `OAuthTokenManager`)
+- **TestConnection()**: `GET /{spreadsheet_id}?fields=properties.title` — verifies access and returns sheet title
+
+#### GoogleSheetsCloudTaskExecutor
+
+Task types: `sheets_read`, `sheets_write`
+
+**sheets_read** — read a range from a spreadsheet to CSV/JSON on disk:
+```json
+{
+  "type": "sheets_read",
+  "params": {
+    "connection": "my-sheets",
+    "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+    "range": "Sheet1!A1:D100",
+    "output_format": "csv",
+    "output_file": "data.csv"
+  }
+}
+```
+
+**sheets_write** — write data from a local file to a spreadsheet range:
+```json
+{
+  "type": "sheets_write",
+  "params": {
+    "connection": "my-sheets",
+    "spreadsheet_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+    "range": "Results!A1",
+    "input_file": "results.csv",
+    "value_input_option": "USER_ENTERED"
+  }
+}
+```
+
+**sheets_read params:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `google_sheets`) |
+| `spreadsheet_id` | no | connection default | Google Sheets spreadsheet ID |
+| `range` | yes | | A1 notation range (e.g. `Sheet1!A1:D100`) |
+| `output_format` | no | `csv` | `csv` or `json` |
+| `output_file` | no | `result.csv`/`result.json` | Output filename |
+
+Read calls `GET /{spreadsheetId}/values/{range}` and parses the `values` array.
+
+**sheets_write params:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `google_sheets`) |
+| `spreadsheet_id` | no | connection default | Google Sheets spreadsheet ID |
+| `range` | yes | | A1 notation range for the write target |
+| `input_file` | yes | | Local CSV file to upload (relative to working directory) |
+| `value_input_option` | no | `USER_ENTERED` | `RAW` or `USER_ENTERED` (formulas parsed) |
+
+Write calls `PUT /{spreadsheetId}/values/{range}?valueInputOption={option}` with the parsed CSV data as a JSON `values` array.
+
+**Files:** `application/cloud/googleSheetsConnector.h/cpp`, `application/cloud/googleSheetsCloudTaskExecutor.h/cpp`
+
+### Frontend (Phase 8)
+
+**ConnectionsView** — type-specific config fields:
+- **GitHub**: owner, repo
+- **Jira**: project_key
+- **Google Sheets**: spreadsheet_id
+
+**Task inspector** — one section per task type:
+- **github_issue**: connection, operation dropdown, owner, repo, title, body, labels, issue_number, path
+- **jira_issue**: connection, operation dropdown, project_key, summary, description, issue_type, priority, labels, issue_key, body
+- **sheets_read**: connection, spreadsheet_id, range, output_format, output_file
+- **sheets_write**: connection, spreadsheet_id, range, input_file, value_input_option
+
+### Backend File Structure (Phase 8)
+
+```
+application/cloud/
+  gitHubConnector.h/cpp                  (+) GitHub/GitLab connector
+  gitHubCloudTaskExecutor.h/cpp          (+) Issue CRUD, file retrieval
+  jiraConnector.h/cpp                    (+) Jira connector
+  jiraCloudTaskExecutor.h/cpp            (+) Issue CRUD
+  googleSheetsConnector.h/cpp            (+) Google Sheets connector
+  googleSheetsCloudTaskExecutor.h/cpp    (+) Read/write ranges
+```
 
 ---
 

@@ -18,6 +18,13 @@ export interface StatusResponse {
   websocket_clients: number;
   mcp_connected?: boolean;
   mcp_last_heartbeat_secs_ago?: number;
+  connection_health?: ConnectionHealthEntry[];
+}
+
+export interface ConnectionHealthEntry {
+  name: string;
+  circuit_state: string;
+  consecutive_failures: number;
 }
 
 export interface WorkflowEntry {

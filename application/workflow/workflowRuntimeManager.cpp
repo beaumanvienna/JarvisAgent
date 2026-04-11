@@ -1184,6 +1184,7 @@ namespace AIAssistant
             activeRun.m_Run.m_Context = pendingRun.m_Context;
             activeRun.m_Run.m_State = WorkflowRunState::Running;
             activeRun.m_Run.m_StartedAtIso8601 = GetIso8601NowUTC();
+            activeRun.m_Run.m_CancellationToken = std::make_shared<TaskCancellationToken>();
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
 
             InitializeControlflowRuntime(activeRun);
@@ -2118,6 +2119,10 @@ namespace AIAssistant
             if (activeRun.m_Run.m_RunId == runId)
             {
                 activeRun.m_CancelRequested = true;
+                if (activeRun.m_Run.m_CancellationToken)
+                {
+                    activeRun.m_Run.m_CancellationToken->Cancel();
+                }
                 CancelChildSubWorkflowRuns(runId);
                 return true;
             }

@@ -96,6 +96,7 @@ export default function App() {
         sessions={ws.sessions}
         pythonRunning={ws.pythonRunning}
         mcpConnected={status?.mcp_connected ?? false}
+        connectionHealth={status?.connection_health}
         totalCompleted={ws.totalCompleted}
         totalFailed={ws.totalFailed}
         onQuit={handleQuit}

@@ -63,10 +63,23 @@ Called at the end of `OnStart()`:
    - `AiCallTaskExecutor` → `TaskType::AiCall`
    - `PythonTaskExecutor` → `TaskType::Python`
    - `InternalTaskExecutor` → `TaskType::Internal` (wraps `m_InternalTaskRegistry` with a no-op deleter)
-3. Wire `WebServer` ↔ `WorkflowRegistry`
-4. Create and start `WorkflowRuntimeManager`, wire it to `WebServer`
-5. Create `TriggerEngine` with a callback that enqueues workflow runs via `WorkflowRuntimeManager`
-6. Bind all JCWF triggers into `TriggerEngine` via `WorkflowTriggerBinder`
+   - `SubWorkflowTaskExecutor` → `TaskType::SubWorkflow`
+3. Register cloud connectors and task executors:
+   - `PolarionConnector` + `PolarionWriteTaskExecutor` → `TaskType::PolarionWrite`
+   - `S3Connector` + `S3CloudTaskExecutor` → `TaskType::S3`
+   - `PostgresConnector` + `DbQueryCloudTaskExecutor` → `TaskType::DbQuery`
+   - `OneDriveConnector` + `OneDriveCloudTaskExecutor` → `TaskType::OneDrive`
+   - `SnowflakeConnector` + `SnowflakeCloudTaskExecutor` → `TaskType::SnowflakeQuery`
+   - `SlackConnector` + `SlackCloudTaskExecutor` → `TaskType::SlackMessage`
+   - `EmailConnector` + `EmailCloudTaskExecutor` → `TaskType::EmailSend`
+   - `GitHubConnector` + `GitHubCloudTaskExecutor` → `TaskType::GitHubIssue`
+   - `JiraConnector` + `JiraCloudTaskExecutor` → `TaskType::JiraIssue`
+   - `GoogleSheetsConnector` + `GoogleSheetsCloudTaskExecutor` → `TaskType::SheetsRead`, `TaskType::SheetsWrite`
+4. Wire `WebServer` ↔ `WorkflowRegistry`
+5. Create and start `WorkflowRuntimeManager`, wire it to `WebServer`
+6. Late-bind `WorkflowRuntimeManager` to `SubWorkflowTaskExecutor`
+7. Create `TriggerEngine` with a callback that enqueues workflow runs via `WorkflowRuntimeManager`
+8. Bind all JCWF triggers into `TriggerEngine` via `WorkflowTriggerBinder`
 
 ---
 
@@ -179,7 +192,7 @@ Loads, validates, and stores all `.jcwf` workflow definitions from the workflows
 Executes workflow runs: enqueues runs, dispatches tasks according to the DAG, tracks per-task state, handles pause/resume/stop/cancel. Broadcasts state changes to the WebServer.
 
 ### TriggerEngine
-Evaluates workflow triggers (cron, file_watch, structure) and fires callbacks to enqueue workflow runs. Receives file events from `OnEvent()` and time ticks from `OnUpdate()`.
+Evaluates workflow triggers (cron, file_watch, manual, webhook, s3_watch, onedrive_watch, email_watch) and fires callbacks to enqueue workflow runs. Receives file events from `OnEvent()` and time ticks from `OnUpdate()`.
 
 ### AiRequestPool
 Tracks in-flight `ai_call` task requests. Matches PROB output files and path-based `.output` files to pending requests for workflow task completion.
@@ -193,6 +206,8 @@ Maps `TaskType` → `ITaskExecutor`. Registered executors:
 - `AiCallTaskExecutor` — AI provider requests via `AiRequestPool`
 - `PythonTaskExecutor` — embedded Python execution
 - `InternalTaskExecutor` — delegates to `InternalTaskRegistry` factories
+- `SubWorkflowTaskExecutor` — nested workflow execution
+- 10 cloud task executors — see `application/cloud/README.md`
 
 ### StatusRenderer
 Draws dynamic ncurses terminal status window showing session states, active queries, and completed queries.

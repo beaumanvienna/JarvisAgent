@@ -426,6 +426,22 @@ The OneDrive integration uses the OAuth 2.0 authorization code flow with PKCE (P
 - **Attachment handling** — attachments are read from the task working directory only; path traversal is constrained by `TaskPathResolver`
 - **Email content** — message body and subject may contain workflow template variables; operators should review templates to avoid exposing sensitive data
 
+### Additional Integrations Security (GitHub, Jira, Google Sheets)
+
+- **GitHub PATs** are stored in the encrypted key store; `User-Agent: j9t/1.0` header is set per GitHub API requirements
+- **Jira Cloud** uses BasicAuth (email + API token) — the API token is stored as `BasicAuthCredential`; Jira Data Center uses PAT as Bearer token
+- **Google Sheets** supports both API key (read-only, public sheets) and OAuth2 (read/write, private sheets). API keys are sent as `?key=` query parameters (not in headers) per Google's convention
+- **GitHub file content** returned by `get_file` is base64-decoded before writing to disk; content is constrained to the task working directory by `TaskPathResolver`
+
+### Phase 9 Hardening
+
+- **Circuit breaker** — `CloudCircuitBreaker` prevents failure cascading during cloud outages. Per-connection state machine (Closed/Open/HalfOpen) with configurable thresholds. All cloud tasks automatically benefit via `ICloudTaskExecutor`.
+- **Audit logging** — all cloud task executions are logged to `log/security.txt` with task ID, connection name, connection type, and run ID
+- **OAuth CSRF protection** — random 16-byte `state` token generated per OAuth flow, validated on callback before token exchange
+- **Download size limits** — `CURLOPT_MAXFILESIZE_LARGE` (256 MB) set on S3 and OneDrive download operations to prevent unbounded downloads
+- **Path traversal validation** — `ValidateLocalPath()` rejects `local_path` params containing `..` or resolving outside the task working directory; logged to security log
+- **Cancellation propagation** — `TaskCancellationToken` shared per run, cancelled via `POST /api/workflow-runs/{runId}/cancel`, checked by long-running cloud tasks (Snowflake async polling)
+
 ### Remaining Threats (Cloud-Specific)
 
 - **Credential exposure if encrypted key file is compromised** — mitigated by AES-256-GCM + PBKDF2 (100k iterations), but ultimately depends on master password strength

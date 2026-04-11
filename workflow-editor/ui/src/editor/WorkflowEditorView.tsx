@@ -3392,6 +3392,10 @@ export default function WorkflowEditorView(props: {
                       <option value="snowflake_query">snowflake_query</option>
                       <option value="slack_message">slack_message</option>
                       <option value="email_send">email_send</option>
+                      <option value="github_issue">github_issue</option>
+                      <option value="jira_issue">jira_issue</option>
+                      <option value="sheets_read">sheets_read</option>
+                      <option value="sheets_write">sheets_write</option>
                     </select>
                   </label>
 
@@ -3744,6 +3748,169 @@ export default function WorkflowEditorView(props: {
                           <div className="small">cc (optional, comma-separated)</div>
                           <input className="input" value={(params.cc as string) ?? ""} onChange={(e) => { updateParams({ cc: e.target.value }); }} />
                         </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "github_issue" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(110,110,110,0.5)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(200,200,200,0.95)" }}>GitHub Issue params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-github" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? ""} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="">select...</option>
+                            <option value="create">create</option>
+                            <option value="comment">comment</option>
+                            <option value="close">close</option>
+                            <option value="get_file">get_file</option>
+                            <option value="list_issues">list_issues</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">owner (optional, overrides connection)</div>
+                          <input className="input" value={(params.owner as string) ?? ""} onChange={(e) => { updateParams({ owner: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">repo (optional, overrides connection)</div>
+                          <input className="input" value={(params.repo as string) ?? ""} onChange={(e) => { updateParams({ repo: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">title (create)</div>
+                          <input className="input" value={(params.title as string) ?? ""} onChange={(e) => { updateParams({ title: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">body (create, comment)</div>
+                          <textarea className="input" rows={3} value={(params.body as string) ?? ""} onChange={(e) => { updateParams({ body: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">issue_number (comment, close)</div>
+                          <input className="input" value={(params.issue_number as string) ?? ""} onChange={(e) => { updateParams({ issue_number: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">path (get_file)</div>
+                          <input className="input" value={(params.path as string) ?? ""} placeholder="src/main.cpp" onChange={(e) => { updateParams({ path: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "jira_issue" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(0,130,216,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(0,130,216,0.95)" }}>Jira Issue params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-jira" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? ""} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="">select...</option>
+                            <option value="create">create</option>
+                            <option value="update">update</option>
+                            <option value="transition">transition</option>
+                            <option value="comment">comment</option>
+                            <option value="get">get</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">project_key (create, overrides connection)</div>
+                          <input className="input" value={(params.project_key as string) ?? ""} placeholder="PROJ" onChange={(e) => { updateParams({ project_key: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">summary (create)</div>
+                          <input className="input" value={(params.summary as string) ?? ""} onChange={(e) => { updateParams({ summary: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">description (create, optional)</div>
+                          <textarea className="input" rows={3} value={(params.description as string) ?? ""} onChange={(e) => { updateParams({ description: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">issue_type (create, default: Task)</div>
+                          <input className="input" value={(params.issue_type as string) ?? ""} placeholder="Bug" onChange={(e) => { updateParams({ issue_type: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">issue_key (update, transition, comment, get)</div>
+                          <input className="input" value={(params.issue_key as string) ?? ""} placeholder="PROJ-123" onChange={(e) => { updateParams({ issue_key: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">body (comment)</div>
+                          <textarea className="input" rows={2} value={(params.body as string) ?? ""} onChange={(e) => { updateParams({ body: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {(selectedNode.data.task.type === "sheets_read" || selectedNode.data.task.type === "sheets_write") && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    const isWrite = selectedNode.data.task.type === "sheets_write";
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(15,157,88,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(15,157,88,0.95)" }}>Google Sheets params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-sheets" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">spreadsheet_id (optional, overrides connection)</div>
+                          <input className="input" value={(params.spreadsheet_id as string) ?? ""} onChange={(e) => { updateParams({ spreadsheet_id: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">range (A1 notation)</div>
+                          <input className="input" value={(params.range as string) ?? ""} placeholder="Sheet1!A1:D100" onChange={(e) => { updateParams({ range: e.target.value }); }} />
+                        </label>
+                        {!isWrite && (
+                          <>
+                            <label className="field">
+                              <div className="small">output_format</div>
+                              <select className="input" value={(params.output_format as string) ?? "csv"} onChange={(e) => { updateParams({ output_format: e.target.value }); }}>
+                                <option value="csv">csv</option>
+                                <option value="json">json</option>
+                              </select>
+                            </label>
+                            <label className="field">
+                              <div className="small">output_file (optional)</div>
+                              <input className="input" value={(params.output_file as string) ?? ""} placeholder="result.csv" onChange={(e) => { updateParams({ output_file: e.target.value }); }} />
+                            </label>
+                          </>
+                        )}
+                        {isWrite && (
+                          <>
+                            <label className="field">
+                              <div className="small">input_file (CSV)</div>
+                              <input className="input" value={(params.input_file as string) ?? ""} placeholder="data.csv" onChange={(e) => { updateParams({ input_file: e.target.value }); }} />
+                            </label>
+                            <label className="field">
+                              <div className="small">value_input_option</div>
+                              <select className="input" value={(params.value_input_option as string) ?? "USER_ENTERED"} onChange={(e) => { updateParams({ value_input_option: e.target.value }); }}>
+                                <option value="USER_ENTERED">USER_ENTERED</option>
+                                <option value="RAW">RAW</option>
+                              </select>
+                            </label>
+                          </>
+                        )}
                       </div>
                     );
                   })()}

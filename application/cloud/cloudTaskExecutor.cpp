@@ -23,10 +23,12 @@
 
 #include "simdjson/simdjson.h"
 
+#include "core.h"
 #include "engine.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
+#include "cloud/cloudCircuitBreaker.h"
 
 namespace AIAssistant
 {
@@ -101,9 +103,71 @@ namespace AIAssistant
             return false;
         }
 
-        // Delegate to the concrete cloud executor
-        TaskCancellationToken cancellationToken; // No-op for now; Phase 9 wires into run cancel
-        return ExecuteCloud(workflowDefinition, workflowRun, taskDefinition, taskState, *connection, credentials,
-                            cancellationToken);
+        // Audit log: cloud task execution
+        LOG_SECURITY_INFO("[security] cloud_task_execute: task='{}' connection='{}' type='{}' run='{}'",
+                          taskDefinition.m_Id, connectionName, connection->m_Type, workflowRun.m_RunId);
+
+        // Check circuit breaker before proceeding
+        auto& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
+        if (!circuitBreaker.AllowRequest(connectionName))
+        {
+            taskState.m_LastErrorMessage = "Cloud connection '" + connectionName +
+                                           "' circuit breaker is open — request short-circuited";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_WARN("ICloudTaskExecutor: circuit breaker open for '{}', task '{}' short-circuited",
+                         connectionName, taskDefinition.m_Id);
+            return false;
+        }
+
+        // Use the run's cancellation token (wired into RequestCancelRun in Phase 9).
+        // Falls back to a local no-op token if the run has no token (shouldn't happen).
+        TaskCancellationToken localToken;
+        TaskCancellationToken const& cancellationToken =
+            workflowRun.m_CancellationToken ? *workflowRun.m_CancellationToken : localToken;
+
+        bool success = ExecuteCloud(workflowDefinition, workflowRun, taskDefinition, taskState, *connection,
+                                    credentials, cancellationToken);
+
+        // Record result in circuit breaker
+        if (success)
+        {
+            circuitBreaker.RecordSuccess(connectionName);
+        }
+        else
+        {
+            circuitBreaker.RecordFailure(connectionName);
+        }
+
+        return success;
+    }
+    bool ICloudTaskExecutor::ValidateLocalPath(std::string const& localPath,
+                                               std::filesystem::path const& baseDir, std::string const& taskId)
+    {
+        if (localPath.empty())
+        {
+            return true;
+        }
+
+        // Reject obvious traversal patterns
+        if (localPath.find("..") != std::string::npos)
+        {
+            LOG_SECURITY_INFO("[security] path_traversal_blocked: task='{}' local_path='{}' contains '..'", taskId,
+                              localPath);
+            return false;
+        }
+
+        // Resolve and verify the path stays within the base directory
+        std::filesystem::path resolved = (baseDir / localPath).lexically_normal();
+        std::string resolvedStr = resolved.string();
+        std::string baseDirStr = baseDir.lexically_normal().string();
+
+        if (resolvedStr.find(baseDirStr) != 0)
+        {
+            LOG_SECURITY_INFO("[security] path_traversal_blocked: task='{}' resolved='{}' escapes base='{}'", taskId,
+                              resolvedStr, baseDirStr);
+            return false;
+        }
+
+        return true;
     }
 } // namespace AIAssistant

@@ -749,6 +749,148 @@ Stores `last_seen_uid` for future efficient polling via IMAP UID.
 
 ---
 
-## 14. Next Steps
+## 14. Additional Integrations (Phase 8)
+
+### GitHubConnector
+
+Implements `ICloudConnector` for GitHub (and GitLab/GitHub Enterprise) via REST API with Bearer token (PAT).
+
+**Files:** `application/cloud/gitHubConnector.h/cpp`
+
+| Key | Description |
+|-----|-------------|
+| `owner` | Default repository owner / organization |
+| `repo` | Default repository name |
+
+- **Endpoint**: API base URL (default: `https://api.github.com`)
+- **Auth type**: BearerToken (Personal Access Token)
+- **TestConnection()**: `GET /user`
+
+### github_issue Task Type
+
+| Operation | Description |
+|-----------|-------------|
+| `create` | Create issue with title, body, labels |
+| `comment` | Comment on issue/PR by number |
+| `close` | Close an issue |
+| `get_file` | Get file content from repo (base64-decoded to disk) |
+| `list_issues` | List open issues to JSON |
+
+**Files:** `application/cloud/gitHubCloudTaskExecutor.h/cpp`
+
+### JiraConnector
+
+Implements `ICloudConnector` for Jira REST API v3. Supports BasicAuth (Jira Cloud: email + API token) and BearerToken (Jira Data Center: PAT).
+
+**Files:** `application/cloud/jiraConnector.h/cpp`
+
+| Key | Description |
+|-----|-------------|
+| `project_key` | Default Jira project key |
+
+- **TestConnection()**: `GET /rest/api/3/myself`
+
+### jira_issue Task Type
+
+| Operation | Description |
+|-----------|-------------|
+| `create` | Create issue with summary, description (ADF), type, priority, labels |
+| `update` | Update fields on existing issue |
+| `transition` | Transition issue status |
+| `comment` | Add comment (ADF format) |
+| `get` | Get issue details to JSON |
+
+**Files:** `application/cloud/jiraCloudTaskExecutor.h/cpp`
+
+### GoogleSheetsConnector
+
+Implements `ICloudConnector` for Google Sheets API v4. Supports API key auth (read-only public sheets) or OAuth2 (read/write private sheets).
+
+**Files:** `application/cloud/googleSheetsConnector.h/cpp`
+
+| Key | Description |
+|-----|-------------|
+| `spreadsheet_id` | Default Google Sheets spreadsheet ID |
+
+- **TestConnection()**: `GET /{spreadsheet_id}?fields=properties.title`
+
+### sheets_read / sheets_write Task Types
+
+- **sheets_read**: `GET /{spreadsheetId}/values/{range}` — parses values array, writes CSV or JSON
+- **sheets_write**: `PUT /{spreadsheetId}/values/{range}` — reads local CSV, uploads as JSON values array
+
+**Files:** `application/cloud/googleSheetsCloudTaskExecutor.h/cpp`
+
+### Connections UI
+
+- **GitHub**: owner, repo fields
+- **Jira**: project_key field
+- **Google Sheets**: spreadsheet_id field
+
+### Task Inspector
+
+- **github_issue**: Gray accent — operation dropdown, owner, repo, title, body, issue_number, path
+- **jira_issue**: Blue accent — operation dropdown, project_key, summary, description, issue_type, issue_key, body
+- **sheets_read/sheets_write**: Green accent — spreadsheet_id, range, format/file fields
+
+---
+
+## 15. Hardening (Phase 9)
+
+### Runtime Resilience (9a)
+
+- **CloudCircuitBreaker** — per-connection circuit breaker (Closed/Open/HalfOpen state machine). Tracks consecutive failures, short-circuits requests during outages, auto-recovers after 60s cooldown. Wired into `ICloudTaskExecutor::Execute()` — all cloud tasks automatically benefit.
+- **CloudConnectionPool** — generic connection pool for persistent-connection providers (PostgreSQL libpq, future IMAP). Health-checks on acquire, evicts stale connections after 5 minutes idle.
+- **TaskCancellationToken** — wired into `WorkflowRun`. When `POST /api/workflow-runs/{runId}/cancel` is called, the token propagates to in-flight cloud tasks. Snowflake executor already checks this during async polling and sends a cancel request to Snowflake.
+- **ProviderRateLimitPolicy** — extends `CloudRetryPolicy` with per-provider rate-limit awareness (minimum request intervals, burst limits per window).
+- **Connection health in /api/status** — circuit breaker state exposed as `connection_health` array in the status response. Dashboard shows a Cloud health LED (green/yellow/red).
+
+### Security & Audit (9b)
+
+- **Audit logging** — all cloud task executions logged to `log/security.txt` with task ID, connection name, type, and run ID.
+- **OAuth CSRF protection** — `state` parameter added to OAuth authorize URL, validated on callback. Random 16-byte token per flow.
+- **Download size limits** — `CURLOPT_MAXFILESIZE_LARGE` set to 256 MB on S3 and OneDrive download operations.
+- **Path traversal validation** — `ICloudTaskExecutor::ValidateLocalPath()` rejects `local_path` params containing `..` or resolving outside the task working directory. Logged to security log.
+- **RSA key minimum 2048 bits** — enforced in `JwtGenerator::Generate()` (Phase 0).
+- **SSL verification** — `CURLOPT_SSL_VERIFYPEER` is never disabled; libcurl defaults to enabled.
+
+### Deployment & Ops (9c)
+
+#### Outbound Firewall Rules
+
+| Integration | Endpoints | Ports |
+|-------------|-----------|-------|
+| Polarion | `polarion.company.com` (on-prem) | 443 |
+| S3 (AWS) | `*.s3.{region}.amazonaws.com` | 443 |
+| S3 (MinIO) | Custom endpoint | Configured port |
+| OneDrive | `login.microsoftonline.com`, `graph.microsoft.com` | 443 |
+| Snowflake | `{account}.snowflakecomputing.com` | 443 |
+| Slack | `slack.com` | 443 |
+| Email (SMTP) | SMTP server (e.g. `smtp.gmail.com`) | 587, 465 |
+| Email (IMAP) | IMAP server (e.g. `imap.gmail.com`) | 993 |
+| GitHub | `api.github.com` | 443 |
+| Jira Cloud | `*.atlassian.net` | 443 |
+| Google Sheets | `sheets.googleapis.com` | 443 |
+| PostgreSQL | Database server | 5432 |
+
+All connections use TLS (HTTPS or STARTTLS). No plaintext HTTP connections to cloud services.
+
+#### Container Image Signing
+
+For production container deployments, images should be signed using [cosign](https://github.com/sigstore/cosign) (Apache-2.0 license):
+
+```bash
+# Sign after build
+cosign sign --key cosign.key ghcr.io/myorg/j9t:latest
+
+# Verify before deploy
+cosign verify --key cosign.pub ghcr.io/myorg/j9t:latest
+```
+
+The Docker build (`docker-compose.example.yml`) produces unsigned images by default. Production deployments should add signing to their CI/CD pipeline.
+
+---
+
+## 16. Next Steps
 
 See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 9.
