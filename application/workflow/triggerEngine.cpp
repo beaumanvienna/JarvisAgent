@@ -391,6 +391,31 @@ namespace AIAssistant
             triggerId, workflowId, connectionName, folder.empty() ? "<root>" : folder, pollIntervalSeconds);
     }
 
+    void TriggerEngine::AddEmailWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                             std::string const& connectionName, std::string const& folder,
+                                             std::string const& subjectFilter, uint32_t pollIntervalSeconds,
+                                             bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        EmailWatchTriggerInstance instance{};
+        instance.m_WorkflowId = workflowId;
+        instance.m_TriggerId = triggerId;
+        instance.m_ConnectionName = connectionName;
+        instance.m_Folder = folder.empty() ? "INBOX" : folder;
+        instance.m_SubjectFilter = subjectFilter;
+        instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
+        instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
+        instance.m_IsEnabled = isEnabled;
+
+        m_EmailWatchTriggers.push_back(std::move(instance));
+
+        LOG_APP_INFO(
+            "TriggerEngine::AddEmailWatchTrigger: registered email_watch trigger '{}' for workflow '{}' "
+            "(connection={}, folder={}, subject_filter={}, interval={}s)",
+            triggerId, workflowId, connectionName, instance.m_Folder,
+            subjectFilter.empty() ? "<all>" : subjectFilter, pollIntervalSeconds);
+    }
+
     TriggerEngine::WebhookTriggerInstance const* TriggerEngine::GetWebhookTrigger(std::string const& workflowId) const
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -411,6 +436,7 @@ namespace AIAssistant
         m_WebhookTriggers.clear();
         m_S3WatchTriggers.clear();
         m_OneDriveWatchTriggers.clear();
+        m_EmailWatchTriggers.clear();
         m_FileWatchIndex.clear();
         m_WebhookIndex.clear();
         LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
@@ -427,6 +453,7 @@ namespace AIAssistant
         EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
         EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
         EraseWorkflowFromVector(m_OneDriveWatchTriggers, workflowId);
+        EraseWorkflowFromVector(m_EmailWatchTriggers, workflowId);
 
         // Rebuild file-watch index because indices may have changed.
         m_FileWatchIndex.clear();
@@ -505,6 +532,18 @@ namespace AIAssistant
                 // Same pattern as S3: fire on every poll interval.
                 // The workflow run performs the actual delta query to detect changes.
                 eventsToFire.push_back({odInstance.m_WorkflowId, odInstance.m_TriggerId});
+            }
+
+            // Email watch triggers (IMAP polling)
+            for (EmailWatchTriggerInstance& emailInstance : m_EmailWatchTriggers)
+            {
+                if (!emailInstance.m_IsEnabled || steadyNow < emailInstance.m_NextPollTime)
+                {
+                    continue;
+                }
+
+                emailInstance.m_NextPollTime = steadyNow + emailInstance.m_PollInterval;
+                eventsToFire.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId});
             }
         }
 

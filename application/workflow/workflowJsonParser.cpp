@@ -359,6 +359,21 @@ namespace AIAssistant
             return TaskType::OneDrive;
         }
 
+        if (rawType == "snowflake_query")
+        {
+            return TaskType::SnowflakeQuery;
+        }
+
+        if (rawType == "slack_message")
+        {
+            return TaskType::SlackMessage;
+        }
+
+        if (rawType == "email_send")
+        {
+            return TaskType::EmailSend;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }
@@ -402,6 +417,11 @@ namespace AIAssistant
         if (typeString == "onedrive_watch")
         {
             return WorkflowTriggerType::OneDriveWatch;
+        }
+
+        if (typeString == "email_watch")
+        {
+            return WorkflowTriggerType::EmailWatch;
         }
 
         LOG_CORE_WARN("Unknown trigger type '{}', defaulting to Unknown", typeString);

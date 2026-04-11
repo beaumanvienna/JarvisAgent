@@ -56,6 +56,12 @@
 #include "cloud/dbQueryCloudTaskExecutor.h"
 #include "cloud/oneDriveConnector.h"
 #include "cloud/oneDriveCloudTaskExecutor.h"
+#include "cloud/snowflakeConnector.h"
+#include "cloud/snowflakeCloudTaskExecutor.h"
+#include "cloud/slackConnector.h"
+#include "cloud/slackCloudTaskExecutor.h"
+#include "cloud/emailConnector.h"
+#include "cloud/emailCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "workflow/aiRequestPool.h"
@@ -304,6 +310,27 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> oneDriveExecutor =
                     std::make_shared<OneDriveCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::OneDrive, oneDriveExecutor);
+
+                // Snowflake connector + executor
+                connectorRegistry.Register(std::make_unique<SnowflakeConnector>());
+
+                std::shared_ptr<ITaskExecutor> snowflakeExecutor =
+                    std::make_shared<SnowflakeCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::SnowflakeQuery, snowflakeExecutor);
+
+                // Slack connector + executor
+                connectorRegistry.Register(std::make_unique<SlackConnector>());
+
+                std::shared_ptr<ITaskExecutor> slackExecutor =
+                    std::make_shared<SlackCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::SlackMessage, slackExecutor);
+
+                // Email connector + executor
+                connectorRegistry.Register(std::make_unique<EmailConnector>());
+
+                std::shared_ptr<ITaskExecutor> emailExecutor =
+                    std::make_shared<EmailCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::EmailSend, emailExecutor);
             }
         }
 

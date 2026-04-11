@@ -394,6 +394,17 @@ The MCP server is a standalone TypeScript sidecar communicating with j9t over lo
 - Generated JWTs are auto-registered with `SecretRedactor`
 - Private key material is freed via `EVP_PKEY_free()` after signing
 
+### Snowflake JWT Authentication
+
+Snowflake uses RSA key-pair authentication via the `JwtGenerator`:
+
+- **No password or shared secret** — authentication is based on an RSA key pair; the private key never leaves the j9t host
+- **JWT expiry** — tokens are generated with a 1-hour expiry (`exp` claim), regenerated per request by `ResolveCredentials()`
+- **Public key fingerprint** — the JWT `iss` claim includes the SHA-256 fingerprint of the public key, binding the token to a specific key pair
+- **Key storage** — RSA private key (PEM) is stored in the encrypted key store as a `KeyPairCredential`
+- **Request header** — `X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT` signals Snowflake to validate the JWT against the user's assigned public key
+- **Statement cancellation** — if a workflow run is cancelled during async polling, the executor sends a cancel request to Snowflake to release server-side resources
+
 ### OAuth 2.0 with PKCE (OneDrive)
 
 The OneDrive integration uses the OAuth 2.0 authorization code flow with PKCE (Proof Key for Code Exchange):
@@ -405,6 +416,15 @@ The OneDrive integration uses the OAuth 2.0 authorization code flow with PKCE (P
 - **Token refresh** — `OAuthTokenManager` runs a background thread refreshing tokens 5 minutes before expiry via `POST /oauth2/v2.0/token`. Both access and refresh tokens are registered with `SecretRedactor` on acquisition and rotated on refresh
 - **Scope restriction** — default scopes are `Files.ReadWrite offline_access` (minimum for file upload/download + token refresh). Operators should not grant broader scopes than needed
 - **Redirect URI** — callback is `http://localhost:{port}/api/connections/{name}/oauth/callback`, only reachable on the local machine
+
+### Messaging Security (Slack, Email)
+
+- **Slack Bot tokens** (`xoxb-...`) are stored in the encrypted key store and registered with `SecretRedactor`
+- **Email credentials** (username + password/app password) are stored as `BasicAuthCredential` in the encrypted key store
+- **SMTP TLS** — STARTTLS is enforced for port 587; implicit TLS for port 465. `CURLOPT_SSL_VERIFYPEER` remains enabled
+- **IMAP TLS** — IMAPS (port 993) with certificate verification
+- **Attachment handling** — attachments are read from the task working directory only; path traversal is constrained by `TaskPathResolver`
+- **Email content** — message body and subject may contain workflow template variables; operators should review templates to avoid exposing sensitive data
 
 ### Remaining Threats (Cloud-Specific)
 

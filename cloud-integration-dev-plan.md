@@ -101,19 +101,19 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 
 ### Phase 6 — Snowflake
 
-- [ ] Implement `SnowflakeConnector : ICloudConnector`
-- [ ] Implement `SnowflakeJwtAuth` (RSA RS256 JWT via `JwtGenerator`)
-- [ ] Implement `SnowflakeCloudTaskExecutor` (SQL query via `/api/v2/statements`, async polling)
-- [ ] Frontend: Snowflake connection config, `snowflake_query` task inspector
+- [x] Implement `SnowflakeConnector : ICloudConnector`
+- [x] Implement `SnowflakeJwtAuth` (RSA RS256 JWT via `JwtGenerator`)
+- [x] Implement `SnowflakeCloudTaskExecutor` (SQL query via `/api/v2/statements`, async polling)
+- [x] Frontend: Snowflake connection config, `snowflake_query` task inspector
 
 ### Phase 7 — Messaging (Slack, Email)
 
-- [ ] Implement `SlackConnector : ICloudConnector`
-- [ ] Implement `SlackCloudTaskExecutor` (`chat.postMessage` via REST)
-- [ ] Implement `EmailConnector : ICloudConnector` (SMTP/IMAP via libcurl)
-- [ ] Implement `EmailCloudTaskExecutor` (send via SMTP)
-- [ ] Add `email_watch` trigger type (IMAP polling)
-- [ ] Frontend: Slack and Email connection config, task inspector sections
+- [x] Implement `SlackConnector : ICloudConnector`
+- [x] Implement `SlackCloudTaskExecutor` (`chat.postMessage` via REST)
+- [x] Implement `EmailConnector : ICloudConnector` (SMTP/IMAP via libcurl)
+- [x] Implement `EmailCloudTaskExecutor` (send via SMTP)
+- [x] Add `email_watch` trigger type (IMAP polling)
+- [x] Frontend: Slack and Email connection config, task inspector sections
 
 ### Phase 8 — Additional Integrations
 

@@ -460,6 +460,106 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
             </>
           )}
 
+          {editing.type === "snowflake" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Account (e.g. xy12345)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="xy12345"
+                  value={editing.params.account ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>User</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="SVC_JARVIS"
+                  value={editing.params.user ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, user: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Warehouse</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="COMPUTE_WH"
+                  value={editing.params.warehouse ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, warehouse: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Database</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="ANALYTICS"
+                  value={editing.params.database ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Schema</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="PUBLIC"
+                  value={editing.params.schema ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, schema: e.target.value } } : prev)}
+                />
+              </div>
+            </>
+          )}
+
+          {editing.type === "email" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>SMTP Host</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="smtp.gmail.com"
+                  value={editing.params.smtp_host ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_host: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>SMTP Port (587=STARTTLS, 465=SSL)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="587"
+                  value={editing.params.smtp_port ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_port: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>IMAP Host (for email_watch trigger)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="imap.gmail.com"
+                  value={editing.params.imap_host ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, imap_host: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>From address (default: credential username)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="alerts@company.com"
+                  value={editing.params.from ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, from: e.target.value } } : prev)}
+                />
+              </div>
+            </>
+          )}
+
           <div className="field" style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 12, opacity: 0.8 }}>Parameters</label>
             {Object.entries(editing.params).map(([k, v]) => (

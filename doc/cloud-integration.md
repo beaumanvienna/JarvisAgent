@@ -590,6 +590,165 @@ The workflow editor shows a OneDrive task inspector panel (blue accent) for `one
 
 ---
 
-## 12. Next Steps
+## 12. Snowflake Integration (Phase 6)
+
+### SnowflakeConnector
+
+Implements `ICloudConnector` for Snowflake via the Snowflake SQL REST API with RSA JWT authentication.
+
+**Files:** `application/cloud/snowflakeConnector.h/cpp`
+
+**Connection params:**
+
+| Key | Description |
+|-----|-------------|
+| `account` | Snowflake account identifier (e.g. `"xy12345"`), required |
+| `user` | Snowflake user name (e.g. `"SVC_JARVIS"`), required |
+| `warehouse` | Default warehouse (e.g. `"COMPUTE_WH"`) |
+| `database` | Default database (e.g. `"ANALYTICS"`) |
+| `schema` | Default schema (e.g. `"PUBLIC"`) |
+
+- **Endpoint**: Account locator with region (e.g. `"xy12345.us-east-1"`), used to construct the API URL `https://{endpoint}.snowflakecomputing.com`
+- **Auth type**: JwtRsa (RSA RS256 JWT via `JwtGenerator`)
+- **Key**: KeyPairCredential with RSA private key in PEM format
+- **TestConnection()**: `POST /api/v2/statements` with `SELECT 1`
+
+### JWT Authentication
+
+Snowflake uses RSA key-pair authentication. The `JwtGenerator::GenerateSnowflakeJwt()` method (built in Phase 0):
+
+1. Uppercases account and user per Snowflake convention
+2. Extracts the public key fingerprint (SHA-256 of DER-encoded public key)
+3. Builds JWT claims: `iss` (account + user + fingerprint), `sub` (account + user), `iat`, `exp` (1-hour)
+4. Signs with RS256 via OpenSSL `EVP_DigestSign`
+
+The `X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT` header tells Snowflake to expect JWT auth.
+
+### snowflake_query Task Type
+
+JCWF task type `"snowflake_query"` executes SQL queries via the Snowflake SQL REST API with async polling.
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `snowflake`) |
+| `query` | yes | | SQL statement |
+| `warehouse` | no | connection default | Override warehouse |
+| `database` | no | connection default | Override database |
+| `schema` | no | connection default | Override schema |
+| `output_format` | no | `csv` | `csv` or `json` |
+| `output_file` | no | `result.csv`/`result.json` | Output filename |
+| `timeout` | no | 3600 | Statement timeout in seconds |
+| `poll_interval` | no | 2 | Polling interval in seconds |
+
+**Execution flow:**
+1. `POST /api/v2/statements` with SQL body — receives `statementHandle`
+2. Poll `GET /api/v2/statements/{handle}` until `message == "Statement executed successfully."`
+3. Parse `resultSetMetaData.rowType` for column names, `data` array for row values (jsonv2 format)
+4. Write results to CSV (RFC 4180) or JSON (array of objects) in the task working directory
+5. Raw Snowflake response saved to `response.json`
+
+Supports cooperative cancellation: if the workflow run is cancelled, the executor sends `POST /api/v2/statements/{handle}/cancel` to Snowflake.
+
+**Files:** `application/cloud/snowflakeCloudTaskExecutor.h/cpp`
+
+### Connections UI
+
+The ConnectionsView shows dedicated fields for Snowflake connections: Account, User, Warehouse, Database, Schema.
+
+### Task Inspector
+
+The workflow editor shows a Snowflake Query inspector panel (light blue accent) with fields: connection, query (SQL textarea), warehouse, database, schema, output_format, output_file.
+
+---
+
+## 13. Messaging — Slack and Email (Phase 7)
+
+### SlackConnector
+
+Implements `ICloudConnector` for the Slack Web API with Bearer token authentication.
+
+**Files:** `application/cloud/slackConnector.h/cpp`
+
+- **Endpoint**: Slack API base URL (default: `https://slack.com/api`)
+- **Auth type**: BearerToken (Bot token `xoxb-...` from KeyManager)
+- **TestConnection()**: `POST /api/auth.test` — verifies token and returns workspace info
+
+### slack_message Task Type
+
+JCWF task type `"slack_message"` sends messages to Slack channels.
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `connection` | yes | Named CloudConnection (type `slack`) |
+| `channel` | yes | Slack channel name or ID (e.g. `#alerts`, `C01ABCDEF`) |
+| `text` | yes | Message text (supports template variables) |
+
+Sends `POST /api/chat.postMessage` with JSON body. Checks Slack's `{"ok": true/false}` response for success.
+
+**Files:** `application/cloud/slackCloudTaskExecutor.h/cpp`
+
+### EmailConnector
+
+Implements `ICloudConnector` for SMTP send and IMAP read via libcurl.
+
+**Files:** `application/cloud/emailConnector.h/cpp`
+
+**Connection params:**
+
+| Key | Description |
+|-----|-------------|
+| `smtp_host` | SMTP server (e.g. `"smtp.gmail.com"`), required for send |
+| `smtp_port` | SMTP port (default: `"587"` for STARTTLS, `"465"` for SSL) |
+| `imap_host` | IMAP server (e.g. `"imap.gmail.com"`), required for email_watch |
+| `imap_port` | IMAP port (default: `"993"`) |
+| `from` | Sender address (default: credential username) |
+| `use_ssl` | `"true"` (default) or `"false"` |
+
+- **Auth type**: BasicAuth (email + password/app password from KeyManager)
+- **TestConnection()**: SMTP `CONNECT_ONLY` handshake via libcurl
+
+### email_send Task Type
+
+JCWF task type `"email_send"` sends emails via SMTP with optional attachments.
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `connection` | yes | Named CloudConnection (type `email`) |
+| `to` | yes | Recipient(s), comma-separated |
+| `subject` | yes | Email subject (supports template variables) |
+| `body` | yes | Email body text |
+| `cc` | no | CC recipients, comma-separated |
+| `attachments` | no | Array of file paths relative to working directory |
+
+Builds RFC 2822 messages with MIME multipart for attachments. Base64-encodes attachment content. Uses libcurl SMTP with `CURLOPT_MAIL_FROM` and `CURLOPT_MAIL_RCPT`.
+
+**Files:** `application/cloud/emailCloudTaskExecutor.h/cpp`
+
+### email_watch Trigger
+
+Polls an IMAP folder on a configurable interval.
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `email`) |
+| `folder` | no | `INBOX` | IMAP folder to watch |
+| `subject_filter` | no | all | Subject pattern filter |
+| `poll_interval_seconds` | no | 300 | Polling interval (minimum 60) |
+
+Stores `last_seen_uid` for future efficient polling via IMAP UID.
+
+### Connections UI
+
+- **Slack**: No dedicated fields (just the generic connection name, key, auth type)
+- **Email**: Dedicated fields for SMTP Host, SMTP Port, IMAP Host, From address
+
+### Task Inspector
+
+- **slack_message**: Pink accent panel with connection, channel, text (textarea)
+- **email_send**: Orange accent panel with connection, to, subject, body (textarea), cc
+
+---
+
+## 14. Next Steps
 
 See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 9.

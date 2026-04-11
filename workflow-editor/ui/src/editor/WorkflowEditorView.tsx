@@ -3389,6 +3389,9 @@ export default function WorkflowEditorView(props: {
                       <option value="db_query">db_query</option>
                       <option value="onedrive_upload">onedrive_upload</option>
                       <option value="onedrive_download">onedrive_download</option>
+                      <option value="snowflake_query">snowflake_query</option>
+                      <option value="slack_message">slack_message</option>
+                      <option value="email_send">email_send</option>
                     </select>
                   </label>
 
@@ -3635,6 +3638,111 @@ export default function WorkflowEditorView(props: {
                         <label className="field">
                           <div className="small">local_path (relative to working directory)</div>
                           <input className="input" value={(params.local_path as string) ?? ""} placeholder="report.pdf" onChange={(e) => { updateParams({ local_path: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "snowflake_query" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(96,165,250,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(96,165,250,0.95)" }}>Snowflake Query params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-snowflake" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">query (SQL)</div>
+                          <textarea className="input" rows={4} value={(params.query as string) ?? ""} placeholder="SELECT * FROM sales LIMIT 10" onChange={(e) => { updateParams({ query: e.target.value }); }} style={{ fontFamily: "monospace", fontSize: 11 }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">warehouse (optional, overrides connection)</div>
+                          <input className="input" value={(params.warehouse as string) ?? ""} placeholder="COMPUTE_WH" onChange={(e) => { updateParams({ warehouse: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">database (optional, overrides connection)</div>
+                          <input className="input" value={(params.database as string) ?? ""} onChange={(e) => { updateParams({ database: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">schema (optional, overrides connection)</div>
+                          <input className="input" value={(params.schema as string) ?? ""} onChange={(e) => { updateParams({ schema: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">output_format</div>
+                          <select className="input" value={(params.output_format as string) ?? "csv"} onChange={(e) => { updateParams({ output_format: e.target.value }); }}>
+                            <option value="csv">csv</option>
+                            <option value="json">json</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">output_file (optional)</div>
+                          <input className="input" value={(params.output_file as string) ?? ""} placeholder="result.csv" onChange={(e) => { updateParams({ output_file: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "slack_message" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(233,30,99,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(233,30,99,0.95)" }}>Slack Message params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-slack" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">channel</div>
+                          <input className="input" value={(params.channel as string) ?? ""} placeholder="#alerts or C01ABCDEF" onChange={(e) => { updateParams({ channel: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">text</div>
+                          <textarea className="input" rows={3} value={(params.text as string) ?? ""} placeholder="Workflow completed: {{output}}" onChange={(e) => { updateParams({ text: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "email_send" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(255,152,0,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(255,152,0,0.95)" }}>Email Send params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-email" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">to (comma-separated)</div>
+                          <input className="input" value={(params.to as string) ?? ""} placeholder="team@company.com" onChange={(e) => { updateParams({ to: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">subject</div>
+                          <input className="input" value={(params.subject as string) ?? ""} placeholder="Report: {{workflow_id}}" onChange={(e) => { updateParams({ subject: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">body</div>
+                          <textarea className="input" rows={3} value={(params.body as string) ?? ""} placeholder="See attached report." onChange={(e) => { updateParams({ body: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">cc (optional, comma-separated)</div>
+                          <input className="input" value={(params.cc as string) ?? ""} onChange={(e) => { updateParams({ cc: e.target.value }); }} />
                         </label>
                       </div>
                     );

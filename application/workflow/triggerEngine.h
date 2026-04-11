@@ -130,6 +130,15 @@ namespace AIAssistant
                                      std::string const& connectionName, std::string const& folder,
                                      uint32_t pollIntervalSeconds, bool isEnabled);
 
+        // Register an email-watch trigger (polls IMAP folder for new messages).
+        // connectionName: named CloudConnection for email access (IMAP).
+        // folder: IMAP folder to watch (default: "INBOX").
+        // subjectFilter: only trigger on messages matching this subject pattern (empty = all).
+        // pollIntervalSeconds: polling interval (minimum 60).
+        void AddEmailWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                  std::string const& connectionName, std::string const& folder,
+                                  std::string const& subjectFilter, uint32_t pollIntervalSeconds, bool isEnabled);
+
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
@@ -253,6 +262,19 @@ namespace AIAssistant
             bool m_IsEnabled{true};
         };
 
+        struct EmailWatchTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_ConnectionName;
+            std::string m_Folder;         // IMAP folder (default: "INBOX")
+            std::string m_SubjectFilter;  // Subject pattern filter (empty = all)
+            std::chrono::seconds m_PollInterval{300};
+            std::chrono::steady_clock::time_point m_NextPollTime{};
+            std::string m_LastSeenUid;    // Last processed message UID
+            bool m_IsEnabled{true};
+        };
+
     private:
         void FireTrigger(std::string const& workflowId, std::string const& triggerId) const;
 
@@ -275,6 +297,7 @@ namespace AIAssistant
         std::vector<WebhookTriggerInstance> m_WebhookTriggers;
         std::vector<S3WatchTriggerInstance> m_S3WatchTriggers;
         std::vector<OneDriveWatchTriggerInstance> m_OneDriveWatchTriggers;
+        std::vector<EmailWatchTriggerInstance> m_EmailWatchTriggers;
 
         // Optional acceleration structure for file-trigger lookups:
         // map path → indices into m_FileWatchTriggers.

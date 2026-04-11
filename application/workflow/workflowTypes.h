@@ -72,7 +72,8 @@ namespace AIAssistant
         Manual,
         Webhook,
         S3Watch,
-        OneDriveWatch
+        OneDriveWatch,
+        EmailWatch
     };
 
     // ---------------------------------------------------------------------
@@ -90,7 +91,10 @@ namespace AIAssistant
         PolarionWrite,
         S3,
         DbQuery,
-        OneDrive
+        OneDrive,
+        SnowflakeQuery,
+        SlackMessage,
+        EmailSend
     };
 
     enum class TaskMode
