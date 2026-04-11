@@ -29,6 +29,7 @@
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "cloud/cloudCircuitBreaker.h"
+#include "workflow/templateEngine.h"
 
 namespace AIAssistant
 {
@@ -125,7 +126,52 @@ namespace AIAssistant
         TaskCancellationToken const& cancellationToken =
             workflowRun.m_CancellationToken ? *workflowRun.m_CancellationToken : localToken;
 
-        bool success = ExecuteCloud(workflowDefinition, workflowRun, taskDefinition, taskState, *connection,
+        // Expand template variables in params JSON (e.g. {{item.id}}, {{taskId.output_file}}).
+        // Per-item filter bindings and upstream per_item outputs are in taskState.m_InputValues.
+        // Values are JSON-escaped before substitution so that embedded quotes, backslashes,
+        // and newlines don't break the JSON structure of m_ParamsJson.
+        TaskDef expandedTaskDef = taskDefinition;
+        if (!taskState.m_InputValues.empty() && !taskDefinition.m_ParamsJson.empty())
+        {
+            std::unordered_map<std::string, std::string> jsonEscapedValues;
+            jsonEscapedValues.reserve(taskState.m_InputValues.size());
+            for (auto const& [key, value] : taskState.m_InputValues)
+            {
+                std::string escaped;
+                escaped.reserve(value.size() + 16);
+                for (char c : value)
+                {
+                    switch (c)
+                    {
+                        case '"':  escaped += "\\\""; break;
+                        case '\\': escaped += "\\\\"; break;
+                        case '\n': escaped += "\\n"; break;
+                        case '\r': escaped += "\\r"; break;
+                        case '\t': escaped += "\\t"; break;
+                        default:   escaped += c; break;
+                    }
+                }
+                jsonEscapedValues[key] = std::move(escaped);
+            }
+
+            TemplateContext templateContext;
+            templateContext.m_InputValues = &jsonEscapedValues;
+
+            std::string expandedParams;
+            std::string templateError;
+            if (ExpandTemplate(taskDefinition.m_ParamsJson, templateContext, TemplateMode::Lenient,
+                               expandedParams, templateError))
+            {
+                expandedTaskDef.m_ParamsJson = std::move(expandedParams);
+            }
+            else
+            {
+                LOG_APP_WARN("ICloudTaskExecutor: template expansion warning for task '{}': {}",
+                             taskDefinition.m_Id, templateError);
+            }
+        }
+
+        bool success = ExecuteCloud(workflowDefinition, workflowRun, expandedTaskDef, taskState, *connection,
                                     credentials, cancellationToken);
 
         // Record result in circuit breaker

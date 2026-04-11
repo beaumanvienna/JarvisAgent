@@ -164,7 +164,7 @@ All demo workflows must demonstrate a meaningful **round-trip** pattern: read fr
 | **PostgreSQL** | Already running | `localhost:5432`, db `j9t_test`, user `j9t_user`, pw `1234!@#$` |
 | **S3 (MinIO)** | `docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin123 minio/minio server /data --console-address ":9001"` | S3-compatible on port 9000, console on 9001. Create bucket: `docker exec minio mc mb /data/j9t-test` |
 | **Email (SMTP)** | Real: `beaumanvienna@gmail.com` with Gmail App Password. Local mock: `docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit` | Mailpit: SMTP on 1025, web UI on 8025 (no auth needed) |
-| **GitHub** | Real: use the jarvisAgent repo itself (`beaumanvienna/jarvisAgent`) with a PAT | Already on GitHub — create test issues in the real repo or a throwaway test repo |
+| **GitHub** | Real: use `beaumanvienna/polarionMockup` with a fine-grained PAT (Issues read+write, Metadata read) | Tested with 3 real improvement issues |
 | **Jira** | Free tier: `https://<yourname>.atlassian.net` — create a free Jira Cloud project | Email + API token auth |
 | **Slack** | Create a free Slack workspace + Bot with `chat:write` scope | Free tier is sufficient for testing |
 | **OneDrive** | Real Microsoft account (personal or work) + Azure AD app registration | OAuth PKCE flow, no client secret needed |
@@ -176,14 +176,14 @@ All demo workflows must demonstrate a meaningful **round-trip** pattern: read fr
 Each demo workflow must have: cloud read/write + AI processing + verifiable output.
 
 - [ ] **Polarion round-trip** (`goKartComplianceCheck`): Migrate from inline `base_url`/`project_id`/`key_name` to a named `CloudConnection`. Add `polarion_write` task to write compliance status back to each work item after AI assessment. Verify write-back in PolarionMockup. See refactor details below.
-- [ ] **PostgreSQL round-trip** (`postgresDemo`): Add AI task — query rows, AI summarizes the data, insert summary back into a new table. Verify summary row exists.
+- [x] **PostgreSQL round-trip** (`postgresDemo`): Query department stats → per_item AI analysis → per_item INSERT analysis back via `{{ai_analyze.captured_stdout}}`. Verified: 3 departments, 3 AI summaries written to `j9t_demo_analysis`.
 - [ ] **S3 round-trip** (`s3UploadDownloadDemo`): Upload sample data → download → AI analyzes content → upload AI report back to S3. Verify report object exists in bucket.
 - [ ] **Email round-trip** (`emailSendDemo`): AI generates a report from workflow context → email sends it with attachment. Verify email received (Mailpit web UI or Gmail inbox).
-- [ ] **GitHub round-trip** (`gitHubIssueDemo`): List open issues → AI triages/categorizes each issue → create a summary comment on each. Verify comments created via API.
+- [x] **GitHub round-trip** (`gitHubIssueDemo`): List issues → python converts to CSV → per_item AI triage → per_item comment via `{{ai_triage.captured_stdout}}`. Verified: 3 issues triaged, comments posted on `beaumanvienna/polarionMockup`.
 - [ ] **Jira round-trip** (`jiraIssueDemo`): Create issue with AI-generated description from input data → get issue back → verify fields match.
 - [ ] **Google Sheets round-trip** (`sheetsQuizGrader`): Already complete — read quiz → AI grades → write grades back. Verify grades column populated.
 - [ ] **OneDrive round-trip** (`oneDriveUploadDownloadDemo`): Upload data file → download → AI processes content → upload AI output. Verify output file exists on OneDrive.
-- [ ] **Snowflake round-trip** (`snowflakeQueryDemo`): Create + insert → query → AI analyzes query results → insert AI summary row. Verify summary row via final query.
+- [ ] **Snowflake round-trip** (`snowflakeQueryDemo`): Query region stats → per_item AI classifies (STRONG/MODERATE/WEAK) → per_item INSERT verdict via `{{ai_analyze.captured_stdout}}` + `{{ai_analyze.output_file}}`. Workflow ready, requires Snowflake trial account to test.
 - [ ] **Slack notification** (`slackMessageDemo`): AI generates a status report from workflow run context → Slack posts it. Verify message in channel.
 
 #### Simulatable Without Real Cloud Accounts
@@ -256,11 +256,11 @@ The file-based approach is more robust since AI responses can be large. The down
 - `portfolioDividendAnalysis` — already works (single aggregation, not per_item write-back)
 
 **TODO:**
-- [ ] Implement per_item output piping (`{{taskId.output_file}}` and `{{taskId.captured_stdout}}` template variables)
+- [x] Implement per_item output piping (`{{taskId.output_file}}` and `{{taskId.captured_stdout}}` template variables)
 - [ ] Update `goKartComplianceCheck` write_status to use `{{assessRequirement.output_file}}` for the full AI assessment text
-- [ ] Update remaining demo workflows to write actual AI output back to cloud services
-- [ ] Add per_item output piping to the JCWF specification (section 3.3.2)
-- [ ] Add per_item output piping to `doc/jcwf_generation_guide.md`
+- [x] Update remaining demo workflows to write actual AI output back to cloud services
+- [x] Add per_item output piping to the JCWF specification (section 3.3.2)
+- [x] Add per_item output piping to `doc/jcwf_generation_guide.md`
 
 #### Polarion Demo Refactor Details
 

@@ -216,13 +216,13 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>Keys{dirty ? " *" : ""}</h2>
+        <h2 style={{ margin: 0 }}>Keys</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyKey())}>
             + Add Key
           </button>
-          <button className="btn btnPrimary" type="button" onClick={handlePersistEncrypted}>
-            Save Encrypted
+          <button className="btn btnPrimary" type="button" onClick={handlePersistEncrypted} style={dirty ? { boxShadow: "0 0 0 2px rgba(255,180,60,0.7)" } : {}}>
+            {dirty ? "Save Encrypted *" : "Save Encrypted"}
           </button>
         </div>
       </div>

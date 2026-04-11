@@ -891,6 +891,29 @@ The Docker build (`docker-compose.example.yml`) produces unsigned images by defa
 
 ---
 
-## 16. Next Steps
+## 16. Per-Item Output Piping in Cloud Tasks
 
-See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 9.
+Cloud task executors support `{{...}}` template variable expansion in their `params` JSON. This enables per_item cloud write-back pipelines where each downstream instance consumes the output of its corresponding upstream instance.
+
+**Available variables** (when per_item task B depends on per_item task A, same filter):
+
+| Variable | Description |
+|----------|-------------|
+| `{{A.output_file}}` | Absolute path to A's first output file for the matching item |
+| `{{A.captured_stdout}}` | Captured stdout (up to 1024 chars) from A's matching instance |
+| `{{A.<slotName>}}` | Named output slot value from A's matching instance |
+| `{{binding.field}}` | Filter binding variables (e.g. `{{dept.department}}`) |
+
+**JSON safety**: All template values substituted into cloud task params are JSON-escaped (double quotes, backslashes, newlines). This prevents AI-generated text from breaking the JSON structure.
+
+**Tested round-trip patterns**:
+
+- **PostgreSQL**: query → per_item AI analyze → per_item INSERT via `{{ai_analyze.captured_stdout}}` (dollar-quoting for SQL safety)
+- **GitHub**: list issues → per_item AI triage → per_item comment via `{{ai_triage.captured_stdout}}`
+- **Snowflake**: query → per_item AI classify → per_item INSERT via `{{ai_analyze.captured_stdout}}` + `{{ai_analyze.output_file}}` (ready, needs Snowflake account)
+
+---
+
+## 17. Next Steps
+
+See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 10.

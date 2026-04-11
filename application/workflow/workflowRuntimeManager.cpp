@@ -993,6 +993,14 @@ namespace AIAssistant
             {
                 taskState.m_OutputValues = completion.m_OutputValues;
 
+                // Populate m_CapturedStdout from AI response text (enables per_item output piping).
+                if (!completion.m_ResponseText.empty())
+                {
+                    static constexpr size_t kMaxCaptureChars = 1024;
+                    taskState.m_CapturedStdout = completion.m_ResponseText.substr(
+                        0, std::min(completion.m_ResponseText.size(), kMaxCaptureChars));
+                }
+
                 // Publish ai_call outputs into the run context.
                 for (auto const& [outputName, outputValue] : taskState.m_OutputValues)
                 {
@@ -2815,6 +2823,56 @@ namespace AIAssistant
             childState.m_InputValues[binding + "._index"] = std::to_string(item.m_Index);
             childState.m_InputValues[binding + "._key"] = item.m_Key;
             childState.m_InputValues[binding + "._source_path"] = item.m_SourcePath;
+
+            // Per-item output piping: inject upstream per_item task outputs for the matching item index.
+            // When downstream per_item task B depends on per_item task A (same filter), A's child
+            // outputs become available as {{A.output_file}} and {{A.captured_stdout}}.
+            for (std::string const& depId : taskDef.m_DependsOn)
+            {
+                auto upstreamChildrenIt = activeRun.m_PerItemChildren.find(depId);
+                if (upstreamChildrenIt == activeRun.m_PerItemChildren.end())
+                {
+                    continue; // Not a per_item parent — no output piping needed
+                }
+
+                std::string const upstreamChildId = depId + "#" + std::to_string(item.m_Index);
+                auto upstreamStateIt = workflowRun.m_TaskStates.find(upstreamChildId);
+                if (upstreamStateIt == workflowRun.m_TaskStates.end())
+                {
+                    LOG_APP_WARN("[per_item] upstream child '{}' not found for downstream '{}' — "
+                                 "skipping output piping",
+                                 upstreamChildId, childId);
+                    continue;
+                }
+
+                TaskInstanceState const& upstreamState = upstreamStateIt->second;
+
+                // Inject captured_stdout (up to 1024 chars, set by all executors)
+                if (!upstreamState.m_CapturedStdout.empty())
+                {
+                    childState.m_InputValues[depId + ".captured_stdout"] = upstreamState.m_CapturedStdout;
+                }
+
+                // Inject output_file — first output value sorted by slot name.
+                // Also inject all named outputs as {{depId.slotName}}.
+                if (!upstreamState.m_OutputValues.empty())
+                {
+                    // Deterministic: sort by slot name, pick first for output_file
+                    std::vector<std::pair<std::string, std::string>> sortedOutputs(
+                        upstreamState.m_OutputValues.begin(), upstreamState.m_OutputValues.end());
+                    std::sort(sortedOutputs.begin(), sortedOutputs.end());
+
+                    childState.m_InputValues[depId + ".output_file"] = sortedOutputs.front().second;
+
+                    for (auto const& [slotName, slotValue] : sortedOutputs)
+                    {
+                        childState.m_InputValues[depId + "." + slotName] = slotValue;
+                    }
+
+                    LOG_APP_INFO("[per_item] output piping: {} → {} (output_file='{}')", upstreamChildId,
+                                 childId, sortedOutputs.front().second);
+                }
+            }
 
             // Per-item freshness: skip if unchanged and outputs exist
             if (hasPreviousManifest && !diff.m_ExpressionChanged)

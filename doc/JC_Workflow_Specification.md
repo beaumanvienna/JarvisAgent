@@ -786,6 +786,47 @@ make
 
 **Max items:** Filters support a configurable `max_items` limit (default: 10000). Set to 0 for no limit.
 
+**Per-item output piping** *(v1.1)*: When a `per_item` task B depends on another `per_item` task A (same filter), the runtime automatically injects A's per-instance outputs into B's corresponding instance as template variables:
+
+- `{{A.output_file}}` — absolute path to A's first output file (sorted alphabetically by slot name) for the matching item index.
+- `{{A.captured_stdout}}` — captured stdout of A's instance (up to 1024 characters) for the matching item index.
+- `{{A.<slotName>}}` — each named output slot from A's instance individually.
+
+This enables chained per_item pipelines where each downstream instance consumes the output of its corresponding upstream instance:
+
+```
+filter(N items) → per_item ai_call(N) → per_item cloud_write(N)
+                                              ↑
+                              {{ai_call.captured_stdout}} from matching instance
+```
+
+For cloud task executors, template variables in `params` JSON are expanded with JSON-safe escaping (double quotes, backslashes, and newlines are escaped before substitution) so that piped output text does not break JSON structure.
+
+Example — per_item AI analysis piped into per_item DB write-back:
+
+```jsonc
+// Task A: AI analyzes each department (per_item)
+"ai_analyze": {
+  "type": "ai_call",
+  "mode": "per_item",
+  "filter": "dept-stats",
+  "file_outputs": ["analysis.txt"],
+  // ... queue_binding with {{dept.department}} etc.
+}
+
+// Task B: INSERT each AI analysis back to DB (per_item, same filter)
+"write_analysis": {
+  "type": "db_query",
+  "mode": "per_item",
+  "filter": "dept-stats",
+  "depends_on": ["ai_analyze"],
+  "params": {
+    "connection": "local-pg",
+    "query": "INSERT INTO analysis (department, text) VALUES ('{{dept.department}}', $j9t${{ai_analyze.captured_stdout}}$j9t$)"
+  }
+}
+```
+
 Example (v1.1 — filter-driven):
 
 ```jsonc

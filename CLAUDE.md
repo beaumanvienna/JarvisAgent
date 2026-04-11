@@ -50,12 +50,16 @@ cd workflow-editor/ui && npm install && npm run build
 ## Running
 
 ```bash
-./bin/Release/jarvisAgent-studio
+# Recommended: use the launcher (auto-manages Python venv):
+./jarvisagent.sh              # Studio edition
+./jarvisagent.sh --engine     # Engine edition
+
 # Dashboard: http://localhost:8080
 # Workflow Editor: http://localhost:8080/editor
 
-# Or use the launcher (auto-manages Python venv):
-./jarvisagent.sh
+# Or run the binary directly:
+./bin/Release/jarvisAgent-studio
+./bin/Release/jarvisAgent-engine
 ```
 
 ## Testing
@@ -67,14 +71,16 @@ Tests are Python scripts that hit the REST API of a running JarvisAgent instance
 ./bin/Release/jarvisAgent-studio
 
 # Terminal 2: run tests
-python test/run_tests.py --all             # all workflows
-python test/run_tests.py --workflow NAME   # single workflow
-python test/run_tests.py --list            # list available workflows
+python3 test/run_tests.py --all             # all workflows
+python3 test/run_tests.py --workflow NAME   # single workflow
+python3 test/run_tests.py --list            # list available workflows
 
 # AI assistant tests
-python test/assistant/test_assistant.py                          # 28 non-AI tests
-python test/assistant/test_assistant.py --with-ai               # all 70 tests
-python test/assistant/test_assistant.py --with-ai --auto-approve # all 70 tests including mutating tools
+python3 test/assistant/test_assistant.py                          # 28 non-AI tests
+python3 test/assistant/test_assistant.py --with-ai               # all 70 tests
+python3 test/assistant/test_assistant.py --with-ai --auto-approve # all 70 tests including mutating tools
+
+# Note: Use 'python' instead of 'python3' on Windows and Arch/Manjaro
 ```
 
 ## Code Style
@@ -103,6 +109,8 @@ Format with clang-format using the `.clang-format` config at the root. No automa
 | **Workflow Registry** | JCWF workflow CRUD, versioning | `application/workflow/workflowRegistry.h` |
 | **Python Engine** | Executes Python scripts embedded in workflows | `application/python/pythonEngine.h` |
 | **AI Assistant** | Natural language workflow generation | `application/assistant/` |
+| **AI JCWF Service** | AI-driven JCWF generation pipeline (decompose, generate, review) | `application/web/aiJcwfService.h` |
+| **JCWF Container** | Zip container read/write for `.jcwf` files (miniz) | `application/workflow/jcwfContainer.h` |
 | **Trigger Engine** | Cron, file-watch, webhook, manual triggers | `application/workflow/triggerEngine.h` |
 | **Task Executors** | Pluggable executors: shell/Python/AI/internal tasks | `application/workflow/taskExecutor*.h` |
 
@@ -118,10 +126,11 @@ Format with clang-format using the `.clang-format` config at the root. No automa
 
 ### Workflow Format (JCWF)
 
-Workflows are JSON files defining a DAG of tasks with:
+Workflows are `.jcwf` zip containers holding `global.json` (metadata), canvas JSONs, and sub-workflow folders. Key concepts:
 - **Template variables**: `{{binding.field}}` substitution in task inputs
 - **Per-item fan-out**: CSV/text filters spawn parallel AI calls per item
 - **Task dependencies**: Explicit `dependsOn` edges enabling serial + parallel execution
+- **Sub-workflows**: Nested canvas pages with their own task DAGs
 - **Disk-first design**: All inputs, outputs, and intermediates stored on disk
 
 See `doc/JC_Workflow_Specification.md` for the full format definition.

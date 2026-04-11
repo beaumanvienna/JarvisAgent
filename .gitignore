@@ -51,3 +51,4 @@ vendor/pdcursesmod/bin
 vendor/pdcursesmod/bin-int
 .venv
 .claude/
+connections.json

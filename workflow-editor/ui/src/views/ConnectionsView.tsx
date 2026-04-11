@@ -9,6 +9,7 @@ import {
   authorizeConnection,
   type ConnectionEntry,
 } from "../api/connections";
+import { listProviders, saveProviders } from "../api/providers";
 
 const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira"];
 const AUTH_TYPES = ["bearer", "oauth2", "jwt_rsa", "basic_auth", "sigv4"];
@@ -29,10 +30,11 @@ function emptyConnection(): EditingConnection
 }
 
 type ConnectionsViewProps = {
+  appMasterPassword: string | null;
   onDirtyStateChange?: (dirty: boolean) => void;
 };
 
-export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewProps): JSX.Element
+export default function ConnectionsView({ appMasterPassword, onDirtyStateChange }: ConnectionsViewProps): JSX.Element
 {
   const [connections, setConnections] = useState<ConnectionEntry[]>([]);
   const [editing, setEditing] = useState<EditingConnection | null>(null);
@@ -43,6 +45,12 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
   const [testingName, setTestingName] = useState<string | null>(null);
   const [paramKey, setParamKey] = useState("");
   const [paramValue, setParamValue] = useState("");
+  const [keyNames, setKeyNames] = useState<string[]>([]);
+  const [localMasterPassword, setLocalMasterPassword] = useState<string | null>(null);
+  const [showMasterPasswordPrompt, setShowMasterPasswordPrompt] = useState(false);
+  const [masterPasswordInput, setMasterPasswordInput] = useState("");
+  const [savePasswordError, setSavePasswordError] = useState<string | null>(null);
+  const [showMasterPwVisible, setShowMasterPwVisible] = useState(false);
 
   const refresh = useCallback(async () => {
     try
@@ -64,6 +72,13 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
   }, [onDirtyStateChange]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() =>
+  {
+    listProviders()
+      .then((r) => setKeyNames(r.providers.map((p) => p.name)))
+      .catch(() => {});
+  }, []);
 
   const handleDelete = useCallback(async (name: string) => {
     if (!window.confirm(`Delete connection "${name}"?`)) return;
@@ -150,21 +165,74 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
     }
   }, [editing, refresh]);
 
-  const handlePersist = useCallback(async () => {
-    setStatusMessage("Saving connections...");
+  const doSaveAll = useCallback(async (pw: string, fromPrompt: boolean) => {
+    setStatusMessage("Saving connections and keys...");
     setErrorMessage("");
-    const result = await saveConnections();
-    if (result.ok)
+    setSavePasswordError(null);
+
+    // Save connections.json
+    const connResult = await saveConnections();
+    if (!connResult.ok)
     {
-      setStatusMessage(`Saved to ${result.path ?? "connections.json"}`);
+      setErrorMessage(connResult.message ?? "Connection save failed");
+      setStatusMessage("");
+      return;
+    }
+
+    // Save encrypted keys file
+    const keysResult = await saveProviders(pw);
+    if (keysResult.ok)
+    {
+      setLocalMasterPassword(pw);
+      setShowMasterPasswordPrompt(false);
+      setStatusMessage("Saved connections and keys.");
       await refresh();
+    }
+    else if (keysResult.error === "wrong_password")
+    {
+      setStatusMessage("");
+      setLocalMasterPassword(null);
+      if (fromPrompt)
+      {
+        setSavePasswordError(keysResult.message ?? "Incorrect password.");
+      }
+      else
+      {
+        setSavePasswordError(null);
+        setMasterPasswordInput("");
+        setShowMasterPasswordPrompt(true);
+        setErrorMessage(keysResult.message ?? "Incorrect password.");
+      }
     }
     else
     {
-      setErrorMessage(result.message ?? "Save failed");
+      setErrorMessage(keysResult.message ?? "Keys save failed");
       setStatusMessage("");
     }
   }, [refresh]);
+
+  const handlePersist = useCallback(async () => {
+    const pw = localMasterPassword ?? appMasterPassword;
+    if (pw)
+    {
+      await doSaveAll(pw, false);
+    }
+    else
+    {
+      setMasterPasswordInput("");
+      setSavePasswordError(null);
+      setShowMasterPasswordPrompt(true);
+    }
+  }, [localMasterPassword, appMasterPassword, doSaveAll]);
+
+  const handleMasterPasswordSubmit = useCallback(async () => {
+    if (!masterPasswordInput.trim())
+    {
+      setSavePasswordError("Master password cannot be empty.");
+      return;
+    }
+    await doSaveAll(masterPasswordInput, true);
+  }, [masterPasswordInput, doSaveAll]);
 
   const addParam = useCallback(() => {
     if (!paramKey.trim() || !editing) return;
@@ -183,13 +251,13 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>Connections{dirty ? " *" : ""}</h2>
+        <h2 style={{ margin: 0 }}>Connections</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyConnection())}>
             + Add
           </button>
-          <button className="btn btnPrimary" type="button" onClick={handlePersist}>
-            Save
+          <button className="btn btnPrimary" type="button" onClick={handlePersist} style={dirty ? { boxShadow: "0 0 0 2px rgba(255,180,60,0.7)" } : {}}>
+            {dirty ? "Save *" : "Save"}
           </button>
         </div>
       </div>
@@ -202,6 +270,71 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
       {errorMessage && (
         <div style={{ marginBottom: 10, padding: "8px 12px", borderRadius: 8, background: "rgba(255,120,120,0.08)", border: "1px solid rgba(255,120,120,0.25)", fontSize: 13, color: "#ff8a8a" }}>
           {errorMessage}
+        </div>
+      )}
+
+      {showMasterPasswordPrompt && (
+        <div className="modalOverlay">
+          <div className="modalContent" style={{ maxWidth: 420 }}>
+            <div className="modalHeader">
+              <h2 style={{ margin: 0, fontSize: 16 }}>Master Password Required</h2>
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleMasterPasswordSubmit(); }}>
+              <div className="modalBody">
+                <p style={{ marginTop: 0, marginBottom: 16, color: "#ccc" }}>
+                  Enter your master password to save connections and encrypt the keys file.
+                </p>
+                <div style={{ position: "relative" }}>
+                  <input
+                    type={showMasterPwVisible ? "text" : "password"}
+                    value={masterPasswordInput}
+                    onChange={(e) => setMasterPasswordInput(e.target.value)}
+                    placeholder="Master password"
+                    autoFocus
+                    style={{
+                      width: "100%",
+                      padding: "8px 36px 8px 12px",
+                      fontSize: 14,
+                      borderRadius: 4,
+                      border: "1px solid #555",
+                      background: "#1e1e1e",
+                      color: "#eee",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowMasterPwVisible((prev) => !prev)}
+                    style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "#aaa",
+                      fontSize: 16,
+                      padding: 0,
+                      lineHeight: 1,
+                    }}
+                    title={showMasterPwVisible ? "Hide password" : "Show password"}
+                  >
+                    {showMasterPwVisible ? "\u{1F441}" : "\u{1F441}\u{200D}\u{1F5E8}"}
+                  </button>
+                </div>
+                {savePasswordError && (
+                  <div style={{ marginTop: 8, padding: "6px 10px", borderRadius: 4, background: "#3a1c1c", color: "#f88", fontSize: 13 }}>
+                    {savePasswordError}
+                  </div>
+                )}
+              </div>
+              <div className="modalFooter">
+                <button className="btn" type="submit">Save</button>
+                <button className="btn" type="button" onClick={() => setShowMasterPasswordPrompt(false)} style={{ marginLeft: 8 }}>Cancel</button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
@@ -301,13 +434,14 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
 
           <div className="field" style={{ marginBottom: 10 }}>
             <label style={{ fontSize: 12, opacity: 0.8 }}>Key (from Keys page)</label>
-            <input
+            <select
               className="input"
-              type="text"
-              placeholder="Key name"
               value={editing.key_name}
               onChange={(e) => setEditing((prev) => prev ? { ...prev, key_name: e.target.value } : prev)}
-            />
+            >
+              <option value="">— select key —</option>
+              {keyNames.map((k) => <option key={k} value={k}>{k}</option>)}
+            </select>
           </div>
 
           <div className="field" style={{ marginBottom: 10 }}>

@@ -488,6 +488,20 @@ For `per_item` AI tasks, use `{{binding.field}}` in `queue_binding` content/path
 ]
 ```
 
+### Per-item output piping
+
+When a downstream `per_item` task depends on an upstream `per_item` task (same filter),
+the runtime injects the upstream's per-instance outputs as template variables:
+
+| Variable | Resolves to |
+|----------|-------------|
+| `{{upstream.output_file}}` | Absolute path to the upstream instance's first output file |
+| `{{upstream.captured_stdout}}` | Captured stdout (up to 1024 chars) from the matching instance |
+| `{{upstream.<slotName>}}` | Named output slot value from the matching instance |
+
+These are available in `params`, `queue_binding` content, shell args, and any other
+template-expanded context. For cloud task params (JSON), values are JSON-escaped automatically.
+
 ---
 
 ## 10. Common Patterns
@@ -515,6 +529,49 @@ shell (compile) [expose_error_signal: true]
 ```
 filter (csv) → ai_call (per_item, summarize each) → ai_call_2 (single, combine all summaries)
 ```
+
+### Pattern D: Per-item AI + cloud write-back (output piping)
+
+When a `per_item` task B depends on `per_item` task A (same filter), B's instances
+can reference A's outputs via `{{A.output_file}}`, `{{A.captured_stdout}}`, or
+`{{A.<slotName>}}`. The runtime matches by item index automatically.
+
+```
+filter (csv) → ai_call (per_item, analyze each) → cloud_write (per_item, write AI output back)
+                                                        ↑
+                                        {{ai_call.captured_stdout}} piped from matching instance
+```
+
+Example — query departments, AI analyzes each, INSERT analysis back:
+
+```jsonc
+"ai_analyze": {
+  "type": "ai_call",
+  "mode": "per_item",
+  "filter": "dept-stats",
+  "file_outputs": ["analysis.txt"],
+  "depends_on": ["query_departments"],
+  "queue_binding": {
+    "stng_files": [{ "path": "STNG_analyst.txt", "content": "You are a data analyst..." }],
+    "task_files": [{ "path": "TASK_analyze.txt", "content": "Analyze the department..." }],
+    "cntx_files": [{ "path": "CNTX_context.txt", "content": "Scoring context..." }],
+    "prob_files": [{ "path": "PROB_{{dept.department}}.txt", "content": "Department: {{dept.department}}..." }]
+  }
+},
+"write_analysis": {
+  "type": "db_query",
+  "mode": "per_item",
+  "filter": "dept-stats",
+  "depends_on": ["ai_analyze"],
+  "params": {
+    "connection": "local-pg",
+    "query": "INSERT INTO analysis (dept, text) VALUES ('{{dept.department}}', $j9t${{ai_analyze.captured_stdout}}$j9t$)"
+  }
+}
+```
+
+Cloud task params are JSON-escaped automatically — `{{ai_analyze.captured_stdout}}` content
+with quotes, newlines, or backslashes will not break the JSON structure.
 
 ---
 

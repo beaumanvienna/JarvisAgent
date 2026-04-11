@@ -9,7 +9,7 @@ import {
   testAiInterface,
   type AiInterface,
 } from "../api/aiInterfaces";
-import { listProviders, type ProviderEntry } from "../api/providers";
+import { listProviders, saveProviders, type ProviderEntry } from "../api/providers";
 
 type EditingInterface = {
   name: string;
@@ -51,10 +51,11 @@ function fromEntry(entry: AiInterface): EditingInterface
 }
 
 type AiManagerViewProps = {
+  appMasterPassword: string | null;
   onDirtyStateChange?: (dirty: boolean) => void;
 };
 
-export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps): JSX.Element
+export default function AiManagerView({ appMasterPassword, onDirtyStateChange }: AiManagerViewProps): JSX.Element
 {
   const [interfaces, setInterfaces] = useState<AiInterface[]>([]);
   const [apiIndex, setApiIndex] = useState<number>(0);
@@ -66,6 +67,11 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
   const [dirty, setDirty] = useState<boolean>(false);
   const [testStatus, setTestStatus] = useState<Record<number, "idle" | "testing" | "success" | "error">>({})
   const [testDetails, setTestDetails] = useState<Record<number, string>>({});
+  const [localMasterPassword, setLocalMasterPassword] = useState<string | null>(null);
+  const [showMasterPasswordPrompt, setShowMasterPasswordPrompt] = useState(false);
+  const [masterPasswordInput, setMasterPasswordInput] = useState("");
+  const [savePasswordError, setSavePasswordError] = useState<string | null>(null);
+  const [showMasterPwVisible, setShowMasterPwVisible] = useState(false);
 
   const refresh = useCallback(async () => {
     try
@@ -173,21 +179,72 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
     }
   }, [editing, refresh]);
 
-  const handleSaveToConfig = useCallback(async () => {
-    setStatusMessage("Saving to config.json...");
+  const doSaveAll = useCallback(async (pw: string, fromPrompt: boolean) => {
+    setStatusMessage("Saving config and keys...");
     setErrorMessage("");
-    const result = await saveAiInterfaces();
-    if (result.ok)
+    setSavePasswordError(null);
+
+    const configResult = await saveAiInterfaces();
+    if (!configResult.ok)
     {
-      setStatusMessage(`Saved to ${result.path ?? "config.json"}`);
+      setErrorMessage(configResult.message ?? "Config save failed");
+      setStatusMessage("");
+      return;
+    }
+
+    const keysResult = await saveProviders(pw);
+    if (keysResult.ok)
+    {
+      setLocalMasterPassword(pw);
+      setShowMasterPasswordPrompt(false);
+      setStatusMessage("Saved config and keys.");
       await refresh();
+    }
+    else if (keysResult.error === "wrong_password")
+    {
+      setStatusMessage("");
+      setLocalMasterPassword(null);
+      if (fromPrompt)
+      {
+        setSavePasswordError(keysResult.message ?? "Incorrect password.");
+      }
+      else
+      {
+        setSavePasswordError(null);
+        setMasterPasswordInput("");
+        setShowMasterPasswordPrompt(true);
+        setErrorMessage(keysResult.message ?? "Incorrect password.");
+      }
     }
     else
     {
-      setErrorMessage(result.message ?? "Save failed");
+      setErrorMessage(keysResult.message ?? "Keys save failed");
       setStatusMessage("");
     }
   }, [refresh]);
+
+  const handleSaveToConfig = useCallback(async () => {
+    const pw = localMasterPassword ?? appMasterPassword;
+    if (pw)
+    {
+      await doSaveAll(pw, false);
+    }
+    else
+    {
+      setMasterPasswordInput("");
+      setSavePasswordError(null);
+      setShowMasterPasswordPrompt(true);
+    }
+  }, [localMasterPassword, appMasterPassword, doSaveAll]);
+
+  const handleMasterPasswordSubmit = useCallback(async () => {
+    if (!masterPasswordInput.trim())
+    {
+      setSavePasswordError("Master password cannot be empty.");
+      return;
+    }
+    await doSaveAll(masterPasswordInput, true);
+  }, [masterPasswordInput, doSaveAll]);
 
   const handleTest = useCallback(async (index: number) => {
     setTestStatus((prev) => ({ ...prev, [index]: "testing" }));
@@ -251,7 +308,7 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>AI Interfaces{dirty ? " *" : ""}</h2>
+        <h2 style={{ margin: 0 }}>AI Interfaces</h2>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" type="button" onClick={() => setEditing(emptyInterface())}>
             + Add Interface
@@ -260,10 +317,10 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
             className="btn btnPrimary"
             type="button"
             onClick={handleSaveToConfig}
-            disabled={!dirty}
             title={dirty ? "Save changes to config.json" : "No unsaved changes"}
+            style={dirty ? { boxShadow: "0 0 0 2px rgba(255,180,60,0.7)" } : {}}
           >
-            Save to config.json
+            {dirty ? "Save to config.json *" : "Save to config.json"}
           </button>
           <button className="btn" type="button" onClick={handleReloadConfig} title="Reload config.json from disk">
             Reload
@@ -279,6 +336,71 @@ export default function AiManagerView({ onDirtyStateChange }: AiManagerViewProps
       {errorMessage && (
         <div style={{ marginBottom: 10, padding: "8px 12px", borderRadius: 8, background: "rgba(255,120,120,0.08)", border: "1px solid rgba(255,120,120,0.25)", fontSize: 13, color: "#ff8a8a" }}>
           {errorMessage}
+        </div>
+      )}
+
+      {showMasterPasswordPrompt && (
+        <div className="modalOverlay">
+          <div className="modalContent" style={{ maxWidth: 420 }}>
+            <div className="modalHeader">
+              <h2 style={{ margin: 0, fontSize: 16 }}>Master Password Required</h2>
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleMasterPasswordSubmit(); }}>
+              <div className="modalBody">
+                <p style={{ marginTop: 0, marginBottom: 16, color: "#ccc" }}>
+                  Enter your master password to save config and encrypt the keys file.
+                </p>
+                <div style={{ position: "relative" }}>
+                  <input
+                    type={showMasterPwVisible ? "text" : "password"}
+                    value={masterPasswordInput}
+                    onChange={(e) => setMasterPasswordInput(e.target.value)}
+                    placeholder="Master password"
+                    autoFocus
+                    style={{
+                      width: "100%",
+                      padding: "8px 36px 8px 12px",
+                      fontSize: 14,
+                      borderRadius: 4,
+                      border: "1px solid #555",
+                      background: "#1e1e1e",
+                      color: "#eee",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowMasterPwVisible((prev) => !prev)}
+                    style={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "#aaa",
+                      fontSize: 16,
+                      padding: 0,
+                      lineHeight: 1,
+                    }}
+                    title={showMasterPwVisible ? "Hide password" : "Show password"}
+                  >
+                    {showMasterPwVisible ? "\u{1F441}" : "\u{1F441}\u{200D}\u{1F5E8}"}
+                  </button>
+                </div>
+                {savePasswordError && (
+                  <div style={{ marginTop: 8, padding: "6px 10px", borderRadius: 4, background: "#3a1c1c", color: "#f88", fontSize: 13 }}>
+                    {savePasswordError}
+                  </div>
+                )}
+              </div>
+              <div className="modalFooter">
+                <button className="btn" type="submit">Save</button>
+                <button className="btn" type="button" onClick={() => setShowMasterPasswordPrompt(false)} style={{ marginLeft: 8 }}>Cancel</button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

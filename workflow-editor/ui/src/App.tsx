@@ -185,7 +185,7 @@ export default function App(): JSX.Element
 
     if (route === "ai-manager")
     {
-      return <AiManagerView onDirtyStateChange={setAiManagerDirty} />;
+      return <AiManagerView appMasterPassword={masterPassword} onDirtyStateChange={setAiManagerDirty} />;
     }
 
     if (route === "settings")
@@ -195,7 +195,7 @@ export default function App(): JSX.Element
 
     if (route === "connections")
     {
-      return <ConnectionsView onDirtyStateChange={setConnectionsDirty} />;
+      return <ConnectionsView appMasterPassword={masterPassword} onDirtyStateChange={setConnectionsDirty} />;
     }
 
     return (
