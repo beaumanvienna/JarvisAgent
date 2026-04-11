@@ -354,6 +354,11 @@ namespace AIAssistant
             return TaskType::DbQuery;
         }
 
+        if (rawType == "onedrive_upload" || rawType == "onedrive_download")
+        {
+            return TaskType::OneDrive;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }
@@ -392,6 +397,11 @@ namespace AIAssistant
         if (typeString == "s3_watch")
         {
             return WorkflowTriggerType::S3Watch;
+        }
+
+        if (typeString == "onedrive_watch")
+        {
+            return WorkflowTriggerType::OneDriveWatch;
         }
 
         LOG_CORE_WARN("Unknown trigger type '{}', defaulting to Unknown", typeString);

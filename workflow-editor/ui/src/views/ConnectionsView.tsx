@@ -6,6 +6,7 @@ import {
   deleteConnection,
   testConnection,
   saveConnections,
+  authorizeConnection,
   type ConnectionEntry,
 } from "../api/connections";
 
@@ -384,6 +385,78 @@ export default function ConnectionsView({ onDirtyStateChange }: ConnectionsViewP
                   <option value="verify-full">verify-full</option>
                 </select>
               </div>
+            </>
+          )}
+
+          {editing.type === "onedrive" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Client ID (Azure AD application ID)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. 12345678-abcd-..."
+                  value={editing.params.client_id ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Tenant ID (default: common)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="common"
+                  value={editing.params.tenant_id ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, tenant_id: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Scopes (default: Files.ReadWrite offline_access)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="Files.ReadWrite offline_access"
+                  value={editing.params.scopes ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)}
+                />
+              </div>
+              {!editing.isNew && (
+                <div style={{ marginBottom: 10 }}>
+                  <button
+                    className="btn"
+                    type="button"
+                    style={{ background: "rgba(56,139,253,0.15)", borderColor: "rgba(56,139,253,0.4)" }}
+                    onClick={async () => {
+                      setStatusMessage("Starting OAuth flow...");
+                      setErrorMessage("");
+                      try
+                      {
+                        const result = await authorizeConnection(editing.name);
+                        if (result.ok && result.authorize_url)
+                        {
+                          window.open(result.authorize_url, "_blank", "width=600,height=700");
+                          setStatusMessage("Authorization window opened. Complete the login, then test the connection.");
+                        }
+                        else
+                        {
+                          setErrorMessage(result.message ?? "Failed to start OAuth flow");
+                          setStatusMessage("");
+                        }
+                      }
+                      catch (err: unknown)
+                      {
+                        setErrorMessage(err instanceof Error ? err.message : "OAuth request failed");
+                        setStatusMessage("");
+                      }
+                    }}
+                  >
+                    Authorize with Microsoft
+                  </button>
+                  <div className="small muted" style={{ marginTop: 4 }}>
+                    Opens Microsoft login in a new window. After authorizing, tokens are stored automatically.
+                  </div>
+                </div>
+              )}
             </>
           )}
 

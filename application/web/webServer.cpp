@@ -67,6 +67,10 @@
 #include "cloud/cloudConnector.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
+#include "cloud/oneDriveConnector.h"
+#include "keys/oauthTokenManager.h"
+#include "curlWrapper/curlWrapper.h"
+#include <curl/curl.h>
 #include "workflow/triggerEngine.h"
 #include "workflow/workflowTriggerBinder.h"
 
@@ -1894,6 +1898,15 @@ namespace AIAssistant
 
         CROW_ROUTE(m_Server, "/api/connections/save")
             .methods("POST"_method)([this]() { return HandleConnectionsSavePost(); });
+
+        // OAuth consent flow
+        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/authorize")
+            .methods("GET"_method)(
+                [this](std::string const& connectionName) { return HandleOAuthAuthorizeGet(connectionName); });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/callback")
+            .methods("GET"_method)([this](crow::request const& req, std::string const& connectionName)
+                                   { return HandleOAuthCallbackGet(req, connectionName); });
     }
 #endif // J9T_STUDIO
 
@@ -6499,6 +6512,286 @@ namespace AIAssistant
         responseJson["ok"] = true;
         responseJson["path"] = connectionsFilePath.string();
         return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleOAuthAuthorizeGet(std::string const& connectionName)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        if (!connection)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            err["message"] = "Connection '" + connectionName + "' not found";
+            return MakeJsonResponse(404, err);
+        }
+
+        if (connection->m_AuthType != CloudAuthType::OAuth2)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_auth_type";
+            err["message"] = "Connection '" + connectionName + "' does not use OAuth2 authentication";
+            return MakeJsonResponse(400, err);
+        }
+
+        auto clientIdIt = connection->m_Params.find("client_id");
+        if (clientIdIt == connection->m_Params.end() || clientIdIt->second.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_client_id";
+            err["message"] = "Connection '" + connectionName + "' requires 'client_id' parameter";
+            return MakeJsonResponse(400, err);
+        }
+
+        std::string clientId = clientIdIt->second;
+
+        auto tenantIdIt = connection->m_Params.find("tenant_id");
+        std::string tenantId = (tenantIdIt != connection->m_Params.end() && !tenantIdIt->second.empty())
+                                   ? tenantIdIt->second
+                                   : OneDriveConnector::DEFAULT_TENANT_ID;
+
+        auto scopesIt = connection->m_Params.find("scopes");
+        std::string scopes = (scopesIt != connection->m_Params.end() && !scopesIt->second.empty())
+                                 ? scopesIt->second
+                                 : OneDriveConnector::DEFAULT_SCOPES;
+
+        // Build the authorization URL with PKCE
+        // Generate code_verifier (43-128 chars, base64url-encoded random bytes)
+        unsigned char randomBytes[32];
+        RAND_bytes(randomBytes, sizeof(randomBytes));
+
+        // Base64url encode
+        std::string codeVerifier;
+        codeVerifier.reserve(44);
+        static char const base64url[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        for (size_t i = 0; i < sizeof(randomBytes); ++i)
+        {
+            codeVerifier += base64url[randomBytes[i] % 64];
+        }
+
+        // SHA-256 hash of code_verifier for code_challenge
+        unsigned char hash[32];
+        EVP_Digest(codeVerifier.data(), codeVerifier.size(), hash, nullptr, EVP_sha256(), nullptr);
+
+        std::string codeChallenge;
+        codeChallenge.reserve(44);
+        for (size_t i = 0; i < sizeof(hash); ++i)
+        {
+            codeChallenge += base64url[hash[i] % 64];
+        }
+
+        // Store code_verifier for the callback (keyed by connection name)
+        // Using a simple in-memory map — acceptable since OAuth flows are short-lived
+        {
+            std::lock_guard lock(m_OAuthStateMutex);
+            m_OAuthCodeVerifiers[connectionName] = codeVerifier;
+        }
+
+        std::string authorizeUrl = OneDriveConnector::GetAuthorizeUrl(tenantId);
+
+        // Build redirect URI — the callback endpoint on this server
+        auto const& cfg = Core::g_Core->GetConfig();
+        uint16_t port = (cfg.m_Port != 0) ? cfg.m_Port : static_cast<uint16_t>(8080);
+        std::string redirectUri = "http://localhost:" + std::to_string(port) +
+                                  "/api/connections/" + connectionName + "/oauth/callback";
+
+        // URL-encode scopes (replace spaces with %20)
+        std::string encodedScopes;
+        for (char c : scopes)
+        {
+            if (c == ' ')
+            {
+                encodedScopes += "%20";
+            }
+            else
+            {
+                encodedScopes += c;
+            }
+        }
+
+        std::string fullUrl = authorizeUrl + "?client_id=" + clientId + "&response_type=code" +
+                              "&redirect_uri=" + redirectUri + "&scope=" + encodedScopes +
+                              "&code_challenge=" + codeChallenge + "&code_challenge_method=S256" +
+                              "&response_mode=query";
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["authorize_url"] = fullUrl;
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleOAuthCallbackGet(crow::request const& req, std::string const& connectionName)
+    {
+        auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
+
+        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        if (!connection)
+        {
+            return crow::response(400, "Connection not found: " + connectionName);
+        }
+
+        // Extract authorization code from query params
+        auto codeParam = req.url_params.get("code");
+        if (!codeParam)
+        {
+            auto errorParam = req.url_params.get("error");
+            auto errorDescParam = req.url_params.get("error_description");
+            std::string errorMsg = "OAuth authorization failed";
+            if (errorParam)
+            {
+                errorMsg += ": " + std::string(errorParam);
+            }
+            if (errorDescParam)
+            {
+                errorMsg += " — " + std::string(errorDescParam);
+            }
+            LOG_CORE_ERROR("{}", errorMsg);
+            return crow::response(400, errorMsg);
+        }
+
+        std::string authCode = codeParam;
+
+        // Retrieve the code_verifier for PKCE
+        std::string codeVerifier;
+        {
+            std::lock_guard lock(m_OAuthStateMutex);
+            auto it = m_OAuthCodeVerifiers.find(connectionName);
+            if (it == m_OAuthCodeVerifiers.end())
+            {
+                return crow::response(400, "No pending OAuth flow for connection '" + connectionName + "'");
+            }
+            codeVerifier = it->second;
+            m_OAuthCodeVerifiers.erase(it);
+        }
+
+        auto clientIdIt = connection->m_Params.find("client_id");
+        std::string clientId = (clientIdIt != connection->m_Params.end()) ? clientIdIt->second : "";
+
+        auto tenantIdIt = connection->m_Params.find("tenant_id");
+        std::string tenantId = (tenantIdIt != connection->m_Params.end() && !tenantIdIt->second.empty())
+                                   ? tenantIdIt->second
+                                   : OneDriveConnector::DEFAULT_TENANT_ID;
+
+        std::string tokenUrl = OneDriveConnector::GetTokenUrl(tenantId);
+
+        auto const& cfg = Core::g_Core->GetConfig();
+        uint16_t port = (cfg.m_Port != 0) ? cfg.m_Port : static_cast<uint16_t>(8080);
+        std::string redirectUri = "http://localhost:" + std::to_string(port) +
+                                  "/api/connections/" + connectionName + "/oauth/callback";
+
+        // Exchange authorization code for tokens
+        std::string postBody = "grant_type=authorization_code"
+                               "&code=" + authCode +
+                               "&redirect_uri=" + redirectUri +
+                               "&client_id=" + clientId +
+                               "&code_verifier=" + codeVerifier;
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            return crow::response(500, "curl_easy_init() failed");
+        }
+
+        std::string responseBody;
+        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            buf->append(static_cast<char*>(contents), size * nmemb);
+            return size * nmemb;
+        };
+        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
+
+        curl_easy_setopt(curl, CURLOPT_URL, tokenUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        CURLcode res = curl_easy_perform(curl);
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            std::string errMsg = std::string("Token exchange failed: ") + curl_easy_strerror(res);
+            LOG_CORE_ERROR("OAuth callback for '{}': {}", connectionName, errMsg);
+            return crow::response(500, errMsg);
+        }
+
+        if (httpCode != 200)
+        {
+            std::string errMsg = "Token exchange returned HTTP " + std::to_string(httpCode);
+            if (!responseBody.empty() && responseBody.size() < 500)
+            {
+                errMsg += ": " + responseBody;
+            }
+            LOG_CORE_ERROR("OAuth callback for '{}': {}", connectionName, errMsg);
+            return crow::response(500, errMsg);
+        }
+
+        // Parse the token response
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(responseBody);
+        simdjson::ondemand::document doc;
+        auto parseError = parser.iterate(paddedJson).get(doc);
+        if (parseError)
+        {
+            LOG_CORE_ERROR("OAuth callback for '{}': failed to parse token response", connectionName);
+            return crow::response(500, "Failed to parse token response");
+        }
+
+        std::string_view accessToken;
+        if (doc["access_token"].get_string().get(accessToken))
+        {
+            LOG_CORE_ERROR("OAuth callback for '{}': token response missing access_token", connectionName);
+            return crow::response(500, "Token response missing access_token");
+        }
+
+        std::string_view refreshToken;
+        auto refreshErr = doc["refresh_token"].get_string().get(refreshToken);
+        (void)refreshErr; // Optional field — ignore if absent
+
+        int64_t expiresIn = 3600;
+        int64_t parsedExpiry;
+        if (!doc["expires_in"].get_int64().get(parsedExpiry))
+        {
+            expiresIn = parsedExpiry;
+        }
+
+        // Store tokens in OAuthTokenManager
+        auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
+        oauthManager.StoreTokens(connection->m_KeyName, std::string(accessToken), std::string(refreshToken),
+                                 expiresIn, tokenUrl, clientId);
+
+        LOG_SECURITY_INFO("[security] OAuth tokens acquired for connection '{}' (key: '{}')", connectionName,
+                          connection->m_KeyName);
+
+        // Return a simple HTML page that closes itself (browser was redirected here)
+        std::string html = "<!DOCTYPE html><html><body>"
+                           "<h2>Authorization successful</h2>"
+                           "<p>You can close this window and return to j9t Studio.</p>"
+                           "<script>window.close();</script>"
+                           "</body></html>";
+        auto response = crow::response(200, html);
+        response.set_header("Content-Type", "text/html");
+        return response;
     }
 #endif // J9T_STUDIO
 

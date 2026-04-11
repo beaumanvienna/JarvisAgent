@@ -93,11 +93,11 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 
 ### Phase 5 — OneDrive
 
-- [ ] Implement `OneDriveConnector : ICloudConnector`
-- [ ] OAuth 2.0 authorization code flow with PKCE
-- [ ] Implement `OneDriveCloudTaskExecutor` (upload/download via Graph API)
-- [ ] Add `onedrive_watch` trigger type (delta query polling)
-- [ ] Frontend: OAuth flow dialog, OneDrive connection config, task inspector sections
+- [x] Implement `OneDriveConnector : ICloudConnector`
+- [x] OAuth 2.0 authorization code flow with PKCE
+- [x] Implement `OneDriveCloudTaskExecutor` (upload/download via Graph API)
+- [x] Add `onedrive_watch` trigger type (delta query polling)
+- [x] Frontend: OAuth flow dialog, OneDrive connection config, task inspector sections
 
 ### Phase 6 — Snowflake
 

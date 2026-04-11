@@ -122,6 +122,14 @@ namespace AIAssistant
                                std::string const& connectionName, std::string const& bucket,
                                std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled);
 
+        // Register a OneDrive-watch trigger (polls a OneDrive folder via delta query).
+        // connectionName: named CloudConnection for OneDrive access (OAuth2).
+        // folder: OneDrive folder path to watch (e.g. "Documents/reports").
+        // pollIntervalSeconds: polling interval (minimum 60).
+        void AddOneDriveWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                     std::string const& connectionName, std::string const& folder,
+                                     uint32_t pollIntervalSeconds, bool isEnabled);
+
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
@@ -233,6 +241,18 @@ namespace AIAssistant
             bool m_IsEnabled{true};
         };
 
+        struct OneDriveWatchTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_ConnectionName;
+            std::string m_Folder;
+            std::chrono::seconds m_PollInterval{300};
+            std::chrono::steady_clock::time_point m_NextPollTime{};
+            std::string m_DeltaToken; // Graph API delta token for efficient polling
+            bool m_IsEnabled{true};
+        };
+
     private:
         void FireTrigger(std::string const& workflowId, std::string const& triggerId) const;
 
@@ -254,6 +274,7 @@ namespace AIAssistant
         std::vector<ManualTriggerInstance> m_ManualTriggers;
         std::vector<WebhookTriggerInstance> m_WebhookTriggers;
         std::vector<S3WatchTriggerInstance> m_S3WatchTriggers;
+        std::vector<OneDriveWatchTriggerInstance> m_OneDriveWatchTriggers;
 
         // Optional acceleration structure for file-trigger lookups:
         // map path → indices into m_FileWatchTriggers.

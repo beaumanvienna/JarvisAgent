@@ -170,6 +170,8 @@ namespace AIAssistant
 
         m_KeyboardInput = std::make_unique<KeyboardInput>();
         m_KeyboardInput->Start();
+
+        m_OAuthTokenManager.Start();
     }
 
     void Core::Run(std::unique_ptr<AIAssistant::Application>& app)
@@ -250,6 +252,10 @@ namespace AIAssistant
                           .count();
             return ms;
         };
+
+        LOG_CORE_INFO("[shutdown +{}ms] stopping OAuthTokenManager...", elapsed());
+        m_OAuthTokenManager.Stop();
+        LOG_CORE_INFO("[shutdown +{}ms] OAuthTokenManager stopped", elapsed());
 
         LOG_CORE_INFO("[shutdown +{}ms] stopping KeyboardInput...", elapsed());
         if (m_KeyboardInput)

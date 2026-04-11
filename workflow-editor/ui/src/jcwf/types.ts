@@ -1,9 +1,9 @@
 export type JcwfVersion = "1.0" | "1.1";
 export type JcwfDoc = string | string[];
-export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal" | "sub_workflow" | "polarion_write" | "s3" | "db_query";
+export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal" | "sub_workflow" | "polarion_write" | "s3" | "db_query" | "onedrive_upload" | "onedrive_download";
 export type JcwfTaskMode = "single" | "per_item";
 export type JcwfFilterSourceKind = "csv" | "text_lines" | "query" | "polarion_query";
-export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual" | "webhook" | "s3_watch";
+export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual" | "webhook" | "s3_watch" | "onedrive_watch";
 
 export type JcwfTrigger = {
   type: JcwfTriggerType;

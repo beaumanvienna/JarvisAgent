@@ -394,6 +394,18 @@ The MCP server is a standalone TypeScript sidecar communicating with j9t over lo
 - Generated JWTs are auto-registered with `SecretRedactor`
 - Private key material is freed via `EVP_PKEY_free()` after signing
 
+### OAuth 2.0 with PKCE (OneDrive)
+
+The OneDrive integration uses the OAuth 2.0 authorization code flow with PKCE (Proof Key for Code Exchange):
+
+- **No client secret** — PKCE replaces the client secret with a per-flow `code_verifier` / `code_challenge` pair, making it safe for public/native clients
+- **code_verifier** is generated from 32 bytes of `RAND_bytes()` (OpenSSL CSPRNG), base64url-encoded to 43 characters
+- **code_challenge** is SHA-256 of the verifier, sent in the authorization request; Microsoft validates it during token exchange
+- **Code verifiers are ephemeral** — stored in-memory only (WebServer `m_OAuthCodeVerifiers` map), never persisted to disk
+- **Token refresh** — `OAuthTokenManager` runs a background thread refreshing tokens 5 minutes before expiry via `POST /oauth2/v2.0/token`. Both access and refresh tokens are registered with `SecretRedactor` on acquisition and rotated on refresh
+- **Scope restriction** — default scopes are `Files.ReadWrite offline_access` (minimum for file upload/download + token refresh). Operators should not grant broader scopes than needed
+- **Redirect URI** — callback is `http://localhost:{port}/api/connections/{name}/oauth/callback`, only reachable on the local machine
+
 ### Remaining Threats (Cloud-Specific)
 
 - **Credential exposure if encrypted key file is compromised** — mitigated by AES-256-GCM + PBKDF2 (100k iterations), but ultimately depends on master password strength

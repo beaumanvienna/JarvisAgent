@@ -51,8 +51,11 @@ namespace AIAssistant
         std::string GetAccessToken(std::string const& keyName, std::string& errorMessage);
 
         // Store initial tokens after OAuth consent flow completes.
+        // tokenEndpoint: provider's token URL (e.g., "https://login.microsoftonline.com/.../token")
+        // clientId: OAuth application client ID (needed for refresh requests)
         void StoreTokens(std::string const& keyName, std::string const& accessToken,
-                         std::string const& refreshToken, int64_t expiresInSeconds);
+                         std::string const& refreshToken, int64_t expiresInSeconds,
+                         std::string const& tokenEndpoint = {}, std::string const& clientId = {});
 
         // Check if a credential has valid (non-expired) tokens.
         bool HasValidToken(std::string const& keyName) const;
@@ -62,8 +65,10 @@ namespace AIAssistant
         {
             std::string m_AccessToken;
             std::string m_RefreshToken;
-            int64_t m_ExpiresAt{0};    // Unix timestamp (seconds)
-            bool m_Refreshing{false};  // True while a refresh is in flight
+            std::string m_TokenEndpoint; // Provider's token URL for refresh
+            std::string m_ClientId;      // OAuth client ID for refresh
+            int64_t m_ExpiresAt{0};      // Unix timestamp (seconds)
+            bool m_Refreshing{false};    // True while a refresh is in flight
         };
 
         // Background thread: refreshes tokens expiring within 5 minutes.

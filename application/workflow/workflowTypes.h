@@ -71,7 +71,8 @@ namespace AIAssistant
         Structure,
         Manual,
         Webhook,
-        S3Watch
+        S3Watch,
+        OneDriveWatch
     };
 
     // ---------------------------------------------------------------------
@@ -88,7 +89,8 @@ namespace AIAssistant
         SubWorkflow,
         PolarionWrite,
         S3,
-        DbQuery
+        DbQuery,
+        OneDrive
     };
 
     enum class TaskMode

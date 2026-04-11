@@ -369,6 +369,28 @@ namespace AIAssistant
             prefix.empty() ? "<all>" : prefix, pollIntervalSeconds);
     }
 
+    void TriggerEngine::AddOneDriveWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                                std::string const& connectionName, std::string const& folder,
+                                                uint32_t pollIntervalSeconds, bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        OneDriveWatchTriggerInstance instance{};
+        instance.m_WorkflowId = workflowId;
+        instance.m_TriggerId = triggerId;
+        instance.m_ConnectionName = connectionName;
+        instance.m_Folder = folder;
+        instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
+        instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
+        instance.m_IsEnabled = isEnabled;
+
+        m_OneDriveWatchTriggers.push_back(std::move(instance));
+
+        LOG_APP_INFO(
+            "TriggerEngine::AddOneDriveWatchTrigger: registered onedrive_watch trigger '{}' for workflow '{}' "
+            "(connection={}, folder={}, interval={}s)",
+            triggerId, workflowId, connectionName, folder.empty() ? "<root>" : folder, pollIntervalSeconds);
+    }
+
     TriggerEngine::WebhookTriggerInstance const* TriggerEngine::GetWebhookTrigger(std::string const& workflowId) const
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -388,6 +410,7 @@ namespace AIAssistant
         m_ManualTriggers.clear();
         m_WebhookTriggers.clear();
         m_S3WatchTriggers.clear();
+        m_OneDriveWatchTriggers.clear();
         m_FileWatchIndex.clear();
         m_WebhookIndex.clear();
         LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
@@ -403,6 +426,7 @@ namespace AIAssistant
         EraseWorkflowFromVector(m_ManualTriggers, workflowId);
         EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
         EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
+        EraseWorkflowFromVector(m_OneDriveWatchTriggers, workflowId);
 
         // Rebuild file-watch index because indices may have changed.
         m_FileWatchIndex.clear();
@@ -466,6 +490,21 @@ namespace AIAssistant
                 // by the workflow run that the trigger fires. The trigger fires on every poll interval;
                 // the workflow itself decides if there's new data worth processing.
                 eventsToFire.push_back({s3Instance.m_WorkflowId, s3Instance.m_TriggerId});
+            }
+
+            // OneDrive watch triggers (polling)
+            for (OneDriveWatchTriggerInstance& odInstance : m_OneDriveWatchTriggers)
+            {
+                if (!odInstance.m_IsEnabled || steadyNow < odInstance.m_NextPollTime)
+                {
+                    continue;
+                }
+
+                odInstance.m_NextPollTime = steadyNow + odInstance.m_PollInterval;
+
+                // Same pattern as S3: fire on every poll interval.
+                // The workflow run performs the actual delta query to detect changes.
+                eventsToFire.push_back({odInstance.m_WorkflowId, odInstance.m_TriggerId});
             }
         }
 

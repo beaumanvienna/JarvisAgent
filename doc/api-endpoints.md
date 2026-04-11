@@ -860,6 +860,8 @@ Manage named cloud connections for external service integrations. Connections re
 | DELETE | `/api/connections/<name>` | Delete a connection. |
 | POST | `/api/connections/<name>/test` | Test connectivity via the registered connector. |
 | POST | `/api/connections/save` | Persist connections to `connections.json`. |
+| GET | `/api/connections/<name>/oauth/authorize` | Start OAuth PKCE flow — returns authorization URL. |
+| GET | `/api/connections/<name>/oauth/callback` | OAuth redirect callback — exchanges code for tokens. |
 
 ### GET /api/connections
 **Response (200):**
@@ -911,3 +913,15 @@ Tests the connection using the `ICloudConnector::TestConnection()` method for th
 ### POST /api/connections/save
 Serializes all connections to `connections.json` in the launch directory.
 **Response (200):** `{ "ok": true, "path": "/abs/path/connections.json" }`
+
+### GET /api/connections/\<name\>/oauth/authorize
+Initiates an OAuth 2.0 authorization code flow with PKCE for the named connection. The connection must have `auth_type: "oauth2"` and a `client_id` parameter.
+**Response (200):** `{ "ok": true, "authorize_url": "https://login.microsoftonline.com/..." }`
+**Response (400):** `{ "ok": false, "error": "invalid_auth_type", "message": "..." }`
+
+The frontend opens `authorize_url` in a popup window. After user consent, the browser is redirected to the callback endpoint.
+
+### GET /api/connections/\<name\>/oauth/callback
+OAuth redirect callback. Microsoft redirects here with `?code=...` after user consent. The backend exchanges the authorization code + PKCE code_verifier for access/refresh tokens, stores them in `OAuthTokenManager`, and returns an HTML page that auto-closes.
+**Response (200):** HTML page confirming authorization success.
+**Response (400):** Error message if code is missing or the OAuth flow state is invalid.

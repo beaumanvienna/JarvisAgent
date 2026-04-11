@@ -34,6 +34,7 @@
 #include "log/terminalManager.h"
 #include "log/terminalLogStreamBuf.h"
 #include "keys/keyManager.h"
+#include "keys/oauthTokenManager.h"
 #include "cloud/cloudConnectionManager.h"
 #include "cloud/cloudConnectorRegistry.h"
 
@@ -68,6 +69,8 @@ namespace AIAssistant
         CloudConnectionManager const& GetCloudConnectionManager() const { return m_CloudConnectionManager; }
         CloudConnectorRegistry& GetCloudConnectorRegistry() { return m_CloudConnectorRegistry; }
         CloudConnectorRegistry const& GetCloudConnectorRegistry() const { return m_CloudConnectorRegistry; }
+        OAuthTokenManager& GetOAuthTokenManager() { return m_OAuthTokenManager; }
+        OAuthTokenManager const& GetOAuthTokenManager() const { return m_OAuthTokenManager; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
 
         // event API
@@ -112,6 +115,7 @@ namespace AIAssistant
         KeyManager m_KeyManager;
 
         // cloud integration
+        OAuthTokenManager m_OAuthTokenManager{m_KeyManager};
         CloudConnectionManager m_CloudConnectionManager;
         CloudConnectorRegistry m_CloudConnectorRegistry;
     };

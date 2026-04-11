@@ -109,3 +109,16 @@ export async function saveConnections(): Promise<ConnectionSaveResponse>
   });
   return (await response.json()) as ConnectionSaveResponse;
 }
+
+export type OAuthAuthorizeResponse = {
+  ok: boolean;
+  authorize_url?: string;
+  error?: string;
+  message?: string;
+};
+
+export async function authorizeConnection(name: string): Promise<OAuthAuthorizeResponse>
+{
+  const response = await fetch(`/api/connections/${encodeURIComponent(name)}/oauth/authorize`);
+  return (await response.json()) as OAuthAuthorizeResponse;
+}

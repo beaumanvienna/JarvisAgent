@@ -21,10 +21,14 @@
 
 #include <chrono>
 
+#include <curl/curl.h>
+
 #include "engine.h"
 #include "keys/oauthTokenManager.h"
 #include "keys/keyManager.h"
 #include "log/secretRedactor.h"
+#include "curlWrapper/curlWrapper.h"
+#include "simdjson/simdjson.h"
 
 namespace AIAssistant
 {
@@ -100,13 +104,16 @@ namespace AIAssistant
     }
 
     void OAuthTokenManager::StoreTokens(std::string const& keyName, std::string const& accessToken,
-                                         std::string const& refreshToken, int64_t expiresInSeconds)
+                                         std::string const& refreshToken, int64_t expiresInSeconds,
+                                         std::string const& tokenEndpoint, std::string const& clientId)
     {
         std::lock_guard lock(m_Mutex);
 
         TokenEntry entry;
         entry.m_AccessToken = accessToken;
         entry.m_RefreshToken = refreshToken;
+        entry.m_TokenEndpoint = tokenEndpoint;
+        entry.m_ClientId = clientId;
         entry.m_ExpiresAt = NowUnixSeconds() + expiresInSeconds;
 
         // Register tokens with SecretRedactor
@@ -188,15 +195,121 @@ namespace AIAssistant
 
     bool OAuthTokenManager::RefreshToken(std::string const& keyName, TokenEntry& entry)
     {
-        // Token refresh requires an HTTP POST to the provider's token endpoint.
-        // The actual HTTP call depends on the specific OAuth provider (OneDrive, Google, etc.).
-        // This is a placeholder — concrete connectors will supply their token endpoint URL
-        // and client credentials when they register with the OAuthTokenManager.
-        //
-        // For now, log the attempt. Phase 5 (OneDrive) will implement the full refresh flow
-        // with provider-specific token endpoint configuration.
-        LOG_CORE_INFO("OAuthTokenManager::RefreshToken: refresh for '{}' not yet implemented (requires provider config)",
-                      keyName);
-        return false;
+        if (entry.m_TokenEndpoint.empty())
+        {
+            LOG_CORE_WARN("OAuthTokenManager: no token endpoint configured for '{}', cannot refresh", keyName);
+            return false;
+        }
+
+        if (entry.m_ClientId.empty())
+        {
+            LOG_CORE_WARN("OAuthTokenManager: no client_id configured for '{}', cannot refresh", keyName);
+            return false;
+        }
+
+        // Build refresh request body
+        std::string postBody = "grant_type=refresh_token"
+                               "&refresh_token=" + std::string(entry.m_RefreshToken) +
+                               "&client_id=" + std::string(entry.m_ClientId);
+
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            LOG_CORE_ERROR("OAuthTokenManager: curl_easy_init() failed for '{}'", keyName);
+            return false;
+        }
+
+        std::string responseBody;
+        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            buf->append(static_cast<char*>(contents), size * nmemb);
+            return size * nmemb;
+        };
+        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
+
+        curl_easy_setopt(curl, CURLOPT_URL, entry.m_TokenEndpoint.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        CURLcode res = curl_easy_perform(curl);
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            LOG_CORE_ERROR("OAuthTokenManager: refresh request failed for '{}': {}", keyName,
+                           curl_easy_strerror(res));
+            return false;
+        }
+
+        if (httpCode != 200)
+        {
+            LOG_CORE_ERROR("OAuthTokenManager: refresh for '{}' returned HTTP {} — {}", keyName, httpCode,
+                           responseBody.size() < 500 ? responseBody : responseBody.substr(0, 500));
+            return false;
+        }
+
+        // Parse the token response
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(responseBody);
+        simdjson::ondemand::document doc;
+        auto parseError = parser.iterate(paddedJson).get(doc);
+        if (parseError)
+        {
+            LOG_CORE_ERROR("OAuthTokenManager: failed to parse refresh response for '{}': {}", keyName,
+                           simdjson::error_message(parseError));
+            return false;
+        }
+
+        std::string_view newAccessToken;
+        if (doc["access_token"].get_string().get(newAccessToken))
+        {
+            LOG_CORE_ERROR("OAuthTokenManager: refresh response for '{}' missing access_token", keyName);
+            return false;
+        }
+
+        // Remove old secrets before registering new ones
+        SecretRedactor::Get().RemoveSecret(entry.m_AccessToken);
+
+        entry.m_AccessToken = std::string(newAccessToken);
+        SecretRedactor::Get().AddSecret(entry.m_AccessToken);
+
+        // Update refresh token if a new one was provided (token rotation)
+        std::string_view newRefreshToken;
+        if (!doc["refresh_token"].get_string().get(newRefreshToken))
+        {
+            SecretRedactor::Get().RemoveSecret(entry.m_RefreshToken);
+            entry.m_RefreshToken = std::string(newRefreshToken);
+            SecretRedactor::Get().AddSecret(entry.m_RefreshToken);
+        }
+
+        // Update expiry
+        int64_t expiresIn = 3600; // Default 1 hour
+        int64_t parsedExpiry;
+        if (!doc["expires_in"].get_int64().get(parsedExpiry))
+        {
+            expiresIn = parsedExpiry;
+        }
+        entry.m_ExpiresAt = NowUnixSeconds() + expiresIn;
+
+        LOG_CORE_INFO("OAuthTokenManager: successfully refreshed token for '{}' (expires in {} s)", keyName,
+                       expiresIn);
+        return true;
     }
 } // namespace AIAssistant

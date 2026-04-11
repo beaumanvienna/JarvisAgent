@@ -54,6 +54,8 @@
 #include "cloud/s3CloudTaskExecutor.h"
 #include "cloud/postgresConnector.h"
 #include "cloud/dbQueryCloudTaskExecutor.h"
+#include "cloud/oneDriveConnector.h"
+#include "cloud/oneDriveCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "workflow/aiRequestPool.h"
@@ -295,6 +297,13 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> dbQueryExecutor =
                     std::make_shared<DbQueryCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::DbQuery, dbQueryExecutor);
+
+                // OneDrive connector + executor
+                connectorRegistry.Register(std::make_unique<OneDriveConnector>());
+
+                std::shared_ptr<ITaskExecutor> oneDriveExecutor =
+                    std::make_shared<OneDriveCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::OneDrive, oneDriveExecutor);
             }
         }
 

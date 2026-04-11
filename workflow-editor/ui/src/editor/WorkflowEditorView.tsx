@@ -3387,6 +3387,8 @@ export default function WorkflowEditorView(props: {
                       <option value="polarion_write">polarion_write</option>
                       <option value="s3">s3</option>
                       <option value="db_query">db_query</option>
+                      <option value="onedrive_upload">onedrive_upload</option>
+                      <option value="onedrive_download">onedrive_download</option>
                     </select>
                   </label>
 
@@ -3599,6 +3601,40 @@ export default function WorkflowEditorView(props: {
                         <label className="field">
                           <div className="small">output_file (optional)</div>
                           <input className="input" value={(params.output_file as string) ?? ""} placeholder="result.csv" onChange={(e) => { updateParams({ output_file: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {(selectedNode.data.task.type === "onedrive_upload" || selectedNode.data.task.type === "onedrive_download") && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    const isUpload = selectedNode.data.task.type === "onedrive_upload";
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(56,139,253,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(56,139,253,0.95)" }}>OneDrive params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-onedrive" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? (isUpload ? "upload" : "download")} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="upload">upload</option>
+                            <option value="download">download</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">remote_path (OneDrive path)</div>
+                          <input className="input" value={(params.remote_path as string) ?? ""} placeholder="Documents/reports/output.pdf" onChange={(e) => { updateParams({ remote_path: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">local_path (relative to working directory)</div>
+                          <input className="input" value={(params.local_path as string) ?? ""} placeholder="report.pdf" onChange={(e) => { updateParams({ local_path: e.target.value }); }} />
                         </label>
                       </div>
                     );

@@ -508,6 +508,88 @@ The ConnectionsView shows dedicated fields for PostgreSQL connections: Database 
 
 ---
 
-## 11. Next Steps
+## 11. OneDrive Integration (Phase 5)
+
+### OneDriveConnector
+
+Implements `ICloudConnector` for Microsoft OneDrive via the Microsoft Graph API.
+
+**Files:** `application/cloud/oneDriveConnector.h/cpp`
+
+**Connection params:**
+
+| Key | Description |
+|-----|-------------|
+| `client_id` | Azure AD application (client) ID (required) |
+| `tenant_id` | Azure AD tenant ID (default: `"common"` for multi-tenant) |
+| `scopes` | OAuth scopes (default: `"Files.ReadWrite offline_access"`) |
+
+- **Endpoint**: Graph API base URL (default `https://graph.microsoft.com/v1.0`)
+- **Auth type**: OAuth2 (tokens managed by `OAuthTokenManager`)
+- **TestConnection()**: calls `GET /me/drive` to verify token and return drive info
+
+### OAuth 2.0 Authorization Code Flow with PKCE
+
+OneDrive uses the Microsoft identity platform OAuth 2.0 flow with PKCE (Proof Key for Code Exchange) — no client secret required, suitable for public/native clients.
+
+**Flow:**
+
+1. Frontend calls `GET /api/connections/{name}/oauth/authorize`
+2. Backend generates a random `code_verifier` and derives `code_challenge` (SHA-256), stores the verifier in memory
+3. Backend returns the Microsoft authorization URL with `code_challenge`, `client_id`, `redirect_uri`, and `scopes`
+4. Frontend opens the URL in a popup window; user logs in and consents
+5. Microsoft redirects to `GET /api/connections/{name}/oauth/callback?code=...`
+6. Backend exchanges the authorization code + `code_verifier` for tokens via `POST /oauth2/v2.0/token`
+7. Tokens are stored in `OAuthTokenManager` with the provider's token endpoint and client ID for automatic refresh
+
+**Token refresh:** `OAuthTokenManager` runs a background thread that checks every 30 seconds and refreshes tokens 5 minutes before expiry. The refresh uses the stored `token_endpoint` and `client_id` to POST a standard OAuth refresh request.
+
+**Files:** `engine/keys/oauthTokenManager.h/cpp`, `application/web/webServer.cpp` (OAuth route handlers)
+
+### OneDrive Task Types
+
+JCWF task types `"onedrive_upload"` and `"onedrive_download"` perform file operations via the Graph API.
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `connection` | yes | Named CloudConnection (type `onedrive`) |
+| `operation` | yes | `"upload"` or `"download"` |
+| `remote_path` | yes | OneDrive path (e.g., `"Documents/reports/output.pdf"`) |
+| `local_path` | yes | Local file path relative to task working directory |
+
+- **Upload**: `PUT /me/drive/root:/{remote_path}:/content` with file body
+- **Download**: `GET /me/drive/root:/{remote_path}:/content` to local file
+
+**Files:** `application/cloud/oneDriveCloudTaskExecutor.h/cpp`
+
+### onedrive_watch Trigger
+
+Polls a OneDrive folder on a configurable interval. Fires the workflow on each poll; the workflow itself determines whether there are new/changed files.
+
+**Trigger params:**
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `onedrive`) |
+| `folder` | no | root | OneDrive folder path to watch |
+| `poll_interval_seconds` | no | 300 | Polling interval (minimum 60) |
+
+The trigger instance stores a `delta_token` field for future use with the Graph delta query API (`GET /me/drive/root:/{folder}:/delta`), which returns only changed items since the last sync.
+
+### Connections UI
+
+The ConnectionsView shows dedicated fields for OneDrive connections:
+- **Client ID** — Azure AD application ID
+- **Tenant ID** — Azure AD tenant (default: "common")
+- **Scopes** — OAuth permission scopes
+- **Authorize with Microsoft** button — initiates the OAuth PKCE flow in a popup window (only shown for saved connections)
+
+### Task Inspector
+
+The workflow editor shows a OneDrive task inspector panel (blue accent) for `onedrive_upload` and `onedrive_download` task types with fields: connection, operation, remote_path, local_path.
+
+---
+
+## 12. Next Steps
 
 See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 9.

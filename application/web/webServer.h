@@ -227,6 +227,10 @@ namespace AIAssistant
         crow::response HandleConnectionDelete(std::string const& connectionName);
         crow::response HandleConnectionTestPost(std::string const& connectionName);
         crow::response HandleConnectionsSavePost();
+
+        // OAuth consent flow
+        crow::response HandleOAuthAuthorizeGet(std::string const& connectionName);
+        crow::response HandleOAuthCallbackGet(crow::request const& req, std::string const& connectionName);
 #endif // J9T_STUDIO
 
     private:
@@ -259,6 +263,10 @@ namespace AIAssistant
 #ifdef J9T_STUDIO
         AiJcwfService m_AiJcwfService;
         AssistantController m_AssistantController;
+
+        // OAuth PKCE state: code_verifier per connection (short-lived, in-memory only)
+        std::mutex m_OAuthStateMutex;
+        std::unordered_map<std::string, std::string> m_OAuthCodeVerifiers;
 #endif
     };
 } // namespace AIAssistant

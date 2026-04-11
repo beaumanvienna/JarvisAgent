@@ -533,6 +533,52 @@ namespace AIAssistant
                         break;
                     }
 
+                    case WorkflowTriggerType::OneDriveWatch:
+                    {
+                        std::string connectionName;
+                        std::string folder;
+                        uint32_t pollIntervalSeconds = 300;
+
+                        if (!workflowTrigger.m_ParamsJson.empty())
+                        {
+                            simdjson::ondemand::parser odParser;
+                            simdjson::padded_string odPadded(workflowTrigger.m_ParamsJson);
+                            simdjson::ondemand::document odDoc;
+
+                            if (odParser.iterate(odPadded).get(odDoc) == simdjson::SUCCESS)
+                            {
+                                std::string_view sv;
+                                if (odDoc["connection"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    connectionName = std::string(sv);
+                                }
+                                if (odDoc["folder"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    folder = std::string(sv);
+                                }
+                                uint64_t interval;
+                                if (odDoc["poll_interval_seconds"].get_uint64().get(interval) == simdjson::SUCCESS)
+                                {
+                                    pollIntervalSeconds = static_cast<uint32_t>(interval);
+                                }
+                            }
+                        }
+
+                        if (connectionName.empty())
+                        {
+                            LOG_APP_ERROR(
+                                "WorkflowTriggerBinder::RegisterAll: onedrive_watch trigger '{}' in workflow '{}' "
+                                "missing 'connection' param",
+                                workflowTrigger.m_Id, workflowDefinition.m_Id);
+                            break;
+                        }
+
+                        triggerEngine.AddOneDriveWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
+                                                             connectionName, folder, pollIntervalSeconds,
+                                                             workflowTrigger.m_IsEnabled);
+                        break;
+                    }
+
                     case WorkflowTriggerType::Structure:
                     {
                         LOG_APP_INFO(
