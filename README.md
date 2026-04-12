@@ -28,9 +28,9 @@ JarvisAgent ships in two editions, both included in every package:
 
 ## Screenshots
 
-| Terminal UI | Dashboard | Workflow Editor |
-|:-----------:|:---------:|:---------------:|
-| ![Terminal UI](example/screenshot.png) | ![Dashboard](example/screenshot_dashboard.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) |
+| Dashboard | Workflow Editor | AI Assistant |
+|:---------:|:---------------:|:------------:|
+| ![Dashboard](example/screenshot_dashboard.png) | ![Workflow Editor](example/screenshot_workflow_editor.png) | ![AI Assistant](example/screenshot_ai_assistant.png) |
 
 ---
 
