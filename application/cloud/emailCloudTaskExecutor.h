@@ -27,17 +27,28 @@
 
 namespace AIAssistant
 {
-    // Task executor for sending emails via SMTP using libcurl.
+    // Task executor for email operations via SMTP/IMAP using libcurl.
     //
-    // JCWF task type: "email_send"
+    // JCWF task types: "email_send", "email_read"
     //
-    // Task params JSON keys:
+    // email_send params:
     //   "connection"    — named CloudConnection (required)
     //   "to"            — recipient email address(es), comma-separated (required)
     //   "subject"       — email subject (required)
-    //   "body"          — email body text (required)
+    //   "body"          — email body text (required unless body_file is set)
+    //   "body_file"     — path to file whose contents become the body (takes precedence over body)
     //   "cc"            — CC recipients, comma-separated (optional)
     //   "attachments"   — array of file paths relative to working directory (optional)
+    //
+    // email_read params:
+    //   "connection"    — named CloudConnection with imap_host/imap_port (required)
+    //   "folder"        — IMAP folder to read from (default: "INBOX")
+    //   "max_messages"  — maximum messages to fetch (default: 10)
+    //   "subject_filter" — only include messages whose subject contains this (optional)
+    //
+    // email_read outputs:
+    //   emails_summary.json — array of fetched messages (uid, from, subject, date, body)
+    //   response.json       — {ok, count, folder}
     class EmailCloudTaskExecutor : public ICloudTaskExecutor
     {
     public:
@@ -48,5 +59,10 @@ namespace AIAssistant
                           TaskDef const& taskDefinition, TaskInstanceState& taskState,
                           CloudConnection const& connection, CloudCredentials const& credentials,
                           TaskCancellationToken const& cancellationToken) override;
+
+    private:
+        bool ExecuteEmailRead(WorkflowDefinition const& workflowDefinition, TaskDef const& taskDefinition,
+                              TaskInstanceState& taskState, CloudConnection const& connection,
+                              CloudCredentials const& credentials);
     };
 } // namespace AIAssistant

@@ -89,7 +89,11 @@ namespace AIAssistant
         auto portIt = connection.m_Params.find("imap_port");
         std::string port = (portIt != connection.m_Params.end() && !portIt->second.empty()) ? portIt->second : "993";
 
-        return "imaps://" + host + ":" + port;
+        auto sslIt = connection.m_Params.find("use_ssl");
+        bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+
+        std::string scheme = useSsl ? "imaps" : "imap";
+        return scheme + "://" + host + ":" + port;
     }
 
     bool EmailConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)

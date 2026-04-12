@@ -39,7 +39,12 @@ namespace AIAssistant
     //   "attachment_id"  — attachment ID (required for download_attachment)
     //   "file_path"      — local file path (required for upload/download_attachment)
     //   "file_name"      — attachment filename (optional for upload, defaults to basename)
-    //   "body"           — JSON:API request body string (required for update/create)
+    //   "body"           — JSON:API request body string (required for update/create,
+    //                      unless field_name + field_value/field_value_file are used)
+    //   "field_name"     — attribute name to update (convenience alternative to body)
+    //   "field_value"    — plain text value for the field (JSON-escaped internally)
+    //   "field_value_file" — path to a file whose contents become the field value
+    //                      (takes precedence over field_value; supports per-item output piping)
     //
     // Outputs:
     //   "response"       — raw JSON:API response body (written to task output)

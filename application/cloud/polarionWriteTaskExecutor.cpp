@@ -35,6 +35,44 @@ namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
 
+    static std::string JsonEscape(std::string const& input)
+    {
+        std::string out;
+        out.reserve(input.size() + 32);
+        for (char ch : input)
+        {
+            switch (ch)
+            {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if (static_cast<unsigned char>(ch) < 0x20)
+                    {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(ch));
+                        out += buf;
+                    }
+                    else
+                    {
+                        out += ch;
+                    }
+                    break;
+            }
+        }
+        return out;
+    }
+
+    static std::string BuildFieldUpdateBody(std::string const& projectId, std::string const& workItemId,
+                                            std::string const& fieldName, std::string const& fieldValue)
+    {
+        return "{\"data\":{\"type\":\"workitems\",\"id\":\"" + JsonEscape(projectId) + "/" +
+               JsonEscape(workItemId) + "\",\"attributes\":{\"" + JsonEscape(fieldName) +
+               "\":{\"type\":\"text/plain\",\"value\":\"" + JsonEscape(fieldValue) + "\"}}}}";
+    }
+
     bool PolarionWriteTaskExecutor::ExecuteCloud(WorkflowDefinition const& workflowDefinition,
                                                  WorkflowRun& workflowRun, TaskDef const& taskDefinition,
                                                  TaskInstanceState& taskState, CloudConnection const& connection,
@@ -94,6 +132,9 @@ namespace AIAssistant
         {
             std::string workItemId = getStringParam("work_item_id");
             std::string body = getStringParam("body");
+            std::string fieldName = getStringParam("field_name");
+            std::string fieldValue = getStringParam("field_value");
+            std::string fieldValueFile = getStringParam("field_value_file");
 
             if (workItemId.empty())
             {
@@ -101,9 +142,38 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+
+            // field_name + field_value/field_value_file: build JSON:API body with proper escaping
+            if (!fieldName.empty())
+            {
+                if (!fieldValueFile.empty())
+                {
+                    std::ifstream ifs(fieldValueFile);
+                    if (!ifs.is_open())
+                    {
+                        taskState.m_LastErrorMessage =
+                            "polarion_write 'update': cannot open field_value_file '" + fieldValueFile + "'";
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        return false;
+                    }
+                    fieldValue.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+                }
+
+                if (fieldValue.empty())
+                {
+                    taskState.m_LastErrorMessage =
+                        "polarion_write 'update' with field_name requires field_value or field_value_file";
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    return false;
+                }
+
+                body = BuildFieldUpdateBody(projectId, workItemId, fieldName, fieldValue);
+            }
+
             if (body.empty())
             {
-                taskState.m_LastErrorMessage = "polarion_write 'update' requires 'body' (JSON:API patch body)";
+                taskState.m_LastErrorMessage =
+                    "polarion_write 'update' requires 'body' or 'field_name' + 'field_value'/'field_value_file'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }

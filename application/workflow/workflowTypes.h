@@ -96,6 +96,7 @@ namespace AIAssistant
         SnowflakeQuery,
         SlackMessage,
         EmailSend,
+        EmailRead,
         GitHubIssue,
         JiraIssue,
         SheetsRead,

@@ -113,6 +113,9 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 - [x] Implement `EmailConnector : ICloudConnector` (SMTP/IMAP via libcurl)
 - [x] Implement `EmailCloudTaskExecutor` (send via SMTP)
 - [x] Add `email_watch` trigger type (IMAP polling)
+- [x] Implement `email_read` operation in `EmailCloudTaskExecutor` (fetch from IMAP via libcurl)
+- [ ] Wire `email_watch` trigger to perform actual IMAP UID check before firing (currently fires on timer regardless of new mail)
+- [ ] Frontend: `email_read` task inspector section
 - [x] Frontend: Slack and Email connection config, task inspector sections
 
 ### Phase 8 — Additional Integrations
@@ -164,6 +167,7 @@ All demo workflows must demonstrate a meaningful **round-trip** pattern: read fr
 | **PostgreSQL** | Already running | `localhost:5432`, db `j9t_test`, user `j9t_user`, pw `1234!@#$` |
 | **S3 (MinIO)** | `docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin123 minio/minio server /data --console-address ":9001"` | S3-compatible on port 9000, console on 9001. Create bucket: `docker exec minio mc mb /data/j9t-test` |
 | **Email (SMTP)** | Real: `beaumanvienna@gmail.com` with Gmail App Password. Local mock: `docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit` | Mailpit: SMTP on 1025, web UI on 8025 (no auth needed) |
+| **Email (IMAP)** | `docker run -d --name greenmail -p 3025:3025 -p 3110:3110 -p 3143:3143 -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test' greenmail/standalone` | GreenMail: SMTP 3025, POP3 3110, IMAP 3143. User `test`, pw `test`. Send test email via SMTP, poll via IMAP. |
 | **GitHub** | Real: use `beaumanvienna/polarionMockup` with a fine-grained PAT (Issues read+write, Metadata read) | Tested with 3 real improvement issues |
 | **Jira** | Free tier: `https://<yourname>.atlassian.net` — create a free Jira Cloud project | Email + API token auth |
 | **Slack** | Create a free Slack workspace + Bot with `chat:write` scope | Free tier is sufficient for testing |
@@ -175,10 +179,10 @@ All demo workflows must demonstrate a meaningful **round-trip** pattern: read fr
 
 Each demo workflow must have: cloud read/write + AI processing + verifiable output.
 
-- [ ] **Polarion round-trip** (`goKartComplianceCheck`): Migrate from inline `base_url`/`project_id`/`key_name` to a named `CloudConnection`. Add `polarion_write` task to write compliance status back to each work item after AI assessment. Verify write-back in PolarionMockup. See refactor details below.
+- [x] **Polarion round-trip** (`goKartComplianceCheck`): Migrate from inline `base_url`/`project_id`/`key_name` to a named `CloudConnection`. Add `polarion_write` task to write compliance status back to each work item after AI assessment. Verify write-back in PolarionMockup. See refactor details below.
 - [x] **PostgreSQL round-trip** (`postgresDemo`): Query department stats → per_item AI analysis → per_item INSERT analysis back via `{{ai_analyze.captured_stdout}}`. Verified: 3 departments, 3 AI summaries written to `j9t_demo_analysis`.
-- [ ] **S3 round-trip** (`s3UploadDownloadDemo`): Upload sample data → download → AI analyzes content → upload AI report back to S3. Verify report object exists in bucket.
-- [ ] **Email round-trip** (`emailSendDemo`): AI generates a report from workflow context → email sends it with attachment. Verify email received (Mailpit web UI or Gmail inbox).
+- [x] **S3 round-trip** (`s3UploadDownloadDemo`): Upload sample data → download → AI analyzes content → upload AI report back to S3. Verify report object exists in bucket.
+- [x] **Email round-trip** (`emailDemo`): Fetch incoming email from IMAP (GreenMail) → AI generates reply → send reply back via SMTP. Verified: email_read fetches from IMAP, AI produces response, email_send replies to sender.
 - [x] **GitHub round-trip** (`gitHubIssueDemo`): List issues → python converts to CSV → per_item AI triage → per_item comment via `{{ai_triage.captured_stdout}}`. Verified: 3 issues triaged, comments posted on `beaumanvienna/polarionMockup`.
 - [ ] **Jira round-trip** (`jiraIssueDemo`): Create issue with AI-generated description from input data → get issue back → verify fields match.
 - [ ] **Google Sheets round-trip** (`sheetsQuizGrader`): Already complete — read quiz → AI grades → write grades back. Verify grades column populated.
@@ -193,7 +197,8 @@ These can be tested fully locally with Docker or existing infrastructure:
 1. **Polarion** — PolarionMockup (already exists at `../polarionMockup`)
 2. **PostgreSQL** — local instance (already running)
 3. **S3** — MinIO Docker container (S3-compatible, SigV4 signing works)
-4. **Email** — Mailpit Docker container (SMTP mock with web UI, no auth)
+4. **Email (send)** — Mailpit Docker container (SMTP mock with web UI, no auth)
+5. **Email (receive)** — GreenMail Docker container (SMTP + IMAP, test credentials)
 
 #### Require Real Cloud Accounts
 
@@ -252,12 +257,12 @@ The file-based approach is more robust since AI responses can be large. The down
 - `snowflakeQueryDemo` — INSERT AI revenue analysis per region
 - `gitHubIssueDemo` — post AI triage as comment on each issue
 - `jiraIssueDemo` — update issue with AI-generated content
-- `emailSendDemo` — personalized AI-generated email per recipient
+- `emailDemo` — personalized AI-generated email per recipient
 - `portfolioDividendAnalysis` — already works (single aggregation, not per_item write-back)
 
 **TODO:**
 - [x] Implement per_item output piping (`{{taskId.output_file}}` and `{{taskId.captured_stdout}}` template variables)
-- [ ] Update `goKartComplianceCheck` write_status to use `{{assessRequirement.output_file}}` for the full AI assessment text
+- [x] Update `goKartComplianceCheck` write_status to use `{{assessRequirement.output_file}}` for the full AI assessment text
 - [x] Update remaining demo workflows to write actual AI output back to cloud services
 - [x] Add per_item output piping to the JCWF specification (section 3.3.2)
 - [x] Add per_item output piping to `doc/jcwf_generation_guide.md`
@@ -331,6 +336,114 @@ curl -s http://localhost:18080/polarion/rest/v1/projects/GoKartProcurement/worki
 ```
 
 The mockup supports `PATCH` on work items, so the write-back will be visible in the mock's in-memory state for the lifetime of the mockup process.
+
+#### Email Receive Implementation Details
+
+Two changes are needed to support email receive workflows:
+
+**1. `email_read` operation in `EmailCloudTaskExecutor`**
+
+Add an `"email_read"` operation that fetches emails from IMAP via libcurl and writes them to the task working directory.
+
+Task params:
+```json
+{
+  "connection": "my-email",
+  "operation": "read",
+  "folder": "INBOX",
+  "since_uid": "",
+  "max_messages": 10,
+  "subject_filter": ""
+}
+```
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | — | Named CloudConnection with `imap_host`/`imap_port` params |
+| `operation` | yes | — | `"read"` |
+| `folder` | no | `"INBOX"` | IMAP folder to read from |
+| `since_uid` | no | `""` | Only fetch messages with UID greater than this (incremental) |
+| `max_messages` | no | `10` | Maximum messages to fetch |
+| `subject_filter` | no | `""` | Only include messages whose subject contains this string |
+
+Output:
+- Writes each email as a separate JSON file to the task working directory: `email_001.json`, `email_002.json`, ...
+- Each file contains: `{"uid": "...", "from": "...", "to": "...", "subject": "...", "date": "...", "body": "..."}`
+- Writes `emails_summary.json` with an array of all fetched messages (compact form: uid, from, subject)
+- `captured_stdout` contains the summary JSON
+- `response.json` contains `{"ok": true, "count": N, "folder": "INBOX", "highest_uid": "..."}`
+
+libcurl IMAP approach:
+- URL: `imap://host:port/INBOX` (or `imaps://` with SSL)
+- `CURLOPT_USERPWD` for auth
+- Use `SEARCH UNSEEN` or `SEARCH UID <since_uid>:*` to find messages
+- `FETCH` each message by UID with `BODY[HEADER]` and `BODY[TEXT]`
+- Parse RFC 2822 headers (From, To, Subject, Date) with simple string parsing
+
+**2. Wire `email_watch` trigger to check IMAP before firing**
+
+Currently `email_watch` fires on every poll interval regardless of new mail. Change `TriggerEngine::Tick()` to:
+1. Connect to IMAP using the trigger's connection credentials
+2. `SEARCH UNSEEN` (or `SEARCH UID <last_seen_uid>:*`) to check for new messages
+3. Only fire the trigger if new messages exist
+4. Update `m_LastSeenUid` after firing
+
+This makes the trigger meaningful — workflows only run when new email actually arrives.
+
+**3. Demo workflow: `emailReceiveDemo`**
+
+```json
+{
+  "version": "1.1",
+  "id": "emailReceiveDemo",
+  "triggers": [
+    {
+      "type": "email_watch",
+      "id": "inbox-watch",
+      "enabled": true,
+      "params": {
+        "connection": "my-greenmail",
+        "folder": "INBOX",
+        "poll_interval_seconds": 60
+      }
+    }
+  ],
+  "tasks": {
+    "fetch_emails": {
+      "id": "fetch_emails",
+      "type": "email_send",
+      "label": "fetch new emails from IMAP",
+      "params": {
+        "connection": "my-greenmail",
+        "operation": "read",
+        "folder": "INBOX",
+        "max_messages": 5
+      },
+      "working_directory": "emailReceiveDemo/01_fetch"
+    },
+    "ai_summarize": {
+      "id": "ai_summarize",
+      "type": "ai_call",
+      "label": "AI summarizes email content",
+      "working_directory": "../../queue/emailReceiveDemo/02_ai_summarize",
+      "depends_on": ["fetch_emails"],
+      "queue_binding": {
+        "stng_files": [{"path": "STNG_email.txt", "content": "You are an email assistant. Summarize incoming emails concisely."}],
+        "cntx_files": ["../../../workflows/emailReceiveDemo/01_fetch/emails_summary.json"],
+        "task_files": [{"path": "TASK_summarize.txt", "content": "Summarize each email in one sentence. Output plain text."}],
+        "prob_files": [{"path": "PROB_emails.txt", "content": "Summarize the emails from the context file."}]
+      }
+    }
+  }
+}
+```
+
+**Test procedure:**
+1. Start GreenMail: `docker run -d --name greenmail -p 3025:3025 -p 3143:3143 -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test' greenmail/standalone`
+2. Create connection `my-greenmail` (type: email, smtp_host: localhost, smtp_port: 3025, imap_host: localhost, imap_port: 3143, use_ssl: false)
+3. Send test email via SMTP: `curl smtp://localhost:3025 --mail-from test@localhost --mail-rcpt test@localhost -T - <<< "Subject: Server alert\n\nDisk usage on db-02 is at 85%."`
+4. Either wait for `email_watch` trigger to fire, or run workflow manually
+5. Verify: `fetch_emails` writes email JSON files, AI produces summary
 
 ---
 

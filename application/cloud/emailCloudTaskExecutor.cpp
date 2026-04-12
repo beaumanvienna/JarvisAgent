@@ -179,12 +179,356 @@ namespace AIAssistant
         return toSend;
     }
 
+    // Curl write callback for IMAP responses
+    static size_t ImapWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+    {
+        auto* buf = static_cast<std::string*>(userp);
+        buf->append(static_cast<char*>(contents), size * nmemb);
+        return size * nmemb;
+    }
+
+    // Extract a header value from raw email text
+    static std::string ExtractHeader(std::string const& raw, std::string const& headerName)
+    {
+        std::string search = headerName + ": ";
+        size_t pos = raw.find(search);
+        if (pos == std::string::npos)
+        {
+            // Case-insensitive fallback
+            std::string rawLower = raw;
+            std::string searchLower = search;
+            for (auto& c : rawLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (auto& c : searchLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            pos = rawLower.find(searchLower);
+            if (pos == std::string::npos)
+            {
+                return {};
+            }
+        }
+        size_t valueStart = pos + search.size();
+        size_t lineEnd = raw.find('\r', valueStart);
+        if (lineEnd == std::string::npos)
+        {
+            lineEnd = raw.find('\n', valueStart);
+        }
+        if (lineEnd == std::string::npos)
+        {
+            return raw.substr(valueStart);
+        }
+        return raw.substr(valueStart, lineEnd - valueStart);
+    }
+
+    // Extract body from raw email (everything after the first blank line)
+    static std::string ExtractBody(std::string const& raw)
+    {
+        // RFC 2822: headers and body separated by a blank line (\r\n\r\n)
+        size_t pos = raw.find("\r\n\r\n");
+        if (pos != std::string::npos)
+        {
+            return raw.substr(pos + 4);
+        }
+        pos = raw.find("\n\n");
+        if (pos != std::string::npos)
+        {
+            return raw.substr(pos + 2);
+        }
+        return {};
+    }
+
+    // JSON-escape a string for building JSON manually
+    static std::string JsonEscapeEmail(std::string const& input)
+    {
+        std::string out;
+        out.reserve(input.size() + 32);
+        for (char ch : input)
+        {
+            switch (ch)
+            {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (static_cast<unsigned char>(ch) < 0x20)
+                    {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(ch));
+                        out += buf;
+                    }
+                    else
+                    {
+                        out += ch;
+                    }
+                    break;
+            }
+        }
+        return out;
+    }
+
+    // Perform an IMAP command via libcurl and return the response
+    static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
+                            std::string const& customRequest, std::string& responseBody, std::string& errorMessage,
+                            bool useSsl)
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            errorMessage = "curl_easy_init() failed";
+            return false;
+        }
+
+        responseBody.clear();
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_USERNAME, username.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, password.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ImapWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+        if (!customRequest.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, customRequest.c_str());
+        }
+
+        if (!useSsl)
+        {
+            curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_NONE));
+        }
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            errorMessage = std::string("IMAP request failed: ") + curl_easy_strerror(res);
+            return false;
+        }
+
+        return true;
+    }
+
+    // Parse UIDs from IMAP SEARCH response (format: "* SEARCH 1 2 3\r\n")
+    static std::vector<std::string> ParseSearchUids(std::string const& searchResponse)
+    {
+        std::vector<std::string> uids;
+        // Find "* SEARCH " prefix
+        size_t pos = searchResponse.find("* SEARCH ");
+        if (pos == std::string::npos)
+        {
+            return uids;
+        }
+
+        size_t start = pos + 9; // length of "* SEARCH "
+        size_t lineEnd = searchResponse.find('\r', start);
+        if (lineEnd == std::string::npos)
+        {
+            lineEnd = searchResponse.find('\n', start);
+        }
+        if (lineEnd == std::string::npos)
+        {
+            lineEnd = searchResponse.size();
+        }
+
+        std::string uidLine = searchResponse.substr(start, lineEnd - start);
+        std::istringstream ss(uidLine);
+        std::string uid;
+        while (ss >> uid)
+        {
+            if (!uid.empty() && std::isdigit(static_cast<unsigned char>(uid[0])))
+            {
+                uids.push_back(uid);
+            }
+        }
+
+        return uids;
+    }
+
+    bool EmailCloudTaskExecutor::ExecuteEmailRead(WorkflowDefinition const& workflowDefinition,
+                                                   TaskDef const& taskDefinition, TaskInstanceState& taskState,
+                                                   CloudConnection const& connection,
+                                                   CloudCredentials const& credentials)
+    {
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(taskDefinition.m_ParamsJson);
+        simdjson::ondemand::document doc;
+
+        auto error = parser.iterate(paddedJson).get(doc);
+        if (error)
+        {
+            taskState.m_LastErrorMessage = "Failed to parse email_read task params JSON";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        auto getStringParam = [&doc](std::string const& key) -> std::string
+        {
+            std::string_view sv;
+            if (doc[key].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                return std::string(sv);
+            }
+            return {};
+        };
+
+        std::string folder = getStringParam("folder");
+        if (folder.empty())
+        {
+            folder = "INBOX";
+        }
+
+        std::string subjectFilter = getStringParam("subject_filter");
+
+        int maxMessages = 10;
+        {
+            uint64_t val;
+            if (doc["max_messages"].get_uint64().get(val) == simdjson::SUCCESS)
+            {
+                maxMessages = static_cast<int>(val);
+            }
+        }
+
+        // Build base IMAP URL
+        std::string imapBaseUrl = EmailConnector::BuildImapUrl(connection);
+        auto sslIt = connection.m_Params.find("use_ssl");
+        bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+
+        // Step 1: SEARCH for messages
+        std::string searchUrl = imapBaseUrl + "/" + folder;
+        std::string searchCommand = "SEARCH ALL";
+        std::string searchResponse;
+        std::string imapError;
+
+        if (!ImapCommand(searchUrl, credentials.m_Username, credentials.m_Password, searchCommand, searchResponse,
+                         imapError, useSsl))
+        {
+            taskState.m_LastErrorMessage = "IMAP SEARCH failed: " + imapError;
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        std::vector<std::string> uids = ParseSearchUids(searchResponse);
+        LOG_APP_INFO("[email_read] SEARCH returned {} message(s) in {}", uids.size(), folder);
+
+        // Limit to maxMessages (take the most recent)
+        if (static_cast<int>(uids.size()) > maxMessages)
+        {
+            uids.erase(uids.begin(), uids.end() - maxMessages);
+        }
+
+        // Step 2: FETCH each message
+        std::ostringstream summaryJson;
+        summaryJson << "[";
+
+        int fetchCount = 0;
+
+        // Resolve working directory for output files
+        std::filesystem::path workflowBaseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        std::filesystem::path workDir;
+        if (!workflowBaseDir.empty())
+        {
+            workDir = TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir,
+                                                                        taskDefinition.m_WorkingDirectory);
+            std::error_code ec;
+            std::filesystem::create_directories(workDir, ec);
+        }
+
+        for (auto const& uid : uids)
+        {
+            std::string fetchUrl = imapBaseUrl + "/" + folder + "/;UID=" + uid;
+            std::string rawEmail;
+
+            if (!ImapCommand(fetchUrl, credentials.m_Username, credentials.m_Password, "", rawEmail, imapError, useSsl))
+            {
+                LOG_APP_WARN("[email_read] failed to fetch UID {}: {}", uid, imapError);
+                continue;
+            }
+
+            std::string fromAddr = ExtractHeader(rawEmail, "From");
+            std::string toAddr = ExtractHeader(rawEmail, "To");
+            std::string subject = ExtractHeader(rawEmail, "Subject");
+            std::string date = ExtractHeader(rawEmail, "Date");
+            std::string body = ExtractBody(rawEmail);
+
+            // Trim trailing whitespace from body
+            while (!body.empty() && (body.back() == '\r' || body.back() == '\n' || body.back() == ' '))
+            {
+                body.pop_back();
+            }
+
+            // Apply subject filter
+            if (!subjectFilter.empty())
+            {
+                if (subject.find(subjectFilter) == std::string::npos)
+                {
+                    continue;
+                }
+            }
+
+            if (fetchCount > 0)
+            {
+                summaryJson << ",";
+            }
+
+            summaryJson << "{\"uid\":\"" << JsonEscapeEmail(uid) << "\""
+                        << ",\"from\":\"" << JsonEscapeEmail(fromAddr) << "\""
+                        << ",\"to\":\"" << JsonEscapeEmail(toAddr) << "\""
+                        << ",\"subject\":\"" << JsonEscapeEmail(subject) << "\""
+                        << ",\"date\":\"" << JsonEscapeEmail(date) << "\""
+                        << ",\"body\":\"" << JsonEscapeEmail(body) << "\"}";
+
+            ++fetchCount;
+        }
+
+        summaryJson << "]";
+
+        std::string summaryStr = summaryJson.str();
+        taskState.m_CapturedStdout = summaryStr.substr(0, std::min(summaryStr.size(), kMaxCaptureChars));
+        taskState.m_State = TaskInstanceStateKind::Succeeded;
+
+        // Write output files
+        if (!workDir.empty())
+        {
+            std::ofstream summaryFile(workDir / "emails_summary.json", std::ios::trunc);
+            if (summaryFile.is_open())
+            {
+                summaryFile << summaryStr;
+            }
+
+            std::string responseStr = "{\"ok\":true,\"count\":" + std::to_string(fetchCount) +
+                                      ",\"folder\":\"" + JsonEscapeEmail(folder) + "\"}";
+            std::ofstream responseFile(workDir / "response.json", std::ios::trunc);
+            if (responseFile.is_open())
+            {
+                responseFile << responseStr;
+            }
+        }
+
+        LOG_APP_INFO("[email_read] fetched {} message(s) from {} via connection '{}'", fetchCount, folder,
+                     connection.m_Name);
+
+        return true;
+    }
+
     bool EmailCloudTaskExecutor::ExecuteCloud(WorkflowDefinition const& workflowDefinition,
                                               WorkflowRun& workflowRun, TaskDef const& taskDefinition,
                                               TaskInstanceState& taskState, CloudConnection const& connection,
                                               CloudCredentials const& credentials,
                                               TaskCancellationToken const& cancellationToken)
     {
+        // Route by task type: email_read uses IMAP, email_send uses SMTP
+        if (taskDefinition.m_Type == TaskType::EmailRead)
+        {
+            return ExecuteEmailRead(workflowDefinition, taskDefinition, taskState, connection, credentials);
+        }
+
         simdjson::ondemand::parser parser;
         simdjson::padded_string paddedJson(taskDefinition.m_ParamsJson);
         simdjson::ondemand::document doc;
@@ -224,9 +568,21 @@ namespace AIAssistant
         }
 
         std::string body = getStringParam("body");
+        std::string bodyFile = getStringParam("body_file");
+        if (!bodyFile.empty())
+        {
+            std::ifstream ifs(bodyFile);
+            if (!ifs.is_open())
+            {
+                taskState.m_LastErrorMessage = "email_send: cannot open body_file '" + bodyFile + "'";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            }
+            body.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+        }
         if (body.empty())
         {
-            taskState.m_LastErrorMessage = "Missing required 'body' in email_send task params";
+            taskState.m_LastErrorMessage = "Missing required 'body' or 'body_file' in email_send task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }

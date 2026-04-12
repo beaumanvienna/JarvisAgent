@@ -337,6 +337,7 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> emailExecutor =
                     std::make_shared<EmailCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::EmailSend, emailExecutor);
+                executorRegistry.RegisterExecutor(TaskType::EmailRead, emailExecutor);
 
                 // GitHub connector + executor
                 connectorRegistry.Register(std::make_unique<GitHubConnector>());

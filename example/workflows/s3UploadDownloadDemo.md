@@ -1,15 +1,17 @@
-# s3UploadDownloadDemo Workflow -- S3 Object Storage Integration
+# s3UploadDownloadDemo Workflow -- S3 Round-Trip with AI Analysis
 
 ## Executive Summary
 
-The **s3UploadDownloadDemo** workflow demonstrates how JarvisAgent interacts with **S3-compatible object storage** through the cloud integration layer.
+The **s3UploadDownloadDemo** workflow demonstrates a complete S3 round-trip:
+upload sample data, download it, have AI analyze the content, and upload the
+AI report back to S3.
 
-At its core, this workflow shows:
+This workflow shows:
 
-- how `s3` task types upload and download objects using SigV4-signed requests,
-- how a named **CloudConnection** centralizes S3 credentials and endpoint config,
-- how `list` operations enumerate bucket contents,
-- and how tasks chain via `depends_on` to build upload-then-download pipelines.
+- `s3` task types for upload, download, and list operations with SigV4 signing,
+- named **CloudConnection** for centralized S3 credentials and endpoint config,
+- AI processing of cloud-sourced data,
+- and linear task chaining via `depends_on`.
 
 ---
 
@@ -25,89 +27,84 @@ At its core, this workflow shows:
 | Key | A KeyManager credential with access key ID and secret key |
 | Auth Type | `sigv4` |
 | Region | `us-east-1` |
-| Bucket | `my-bucket` |
+| Bucket | `j9t-test` |
 
-Credentials can be stored as:
-- **BasicAuth**: username = access key ID, password = secret access key
-- **ApiKey**: `ACCESS_KEY_ID:SECRET_ACCESS_KEY` format
+For local testing with MinIO:
+```bash
+docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin123 \
+  minio/minio server /data --console-address ":9001"
+docker exec minio mc mb /data/j9t-test
+```
 
 ---
 
 ## Pipeline Overview
 
 ```
-+-----------------+
-|  create_file    |
-|  shell: echo    |
-|  (01_create)    |
-+--------+--------+
-         |
-         v
-+-----------------+
-|  upload         |
-|  s3: upload     |
-|  (02_upload)    |
-+--------+--------+
-         |
-    +----+----+
-    |         |
-    v         v
-+--------+ +-------------+
-|download| |list_objects  |
-|s3: down| |s3: list      |
-|(03_)   | |(04_list)     |
-+--------+ +-------------+
++----------------+     +----------------+     +-----------------+     +------------------+     +----------------+
+|  upload_data   | --> |  download_data | --> |  ai_analyze     | --> |  upload_report   | --> |  list_objects  |
+|  s3: upload    |     |  s3: download  |     |  ai_call        |     |  s3: upload      |     |  s3: list      |
+|  (01_upload)   |     |  (02_download) |     |  (03_ai_analyze)|     |  (04_upload_rpt) |     |  (05_list)     |
++----------------+     +----------------+     +-----------------+     +------------------+     +----------------+
 ```
 
 ---
 
 ## Task Details
 
-### 1. create_file -- generate sample data
+### 1. upload_data -- upload sample CSV to S3
 
-Creates a sample text file with a timestamp to upload.
-
-| Field | Value |
-|-------|-------|
-| Type | `shell` |
-| Script | `scripts/run.sh` |
-| Args | `echo`, `Hello from j9t S3 demo at $(date)` |
-| Working dir | `s3UploadDownloadDemo/01_create` |
-| Output | `stdout.txt` |
-
-### 2. upload -- upload to S3
-
-Uploads the generated file to the S3 bucket under the key `j9t-demo/hello.txt`.
+Uploads `server_metrics.csv` (bundled in the .jcwf) to S3.
 
 | Field | Value |
 |-------|-------|
 | Type | `s3` |
 | Connection | `my-s3` |
 | Operation | `upload` |
-| Key | `j9t-demo/hello.txt` |
-| File path | `s3UploadDownloadDemo/01_create/stdout.txt` |
-| Working dir | `s3UploadDownloadDemo/02_upload` |
-| Depends on | `create_file` |
+| Key | `j9t-demo/server_metrics.csv` |
+| File path | `workflows/s3UploadDownloadDemo/server_metrics.csv` |
 
-The task executor reads the local file, computes its SHA-256 hash for SigV4 signing, and sends a `PUT` request to S3.
+### 2. download_data -- download from S3
 
-### 3. download -- download from S3
-
-Downloads the same object back to a local file to verify the round-trip.
+Downloads the CSV back to verify the upload and provide input for AI analysis.
 
 | Field | Value |
 |-------|-------|
 | Type | `s3` |
 | Connection | `my-s3` |
 | Operation | `download` |
-| Key | `j9t-demo/hello.txt` |
-| File path | `s3UploadDownloadDemo/03_download/downloaded.txt` |
-| Working dir | `s3UploadDownloadDemo/03_download` |
-| Depends on | `upload` |
+| Key | `j9t-demo/server_metrics.csv` |
+| File path | `workflows/s3UploadDownloadDemo/02_download/metrics.csv` |
 
-### 4. list_objects -- list bucket contents
+### 3. ai_analyze -- AI analyzes server metrics
 
-Lists all objects under the `j9t-demo/` prefix. The response is an S3 `ListBucketResult` XML document written to `response.json` in the task working directory.
+The downloaded CSV is provided as context to the AI, which identifies servers
+needing attention and recommends actions.
+
+| Field | Value |
+|-------|-------|
+| Type | `ai_call` |
+| Context | Downloaded `metrics.csv` |
+| Role | DevOps engineer analyzing server health |
+| Output | Plain text analysis |
+
+### 4. upload_report -- upload AI report back to S3
+
+Uploads the AI-generated health report to S3, completing the round-trip.
+
+| Field | Value |
+|-------|-------|
+| Type | `s3` |
+| Connection | `my-s3` |
+| Operation | `upload` |
+| Key | `j9t-demo/ai_health_report.txt` |
+| File path | AI output file |
+
+### 5. list_objects -- verify bucket contents
+
+Lists all objects under the `j9t-demo/` prefix to confirm both the original
+data and the AI report exist in the bucket.
 
 | Field | Value |
 |-------|-------|
@@ -115,83 +112,43 @@ Lists all objects under the `j9t-demo/` prefix. The response is an S3 `ListBucke
 | Connection | `my-s3` |
 | Operation | `list` |
 | Prefix | `j9t-demo/` |
-| Working dir | `s3UploadDownloadDemo/04_list` |
-| Depends on | `upload` |
 
 ---
 
-## S3 Task Type Reference
+## Sample Data
 
-The `s3` task type is backed by `S3CloudTaskExecutor`, which extends `ICloudTaskExecutor`. The base class automatically resolves the named connection and SigV4 credentials before delegating to the S3-specific logic.
+The workflow includes `server_metrics.csv`:
 
-### Supported Operations
-
-| Operation | Required Params | Description |
-|-----------|----------------|-------------|
-| `upload` | `key`, `file_path` | PUT object to S3 |
-| `download` | `key`, `file_path` | GET object from S3 to local file |
-| `list` | `prefix` (optional) | ListObjectsV2 |
-| `delete` | `key` | DELETE object |
-
-### Common Params
-
-| Param | Required | Description |
-|-------|----------|-------------|
-| `connection` | yes | Named CloudConnection (type `s3`) |
-| `operation` | yes | One of: `upload`, `download`, `list`, `delete` |
-| `bucket` | no | Override the connection's default bucket |
-
----
-
-## SigV4 Authentication
-
-All S3 requests are authenticated using **AWS Signature Version 4** (`SigV4Signer`). The signer:
-
-1. Builds a canonical request (method, path, query, headers, payload hash)
-2. Derives a signing key from the secret access key + date + region + service
-3. Produces an `Authorization` header with the HMAC-SHA256 signature
-
-This is compatible with AWS S3, MinIO, Wasabi, and other S3-compatible services.
-
----
-
-## Running
-
-```bash
-# Manual start only (manual_start: true)
-curl -s -X POST http://localhost:8080/api/workflows/s3UploadDownloadDemo/run
+```csv
+server,cpu_pct,mem_pct,disk_pct,status
+web-01,82,65,45,healthy
+web-02,95,78,52,warning
+db-01,45,88,71,healthy
+db-02,38,92,85,critical
+cache-01,12,34,22,healthy
 ```
 
 ---
 
-## Expected Execution
+## Expected Output
 
-### Task States at Completion
+After a successful run, the S3 bucket contains:
 
-| Task | Final State | Notes |
-|------|-------------|-------|
-| `create_file` | Succeeded | Generated sample text file |
-| `upload` | Succeeded | Uploaded to `s3://bucket/j9t-demo/hello.txt` |
-| `download` | Succeeded | Downloaded to local `downloaded.txt` |
-| `list_objects` | Succeeded | Listed objects under `j9t-demo/` prefix |
+| Object | Size | Description |
+|--------|------|-------------|
+| `j9t-demo/server_metrics.csv` | ~160 bytes | Original server metrics |
+| `j9t-demo/ai_health_report.txt` | ~500 bytes | AI-generated health analysis |
 
-### Output Files
-
-| Path | Content |
-|------|---------|
-| `s3UploadDownloadDemo/01_create/stdout.txt` | Sample text with timestamp |
-| `s3UploadDownloadDemo/02_upload/response.json` | `{"ok":true,"operation":"upload",...}` |
-| `s3UploadDownloadDemo/03_download/downloaded.txt` | Copy of the uploaded file |
-| `s3UploadDownloadDemo/03_download/response.json` | `{"ok":true,"operation":"download",...}` |
-| `s3UploadDownloadDemo/04_list/response.json` | S3 ListBucketResult XML |
+The AI report identifies web-02 (warning: high CPU) and db-02 (critical: high
+memory + disk) as needing immediate attention, with recommended actions.
 
 ---
 
 ## Key Concepts Demonstrated
 
-- **Cloud task executor pattern** -- `ICloudTaskExecutor` resolves connection + credentials, delegates to `ExecuteCloud()`
-- **Named connections** -- S3 endpoint, region, bucket, and credentials are centralized in the Connections tab
-- **SigV4 signing** -- every request is cryptographically signed using HMAC-SHA256
+- **S3 round-trip** -- upload, download, AI process, upload result back
+- **Named connections** -- S3 endpoint, region, bucket, credentials centralized in Connections tab
+- **SigV4 signing** -- every request is cryptographically signed (HMAC-SHA256)
 - **S3-compatible** -- works with AWS S3, MinIO, Wasabi, R2, and any S3-compatible API
-- **Disk-first output** -- all responses are written to `response.json` in the task working directory
-- **DAG dependency** -- download and list both depend on upload completing first
+- **Disk-first output** -- all responses written to `response.json` in task working directory
+- **AI integration** -- cloud-sourced data processed by AI, results written back to cloud

@@ -374,6 +374,11 @@ namespace AIAssistant
             return TaskType::EmailSend;
         }
 
+        if (rawType == "email_read")
+        {
+            return TaskType::EmailRead;
+        }
+
         if (rawType == "github_issue")
         {
             return TaskType::GitHubIssue;

@@ -351,7 +351,10 @@ JCWF task type `"polarion_write"` enables write operations in workflows. Uses th
 | `connection` | yes | Named CloudConnection |
 | `operation` | yes | `update`, `create`, `upload_attachment`, `download_attachment`, `linked_items` |
 | `work_item_id` | for update/attachment/linked_items | Target work item ID |
-| `body` | for update/create | JSON:API request body |
+| `body` | for update/create | JSON:API request body (alternative to `field_name` + `field_value`) |
+| `field_name` | for update (convenience) | Attribute name to update; executor builds the JSON:API body internally with proper escaping |
+| `field_value` | with `field_name` | Plain text value for the field |
+| `field_value_file` | with `field_name` | Path to a file whose contents become the field value (takes precedence over `field_value`; supports per-item output piping via `{{taskId.output_file}}`) |
 | `attachment_id` | for download_attachment | Attachment ID to download |
 | `file_path` | for attachment operations | Local file path |
 | `file_name` | optional for upload | Attachment filename (defaults to basename) |
@@ -716,11 +719,34 @@ JCWF task type `"email_send"` sends emails via SMTP with optional attachments.
 | `connection` | yes | Named CloudConnection (type `email`) |
 | `to` | yes | Recipient(s), comma-separated |
 | `subject` | yes | Email subject (supports template variables) |
-| `body` | yes | Email body text |
+| `body` | yes* | Email body text |
+| `body_file` | no | Path to file whose contents become the body (takes precedence over `body`) |
 | `cc` | no | CC recipients, comma-separated |
 | `attachments` | no | Array of file paths relative to working directory |
 
+*Required unless `body_file` is provided.
+
 Builds RFC 2822 messages with MIME multipart for attachments. Base64-encodes attachment content. Uses libcurl SMTP with `CURLOPT_MAIL_FROM` and `CURLOPT_MAIL_RCPT`.
+
+**Files:** `application/cloud/emailCloudTaskExecutor.h/cpp`
+
+### email_read Task Type
+
+JCWF task type `"email_read"` fetches emails from an IMAP mailbox via libcurl.
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection with `imap_host`/`imap_port` params |
+| `folder` | no | `INBOX` | IMAP folder to read from |
+| `max_messages` | no | `10` | Maximum messages to fetch |
+| `subject_filter` | no | | Only include messages whose subject contains this string |
+
+**Outputs:**
+- `emails_summary.json` — JSON array of fetched messages, each with `uid`, `from`, `to`, `subject`, `date`, `body`
+- `response.json` — `{"ok": true, "count": N, "folder": "INBOX"}`
+- `captured_stdout` — the summary JSON (up to 1024 chars)
+
+Uses libcurl IMAP with `SEARCH ALL` to find messages, then `FETCH` by UID. Parses RFC 2822 headers (From, To, Subject, Date) and extracts the plain text body. Respects `use_ssl` connection param (`imap://` vs `imaps://`).
 
 **Files:** `application/cloud/emailCloudTaskExecutor.h/cpp`
 

@@ -108,12 +108,12 @@ requirements are assessed.
 
 ```
 example/workflows/
-  goKartComplianceCheck.jcwf    ← workflow definition
+  goKartComplianceCheck.jcwf    ← workflow definition (contains global.json, canvas, goKartPlatformSpec.md)
   goKartComplianceCheck.md      ← this document
-  goKartPlatformSpec.md         ← platform go-kart technical specification
 ```
 
-At runtime, both files are copied to the `workflows/` directory.
+The `.jcwf` container includes `goKartPlatformSpec.md` so it is extracted alongside
+the canvas JSON at runtime.
 
 ---
 
@@ -127,11 +127,9 @@ At runtime, both files are copied to the `workflows/` directory.
     "id": "polarion-reqs",
     "source": {
       "kind": "polarion_query",
-      "base_url": "http://localhost:18080/polarion",
-      "project_id": "GoKartProcurement",
+      "connection": "my-polarion",
       "query": "type:requirement",
       "fields": ["id", "title", "description", "status", "severity", "priority"],
-      "key_name": "polarion",
       "page_size": 100
     },
     "binding": "req",
@@ -144,12 +142,13 @@ Key points:
 
 - **`kind: "polarion_query"`** — triggers the `PolarionClient` HTTP path
   instead of the CSV or text_lines evaluators.
+- **`connection: "my-polarion"`** — references a named CloudConnection configured
+  in the Connections tab. The connection provides `base_url`, `project_id`, and
+  Bearer token from `CloudConnectionManager` + `KeyManager`.
 - **`query: "type:requirement"`** — a Lucene expression evaluated server-side.
   Other useful queries: `severity:blocker AND status:approved`, `title:brak*`.
 - **`fields`** — sparse fieldset; only these attributes are requested from the
   API, reducing payload size.
-- **`key_name: "polarion"`** — the KeyManager credential used for the
-  `Authorization: Bearer <PAT>` header.
 - **`binding: "req"`** — all item values are injected with the `req.` prefix
   (e.g. `{{req.title}}`).
 
@@ -346,11 +345,11 @@ all determined at runtime by the Polarion query result.
 cd ../polarionMockup
 ./bin/Release/mockup
 
-# 2. Ensure the workflow and spec are in the runtime folder
+# 2. Copy the workflow to the runtime folder (spec is inside the .jcwf)
 cp example/workflows/goKartComplianceCheck.jcwf workflows/
-cp example/workflows/goKartPlatformSpec.md workflows/
 
-# 3. Ensure the "polarion" key exists in AI Keys (Bearer token: 1234!@#$)
+# 3. Create connection "my-polarion" in the Connections tab
+#    and ensure the "polarion" key exists in Keys (Bearer token: 1234!@#$)
 
 # 4. Start JarvisAgent
 ./bin/Release/jarvisAgent
@@ -376,12 +375,11 @@ Change the `query` field to target specific requirements:
 
 ### Real Polarion Server
 
-Replace `base_url` with the production Polarion URL and update the `key_name`
-to point to a valid PAT credential:
+Create a new connection in the Connections tab pointing to the production server
+and update the filter's `connection` field:
 
 ```jsonc
-"base_url": "https://polarion.example.com/polarion",
-"key_name": "polarion-prod"
+"connection": "prod-polarion"
 ```
 
 ### Adding a Summary Task
