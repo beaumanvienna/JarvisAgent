@@ -27,6 +27,8 @@ Tasks can be AI calls, shell commands, **Python scripts** (executed by the embed
 <br>
 Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before being sent to the AI via [MarkItDown](https://github.com/microsoft/markitdown), and chunked automatically when too large. All inputs, outputs, and intermediate results live on disk.  <br>
 <br>
+**Cloud integration** — workflows read from and write to external systems through a unified connector layer: object storage (S3, Azure Blob, Google Cloud Storage), databases (PostgreSQL, Snowflake), file collaboration (OneDrive, Google Sheets), ALM tools (Polarion, Jira, GitHub), and messaging (Slack, Email). Credentials are stored encrypted, never appear in workflow files, and a single connection definition is reused across all tasks. **Why it matters for the business:** the same automation pipeline can pull data from where it already lives, run AI analysis on it, and push results back into the systems your teams already use — no manual export/import, no separate integration scripts to maintain, and no vendor lock-in.<br>
+<br>
 **Current version: 0.8.5** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.<br>
 <br>
 | Terminal UI | Dashboard | Workflow Editor |
@@ -50,6 +52,7 @@ Office documents (Word, Excel, PowerPoint, PDF) are converted to Markdown before
 | **Networking** | Asynchronous AI query dispatch (HTTP REST via libcurl) with multi-model selection | ✅ |
 | **Security** | Bearer token auth, RBAC (admin/operator/viewer), gateway identity headers, rate limiting, auth lockout, token expiry/rotation, HMAC webhooks, TLS, security audit log, CSP/security headers | ✅ |
 | **Frontend** | React workflow editor (ReactFlow graph UI), AI workflow generator, workflow versioning, live run monitoring via WebSocket | ✅ |
+| **Cloud Integration** | Unified `ICloudConnector` framework, named connections, encrypted credential resolution, 12 connectors (object storage, databases, ALM, messaging, files); MCP sidecar for Claude/AI assistants | ✅ |
 
 ---
 
@@ -77,6 +80,7 @@ Each file category serves a specific purpose, and files are identified using 4-l
 - **Per-item fan-out and filters** — A filter (CSV, text_lines, or Polarion query) produces a list of items. A `per_item` task spawns one AI call per item, all running in parallel. For example, a 60-position stock portfolio CSV yields 60 concurrent dividend-lookup queries, each receiving only its own row as context. This isolation improves accuracy: the AI focuses on a single item rather than parsing a large table, and every response is independently verifiable. A downstream aggregation task then consumes all 60 results via a glob pattern.
 - **Queue binding and environment assembly** — `ai_call` tasks declare inline STNG, TASK, CNTX, and PROB files. Template variables (`{{binding.field}}`) are expanded per filter item. The assembled files are written to disk and picked up by the session manager for dispatch.
 - **REST API and WebSocket** — JarvisAgent exposes a full REST API (`/api/workflows`, `/api/workflows/<id>/run`, `/api/workflows/<id>/clean`, `/api/status`, etc.) for workflow CRUD, run control, and live status. A WebSocket channel pushes real-time task-state updates to the React dashboard and workflow editor. See [doc/api-endpoints.md](doc/api-endpoints.md).
+- **Cloud connector layer** — `ICloudConnector` abstracts authentication (OAuth2, JWT, SigV4, Azure Shared Key, BasicAuth, Bearer) so task executors only deal with resolved credentials. Named `CloudConnection` configs centralise endpoint and key references; secrets stay in the encrypted key store. New connectors plug in by implementing the interface and registering with the connector registry. See [doc/cloud-integration.md](doc/cloud-integration.md).
 - **Environment Files** — Files in categories STNG (Settings), CNTX (Context/Description), and TASK (Tasks). These form the shared environment or knowledge base.  
 - **Query Files aka Requirement Files aka PROB Files** — Each represents a smaller task or requirement that is processed using the shared environment.  
 - **File Watcher** — Monitors additions, modifications, and removals in the queue folder (including environment and query files).  
@@ -123,6 +127,7 @@ Any detected file modification automatically triggers selective reprocessing:
 - **Dual UI** — ncurses terminal UI for headless/SSH operation, plus a browser-based React dashboard for remote monitoring.  
 - **Encrypted API key management** — AES-256-GCM encrypted key store with master password, per-provider key names, and runtime key resolution via `key_name` in config.json interfaces.  
 - **Per-item fan-out** — CSV, text_lines, and Polarion filters produce item lists; `per_item` tasks spawn one AI call per item, all running in parallel.  
+- **Cloud connectors** — Unified framework for object storage (S3, Azure Blob, GCS), databases (PostgreSQL, Snowflake), file collaboration (OneDrive, Google Sheets), ALM (Polarion, Jira, GitHub), and messaging (Slack, Email). Per-item output piping enables full round-trip pipelines: read from cloud → fan out per item → AI processes each → write results back.  
 - **Task watchdog** — Inactivity-based timeout with heartbeat support for long-running shell and Python tasks.  
 - **Event-driven architecture** — Loosely coupled, non-blocking design with thread-safe event queue.  
 - **Cross-platform** — Compiles and runs on **Linux** (GCC), **macOS** (Clang), and **Windows** (MSVC).  
@@ -160,6 +165,32 @@ queue/
 | [Vehicle Troubleshooting Guide](example/workflows/vehicleTroubleshootingGuide.md) | AI-generated flow charts based on user prompt, shell + AI pipeline |
 | [Make-Style Build Example](example/workflows/make_example.md) | Classic dependency graph, file I/O, shell tasks |
 | [Hamburg Tourist Day Planner](example/workflows/hamburg-tourist-day-planner.md) | Webhook trigger, n8n integration, HMAC signing, completion callback with AI output |
+| [S3 Round-Trip](example/workflows/s3UploadDownloadDemo.md), [PostgreSQL](example/workflows/postgresDemo.md), [Email](example/workflows/emailDemo.md), [GitHub](example/workflows/gitHubIssueDemo.md), [Azure Blob](example/workflows/azureBlobDemo.md), [GCS](example/workflows/gcsDemo.md) | Cloud round-trip demos: upload data → AI processes → write results back. Per-item fan-out + output piping. |
+
+---
+
+## Cloud Connectors
+
+The cloud integration layer provides a unified interface for connecting workflows to external systems. All connectors share the same encrypted credential store, retry policy, audit logging, and per-item output piping.
+
+| Connector | Auth | Description |
+|-----------|------|-------------|
+| **Polarion** | Bearer (PAT) | Requirements & ALM. Run Lucene queries against work items, fan out per requirement for AI assessment, and write results back via PATCH (compliance status, links, attachments). |
+| **S3** | SigV4 | Object storage (AWS S3, MinIO, Wasabi, Cloudflare R2, GCS S3-interop). Upload, download, list, and delete blobs. Common pattern: drop a file, AI analyses it, result lands back in the bucket. |
+| **PostgreSQL** | BasicAuth | Run SQL queries via libpq, write results to CSV/JSON, and INSERT AI-generated rows back into the database. Built for analytics pipelines and per-row enrichment. |
+| **Email** (SMTP/IMAP) | BasicAuth | Send messages with MIME attachments via SMTP and read incoming messages from IMAP folders. Use cases: automated outreach, AI replies to support tickets, alerting. |
+| **GitHub** | Bearer (PAT) | List, create, comment, and close issues, plus retrieve repository files. Common pattern: AI triages new issues automatically and posts a comment with severity, root cause hypothesis, and suggested labels. |
+| **Azure Blob** | Shared Key or Azure AD OAuth2 | Native Azure Blob Storage REST API (not S3-compatible). Upload and download blobs with full Azure feature support: tiers, metadata, Data Lake Gen2 hierarchical namespace. |
+| **GCS** (native) | Service account JWT → OAuth2 | Native Google Cloud Storage JSON API. Upload and download objects. Uses standard GCP service account auth instead of HMAC interop keys. |
+| **OneDrive** | OAuth 2.0 PKCE | Microsoft Graph API for personal and work OneDrive accounts. Upload, download, and watch folders for new files. Suitable for document workflows where files arrive from end users. |
+| **Snowflake** | RSA JWT | Cloud data warehouse via the SQL REST API with key-pair authentication. Run analytical queries, fan out per row for AI classification, INSERT verdicts back. No password handling, JWT is minted and rotated automatically. |
+| **Slack** | Bearer (Bot token) | Post messages to channels via the Slack Web API. Used for notifications: workflow status, AI-generated summaries, alerts, and routing of cloud events to human operators. |
+| **Jira** | BasicAuth or Bearer | Atlassian Cloud Jira REST API v3. Create, update, transition, comment on, and query issues. Common pattern: ingest tickets, AI categorises and enriches, write results back. |
+| **Google Sheets** | API key or OAuth2 | Read and write spreadsheet ranges via the Sheets API v4. Useful when business data lives in shared sheets — read a range, AI processes it, write results into adjacent columns. |
+
+Connections are managed through the workflow editor's **Connections** tab. Adding a new connector takes ~200 lines of C++: implement `ICloudConnector::TestConnection()` + `ResolveCredentials()`, plus a task executor that extends `ICloudTaskExecutor`. The base class handles connection lookup, credential resolution, circuit breaker, audit logging, cancellation tokens, and template variable expansion automatically.
+
+The framework also exposes an **MCP sidecar** so Claude Desktop, Claude Code, and other MCP clients can list and run workflows directly. See [doc/cloud-integration.md](doc/cloud-integration.md) for the full architecture and per-connector details.
 
 ---
 
@@ -175,6 +206,7 @@ queue/
 - [x] HTTP/2 multiplexing — all concurrent AI requests share a single TLS connection per provider via a dedicated I/O thread  
 - [x] Engine security hardening — bearer token auth, HMAC webhooks, rate limiting, auth lockout, token auto-expiry/rotation, security audit logging, built-in TLS, RBAC (admin/operator/viewer), gateway identity headers, request body limits, security response headers (CSP, X-Frame-Options, HSTS)  
 - [x] Python engine parallelization — N sub-interpreters with per-engine worker threads and load-balanced task dispatch (Python 3.12+; graceful fallback to single engine on older Python)  
+- [x] Cloud integration — 12 native connectors (Polarion, S3, OneDrive, Snowflake, PostgreSQL, Slack, Email, GitHub, Jira, Google Sheets, Azure Blob, GCS), MCP sidecar for Claude/AI assistants, named connections with encrypted credentials (OAuth2/JWT/SigV4/Shared Key), per-item cloud write-back via output piping  
 
 ### Remaining
 

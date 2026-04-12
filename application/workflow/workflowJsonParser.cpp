@@ -399,6 +399,16 @@ namespace AIAssistant
             return TaskType::SheetsWrite;
         }
 
+        if (rawType == "azure_blob_upload" || rawType == "azure_blob_download")
+        {
+            return TaskType::AzureBlob;
+        }
+
+        if (rawType == "gcs_upload" || rawType == "gcs_download")
+        {
+            return TaskType::Gcs;
+        }
+
         LOG_CORE_WARN("Unknown task type '{}', defaulting to Internal", rawType);
         return TaskType::Internal;
     }
@@ -447,6 +457,16 @@ namespace AIAssistant
         if (typeString == "email_watch")
         {
             return WorkflowTriggerType::EmailWatch;
+        }
+
+        if (typeString == "azure_blob_watch")
+        {
+            return WorkflowTriggerType::AzureBlobWatch;
+        }
+
+        if (typeString == "gcs_watch")
+        {
+            return WorkflowTriggerType::GcsWatch;
         }
 
         LOG_CORE_WARN("Unknown trigger type '{}', defaulting to Unknown", typeString);

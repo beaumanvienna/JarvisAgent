@@ -6,7 +6,7 @@ This document covers the cloud integration layer introduced in j9t, including th
 
 ## 1. Overview
 
-The cloud integration layer provides a uniform interface for connecting j9t workflows to external cloud services (Polarion, S3, OneDrive, Snowflake, PostgreSQL, Slack, Email, GitHub, Jira). All cloud code in the C++ backend uses libcurl + OpenSSL + simdjson — Python is reserved for workflow task scripts only.
+The cloud integration layer provides a uniform interface for connecting j9t workflows to external cloud services (Polarion, S3, OneDrive, Snowflake, PostgreSQL, Slack, Email, GitHub, Jira, Azure Blob Storage, Google Cloud Storage). All cloud code in the C++ backend uses libcurl + OpenSSL + simdjson — Python is reserved for workflow task scripts only.
 
 **Design principles:**
 - **Disk-first** — all cloud data (query results, downloaded files, API responses) is written to the workflow working directory before downstream tasks consume it.
@@ -940,6 +940,141 @@ Cloud task executors support `{{...}}` template variable expansion in their `par
 
 ---
 
-## 17. Next Steps
+## 17. Cloud Storage — Azure Blob / GCS Native (Phase 11)
 
-See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 10.
+The S3 connector (Phase 3) covers AWS S3, MinIO, and GCS in S3-interop mode (HMAC keys + SigV4). Phase 11 adds native connectors for Azure Blob Storage and Google Cloud Storage, supporting their standard auth methods and full API feature sets.
+
+### AzureSharedKeySigner
+
+`AzureSharedKeySigner` implements Azure Storage Shared Key request signing via OpenSSL HMAC-SHA256. It produces the `Authorization`, `x-ms-date`, and `x-ms-version` headers required for Azure Blob Storage REST API authentication.
+
+The signing format differs from AWS SigV4:
+- Authorization header: `SharedKey {accountName}:{Base64(HMAC-SHA256(key, StringToSign))}`
+- Uses RFC 1123 date format (not ISO-8601)
+- Canonicalized headers include all `x-ms-*` headers
+- Canonicalized resource includes query parameters sorted by name
+
+**Files:** `application/cloud/azureSharedKeySigner.h/cpp`
+
+### AzureBlobConnector
+
+`AzureBlobConnector : ICloudConnector` supports Azure Blob Storage with two auth methods:
+
+- **Shared Key** (`azure_shared_key`): HMAC-SHA256 signing via `AzureSharedKeySigner`. Account key stored as `api_key` (Base64-encoded) or `password` in KeyManager.
+- **Azure AD OAuth2** (`oauth2`): Bearer token from `OAuthTokenManager` with Azure AD token endpoint and scope `https://storage.azure.com/.default`.
+
+CloudConnection params:
+
+| Key | Description |
+|-----|-------------|
+| `account_name` | Azure Storage account name (required) |
+| `container` | Default blob container (can be overridden per-task) |
+
+- **Endpoint**: `https://{account_name}.blob.core.windows.net` (default) or custom URL (e.g., `http://127.0.0.1:10000/devstoreaccount1` for Azurite)
+- **TestConnection()**: `GET /{container}?restype=container` — checks container exists and credentials work
+
+**Files:** `application/cloud/azureBlobConnector.h/cpp`
+
+### Azure Blob Task Types
+
+JCWF task types `"azure_blob_upload"` and `"azure_blob_download"` perform blob operations.
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `azure_blob`) |
+| `operation` | yes | | `"upload"` or `"download"` |
+| `container` | no | connection default | Blob container name |
+| `blob_name` | yes | | Blob path within container |
+| `local_path` | yes | | Local file path |
+
+- **Upload**: `PUT /{container}/{blob_name}` with `x-ms-blob-type: BlockBlob` header
+- **Download**: `GET /{container}/{blob_name}` to local file
+
+**Files:** `application/cloud/azureBlobCloudTaskExecutor.h/cpp`
+
+### azure_blob_watch Trigger
+
+Polls on configurable interval. Fires the workflow on each poll; the workflow itself determines whether there are new blobs.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `connection` | (required) | Named CloudConnection (type `azure_blob`) |
+| `container` | connection default | Container to watch |
+| `prefix` | empty (all) | Blob name prefix filter |
+| `poll_interval_seconds` | 300 | Poll interval (minimum 60s) |
+
+### GcsConnector
+
+`GcsConnector : ICloudConnector` supports Google Cloud Storage via the GCS JSON API with service account JWT authentication.
+
+**Auth flow:** Service account private key (PEM, stored as `KeyPairCredential` in KeyManager) → `JwtGenerator` creates a self-signed JWT with scope `https://www.googleapis.com/auth/devstorage.read_write` → exchange JWT for OAuth2 access token via `POST https://oauth2.googleapis.com/token` → token cached with 55-minute TTL (refresh 5 min before 1-hour expiry).
+
+For local testing with fake-gcs-server, the JWT is used directly as a bearer token (token exchange is skipped).
+
+CloudConnection params:
+
+| Key | Description |
+|-----|-------------|
+| `bucket` | Default GCS bucket (can be overridden per-task) |
+| `service_account_email` | Service account email (used in JWT `iss` claim) |
+
+- **Endpoint**: `https://storage.googleapis.com` (default) or `http://localhost:4443` (fake-gcs-server)
+- **Auth type**: JwtRsa
+- **TestConnection()**: `GET /storage/v1/b/{bucket}` — checks bucket exists and credentials work
+
+**Files:** `application/cloud/gcsConnector.h/cpp`
+
+### GCS Task Types
+
+JCWF task types `"gcs_upload"` and `"gcs_download"` perform object operations via the GCS JSON API.
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `gcs`) |
+| `operation` | yes | | `"upload"` or `"download"` |
+| `bucket` | no | connection default | GCS bucket name |
+| `object_name` | yes | | Object path within bucket |
+| `local_path` | yes | | Local file path |
+
+- **Upload**: `POST /upload/storage/v1/b/{bucket}/o?uploadType=media&name={object_name}` with file body
+- **Download**: `GET /storage/v1/b/{bucket}/o/{object_name}?alt=media` to local file
+
+Object names with special characters are URL-encoded.
+
+**Files:** `application/cloud/gcsCloudTaskExecutor.h/cpp`
+
+### gcs_watch Trigger
+
+Polls on configurable interval. Fires the workflow on each poll; the workflow itself determines whether there are new objects.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `connection` | (required) | Named CloudConnection (type `gcs`) |
+| `bucket` | connection default | Bucket to watch |
+| `prefix` | empty (all) | Object name prefix filter |
+| `poll_interval_seconds` | 300 | Poll interval (minimum 60s) |
+
+### Connections UI
+
+The ConnectionsView shows dedicated fields for:
+- **Azure Blob** connections: Account Name, Container
+- **GCS** connections: Bucket, Service Account Email
+
+### Task Inspector
+
+The workflow editor shows:
+- **Azure Blob** task inspector (blue accent, `rgba(0,120,212)`) for `azure_blob_upload` and `azure_blob_download` — fields: connection, operation, container, blob_name, local_path
+- **GCS** task inspector (Google blue accent, `rgba(66,133,244)`) for `gcs_upload` and `gcs_download` — fields: connection, operation, bucket, object_name, local_path
+
+### Local Testing
+
+| Provider | Docker Command | Notes |
+|----------|---------------|-------|
+| Azure Blob | `docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite` | Azurite emulator: Blob on 10000. Default account: `devstoreaccount1`, well-known dev key |
+| GCS | `docker run -d --name fake-gcs -p 4443:4443 fsouza/fake-gcs-server -scheme http` | fake-gcs-server for local testing; create bucket via REST |
+
+---
+
+## 18. Next Steps
+
+See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 11.

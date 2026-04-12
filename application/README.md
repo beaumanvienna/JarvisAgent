@@ -75,6 +75,8 @@ Called at the end of `OnStart()`:
    - `GitHubConnector` + `GitHubCloudTaskExecutor` → `TaskType::GitHubIssue`
    - `JiraConnector` + `JiraCloudTaskExecutor` → `TaskType::JiraIssue`
    - `GoogleSheetsConnector` + `GoogleSheetsCloudTaskExecutor` → `TaskType::SheetsRead`, `TaskType::SheetsWrite`
+   - `AzureBlobConnector` + `AzureBlobCloudTaskExecutor` → `TaskType::AzureBlob`
+   - `GcsConnector` + `GcsCloudTaskExecutor` → `TaskType::Gcs`
 4. Wire `WebServer` ↔ `WorkflowRegistry`
 5. Create and start `WorkflowRuntimeManager`, wire it to `WebServer`
 6. Late-bind `WorkflowRuntimeManager` to `SubWorkflowTaskExecutor`

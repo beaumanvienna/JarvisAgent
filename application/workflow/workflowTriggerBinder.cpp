@@ -630,6 +630,108 @@ namespace AIAssistant
                         break;
                     }
 
+                    case WorkflowTriggerType::AzureBlobWatch:
+                    {
+                        std::string connectionName;
+                        std::string container;
+                        std::string prefix;
+                        uint32_t pollIntervalSeconds = 300;
+
+                        if (!workflowTrigger.m_ParamsJson.empty())
+                        {
+                            simdjson::ondemand::parser azureParser;
+                            simdjson::padded_string azurePadded(workflowTrigger.m_ParamsJson);
+                            simdjson::ondemand::document azureDoc;
+
+                            if (azureParser.iterate(azurePadded).get(azureDoc) == simdjson::SUCCESS)
+                            {
+                                std::string_view sv;
+                                if (azureDoc["connection"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    connectionName = std::string(sv);
+                                }
+                                if (azureDoc["container"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    container = std::string(sv);
+                                }
+                                if (azureDoc["prefix"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    prefix = std::string(sv);
+                                }
+                                int64_t interval = 0;
+                                if (azureDoc["poll_interval_seconds"].get_int64().get(interval) == simdjson::SUCCESS)
+                                {
+                                    pollIntervalSeconds = static_cast<uint32_t>(interval);
+                                }
+                            }
+                        }
+
+                        if (connectionName.empty())
+                        {
+                            LOG_APP_ERROR(
+                                "WorkflowTriggerBinder::RegisterAll: azure_blob_watch trigger '{}' in workflow '{}' "
+                                "missing 'connection' param",
+                                workflowTrigger.m_Id, workflowDefinition.m_Id);
+                            break;
+                        }
+
+                        triggerEngine.AddAzureBlobWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id,
+                                                               connectionName, container, prefix,
+                                                               pollIntervalSeconds, workflowTrigger.m_IsEnabled);
+                        break;
+                    }
+
+                    case WorkflowTriggerType::GcsWatch:
+                    {
+                        std::string connectionName;
+                        std::string bucket;
+                        std::string prefix;
+                        uint32_t pollIntervalSeconds = 300;
+
+                        if (!workflowTrigger.m_ParamsJson.empty())
+                        {
+                            simdjson::ondemand::parser gcsParser;
+                            simdjson::padded_string gcsPadded(workflowTrigger.m_ParamsJson);
+                            simdjson::ondemand::document gcsDoc;
+
+                            if (gcsParser.iterate(gcsPadded).get(gcsDoc) == simdjson::SUCCESS)
+                            {
+                                std::string_view sv;
+                                if (gcsDoc["connection"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    connectionName = std::string(sv);
+                                }
+                                if (gcsDoc["bucket"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    bucket = std::string(sv);
+                                }
+                                if (gcsDoc["prefix"].get_string().get(sv) == simdjson::SUCCESS)
+                                {
+                                    prefix = std::string(sv);
+                                }
+                                int64_t interval = 0;
+                                if (gcsDoc["poll_interval_seconds"].get_int64().get(interval) == simdjson::SUCCESS)
+                                {
+                                    pollIntervalSeconds = static_cast<uint32_t>(interval);
+                                }
+                            }
+                        }
+
+                        if (connectionName.empty())
+                        {
+                            LOG_APP_ERROR(
+                                "WorkflowTriggerBinder::RegisterAll: gcs_watch trigger '{}' in workflow '{}' "
+                                "missing 'connection' param",
+                                workflowTrigger.m_Id, workflowDefinition.m_Id);
+                            break;
+                        }
+
+                        triggerEngine.AddGcsWatchTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, connectionName,
+                                                         bucket, prefix, pollIntervalSeconds,
+                                                         workflowTrigger.m_IsEnabled);
+                        break;
+                    }
+
                     case WorkflowTriggerType::Structure:
                     {
                         LOG_APP_INFO(

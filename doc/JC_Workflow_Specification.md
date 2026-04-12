@@ -51,6 +51,8 @@ This specification focuses on:
     - [3.2.5 Manual Triggers](#325-manual-triggers)
     - [3.2.6 Webhook Triggers](#326-webhook-triggers)
     - [3.2.7 S3-Watch Triggers](#327-s3-watch-triggers)
+    - [3.2.8 Azure Blob-Watch Triggers](#328-azure-blob-watch-triggers)
+    - [3.2.9 GCS-Watch Triggers](#329-gcs-watch-triggers)
   - [3.3 Tasks](#33-tasks)
     - [3.3.1 Task Types](#331-task-types)
     - [3.3.2 Mode: single vs per_item](#332-mode-single-vs-per_item)
@@ -462,6 +464,46 @@ At runtime, the engine will expand designated tasks from this iterator (see task
 - The workflow itself is responsible for detecting new or changed objects (e.g., by comparing against a previous listing stored on disk).
 - The `connection` param references a named CloudConnection of type `s3` configured in the Connections tab.
 
+#### 3.2.8 Azure Blob-Watch Triggers
+
+```jsonc
+{
+  "type": "azure_blob_watch",
+  "id": "watch-blobs",
+  "enabled": true,
+  "params": {
+    "connection": "my-azure-blob",   // named CloudConnection (required)
+    "container": "uploads",          // optional, defaults to connection container
+    "prefix": "inbox/",             // optional blob name prefix filter
+    "poll_interval_seconds": 300    // optional, minimum 60, default 300
+  }
+}
+```
+
+- Azure Blob-watch triggers poll an Azure Blob container at a configurable interval.
+- On each poll interval, the trigger fires and the workflow runs.
+- The `connection` param references a named CloudConnection of type `azure_blob`.
+
+#### 3.2.9 GCS-Watch Triggers
+
+```jsonc
+{
+  "type": "gcs_watch",
+  "id": "watch-objects",
+  "enabled": true,
+  "params": {
+    "connection": "my-gcs",          // named CloudConnection (required)
+    "bucket": "my-bucket",           // optional, defaults to connection bucket
+    "prefix": "inbox/",             // optional object name prefix filter
+    "poll_interval_seconds": 300    // optional, minimum 60, default 300
+  }
+}
+```
+
+- GCS-watch triggers poll a GCS bucket at a configurable interval.
+- On each poll interval, the trigger fires and the workflow runs.
+- The `connection` param references a named CloudConnection of type `gcs`.
+
 ---
 
 ### 3.3 Tasks
@@ -481,7 +523,7 @@ Each task has:
 ```jsonc
 {
   "id": "summarize",
-  "type": "python | shell | ai_call | internal | sub_workflow | polarion_write | s3 | db_query",
+  "type": "python | shell | ai_call | internal | sub_workflow | polarion_write | s3 | db_query | onedrive_upload | onedrive_download | snowflake_query | slack_message | email_send | email_read | github_issue | jira_issue | sheets_read | sheets_write | azure_blob_upload | azure_blob_download | gcs_upload | gcs_download",
   "label": "Summarize report with AI",
   "doc": "Sends the prepared text to an AI assistant and stores the answer.",
   "mode": "single | per_item",
@@ -765,6 +807,48 @@ make
   ```
 
   See `doc/cloud-integration.md` §10 for full param reference.
+
+- `azure_blob_upload` / `azure_blob_download`  
+  Uploads or downloads a blob to/from Azure Blob Storage via the Azure Blob REST API.
+  Authenticated with Azure Storage Shared Key (HMAC-SHA256) or Azure AD OAuth2.
+
+  ```jsonc
+  {
+    "id": "upload_report",
+    "type": "azure_blob_upload",
+    "params": {
+      "connection": "my-azure-blob",
+      "operation": "upload",
+      "container": "reports",
+      "blob_name": "output/{{run_id}}/report.pdf",
+      "local_path": "report.pdf"
+    },
+    "working_directory": "my-workflow/upload"
+  }
+  ```
+
+  See `doc/cloud-integration.md` §17 for full param reference.
+
+- `gcs_upload` / `gcs_download`  
+  Uploads or downloads an object to/from Google Cloud Storage via the GCS JSON API.
+  Authenticated with service account JWT → OAuth2 access token.
+
+  ```jsonc
+  {
+    "id": "upload_data",
+    "type": "gcs_upload",
+    "params": {
+      "connection": "my-gcs",
+      "operation": "upload",
+      "bucket": "workflow-data",
+      "object_name": "output/{{run_id}}/data.csv",
+      "local_path": "data.csv"
+    },
+    "working_directory": "my-workflow/upload"
+  }
+  ```
+
+  See `doc/cloud-integration.md` §17 for full param reference.
 
 #### 3.3.2 Mode: `single` vs `per_item`
 

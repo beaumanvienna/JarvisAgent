@@ -3392,10 +3392,15 @@ export default function WorkflowEditorView(props: {
                       <option value="snowflake_query">snowflake_query</option>
                       <option value="slack_message">slack_message</option>
                       <option value="email_send">email_send</option>
+                      <option value="email_read">email_read</option>
                       <option value="github_issue">github_issue</option>
                       <option value="jira_issue">jira_issue</option>
                       <option value="sheets_read">sheets_read</option>
                       <option value="sheets_write">sheets_write</option>
+                      <option value="azure_blob_upload">azure_blob_upload</option>
+                      <option value="azure_blob_download">azure_blob_download</option>
+                      <option value="gcs_upload">gcs_upload</option>
+                      <option value="gcs_download">gcs_download</option>
                     </select>
                   </label>
 
@@ -3752,6 +3757,36 @@ export default function WorkflowEditorView(props: {
                     );
                   })()}
 
+                  {selectedNode.data.task.type === "email_read" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(255,152,0,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(255,152,0,0.95)" }}>Email Read params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-email" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">folder (default: INBOX)</div>
+                          <input className="input" value={(params.folder as string) ?? ""} placeholder="INBOX" onChange={(e) => { updateParams({ folder: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">subject_filter (optional)</div>
+                          <input className="input" value={(params.subject_filter as string) ?? ""} placeholder="match subject containing..." onChange={(e) => { updateParams({ subject_filter: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">max_messages (default: 10)</div>
+                          <input className="input" type="number" value={(params.max_messages as number) ?? ""} placeholder="10" onChange={(e) => { updateParams({ max_messages: e.target.value ? parseInt(e.target.value) : undefined }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
                   {selectedNode.data.task.type === "github_issue" && (() => {
                     const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
                     const updateParams = (patch: Record<string, unknown>) => {
@@ -3911,6 +3946,80 @@ export default function WorkflowEditorView(props: {
                             </label>
                           </>
                         )}
+                      </div>
+                    );
+                  })()}
+
+                  {(selectedNode.data.task.type === "azure_blob_upload" || selectedNode.data.task.type === "azure_blob_download") && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(0,120,212,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(0,120,212,0.95)" }}>Azure Blob params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-azure-blob" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? (selectedNode.data.task.type === "azure_blob_upload" ? "upload" : "download")} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="upload">upload</option>
+                            <option value="download">download</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">container (optional, defaults to connection)</div>
+                          <input className="input" value={(params.container as string) ?? ""} onChange={(e) => { updateParams({ container: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">blob_name</div>
+                          <input className="input" value={(params.blob_name as string) ?? ""} placeholder="output/report.pdf" onChange={(e) => { updateParams({ blob_name: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">local_path</div>
+                          <input className="input" value={(params.local_path as string) ?? ""} placeholder="report.pdf" onChange={(e) => { updateParams({ local_path: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {(selectedNode.data.task.type === "gcs_upload" || selectedNode.data.task.type === "gcs_download") && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(66,133,244,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(66,133,244,0.95)" }}>GCS params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-gcs" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? (selectedNode.data.task.type === "gcs_upload" ? "upload" : "download")} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="upload">upload</option>
+                            <option value="download">download</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">bucket (optional, defaults to connection)</div>
+                          <input className="input" value={(params.bucket as string) ?? ""} onChange={(e) => { updateParams({ bucket: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">object_name</div>
+                          <input className="input" value={(params.object_name as string) ?? ""} placeholder="output/report.pdf" onChange={(e) => { updateParams({ object_name: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">local_path</div>
+                          <input className="input" value={(params.local_path as string) ?? ""} placeholder="report.pdf" onChange={(e) => { updateParams({ local_path: e.target.value }); }} />
+                        </label>
                       </div>
                     );
                   })()}

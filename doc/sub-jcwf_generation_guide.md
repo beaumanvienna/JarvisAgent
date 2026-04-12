@@ -80,7 +80,7 @@ Each key in `tasks` is the `taskId` (must match the task's `"id"` field).
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `id` | YES | string | Must match the key in `tasks`. |
-| `type` | YES | string | `python`, `shell`, `ai_call`, or `internal`. |
+| `type` | YES | string | `python`, `shell`, `ai_call`, `internal`, `sub_workflow`, or a cloud task type (see `jcwf_generation_guide.md` §2 for the full list). |
 | `label` | no | string | Human-readable task name. |
 | `doc` | no | string | Documentation. |
 | `mode` | no | string | `"single"` (default) or `"per_item"`. |

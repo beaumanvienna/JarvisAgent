@@ -1108,7 +1108,17 @@ namespace AIAssistant
                         m_ActiveRuns[index].m_Run.m_CompletedAtIso8601 = GetIso8601NowUTC();
                     }
 
-                    m_LastRuns[m_ActiveRuns[index].m_Run.m_WorkflowId] = m_ActiveRuns[index].m_Run;
+                    // Only update lastRun if this run started later than the existing entry.
+                    // Prevents an older stuck/timed-out run from overwriting a newer successful one.
+                    {
+                        auto const& workflowId = m_ActiveRuns[index].m_Run.m_WorkflowId;
+                        auto existingIt = m_LastRuns.find(workflowId);
+                        if (existingIt == m_LastRuns.end() ||
+                            m_ActiveRuns[index].m_Run.m_StartedAtIso8601 >= existingIt->second.m_StartedAtIso8601)
+                        {
+                            m_LastRuns[workflowId] = m_ActiveRuns[index].m_Run;
+                        }
+                    }
 
                     if (m_ActiveRuns[index].m_Run.m_HasFailed)
                     {

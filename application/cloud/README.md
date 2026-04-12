@@ -37,6 +37,8 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `gitHubConnector` | `github` | Bearer (PAT) | GitHub / GitLab REST API |
 | `jiraConnector` | `jira` | BasicAuth or Bearer | Jira REST API v3 |
 | `googleSheetsConnector` | `google_sheets` | API key or OAuth2 | Google Sheets API v4 |
+| `azureBlobConnector` | `azure_blob` | Shared Key or OAuth2 | Azure Blob Storage REST API |
+| `gcsConnector` | `gcs` | JWT RSA → OAuth2 | Google Cloud Storage JSON API |
 
 ## Task Executors
 
@@ -52,6 +54,8 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `gitHubCloudTaskExecutor` | `github_issue` | Issue create/comment/close, file retrieval, list issues |
 | `jiraCloudTaskExecutor` | `jira_issue` | Issue create/update/transition/comment/get |
 | `googleSheetsCloudTaskExecutor` | `sheets_read`, `sheets_write` | Read/write spreadsheet ranges |
+| `azureBlobCloudTaskExecutor` | `azure_blob_upload`, `azure_blob_download` | Blob upload/download via Azure REST API |
+| `gcsCloudTaskExecutor` | `gcs_upload`, `gcs_download` | Object upload/download via GCS JSON API |
 
 ## Shared Infrastructure
 
@@ -67,6 +71,7 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `providerRateLimitPolicy` | Per-provider rate-limit awareness (burst limits, min intervals) |
 | `taskCancellationToken` | Cooperative cancellation for long-running cloud operations |
 | `sigV4Signer` | AWS Signature V4 request signing (HMAC-SHA256 via OpenSSL) |
+| `azureSharedKeySigner` | Azure Storage Shared Key request signing (HMAC-SHA256 via OpenSSL) |
 
 ## Adding a New Connector
 
@@ -90,4 +95,4 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `engine/log/secretRedactor.h` | Scrubs secrets from log output |
 | `engine/core.h` | Owns `CloudConnectionManager`, `CloudConnectorRegistry`, `CloudCircuitBreaker`, `OAuthTokenManager` |
 | `application/web/webServer.cpp` | REST API endpoints for connections CRUD, OAuth flow, health status |
-| `application/workflow/triggerEngine.h` | Cloud trigger types (s3_watch, onedrive_watch, email_watch) |
+| `application/workflow/triggerEngine.h` | Cloud trigger types (s3_watch, onedrive_watch, email_watch, azure_blob_watch, gcs_watch) |

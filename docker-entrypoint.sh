@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# docker-entrypoint.sh — First-run seeding for Docker containers.
+# docker-entrypoint.sh — First-run seeding and upgrade handling for Docker containers.
 #
 # Read-only image assets live in /opt/jarvisagent/.
 # The working directory /app is the volume mount (~/JarvisAgent on the host).
@@ -8,10 +8,14 @@
 #
 # Mirrors the behavior of packaging/Linux/jarvisagent-launcher.sh:
 # copies example workflows and default config on first run.
+#
+# On image upgrade (version change), example workflows are re-seeded.
 
 set -euo pipefail
 
 IMAGE_DIR="/opt/jarvisagent"
+IMAGE_VERSION_FILE="$IMAGE_DIR/.image-defaults/.image-version"
+DATA_VERSION_FILE="/app/.image-version"
 
 # ---- Symlink read-only assets into the working directory ----
 # These are re-created on every start (cheap and idempotent).
@@ -19,12 +23,31 @@ ln -sfn "$IMAGE_DIR/dashboard"       /app/dashboard
 ln -sfn "$IMAGE_DIR/workflow-editor"  /app/workflow-editor
 ln -sfn "$IMAGE_DIR/scripts"          /app/scripts
 
-# ---- First-run seeding ----
-# Copy example workflows on first run (only if workflows dir is empty)
+# ---- Determine if seeding is needed ----
+NEED_SEED=false
+
 if [ -z "$(ls -A /app/workflows 2>/dev/null)" ]; then
+    # First run: workflows directory is empty
+    NEED_SEED=true
+    echo "==> First run detected — seeding example workflows"
+elif [ -f "$IMAGE_VERSION_FILE" ]; then
+    IMAGE_VER=$(cat "$IMAGE_VERSION_FILE" 2>/dev/null || echo "")
+    DATA_VER=$(cat "$DATA_VERSION_FILE" 2>/dev/null || echo "")
+    if [ "$IMAGE_VER" != "$DATA_VER" ]; then
+        NEED_SEED=true
+        echo "==> Image upgrade detected ($DATA_VER -> $IMAGE_VER) — re-seeding example workflows"
+    fi
+fi
+
+if [ "$NEED_SEED" = true ]; then
     mkdir -p /app/workflows
     cp -a "$IMAGE_DIR/.image-defaults/workflows/"* /app/workflows/ 2>/dev/null || true
     echo "==> Seeded example workflows into /app/workflows/"
+
+    # Copy version marker so we don't re-seed again until the next upgrade
+    if [ -f "$IMAGE_VERSION_FILE" ]; then
+        cp "$IMAGE_VERSION_FILE" "$DATA_VERSION_FILE"
+    fi
 fi
 
 # Copy example config on first run
@@ -42,7 +65,8 @@ mkdir -p /app/queue /app/log
 MOUNT_UID=$(stat -c '%u' /app)
 MOUNT_GID=$(stat -c '%g' /app)
 if [ "$MOUNT_UID" != "0" ]; then
-    chown -R "$MOUNT_UID:$MOUNT_GID" /app/workflows /app/config.json /app/queue /app/log 2>/dev/null || true
+    chown -R "$MOUNT_UID:$MOUNT_GID" /app/workflows /app/queue /app/log 2>/dev/null || true
+    chown "$MOUNT_UID:$MOUNT_GID" /app/config.json /app/.image-version 2>/dev/null || true
 fi
 
 # ---- Launch ----

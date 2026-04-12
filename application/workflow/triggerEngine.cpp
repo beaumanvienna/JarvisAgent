@@ -416,6 +416,55 @@ namespace AIAssistant
             subjectFilter.empty() ? "<all>" : subjectFilter, pollIntervalSeconds);
     }
 
+    void TriggerEngine::AddAzureBlobWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                                std::string const& connectionName, std::string const& container,
+                                                std::string const& prefix, uint32_t pollIntervalSeconds,
+                                                bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        AzureBlobWatchTriggerInstance instance{};
+        instance.m_WorkflowId = workflowId;
+        instance.m_TriggerId = triggerId;
+        instance.m_ConnectionName = connectionName;
+        instance.m_Container = container;
+        instance.m_Prefix = prefix;
+        instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
+        instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
+        instance.m_IsEnabled = isEnabled;
+
+        m_AzureBlobWatchTriggers.push_back(std::move(instance));
+
+        LOG_APP_INFO(
+            "TriggerEngine::AddAzureBlobWatchTrigger: registered azure_blob_watch trigger '{}' for workflow '{}' "
+            "(connection={}, container={}, prefix={}, interval={}s)",
+            triggerId, workflowId, connectionName, container.empty() ? "<default>" : container,
+            prefix.empty() ? "<all>" : prefix, pollIntervalSeconds);
+    }
+
+    void TriggerEngine::AddGcsWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                            std::string const& connectionName, std::string const& bucket,
+                                            std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        GcsWatchTriggerInstance instance{};
+        instance.m_WorkflowId = workflowId;
+        instance.m_TriggerId = triggerId;
+        instance.m_ConnectionName = connectionName;
+        instance.m_Bucket = bucket;
+        instance.m_Prefix = prefix;
+        instance.m_PollInterval = std::chrono::seconds(std::max(pollIntervalSeconds, 60u));
+        instance.m_NextPollTime = std::chrono::steady_clock::now() + instance.m_PollInterval;
+        instance.m_IsEnabled = isEnabled;
+
+        m_GcsWatchTriggers.push_back(std::move(instance));
+
+        LOG_APP_INFO(
+            "TriggerEngine::AddGcsWatchTrigger: registered gcs_watch trigger '{}' for workflow '{}' "
+            "(connection={}, bucket={}, prefix={}, interval={}s)",
+            triggerId, workflowId, connectionName, bucket.empty() ? "<default>" : bucket,
+            prefix.empty() ? "<all>" : prefix, pollIntervalSeconds);
+    }
+
     TriggerEngine::WebhookTriggerInstance const* TriggerEngine::GetWebhookTrigger(std::string const& workflowId) const
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -437,6 +486,8 @@ namespace AIAssistant
         m_S3WatchTriggers.clear();
         m_OneDriveWatchTriggers.clear();
         m_EmailWatchTriggers.clear();
+        m_AzureBlobWatchTriggers.clear();
+        m_GcsWatchTriggers.clear();
         m_FileWatchIndex.clear();
         m_WebhookIndex.clear();
         LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
@@ -454,6 +505,8 @@ namespace AIAssistant
         EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
         EraseWorkflowFromVector(m_OneDriveWatchTriggers, workflowId);
         EraseWorkflowFromVector(m_EmailWatchTriggers, workflowId);
+        EraseWorkflowFromVector(m_AzureBlobWatchTriggers, workflowId);
+        EraseWorkflowFromVector(m_GcsWatchTriggers, workflowId);
 
         // Rebuild file-watch index because indices may have changed.
         m_FileWatchIndex.clear();
@@ -544,6 +597,30 @@ namespace AIAssistant
 
                 emailInstance.m_NextPollTime = steadyNow + emailInstance.m_PollInterval;
                 eventsToFire.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId});
+            }
+
+            // Azure Blob watch triggers (polling)
+            for (AzureBlobWatchTriggerInstance& azureInstance : m_AzureBlobWatchTriggers)
+            {
+                if (!azureInstance.m_IsEnabled || steadyNow < azureInstance.m_NextPollTime)
+                {
+                    continue;
+                }
+
+                azureInstance.m_NextPollTime = steadyNow + azureInstance.m_PollInterval;
+                eventsToFire.push_back({azureInstance.m_WorkflowId, azureInstance.m_TriggerId});
+            }
+
+            // GCS watch triggers (polling)
+            for (GcsWatchTriggerInstance& gcsInstance : m_GcsWatchTriggers)
+            {
+                if (!gcsInstance.m_IsEnabled || steadyNow < gcsInstance.m_NextPollTime)
+                {
+                    continue;
+                }
+
+                gcsInstance.m_NextPollTime = steadyNow + gcsInstance.m_PollInterval;
+                eventsToFire.push_back({gcsInstance.m_WorkflowId, gcsInstance.m_TriggerId});
             }
         }
 

@@ -139,6 +139,24 @@ namespace AIAssistant
                                   std::string const& connectionName, std::string const& folder,
                                   std::string const& subjectFilter, uint32_t pollIntervalSeconds, bool isEnabled);
 
+        // Register an Azure Blob-watch trigger (polls a container for new blobs).
+        // connectionName: named CloudConnection for Azure Blob access.
+        // container: blob container to watch (empty = use connection default).
+        // prefix: blob name prefix to filter (empty = watch entire container).
+        // pollIntervalSeconds: polling interval (minimum 60).
+        void AddAzureBlobWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                      std::string const& connectionName, std::string const& container,
+                                      std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled);
+
+        // Register a GCS-watch trigger (polls a bucket for new objects).
+        // connectionName: named CloudConnection for GCS access.
+        // bucket: GCS bucket to watch (empty = use connection default).
+        // prefix: object name prefix to filter (empty = watch entire bucket).
+        // pollIntervalSeconds: polling interval (minimum 60).
+        void AddGcsWatchTrigger(std::string const& workflowId, std::string const& triggerId,
+                                std::string const& connectionName, std::string const& bucket,
+                                std::string const& prefix, uint32_t pollIntervalSeconds, bool isEnabled);
+
         // Remove all triggers associated with a workflow (for reload).
         void ClearWorkflowTriggers(std::string const& workflowId);
 
@@ -275,6 +293,32 @@ namespace AIAssistant
             bool m_IsEnabled{true};
         };
 
+        struct AzureBlobWatchTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_ConnectionName;
+            std::string m_Container;
+            std::string m_Prefix;
+            std::chrono::seconds m_PollInterval{300};
+            std::chrono::steady_clock::time_point m_NextPollTime{};
+            std::string m_LastSeenTimestamp; // Last-Modified of newest blob from last poll
+            bool m_IsEnabled{true};
+        };
+
+        struct GcsWatchTriggerInstance
+        {
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
+            std::string m_ConnectionName;
+            std::string m_Bucket;
+            std::string m_Prefix;
+            std::chrono::seconds m_PollInterval{300};
+            std::chrono::steady_clock::time_point m_NextPollTime{};
+            std::string m_LastSeenTimestamp; // 'updated' timestamp of newest object from last poll
+            bool m_IsEnabled{true};
+        };
+
     private:
         void FireTrigger(std::string const& workflowId, std::string const& triggerId) const;
 
@@ -298,6 +342,8 @@ namespace AIAssistant
         std::vector<S3WatchTriggerInstance> m_S3WatchTriggers;
         std::vector<OneDriveWatchTriggerInstance> m_OneDriveWatchTriggers;
         std::vector<EmailWatchTriggerInstance> m_EmailWatchTriggers;
+        std::vector<AzureBlobWatchTriggerInstance> m_AzureBlobWatchTriggers;
+        std::vector<GcsWatchTriggerInstance> m_GcsWatchTriggers;
 
         // Optional acceleration structure for file-trigger lookups:
         // map path → indices into m_FileWatchTriggers.

@@ -68,6 +68,10 @@
 #include "cloud/jiraCloudTaskExecutor.h"
 #include "cloud/googleSheetsConnector.h"
 #include "cloud/googleSheetsCloudTaskExecutor.h"
+#include "cloud/azureBlobConnector.h"
+#include "cloud/azureBlobCloudTaskExecutor.h"
+#include "cloud/gcsConnector.h"
+#include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "workflow/aiRequestPool.h"
@@ -360,6 +364,20 @@ namespace AIAssistant
                     std::make_shared<GoogleSheetsCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::SheetsRead, sheetsExecutor);
                 executorRegistry.RegisterExecutor(TaskType::SheetsWrite, sheetsExecutor);
+
+                // Azure Blob connector + executor
+                connectorRegistry.Register(std::make_unique<AzureBlobConnector>());
+
+                std::shared_ptr<ITaskExecutor> azureBlobExecutor =
+                    std::make_shared<AzureBlobCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::AzureBlob, azureBlobExecutor);
+
+                // GCS connector + executor
+                connectorRegistry.Register(std::make_unique<GcsConnector>());
+
+                std::shared_ptr<ITaskExecutor> gcsExecutor =
+                    std::make_shared<GcsCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::Gcs, gcsExecutor);
             }
         }
 

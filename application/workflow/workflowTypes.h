@@ -74,7 +74,9 @@ namespace AIAssistant
         Webhook,
         S3Watch,
         OneDriveWatch,
-        EmailWatch
+        EmailWatch,
+        AzureBlobWatch,
+        GcsWatch
     };
 
     // ---------------------------------------------------------------------
@@ -100,7 +102,9 @@ namespace AIAssistant
         GitHubIssue,
         JiraIssue,
         SheetsRead,
-        SheetsWrite
+        SheetsWrite,
+        AzureBlob,
+        Gcs
     };
 
     enum class TaskMode

@@ -115,7 +115,7 @@ Lower auth complexity than Snowflake, easier to test locally, validates the DB a
 - [x] Add `email_watch` trigger type (IMAP polling)
 - [x] Implement `email_read` operation in `EmailCloudTaskExecutor` (fetch from IMAP via libcurl)
 - [ ] Wire `email_watch` trigger to perform actual IMAP UID check before firing (currently fires on timer regardless of new mail)
-- [ ] Frontend: `email_read` task inspector section
+- [x] Frontend: `email_read` task inspector section
 - [x] Frontend: Slack and Email connection config, task inspector sections
 
 ### Phase 8 — Additional Integrations
@@ -155,6 +155,19 @@ Split into three sub-phases to avoid a monolithic hardening bucket:
 - [x] Document outbound firewall rules per integration
 - [x] Container image signing (cosign, Apache-2.0)
 
+### Phase 11 — Cloud Storage (Azure Blob / GCS Native)
+
+Azure Blob Storage and Google Cloud Storage via their native REST APIs. The existing S3 connector covers GCS in S3-interop mode (HMAC keys + SigV4), but the native GCS JSON API supports service account OAuth2/JWT auth — the standard for GCP-native users. Azure Blob is not S3-compatible and requires its own auth (Shared Key or Azure AD OAuth2).
+
+- [x] Implement `AzureBlobConnector : ICloudConnector` (Shared Key signing or Azure AD OAuth2)
+- [x] Implement `AzureBlobSharedKeySigner` (HMAC-SHA256 `SharedKey` authorization header, analogous to SigV4 but Azure-specific)
+- [x] Implement `AzureBlobCloudTaskExecutor` (upload/download via Azure Blob REST API)
+- [x] Add `azure_blob_watch` trigger type (polling via `GET ?comp=list&restype=container`)
+- [x] Implement `GcsConnector : ICloudConnector` (service account JWT via `JwtGenerator` + `OAuthTokenManager`)
+- [x] Implement `GcsCloudTaskExecutor` (upload/download via GCS JSON API)
+- [x] Add `gcs_watch` trigger type (polling via `GET /storage/v1/b/{bucket}/o`)
+- [x] Frontend: Azure Blob and GCS connection config, task inspector sections
+
 ### Phase 10 — End-to-End Testing
 
 All demo workflows must demonstrate a meaningful **round-trip** pattern: read from cloud, process with AI, write results back (or the reverse). Each test validates the full stack from connection setup through task execution to output verification.
@@ -174,6 +187,8 @@ All demo workflows must demonstrate a meaningful **round-trip** pattern: read fr
 | **OneDrive** | Real Microsoft account (personal or work) + Azure AD app registration | OAuth PKCE flow, no client secret needed |
 | **Snowflake** | 30-day free trial at `signup.snowflake.com` | RSA key pair auth |
 | **Google Sheets** | Google API key (free, read-only public sheets) or OAuth2 | Create a public sheet with quiz data from `sheetsQuizGrader_sample_data.csv` |
+| **Azure Blob** | `docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 mcr.microsoft.com/azure-storage/azurite` | Azurite emulator: Blob on 10000, Queue on 10001, Table on 10002. Default account: `devstoreaccount1`, key: well-known dev key |
+| **GCS** | Real: GCP service account + key JSON. Local: `docker run -d --name fake-gcs -p 4443:4443 fsouza/fake-gcs-server -scheme http` | fake-gcs-server for local testing; create bucket via REST |
 
 #### Test Plan — Round-Trip Demo Workflows
 
@@ -189,6 +204,8 @@ Each demo workflow must have: cloud read/write + AI processing + verifiable outp
 - [ ] **OneDrive round-trip** (`oneDriveUploadDownloadDemo`): Upload data file → download → AI processes content → upload AI output. Verify output file exists on OneDrive.
 - [ ] **Snowflake round-trip** (`snowflakeQueryDemo`): Query region stats → per_item AI classifies (STRONG/MODERATE/WEAK) → per_item INSERT verdict via `{{ai_analyze.captured_stdout}}` + `{{ai_analyze.output_file}}`. Workflow ready, requires Snowflake trial account to test.
 - [ ] **Slack notification** (`slackMessageDemo`): AI generates a status report from workflow run context → Slack posts it. Verify message in channel.
+- [x] **Azure Blob round-trip** (`azureBlobDemo`): Upload sample data → download → AI analyzes content → upload AI report back. Verified: 5 projects fan-out, 5 AI risk assessments, 5 reports uploaded to Azurite container.
+- [x] **GCS round-trip** (`gcsDemo`): Upload sample data → download → AI analyzes content → upload AI report back. Verified: 5 regions fan-out, 5 AI analyses, 5 reports uploaded to fake-gcs-server bucket.
 
 #### Simulatable Without Real Cloud Accounts
 
@@ -197,6 +214,8 @@ These can be tested fully locally with Docker or existing infrastructure:
 1. **Polarion** — PolarionMockup (already exists at `../polarionMockup`)
 2. **PostgreSQL** — local instance (already running)
 3. **S3** — MinIO Docker container (S3-compatible, SigV4 signing works)
+4. **Azure Blob** — Azurite Docker container (full Azure Blob API emulation, Shared Key auth)
+5. **GCS** — fake-gcs-server Docker container (basic GCS JSON API emulation)
 4. **Email (send)** — Mailpit Docker container (SMTP mock with web UI, no auth)
 5. **Email (receive)** — GreenMail Docker container (SMTP + IMAP, test credentials)
 
@@ -209,6 +228,8 @@ These can be tested fully locally with Docker or existing infrastructure:
 9. **OneDrive** — Microsoft account + Azure AD app
 10. **Snowflake** — 30-day trial
 11. **Google Sheets** — Google API key (free) or OAuth2
+12. **Azure Blob** — Azure Storage account (free tier available) or Azurite Docker emulator for local testing
+13. **GCS** — Google Cloud Storage bucket + service account key (free tier: 5 GB)
 
 #### Per-Item Output Piping (Prerequisite for Full Round-Trip Testing)
 
@@ -465,7 +486,8 @@ namespace AIAssistant
         OAuth2,         // OAuth 2.0 access token (auto-refreshed)
         JwtRsa,         // RSA-signed JWT (e.g., Snowflake)
         BasicAuth,      // Username + password
-        SigV4           // AWS Signature V4 (S3-compatible)
+        SigV4,          // AWS Signature V4 (S3-compatible)
+        AzureSharedKey  // Azure Storage Shared Key
     };
 
     // Resolved credentials ready for use in HTTP requests.
@@ -585,6 +607,8 @@ The `Execute()` base method: looks up the connection by name from `taskDef.m_Par
 | `PostgresConnector` | `application/cloud/postgresConnector.h/cpp` | PostgreSQL via libpq (PostgreSQL License) |
 | `GitConnector` | `application/cloud/gitConnector.h/cpp` | GitHub/GitLab REST API |
 | `JiraConnector` | `application/cloud/jiraConnector.h/cpp` | Jira/Linear REST API |
+| `AzureBlobConnector` | `application/cloud/azureBlobConnector.h/cpp` | Azure Blob / Data Lake Storage REST API |
+| `GcsConnector` | `application/cloud/gcsConnector.h/cpp` | Google Cloud Storage JSON API (native) |
 
 ### Shared utilities
 
@@ -593,6 +617,7 @@ The `Execute()` base method: looks up the connection by name from `taskDef.m_Par
 | `OAuthTokenManager` | `engine/keys/oauthTokenManager.h/cpp` | OAuth 2.0 token refresh loop, expiry tracking, thread-safe token access |
 | `JwtGenerator` | `engine/keys/jwtGenerator.h/cpp` | RSA RS256 JWT creation via OpenSSL `EVP_DigestSign`, base64url encoding |
 | `SigV4Signer` | `engine/keys/sigV4Signer.h/cpp` | AWS Signature V4 request signing via OpenSSL HMAC-SHA256 |
+| `AzureSharedKeySigner` | `engine/keys/azureSharedKeySigner.h/cpp` | Azure Storage Shared Key authorization header via OpenSSL HMAC-SHA256 |
 | `CloudRetryPolicy` | `application/cloud/cloudRetryPolicy.h/cpp` | Centralized retry with exponential backoff + jitter (see below) |
 | `SecretRedactor` | `engine/log/secretRedactor.h/cpp` | Scrub sensitive values from log output (see below) |
 | `CloudConnectionPool` | `application/cloud/cloudConnectionPool.h/cpp` | Connection pooling for persistent-connection providers (Phase 9) |
@@ -718,6 +743,10 @@ application/
     gitConnector.cpp                        (+) GitHub/GitLab REST API
     jiraConnector.h                         (+) JiraConnector : ICloudConnector
     jiraConnector.cpp                       (+)
+    azureBlobConnector.h                    (+) AzureBlobConnector : ICloudConnector
+    azureBlobConnector.cpp                  (+) Shared Key / Azure AD auth, Blob REST API
+    gcsConnector.h                          (+) GcsConnector : ICloudConnector
+    gcsConnector.cpp                        (+) Service account JWT + OAuth2, GCS JSON API
   workflow/
     cloudTaskExecutors/                     (+) new directory
       s3TaskExecutor.h                      (+) S3CloudTaskExecutor : ICloudTaskExecutor
@@ -734,12 +763,16 @@ application/
       dbQueryTaskExecutor.cpp               (+) SQL query via libpq, results to CSV/JSON
       polarionWriteTaskExecutor.h           (+) PolarionWriteTaskExecutor : ICloudTaskExecutor
       polarionWriteTaskExecutor.cpp         (+) PATCH/POST work items
+      azureBlobTaskExecutor.h               (+) AzureBlobCloudTaskExecutor : ICloudTaskExecutor
+      azureBlobTaskExecutor.cpp             (+) upload/download via Azure Blob REST API
+      gcsTaskExecutor.h                     (+) GcsCloudTaskExecutor : ICloudTaskExecutor
+      gcsTaskExecutor.cpp                   (+) upload/download via GCS JSON API
     filter/
       polarionClient.h                      (~) refactor to accept CloudConnection + CloudCredentials
       polarionClient.cpp                    (~)
       filterEngine.cpp                      (~) resolve connection for polarion_query filter
     taskExecutorRegistry.cpp                (~) register new cloud task executors
-    triggerEngine.h                          (~) add cloud trigger types (s3_watch, onedrive_watch, email_watch)
+    triggerEngine.h                          (~) add cloud trigger types (s3_watch, onedrive_watch, email_watch, azure_blob_watch, gcs_watch)
     triggerEngine.cpp                        (~)
     workflowTypes.h                         (~) add new task types, trigger types, connection ref field
 
@@ -756,6 +789,8 @@ engine/
     jwtGenerator.cpp                        (+)
     sigV4Signer.h                           (+) AWS Signature V4 signing
     sigV4Signer.cpp                         (+)
+    azureSharedKeySigner.h                  (+) Azure Storage Shared Key signing
+    azureSharedKeySigner.cpp                (+)
   log/
     secretRedactor.h                        (+) SecretRedactor (scrub secrets from log output)
     secretRedactor.cpp                      (+)
@@ -898,7 +933,7 @@ mcp:
 
 ## 5. Object Storage (S3-compatible)
 
-Covers AWS S3, MinIO (self-hosted, accessed over HTTP), and GCS (S3-compatible interop mode). All access via S3 REST protocol using libcurl + SigV4 signing via OpenSSL.
+Covers AWS S3, MinIO (self-hosted, accessed over HTTP), and GCS (S3-compatible interop mode via HMAC keys). All access via S3 REST protocol using libcurl + SigV4 signing via OpenSSL. For GCS with native service account auth, see Phase 11 (`GcsConnector`).
 
 ### S3Connector
 
@@ -1481,7 +1516,180 @@ application/cloud/
 
 ---
 
-## 11. KeyManager Extension
+## 11. Cloud Storage — Azure Blob / GCS Native (Phase 11)
+
+The S3 connector (Phase 3) covers AWS S3, MinIO, and GCS in S3-interop mode. This phase adds native connectors for Azure Blob Storage and Google Cloud Storage, supporting their standard auth methods and full API feature sets.
+
+**Why not just S3 interop?**
+
+| Aspect | S3 interop (existing) | Native connector |
+|--------|----------------------|------------------|
+| **GCS auth** | Requires HMAC key creation (extra step, not default GCP practice) | Service account JSON key → JWT → OAuth2 access token (standard GCP flow) |
+| **Azure Blob** | Not S3-compatible (different API, different signing) | Shared Key or Azure AD OAuth2 (native Azure auth) |
+| **Feature coverage** | Basic GET/PUT/LIST only | Full API: metadata, tiers, lifecycle, ACLs, append blobs, Data Lake Gen2 hierarchical namespace |
+| **Error messages** | Generic S3 errors | Provider-specific error codes and diagnostics |
+
+### AzureBlobConnector
+
+Implements `ICloudConnector`. Uses Azure Blob Service REST API with Shared Key authorization or Azure AD OAuth2.
+
+**Connection params:**
+```json
+{
+  "name": "my-azure-blob",
+  "type": "azure_blob",
+  "endpoint": "https://myaccount.blob.core.windows.net",
+  "key_name": "azure-storage-key",
+  "auth_type": "azure_shared_key",
+  "params": {
+    "account_name": "myaccount",
+    "container": "workflow-data"
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `account_name` | Azure Storage account name |
+| `container` | Default blob container (can be overridden per-task) |
+
+- **Auth types supported:**
+  - `azure_shared_key` — HMAC-SHA256 `SharedKey` authorization header (uses `AzureSharedKeySigner`). Key stored as `ApiKeyCredential` in KeyManager.
+  - `oauth2` — Azure AD service principal or managed identity. Uses `OAuthTokenManager` with Azure AD token endpoint (`https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token`), scope `https://storage.azure.com/.default`.
+- **TestConnection:** `GET /{container}?restype=container` — checks container exists and credentials work.
+
+### AzureSharedKeySigner
+
+```cpp
+// engine/keys/azureSharedKeySigner.h
+class AzureSharedKeySigner
+{
+public:
+    // Sign an HTTP request using Azure Storage Shared Key authorization.
+    // Populates the Authorization header: SharedKey {account}:{signature}
+    // Signature = Base64(HMAC-SHA256(key, StringToSign))
+    // StringToSign = VERB\nContent-Encoding\nContent-Language\n...
+    static void SignRequest(std::string const& method, std::string const& url,
+                            std::string const& accountName, std::string const& accountKey,
+                            std::vector<std::pair<std::string, std::string>>& headers);
+};
+```
+
+Uses OpenSSL `HMAC()` with SHA-256. The Azure string-to-sign format differs from SigV4 — it includes canonicalized headers (`x-ms-*`) and canonicalized resource path. Adds `x-ms-date` and `x-ms-version` headers.
+
+### AzureBlobCloudTaskExecutor
+
+Task types: `azure_blob_upload`, `azure_blob_download`
+
+```json
+{
+  "type": "azure_blob_upload",
+  "params": {
+    "connection": "my-azure-blob",
+    "container": "reports",
+    "blob_name": "output/{{run_id}}/report.pdf",
+    "local_path": "report.pdf"
+  }
+}
+```
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `azure_blob`) |
+| `container` | no | connection default | Blob container name |
+| `blob_name` | yes | | Blob path within container |
+| `local_path` | yes | | Local file path (relative to working directory) |
+
+- Upload: `PUT /{container}/{blob_name}` with `x-ms-blob-type: BlockBlob` header
+- Download: `GET /{container}/{blob_name}` → write to `local_path` in working directory
+
+### azure_blob_watch trigger
+
+Polls `GET /{container}?restype=container&comp=list&prefix={prefix}` on configurable interval. Compares `Last-Modified` timestamps against last poll. Fires workflow when new blobs appear. Stores last-seen timestamp in trigger state.
+
+### GcsConnector
+
+Implements `ICloudConnector`. Uses GCS JSON API (`https://storage.googleapis.com/storage/v1/`) with service account JWT auth via `JwtGenerator` + `OAuthTokenManager`.
+
+**Connection params:**
+```json
+{
+  "name": "my-gcs",
+  "type": "gcs",
+  "endpoint": "https://storage.googleapis.com",
+  "key_name": "gcp-service-account",
+  "auth_type": "jwt_rsa",
+  "params": {
+    "bucket": "workflow-data",
+    "service_account_email": "j9t@myproject.iam.gserviceaccount.com"
+  }
+}
+```
+
+| Key | Description |
+|-----|-------------|
+| `bucket` | Default GCS bucket (can be overridden per-task) |
+| `service_account_email` | Service account email (used in JWT `iss` claim) |
+
+- **Auth flow:** Service account private key (PEM) stored as `KeyPairCredential` in KeyManager → `JwtGenerator` creates a self-signed JWT with `scope: https://www.googleapis.com/auth/devstorage.read_write` → exchange JWT for OAuth2 access token via `POST https://oauth2.googleapis.com/token` → `OAuthTokenManager` handles refresh. This reuses the existing `JwtGenerator` and `OAuthTokenManager` infrastructure from Phase 0/5.
+- **TestConnection:** `GET /storage/v1/b/{bucket}` — checks bucket exists and credentials work.
+
+### GcsCloudTaskExecutor
+
+Task types: `gcs_upload`, `gcs_download`
+
+```json
+{
+  "type": "gcs_upload",
+  "params": {
+    "connection": "my-gcs",
+    "bucket": "reports",
+    "object_name": "output/{{run_id}}/report.pdf",
+    "local_path": "report.pdf"
+  }
+}
+```
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `connection` | yes | | Named CloudConnection (type `gcs`) |
+| `bucket` | no | connection default | GCS bucket name |
+| `object_name` | yes | | Object path within bucket |
+| `local_path` | yes | | Local file path (relative to working directory) |
+
+- Upload: `POST /upload/storage/v1/b/{bucket}/o?uploadType=media&name={object_name}` with file body
+- Download: `GET /storage/v1/b/{bucket}/o/{object_name}?alt=media` → write to `local_path` in working directory
+
+### gcs_watch trigger
+
+Polls `GET /storage/v1/b/{bucket}/o?prefix={prefix}` on configurable interval. Compares `updated` timestamps against last poll. Fires workflow when new objects appear. Stores last-seen timestamp in trigger state.
+
+### Frontend (Phase 11)
+
+**ConnectionsView** — type-specific config fields:
+- **Azure Blob**: account_name, container, auth type dropdown (Shared Key / Azure AD OAuth2)
+- **GCS**: bucket, service_account_email
+
+**Task inspector** — one section per task type:
+- **azure_blob_upload / azure_blob_download**: connection, container, blob_name, local_path
+- **gcs_upload / gcs_download**: connection, bucket, object_name, local_path
+
+### Backend File Structure (Phase 11)
+
+```
+application/cloud/
+  azureBlobConnector.h/cpp                 (+) Azure Blob / Data Lake connector
+  azureBlobCloudTaskExecutor.h/cpp         (+) upload/download
+  gcsConnector.h/cpp                       (+) GCS native JSON API connector
+  gcsCloudTaskExecutor.h/cpp               (+) upload/download
+
+engine/keys/
+  azureSharedKeySigner.h/cpp               (+) Azure Storage Shared Key signing
+```
+
+---
+
+## 12. KeyManager Extension
 
 ### Current model
 
@@ -1551,7 +1759,7 @@ Serialization to `keys.json.enc`: the `GetType()` string is written as a JSON fi
 
 ---
 
-## 12. Frontend Changes
+## 13. Frontend Changes
 
 ### New navigation
 
@@ -1574,7 +1782,7 @@ Workflows | Editor | AI Manager | Keys | Connections | Assistant | Log | Dashboa
 | `App.tsx` | Add `"connections"` to `RouteKey` union. Rename "AI Keys" button to "Keys". Add "Connections" nav button with dirty indicator (`*`). Render `ConnectionsView` for the `"connections"` route. Add `connectionsDirty` state (same pattern as `aiManagerDirty` and `keysDirty`). |
 | `views/ProvidersSettingsView.tsx` | Add credential type dropdown (api_key / oauth / key_pair / credentials). Conditional fields: oauth shows token status + "Authorize" button + expiry; key_pair shows textarea for PEM; credentials shows username + password. |
 | `api/providers.ts` | Extend `ProviderEntry` type to match `ICredential` hierarchy: add `credential_type`, and type-specific fields (`username`, `refresh_token`, `expires_at`, `scopes`, `private_key_pem`). |
-| `jcwf/types.ts` | Add to `JcwfTaskType`: `s3_upload`, `s3_download`, `onedrive_upload`, `onedrive_download`, `snowflake_query`, `db_query`, `slack_message`, `email_send`, `polarion_write`, `git_create_issue`, `git_comment_pr`, `git_get_file`, `jira_create_issue`, `jira_update_issue`, `jira_query`, `sheets_read`, `sheets_write`. Add to `JcwfTriggerType`: `s3_watch`, `onedrive_watch`, `email_watch`. Add to `JcwfFilterSourceKind`: `jira_query` (JQL fan-out, like `polarion_query`). Add optional `connection` field to `JcwfTask` and `JcwfFilterSource`. |
+| `jcwf/types.ts` | Add to `JcwfTaskType`: `s3_upload`, `s3_download`, `onedrive_upload`, `onedrive_download`, `snowflake_query`, `db_query`, `slack_message`, `email_send`, `polarion_write`, `git_create_issue`, `git_comment_pr`, `git_get_file`, `jira_create_issue`, `jira_update_issue`, `jira_query`, `sheets_read`, `sheets_write`, `azure_blob_upload`, `azure_blob_download`, `gcs_upload`, `gcs_download`. Add to `JcwfTriggerType`: `s3_watch`, `onedrive_watch`, `email_watch`, `azure_blob_watch`, `gcs_watch`. Add to `JcwfFilterSourceKind`: `jira_query` (JQL fan-out, like `polarion_query`). Add optional `connection` field to `JcwfTask` and `JcwfFilterSource`. |
 | `editor/WorkflowEditorView.tsx` | Inspector panel: add cloud task type sections with connection dropdown + type-specific param fields. Trigger panel: add cloud trigger types with connection dropdown + config fields. |
 | `editor/FilterBuilderDialog.tsx` | Add `connection` dropdown for `polarion_query` and `jira_query` filter sources (replaces inline `base_url`/`project_id`/`key_name` fields with a single connection reference). |
 | `editor/validation.ts` | Add validation rules for cloud task types: require `connection` param, validate type-specific required fields (e.g., `s3_upload` needs `bucket` + `key` + `local_path`; `db_query` needs `query`; `slack_message` needs `channel` + `text`). |
@@ -1611,7 +1819,7 @@ Workflows | Editor | AI Manager | Keys | Connections | Assistant | Log | Dashboa
 
 ---
 
-## 13. REST API Endpoints
+## 14. REST API Endpoints
 
 New endpoints in `webServer.cpp`:
 
@@ -1630,7 +1838,7 @@ RBAC: connections endpoints require `admin` role in Engine mode.
 
 ---
 
-## 14. Security Review
+## 15. Security Review
 
 All cloud access in this plan is secure. Every integration uses HTTPS via libcurl (TLS 1.2+), credentials are stored in the AES-256-GCM encrypted key store, and no secrets appear in JCWF files. This section documents the security measures and identifies items to verify during implementation.
 
@@ -1697,14 +1905,14 @@ All cloud access in this plan is secure. Every integration uses HTTPS via libcur
 
 ---
 
-## 15. Cloud Integration Documentation
+## 16. Cloud Integration Documentation
 
 A new document `doc/cloud-integration.md` should be created covering:
 
 ### User-facing documentation
 
 1. **Getting started with Connections** — how to add a cloud connection via the Connections tab, link a key, test connectivity.
-2. **Connection types reference** — one section per connector type (Polarion, S3, OneDrive, Snowflake, Slack, Email, PostgreSQL, GitHub, Jira, Google Sheets). For each:
+2. **Connection types reference** — one section per connector type (Polarion, S3, OneDrive, Snowflake, Slack, Email, PostgreSQL, GitHub, Jira, Google Sheets, Azure Blob, GCS). For each:
    - Required connection params
    - Authentication method and key type
    - Example connection configuration
@@ -1741,7 +1949,7 @@ doc/
 
 ---
 
-## 16. Implementation Order
+## 17. Implementation Order
 
 1. **Phase 0 — Foundation:** abstraction layer (`ICloudConnector`, `ICredential` hierarchy, `CloudRetryPolicy`, `SecretRedactor`), connections API + UI
 2. **Phase 1 — MCP:** standalone TypeScript server — highest ecosystem leverage, zero C++ changes
@@ -1756,3 +1964,5 @@ doc/
 11. **Phase 9a — Runtime Resilience:** circuit breaker, connection pool, cancellation wiring, provider rate limits, health checks
 12. **Phase 9b — Security & Audit:** audit logging, OAuth CSRF, download limits, path traversal, TLS verification
 13. **Phase 9c — Deployment & Ops:** firewall docs, container signing
+14. **Phase 10 — End-to-End Testing:** round-trip demo workflows for all connectors
+15. **Phase 11 — Cloud Storage (Azure Blob / GCS Native):** Azure Blob (Shared Key + Azure AD), GCS JSON API (service account JWT), upload/download task executors, watch triggers

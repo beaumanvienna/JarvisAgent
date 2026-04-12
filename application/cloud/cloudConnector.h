@@ -36,7 +36,8 @@ namespace AIAssistant
         OAuth2,      // OAuth 2.0 access token (auto-refreshed)
         JwtRsa,      // RSA-signed JWT (e.g., Snowflake)
         BasicAuth,   // Username + password
-        SigV4        // AWS Signature V4 (S3-compatible)
+        SigV4,       // AWS Signature V4 (S3-compatible)
+        AzureSharedKey // Azure Storage Shared Key
     };
 
     // Resolved credentials ready for use in HTTP requests.
@@ -75,6 +76,7 @@ namespace AIAssistant
             case CloudAuthType::JwtRsa: return "jwt_rsa";
             case CloudAuthType::BasicAuth: return "basic_auth";
             case CloudAuthType::SigV4: return "sigv4";
+            case CloudAuthType::AzureSharedKey: return "azure_shared_key";
         }
         return "bearer";
     }
@@ -85,6 +87,7 @@ namespace AIAssistant
         if (str == "jwt_rsa") return CloudAuthType::JwtRsa;
         if (str == "basic_auth") return CloudAuthType::BasicAuth;
         if (str == "sigv4") return CloudAuthType::SigV4;
+        if (str == "azure_shared_key") return CloudAuthType::AzureSharedKey;
         return CloudAuthType::BearerToken;
     }
 

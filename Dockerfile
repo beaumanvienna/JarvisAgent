@@ -120,18 +120,33 @@ COPY --from=editor-builder /ui/dist /opt/jarvisagent/workflow-editor/ui/dist
 # Scripts
 COPY scripts /opt/jarvisagent/scripts
 
-# Curated example workflows for first-run seeding (same set as DEB/RPM/Arch — see PKGBUILD)
+# Curated example workflows for first-run seeding.
+# All input files are bundled inside each .jcwf zip — no loose files to copy.
 RUN mkdir -p /opt/jarvisagent/.image-defaults/workflows
 COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/aiZipDemo.jcwf \
      example/workflows/make-example.jcwf \
+     example/workflows/make-example-subwf.jcwf \
      example/workflows/portfolioDividendAnalysis.jcwf \
      example/workflows/vehicleTroubleshootingGuide.jcwf \
+     example/workflows/bookSummaryPipeline.jcwf \
+     example/workflows/hamburg-tourist-day-planner.jcwf \
+     example/workflows/exampleMakefile4.jcwf \
+     example/workflows/exampleMakefile5.jcwf \
+     example/workflows/goKartComplianceCheck.jcwf \
+     example/workflows/s3UploadDownloadDemo.jcwf \
+     example/workflows/postgresDemo.jcwf \
+     example/workflows/emailDemo.jcwf \
+     example/workflows/gitHubIssueDemo.jcwf \
+     example/workflows/azureBlobDemo.jcwf \
+     example/workflows/gcsDemo.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/
-# (Input files are bundled inside each .jcwf zip — no loose files to copy)
 
 # Default config for first-run seeding
 COPY config.json /opt/jarvisagent/.image-defaults/config.json
+
+# Image version marker for upgrade detection (entrypoint re-seeds workflows on version change)
+RUN echo "0.8.5" > /opt/jarvisagent/.image-defaults/.image-version
 
 # Entrypoint script
 COPY docker-entrypoint.sh /opt/jarvisagent/docker-entrypoint.sh

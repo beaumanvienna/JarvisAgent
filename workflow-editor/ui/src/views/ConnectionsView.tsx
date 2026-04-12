@@ -11,8 +11,8 @@ import {
 } from "../api/connections";
 import { listProviders, saveProviders } from "../api/providers";
 
-const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira"];
-const AUTH_TYPES = ["bearer", "oauth2", "jwt_rsa", "basic_auth", "sigv4"];
+const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira", "google_sheets", "azure_blob", "gcs"];
+const AUTH_TYPES = ["bearer", "oauth2", "jwt_rsa", "basic_auth", "sigv4", "azure_shared_key"];
 
 type EditingConnection = {
   name: string;
@@ -743,6 +743,56 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
                 onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)}
               />
             </div>
+          )}
+
+          {editing.type === "azure_blob" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Account Name</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="devstoreaccount1"
+                  value={editing.params.account_name ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account_name: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Container</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="workflow-data"
+                  value={editing.params.container ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, container: e.target.value } } : prev)}
+                />
+              </div>
+            </>
+          )}
+
+          {editing.type === "gcs" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Bucket</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="workflow-data"
+                  value={editing.params.bucket ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Service Account Email</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="j9t@myproject.iam.gserviceaccount.com"
+                  value={editing.params.service_account_email ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, service_account_email: e.target.value } } : prev)}
+                />
+              </div>
+            </>
           )}
 
           <div className="field" style={{ marginBottom: 10 }}>
