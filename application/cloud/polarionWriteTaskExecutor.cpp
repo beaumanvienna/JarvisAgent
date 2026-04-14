@@ -308,15 +308,7 @@ namespace AIAssistant
             std::filesystem::path workDir =
                 TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
 
-            std::error_code ec;
-            std::filesystem::create_directories(workDir, ec);
-
-            std::filesystem::path responsePath = workDir / "response.json";
-            std::ofstream responseFile(responsePath, std::ios::trunc);
-            if (responseFile.is_open())
-            {
-                responseFile << responseBody;
-            }
+            WriteResponseJson(workDir, taskState, responseBody);
         }
 
         return true;

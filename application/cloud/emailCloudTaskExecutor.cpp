@@ -504,11 +504,7 @@ namespace AIAssistant
 
             std::string responseStr = "{\"ok\":true,\"count\":" + std::to_string(fetchCount) +
                                       ",\"folder\":\"" + JsonEscapeEmail(folder) + "\"}";
-            std::ofstream responseFile(workDir / "response.json", std::ios::trunc);
-            if (responseFile.is_open())
-            {
-                responseFile << responseStr;
-            }
+            WriteResponseJson(workDir, taskState, responseStr);
         }
 
         LOG_APP_INFO("[email_read] fetched {} message(s) from {} via connection '{}'", fetchCount, folder,
@@ -718,14 +714,7 @@ namespace AIAssistant
             std::filesystem::path workDir =
                 TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
 
-            std::error_code ec;
-            std::filesystem::create_directories(workDir, ec);
-
-            std::ofstream responseFile(workDir / "response.json", std::ios::trunc);
-            if (responseFile.is_open())
-            {
-                responseFile << summary;
-            }
+            WriteResponseJson(workDir, taskState, summary);
         }
 
         return true;

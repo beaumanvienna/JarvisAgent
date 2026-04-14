@@ -33,6 +33,8 @@
 
 #include <curl/curl.h>
 
+#include "simdjson/simdjson.h"
+
 #include "core.h"
 #include "engine.h"
 #include "jarvisAgent.h"
@@ -49,6 +51,152 @@ namespace AIAssistant
 {
     namespace
     {
+        // Recursively flatten a simdjson DOM element into dotted-path key/value pairs.
+        // Objects → "parent.child", arrays → "parent[0]", leaves → string repr.
+        void FlattenJsonDom(simdjson::dom::element elem, std::string const& prefix,
+                            std::unordered_map<std::string, std::string>& out)
+        {
+            if (elem.is_object())
+            {
+                simdjson::dom::object obj = elem;
+                for (auto field : obj)
+                {
+                    std::string key(field.key);
+                    std::string nested = prefix.empty() ? key : prefix + "." + key;
+                    FlattenJsonDom(field.value, nested, out);
+                }
+            }
+            else if (elem.is_array())
+            {
+                simdjson::dom::array arr = elem;
+                size_t idx = 0;
+                for (auto child : arr)
+                {
+                    std::string nested = prefix + "[" + std::to_string(idx++) + "]";
+                    FlattenJsonDom(child, nested, out);
+                }
+            }
+            else if (elem.is_string())
+            {
+                std::string_view sv = elem;
+                out[prefix] = std::string(sv);
+            }
+            else if (elem.is_int64())
+            {
+                out[prefix] = std::to_string(int64_t(elem));
+            }
+            else if (elem.is_uint64())
+            {
+                out[prefix] = std::to_string(uint64_t(elem));
+            }
+            else if (elem.is_double())
+            {
+                std::ostringstream oss;
+                oss << double(elem);
+                out[prefix] = oss.str();
+            }
+            else if (elem.is_bool())
+            {
+                out[prefix] = bool(elem) ? "true" : "false";
+            }
+            else if (elem.is_null())
+            {
+                out[prefix] = "";
+            }
+        }
+
+        // Inject upstream task outputs into a downstream task's InputValues map.
+        // Populates {{depIdPrefix.captured_stdout}}, {{depIdPrefix.output_file}},
+        // {{depIdPrefix.SLOT}} for each declared output slot, and flattened
+        // {{depIdPrefix.json.PATH}} entries parsed from response.json if present
+        // in the upstream task's working directory.
+        //
+        // upstreamInstanceId is the full instance id of the source task state (e.g.
+        // "createIssue" for regular tasks, "createIssue#3" for per-item child 3).
+        // The suffix after '#' — if any — selects the matching per-child response
+        // file (response_3.json) so per-item chains read their own index.
+        void InjectUpstreamOutputs(WorkflowDefinition const& workflowDefinition, TaskDef const& upstreamDef,
+                                   TaskInstanceState const& upstreamState, std::string const& depIdPrefix,
+                                   std::string const& upstreamInstanceId,
+                                   std::unordered_map<std::string, std::string>& targetInputValues)
+        {
+            if (!upstreamState.m_CapturedStdout.empty())
+            {
+                targetInputValues[depIdPrefix + ".captured_stdout"] = upstreamState.m_CapturedStdout;
+            }
+
+            if (!upstreamState.m_OutputValues.empty())
+            {
+                std::vector<std::pair<std::string, std::string>> sortedOutputs(
+                    upstreamState.m_OutputValues.begin(), upstreamState.m_OutputValues.end());
+                std::sort(sortedOutputs.begin(), sortedOutputs.end());
+
+                targetInputValues[depIdPrefix + ".output_file"] = sortedOutputs.front().second;
+                for (auto const& [slotName, slotValue] : sortedOutputs)
+                {
+                    targetInputValues[depIdPrefix + "." + slotName] = slotValue;
+                }
+            }
+
+            // JSON-path expansion from upstream's response.json (cloud tasks).
+            std::filesystem::path const workflowBaseDir =
+                TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+            if (workflowBaseDir.empty() || upstreamDef.m_WorkingDirectory.empty())
+            {
+                return;
+            }
+
+            std::filesystem::path const taskDir =
+                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, upstreamDef.m_WorkingDirectory);
+
+            // Pick response.json or response_<N>.json based on instance id.
+            std::string responseFilename = "response.json";
+            auto const hashPos = upstreamInstanceId.rfind('#');
+            if (hashPos != std::string::npos)
+            {
+                std::string const suffix = upstreamInstanceId.substr(hashPos + 1);
+                if (!suffix.empty())
+                {
+                    responseFilename = "response_" + suffix + ".json";
+                }
+            }
+            std::filesystem::path const responseJsonPath = taskDir / responseFilename;
+
+            std::error_code ec;
+            if (!std::filesystem::exists(responseJsonPath, ec))
+            {
+                return;
+            }
+
+            try
+            {
+                simdjson::dom::parser parser;
+                simdjson::dom::element root;
+                auto err = parser.load(responseJsonPath.string()).get(root);
+                if (err != simdjson::SUCCESS)
+                {
+                    LOG_APP_WARN("[upstream] failed to parse response.json for task '{}': {}", depIdPrefix,
+                                 simdjson::error_message(err));
+                    return;
+                }
+
+                std::unordered_map<std::string, std::string> flattened;
+                FlattenJsonDom(root, "", flattened);
+
+                for (auto const& [path, value] : flattened)
+                {
+                    targetInputValues[depIdPrefix + ".json." + path] = value;
+                }
+
+                LOG_APP_INFO("[upstream] injected {} json fields from task '{}' response.json", flattened.size(),
+                             depIdPrefix);
+            }
+            catch (std::exception const& e)
+            {
+                LOG_APP_WARN("[upstream] exception reading response.json for task '{}': {}", depIdPrefix, e.what());
+            }
+        }
+
         std::string GetIso8601NowUTC()
         {
             auto const now = std::chrono::system_clock::now();
@@ -1933,6 +2081,31 @@ namespace AIAssistant
             result.m_TaskState.m_InputValues[key] = value;
         }
 
+        // Inject upstream task outputs for non-per-item chains.  Per-item children already
+        // receive this injection at dispatch time (see per-item loop), so we only need to
+        // handle regular task instances here.  The injection is idempotent — existing entries
+        // from the per-item path are simply overwritten with the same values.
+        if (taskId == taskDefinition.m_Id) // not a per-item child ("parentId#N")
+        {
+            for (std::string const& depId : taskDefinition.m_DependsOn)
+            {
+                auto upstreamStateIt = workerRun.m_TaskStates.find(depId);
+                if (upstreamStateIt == workerRun.m_TaskStates.end())
+                {
+                    continue;
+                }
+
+                auto upstreamDefIt = workflowDefinition.m_Tasks.find(depId);
+                if (upstreamDefIt == workflowDefinition.m_Tasks.end())
+                {
+                    continue;
+                }
+
+                InjectUpstreamOutputs(workflowDefinition, upstreamDefIt->second, upstreamStateIt->second, depId,
+                                      depId, result.m_TaskState.m_InputValues);
+            }
+        }
+
         {
             std::string summary;
             for (auto const& p : resolvedInputs.m_StringValues)
@@ -2836,7 +3009,8 @@ namespace AIAssistant
 
             // Per-item output piping: inject upstream per_item task outputs for the matching item index.
             // When downstream per_item task B depends on per_item task A (same filter), A's child
-            // outputs become available as {{A.output_file}} and {{A.captured_stdout}}.
+            // outputs become available as {{A.captured_stdout}}, {{A.output_file}}, and
+            // {{A.json.PATH}} (flattened from A's per-child response_<N>.json).
             for (std::string const& depId : taskDef.m_DependsOn)
             {
                 auto upstreamChildrenIt = activeRun.m_PerItemChildren.find(depId);
@@ -2855,33 +3029,14 @@ namespace AIAssistant
                     continue;
                 }
 
-                TaskInstanceState const& upstreamState = upstreamStateIt->second;
-
-                // Inject captured_stdout (up to 1024 chars, set by all executors)
-                if (!upstreamState.m_CapturedStdout.empty())
+                auto upstreamDefIt = workflowDef.m_Tasks.find(depId);
+                if (upstreamDefIt == workflowDef.m_Tasks.end())
                 {
-                    childState.m_InputValues[depId + ".captured_stdout"] = upstreamState.m_CapturedStdout;
+                    continue;
                 }
 
-                // Inject output_file — first output value sorted by slot name.
-                // Also inject all named outputs as {{depId.slotName}}.
-                if (!upstreamState.m_OutputValues.empty())
-                {
-                    // Deterministic: sort by slot name, pick first for output_file
-                    std::vector<std::pair<std::string, std::string>> sortedOutputs(
-                        upstreamState.m_OutputValues.begin(), upstreamState.m_OutputValues.end());
-                    std::sort(sortedOutputs.begin(), sortedOutputs.end());
-
-                    childState.m_InputValues[depId + ".output_file"] = sortedOutputs.front().second;
-
-                    for (auto const& [slotName, slotValue] : sortedOutputs)
-                    {
-                        childState.m_InputValues[depId + "." + slotName] = slotValue;
-                    }
-
-                    LOG_APP_INFO("[per_item] output piping: {} → {} (output_file='{}')", upstreamChildId,
-                                 childId, sortedOutputs.front().second);
-                }
+                InjectUpstreamOutputs(workflowDef, upstreamDefIt->second, upstreamStateIt->second, depId,
+                                      upstreamChildId, childState.m_InputValues);
             }
 
             // Per-item freshness: skip if unchanged and outputs exist

@@ -172,6 +172,24 @@ Each entry is either:
 The SessionManager writes the AI response to `<stem>.output.<ext>`:
 - `PROB_hello.txt` → `PROB_hello.output.txt`
 
+#### Exposing the AI response to downstream non-ai_call tasks
+
+When a downstream `cloud_*`, `shell`, or `python` task needs the AI response as a file path (via `{{taskId.output_file}}` or `{{taskId.<slot>}}`), declare an `outputs` slot on the `ai_call` task — do **NOT** use `file_outputs`:
+
+```jsonc
+"ai_bug_report": {
+  "type": "ai_call",
+  "working_directory": "../../queue/myWorkflow/01_generate",
+  "outputs": { "bug_report": { "type": "string" } },  // ✓ slot auto-maps to PROB_*.output.txt
+  // NOT: "file_outputs": ["bug_report.txt"]            // ✗ writes a second file inside queue/
+  "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
+}
+```
+
+The runtime maps the declared slot to the natural `PROB_*.output.txt` file the SessionManager produces. Downstream tasks then use `{{ai_bug_report.output_file}}` or `{{ai_bug_report.bug_report}}` — both resolve to the absolute path of the AI response.
+
+**Why not `file_outputs` on `ai_call`?** `file_outputs` paths are resolved against the task's `working_directory`. For `ai_call` that directory is inside `queue/`, so the output file lands inside a watched queue folder. The file categorizer treats any file in a queue folder that doesn't match STNG/CNTX/TASK/PROB/PROV/`*.output.*` as a new requirements file and fires an **extra AI call** — wasted tokens and latency. Always use the `outputs` slot pattern on `ai_call`.
+
 #### Consuming upstream AI outputs as context
 
 Use `cntx_files` to reference upstream task outputs:
@@ -765,3 +783,4 @@ Same as Example A but the AI deliberately introduces a syntax error. A branch no
 11. **Over-decomposed outputs** — Prefer a single combined JSON output file over splitting into multiple files. If a python task extracts statistics, write everything into ONE JSON file, not separate files per category. This simplifies downstream wiring and cntx_files references.
 12. **Wrong cntx_files path crossing queue↔workflows** — To reach a python/shell task's output from an ai_call's working directory, you need `../../../workflows/<taskWorkDir>/<outputFile>` (3 levels up from `queue/X/Y` to the JarvisAgent root, then into `workflows/`). Using only `../../` reaches `queue/` — not `workflows/`.
 13. **Duplicated literal paths in `args` + `file_inputs`/`file_outputs`** — If a shell task has `file_inputs` and `file_outputs`, do NOT also put the same literal paths in `args`. The executor auto-injects individual `{{input[0]}}`, `{{input[1]}}`, …, `{{output[0]}}`, `{{output[1]}}`, … when no macros are present in args. Either omit `args` entirely (recommended for simple scripts) or use explicit `{{input[i]}}` / `{{output[i]}}` macros.
+14. **`file_outputs` on `ai_call` tasks** — NEVER declare `file_outputs` on an `ai_call`. The paths resolve against the task's `working_directory`, which is inside `queue/` for ai_call tasks, so the output file lands in a watched queue folder. The file categorizer then treats it as a new requirements file and fires a second wasted AI call. Use an `outputs` slot instead — it auto-maps to the natural `PROB_*.output.txt` file the SessionManager produces, and `{{taskId.output_file}}` / `{{taskId.<slot>}}` still resolve correctly for downstream consumers. See §3.2 "Exposing the AI response to downstream non-ai_call tasks" for the canonical pattern.

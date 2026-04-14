@@ -136,6 +136,7 @@ Example ai_call task with queue_binding:
   "id": "generate",
   "type": "ai_call",
   "working_directory": "../queue/myWorkflow/01_generate",
+  "outputs": { "generated_code": { "type": "string" } },
   "queue_binding": {
     "stng_files": [{"path": "STNG_style.txt", "content": "Be precise. No markdown fences."}],
     "task_files": [{"path": "TASK_gen.txt", "content": "Generate the requested code."}],
@@ -145,9 +146,11 @@ Example ai_call task with queue_binding:
 }
 
 AI call output: SessionManager writes response to <stem>.output.<ext> (e.g. PROB_code.txt -> PROB_code.output.txt).
+Exposing the AI response to downstream tasks: declare an "outputs" slot on the ai_call (as shown above). The slot auto-maps to the natural PROB_*.output.txt file. Downstream tasks reference it as {{taskId.output_file}} or {{taskId.<slotName>}}, both resolve to the absolute path of the AI response.
 
 Common pitfalls:
 - ai_call stng_files MUST include "No markdown fences, no explanations." to prevent AI from wrapping output.
+- ai_call tasks MUST NOT declare "file_outputs". Their working_directory is inside a queue folder; any file landing there that is not STNG/CNTX/TASK/PROB/PROV/*.output.* is mis-categorized as a new requirement and triggers a second wasted AI call. Use the "outputs" slot pattern instead.
 - Shell commands MUST start with "scripts/".
 - file_inputs are relative to working_directory — use bare filenames, never prefix with working_directory.
 - Use version "1.1" if using filters, control_nodes, or controlflow.

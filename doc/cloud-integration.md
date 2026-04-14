@@ -826,6 +826,22 @@ Implements `ICloudConnector` for Jira REST API v3. Supports BasicAuth (Jira Clou
 | `comment` | Add comment (ADF format) |
 | `get` | Get issue details to JSON |
 
+**create params:**
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `connection` | yes | Named CloudConnection |
+| `operation` | yes | `create` |
+| `project_key` | yes (or on connection) | Jira project key |
+| `summary` | yes | Issue title |
+| `issue_type` | no | Default `Task` (e.g. `Bug`, `Story`) |
+| `description` | no | Inline ADF description text |
+| `description_file` | no | Path to a file whose contents become the description (takes precedence over `description`; supports AI output piping via `{{upstreamTask.output_file}}`). Newlines are collapsed to spaces since ADF text nodes cannot contain embedded newlines. |
+| `priority` | no | Priority name (e.g. `High`) |
+| `labels` | no | Array of label strings |
+
+All operations write the Jira API response to `response.json` in the task working directory (per-item children use `response_<N>.json`). The response is captured as stdout and parsed for JSON-path template resolution — downstream tasks can reference `{{create_issue.json.key}}` to chain issue operations.
+
 **Files:** `application/cloud/jiraCloudTaskExecutor.h/cpp`
 
 ### GoogleSheetsConnector

@@ -517,13 +517,7 @@ namespace AIAssistant
         taskState.m_State = TaskInstanceStateKind::Succeeded;
 
         // Write raw response
-        {
-            std::ofstream responseFile(workDir / "response.json", std::ios::trunc);
-            if (responseFile.is_open())
-            {
-                responseFile << responseBody;
-            }
-        }
+        WriteResponseJson(workDir, taskState, responseBody);
 
         return true;
     }

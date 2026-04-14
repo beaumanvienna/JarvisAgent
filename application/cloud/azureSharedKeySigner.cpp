@@ -60,7 +60,7 @@ namespace AIAssistant
 
         BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
         BIO_write(b64, data.data(), static_cast<int>(data.size()));
-        BIO_flush(b64);
+        (void)BIO_flush(b64);
 
         BUF_MEM* bufPtr = nullptr;
         BIO_get_mem_ptr(b64, &bufPtr);

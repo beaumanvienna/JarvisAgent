@@ -21,6 +21,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#include <fstream>
+
 #include "simdjson/simdjson.h"
 
 #include "core.h"
@@ -215,5 +217,42 @@ namespace AIAssistant
         }
 
         return true;
+    }
+
+    std::string ICloudTaskExecutor::ResponseJsonFilename(TaskInstanceState const& taskState)
+    {
+        // Per-item child instance ids have the form "parentId#N".  Regular tasks have
+        // no '#' — use the plain filename for them to preserve existing behaviour.
+        std::string const& instanceId = taskState.m_TaskInstanceId;
+        auto const hashPos = instanceId.rfind('#');
+        if (hashPos == std::string::npos)
+        {
+            return "response.json";
+        }
+        std::string const suffix = instanceId.substr(hashPos + 1);
+        if (suffix.empty())
+        {
+            return "response.json";
+        }
+        return "response_" + suffix + ".json";
+    }
+
+    void ICloudTaskExecutor::WriteResponseJson(std::filesystem::path const& workDir,
+                                               TaskInstanceState const& taskState,
+                                               std::string const& responseBody)
+    {
+        if (workDir.empty())
+        {
+            return;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(workDir, ec);
+
+        std::ofstream responseFile(workDir / ResponseJsonFilename(taskState), std::ios::trunc);
+        if (responseFile.is_open())
+        {
+            responseFile << responseBody;
+        }
     }
 } // namespace AIAssistant

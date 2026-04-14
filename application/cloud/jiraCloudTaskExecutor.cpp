@@ -193,6 +193,40 @@ namespace AIAssistant
             std::string description = getStringParam("description");
             std::string priority = getStringParam("priority");
 
+            // description_file: read description from a file (takes precedence over inline
+            // description).  Mirrors polarion_write's field_value_file, enabling per-task
+            // AI output piping via {{upstreamTask.output_file}}.
+            std::string descriptionFile = getStringParam("description_file");
+            if (!descriptionFile.empty())
+            {
+                std::ifstream in(descriptionFile);
+                if (!in.is_open())
+                {
+                    taskState.m_LastErrorMessage =
+                        "jira_issue 'create': description_file not readable: " + descriptionFile;
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    return false;
+                }
+                std::ostringstream oss;
+                oss << in.rdbuf();
+                description = oss.str();
+                while (!description.empty() && (description.back() == '\n' || description.back() == '\r'))
+                {
+                    description.pop_back();
+                }
+            }
+
+            // ADF text nodes cannot contain embedded newlines — collapse to spaces so the
+            // single-paragraph description body below stays valid.  Multi-paragraph ADF is a
+            // possible future enhancement.
+            for (char& c : description)
+            {
+                if (c == '\n' || c == '\r' || c == '\t')
+                {
+                    c = ' ';
+                }
+            }
+
             // Build Jira REST API v3 create issue body
             std::string requestBody = "{\"fields\":{";
             requestBody += "\"project\":{\"key\":\"" + JsonEscape(projectKey) + "\"}";
@@ -412,14 +446,7 @@ namespace AIAssistant
             std::filesystem::path workDir =
                 TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
 
-            std::error_code ec;
-            std::filesystem::create_directories(workDir, ec);
-
-            std::ofstream responseFile(workDir / "response.json", std::ios::trunc);
-            if (responseFile.is_open())
-            {
-                responseFile << responseBody;
-            }
+            WriteResponseJson(workDir, taskState, responseBody);
         }
 
         return true;

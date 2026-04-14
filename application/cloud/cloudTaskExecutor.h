@@ -59,6 +59,18 @@ namespace AIAssistant
         static bool ValidateLocalPath(std::string const& localPath, std::filesystem::path const& baseDir,
                                       std::string const& taskId);
 
+        // Compute the response.json filename for a given task instance.
+        // Returns "response.json" for regular tasks, "response_<N>.json" for per-item
+        // children (taskInstanceId of the form "parentId#N").  This lets concurrent
+        // per-item children write to disjoint files so JSON-path template resolution
+        // can target the per-index upstream output.
+        static std::string ResponseJsonFilename(TaskInstanceState const& taskState);
+
+        // Write the cloud response body to the per-instance response.json file inside
+        // workDir. Silently no-ops if workDir cannot be created.
+        static void WriteResponseJson(std::filesystem::path const& workDir, TaskInstanceState const& taskState,
+                                      std::string const& responseBody);
+
         CloudConnectorRegistry& m_ConnectorRegistry;
         CloudConnectionManager& m_ConnectionManager;
     };

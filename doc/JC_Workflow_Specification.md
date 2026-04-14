@@ -870,13 +870,18 @@ make
 
 **Max items:** Filters support a configurable `max_items` limit (default: 10000). Set to 0 for no limit.
 
-**Per-item output piping** *(v1.1)*: When a `per_item` task B depends on another `per_item` task A (same filter), the runtime automatically injects A's per-instance outputs into B's corresponding instance as template variables:
+**Upstream output piping** *(v1.1)*: For any task B that declares a `depends_on` on an upstream task A, the runtime automatically injects A's outputs into B's template context. This works for both regular (single-instance) chains and `per_item` chains — in the per_item case, the matching-index child outputs are injected.
 
-- `{{A.output_file}}` — absolute path to A's first output file (sorted alphabetically by slot name) for the matching item index.
-- `{{A.captured_stdout}}` — captured stdout of A's instance (up to 1024 characters) for the matching item index.
-- `{{A.<slotName>}}` — each named output slot from A's instance individually.
+Available template variables on a declared dependency:
 
-This enables chained per_item pipelines where each downstream instance consumes the output of its corresponding upstream instance:
+- `{{A.output_file}}` — absolute path to A's first output file (sorted alphabetically by slot name).
+- `{{A.captured_stdout}}` — captured stdout of A (up to 1024 characters).
+- `{{A.<slotName>}}` — each named output slot from A individually.
+- `{{A.json.<path>}}` — for cloud tasks that write `response.json`, the JSON response is parsed and flattened into dotted-path entries. Example: `{{create_issue.json.key}}`, `{{create_issue.json.fields.summary}}`, `{{list_issues.json.items[0].id}}`.
+
+**Per-child response files:** Cloud task executors write their HTTP response to `response.json` for regular tasks and to `response_<N>.json` for per-item children (where `N` is the item index). The JSON-path resolver reads the appropriate file based on the caller's instance — so chained per_item cloud operations get their own matching-index response without races between concurrent children.
+
+This enables chained pipelines where each downstream task consumes structured fields from its corresponding upstream response:
 
 ```
 filter(N items) → per_item ai_call(N) → per_item cloud_write(N)
@@ -1203,6 +1208,21 @@ inserting `.output` before the extension:
 For `ai_call` tasks, the **PROB files are the requirement files**.  The
 workflow executor writes PROB files to the task's queue folder; the
 SessionManager dispatches them.
+
+**Exposing the AI response to downstream tasks.** When a downstream task (cloud, shell, python) needs the AI response as a file path, the `ai_call` task MUST declare an `outputs` slot and MUST NOT declare `file_outputs`:
+
+```jsonc
+"summarize": {
+  "type": "ai_call",
+  "working_directory": "../../queue/myWorkflow/01_summarize",
+  "outputs": { "summary": { "type": "string" } },  // REQUIRED for downstream piping
+  "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
+}
+```
+
+The runtime maps the declared output slot to the natural `<PROB_stem>.output.<ext>` file the SessionManager produces. Downstream tasks reference it as `{{summarize.output_file}}` or `{{summarize.summary}}`, which resolve to the absolute path of the AI response.
+
+**Why `file_outputs` is forbidden on `ai_call`:** `file_outputs` paths resolve against the task's `working_directory`, which for `ai_call` is inside a watched queue folder. A file written there that does not match any recognized prefix (STNG/CNTX/TASK/PROB/PROV/`*.output.*`) is categorized as a new requirement file and triggers an additional AI query. The runtime MUST warn (or, implementations MAY reject) `ai_call` tasks that declare `file_outputs`.
 
 ##### 3.3.6.4 `queue_binding` — Declaring Queue Files in JCWF
 

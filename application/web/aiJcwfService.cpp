@@ -1801,7 +1801,13 @@ namespace AIAssistant
                     "- Port names: dep-source, error-signal, cf-in-normal, cf-in-error, "
                     "cf-out-normal, cf-out-error, dep-target.\n"
                     "- Every ai_call stng_files content MUST include 'No markdown fences, no explanations.' "
-                    "because AI output is consumed directly by compilers/tools.\n";
+                    "because AI output is consumed directly by compilers/tools.\n"
+                    "- ai_call tasks MUST NOT declare 'file_outputs'. Their working_directory is inside a queue "
+                    "folder; any file landing there that is not STNG/CNTX/TASK/PROB/PROV/*.output.* is "
+                    "mis-categorized as a new requirement and triggers an extra wasted AI call. Instead, "
+                    "declare an 'outputs' slot: \"outputs\": { \"<slotName>\": { \"type\": \"string\" } }. "
+                    "The slot auto-maps to the SessionManager's natural PROB_*.output.txt file, and downstream "
+                    "tasks reference it as {{taskId.output_file}} or {{taskId.<slotName>}}.\n";
 
                 std::string const generateStng = "Output ONLY valid JSON. No markdown fences. No explanations. No comments. "
                                                  "The output MUST parse as a complete JCWF file.";
