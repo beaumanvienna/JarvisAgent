@@ -45,9 +45,12 @@ namespace AIAssistant
         bool TestConnection(CloudConnection const& connection, std::string& errorMessage) override;
         bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                 std::string& errorMessage) override;
+        bool GetOAuth2ProviderInfo(CloudConnection const& connection,
+                                   OAuth2ProviderInfo& info) const override;
 
         static std::string GetApiBaseUrl(CloudConnection const& connection);
 
         static constexpr char const* DEFAULT_API_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets";
+        static constexpr char const* DEFAULT_OAUTH_SCOPES = "https://www.googleapis.com/auth/spreadsheets";
     };
 } // namespace AIAssistant

@@ -6569,50 +6569,85 @@ namespace AIAssistant
 
         std::string clientId = clientIdIt->second;
 
-        auto tenantIdIt = connection->m_Params.find("tenant_id");
-        std::string tenantId = (tenantIdIt != connection->m_Params.end() && !tenantIdIt->second.empty())
-                                   ? tenantIdIt->second
-                                   : OneDriveConnector::DEFAULT_TENANT_ID;
+        // Look up the connector for this connection's type so we can get provider-specific
+        // OAuth2 endpoints and parameters (Google vs Microsoft vs future providers).
+        auto& connectorRegistry = Core::g_Core->GetCloudConnectorRegistry();
+        ICloudConnector* connector = connectorRegistry.GetConnector(connection->m_Type);
+        if (!connector)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "no_connector";
+            err["message"] = "No connector registered for type '" + connection->m_Type + "'";
+            return MakeJsonResponse(400, err);
+        }
+
+        OAuth2ProviderInfo providerInfo;
+        if (!connector->GetOAuth2ProviderInfo(*connection, providerInfo))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "oauth2_not_supported";
+            err["message"] = "Connector '" + connection->m_Type + "' does not support OAuth2";
+            return MakeJsonResponse(400, err);
+        }
 
         auto scopesIt = connection->m_Params.find("scopes");
         std::string scopes = (scopesIt != connection->m_Params.end() && !scopesIt->second.empty())
                                  ? scopesIt->second
-                                 : OneDriveConnector::DEFAULT_SCOPES;
+                                 : providerInfo.m_DefaultScopes;
 
-        // Build the authorization URL with PKCE
-        // Generate code_verifier (43-128 chars, base64url-encoded random bytes)
+        // Proper base64url encoder (no padding) — RFC 4648 §5, used by PKCE per RFC 7636.
+        auto base64UrlEncode = [](unsigned char const* data, size_t len) -> std::string
+        {
+            static char const alphabet[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            std::string out;
+            out.reserve(((len + 2) / 3) * 4);
+            size_t i = 0;
+            while (i + 3 <= len)
+            {
+                uint32_t const v =
+                    (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) | uint32_t(data[i + 2]);
+                out += alphabet[(v >> 18) & 0x3F];
+                out += alphabet[(v >> 12) & 0x3F];
+                out += alphabet[(v >> 6) & 0x3F];
+                out += alphabet[v & 0x3F];
+                i += 3;
+            }
+            if (i < len)
+            {
+                uint32_t v = uint32_t(data[i]) << 16;
+                if (i + 1 < len)
+                {
+                    v |= uint32_t(data[i + 1]) << 8;
+                }
+                out += alphabet[(v >> 18) & 0x3F];
+                out += alphabet[(v >> 12) & 0x3F];
+                if (i + 1 < len)
+                {
+                    out += alphabet[(v >> 6) & 0x3F];
+                }
+            }
+            return out;
+        };
+
+        // Build the authorization URL with PKCE.
+        // PKCE code_verifier: base64url-encoded 32 random bytes → 43 chars (no padding),
+        // within the RFC 7636 range of 43–128 chars.
         unsigned char randomBytes[32];
         RAND_bytes(randomBytes, sizeof(randomBytes));
+        std::string codeVerifier = base64UrlEncode(randomBytes, sizeof(randomBytes));
 
-        // Base64url encode
-        std::string codeVerifier;
-        codeVerifier.reserve(44);
-        static char const base64url[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        for (size_t i = 0; i < sizeof(randomBytes); ++i)
-        {
-            codeVerifier += base64url[randomBytes[i] % 64];
-        }
-
-        // SHA-256 hash of code_verifier for code_challenge
+        // code_challenge = BASE64URL(SHA256(code_verifier))
         unsigned char hash[32];
         EVP_Digest(codeVerifier.data(), codeVerifier.size(), hash, nullptr, EVP_sha256(), nullptr);
+        std::string codeChallenge = base64UrlEncode(hash, sizeof(hash));
 
-        std::string codeChallenge;
-        codeChallenge.reserve(44);
-        for (size_t i = 0; i < sizeof(hash); ++i)
-        {
-            codeChallenge += base64url[hash[i] % 64];
-        }
-
-        // Generate CSRF state token
+        // CSRF state token: 16 random bytes, base64url-encoded.
         unsigned char stateBytes[16];
         RAND_bytes(stateBytes, sizeof(stateBytes));
-        std::string stateToken;
-        stateToken.reserve(22);
-        for (size_t i = 0; i < sizeof(stateBytes); ++i)
-        {
-            stateToken += base64url[stateBytes[i] % 64];
-        }
+        std::string stateToken = base64UrlEncode(stateBytes, sizeof(stateBytes));
 
         // Store code_verifier and state token for the callback (keyed by connection name)
         // Using a simple in-memory map — acceptable since OAuth flows are short-lived
@@ -6622,32 +6657,46 @@ namespace AIAssistant
             m_OAuthStateTokens[connectionName] = stateToken;
         }
 
-        std::string authorizeUrl = OneDriveConnector::GetAuthorizeUrl(tenantId);
-
-        // Build redirect URI — the callback endpoint on this server
+        // Build redirect URI — the callback endpoint on this server.
+        // Use https:// when TLS is configured so the redirect URI the provider sends the
+        // browser to actually matches the scheme the server listens on.
         auto const& cfg = Core::g_Core->GetConfig();
         uint16_t port = (cfg.m_Port != 0) ? cfg.m_Port : static_cast<uint16_t>(8080);
-        std::string redirectUri = "http://localhost:" + std::to_string(port) +
+        std::string const scheme = (!cfg.m_TlsCert.empty() && !cfg.m_TlsKey.empty()) ? "https" : "http";
+        std::string redirectUri = scheme + "://localhost:" + std::to_string(port) +
                                   "/api/connections/" + connectionName + "/oauth/callback";
 
-        // URL-encode scopes (replace spaces with %20)
-        std::string encodedScopes;
-        for (char c : scopes)
+        // Percent-encode a string for safe inclusion in URL query parameters.
+        auto percentEncode = [](std::string const& input)
         {
-            if (c == ' ')
+            static char const kHex[] = "0123456789ABCDEF";
+            std::string out;
+            out.reserve(input.size() * 3);
+            for (unsigned char c : input)
             {
-                encodedScopes += "%20";
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+                    c == '_' || c == '.' || c == '~')
+                {
+                    out += static_cast<char>(c);
+                }
+                else
+                {
+                    out += '%';
+                    out += kHex[(c >> 4) & 0xF];
+                    out += kHex[c & 0xF];
+                }
             }
-            else
-            {
-                encodedScopes += c;
-            }
-        }
+            return out;
+        };
 
-        std::string fullUrl = authorizeUrl + "?client_id=" + clientId + "&response_type=code" +
-                              "&redirect_uri=" + redirectUri + "&scope=" + encodedScopes +
-                              "&code_challenge=" + codeChallenge + "&code_challenge_method=S256" +
-                              "&state=" + stateToken + "&response_mode=query";
+        std::string fullUrl = providerInfo.m_AuthorizeUrl + "?client_id=" + percentEncode(clientId) +
+                              "&response_type=code" + "&redirect_uri=" + percentEncode(redirectUri) +
+                              "&scope=" + percentEncode(scopes) + "&code_challenge=" + codeChallenge +
+                              "&code_challenge_method=S256" + "&state=" + stateToken;
+        for (auto const& [k, v] : providerInfo.m_ExtraAuthorizeParams)
+        {
+            fullUrl += "&" + percentEncode(k) + "=" + percentEncode(v);
+        }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -6723,24 +6772,70 @@ namespace AIAssistant
         auto clientIdIt = connection->m_Params.find("client_id");
         std::string clientId = (clientIdIt != connection->m_Params.end()) ? clientIdIt->second : "";
 
-        auto tenantIdIt = connection->m_Params.find("tenant_id");
-        std::string tenantId = (tenantIdIt != connection->m_Params.end() && !tenantIdIt->second.empty())
-                                   ? tenantIdIt->second
-                                   : OneDriveConnector::DEFAULT_TENANT_ID;
-
-        std::string tokenUrl = OneDriveConnector::GetTokenUrl(tenantId);
+        // Look up provider info via the registered connector (Google vs Microsoft vs ...).
+        auto& connectorRegistryCb = Core::g_Core->GetCloudConnectorRegistry();
+        ICloudConnector* connectorCb = connectorRegistryCb.GetConnector(connection->m_Type);
+        if (!connectorCb)
+        {
+            return crow::response(400, "No connector registered for type '" + connection->m_Type + "'");
+        }
+        OAuth2ProviderInfo providerInfo;
+        if (!connectorCb->GetOAuth2ProviderInfo(*connection, providerInfo))
+        {
+            return crow::response(400, "Connector '" + connection->m_Type + "' does not support OAuth2");
+        }
+        std::string tokenUrl = providerInfo.m_TokenUrl;
 
         auto const& cfg = Core::g_Core->GetConfig();
         uint16_t port = (cfg.m_Port != 0) ? cfg.m_Port : static_cast<uint16_t>(8080);
-        std::string redirectUri = "http://localhost:" + std::to_string(port) +
+        std::string const scheme = (!cfg.m_TlsCert.empty() && !cfg.m_TlsKey.empty()) ? "https" : "http";
+        std::string redirectUri = scheme + "://localhost:" + std::to_string(port) +
                                   "/api/connections/" + connectionName + "/oauth/callback";
 
-        // Exchange authorization code for tokens
+        // Percent-encode a string for safe inclusion in x-www-form-urlencoded bodies.
+        auto percentEncodeCb = [](std::string const& input)
+        {
+            static char const kHex[] = "0123456789ABCDEF";
+            std::string out;
+            out.reserve(input.size() * 3);
+            for (unsigned char c : input)
+            {
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+                    c == '_' || c == '.' || c == '~')
+                {
+                    out += static_cast<char>(c);
+                }
+                else
+                {
+                    out += '%';
+                    out += kHex[(c >> 4) & 0xF];
+                    out += kHex[c & 0xF];
+                }
+            }
+            return out;
+        };
+
+        // Exchange authorization code for tokens.
         std::string postBody = "grant_type=authorization_code"
-                               "&code=" + authCode +
-                               "&redirect_uri=" + redirectUri +
-                               "&client_id=" + clientId +
+                               "&code=" + percentEncodeCb(authCode) +
+                               "&redirect_uri=" + percentEncodeCb(redirectUri) +
+                               "&client_id=" + percentEncodeCb(clientId) +
                                "&code_verifier=" + codeVerifier;
+
+        // Google (and other confidential clients) require client_secret in the token
+        // exchange in addition to PKCE.  Microsoft PKCE public clients do not.
+        if (providerInfo.m_RequiresClientSecret)
+        {
+            auto clientSecretIt = connection->m_Params.find("client_secret");
+            if (clientSecretIt == connection->m_Params.end() || clientSecretIt->second.empty())
+            {
+                LOG_CORE_ERROR("OAuth callback for '{}': provider requires client_secret but connection has none",
+                               connectionName);
+                return crow::response(400, "Connection '" + connectionName +
+                                               "' requires 'client_secret' parameter for this provider");
+            }
+            postBody += "&client_secret=" + percentEncodeCb(clientSecretIt->second);
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -6827,10 +6922,79 @@ namespace AIAssistant
             expiresIn = parsedExpiry;
         }
 
-        // Store tokens in OAuthTokenManager
+        // Store tokens in OAuthTokenManager.  Pass client_secret through for confidential
+        // clients so the background refresh loop can use it.
+        std::string clientSecretForRefresh;
+        if (providerInfo.m_RequiresClientSecret)
+        {
+            auto clientSecretIt = connection->m_Params.find("client_secret");
+            if (clientSecretIt != connection->m_Params.end())
+            {
+                clientSecretForRefresh = clientSecretIt->second;
+            }
+        }
         auto& oauthManager = Core::g_Core->GetOAuthTokenManager();
         oauthManager.StoreTokens(connection->m_KeyName, std::string(accessToken), std::string(refreshToken),
-                                 expiresIn, tokenUrl, clientId);
+                                 expiresIn, tokenUrl, clientId, clientSecretForRefresh);
+
+        // Persist refresh_token + OAuth app config to the encrypted keys file so tokens
+        // survive a restart.  The access_token itself is short-lived and is NOT persisted;
+        // on startup the OAuthTokenManager hydrates from the refresh_token and fetches a
+        // fresh access_token.
+        {
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            auto const* existing = keyManager.GetProvider(connection->m_KeyName);
+            if (existing)
+            {
+                KeyManager::ProviderConfig updated = *existing;
+                updated.m_CredentialType = "oauth";
+                updated.m_RefreshToken = std::string(refreshToken);
+                updated.m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
+                updated.m_Scopes = connection->m_Params.count("scopes")
+                                       ? connection->m_Params.at("scopes")
+                                       : providerInfo.m_DefaultScopes;
+                updated.m_TokenEndpoint = tokenUrl;
+                updated.m_ClientId = clientId;
+                updated.m_ClientSecret = clientSecretForRefresh;
+                keyManager.UpdateProvider(connection->m_KeyName, std::move(updated));
+
+                std::string cachedPassword = keyManager.GetCachedMasterPassword();
+                if (cachedPassword.empty())
+                {
+                    if (char const* envPwd = std::getenv("JARVIS_MASTER_PASSWORD"); envPwd && *envPwd)
+                    {
+                        cachedPassword = envPwd;
+                    }
+                }
+
+                auto const& keysPath = keyManager.GetKeysFilePath();
+                if (!cachedPassword.empty() && !keysPath.empty())
+                {
+                    if (keyManager.Save(keysPath, cachedPassword))
+                    {
+                        LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
+                                          connection->m_KeyName);
+                    }
+                    else
+                    {
+                        LOG_CORE_WARN("OAuth callback: failed to persist tokens for '{}' — refresh_token "
+                                      "will be lost on restart",
+                                      connection->m_KeyName);
+                    }
+                }
+                else
+                {
+                    LOG_CORE_WARN("OAuth callback: no cached master password or keys file path — refresh_token "
+                                  "for '{}' held in memory only and will be lost on restart",
+                                  connection->m_KeyName);
+                }
+            }
+            else
+            {
+                LOG_CORE_WARN("OAuth callback: key '{}' not found in KeyManager, cannot persist refresh_token",
+                              connection->m_KeyName);
+            }
+        }
 
         LOG_SECURITY_INFO("[security] OAuth tokens acquired for connection '{}' (key: '{}')", connectionName,
                           connection->m_KeyName);

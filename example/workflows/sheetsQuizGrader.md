@@ -1,139 +1,190 @@
-# sheetsQuizGrader Workflow -- Google Sheets + AI Grading
+# sheetsQuizGrader Workflow — Google Sheets Read-Grade-Write Round-Trip
 
 ## Executive Summary
 
-The **sheetsQuizGrader** workflow demonstrates the full Google Sheets read/write cycle combined with AI evaluation. It reads C++ and Vulkan coding quiz questions from a Google Sheet, uses an AI model to grade each answer, and writes the grades back to the sheet.
+The **sheetsQuizGrader** workflow demonstrates a full Google Sheets read/write cycle with an AI evaluation step in the middle. It reads C++ and Vulkan quiz questions + student answers from a Google Sheet, runs an AI model that grades each answer and produces CSV, and writes the grades back to the same sheet.
 
-This workflow shows:
+This is the canonical demo for:
 
-- how `sheets_read` reads a spreadsheet range to CSV,
-- how `ai_call` evaluates structured data and produces CSV output,
-- how `sheets_write` uploads CSV results back to the spreadsheet,
-- and how the three task types chain together in a read-process-write pipeline.
+- `sheets_read` → `ai_call` → `sheets_write` chaining via `depends_on`
+- OAuth2 authentication to Google (required for sheets_write; API keys work only for read-only)
+- The `outputs:{}` slot pattern on `ai_call` (instead of the anti-pattern `file_outputs` inside a queue folder)
+- Persistent OAuth refresh tokens — once consent is granted, j9t stores the refresh token in the encrypted key store, and subsequent restarts do not require re-consent
 
 ---
 
 ## Prerequisites
 
-1. A Google Sheets spreadsheet with the sample quiz data
-2. A CloudConnection named `my-sheets` configured in the **Connections** tab
-3. An AI provider configured (e.g., OpenAI GPT-4.1-mini)
+1. A Google account
+2. A Google Cloud project with the **Google Sheets API** enabled
+3. A Google OAuth 2.0 client credential (Web application type) — see OAuth setup below
+4. A `my-sheets` CloudConnection configured in j9t
+5. A Google Sheet populated with the sample quiz data from `example/workflows/sheetsQuizGrader_sample_data.csv`
+6. An AI provider configured (OpenAI, Anthropic, Gemini etc.)
 
-### Setting up the quiz spreadsheet
+### Creating the Google Sheet
 
-1. Create a new Google Sheet
-2. Import the sample data from `example/workflows/sheetsQuizGrader_sample_data.csv`:
-   - The sheet should have **Column A** = Question, **Column B** = Answer
-   - Row 1 is the header, rows 2-11 are the 10 quiz items
-3. Note the spreadsheet ID from the URL: `https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit`
-4. Configure the `my-sheets` connection with this spreadsheet ID
+1. Import `example/workflows/sheetsQuizGrader_sample_data.csv` into a new Google Sheet. Google will name the tab after the file — default `sheetsQuizGrader_sample_data`.
+2. Copy the spreadsheet ID from the URL — it's the long token between `/d/` and `/edit`:
+   ```
+   https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit
+   ```
+3. Note the tab name (bottom-left) — if it isn't `sheetsQuizGrader_sample_data`, adjust the `range` in the JCWF.
 
-### Quiz content
+### Google Cloud OAuth setup (one-time)
 
-The sample data contains 10 C++ and Vulkan questions. Some answers are correct, some are deliberately wrong:
+1. Go to https://console.cloud.google.com and create (or select) a project.
+2. **APIs & Services → Enable APIs → Google Sheets API → Enable.**
+3. **APIs & Services → OAuth consent screen** (now called "Google Auth Platform" in the new UI):
+   - User type: **External**
+   - App name: `j9t local` (any name)
+   - Add yourself as a **Test user** under **Audience** — required while the app is in Testing mode.
+4. **APIs & Services → Credentials → + Create Credentials → OAuth client ID**:
+   - Application type: **Web application**
+   - Name: `j9t local`
+   - Authorized redirect URI (exactly):
+     ```
+     https://localhost:8443/api/connections/my-sheets/oauth/callback
+     ```
+   - Click **Create** and copy the **Client ID** and **Client secret**.
 
-| # | Topic | Answer Quality |
-|---|-------|---------------|
-| 1 | VkInstance purpose | Correct |
-| 2 | std::span in C++20 | Correct |
-| 3 | GPU representation in Vulkan | Correct (VkDevice, though VkPhysicalDevice is more precise) |
-| 4 | What std::move does | **Incorrect** (it casts to rvalue, it does not copy) |
-| 5 | Vulkan render pass | Correct |
-| 6 | RAII in C++ | Correct |
-| 7 | VkBuffer vs VkImage | Correct |
-| 8 | volatile keyword | Partially correct (missing the "no reordering" aspect) |
-| 9 | Vulkan descriptor set | **Incorrect** (descriptor sets are not garbage-collected) |
-| 10 | std::unique_ptr | Correct |
+### Configuring j9t
+
+All config goes through the REST API — never edit `keys.json.enc` or `connections.json` by hand.
+
+```bash
+# 1. Create a key to host the OAuth tokens
+curl -sk -X POST https://localhost:8443/api/settings/providers \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "google-sheets-oauth",
+        "display_name": "Google Sheets OAuth",
+        "credential_type": "oauth",
+        "scopes": "https://www.googleapis.com/auth/spreadsheets"
+      }'
+curl -sk -X POST https://localhost:8443/api/settings/providers/save
+
+# 2. Create the my-sheets connection
+curl -sk -X POST https://localhost:8443/api/connections \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "my-sheets",
+        "type": "google_sheets",
+        "endpoint": "https://sheets.googleapis.com/v4/spreadsheets",
+        "key_name": "google-sheets-oauth",
+        "auth_type": "oauth2",
+        "params": {
+          "client_id": "YOUR_CLIENT_ID",
+          "client_secret": "YOUR_CLIENT_SECRET",
+          "spreadsheet_id": "YOUR_SPREADSHEET_ID",
+          "scopes": "https://www.googleapis.com/auth/spreadsheets"
+        }
+      }'
+curl -sk -X POST https://localhost:8443/api/connections/save
+
+# 3. Start the OAuth authorize flow
+curl -sk https://localhost:8443/api/connections/my-sheets/oauth/authorize
+# → response contains "authorize_url": open in your browser
+```
+
+Walk through the browser flow:
+- Google account picker → your Gmail
+- "Google hasn't verified this app" → **Continue** (expected in Testing mode)
+- Consent screen → **Continue**
+- Self-signed cert warning on `https://localhost:8443/...` → **Advanced → Proceed to localhost (unsafe)**
+- Final page: **Authorization successful**
+
+At this point, j9t has:
+
+- An access token in memory (valid for 1 hour)
+- A refresh token persisted in `keys.json.enc` — subsequent j9t restarts hydrate the token entry from disk and refresh the access token on demand, **no re-consent needed**
 
 ---
 
-## Pipeline Overview
+## Task Graph
 
 ```
-+-----------------+     +-----------------+     +-----------------+
-|  read_quiz      | --> |  grade_answers  | --> |  write_grades   |
-|  sheets_read    |     |  ai_call        |     |  sheets_write   |
-|  (01_read)      |     |  (02_grade)     |     |  (03_write)     |
-+-----------------+     +-----------------+     +-----------------+
+read_quiz  ──►  grade_answers  ──►  write_grades
+(sheets_read)    (ai_call)          (sheets_write)
 ```
 
----
-
-## Trigger
-
-Manual trigger only -- will not start at j9t startup.
-
----
-
-## Task Details
-
-### 1. read_quiz -- read quiz from Google Sheets
-
-Reads the quiz questions and answers from the spreadsheet.
+### 1. read_quiz — fetch quiz from Google Sheets
 
 | Field | Value |
 |-------|-------|
 | Type | `sheets_read` |
 | Connection | `my-sheets` |
-| Range | `Sheet1!A1:B11` |
-| Output Format | `csv` |
-| Output File | `quiz_data.csv` |
+| Range | `sheetsQuizGrader_sample_data!A1:B11` |
+| Output format | `csv` |
+| Output file | `quiz_data.csv` (written inside the task working directory) |
 
-### 2. grade_answers -- AI evaluates each answer
+Pulls the question/answer rows into `workflows/sheetsQuizGrader/01_read/quiz_data.csv`.
 
-An AI model grades each answer as Correct, Partially Correct, or Incorrect with a brief explanation.
+### 2. grade_answers — AI grades each answer
 
 | Field | Value |
 |-------|-------|
 | Type | `ai_call` |
 | Mode | `one_shot` |
-| Output | `grades.csv` (3 columns: Grade, Score, Explanation) |
+| Working directory | `../../queue/sheetsQuizGrader/02_grade` |
+| Outputs | `grades` slot (auto-maps to `PROB_grade.output.txt`) |
 | Depends on | `read_quiz` |
 
-The AI prompt includes all 10 questions and answers, asking the model to produce a CSV with grades (0/5/10), and one-sentence explanations.
+Queue binding:
+- **STNG**: senior C++/Vulkan grader — output raw CSV only, no markdown, no headers
+- **CNTX**: grading rubric (CORRECT / PARTIAL / WRONG semantics)
+- **TASK**: emit CSV rows, one per question, same order as input
+- **PROB**: the actual student answers (derived from `quiz_data.csv`)
 
-### 3. write_grades -- write grades back to sheet
+The AI produces a plain-text CSV body at `queue/sheetsQuizGrader/02_grade/PROB_grade.output.txt`. The `outputs` slot (no `file_outputs`!) maps this path to `{{grade_answers.output_file}}` for downstream consumers.
 
-Writes the AI's grading CSV to Column C of the spreadsheet, adding Grade, Score, and Explanation columns alongside the original data.
+### 3. write_grades — push grades back to the sheet
 
 | Field | Value |
 |-------|-------|
 | Type | `sheets_write` |
 | Connection | `my-sheets` |
-| Range | `Sheet1!C1` |
-| Input File | `grades.csv` |
-| Value Input Option | `USER_ENTERED` |
+| Range | `sheetsQuizGrader_sample_data!C1` |
+| Input file | `{{grade_answers.output_file}}` (absolute path to the AI CSV) |
+| Value input option | `USER_ENTERED` |
 | Depends on | `grade_answers` |
+
+`sheets_write` reads the CSV line-by-line (extension-agnostic) and PUTs it to Google Sheets at column C onward. Because the AI produces 3 columns (grade, score, explanation), the grades fan out across columns C, D, E.
 
 ---
 
 ## Running
 
 ```bash
-curl -s -X POST http://localhost:8080/api/workflows/sheetsQuizGrader/run
+curl -sk -X POST https://localhost:8443/api/workflows/sheetsQuizGrader/run
+```
+
+Poll the run:
+
+```bash
+curl -sk "https://localhost:8443/api/workflow-runs/<runId>"
 ```
 
 ---
 
 ## Expected Output
 
-After the workflow completes, the Google Sheet will have 5 columns:
+After the workflow completes, the sheet has 5 populated columns:
 
-| A (Question) | B (Answer) | C (Grade) | D (Score) | E (Explanation) |
+| A (Question) | B (Student Answer) | C (Grade) | D (Score) | E (Explanation) |
 |---|---|---|---|---|
-| What is VkInstance... | VkInstance is the connection... | Correct | 10 | Accurately describes VkInstance's role... |
-| ... | ... | ... | ... | ... |
-| What does std::move do... | std::move copies the object... | Incorrect | 0 | std::move performs an rvalue cast, not a copy... |
+| What is VkInstance... | VkInstance is the connection... | Correct | 10 | Accurately describes VkInstance... |
+| What does std::move do... | std::move copies and frees... | Incorrect | 0 | std::move casts to rvalue, it does not copy or free... |
 | ... | ... | ... | ... | ... |
 
-Expected scores: ~70/100 (7 correct, 1 partial, 2 incorrect).
+Expected total: around 70 / 100 (roughly 7 correct, 1 partial, 2 incorrect) — the sample data is deliberately mixed.
 
 ---
 
 ## Key Concepts Demonstrated
 
-- **Google Sheets read + write** -- full round-trip: read CSV from sheet, process, write results back
-- **AI-powered evaluation** -- `ai_call` task grades structured quiz data with explanations
-- **Pipeline chaining** -- `sheets_read` -> `ai_call` -> `sheets_write` via `depends_on`
-- **Sample data included** -- `sheetsQuizGrader_sample_data.csv` ready to import into Google Sheets
-- **Mixed correctness** -- deliberately includes wrong answers to demonstrate AI grading accuracy
+- **Full Google Sheets round-trip** — read, AI-process, write back to the same sheet
+- **OAuth2 with PKCE + client secret** — j9t's generic OAuth2 flow handles both Microsoft (PKCE-only, public client) and Google (PKCE + client secret, confidential client) providers; per-connector `OAuth2ProviderInfo` drives the quirks.
+- **Persistent refresh tokens** — after one consent, j9t restarts no longer require re-consent. Tokens live encrypted in `keys.json.enc`, hydrated on startup, and refreshed on demand the first time a workflow asks for an access token.
+- **`outputs` slot on `ai_call`** — exposes the AI response as `{{grade_answers.output_file}}` without writing a stray `grades.csv` into the queue folder (which would mis-categorize as a new requirements file and fire a second wasted AI request).
+- **Schema-constrained AI output** — STNG/TASK/CNTX explicitly tell the model to emit a fixed CSV schema with no markdown, no headers, no preamble. `sheets_write` then consumes it verbatim.

@@ -89,6 +89,21 @@ namespace AIAssistant
         return "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token";
     }
 
+    bool OneDriveConnector::GetOAuth2ProviderInfo(CloudConnection const& connection,
+                                                  OAuth2ProviderInfo& info) const
+    {
+        auto tenantIdIt = connection.m_Params.find("tenant_id");
+        std::string const tenantId =
+            (tenantIdIt != connection.m_Params.end() && !tenantIdIt->second.empty()) ? tenantIdIt->second
+                                                                                      : std::string(DEFAULT_TENANT_ID);
+        info.m_AuthorizeUrl = GetAuthorizeUrl(tenantId);
+        info.m_TokenUrl = GetTokenUrl(tenantId);
+        info.m_DefaultScopes = DEFAULT_SCOPES;
+        info.m_ExtraAuthorizeParams = {{"response_mode", "query"}};
+        info.m_RequiresClientSecret = false; // PKCE public client
+        return true;
+    }
+
     bool OneDriveConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)
     {
         auto clientIdIt = connection.m_Params.find("client_id");

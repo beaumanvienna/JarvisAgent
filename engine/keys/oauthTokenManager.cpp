@@ -58,9 +58,52 @@ namespace AIAssistant
         {
             return;
         }
+        HydrateFromKeyManager();
         m_Running.store(true);
         m_RefreshThread = std::thread(&OAuthTokenManager::RefreshLoop, this);
         LOG_CORE_INFO("OAuthTokenManager: refresh loop started");
+    }
+
+    void OAuthTokenManager::HydrateFromKeyManager()
+    {
+        size_t hydrated = 0;
+        auto const names = m_KeyManager.GetProviderNames();
+        for (auto const& name : names)
+        {
+            auto const* provider = m_KeyManager.GetProvider(name);
+            if (!provider || provider->m_CredentialType != "oauth" || provider->m_RefreshToken.empty())
+            {
+                continue;
+            }
+
+            std::lock_guard lock(m_Mutex);
+            if (m_Tokens.find(name) != m_Tokens.end())
+            {
+                continue; // already hydrated (e.g. from an in-session OAuth callback)
+            }
+
+            TokenEntry entry;
+            entry.m_AccessToken.clear();           // force refresh on first use
+            entry.m_RefreshToken = provider->m_RefreshToken;
+            entry.m_TokenEndpoint = provider->m_TokenEndpoint;
+            entry.m_ClientId = provider->m_ClientId;
+            entry.m_ClientSecret = provider->m_ClientSecret;
+            entry.m_ExpiresAt = 0;                 // expired → next GetAccessToken triggers refresh
+
+            SecretRedactor::Get().AddSecret(entry.m_RefreshToken);
+            if (!entry.m_ClientSecret.empty())
+            {
+                SecretRedactor::Get().AddSecret(entry.m_ClientSecret);
+            }
+
+            m_Tokens[name] = std::move(entry);
+            ++hydrated;
+        }
+
+        if (hydrated > 0)
+        {
+            LOG_CORE_INFO("OAuthTokenManager: hydrated {} OAuth token entry(ies) from KeyManager", hydrated);
+        }
     }
 
     void OAuthTokenManager::Stop()
@@ -90,13 +133,40 @@ namespace AIAssistant
 
         TokenEntry& entry = it->second;
 
-        // Wait if a refresh is in progress
+        // Wait if another thread is already refreshing this entry.
         m_Cv.wait(lock, [&entry]() { return !entry.m_Refreshing; });
 
         int64_t now = NowUnixSeconds();
-        if (entry.m_ExpiresAt > 0 && now >= entry.m_ExpiresAt)
+        bool const tokenMissing = entry.m_AccessToken.empty();
+        bool const tokenExpired = entry.m_ExpiresAt > 0 && now >= entry.m_ExpiresAt;
+        bool const tokenUnset = entry.m_ExpiresAt == 0;
+
+        // Trigger a synchronous refresh if the access token is empty, unset, or already
+        // expired.  This covers two cases:
+        //   1. Hydrated-from-disk entries (empty access_token, ExpiresAt=0) on the first
+        //      GetAccessToken call after startup.
+        //   2. Any entry the background refresh loop has not yet picked up (e.g. the
+        //      access_token expired between refresh loop ticks).
+        if ((tokenMissing || tokenExpired || tokenUnset) && !entry.m_RefreshToken.empty())
         {
-            errorMessage = "OAuth token for '" + keyName + "' has expired and refresh failed";
+            LOG_CORE_INFO("OAuthTokenManager: on-demand refresh for '{}' (access_token {}, expires_at={})", keyName,
+                          tokenMissing ? "empty" : "set", entry.m_ExpiresAt);
+            entry.m_Refreshing = true;
+            lock.unlock();
+            bool const success = RefreshToken(keyName, entry);
+            lock.lock();
+            entry.m_Refreshing = false;
+            m_Cv.notify_all();
+            if (!success)
+            {
+                errorMessage = "On-demand refresh of OAuth token for '" + keyName + "' failed";
+                return {};
+            }
+        }
+
+        if (entry.m_AccessToken.empty())
+        {
+            errorMessage = "No access token available for '" + keyName + "' (refresh token missing?)";
             return {};
         }
 
@@ -105,7 +175,8 @@ namespace AIAssistant
 
     void OAuthTokenManager::StoreTokens(std::string const& keyName, std::string const& accessToken,
                                          std::string const& refreshToken, int64_t expiresInSeconds,
-                                         std::string const& tokenEndpoint, std::string const& clientId)
+                                         std::string const& tokenEndpoint, std::string const& clientId,
+                                         std::string const& clientSecret)
     {
         std::lock_guard lock(m_Mutex);
 
@@ -114,6 +185,7 @@ namespace AIAssistant
         entry.m_RefreshToken = refreshToken;
         entry.m_TokenEndpoint = tokenEndpoint;
         entry.m_ClientId = clientId;
+        entry.m_ClientSecret = clientSecret;
         entry.m_ExpiresAt = NowUnixSeconds() + expiresInSeconds;
 
         // Register tokens with SecretRedactor
@@ -121,6 +193,10 @@ namespace AIAssistant
         if (!refreshToken.empty())
         {
             SecretRedactor::Get().AddSecret(refreshToken);
+        }
+        if (!clientSecret.empty())
+        {
+            SecretRedactor::Get().AddSecret(clientSecret);
         }
 
         m_Tokens[keyName] = std::move(entry);
@@ -207,10 +283,15 @@ namespace AIAssistant
             return false;
         }
 
-        // Build refresh request body
+        // Build refresh request body.  Confidential-client providers (Google) also need
+        // client_secret; public clients (Microsoft PKCE) do not.
         std::string postBody = "grant_type=refresh_token"
                                "&refresh_token=" + std::string(entry.m_RefreshToken) +
                                "&client_id=" + std::string(entry.m_ClientId);
+        if (!entry.m_ClientSecret.empty())
+        {
+            postBody += "&client_secret=" + std::string(entry.m_ClientSecret);
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)

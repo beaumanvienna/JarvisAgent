@@ -63,8 +63,14 @@ namespace AIAssistant
         }
 
         m_Dirty = false;
+        m_CachedMasterPassword = masterPassword;
         LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Providers.size(), keysFilePath.string());
         return true;
+    }
+
+    std::string KeyManager::GetCachedMasterPassword() const
+    {
+        return m_CachedMasterPassword;
     }
 
     bool KeyManager::Save(std::filesystem::path const& keysFilePath, std::string const& masterPassword)
@@ -93,6 +99,7 @@ namespace AIAssistant
         file.close();
 
         m_Dirty = false;
+        m_CachedMasterPassword = masterPassword;
         LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }
@@ -431,6 +438,18 @@ namespace AIAssistant
             {
                 config.m_Scopes = std::string(sv);
             }
+            if (providerObj["token_endpoint"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_TokenEndpoint = std::string(sv);
+            }
+            if (providerObj["client_id"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ClientId = std::string(sv);
+            }
+            if (providerObj["client_secret"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                config.m_ClientSecret = std::string(sv);
+            }
 
             // Key pair fields
             if (providerObj["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
@@ -487,7 +506,10 @@ namespace AIAssistant
                 oss << ",\n";
                 oss << "            \"refresh_token\": \"" << config.m_RefreshToken << "\",\n";
                 oss << "            \"expires_at\": " << config.m_ExpiresAt << ",\n";
-                oss << "            \"scopes\": \"" << config.m_Scopes << "\"";
+                oss << "            \"scopes\": \"" << config.m_Scopes << "\",\n";
+                oss << "            \"token_endpoint\": \"" << config.m_TokenEndpoint << "\",\n";
+                oss << "            \"client_id\": \"" << config.m_ClientId << "\",\n";
+                oss << "            \"client_secret\": \"" << config.m_ClientSecret << "\"";
             }
             else if (config.m_CredentialType == "key_pair")
             {

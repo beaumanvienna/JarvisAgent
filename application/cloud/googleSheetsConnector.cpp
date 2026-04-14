@@ -52,6 +52,22 @@ namespace AIAssistant
         return DEFAULT_API_BASE_URL;
     }
 
+    bool GoogleSheetsConnector::GetOAuth2ProviderInfo(CloudConnection const& connection,
+                                                      OAuth2ProviderInfo& info) const
+    {
+        (void)connection;
+        info.m_AuthorizeUrl = "https://accounts.google.com/o/oauth2/v2/auth";
+        info.m_TokenUrl = "https://oauth2.googleapis.com/token";
+        info.m_DefaultScopes = DEFAULT_OAUTH_SCOPES;
+        // access_type=offline + prompt=consent ensures Google returns a refresh_token even
+        // when the user has previously authorized the app.  Without this Google only returns
+        // a short-lived access_token on subsequent consents.
+        info.m_ExtraAuthorizeParams = {{"access_type", "offline"}, {"prompt", "consent"},
+                                        {"include_granted_scopes", "true"}};
+        info.m_RequiresClientSecret = true; // Google Web clients require client_secret for token exchange
+        return true;
+    }
+
     bool GoogleSheetsConnector::ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                                    std::string& errorMessage)
     {

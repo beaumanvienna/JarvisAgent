@@ -45,6 +45,12 @@ namespace AIAssistant
         void Start();
         void Stop();
 
+        // Seed in-memory token entries from persisted KeyManager provider configs.
+        // Any provider with credential_type == "oauth" and a non-empty refresh_token is
+        // hydrated with an empty access_token + m_ExpiresAt = 0 so the next GetAccessToken
+        // call triggers a refresh using the stored refresh_token + client credentials.
+        void HydrateFromKeyManager();
+
         // Get a valid access token for the named credential.
         // Blocks briefly if a refresh is in progress.
         // Returns empty string and populates errorMessage on failure.
@@ -53,9 +59,11 @@ namespace AIAssistant
         // Store initial tokens after OAuth consent flow completes.
         // tokenEndpoint: provider's token URL (e.g., "https://login.microsoftonline.com/.../token")
         // clientId: OAuth application client ID (needed for refresh requests)
+        // clientSecret: OAuth client secret (required by confidential-client providers like Google)
         void StoreTokens(std::string const& keyName, std::string const& accessToken,
                          std::string const& refreshToken, int64_t expiresInSeconds,
-                         std::string const& tokenEndpoint = {}, std::string const& clientId = {});
+                         std::string const& tokenEndpoint = {}, std::string const& clientId = {},
+                         std::string const& clientSecret = {});
 
         // Check if a credential has valid (non-expired) tokens.
         bool HasValidToken(std::string const& keyName) const;
@@ -67,6 +75,7 @@ namespace AIAssistant
             std::string m_RefreshToken;
             std::string m_TokenEndpoint; // Provider's token URL for refresh
             std::string m_ClientId;      // OAuth client ID for refresh
+            std::string m_ClientSecret;  // OAuth client secret (confidential clients only)
             int64_t m_ExpiresAt{0};      // Unix timestamp (seconds)
             bool m_Refreshing{false};    // True while a refresh is in flight
         };

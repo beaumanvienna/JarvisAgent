@@ -91,6 +91,18 @@ namespace AIAssistant
         return CloudAuthType::BearerToken;
     }
 
+    // Per-provider OAuth2 configuration returned by a connector so the generic OAuth2
+    // authorize/callback handlers in webServer can talk to any provider (Google, Microsoft,
+    // GitHub, etc.) without hardcoding endpoints or parameter quirks.
+    struct OAuth2ProviderInfo
+    {
+        std::string m_AuthorizeUrl;                       // e.g. "https://accounts.google.com/o/oauth2/v2/auth"
+        std::string m_TokenUrl;                           // e.g. "https://oauth2.googleapis.com/token"
+        std::string m_DefaultScopes;                      // space-separated scope list
+        std::map<std::string, std::string> m_ExtraAuthorizeParams; // provider-specific authorize params
+        bool m_RequiresClientSecret{false};               // true → POST client_secret in token exchange
+    };
+
     // Abstract interface for all cloud service connectors.
     class ICloudConnector
     {
@@ -108,5 +120,13 @@ namespace AIAssistant
         // Handles OAuth refresh, JWT generation, SigV4 derivation, etc.
         virtual bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                         std::string& errorMessage) = 0;
+
+        // Return OAuth2 provider info for this connector.  Non-OAuth2 connectors return false.
+        // Default implementation returns false (connector does not support OAuth2).
+        virtual bool GetOAuth2ProviderInfo(CloudConnection const& /*connection*/,
+                                           OAuth2ProviderInfo& /*info*/) const
+        {
+            return false;
+        }
     };
 } // namespace AIAssistant

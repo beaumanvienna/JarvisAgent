@@ -55,6 +55,10 @@ namespace AIAssistant
             std::string m_RefreshToken;
             int64_t m_ExpiresAt{0}; // Unix timestamp (seconds)
             std::string m_Scopes;
+            // OAuth provider config needed to refresh the access token after a restart.
+            std::string m_TokenEndpoint; // e.g. https://oauth2.googleapis.com/token
+            std::string m_ClientId;      // OAuth application client id
+            std::string m_ClientSecret;  // OAuth application client secret (confidential clients only)
 
             // Key pair fields (credential_type == "key_pair")
             std::string m_PrivateKeyPem;
@@ -94,6 +98,12 @@ namespace AIAssistant
 
         // Store the keys file path so Unlock() can use it at runtime
         void SetKeysFilePath(std::filesystem::path const& path) { m_KeysFilePath = path; }
+        std::filesystem::path const& GetKeysFilePath() const { return m_KeysFilePath; }
+
+        // Cache the master password after a successful Load/Unlock so server-side
+        // operations (e.g. OAuth token callbacks) can persist encrypted updates without
+        // re-prompting the user.  Returns empty string if no password is cached.
+        std::string GetCachedMasterPassword() const;
 
         // Dirty flag: true when in-memory state differs from on-disk state
         bool IsDirty() const { return m_Dirty; }
@@ -124,6 +134,7 @@ namespace AIAssistant
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};
         std::filesystem::path m_KeysFilePath;
+        std::string m_CachedMasterPassword;
         bool m_Dirty{false};
     };
 } // namespace AIAssistant

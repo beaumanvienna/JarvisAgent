@@ -99,7 +99,11 @@ Abstract base for all credential types stored in `KeyManager`. Replaces the flat
 
 Manages OAuth 2.0 token lifecycle: stores access/refresh tokens, tracks expiry, runs a background refresh loop (checks every 30s, refreshes tokens expiring within 5 minutes). Thread-safe. Registers tokens with `SecretRedactor` on acquisition.
 
-**Files:** `engine/keys/oauthTokenManager.h/cpp`
+**Persistence across restarts.** On `Start()`, the manager calls `HydrateFromKeyManager()` which walks all providers with `credential_type == "oauth"` and a non-empty `refresh_token` and seeds in-memory entries with the stored `refresh_token`, `token_endpoint`, `client_id`, and `client_secret`. The access_token itself is not persisted (short-lived). The hydrated entry has `m_ExpiresAt = 0`, so the first `GetAccessToken` call after startup performs an **on-demand synchronous refresh** using the stored refresh_token + client credentials, yielding a fresh access_token. This lets j9t restart without triggering a new user consent dialog.
+
+On successful consent in the OAuth callback, `webServer.cpp` stores the tokens in `OAuthTokenManager` **and** writes `refresh_token` + `expires_at` + `scopes` + `token_endpoint` + `client_id` + `client_secret` into the `KeyManager::ProviderConfig`, then calls `KeyManager::Save()` to encrypt the updated registry into `keys.json.enc`. The master password is cached in `KeyManager` after successful `Load`/`Unlock`/`Save` so the callback can re-encrypt without re-prompting the user (it falls back to `JARVIS_MASTER_PASSWORD` if the cache is empty).
+
+**Files:** `engine/keys/oauthTokenManager.h/cpp`, `engine/keys/keyManager.h/cpp`
 
 ### JwtGenerator
 
@@ -531,23 +535,45 @@ Implements `ICloudConnector` for Microsoft OneDrive via the Microsoft Graph API.
 - **Auth type**: OAuth2 (tokens managed by `OAuthTokenManager`)
 - **TestConnection()**: calls `GET /me/drive` to verify token and return drive info
 
-### OAuth 2.0 Authorization Code Flow with PKCE
+### Generic OAuth 2.0 Authorization Code Flow with PKCE
 
-OneDrive uses the Microsoft identity platform OAuth 2.0 flow with PKCE (Proof Key for Code Exchange) — no client secret required, suitable for public/native clients.
+The `/api/connections/<name>/oauth/authorize` and `/oauth/callback` handlers in `webServer.cpp` are **provider-agnostic**. They look up the connector for the connection's type via `CloudConnectorRegistry` and call `connector->GetOAuth2ProviderInfo(connection, info)`, which returns a per-provider `OAuth2ProviderInfo` struct:
 
-**Flow:**
+```cpp
+struct OAuth2ProviderInfo
+{
+    std::string m_AuthorizeUrl;              // e.g. https://accounts.google.com/o/oauth2/v2/auth
+    std::string m_TokenUrl;                  // e.g. https://oauth2.googleapis.com/token
+    std::string m_DefaultScopes;             // space-separated scopes
+    std::map<std::string, std::string> m_ExtraAuthorizeParams;  // provider quirks
+    bool m_RequiresClientSecret;             // Google: true, Microsoft PKCE: false
+};
+```
 
-1. Frontend calls `GET /api/connections/{name}/oauth/authorize`
-2. Backend generates a random `code_verifier` and derives `code_challenge` (SHA-256), stores the verifier in memory
-3. Backend returns the Microsoft authorization URL with `code_challenge`, `client_id`, `redirect_uri`, and `scopes`
-4. Frontend opens the URL in a popup window; user logs in and consents
-5. Microsoft redirects to `GET /api/connections/{name}/oauth/callback?code=...`
-6. Backend exchanges the authorization code + `code_verifier` for tokens via `POST /oauth2/v2.0/token`
-7. Tokens are stored in `OAuthTokenManager` with the provider's token endpoint and client ID for automatic refresh
+Current implementations:
 
-**Token refresh:** `OAuthTokenManager` runs a background thread that checks every 30 seconds and refreshes tokens 5 minutes before expiry. The refresh uses the stored `token_endpoint` and `client_id` to POST a standard OAuth refresh request.
+| Connector | Authorize URL | Token URL | Default scopes | Client secret required |
+|-----------|---------------|-----------|----------------|------------------------|
+| OneDrive | `login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize` | `login.microsoftonline.com/{tenant}/oauth2/v2.0/token` | `Files.ReadWrite offline_access` | No (PKCE public client) |
+| Google Sheets | `accounts.google.com/o/oauth2/v2/auth` | `oauth2.googleapis.com/token` | `https://www.googleapis.com/auth/spreadsheets` | Yes |
 
-**Files:** `engine/keys/oauthTokenManager.h/cpp`, `application/web/webServer.cpp` (OAuth route handlers)
+Google Sheets additionally sets `access_type=offline&prompt=consent&include_granted_scopes=true` as extra authorize params — without these Google omits the refresh token on re-consent.
+
+**Flow (generic):**
+
+1. Frontend or client calls `GET /api/connections/{name}/oauth/authorize`
+2. Backend generates a RFC 7636-compliant `code_verifier` (43 chars, base64url of 32 random bytes) and derives `code_challenge = BASE64URL(SHA256(code_verifier))`, plus a random CSRF state token. All three are stored in-memory per connection.
+3. Backend looks up the connector and builds the provider's authorize URL with `client_id`, `redirect_uri`, `scope`, `code_challenge`, `state`, plus any provider-specific extra params.
+4. Client opens the returned URL in a browser; user consents.
+5. Provider redirects to `GET /api/connections/{name}/oauth/callback?code=...&state=...`
+6. Backend validates the state token, retrieves the stored `code_verifier`, and POSTs a token exchange to the connector's `TokenUrl`. For confidential clients (`m_RequiresClientSecret`), `client_secret` from `connection.m_Params` is included in the POST body.
+7. Tokens are stored in `OAuthTokenManager` **and** persisted to `keys.json.enc` via `KeyManager::Save()` (using the cached master password). On the next j9t startup, `HydrateFromKeyManager()` restores the refresh token and an on-demand refresh in `GetAccessToken` fetches a fresh access token — no user re-consent required.
+
+**Redirect URI scheme** follows the server's TLS configuration: if `config.m_TlsCert` and `m_TlsKey` are set the redirect is `https://localhost:<port>/...`, otherwise `http://`. Pre-Phase-10 code hardcoded `http://` which broke every TLS-enabled deployment silently.
+
+**Token refresh:** `OAuthTokenManager` runs a background thread that checks every 30 seconds and refreshes tokens 5 minutes before expiry. `GetAccessToken` also performs synchronous on-demand refresh when the in-memory entry is empty or expired — this covers hydrated-from-disk entries on the first call after startup.
+
+**Files:** `engine/keys/oauthTokenManager.h/cpp`, `engine/keys/keyManager.h/cpp`, `application/web/webServer.cpp`, `application/cloud/cloudConnector.h` (`OAuth2ProviderInfo`), `application/cloud/oneDriveConnector.h/cpp`, `application/cloud/googleSheetsConnector.h/cpp`
 
 ### OneDrive Task Types
 

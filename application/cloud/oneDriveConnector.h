@@ -44,6 +44,8 @@ namespace AIAssistant
         bool TestConnection(CloudConnection const& connection, std::string& errorMessage) override;
         bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                 std::string& errorMessage) override;
+        bool GetOAuth2ProviderInfo(CloudConnection const& connection,
+                                   OAuth2ProviderInfo& info) const override;
 
         // Build the Graph API base URL from connection config.
         // Returns m_Endpoint if set, otherwise the default Graph API URL.
