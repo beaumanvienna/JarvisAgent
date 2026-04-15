@@ -523,7 +523,7 @@ Each task has:
 ```jsonc
 {
   "id": "summarize",
-  "type": "python | shell | ai_call | internal | sub_workflow | polarion_write | s3 | db_query | onedrive_upload | onedrive_download | snowflake_query | slack_message | slack_read | email_send | email_read | github_issue | jira_issue | sheets_read | sheets_write | azure_blob_upload | azure_blob_download | gcs_upload | gcs_download",
+  "type": "python | shell | ai_call | internal | sub_workflow | polarion_write | s3 | db_query | onedrive_upload | onedrive_download | snowflake_query | slack_message | slack_read | email_send | email_read | github_issue | jira_issue | redmine_issue | sheets_read | sheets_write | azure_blob_upload | azure_blob_download | gcs_upload | gcs_download",
   "label": "Summarize report with AI",
   "doc": "Sends the prepared text to an AI assistant and stores the answer.",
   "mode": "single | per_item",

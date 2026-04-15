@@ -168,6 +168,20 @@ Azure Blob Storage and Google Cloud Storage via their native REST APIs. The exis
 - [x] Add `gcs_watch` trigger type (polling via `GET /storage/v1/b/{bucket}/o`)
 - [x] Frontend: Azure Blob and GCS connection config, task inspector sections
 
+### Phase 12 — FOSS Connectors (Redmine)
+
+Adds support for self-hosted FOSS issue trackers. Strategic value: GitHub and Jira are both proprietary SaaS, so a Redmine connector gives j9t a credible "we integrate with self-hosted open-source trackers too" story. Redmine's REST API is well documented, the official `redmine/redmine` Docker image makes E2E testing trivial (no API key signup grief), and the implementation can clone the Jira executor pattern almost line-for-line.
+
+**Scope guard:** keep the surface tight — same coverage as the Jira demo (create / get / update / comment), no custom fields, no time tracking, no project CRUD. If we ever need more, add it in a follow-up phase.
+
+- [x] Implement `RedmineConnector : ICloudConnector` (clone `JiraConnector`; auth via `X-Redmine-API-Key` header, key stored as ApiKey in KeyManager and shipped through `credentials.m_Token`)
+- [x] Implement `RedmineCloudTaskExecutor` with `redmine_issue` task type and two operations: `list_issues` (GET `/issues.json?project_id=...&status_id=...&limit=...`) and `update_issue` (PUT `/issues/{id}.json` with `notes` + `assigned_to_id` body, supports inline params, `notes_file`, and `assigned_to_id_file`). 204-No-Content responses synthesized to a useful payload. Mirrors the `email_send` / `slack_message` `text_file` pattern.
+- [x] Add `TaskType::RedmineIssue` + `"redmine_issue"` parser mapping + jarvisAgent.cpp registration
+- [ ] Frontend: Redmine connection config (endpoint + key_name), task inspector section *(deferred — backend + REST E2E shipped, frontend can wait)*
+- [x] Local test infrastructure: `docker run -d --name redmine -p 3000:3000 redmine`. Setup steps documented in `example/workflows/redmineTriageBot.md` (load default configuration, enable REST API, create users `JC`/`Ahmet`, create project `j9t-demo`, add members as Developer, create 3 seed issues from `redmine_seed_tickets.csv`, generate API key under My account).
+- [x] **Round-trip demo** (`redmineTriageBot`): `redmine_issue/list_issues` fetches open issues from `j9t-demo` → python `convertRedmineIssuesToCsv` writes `issues.csv` with `id`/`subject`/`description`/`tracker` columns → `csv` filter fans out per ticket → per_item `ai_classify` (one_shot, strict prompt) emits exactly one digit (5 = JC backend, 6 = Ahmet frontend) → per_item `ai_comment` (one_shot, PM-triage persona) emits the triage note → per_item `redmine_issue/update_issue` sets `assigned_to_id={{ai_classify.captured_stdout}}` and `notes={{ai_comment.captured_stdout}}` against `issue_id={{issue.id}}`. Verified end-to-end against real Dockerized Redmine: 3 seed tickets (Login API crash → JC, Dashboard chart flicker → Ahmet, CSV export feature → Ahmet) all routed correctly on the first run, with coherent on-topic triage notes posted to each issue.
+- [x] Update `doc/cloud-integration.md` (Phase 12 section) and `example/workflows/redmineTriageBot.md`
+
 ### Phase 10 — End-to-End Testing
 
 All demo workflows must demonstrate a meaningful **round-trip** pattern: read from cloud, process with AI, write results back (or the reverse). Each test validates the full stack from connection setup through task execution to output verification.

@@ -79,7 +79,7 @@ The `tasks` object maps each `taskId` (string key) to a task definition:
 | Field | Required | Type | Description |
 |-------|----------|------|-------------|
 | `id` | YES | string | Must match the key in the `tasks` map. |
-| `type` | YES | string | `"shell"`, `"ai_call"`, `"python"`, `"internal"`, `"sub_workflow"`, or a cloud task type (see §3 and `JC_Workflow_Specification.md` §3.3.1). Cloud types: `"polarion_write"`, `"s3"`, `"db_query"`, `"onedrive_upload"`, `"onedrive_download"`, `"snowflake_query"`, `"slack_message"`, `"slack_read"`, `"email_send"`, `"email_read"`, `"github_issue"`, `"jira_issue"`, `"sheets_read"`, `"sheets_write"`, `"azure_blob_upload"`, `"azure_blob_download"`, `"gcs_upload"`, `"gcs_download"`. |
+| `type` | YES | string | `"shell"`, `"ai_call"`, `"python"`, `"internal"`, `"sub_workflow"`, or a cloud task type (see §3 and `JC_Workflow_Specification.md` §3.3.1). Cloud types: `"polarion_write"`, `"s3"`, `"db_query"`, `"onedrive_upload"`, `"onedrive_download"`, `"snowflake_query"`, `"slack_message"`, `"slack_read"`, `"email_send"`, `"email_read"`, `"github_issue"`, `"jira_issue"`, `"redmine_issue"`, `"sheets_read"`, `"sheets_write"`, `"azure_blob_upload"`, `"azure_blob_download"`, `"gcs_upload"`, `"gcs_download"`. |
 | `label` | no | string | Display name. |
 | `doc` | no | string | Documentation. |
 | `depends_on` | no | array of strings | Task IDs that must complete before this task runs. Forms a DAG (no cycles). |

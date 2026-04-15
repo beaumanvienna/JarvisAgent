@@ -1,0 +1,4 @@
+subject,description,tracker
+"Login API returns 500 on empty password","POST /api/login crashes the backend with NullPointerException when the password field is an empty string instead of returning 400. Reproduced on staging, affects ~5% of bot traffic.",Bug
+"Dashboard charts flicker on dark-mode toggle","Switching between light and dark mode causes the Recharts SVGs in the dashboard view to re-render with a 200ms blank flash. Visible in Chrome and Firefox. Affects perceived polish but not functionality.",Bug
+"Add CSV export button to workflow runs table","Users want to export the list of recent workflow runs as CSV from the runs view in the React dashboard. No backend change needed — table data is already in the React store; just need a download button and a csv-stringify helper.",Feature

@@ -102,6 +102,7 @@ namespace AIAssistant
         EmailRead,
         GitHubIssue,
         JiraIssue,
+        RedmineIssue,
         SheetsRead,
         SheetsWrite,
         AzureBlob,

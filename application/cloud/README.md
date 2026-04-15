@@ -36,6 +36,7 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `emailConnector` | `email` | BasicAuth | SMTP send / IMAP read via libcurl |
 | `gitHubConnector` | `github` | Bearer (PAT) | GitHub / GitLab REST API |
 | `jiraConnector` | `jira` | BasicAuth or Bearer | Jira REST API v3 |
+| `redmineConnector` | `redmine` | API key (X-Redmine-API-Key header) | Redmine REST API (self-hosted FOSS issue tracker) |
 | `googleSheetsConnector` | `google_sheets` | API key or OAuth2 | Google Sheets API v4 |
 | `azureBlobConnector` | `azure_blob` | Shared Key or OAuth2 | Azure Blob Storage REST API |
 | `gcsConnector` | `gcs` | JWT RSA → OAuth2 | Google Cloud Storage JSON API |
@@ -53,6 +54,7 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `emailCloudTaskExecutor` | `email_send` | SMTP send with MIME attachments |
 | `gitHubCloudTaskExecutor` | `github_issue` | Issue create/comment/close, file retrieval, list issues |
 | `jiraCloudTaskExecutor` | `jira_issue` | Issue create/update/transition/comment/get |
+| `redmineCloudTaskExecutor` | `redmine_issue` | List issues (`list_issues`) and update with notes + assignee (`update_issue`) |
 | `googleSheetsCloudTaskExecutor` | `sheets_read`, `sheets_write` | Read/write spreadsheet ranges |
 | `azureBlobCloudTaskExecutor` | `azure_blob_upload`, `azure_blob_download` | Blob upload/download via Azure REST API |
 | `gcsCloudTaskExecutor` | `gcs_upload`, `gcs_download` | Object upload/download via GCS JSON API |

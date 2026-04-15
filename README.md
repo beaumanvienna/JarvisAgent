@@ -60,7 +60,7 @@ Workflows read from and write to external systems through a unified `ICloudConne
 |---|---|
 | Object storage | S3 (+ MinIO/R2/Wasabi), Azure Blob, Google Cloud Storage |
 | Databases | PostgreSQL, Snowflake |
-| ALM | Polarion, Jira, GitHub |
+| ALM | Polarion, Jira, GitHub, Redmine |
 | Collaboration | OneDrive, Google Sheets |
 | Messaging | Slack, Email (SMTP/IMAP) |
 

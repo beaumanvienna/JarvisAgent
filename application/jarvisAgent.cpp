@@ -66,6 +66,8 @@
 #include "cloud/gitHubCloudTaskExecutor.h"
 #include "cloud/jiraConnector.h"
 #include "cloud/jiraCloudTaskExecutor.h"
+#include "cloud/redmineConnector.h"
+#include "cloud/redmineCloudTaskExecutor.h"
 #include "cloud/googleSheetsConnector.h"
 #include "cloud/googleSheetsCloudTaskExecutor.h"
 #include "cloud/azureBlobConnector.h"
@@ -357,6 +359,13 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> jiraExecutor =
                     std::make_shared<JiraCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::JiraIssue, jiraExecutor);
+
+                // Redmine connector + executor
+                connectorRegistry.Register(std::make_unique<RedmineConnector>());
+
+                std::shared_ptr<ITaskExecutor> redmineExecutor =
+                    std::make_shared<RedmineCloudTaskExecutor>(connectorRegistry, connectionManager);
+                executorRegistry.RegisterExecutor(TaskType::RedmineIssue, redmineExecutor);
 
                 // Google Sheets connector + executor
                 connectorRegistry.Register(std::make_unique<GoogleSheetsConnector>());

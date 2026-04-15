@@ -31,6 +31,7 @@ Ready-to-use JCWF workflow examples. Copy any `.jcwf` file to the `workflows/` f
 | [emailDemo](emailDemo.md) | `email_read`, `email_send` | Email round-trip: IMAP read + AI reply + SMTP send |
 | [gitHubIssueDemo](gitHubIssueDemo.md) | `github_issue` | Create/list GitHub issues |
 | [jiraIssueDemo](jiraIssueDemo.md) | `jira_issue` | Create Jira issues |
+| [redmineTriageBot](redmineTriageBot.md) | `redmine_issue`, `ai_call`, `python` | Redmine round-trip: list issues, AI classifies backend/frontend developers, AI writes triage comment, per-item update assigns + comments |
 | [sheetsQuizGrader](sheetsQuizGrader.md) | `sheets_read/write` + `ai_call` | Read quiz from Google Sheets, AI grades answers, write results back |
 
 ## Build & Test Workflows

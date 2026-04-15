@@ -394,6 +394,11 @@ namespace AIAssistant
             return TaskType::JiraIssue;
         }
 
+        if (rawType == "redmine_issue")
+        {
+            return TaskType::RedmineIssue;
+        }
+
         if (rawType == "sheets_read")
         {
             return TaskType::SheetsRead;

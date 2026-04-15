@@ -1145,6 +1145,70 @@ The workflow editor shows:
 
 ---
 
-## 18. Next Steps
+## 18. FOSS Connectors — Redmine (Phase 12)
 
-See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 11.
+Redmine is a self-hosted open-source project management tool with a well-documented REST API. The Redmine connector complements the proprietary GitHub and Jira connectors with a FOSS option that runs entirely from a Docker image — no signup, no credit card, no API quota, no rate limits. It uses an `X-Redmine-API-Key` header for authentication (one key per Redmine user, generated under My account once the REST web service is enabled in Administration → Settings → API).
+
+### RedmineConnector
+
+**Files:** `application/cloud/redmineConnector.h/cpp`
+
+- **Endpoint**: Redmine instance URL (e.g. `http://localhost:3000`)
+- **Auth**: API key stored in KeyManager; the connector unconditionally builds an `X-Redmine-API-Key` header from the credential token (the `auth_type` field on the connection is set to `bearer` purely because the existing `CloudAuthType` enum has no dedicated ApiKey value).
+- **TestConnection()**: `GET /users/current.json` — verifies the key and returns the calling user.
+- **Connection params**:
+  - `project_identifier` — default Redmine project identifier (e.g. `j9t-demo`); used by `list_issues` when the task doesn't override it.
+
+### redmine_issue Task Type
+
+JCWF task type `"redmine_issue"` with two operations:
+
+#### `list_issues`
+
+`GET /issues.json?project_id=<ident>&status_id=<status>&limit=<N>` — fetches open issues from one Redmine project.
+
+| Param | Required | Default | Description |
+|---|---|---|---|
+| `connection` | yes | — | Named CloudConnection (type `redmine`) |
+| `operation` | yes | — | `"list_issues"` |
+| `project_identifier` | no | from connection params | Redmine project identifier |
+| `status` | no | `"open"` | `"open"`, `"closed"`, or `"*"` |
+| `limit` | no | `25` | Max issues to return |
+
+Writes the raw response body to `response.json` in the working directory. The `count` of issues + the JSON shape (`{"issues":[...]}`) match Redmine's REST conventions — feed it to a small python step to project into a CSV the `csv` filter can consume.
+
+#### `update_issue`
+
+`PUT /issues/{id}.json` with `{"issue":{"notes":"...","assigned_to_id":N}}` — atomically posts a comment and/or sets the assignee on an existing issue.
+
+| Param | Required | Description |
+|---|---|---|
+| `connection` | yes | Named CloudConnection (type `redmine`) |
+| `operation` | yes | `"update_issue"` |
+| `issue_id` | yes | Integer Redmine issue id (accepts string or int in JSON) |
+| `notes` | no* | Inline comment text |
+| `notes_file` | no* | Read comment text from file (relative to j9t cwd) |
+| `assigned_to_id` | no* | Inline numeric Redmine user id |
+| `assigned_to_id_file` | no* | Read assignee id from file (one integer per line) |
+
+\*at least one of notes/notes_file/assigned_to_id/assigned_to_id_file must be present.
+
+Redmine returns 204 No Content on success; the executor synthesizes `{"ok":true,"operation":"update_issue","issue_id":N}` so downstream tasks see something useful.
+
+**Files:** `application/cloud/redmineCloudTaskExecutor.h/cpp`
+
+### Local Test Infrastructure
+
+```bash
+docker run -d --name redmine -p 3000:3000 redmine
+```
+
+Wait ~30 seconds for Rails to boot. On first login at http://localhost:3000 sign in as `admin`/`admin`, change the password, then go to **Administration** and click **Load the default configuration** to seed trackers, statuses, workflows, roles, and enumerations. **Without this step**, attempts to create issues will fail with cascading "Default status cannot be blank" / "Role cannot be empty" errors. After loading defaults, enable REST in **Administration → Settings → API**, then generate an API key under **My account → API access key → Reset → Show**.
+
+See `example/workflows/redmineTriageBot.md` for the full setup walkthrough including users, project, members, and seed issues.
+
+---
+
+## 19. Next Steps
+
+See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 12.
