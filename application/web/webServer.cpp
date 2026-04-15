@@ -6944,54 +6944,68 @@ namespace AIAssistant
         {
             auto& keyManager = Core::g_Core->GetKeyManager();
             auto const* existing = keyManager.GetProvider(connection->m_KeyName);
+
+            // Auto-create a placeholder provider if one doesn't already exist for this
+            // connection's key_name. Without this, the OAuth callback would have to bail
+            // out and tokens would remain in OAuthTokenManager memory only — lost on the
+            // next j9t restart. Matches the natural UX where a user creates an OAuth
+            // connection in the editor and immediately clicks "Authorize" without having
+            // to manually create a same-named entry in the providers/keys view first.
+            KeyManager::ProviderConfig updated = existing ? *existing : KeyManager::ProviderConfig{};
+            if (!existing)
+            {
+                updated.m_DisplayName = connection->m_KeyName;
+                LOG_CORE_INFO("OAuth callback: auto-creating KeyManager provider '{}' for connection '{}'",
+                              connection->m_KeyName, connectionName);
+            }
+
+            updated.m_CredentialType = "oauth";
+            updated.m_RefreshToken = std::string(refreshToken);
+            updated.m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
+            updated.m_Scopes = connection->m_Params.count("scopes")
+                                   ? connection->m_Params.at("scopes")
+                                   : providerInfo.m_DefaultScopes;
+            updated.m_TokenEndpoint = tokenUrl;
+            updated.m_ClientId = clientId;
+            updated.m_ClientSecret = clientSecretForRefresh;
+
             if (existing)
             {
-                KeyManager::ProviderConfig updated = *existing;
-                updated.m_CredentialType = "oauth";
-                updated.m_RefreshToken = std::string(refreshToken);
-                updated.m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
-                updated.m_Scopes = connection->m_Params.count("scopes")
-                                       ? connection->m_Params.at("scopes")
-                                       : providerInfo.m_DefaultScopes;
-                updated.m_TokenEndpoint = tokenUrl;
-                updated.m_ClientId = clientId;
-                updated.m_ClientSecret = clientSecretForRefresh;
                 keyManager.UpdateProvider(connection->m_KeyName, std::move(updated));
+            }
+            else
+            {
+                keyManager.AddProvider(connection->m_KeyName, std::move(updated));
+            }
 
-                std::string cachedPassword = keyManager.GetCachedMasterPassword();
-                if (cachedPassword.empty())
+            std::string cachedPassword = keyManager.GetCachedMasterPassword();
+            if (cachedPassword.empty())
+            {
+                if (char const* envPwd = std::getenv("JARVIS_MASTER_PASSWORD"); envPwd && *envPwd)
                 {
-                    if (char const* envPwd = std::getenv("JARVIS_MASTER_PASSWORD"); envPwd && *envPwd)
-                    {
-                        cachedPassword = envPwd;
-                    }
+                    cachedPassword = envPwd;
                 }
+            }
 
-                auto const& keysPath = keyManager.GetKeysFilePath();
-                if (!cachedPassword.empty() && !keysPath.empty())
+            auto const& keysPath = keyManager.GetKeysFilePath();
+            if (!cachedPassword.empty() && !keysPath.empty())
+            {
+                if (keyManager.Save(keysPath, cachedPassword))
                 {
-                    if (keyManager.Save(keysPath, cachedPassword))
-                    {
-                        LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
-                                          connection->m_KeyName);
-                    }
-                    else
-                    {
-                        LOG_CORE_WARN("OAuth callback: failed to persist tokens for '{}' — refresh_token "
-                                      "will be lost on restart",
+                    LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
                                       connection->m_KeyName);
-                    }
                 }
                 else
                 {
-                    LOG_CORE_WARN("OAuth callback: no cached master password or keys file path — refresh_token "
-                                  "for '{}' held in memory only and will be lost on restart",
+                    LOG_CORE_WARN("OAuth callback: failed to persist tokens for '{}' — refresh_token "
+                                  "will be lost on restart",
                                   connection->m_KeyName);
                 }
             }
             else
             {
-                LOG_CORE_WARN("OAuth callback: key '{}' not found in KeyManager, cannot persist refresh_token",
+                LOG_CORE_WARN("OAuth callback: no cached master password or keys file path — refresh_token "
+                              "for '{}' held in memory only and will be lost on restart",
                               connection->m_KeyName);
             }
         }
