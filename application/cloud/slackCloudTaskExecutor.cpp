@@ -23,6 +23,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 #include <curl/curl.h>
 
@@ -52,10 +53,151 @@ namespace AIAssistant
                 case '\n': out += "\\n"; break;
                 case '\r': out += "\\r"; break;
                 case '\t': out += "\\t"; break;
-                default: out += c; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                        out += buf;
+                    }
+                    else
+                    {
+                        out += c;
+                    }
+                    break;
             }
         }
         return out;
+    }
+
+    // Read entire file into a string. Returns empty string on failure.
+    static std::string ReadFileToString(std::string const& path)
+    {
+        std::ifstream ifs(path);
+        if (!ifs.is_open())
+        {
+            return {};
+        }
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        return ss.str();
+    }
+
+    // Trim trailing whitespace/newlines
+    static std::string TrimTrailing(std::string s)
+    {
+        while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t'))
+        {
+            s.pop_back();
+        }
+        return s;
+    }
+
+    // libcurl write callback
+    static size_t WriteBodyCallback(void* contents, size_t size, size_t nmemb, void* userp)
+    {
+        auto* buf = static_cast<std::string*>(userp);
+        buf->append(static_cast<char*>(contents), size * nmemb);
+        return size * nmemb;
+    }
+
+    // Shared HTTP helper: performs a request to the Slack Web API with Bearer auth.
+    // Returns true on CURLE_OK (httpCode set). On failure, populates taskState.m_LastErrorMessage.
+    static bool PerformSlackRequest(std::string const& url, std::string const& postBody, std::string const& token,
+                                    std::string& responseBody, long& httpCode, TaskInstanceState& taskState,
+                                    char const* contextLabel)
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            taskState.m_LastErrorMessage = std::string(contextLabel) + ": curl_easy_init() failed";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        if (!postBody.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postBody.c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(postBody.size()));
+        }
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteBodyCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        struct curl_slist* headers = nullptr;
+        std::string authHeader = "Authorization: Bearer " + token;
+        headers = curl_slist_append(headers, authHeader.c_str());
+        headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        CURLcode res = curl_easy_perform(curl);
+        httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            taskState.m_LastErrorMessage = std::string(contextLabel) + " failed: " + curl_easy_strerror(res);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        if (httpCode >= 400)
+        {
+            taskState.m_LastErrorMessage =
+                std::string(contextLabel) + " failed: HTTP " + std::to_string(httpCode);
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        return true;
+    }
+
+    // Check Slack's {"ok": true/false} envelope. Returns false and sets error on ok:false.
+    static bool CheckSlackOk(std::string const& responseBody, TaskInstanceState& taskState, char const* contextLabel)
+    {
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string padded(responseBody);
+        simdjson::ondemand::document doc;
+        if (parser.iterate(padded).get(doc))
+        {
+            taskState.m_LastErrorMessage = std::string(contextLabel) + ": failed to parse Slack response JSON";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        bool ok = false;
+        if (doc["ok"].get_bool().get(ok) != simdjson::SUCCESS || !ok)
+        {
+            // Re-parse to read the error field (simdjson ondemand doesn't allow random reads)
+            simdjson::ondemand::parser parser2;
+            simdjson::padded_string padded2(responseBody);
+            simdjson::ondemand::document doc2;
+            std::string slackError = "unknown error";
+            if (!parser2.iterate(padded2).get(doc2))
+            {
+                std::string_view sv;
+                if (doc2["error"].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    slackError = std::string(sv);
+                }
+            }
+            taskState.m_LastErrorMessage = std::string(contextLabel) + " failed: " + slackError;
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        return true;
     }
 
     bool SlackCloudTaskExecutor::ExecuteCloud(WorkflowDefinition const& workflowDefinition,
@@ -63,6 +205,21 @@ namespace AIAssistant
                                               TaskInstanceState& taskState, CloudConnection const& connection,
                                               CloudCredentials const& credentials,
                                               TaskCancellationToken const& cancellationToken)
+    {
+        (void)workflowRun;
+        (void)cancellationToken;
+
+        if (taskDefinition.m_Type == TaskType::SlackRead)
+        {
+            return ExecuteSlackRead(workflowDefinition, taskDefinition, taskState, connection, credentials);
+        }
+        return ExecuteSlackPost(workflowDefinition, taskDefinition, taskState, connection, credentials);
+    }
+
+    bool SlackCloudTaskExecutor::ExecuteSlackPost(WorkflowDefinition const& workflowDefinition,
+                                                  TaskDef const& taskDefinition, TaskInstanceState& taskState,
+                                                  CloudConnection const& connection,
+                                                  CloudCredentials const& credentials)
     {
         simdjson::ondemand::parser parser;
         simdjson::padded_string paddedJson(taskDefinition.m_ParamsJson);
@@ -95,96 +252,58 @@ namespace AIAssistant
         }
 
         std::string text = getStringParam("text");
+        std::string textFile = getStringParam("text_file");
+        if (!textFile.empty())
+        {
+            std::string loaded = ReadFileToString(textFile);
+            if (loaded.empty())
+            {
+                taskState.m_LastErrorMessage = "slack_message: cannot open or empty text_file '" + textFile + "'";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            }
+            text = TrimTrailing(std::move(loaded));
+        }
         if (text.empty())
         {
-            taskState.m_LastErrorMessage = "Missing required 'text' in slack_message task params";
+            taskState.m_LastErrorMessage = "Missing required 'text' or 'text_file' in slack_message task params";
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
+        }
+
+        std::string threadTs = getStringParam("thread_ts");
+        std::string threadTsFile = getStringParam("thread_ts_file");
+        if (!threadTsFile.empty())
+        {
+            std::string loaded = ReadFileToString(threadTsFile);
+            threadTs = TrimTrailing(std::move(loaded));
         }
 
         // POST /api/chat.postMessage
         std::string url = SlackConnector::GetApiBaseUrl(connection) + "/chat.postMessage";
         std::string requestBody = "{\"channel\":\"" + JsonEscape(channel) +
-                                  "\",\"text\":\"" + JsonEscape(text) + "\"}";
-
-        CURL* curl = curl_easy_init();
-        if (!curl)
+                                  "\",\"text\":\"" + JsonEscape(text) + "\"";
+        if (!threadTs.empty())
         {
-            taskState.m_LastErrorMessage = "curl_easy_init() failed";
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            return false;
+            requestBody += ",\"thread_ts\":\"" + JsonEscape(threadTs) + "\"";
         }
+        requestBody += "}";
 
         std::string responseBody;
-        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
-        {
-            auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
-        };
-        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestBody.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
-
-        struct curl_slist* headers = nullptr;
-        std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
-        headers = curl_slist_append(headers, authHeader.c_str());
-        headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-        CURLcode res = curl_easy_perform(curl);
         long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK)
+        if (!PerformSlackRequest(url, requestBody, credentials.m_Token, responseBody, httpCode, taskState,
+                                 "Slack postMessage"))
         {
-            taskState.m_LastErrorMessage = std::string("Slack postMessage failed: ") + curl_easy_strerror(res);
-            taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
 
-        if (httpCode >= 400)
+        if (!CheckSlackOk(responseBody, taskState, "Slack postMessage"))
         {
-            taskState.m_LastErrorMessage = "Slack postMessage failed: HTTP " + std::to_string(httpCode);
-            taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
 
-        // Slack returns {"ok": true/false} on HTTP 200
-        simdjson::ondemand::parser respParser;
-        simdjson::padded_string respPadded(responseBody);
-        simdjson::ondemand::document respDoc;
-
-        if (!respParser.iterate(respPadded).get(respDoc))
-        {
-            bool ok = false;
-            if (!respDoc["ok"].get_bool().get(ok) && !ok)
-            {
-                std::string_view slackError;
-                auto err = respDoc["error"].get_string().get(slackError);
-                (void)err;
-                taskState.m_LastErrorMessage =
-                    "Slack postMessage failed: " + (slackError.empty() ? std::string("unknown error") : std::string(slackError));
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                return false;
-            }
-        }
-
-        LOG_APP_INFO("[slack] message sent to {} via connection '{}'", channel, connection.m_Name);
+        LOG_APP_INFO("[slack] message sent to {} via connection '{}' (thread_ts='{}')", channel, connection.m_Name,
+                     threadTs);
 
         taskState.m_CapturedStdout = responseBody.substr(0, std::min(responseBody.size(), kMaxCaptureChars));
         taskState.m_State = TaskInstanceStateKind::Succeeded;
@@ -195,9 +314,208 @@ namespace AIAssistant
         {
             std::filesystem::path workDir =
                 TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
-
             WriteResponseJson(workDir, taskState, responseBody);
         }
+
+        return true;
+    }
+
+    bool SlackCloudTaskExecutor::ExecuteSlackRead(WorkflowDefinition const& workflowDefinition,
+                                                  TaskDef const& taskDefinition, TaskInstanceState& taskState,
+                                                  CloudConnection const& connection,
+                                                  CloudCredentials const& credentials)
+    {
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string paddedJson(taskDefinition.m_ParamsJson);
+        simdjson::ondemand::document doc;
+
+        if (parser.iterate(paddedJson).get(doc))
+        {
+            taskState.m_LastErrorMessage = "Failed to parse slack_read task params JSON";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        std::string channel;
+        std::string oldest;
+        int64_t limit = 10;
+        bool excludeBots = true;
+
+        {
+            std::string_view sv;
+            if (doc["channel"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                channel = std::string(sv);
+            }
+            if (doc["oldest"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                oldest = std::string(sv);
+            }
+            int64_t limitVal = 0;
+            if (doc["limit"].get_int64().get(limitVal) == simdjson::SUCCESS)
+            {
+                limit = limitVal;
+            }
+            bool exVal = true;
+            if (doc["exclude_bots"].get_bool().get(exVal) == simdjson::SUCCESS)
+            {
+                excludeBots = exVal;
+            }
+        }
+
+        if (channel.empty())
+        {
+            taskState.m_LastErrorMessage = "Missing required 'channel' in slack_read task params";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+        if (channel[0] == '#')
+        {
+            taskState.m_LastErrorMessage =
+                "slack_read 'channel' must be a channel ID (e.g. C01ABCDEF), not a name like '" + channel + "'";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            return false;
+        }
+
+        // GET /api/conversations.history?channel=...&limit=...[&oldest=...]
+        std::string url = SlackConnector::GetApiBaseUrl(connection) + "/conversations.history?channel=" + channel +
+                          "&limit=" + std::to_string(limit);
+        if (!oldest.empty())
+        {
+            url += "&oldest=" + oldest;
+        }
+
+        std::string responseBody;
+        long httpCode = 0;
+        if (!PerformSlackRequest(url, /*postBody*/ "", credentials.m_Token, responseBody, httpCode, taskState,
+                                 "Slack conversations.history"))
+        {
+            return false;
+        }
+        if (!CheckSlackOk(responseBody, taskState, "Slack conversations.history"))
+        {
+            return false;
+        }
+
+        // Parse messages array
+        struct SlackMsg
+        {
+            std::string m_Ts;
+            std::string m_User;
+            std::string m_Text;
+            bool m_IsBot = false;
+        };
+        std::vector<SlackMsg> messages;
+
+        {
+            simdjson::ondemand::parser p2;
+            simdjson::padded_string padded2(responseBody);
+            simdjson::ondemand::document d2;
+            if (p2.iterate(padded2).get(d2))
+            {
+                taskState.m_LastErrorMessage = "slack_read: failed to re-parse response JSON";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            }
+
+            simdjson::ondemand::array arr;
+            if (d2["messages"].get_array().get(arr) == simdjson::SUCCESS)
+            {
+                for (auto elem : arr)
+                {
+                    SlackMsg m;
+                    std::string_view sv;
+                    if (elem["ts"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        m.m_Ts = std::string(sv);
+                    }
+                    if (elem["user"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        m.m_User = std::string(sv);
+                    }
+                    if (elem["text"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        m.m_Text = std::string(sv);
+                    }
+                    std::string_view botId;
+                    if (elem["bot_id"].get_string().get(botId) == simdjson::SUCCESS && !botId.empty())
+                    {
+                        m.m_IsBot = true;
+                    }
+                    if (excludeBots && m.m_IsBot)
+                    {
+                        continue;
+                    }
+                    if (m.m_Ts.empty() || m.m_Text.empty())
+                    {
+                        continue;
+                    }
+                    messages.push_back(std::move(m));
+                }
+            }
+        }
+
+        // Slack returns messages newest-first. After filtering, messages[0] is the latest.
+        std::string latestTs;
+        std::string latestText;
+        if (!messages.empty())
+        {
+            latestTs = messages.front().m_Ts;
+            latestText = messages.front().m_Text;
+        }
+
+        // Build summary JSON (array of {ts, user, text})
+        std::ostringstream summary;
+        summary << "[";
+        for (size_t i = 0; i < messages.size(); ++i)
+        {
+            if (i > 0) summary << ",";
+            summary << "{\"ts\":\"" << JsonEscape(messages[i].m_Ts) << "\""
+                    << ",\"user\":\"" << JsonEscape(messages[i].m_User) << "\""
+                    << ",\"text\":\"" << JsonEscape(messages[i].m_Text) << "\"}";
+        }
+        summary << "]";
+        std::string summaryStr = summary.str();
+
+        taskState.m_CapturedStdout = summaryStr.substr(0, std::min(summaryStr.size(), kMaxCaptureChars));
+        taskState.m_State = TaskInstanceStateKind::Succeeded;
+
+        // Write outputs to task working directory
+        std::filesystem::path workflowBaseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        if (!workflowBaseDir.empty())
+        {
+            std::filesystem::path workDir =
+                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
+
+            std::error_code ec;
+            std::filesystem::create_directories(workDir, ec);
+
+            std::ofstream summaryFile(workDir / "messages_summary.json", std::ios::trunc);
+            if (summaryFile.is_open())
+            {
+                summaryFile << summaryStr;
+            }
+
+            std::ofstream latestMsg(workDir / "latest_message.txt", std::ios::trunc);
+            if (latestMsg.is_open())
+            {
+                latestMsg << latestText;
+            }
+
+            std::ofstream latestTsFile(workDir / "latest_ts.txt", std::ios::trunc);
+            if (latestTsFile.is_open())
+            {
+                latestTsFile << latestTs;
+            }
+
+            std::string responseJson = "{\"ok\":true,\"count\":" + std::to_string(messages.size()) +
+                                       ",\"channel\":\"" + JsonEscape(channel) + "\"" +
+                                       ",\"latest_ts\":\"" + JsonEscape(latestTs) + "\"}";
+            WriteResponseJson(workDir, taskState, responseJson);
+        }
+
+        LOG_APP_INFO("[slack_read] fetched {} message(s) from {} via connection '{}' (latest_ts='{}')",
+                     messages.size(), channel, connection.m_Name, latestTs);
 
         return true;
     }

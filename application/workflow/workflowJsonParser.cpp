@@ -369,6 +369,11 @@ namespace AIAssistant
             return TaskType::SlackMessage;
         }
 
+        if (rawType == "slack_read")
+        {
+            return TaskType::SlackRead;
+        }
+
         if (rawType == "email_send")
         {
             return TaskType::EmailSend;

@@ -27,7 +27,7 @@ Ready-to-use JCWF workflow examples. Copy any `.jcwf` file to the `workflows/` f
 | [s3UploadDownloadDemo](s3UploadDownloadDemo.md) | `s3` | Upload, download, list S3 objects |
 | [oneDriveUploadDownloadDemo](oneDriveUploadDownloadDemo.md) | `onedrive_upload/download` | OneDrive file transfer via Graph API |
 | [snowflakeQueryDemo](snowflakeQueryDemo.md) | `snowflake_query` | SQL queries with JWT RSA auth |
-| [slackMessageDemo](slackMessageDemo.md) | `slack_message` | Send Slack channel messages |
+| [slackQAndABot](slackQAndABot.md) | `slack_read`, `ai_call`, `slack_message` | Slack round-trip: read user question, AI answers as C++/Vulkan expert, reply in thread |
 | [emailDemo](emailDemo.md) | `email_read`, `email_send` | Email round-trip: IMAP read + AI reply + SMTP send |
 | [gitHubIssueDemo](gitHubIssueDemo.md) | `github_issue` | Create/list GitHub issues |
 | [jiraIssueDemo](jiraIssueDemo.md) | `jira_issue` | Create Jira issues |

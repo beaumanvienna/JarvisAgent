@@ -97,6 +97,7 @@ namespace AIAssistant
         OneDrive,
         SnowflakeQuery,
         SlackMessage,
+        SlackRead,
         EmailSend,
         EmailRead,
         GitHubIssue,

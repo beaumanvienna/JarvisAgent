@@ -334,6 +334,7 @@ namespace AIAssistant
                 std::shared_ptr<ITaskExecutor> slackExecutor =
                     std::make_shared<SlackCloudTaskExecutor>(connectorRegistry, connectionManager);
                 executorRegistry.RegisterExecutor(TaskType::SlackMessage, slackExecutor);
+                executorRegistry.RegisterExecutor(TaskType::SlackRead, slackExecutor);
 
                 // Email connector + executor
                 connectorRegistry.Register(std::make_unique<EmailConnector>());

@@ -704,15 +704,41 @@ Implements `ICloudConnector` for the Slack Web API with Bearer token authenticat
 
 ### slack_message Task Type
 
-JCWF task type `"slack_message"` sends messages to Slack channels.
+JCWF task type `"slack_message"` sends messages to Slack channels via `POST /api/chat.postMessage`.
 
 | Param | Required | Description |
 |-------|----------|-------------|
 | `connection` | yes | Named CloudConnection (type `slack`) |
 | `channel` | yes | Slack channel name or ID (e.g. `#alerts`, `C01ABCDEF`) |
-| `text` | yes | Message text (supports template variables) |
+| `text` | yes (or `text_file`) | Inline message text (supports template variables) |
+| `text_file` | yes (or `text`) | Read message text from file (relative to j9t cwd); trims trailing whitespace. Use for long AI-generated content (mirrors `email_send` `body_file`). |
+| `thread_ts` | no | Post as a threaded reply to this parent message ts. |
+| `thread_ts_file` | no | Read `thread_ts` from file. Used to wire an upstream `slack_read` task's `latest_ts.txt` into the reply. |
 
-Sends `POST /api/chat.postMessage` with JSON body. Checks Slack's `{"ok": true/false}` response for success.
+Checks Slack's `{"ok": true/false}` response for success.
+
+### slack_read Task Type
+
+JCWF task type `"slack_read"` reads recent messages from a Slack channel via `GET /api/conversations.history`. Requires the bot token to have the `channels:history` scope (plus `channels:read` to resolve channel names, if desired).
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `connection` | yes | Named CloudConnection (type `slack`) |
+| `channel` | yes | Channel **ID** (e.g. `C01ABCDEF`). Must not start with `#` — Slack's history API requires the ID, not the name. |
+| `limit` | no (default `10`) | Max messages to fetch |
+| `oldest` | no | Only return messages with `ts` strictly greater than this (for incremental polling) |
+| `exclude_bots` | no (default `true`) | Skip messages that have a `bot_id` field. Essential to avoid self-reply loops when the same bot also posts into the channel. |
+
+Outputs written to the task working directory:
+
+| File | Content |
+|---|---|
+| `messages_summary.json` | Array of `{ts, user, text}` for all fetched non-bot messages (newest first). |
+| `latest_message.txt` | Text of the most recent message after filtering (suitable as `cntx_files` for a downstream `ai_call`). |
+| `latest_ts.txt` | `ts` of the most recent message after filtering (suitable as `thread_ts_file` for a downstream `slack_message`). |
+| `response.json` | `{ok, count, channel, latest_ts}` |
+
+See `example/workflows/slackQAndABot.md` for a full read → AI → threaded reply round-trip walkthrough.
 
 **Files:** `application/cloud/slackCloudTaskExecutor.h/cpp`
 

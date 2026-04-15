@@ -27,14 +27,29 @@
 
 namespace AIAssistant
 {
-    // Task executor for sending Slack messages via the Slack Web API.
+    // Task executor for the Slack Web API. Handles two JCWF task types:
     //
-    // JCWF task type: "slack_message"
+    // 1. "slack_message" -- POST /api/chat.postMessage
+    //    Params:
+    //      "connection"      (required) named CloudConnection
+    //      "channel"         (required) channel name or ID (e.g. "#alerts" or "C01ABCDEF")
+    //      "text"            (required unless "text_file" set) message text
+    //      "text_file"       (optional) read text from file instead (relative to j9t cwd)
+    //      "thread_ts"       (optional) post as a threaded reply to this message ts
+    //      "thread_ts_file"  (optional) read thread_ts from file (relative to j9t cwd)
     //
-    // Task params JSON keys:
-    //   "connection"  — named CloudConnection (required)
-    //   "channel"     — Slack channel name or ID (required, e.g. "#alerts" or "C01ABCDEF")
-    //   "text"        — message text (required, supports template variables)
+    // 2. "slack_read" -- GET /api/conversations.history
+    //    Params:
+    //      "connection"      (required) named CloudConnection
+    //      "channel"         (required) channel ID (must be "C...", not "#name")
+    //      "limit"           (optional, default 10) max messages
+    //      "oldest"          (optional) only return messages with ts strictly greater than this
+    //      "exclude_bots"    (optional, default true) filter out messages with a bot_id field
+    //    Outputs written to the task working directory:
+    //      messages_summary.json -- array of {ts, user, text}
+    //      latest_message.txt    -- text of most recent message after filtering
+    //      latest_ts.txt         -- ts of most recent message after filtering
+    //      response.json         -- {ok, count, latest_ts}
     class SlackCloudTaskExecutor : public ICloudTaskExecutor
     {
     public:
@@ -45,5 +60,14 @@ namespace AIAssistant
                           TaskDef const& taskDefinition, TaskInstanceState& taskState,
                           CloudConnection const& connection, CloudCredentials const& credentials,
                           TaskCancellationToken const& cancellationToken) override;
+
+    private:
+        bool ExecuteSlackPost(WorkflowDefinition const& workflowDefinition, TaskDef const& taskDefinition,
+                              TaskInstanceState& taskState, CloudConnection const& connection,
+                              CloudCredentials const& credentials);
+
+        bool ExecuteSlackRead(WorkflowDefinition const& workflowDefinition, TaskDef const& taskDefinition,
+                              TaskInstanceState& taskState, CloudConnection const& connection,
+                              CloudCredentials const& credentials);
     };
 } // namespace AIAssistant
