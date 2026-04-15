@@ -733,16 +733,85 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
           )}
 
           {editing.type === "google_sheets" && (
-            <div className="field" style={{ marginBottom: 10 }}>
-              <label style={{ fontSize: 12, opacity: 0.8 }}>Spreadsheet ID</label>
-              <input
-                className="input"
-                type="text"
-                placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
-                value={editing.params.spreadsheet_id ?? ""}
-                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)}
-              />
-            </div>
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Spreadsheet ID</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+                  value={editing.params.spreadsheet_id ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Client ID (Google Cloud OAuth client)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="1234567890-abc.apps.googleusercontent.com"
+                  value={editing.params.client_id ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Client Secret</label>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="GOCSPX-..."
+                  value={editing.params.client_secret ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_secret: e.target.value } } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>Scopes (default: spreadsheets)</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="https://www.googleapis.com/auth/spreadsheets"
+                  value={editing.params.scopes ?? ""}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)}
+                />
+              </div>
+              {!editing.isNew && (
+                <div style={{ marginBottom: 10 }}>
+                  <button
+                    className="btn"
+                    type="button"
+                    style={{ background: "rgba(52,168,83,0.15)", borderColor: "rgba(52,168,83,0.4)" }}
+                    onClick={async () => {
+                      setStatusMessage("Starting OAuth flow...");
+                      setErrorMessage("");
+                      try
+                      {
+                        const result = await authorizeConnection(editing.name);
+                        if (result.ok && result.authorize_url)
+                        {
+                          window.open(result.authorize_url, "_blank", "width=600,height=700");
+                          setStatusMessage("Authorization window opened. Complete the login, then test the connection.");
+                        }
+                        else
+                        {
+                          setErrorMessage(result.message ?? "Failed to start OAuth flow");
+                          setStatusMessage("");
+                        }
+                      }
+                      catch (err: unknown)
+                      {
+                        setErrorMessage(err instanceof Error ? err.message : "OAuth request failed");
+                        setStatusMessage("");
+                      }
+                    }}
+                  >
+                    Authorize with Google
+                  </button>
+                  <div className="small muted" style={{ marginTop: 4 }}>
+                    Opens Google login in a new window. After authorizing, tokens are stored automatically.
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           {editing.type === "azure_blob" && (
