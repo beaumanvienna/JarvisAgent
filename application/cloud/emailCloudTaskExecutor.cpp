@@ -179,12 +179,13 @@ namespace AIAssistant
         return toSend;
     }
 
-    // Curl write callback for IMAP responses
-    static size_t ImapWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+    // IMAP write callback and command/parse functions are now in EmailConnector.
+    // Local aliases for brevity within this file.
+    static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
+                            std::string const& customRequest, std::string& responseBody,
+                            std::string& errorMessage, bool useSsl)
     {
-        auto* buf = static_cast<std::string*>(userp);
-        buf->append(static_cast<char*>(contents), size * nmemb);
-        return size * nmemb;
+        return EmailConnector::ImapCommand(url, username, password, customRequest, responseBody, errorMessage, useSsl);
     }
 
     // Extract a header value from raw email text
@@ -266,89 +267,9 @@ namespace AIAssistant
         return out;
     }
 
-    // Perform an IMAP command via libcurl and return the response
-    static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
-                            std::string const& customRequest, std::string& responseBody, std::string& errorMessage,
-                            bool useSsl)
-    {
-        CURL* curl = curl_easy_init();
-        if (!curl)
-        {
-            errorMessage = "curl_easy_init() failed";
-            return false;
-        }
-
-        responseBody.clear();
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_USERNAME, username.c_str());
-        curl_easy_setopt(curl, CURLOPT_PASSWORD, password.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ImapWriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-
-        if (!customRequest.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, customRequest.c_str());
-        }
-
-        if (!useSsl)
-        {
-            curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_NONE));
-        }
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
-
-        CURLcode res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK)
-        {
-            errorMessage = std::string("IMAP request failed: ") + curl_easy_strerror(res);
-            return false;
-        }
-
-        return true;
-    }
-
-    // Parse UIDs from IMAP SEARCH response (format: "* SEARCH 1 2 3\r\n")
     static std::vector<std::string> ParseSearchUids(std::string const& searchResponse)
     {
-        std::vector<std::string> uids;
-        // Find "* SEARCH " prefix
-        size_t pos = searchResponse.find("* SEARCH ");
-        if (pos == std::string::npos)
-        {
-            return uids;
-        }
-
-        size_t start = pos + 9; // length of "* SEARCH "
-        size_t lineEnd = searchResponse.find('\r', start);
-        if (lineEnd == std::string::npos)
-        {
-            lineEnd = searchResponse.find('\n', start);
-        }
-        if (lineEnd == std::string::npos)
-        {
-            lineEnd = searchResponse.size();
-        }
-
-        std::string uidLine = searchResponse.substr(start, lineEnd - start);
-        std::istringstream ss(uidLine);
-        std::string uid;
-        while (ss >> uid)
-        {
-            if (!uid.empty() && std::isdigit(static_cast<unsigned char>(uid[0])))
-            {
-                uids.push_back(uid);
-            }
-        }
-
-        return uids;
+        return EmailConnector::ParseSearchUids(searchResponse);
     }
 
     bool EmailCloudTaskExecutor::ExecuteEmailRead(WorkflowDefinition const& workflowDefinition,

@@ -3395,6 +3395,7 @@ export default function WorkflowEditorView(props: {
                       <option value="email_read">email_read</option>
                       <option value="github_issue">github_issue</option>
                       <option value="jira_issue">jira_issue</option>
+                      <option value="redmine_issue">redmine_issue</option>
                       <option value="sheets_read">sheets_read</option>
                       <option value="sheets_write">sheets_write</option>
                       <option value="azure_blob_upload">azure_blob_upload</option>
@@ -3888,6 +3889,56 @@ export default function WorkflowEditorView(props: {
                         <label className="field">
                           <div className="small">body (comment)</div>
                           <textarea className="input" rows={2} value={(params.body as string) ?? ""} onChange={(e) => { updateParams({ body: e.target.value }); }} />
+                        </label>
+                      </div>
+                    );
+                  })()}
+
+                  {selectedNode.data.task.type === "redmine_issue" && (() => {
+                    const params = (selectedNode.data.task.params ?? {}) as Record<string, unknown>;
+                    const updateParams = (patch: Record<string, unknown>) => {
+                      const merged = { ...params, ...patch };
+                      Object.keys(merged).forEach((k) => { if (merged[k] === "" || merged[k] === undefined) delete merged[k]; });
+                      updateSelectedTaskField({ params: Object.keys(merged).length > 0 ? merged : undefined } as Partial<JcwfTask>);
+                    };
+                    return (
+                      <div className="field" style={{ borderLeft: "2px solid rgba(179,0,0,0.4)", paddingLeft: 8 }}>
+                        <div className="small" style={{ color: "rgba(179,0,0,0.95)" }}>Redmine Issue params</div>
+                        <label className="field">
+                          <div className="small">connection</div>
+                          <input className="input" value={(params.connection as string) ?? ""} placeholder="my-redmine" onChange={(e) => { updateParams({ connection: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">operation</div>
+                          <select className="input" value={(params.operation as string) ?? ""} onChange={(e) => { updateParams({ operation: e.target.value }); }}>
+                            <option value="">select...</option>
+                            <option value="list_issues">list_issues</option>
+                            <option value="update_issue">update_issue</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <div className="small">project_identifier (list_issues, overrides connection)</div>
+                          <input className="input" value={(params.project_identifier as string) ?? ""} placeholder="j9t-demo" onChange={(e) => { updateParams({ project_identifier: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">issue_id (update_issue)</div>
+                          <input className="input" value={(params.issue_id as string) ?? ""} placeholder="1" onChange={(e) => { updateParams({ issue_id: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">notes (update_issue, inline comment)</div>
+                          <textarea className="input" rows={2} value={(params.notes as string) ?? ""} onChange={(e) => { updateParams({ notes: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">assigned_to_id (update_issue)</div>
+                          <input className="input" value={(params.assigned_to_id as string) ?? ""} placeholder="5" onChange={(e) => { updateParams({ assigned_to_id: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">status (list_issues, default: open)</div>
+                          <input className="input" value={(params.status as string) ?? ""} placeholder="open" onChange={(e) => { updateParams({ status: e.target.value }); }} />
+                        </label>
+                        <label className="field">
+                          <div className="small">limit (list_issues, default: 25)</div>
+                          <input className="input" value={(params.limit as string) ?? ""} placeholder="25" onChange={(e) => { updateParams({ limit: e.target.value }); }} />
                         </label>
                       </div>
                     );

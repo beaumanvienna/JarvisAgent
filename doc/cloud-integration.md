@@ -6,12 +6,14 @@ This document covers the cloud integration layer introduced in j9t, including th
 
 ## 1. Overview
 
-The cloud integration layer provides a uniform interface for connecting j9t workflows to external cloud services (Polarion, S3, OneDrive, Snowflake, PostgreSQL, Slack, Email, GitHub, Jira, Azure Blob Storage, Google Cloud Storage). All cloud code in the C++ backend uses libcurl + OpenSSL + simdjson — Python is reserved for workflow task scripts only.
+The cloud integration layer provides a uniform interface for connecting j9t workflows to external cloud services (Polarion, S3, OneDrive, Snowflake, PostgreSQL, Slack, Email, GitHub, Jira, Redmine, Azure Blob Storage, Google Cloud Storage). All cloud code in the C++ backend uses libcurl + OpenSSL + simdjson — Python is reserved for workflow task scripts only.
 
 **Design principles:**
 - **Disk-first** — all cloud data (query results, downloaded files, API responses) is written to the workflow working directory before downstream tasks consume it.
 - **GPL-3.0 compliance** — all libraries linked into j9t are GPL-3.0 compatible. Cloud services are accessed via open REST/HTTP protocols.
 - **Credential safety** — secrets are stored in the encrypted key store (`keys.json.enc`) and never appear in JCWF files or log output.
+
+**Relationship to the AI pipeline:** The existing AI interface code (`CurlMultiDispatcher`, `aiRequestPool`, `aiCallTaskExecutor`, AI Manager UI) is a separate domain with its own architecture and must **not** be refactored into `ICloudConnector`. Three cloud foundation utilities do benefit the AI pipeline: `ICredential` hierarchy (type-safe key storage), `SecretRedactor` (scrubs AI API keys from logs), and `OAuthTokenManager` + `JwtGenerator` (enables future Google Vertex AI support via service account OAuth2/JWT auth).
 
 ---
 
@@ -210,7 +212,8 @@ The "AI Keys" nav button is renamed to "Keys". The `ProvidersSettingsView` now i
 
 New "Connections" nav button between "Keys" and "Assistant" in the workflow editor. `ConnectionsView` provides:
 - Connection list with type, endpoint, key reference
-- **Test** button per connection (calls `/api/connections/{name}/test`)
+- **Test** button per connection (calls `/api/connections/{name}/test`) with green/red LED indicators showing the test result on each connection row
+- Modal dialogs for connection and key editing (replacing earlier inline card layout)
 - Edit form with type dropdown, endpoint, key name, auth type, and dynamic key-value params editor
 - **Save** button persists to `connections.json`
 - Dirty state indicator (`*`) in the nav button
@@ -690,6 +693,12 @@ The ConnectionsView shows dedicated fields for Snowflake connections: Account, U
 
 The workflow editor shows a Snowflake Query inspector panel (light blue accent) with fields: connection, query (SQL textarea), warehouse, database, schema, output_format, output_file.
 
+### Implementation Notes
+
+- **User-Agent header** — Both `SnowflakeConnector` and `SnowflakeCloudTaskExecutor` set `User-Agent: j9t/1.0` on every request. The Snowflake SQL REST API requires a `User-Agent` header; requests without one are rejected.
+- **JWT fingerprint encoding** — The `RSA_PUBLIC_KEY_FP` value in the JWT `iss` claim uses **standard Base64** (with `+`, `/`, `=` padding), not Base64URL. Snowflake expects standard encoding for the fingerprint even though the JWT header/payload/signature use Base64URL per RFC 7519.
+- **Single-statement requests** — Each REST API request must contain exactly one SQL statement. Multi-statement execution is not supported unless the `MULTI_STATEMENT_COUNT` parameter is explicitly set in the request body, which the executor does not currently use.
+
 ---
 
 ## 13. Messaging — Slack and Email (Phase 7)
@@ -815,7 +824,13 @@ Polls an IMAP folder on a configurable interval.
 | `subject_filter` | no | all | Subject pattern filter |
 | `poll_interval_seconds` | no | 300 | Polling interval (minimum 60) |
 
-Stores `last_seen_uid` for future efficient polling via IMAP UID.
+`EmailConnector::CheckForNewMail()` runs on each poll interval:
+
+1. Opens an IMAP connection and issues `SEARCH ALL` on the configured folder (uses `SEARCH ALL` instead of `UID SEARCH` for broad IMAP server compatibility, e.g. GreenMail).
+2. Compares returned UIDs against the stored `m_LastSeenUid` watermark.
+3. On the **first poll**, seeds the watermark to the highest UID silently — does not fire the trigger for pre-existing mail.
+4. On subsequent polls, fires the trigger only when UIDs strictly greater than the watermark are found, then advances the watermark.
+5. IMAP network I/O runs **outside the trigger engine mutex** to avoid blocking other triggers during potentially slow connections.
 
 ### Connections UI
 
@@ -1207,8 +1222,16 @@ Wait ~30 seconds for Rails to boot. On first login at http://localhost:3000 sign
 
 See `example/workflows/redmineTriageBot.md` for the full setup walkthrough including users, project, members, and seed issues.
 
+### Connections UI
+
+The ConnectionsView shows a dedicated field for Redmine connections: **Project Identifier**.
+
+### Task Inspector
+
+The workflow editor shows a Redmine task inspector panel (red accent, `rgba(179,0,0)`) for the `redmine_issue` task type with fields: connection, operation (`list_issues` / `update_issue`), project_identifier, issue_id, notes, assigned_to_id, status, limit.
+
 ---
 
 ## 19. Next Steps
 
-See `cloud-integration-dev-plan.md` for the complete roadmap through Phase 12.
+All phases 0–12 are complete and all 13 round-trip demos have been verified end-to-end.

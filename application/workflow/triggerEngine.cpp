@@ -29,6 +29,7 @@
 // Bring in logging and core types.
 #include "core.h"
 #include "engine.h"
+#include "cloud/emailConnector.h"
 
 // MSVC natively supports C++20 chrono timezone (time_zone, zoned_time, etc.).
 // Apple Clang's libc++ does not, so we use Howard Hinnant's date library on non-MSVC platforms.
@@ -528,6 +529,16 @@ namespace AIAssistant
     {
         std::vector<TriggerFiredEvent> eventsToFire;
 
+        struct EmailPollJob
+        {
+            size_t m_Index;
+            std::string m_ConnectionName;
+            std::string m_Folder;
+            std::string m_SubjectFilter;
+            std::string m_LastSeenUid;
+        };
+        std::vector<EmailPollJob> emailPollJobs;
+
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
 
@@ -587,16 +598,18 @@ namespace AIAssistant
                 eventsToFire.push_back({odInstance.m_WorkflowId, odInstance.m_TriggerId});
             }
 
-            // Email watch triggers (IMAP polling)
-            for (EmailWatchTriggerInstance& emailInstance : m_EmailWatchTriggers)
+            // Email watch triggers — collect due triggers under lock, IMAP check happens below
+            for (size_t i = 0; i < m_EmailWatchTriggers.size(); ++i)
             {
+                EmailWatchTriggerInstance& emailInstance = m_EmailWatchTriggers[i];
                 if (!emailInstance.m_IsEnabled || steadyNow < emailInstance.m_NextPollTime)
                 {
                     continue;
                 }
 
                 emailInstance.m_NextPollTime = steadyNow + emailInstance.m_PollInterval;
-                eventsToFire.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId});
+                emailPollJobs.push_back({i, emailInstance.m_ConnectionName, emailInstance.m_Folder,
+                                         emailInstance.m_SubjectFilter, emailInstance.m_LastSeenUid});
             }
 
             // Azure Blob watch triggers (polling)
@@ -621,6 +634,71 @@ namespace AIAssistant
 
                 gcsInstance.m_NextPollTime = steadyNow + gcsInstance.m_PollInterval;
                 eventsToFire.push_back({gcsInstance.m_WorkflowId, gcsInstance.m_TriggerId});
+            }
+        }
+
+        // Email watch: perform IMAP UID checks outside the lock (network I/O)
+        for (auto const& job : emailPollJobs)
+        {
+            auto const* connection = Core::g_Core->GetCloudConnectionManager().GetConnection(job.m_ConnectionName);
+            if (!connection)
+            {
+                LOG_APP_WARN("[email_watch] connection '{}' not found, skipping IMAP check", job.m_ConnectionName);
+                continue;
+            }
+
+            EmailConnector emailConnector;
+            CloudCredentials credentials;
+            std::string errorMessage;
+            if (!emailConnector.ResolveCredentials(*connection, credentials, errorMessage))
+            {
+                LOG_APP_WARN("[email_watch] failed to resolve credentials for '{}': {}", job.m_ConnectionName,
+                             errorMessage);
+                continue;
+            }
+
+            bool hasNewMail = false;
+            std::string highestUid = EmailConnector::CheckForNewMail(
+                *connection, credentials, job.m_Folder, job.m_SubjectFilter, job.m_LastSeenUid, hasNewMail,
+                errorMessage);
+
+            if (highestUid.empty() && !errorMessage.empty())
+            {
+                LOG_APP_WARN("[email_watch] IMAP check failed for '{}': {}", job.m_ConnectionName, errorMessage);
+                continue;
+            }
+
+            if (!hasNewMail && job.m_LastSeenUid.empty() && !highestUid.empty())
+            {
+                LOG_APP_INFO("[email_watch] seeded UID watermark for '{}' folder '{}' (highest UID {})",
+                             job.m_ConnectionName, job.m_Folder, highestUid);
+            }
+            else if (!hasNewMail)
+            {
+                LOG_APP_INFO("[email_watch] polled '{}' folder '{}' — no new mail (watermark UID {})",
+                             job.m_ConnectionName, job.m_Folder,
+                             highestUid.empty() ? "<empty>" : highestUid);
+            }
+
+            // Update the watermark under lock
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                if (job.m_Index < m_EmailWatchTriggers.size())
+                {
+                    m_EmailWatchTriggers[job.m_Index].m_LastSeenUid = highestUid;
+                }
+            }
+
+            if (hasNewMail)
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                if (job.m_Index < m_EmailWatchTriggers.size())
+                {
+                    auto const& emailInstance = m_EmailWatchTriggers[job.m_Index];
+                    LOG_APP_INFO("[email_watch] new mail detected in '{}' (UID {}), firing trigger '{}'",
+                                 job.m_Folder, highestUid, emailInstance.m_TriggerId);
+                    eventsToFire.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId});
+                }
             }
         }
 

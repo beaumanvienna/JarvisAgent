@@ -198,7 +198,22 @@ namespace AIAssistant
         std::vector<uint8_t> hash(SHA256_DIGEST_LENGTH);
         SHA256(derBuf.data(), derBuf.size(), hash.data());
 
-        return "SHA256:" + Base64UrlEncode(hash);
+        // Snowflake expects standard Base64 (with + / =) for the fingerprint, not URL-safe.
+        static char const* const TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string b64;
+        b64.reserve(((hash.size() + 2) / 3) * 4);
+        for (size_t i = 0; i < hash.size(); i += 3)
+        {
+            uint32_t n = static_cast<uint32_t>(hash[i]) << 16;
+            if (i + 1 < hash.size()) n |= static_cast<uint32_t>(hash[i + 1]) << 8;
+            if (i + 2 < hash.size()) n |= static_cast<uint32_t>(hash[i + 2]);
+            b64 += TABLE[(n >> 18) & 0x3F];
+            b64 += TABLE[(n >> 12) & 0x3F];
+            b64 += (i + 1 < hash.size()) ? TABLE[(n >> 6) & 0x3F] : '=';
+            b64 += (i + 2 < hash.size()) ? TABLE[n & 0x3F] : '=';
+        }
+
+        return "SHA256:" + b64;
     }
 
     std::string JwtGenerator::GenerateSnowflakeJwt(std::string const& account, std::string const& user,

@@ -23,6 +23,9 @@
 
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "cloud/cloudConnector.h"
 
 namespace AIAssistant
@@ -52,5 +55,25 @@ namespace AIAssistant
 
         // Build the IMAP URL for libcurl (e.g. "imaps://imap.gmail.com:993")
         static std::string BuildImapUrl(CloudConnection const& connection);
+
+        // Perform a single IMAP command via libcurl and return the response body.
+        static bool ImapCommand(std::string const& url, std::string const& username, std::string const& password,
+                                std::string const& customRequest, std::string& responseBody,
+                                std::string& errorMessage, bool useSsl);
+
+        // Parse UIDs from an IMAP SEARCH response (format: "* SEARCH 1 2 3\r\n").
+        static std::vector<std::string> ParseSearchUids(std::string const& searchResponse);
+
+        // Check an IMAP folder for messages newer than lastSeenUid.
+        // Returns the highest UID found, or "" on error / no messages.
+        // On first call (lastSeenUid empty), seeds the watermark without reporting new mail
+        // (hasNewMail will be false).
+        static std::string CheckForNewMail(CloudConnection const& connection,
+                                           CloudCredentials const& credentials,
+                                           std::string const& folder,
+                                           std::string const& subjectFilter,
+                                           std::string const& lastSeenUid,
+                                           bool& hasNewMail,
+                                           std::string& errorMessage);
     };
 } // namespace AIAssistant

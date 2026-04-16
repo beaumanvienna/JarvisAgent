@@ -11,7 +11,7 @@ import {
 } from "../api/connections";
 import { listProviders, saveProviders } from "../api/providers";
 
-const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira", "google_sheets", "azure_blob", "gcs"];
+const CONNECTION_TYPES = ["polarion", "s3", "onedrive", "snowflake", "postgres", "slack", "email", "github", "jira", "redmine", "google_sheets", "azure_blob", "gcs"];
 const AUTH_TYPES = ["bearer", "oauth2", "jwt_rsa", "basic_auth", "sigv4", "azure_shared_key"];
 
 type EditingConnection = {
@@ -29,6 +29,8 @@ function emptyConnection(): EditingConnection
   return { name: "", type: "polarion", endpoint: "", key_name: "", auth_type: "bearer", params: {}, isNew: true };
 }
 
+type TestResult = "pass" | "fail" | null;
+
 type ConnectionsViewProps = {
   appMasterPassword: string | null;
   onDirtyStateChange?: (dirty: boolean) => void;
@@ -43,6 +45,7 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
   const [loading, setLoading] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [testingName, setTestingName] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
   const [paramKey, setParamKey] = useState("");
   const [paramValue, setParamValue] = useState("");
   const [keyNames, setKeyNames] = useState<string[]>([]);
@@ -88,6 +91,7 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
       setStatusMessage(`Deleted "${name}"`);
       setErrorMessage("");
       if (editing && editing.name === name) setEditing(null);
+      setTestResults((prev) => { const next = { ...prev }; delete next[name]; return next; });
       await refresh();
     }
     else
@@ -104,10 +108,12 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     setTestingName(null);
     if (result.ok)
     {
+      setTestResults((prev) => ({ ...prev, [name]: "pass" }));
       setStatusMessage(`Connection "${name}" is working`);
     }
     else
     {
+      setTestResults((prev) => ({ ...prev, [name]: "fail" }));
       setErrorMessage(result.message ?? "Test failed");
     }
   }, []);
@@ -156,6 +162,7 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
         setStatusMessage(`Updated connection "${editing.name}"`);
         setErrorMessage("");
         setEditing(null);
+        setTestResults((prev) => { const next = { ...prev }; delete next[editing.name]; return next; });
         await refresh();
       }
       else
@@ -247,6 +254,17 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     delete newParams[key];
     setEditing({ ...editing, params: newParams });
   }, [editing]);
+
+  const ledStyle = (result: TestResult): React.CSSProperties => ({
+    display: "inline-block",
+    width: 10,
+    height: 10,
+    borderRadius: "50%",
+    marginRight: 8,
+    flexShrink: 0,
+    background: result === "pass" ? "#4ade80" : result === "fail" ? "#f87171" : "transparent",
+    boxShadow: result === "pass" ? "0 0 6px rgba(74,222,128,0.5)" : result === "fail" ? "0 0 6px rgba(248,113,113,0.5)" : "none",
+  });
 
   return (
     <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
@@ -350,12 +368,15 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
         <div>
           {connections.map((c) => (
             <div key={c.name} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>
-                  {c.name}
-                </div>
-                <div className="small muted" style={{ marginTop: 2 }}>
-                  {c.type}{" \u2022 "}{c.endpoint || "(no endpoint)"}{c.key_name ? ` \u2022 key: ${c.key_name}` : ""}
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <span style={ledStyle(testResults[c.name] ?? null)} />
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>
+                    {c.name}
+                  </div>
+                  <div className="small muted" style={{ marginTop: 2 }}>
+                    {c.type}{" \u2022 "}{c.endpoint || "(no endpoint)"}{c.key_name ? ` \u2022 key: ${c.key_name}` : ""}
+                  </div>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0, marginLeft: 12 }}>
@@ -392,10 +413,14 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
       )}
 
       {editing && (
-        <div className="card" style={{ marginTop: 16, borderColor: "rgba(120,180,255,0.35)" }}>
-          <h3 style={{ margin: "0 0 12px 0", fontSize: 15 }}>
-            {editing.isNew ? "Add Connection" : `Edit: ${editing.name}`}
-          </h3>
+        <div className="modalOverlay">
+          <div className="modalContent" style={{ maxWidth: 560 }}>
+            <div className="modalHeader">
+              <h2 style={{ margin: 0, fontSize: 16 }}>
+                {editing.isNew ? "Add Connection" : `Edit: ${editing.name}`}
+              </h2>
+            </div>
+            <div className="modalBody" style={{ maxHeight: "70vh", overflowY: "auto" }}>
 
           {editing.isNew && (
             <div className="field" style={{ marginBottom: 10 }}>
@@ -459,23 +484,11 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Region</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="e.g. us-east-1"
-                  value={editing.params.region ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, region: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="e.g. us-east-1" value={editing.params.region ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, region: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Bucket</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="e.g. my-bucket"
-                  value={editing.params.bucket ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="e.g. my-bucket" value={editing.params.bucket ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -483,13 +496,7 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
           {editing.type === "polarion" && (
             <div className="field" style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 12, opacity: 0.8 }}>Project ID</label>
-              <input
-                className="input"
-                type="text"
-                placeholder="e.g. GoKartProcurement"
-                value={editing.params.project_id ?? ""}
-                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_id: e.target.value } } : prev)}
-              />
+              <input className="input" type="text" placeholder="e.g. GoKartProcurement" value={editing.params.project_id ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_id: e.target.value } } : prev)} />
             </div>
           )}
 
@@ -497,21 +504,11 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Database</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="e.g. mydb"
-                  value={editing.params.database ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="e.g. mydb" value={editing.params.database ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>SSL Mode</label>
-                <select
-                  className="input"
-                  value={editing.params.sslmode ?? "prefer"}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, sslmode: e.target.value } } : prev)}
-                >
+                <select className="input" value={editing.params.sslmode ?? "prefer"} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, sslmode: e.target.value } } : prev)}>
                   <option value="disable">disable</option>
                   <option value="prefer">prefer</option>
                   <option value="require">require</option>
@@ -526,33 +523,15 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Client ID (Azure AD application ID)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="e.g. 12345678-abcd-..."
-                  value={editing.params.client_id ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="e.g. 12345678-abcd-..." value={editing.params.client_id ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Tenant ID (default: common)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="common"
-                  value={editing.params.tenant_id ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, tenant_id: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="common" value={editing.params.tenant_id ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, tenant_id: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Scopes (default: Files.ReadWrite offline_access)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="Files.ReadWrite offline_access"
-                  value={editing.params.scopes ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="Files.ReadWrite offline_access" value={editing.params.scopes ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)} />
               </div>
               {!editing.isNew && (
                 <div style={{ marginBottom: 10 }}>
@@ -598,53 +577,23 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Account (e.g. xy12345)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="xy12345"
-                  value={editing.params.account ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="xy12345" value={editing.params.account ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>User</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="SVC_JARVIS"
-                  value={editing.params.user ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, user: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="SVC_JARVIS" value={editing.params.user ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, user: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Warehouse</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="COMPUTE_WH"
-                  value={editing.params.warehouse ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, warehouse: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="COMPUTE_WH" value={editing.params.warehouse ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, warehouse: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Database</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="ANALYTICS"
-                  value={editing.params.database ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="ANALYTICS" value={editing.params.database ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, database: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Schema</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="PUBLIC"
-                  value={editing.params.schema ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, schema: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="PUBLIC" value={editing.params.schema ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, schema: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -653,43 +602,19 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>SMTP Host</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="smtp.gmail.com"
-                  value={editing.params.smtp_host ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_host: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="smtp.gmail.com" value={editing.params.smtp_host ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_host: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>SMTP Port (587=STARTTLS, 465=SSL)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="587"
-                  value={editing.params.smtp_port ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_port: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="587" value={editing.params.smtp_port ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, smtp_port: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>IMAP Host (for email_watch trigger)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="imap.gmail.com"
-                  value={editing.params.imap_host ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, imap_host: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="imap.gmail.com" value={editing.params.imap_host ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, imap_host: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>From address (default: credential username)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="alerts@company.com"
-                  value={editing.params.from ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, from: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="alerts@company.com" value={editing.params.from ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, from: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -698,23 +623,11 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Owner (organization or user)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="myorg"
-                  value={editing.params.owner ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, owner: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="myorg" value={editing.params.owner ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, owner: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Repository</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="myrepo"
-                  value={editing.params.repo ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, repo: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="myrepo" value={editing.params.repo ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, repo: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -722,13 +635,14 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
           {editing.type === "jira" && (
             <div className="field" style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 12, opacity: 0.8 }}>Project Key</label>
-              <input
-                className="input"
-                type="text"
-                placeholder="PROJ"
-                value={editing.params.project_key ?? ""}
-                onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_key: e.target.value } } : prev)}
-              />
+              <input className="input" type="text" placeholder="PROJ" value={editing.params.project_key ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_key: e.target.value } } : prev)} />
+            </div>
+          )}
+
+          {editing.type === "redmine" && (
+            <div className="field" style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 12, opacity: 0.8 }}>Project Identifier</label>
+              <input className="input" type="text" placeholder="j9t-demo" value={editing.params.project_identifier ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, project_identifier: e.target.value } } : prev)} />
             </div>
           )}
 
@@ -736,43 +650,19 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Spreadsheet ID</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
-                  value={editing.params.spreadsheet_id ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms" value={editing.params.spreadsheet_id ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, spreadsheet_id: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Client ID (Google Cloud OAuth client)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="1234567890-abc.apps.googleusercontent.com"
-                  value={editing.params.client_id ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="1234567890-abc.apps.googleusercontent.com" value={editing.params.client_id ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_id: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Client Secret</label>
-                <input
-                  className="input"
-                  type="password"
-                  placeholder="GOCSPX-..."
-                  value={editing.params.client_secret ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_secret: e.target.value } } : prev)}
-                />
+                <input className="input" type="password" placeholder="GOCSPX-..." value={editing.params.client_secret ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, client_secret: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Scopes (default: spreadsheets)</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="https://www.googleapis.com/auth/spreadsheets"
-                  value={editing.params.scopes ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="https://www.googleapis.com/auth/spreadsheets" value={editing.params.scopes ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, scopes: e.target.value } } : prev)} />
               </div>
               {!editing.isNew && (
                 <div style={{ marginBottom: 10 }}>
@@ -818,23 +708,11 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Account Name</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="devstoreaccount1"
-                  value={editing.params.account_name ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account_name: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="devstoreaccount1" value={editing.params.account_name ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, account_name: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Container</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="workflow-data"
-                  value={editing.params.container ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, container: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="workflow-data" value={editing.params.container ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, container: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -843,23 +721,11 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
             <>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Bucket</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="workflow-data"
-                  value={editing.params.bucket ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="workflow-data" value={editing.params.bucket ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, bucket: e.target.value } } : prev)} />
               </div>
               <div className="field" style={{ marginBottom: 10 }}>
                 <label style={{ fontSize: 12, opacity: 0.8 }}>Service Account Email</label>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="j9t@myproject.iam.gserviceaccount.com"
-                  value={editing.params.service_account_email ?? ""}
-                  onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, service_account_email: e.target.value } } : prev)}
-                />
+                <input className="input" type="text" placeholder="j9t@myproject.iam.gserviceaccount.com" value={editing.params.service_account_email ?? ""} onChange={(e) => setEditing((prev) => prev ? { ...prev, params: { ...prev.params, service_account_email: e.target.value } } : prev)} />
               </div>
             </>
           )}
@@ -874,33 +740,21 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
               </div>
             ))}
             <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-              <input
-                className="input"
-                type="text"
-                placeholder="Key"
-                value={paramKey}
-                onChange={(e) => setParamKey(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <input
-                className="input"
-                type="text"
-                placeholder="Value"
-                value={paramValue}
-                onChange={(e) => setParamValue(e.target.value)}
-                style={{ flex: 2 }}
-              />
+              <input className="input" type="text" placeholder="Key" value={paramKey} onChange={(e) => setParamKey(e.target.value)} style={{ flex: 1 }} />
+              <input className="input" type="text" placeholder="Value" value={paramValue} onChange={(e) => setParamValue(e.target.value)} style={{ flex: 2 }} />
               <button className="btn" type="button" onClick={addParam} style={{ flexShrink: 0 }}>Add</button>
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button className="btn btnPrimary" type="button" onClick={handleSave}>
-              {editing.isNew ? "Create" : "Update"}
-            </button>
-            <button className="btn" type="button" onClick={() => setEditing(null)}>
-              Cancel
-            </button>
+            </div>
+            <div className="modalFooter">
+              <button className="btn btnPrimary" type="button" onClick={handleSave}>
+                {editing.isNew ? "Create" : "Update"}
+              </button>
+              <button className="btn" type="button" onClick={() => setEditing(null)} style={{ marginLeft: 8 }}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

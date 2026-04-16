@@ -103,7 +103,7 @@ export default function WorkflowListView(props: {
   }, [response, filterText]);
 
   return (
-    <div className="panel">
+    <div className="panel" style={{ maxWidth: 720, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <h2 style={{ marginTop: 0, marginBottom: 0 }}>Workflows</h2>
         <div style={{ display: "flex", gap: 8 }}>
@@ -146,14 +146,15 @@ export default function WorkflowListView(props: {
       <div style={{ maxWidth: 860 }}>
         {workflows.map((w) => {
           const item: WorkflowListItem = { id: w.id, label: w.label, path: w.path };
+          const displayPath = w.path ? w.path.replace(/^\/(?:home|Users)\/[^/]+\//, "~/") : "path unknown";
           return (
             <div key={w.id} className="card" style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
-              <div>
-                <div style={{ fontWeight: 700 }}>{w.label && w.label.length > 0 ? w.label : w.id}</div>
-                <div className="small">{w.path ? w.path : "path unknown"}</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label && w.label.length > 0 ? w.label : w.id}</div>
+                <div className="small" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayPath}</div>
               </div>
 
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                 <button className="btn" type="button" onClick={() => { props.onOpenWorkflow(item); }}>
                   Open
                 </button>
@@ -171,9 +172,9 @@ export default function WorkflowListView(props: {
           <h3 style={{ color: "#f87171", marginBottom: 8 }}>Broken Workflows</h3>
           {(response?.broken ?? []).map((b: BrokenWorkflowItem) => (
             <div key={b.id} className="card" style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", borderLeft: "3px solid #f87171" }}>
-              <div>
-                <div style={{ fontWeight: 700, color: "#f87171" }}>{b.id}</div>
-                <div className="small">{b.path ?? "path unknown"}</div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 700, color: "#f87171", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.id}</div>
+                <div className="small" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.path ?? "path unknown"}</div>
                 <div className="small" style={{ color: "#fbbf24", marginTop: 4 }}>{b.error}</div>
               </div>
             </div>

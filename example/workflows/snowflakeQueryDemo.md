@@ -1,190 +1,241 @@
-# snowflakeQueryDemo Workflow -- Snowflake SQL REST API Integration
+# snowflakeQueryDemo Workflow -- Snowflake Per-Item Round-Trip
 
 ## Executive Summary
 
-The **snowflakeQueryDemo** workflow demonstrates how JarvisAgent executes SQL queries against **Snowflake** through the cloud integration layer using the Snowflake SQL REST API with RSA JWT authentication.
+The **snowflakeQueryDemo** workflow is a true Snowflake round-trip demo with AI-driven per-item classification. It creates a database and two tables, inserts 8 sales records, queries aggregated region stats to CSV, fans out to an AI classifier that labels each region STRONG/MODERATE/WEAK, then INSERTs the verdict back into a dedicated analysis table per region. A final verify task SELECTs counts from both tables to confirm the round-trip completed. Round-trip = read external -> process with AI -> write back to the same external system.
 
-At its core, this workflow shows:
-
-- how `snowflake_query` tasks submit SQL statements and poll for async results,
-- how RSA key-pair authentication works via `JwtGenerator` (no passwords or shared secrets),
-- how a named **CloudConnection** centralizes Snowflake account, warehouse, and credential config,
-- how results are written to disk in both CSV and JSON formats,
-- and how tasks chain via `depends_on` to build a DDL-then-DML-then-query pipeline.
+The AI classifier is constrained to output a single word (STRONG, MODERATE, or WEAK) so its `captured_stdout` can be wired straight into the downstream `write_analysis` INSERT statement via template variable -- no Python parsing step needed.
 
 ---
 
 ## Prerequisites
 
-1. A Snowflake account with SQL REST API access
-2. An RSA key pair (2048-bit minimum) assigned to the Snowflake user:
-   ```bash
-   # Generate key pair
-   openssl genrsa -out snowflake_rsa_key.pem 2048
-   openssl rsa -in snowflake_rsa_key.pem -pubout -out snowflake_rsa_key.pub
+### 1. Snowflake account
 
-   # Assign public key to Snowflake user (run in Snowflake)
-   ALTER USER SVC_JARVIS SET RSA_PUBLIC_KEY='<public key without header/footer>';
-   ```
-3. A KeyManager credential (type `key_pair`) containing the RSA private key PEM
-4. A CloudConnection named `my-snowflake` configured in the **Connections** tab:
+A Snowflake account with SQL REST API access. You need the **org-account identifier** (e.g. `TVXEFHO-JHB68153`), which you can find in the Snowflake UI under **Admin -> Accounts**.
+
+### 2. RSA key pair for JWT authentication
+
+Snowflake JWT auth uses RSA key pairs -- no passwords, no shared secrets.
+
+```bash
+# Generate 2048-bit RSA key pair
+openssl genrsa -out snowflake_rsa_key.pem 2048
+openssl rsa -in snowflake_rsa_key.pem -pubout -out snowflake_rsa_key.pub
+
+# Assign public key to your Snowflake user (run in Snowflake worksheet)
+ALTER USER SVC_JARVIS SET RSA_PUBLIC_KEY='<public key without header/footer>';
+```
+
+### 3. Store the RSA private key in KeyManager
+
+```bash
+curl -sk -X POST https://localhost:8443/api/settings/providers \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"snowflake-key",
+    "display_name":"Snowflake RSA Key",
+    "api_key":"<paste entire PEM including BEGIN/END lines>",
+    "credential_type":"key_pair",
+    "api_type":"snowflake"
+  }'
+curl -sk -X POST https://localhost:8443/api/settings/providers/save -d '{}'
+```
+
+### 4. Create the `my-snowflake` CloudConnection
+
+```bash
+curl -sk -X POST https://localhost:8443/api/connections \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"my-snowflake",
+    "type":"snowflake",
+    "endpoint":"TVXEFHO-JHB68153",
+    "key_name":"snowflake-key",
+    "auth_type":"jwt_rsa",
+    "params":{
+      "account":"TVXEFHO-JHB68153",
+      "user":"SVC_JARVIS",
+      "warehouse":"COMPUTE_WH",
+      "database":"J9T_DEMO",
+      "schema":"PUBLIC"
+    }
+  }'
+curl -sk -X POST https://localhost:8443/api/connections/save -d '{}'
+curl -sk -X POST https://localhost:8443/api/connections/my-snowflake/test -d '{}'
+# -> {"ok":true}
+```
 
 | Field | Example |
 |-------|---------|
 | Type | `snowflake` |
-| Endpoint | `xy12345.us-east-1` (account locator with region) |
-| Key | A KeyManager credential with RSA private key |
-| Auth Type | `jwt_rsa` |
-| Account | `xy12345` |
+| Endpoint | `TVXEFHO-JHB68153` (org-account identifier) |
+| Key | A KeyManager credential with RSA private key PEM |
+| Auth type | `jwt_rsa` |
+| Account | `TVXEFHO-JHB68153` |
 | User | `SVC_JARVIS` |
 | Warehouse | `COMPUTE_WH` |
-| Database | `ANALYTICS` |
+| Database | `J9T_DEMO` |
 | Schema | `PUBLIC` |
-
----
-
-## Pipeline Overview
-
-```
-+-----------------+
-|  create_table   |
-|  snowflake: DDL |
-|  (01_create)    |
-+--------+--------+
-         |
-         v
-+-----------------+
-|  insert_data    |
-|  snowflake: INS |
-|  (02_insert)    |
-+--------+--------+
-         |
-    +----+----+
-    |         |
-    v         v
-+--------+ +-------------+
-|query   | |query_json   |
-|csv     | |snowflake:JSON|
-|(03_)   | |(04_)         |
-+--------+ +-------------+
-```
 
 ---
 
 ## Trigger
 
-This workflow uses a **manual trigger** only. It will not start automatically when j9t loads -- it must be started explicitly via the web UI or REST API.
+Manual only.
+
+```bash
+curl -sk -X POST https://localhost:8443/api/workflows/snowflakeQueryDemo/run -d '{}'
+```
+
+---
+
+## Task Graph
+
+```
+create_db (snowflake: CREATE DATABASE)
+    |
+    +------+------+
+    |             |
+    v             v
+create_table  create_analysis_table
+(snowflake:   (snowflake:
+ j9t_demo)     j9t_demo_analysis)
+    |             |
+    +------+------+
+           |
+           v
+      insert_data (snowflake: INSERT 8 rows)
+           |
+           v
+      query_regions (snowflake: SELECT GROUP BY region -> CSV)
+           |
+           +---> filter "region-stats" (csv, binding: region)
+           |
+           v
+      ai_analyze (per_item, AI classifies STRONG/MODERATE/WEAK)
+           |
+           v
+      write_analysis (per_item, snowflake: INSERT verdict back)
+           |
+           v
+        verify (snowflake: SELECT counts from both tables)
+```
 
 ---
 
 ## Task Details
 
-### 1. create_table -- create demo table
-
-Creates a `j9t_demo` table with company name, region, revenue, and timestamp columns.
+### 1. create_db -- create demo database
 
 | Field | Value |
 |-------|-------|
 | Type | `snowflake_query` |
 | Connection | `my-snowflake` |
-| Query | `CREATE TABLE IF NOT EXISTS j9t_demo (id INTEGER AUTOINCREMENT, ...)` |
+| Query | `CREATE DATABASE IF NOT EXISTS J9T_DEMO` |
+| Working dir | `snowflakeQueryDemo/00_create_db` |
+
+Creates the `J9T_DEMO` database if it does not already exist. All downstream tasks use fully-qualified table names (`J9T_DEMO.PUBLIC.table`) so the connection-level database/schema defaults are not relied upon.
+
+### 2. create_table -- create sales data table
+
+| Field | Value |
+|-------|-------|
+| Type | `snowflake_query` |
+| Connection | `my-snowflake` |
+| Query | `CREATE OR REPLACE TABLE J9T_DEMO.PUBLIC.j9t_demo (id INTEGER AUTOINCREMENT, name STRING, region STRING, revenue FLOAT, created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP())` |
 | Working dir | `snowflakeQueryDemo/01_create_table` |
+| Depends on | `create_db` |
 
-### 2. insert_data -- insert sample rows
-
-Inserts five sample company records with revenue data.
+### 3. create_analysis_table -- create analysis results table
 
 | Field | Value |
 |-------|-------|
 | Type | `snowflake_query` |
 | Connection | `my-snowflake` |
-| Query | `INSERT INTO j9t_demo (name, region, revenue) VALUES (...)` |
+| Query | `CREATE OR REPLACE TABLE J9T_DEMO.PUBLIC.j9t_demo_analysis (id INTEGER AUTOINCREMENT, region STRING NOT NULL, verdict STRING NOT NULL, analysis_file STRING, created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP())` |
+| Working dir | `snowflakeQueryDemo/01b_create_analysis` |
+| Depends on | `create_db` |
+
+Runs in parallel with `create_table` -- both depend only on `create_db`.
+
+### 4. insert_data -- insert 8 sample sales records
+
+| Field | Value |
+|-------|-------|
+| Type | `snowflake_query` |
+| Connection | `my-snowflake` |
+| Query | `INSERT INTO J9T_DEMO.PUBLIC.j9t_demo (name, region, revenue) VALUES ('Acme Corp', 'EMEA', 1250000.50), ('Globex Inc', 'APAC', 890000.00), ('Initech', 'AMER', 2100000.75), ('Umbrella LLC', 'EMEA', 430000.25), ('Cyberdyne', 'AMER', 3200000.00), ('Soylent Corp', 'APAC', 670000.00), ('Tyrell Corp', 'EMEA', 980000.00), ('Weyland Corp', 'APAC', 1450000.50)` |
 | Working dir | `snowflakeQueryDemo/02_insert` |
-| Depends on | `create_table` |
+| Depends on | `create_table`, `create_analysis_table` |
 
-### 3. query_csv -- full revenue report as CSV
+Waits for both table creation tasks before inserting. Three regions (AMER, EMEA, APAC) with 2-3 companies each.
 
-Queries all rows ordered by revenue descending and writes results to CSV.
+### 5. query_regions -- aggregate region stats to CSV
 
 | Field | Value |
 |-------|-------|
 | Type | `snowflake_query` |
 | Connection | `my-snowflake` |
-| Query | `SELECT name, region, revenue, created_at FROM j9t_demo ORDER BY revenue DESC` |
+| Query | `SELECT region AS "region", COUNT(*) AS "company_count", ROUND(SUM(revenue)) AS "total_revenue", ROUND(AVG(revenue)) AS "avg_revenue", ROUND(MIN(revenue)) AS "min_revenue", ROUND(MAX(revenue)) AS "max_revenue" FROM J9T_DEMO.PUBLIC.j9t_demo GROUP BY region ORDER BY "total_revenue" DESC` |
 | Output format | `csv` |
-| Output file | `revenue_report.csv` |
-| Working dir | `snowflakeQueryDemo/03_query_csv` |
+| Output file | `region_stats.csv` |
+| Working dir | `snowflakeQueryDemo/03_query_regions` |
 | Depends on | `insert_data` |
 
-### 4. query_json -- top revenue as JSON
+The column aliases are **lowercase and double-quoted** (`AS "region"`, not `AS REGION`). This is critical -- Snowflake uppercases unquoted identifiers, and the downstream CSV filter bindings use lowercase names (`{{region.region}}`, `{{region.total_revenue}}`). Without quoting, the CSV headers would be `REGION`, `TOTAL_REVENUE`, etc. and the template variables would not resolve.
 
-Queries companies with revenue >= 1M and writes results to JSON.
+The resulting CSV has 3 rows (one per region) and feeds the `region-stats` filter.
+
+### 6. ai_analyze -- AI classifies each region (per-item)
 
 | Field | Value |
 |-------|-------|
-| Type | `snowflake_query` |
-| Connection | `my-snowflake` |
-| Query | `SELECT name, region, revenue FROM j9t_demo WHERE revenue >= 1000000 ORDER BY revenue DESC` |
-| Output format | `json` |
-| Output file | `top_revenue.json` |
-| Working dir | `snowflakeQueryDemo/04_query_json` |
-| Depends on | `insert_data` |
+| Type | `ai_call` |
+| Mode | `per_item` |
+| Filter | `region-stats` (csv, binding: `region`) |
+| Working dir | `../../queue/snowflakeQueryDemo/04_ai_analyze` |
+| Depends on | `query_regions` |
+| Queue binding | STNG + CNTX + TASK + PROB files |
 
----
+The filter sources `03_query_regions/region_stats.csv` and binds each row as `region`. The AI runs once per region (3 times total) with PROB files templated per item:
 
-## snowflake_query Task Type Reference
-
-The `snowflake_query` task type is backed by `SnowflakeCloudTaskExecutor`, which extends `ICloudTaskExecutor`. The base class resolves the named connection and generates a fresh JWT before delegating to the Snowflake-specific logic.
-
-### Execution Flow
-
-1. Generate JWT via `JwtGenerator::GenerateSnowflakeJwt()`
-2. `POST /api/v2/statements` with SQL body -- receive `statementHandle`
-3. Poll `GET /api/v2/statements/{handle}` until `message == "Statement executed successfully."`
-4. Parse result set (jsonv2 format): column names from `resultSetMetaData.rowType`, row values from `data` array
-5. Write to output file (CSV or JSON) in the task working directory
-6. Save raw Snowflake response to `response.json`
-
-### Common Params
-
-| Param | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `connection` | yes | | Named CloudConnection (type `snowflake`) |
-| `query` | yes | | SQL statement |
-| `warehouse` | no | connection default | Override warehouse for this query |
-| `database` | no | connection default | Override database |
-| `schema` | no | connection default | Override schema |
-| `output_format` | no | `csv` | `csv` or `json` |
-| `output_file` | no | auto | Output filename |
-| `timeout` | no | 3600 | Statement timeout (seconds) |
-| `poll_interval` | no | 2 | Async poll interval (seconds) |
-
----
-
-## JWT Authentication
-
-All requests include:
-- `Authorization: Bearer <JWT>` -- RS256-signed JWT with 1-hour expiry
-- `X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT` -- tells Snowflake to validate against the user's assigned public key
-
-The JWT contains:
-- `iss`: `{ACCOUNT}.{USER}.SHA256:{public_key_fingerprint}`
-- `sub`: `{ACCOUNT}.{USER}`
-- `iat`: current Unix time
-- `exp`: current + 3600 seconds
-
-No passwords, no shared secrets -- authentication is purely RSA key-pair based.
-
----
-
-## Running
-
-```bash
-# Manual trigger only
-curl -s -X POST http://localhost:8080/api/workflows/snowflakeQueryDemo/run
+```
+Region: {{region.region}}
+Company Count: {{region.company_count}}
+Total Revenue: {{region.total_revenue}}
+...
 ```
 
-Or click the play button in the workflow editor / dashboard.
+The system prompt constrains the AI to output **exactly one word**: STRONG, MODERATE, or WEAK. The thresholds are embedded in the TASK file (STRONG = total above 2500000 or avg above 1000000, WEAK = total below 1000000 or avg below 500000). `captured_stdout` ends up as the literal string `"STRONG"`, `"MODERATE"`, or `"WEAK"`.
+
+### 7. write_analysis -- INSERT verdict back to Snowflake (per-item)
+
+| Field | Value |
+|-------|-------|
+| Type | `snowflake_query` |
+| Mode | `per_item` |
+| Filter | `region-stats` |
+| Connection | `my-snowflake` |
+| Query | `INSERT INTO J9T_DEMO.PUBLIC.j9t_demo_analysis (region, verdict, analysis_file) VALUES ('{{region.region}}', '{{ai_analyze.captured_stdout}}', '{{ai_analyze.output_file}}')` |
+| Working dir | `snowflakeQueryDemo/05_write_analysis` |
+| Depends on | `ai_analyze` |
+
+Runs once per region, inserting the AI's verdict and the path to its output file. Both `{{ai_analyze.captured_stdout}}` and `{{ai_analyze.output_file}}` resolve to the matching item's output for the same row index -- the runtime tracks per-item correspondence automatically.
+
+### 8. verify -- confirm round-trip with row counts
+
+| Field | Value |
+|-------|-------|
+| Type | `snowflake_query` |
+| Connection | `my-snowflake` |
+| Query | `SELECT 'j9t_demo' AS table_name, COUNT(*) AS row_count FROM J9T_DEMO.PUBLIC.j9t_demo UNION ALL SELECT 'j9t_demo_analysis', COUNT(*) FROM J9T_DEMO.PUBLIC.j9t_demo_analysis` |
+| Output format | `csv` |
+| Output file | `verification.csv` |
+| Working dir | `snowflakeQueryDemo/06_verify` |
+| Depends on | `write_analysis` |
+
+Expected output: `j9t_demo` has 8 rows, `j9t_demo_analysis` has 3 rows (one per region).
 
 ---
 
@@ -194,27 +245,34 @@ Or click the play button in the workflow editor / dashboard.
 
 | Task | Final State | Notes |
 |------|-------------|-------|
-| `create_table` | Succeeded | Table created (or already exists) |
-| `insert_data` | Succeeded | 5 rows inserted |
-| `query_csv` | Succeeded | All rows exported to CSV |
-| `query_json` | Succeeded | High-revenue companies exported to JSON |
+| `create_db` | Succeeded | Database created (or already exists) |
+| `create_table` | Succeeded | Sales table created |
+| `create_analysis_table` | Succeeded | Analysis table created (parallel with above) |
+| `insert_data` | Succeeded | 8 rows inserted |
+| `query_regions` | Succeeded | 3-row CSV: AMER, EMEA, APAC |
+| `ai_analyze` | Succeeded (x3) | Per-item: STRONG, MODERATE, or WEAK per region |
+| `write_analysis` | Succeeded (x3) | Per-item: INSERT into analysis table per region |
+| `verify` | Succeeded | 8 sales rows + 3 analysis rows confirmed |
 
 ### Output Files
 
 | Path | Content |
 |------|---------|
-| `snowflakeQueryDemo/03_query_csv/revenue_report.csv` | All 5 rows sorted by revenue |
-| `snowflakeQueryDemo/04_query_json/top_revenue.json` | 3 rows (Cyberdyne, Initech, Acme Corp) |
+| `snowflakeQueryDemo/03_query_regions/region_stats.csv` | 3 rows: region, company_count, total_revenue, avg_revenue, min_revenue, max_revenue |
+| `snowflakeQueryDemo/06_verify/verification.csv` | 2 rows: j9t_demo=8, j9t_demo_analysis=3 |
 | `snowflakeQueryDemo/*/response.json` | Raw Snowflake API response per task |
+| `queue/snowflakeQueryDemo/04_ai_analyze/PROB_*.output.txt` | AI classification output per region |
 
 ---
 
 ## Key Concepts Demonstrated
 
-- **RSA JWT authentication** -- no passwords, cryptographic key-pair auth via `JwtGenerator`
-- **Async SQL execution** -- submit-then-poll pattern for long-running queries
-- **Cooperative cancellation** -- workflow cancel propagates to Snowflake `POST .../cancel`
-- **Cloud task executor pattern** -- `ICloudTaskExecutor` resolves connection + credentials
-- **Named connections** -- account, warehouse, database, schema centralized in Connections tab
-- **Dual output formats** -- CSV for spreadsheets, JSON for downstream API consumption
-- **DAG dependency** -- both query tasks fan out in parallel after insert completes
+- **True round-trip pattern** -- create tables, query data, AI classifies, write verdicts back to the same Snowflake database
+- **RSA JWT authentication** -- no passwords, no shared secrets; RS256-signed JWT with `X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT` header, validated against the user's assigned public key
+- **Snowflake SQL REST API async polling** -- `POST /api/v2/statements` returns a `statementHandle`, executor polls `GET /api/v2/statements/{handle}` until completion; each request carries a single SQL statement (Snowflake REST API limitation)
+- **User-Agent header required** -- Snowflake's REST API rejects requests without a `User-Agent` header; the executor sets this automatically
+- **Per-item fan-out with AI classification** -- CSV filter spawns one AI call per region row; strict-output prompt constrains the model to a single word
+- **Per-item output piping for write-back** -- `{{ai_analyze.captured_stdout}}` and `{{ai_analyze.output_file}}` resolve to the matching item's output for the same row index, no Python glue needed
+- **Fully-qualified table names** -- `J9T_DEMO.PUBLIC.j9t_demo` avoids reliance on connection-level database/schema defaults, making the workflow portable across warehouse configurations
+- **Lowercase quoted column aliases** -- `SELECT region AS "region"` ensures CSV headers match the lowercase template binding names (`{{region.region}}`); without quoting, Snowflake uppercases identifiers and bindings would fail to resolve
+- **Single statement per request** -- the Snowflake SQL REST API does not support multi-statement batches; the workflow uses separate tasks for CREATE DATABASE, CREATE TABLE, INSERT, and SELECT

@@ -1,6 +1,6 @@
 export type JcwfVersion = "1.0" | "1.1";
 export type JcwfDoc = string | string[];
-export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal" | "sub_workflow" | "polarion_write" | "s3" | "db_query" | "onedrive_upload" | "onedrive_download" | "snowflake_query" | "slack_message" | "email_send" | "email_read" | "github_issue" | "jira_issue" | "sheets_read" | "sheets_write" | "azure_blob_upload" | "azure_blob_download" | "gcs_upload" | "gcs_download";
+export type JcwfTaskType = "python" | "shell" | "ai_call" | "internal" | "sub_workflow" | "polarion_write" | "s3" | "db_query" | "onedrive_upload" | "onedrive_download" | "snowflake_query" | "slack_message" | "email_send" | "email_read" | "github_issue" | "jira_issue" | "redmine_issue" | "sheets_read" | "sheets_write" | "azure_blob_upload" | "azure_blob_download" | "gcs_upload" | "gcs_download";
 export type JcwfTaskMode = "single" | "per_item";
 export type JcwfFilterSourceKind = "csv" | "text_lines" | "query" | "polarion_query";
 export type JcwfTriggerType = "auto" | "cron" | "file_watch" | "structure" | "manual" | "webhook" | "s3_watch" | "onedrive_watch" | "email_watch" | "azure_blob_watch" | "gcs_watch";

@@ -190,6 +190,7 @@ namespace AIAssistant
         headers = curl_slist_append(headers, "Content-Type: application/json");
         headers = curl_slist_append(headers, "Accept: application/json");
         headers = curl_slist_append(headers, "X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT");
+        headers = curl_slist_append(headers, "User-Agent: j9t/1.0");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);

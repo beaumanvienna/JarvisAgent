@@ -96,7 +96,7 @@ See [doc/cloud-integration.md](doc/cloud-integration.md) for the full architectu
 | [Portfolio Dividend Analysis](example/workflows/portfolioDividendAnalysis.md) | CSV filter, 60-position fan-out, glob aggregation |
 | [AI Car Maintenance Pipeline](example/workflows/aiCarMaintenancePipeline.md) | Multi-stage pipeline with AI categorization |
 | [Hamburg Tourist Day Planner](example/workflows/hamburg-tourist-day-planner.md) | Webhook trigger, n8n integration, HMAC, callback |
-| Cloud round-trip demos | [S3](example/workflows/s3UploadDownloadDemo.md), [PostgreSQL](example/workflows/postgresDemo.md), [Email](example/workflows/emailDemo.md), [GitHub](example/workflows/gitHubIssueDemo.md), [Azure Blob](example/workflows/azureBlobDemo.md), [GCS](example/workflows/gcsDemo.md) |
+| Cloud round-trip demos | [Polarion](example/workflows/goKartComplianceCheck.md), [PostgreSQL](example/workflows/postgresDemo.md), [S3](example/workflows/s3UploadDownloadDemo.md), [Email](example/workflows/emailDemo.md), [GitHub](example/workflows/gitHubIssueDemo.md), [Jira](example/workflows/jiraIssueDemo.md), [Slack](example/workflows/slackQAndABot.md), [OneDrive](example/workflows/oneDriveUploadDownloadDemo.md), [Snowflake](example/workflows/snowflakeQueryDemo.md), [Google Sheets](example/workflows/sheetsQuizGrader.md), [Azure Blob](example/workflows/azureBlobDemo.md), [GCS](example/workflows/gcsDemo.md), [Redmine](example/workflows/redmineTriageBot.md) |
 
 ---
 

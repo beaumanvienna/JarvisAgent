@@ -50,8 +50,8 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `oneDriveCloudTaskExecutor` | `onedrive_upload`, `onedrive_download` | File upload/download via Graph API |
 | `snowflakeCloudTaskExecutor` | `snowflake_query` | SQL submit + async poll + result parsing |
 | `dbQueryCloudTaskExecutor` | `db_query` | SQL query via libpq, CSV/JSON output |
-| `slackCloudTaskExecutor` | `slack_message` | chat.postMessage |
-| `emailCloudTaskExecutor` | `email_send` | SMTP send with MIME attachments |
+| `slackCloudTaskExecutor` | `slack_message`, `slack_read` | chat.postMessage, conversations.history |
+| `emailCloudTaskExecutor` | `email_send`, `email_read` | SMTP send with MIME attachments, IMAP read |
 | `gitHubCloudTaskExecutor` | `github_issue` | Issue create/comment/close, file retrieval, list issues |
 | `jiraCloudTaskExecutor` | `jira_issue` | Issue create/update/transition/comment/get |
 | `redmineCloudTaskExecutor` | `redmine_issue` | List issues (`list_issues`) and update with notes + assignee (`update_issue`) |

@@ -43,6 +43,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
   const [masterPasswordInput, setMasterPasswordInput] = useState("");
   const [showMasterPwVisible, setShowMasterPwVisible] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [savePasswordError, setSavePasswordError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try
@@ -153,8 +154,6 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
     }
   }, [editing, refresh]);
 
-  const [savePasswordError, setSavePasswordError] = useState<string | null>(null);
-
   const doSaveWithPassword = useCallback(async (pw: string, fromPrompt: boolean) => {
     setStatusMessage("Saving encrypted keys file...");
     setErrorMessage("");
@@ -218,7 +217,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 style={{ margin: 0 }}>Keys</h2>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" type="button" onClick={() => setEditing(emptyKey())}>
+          <button className="btn" type="button" onClick={() => { setShowPassword(false); setEditing(emptyKey()); }}>
             + Add Key
           </button>
           <button className="btn btnPrimary" type="button" onClick={handlePersistEncrypted} style={dirty ? { boxShadow: "0 0 0 2px rgba(255,180,60,0.7)" } : {}}>
@@ -271,7 +270,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
                 <button
                   className="btn"
                   type="button"
-                  onClick={() => setEditing({ name: p.name, api_key: "", credential_type: p.credential_type ?? "api_key", scopes: p.scopes ?? "", private_key_pem: "", username: p.username ?? "", password: "", isNew: false })}
+                  onClick={() => { setShowPassword(false); setEditing({ name: p.name, api_key: "", credential_type: p.credential_type ?? "api_key", scopes: p.scopes ?? "", private_key_pem: "", username: p.username ?? "", password: "", isNew: false }); }}
                 >
                   Edit
                 </button>
@@ -359,10 +358,14 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
       )}
 
       {editing && (
-        <div className="card" style={{ marginTop: 16, borderColor: "rgba(120,180,255,0.35)" }}>
-          <h3 style={{ margin: "0 0 12px 0", fontSize: 15 }}>
-            {editing.isNew ? "Add Key" : `Edit Key: ${editing.name}`}
-          </h3>
+        <div className="modalOverlay">
+          <div className="modalContent" style={{ maxWidth: 500 }}>
+            <div className="modalHeader">
+              <h2 style={{ margin: 0, fontSize: 16 }}>
+                {editing.isNew ? "Add Key" : `Edit Key: ${editing.name}`}
+              </h2>
+            </div>
+            <div className="modalBody">
 
           {editing.isNew ? (
             <div className="field" style={{ marginBottom: 10 }}>
@@ -510,13 +513,15 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
             </>
           )}
 
-          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button className="btn btnPrimary" type="button" onClick={handleSave}>
-              {editing.isNew ? "Create" : "Update"}
-            </button>
-            <button className="btn" type="button" onClick={() => setEditing(null)}>
-              Cancel
-            </button>
+            </div>
+            <div className="modalFooter">
+              <button className="btn btnPrimary" type="button" onClick={handleSave}>
+                {editing.isNew ? "Create" : "Update"}
+              </button>
+              <button className="btn" type="button" onClick={() => setEditing(null)} style={{ marginLeft: 8 }}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

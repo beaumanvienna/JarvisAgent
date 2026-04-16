@@ -24,6 +24,7 @@
 #include "cloud/emailConnector.h"
 
 #include <curl/curl.h>
+#include <sstream>
 
 #include "core.h"
 #include "engine.h"
@@ -154,5 +155,162 @@ namespace AIAssistant
         }
 
         return true;
+    }
+
+    // ========================================================================
+    // IMAP utilities (shared by email_read task executor and email_watch trigger)
+    // ========================================================================
+
+    static size_t ImapWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+    {
+        auto* buf = static_cast<std::string*>(userp);
+        buf->append(static_cast<char*>(contents), size * nmemb);
+        return size * nmemb;
+    }
+
+    bool EmailConnector::ImapCommand(std::string const& url, std::string const& username,
+                                     std::string const& password, std::string const& customRequest,
+                                     std::string& responseBody, std::string& errorMessage, bool useSsl)
+    {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+        {
+            errorMessage = "curl_easy_init() failed";
+            return false;
+        }
+
+        responseBody.clear();
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_USERNAME, username.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, password.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ImapWriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+        if (!customRequest.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, customRequest.c_str());
+        }
+
+        if (!useSsl)
+        {
+            curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_NONE));
+        }
+
+        auto const& caBundle = CurlWrapper::GetCaBundlePath();
+        if (!caBundle.empty())
+        {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+
+        CURLcode res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK)
+        {
+            errorMessage = std::string("IMAP request failed: ") + curl_easy_strerror(res);
+            return false;
+        }
+
+        return true;
+    }
+
+    std::vector<std::string> EmailConnector::ParseSearchUids(std::string const& searchResponse)
+    {
+        std::vector<std::string> uids;
+        size_t pos = searchResponse.find("* SEARCH ");
+        if (pos == std::string::npos)
+        {
+            return uids;
+        }
+
+        size_t start = pos + 9; // length of "* SEARCH "
+        size_t lineEnd = searchResponse.find('\r', start);
+        if (lineEnd == std::string::npos)
+        {
+            lineEnd = searchResponse.find('\n', start);
+        }
+        if (lineEnd == std::string::npos)
+        {
+            lineEnd = searchResponse.size();
+        }
+
+        std::string uidLine = searchResponse.substr(start, lineEnd - start);
+        std::istringstream ss(uidLine);
+        std::string uid;
+        while (ss >> uid)
+        {
+            if (!uid.empty() && std::isdigit(static_cast<unsigned char>(uid[0])))
+            {
+                uids.push_back(uid);
+            }
+        }
+
+        return uids;
+    }
+
+    std::string EmailConnector::CheckForNewMail(CloudConnection const& connection,
+                                                CloudCredentials const& credentials,
+                                                std::string const& folder,
+                                                std::string const& subjectFilter,
+                                                std::string const& lastSeenUid,
+                                                bool& hasNewMail,
+                                                std::string& errorMessage)
+    {
+        hasNewMail = false;
+
+        std::string imapBaseUrl = BuildImapUrl(connection);
+        auto sslIt = connection.m_Params.find("use_ssl");
+        bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+
+        std::string searchUrl = imapBaseUrl + "/" + folder;
+
+        // Always use SEARCH ALL — UID SEARCH is not universally supported (e.g. GreenMail).
+        // We filter by watermark in code after parsing the results.
+        std::string searchCommand = "SEARCH ALL";
+
+        // Append subject filter if set
+        if (!subjectFilter.empty())
+        {
+            searchCommand += " SUBJECT \"" + subjectFilter + "\"";
+        }
+
+        std::string searchResponse;
+        if (!ImapCommand(searchUrl, credentials.m_Username, credentials.m_Password,
+                         searchCommand, searchResponse, errorMessage, useSsl))
+        {
+            return {};
+        }
+
+        std::vector<std::string> uids = ParseSearchUids(searchResponse);
+        if (uids.empty())
+        {
+            // No messages found — return the existing watermark unchanged
+            return lastSeenUid;
+        }
+
+        // Highest UID is the last element (IMAP UIDs are returned in ascending order)
+        std::string const& highestUid = uids.back();
+
+        if (lastSeenUid.empty())
+        {
+            // First poll: seed the watermark silently — don't fire for existing mail
+            return highestUid;
+        }
+
+        // IMAP UID SEARCH <N>:* can return UID == lastSeenUid when no newer messages exist
+        // (the range is inclusive and the server returns the boundary UID).
+        // Only report new mail if we found a UID strictly greater than the watermark.
+        for (auto const& uid : uids)
+        {
+            if (std::stoull(uid) > std::stoull(lastSeenUid))
+            {
+                hasNewMail = true;
+                break;
+            }
+        }
+
+        return highestUid;
     }
 } // namespace AIAssistant

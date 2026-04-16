@@ -219,7 +219,10 @@ namespace AIAssistant
                 status = "open";
             }
             int64_t limitVal = 25;
-            doc["limit"].get_int64().get(limitVal);
+            if (doc["limit"].get_int64().get(limitVal) != simdjson::SUCCESS)
+            {
+                limitVal = 25;
+            }
 
             std::string url = baseUrl + "/issues.json?project_id=" + projectIdent + "&status_id=" + status +
                               "&limit=" + std::to_string(limitVal);
