@@ -6,7 +6,7 @@
 
 Turn j9t into a general-purpose orchestration backend by allowing external callers to submit workflows dynamically via the REST API.
 
-- `POST /api/workflows/run-adhoc` accepts a JCWF payload (zip or inline JSON)
+- `POST /api/workflows/run-adhoc` accepts a JCWF payload
 - Stages the workflow in a temporary directory, executes it, returns results
 - Enables autonomous AI agents (Claude Code, custom agents, any HTTP client) to compose and submit workflows on the fly
 - Cleanup policy for temp workflows (TTL-based or on-completion)
