@@ -462,6 +462,12 @@ JCWF trigger type `"s3_watch"` polls an S3 bucket at a configurable interval. On
 
 The ConnectionsView shows dedicated fields for S3 connections (Region, Bucket) and Polarion connections (Project ID) alongside the generic parameters table.
 
+### Local Testing
+
+| Provider | Docker Command | Notes |
+|----------|---------------|-------|
+| S3 (MinIO) | `docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin123 minio/minio server /data --console-address ":9001"` | S3-compatible on port 9000, console on 9001. Create bucket: `docker exec minio mc mb /data/j9t-test` |
+
 ### Example Workflow
 
 `workflows/s3UploadDownloadDemo.jcwf` — creates a sample file, uploads it to S3, downloads it back, and lists the prefix. Requires an S3 connection named `my-s3`.
@@ -841,6 +847,13 @@ Polls an IMAP folder on a configurable interval.
 
 - **slack_message**: Pink accent panel with connection, channel, text (textarea)
 - **email_send**: Orange accent panel with connection, to, subject, body (textarea), cc
+
+### Local Testing
+
+| Provider | Docker Command | Notes |
+|----------|---------------|-------|
+| Email (SMTP mock) | `docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit` | Mailpit: SMTP on 1025, web UI on 8025 (no auth needed) |
+| Email (IMAP mock) | `docker run -d --name greenmail -p 3025:3025 -p 3110:3110 -p 3143:3143 -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test' greenmail/standalone` | GreenMail: SMTP 3025, POP3 3110, IMAP 3143. User `test`, pw `test`. Send test email via SMTP, poll via IMAP. |
 
 ---
 
