@@ -208,17 +208,26 @@ See also:
 - ~~Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`~~
 - **Done (v0.8.2):** published, installed, and tested end-to-end. Shared launcher creates `~/JarvisAgent` with user-space Python venv on first run.
 
-### 5. Landing page for new users
+### 5. Unified auth model — migrate Engine REST API from shared admin token to MCP keys
+- Currently Engine uses a single shared bearer token (`engine_api_token.txt`) for all REST API auth — no per-user identity
+- Studio has no REST auth at all — the localhost-only assumption breaks once j9t is deployed in teams or the cloud
+- Migrate all REST authentication (both editions) to MCP API keys so every request has per-user identity, RBAC, and audit trail
+- Deprecate `engine_api_token.txt` as the primary auth mechanism (retain as bootstrap credential for first admin enrollment)
+- Touches: webhook HMAC flow, n8n integration, gateway trust model, WebSocket auth
+- Prerequisite: MCP API key system from `Adhoc Workflow Submission and MCP.md` Phase 1
+- See `Adhoc Workflow Submission and MCP.md` for the full MCP key design (enrollment tokens, self-renewal, encrypted store, dashboard login)
+
+### 6. Landing page for new users
 - Create a welcoming landing page / website for JarvisAgent
 - Should explain what JarvisAgent is, key features, screenshots, and download links
 - Target audience: first-time visitors who discover the project
 
-### 6. Self-hosted Docker registry
+### 7. Self-hosted Docker registry
 - Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
 - Benefits: custom domain, no GitHub dependency, potential for private images
 - Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
 
-### 7. Promotion video
+### 8. Promotion video
 - Create a demo / promotion video showcasing JarvisAgent
 - Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
 - Target: GitHub README embed, YouTube, social media
