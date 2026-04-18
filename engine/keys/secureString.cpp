@@ -44,18 +44,15 @@ namespace AIAssistant
             if (!ptr || size == 0) return;
 #ifdef _WIN32
             SecureZeroMemory(ptr, size);
-#elif defined(__STDC_LIB_EXT1__) || defined(__APPLE__)
-            // memset_s is available on Apple and C11 Annex K
-    #ifdef __APPLE__
+#elif defined(__STDC_LIB_EXT1__)
             memset_s(ptr, size, 0, size);
-    #else
-            memset_s(ptr, size, 0, size);
-    #endif
 #elif defined(__GLIBC__) || defined(__BIONIC__)
             explicit_bzero(ptr, size);
 #else
-            // Portable fallback that the compiler cannot optimise away because
-            // the pointer is laundered through a volatile variable.
+            // Portable fallback (also used on Apple, where memset_s requires
+            // __STDC_WANT_LIB_EXT1__ to be defined before <string.h>).
+            // The compiler cannot optimise this away because the pointer is
+            // laundered through a volatile variable.
             volatile unsigned char* p = static_cast<volatile unsigned char*>(ptr);
             while (size--) *p++ = 0;
 #endif

@@ -235,6 +235,50 @@ Spec clarification landed at the same time (`doc/JC_Workflow_Specification.md` �
 
 Related cleanup flagged but not fixed in this pass (post-1.0): `FireBranchIfReady` log line fires with `completedState=6` (`WaitingExternal`) — misleading; `TimeoutWaitingExternalTasks()` didn't catch these stalls and should be revisited when Option E lands.
 
+### 5d. Repository layout + root-folder hygiene (pre-1.0 cleanup)
+
+The repository grew organically and the root is crowded. Group sources under a single `code/` tree, prune unused artefacts, and clean up root-level files that don't belong there. Target: before 1.0 ships (GitHub first impression matters).
+
+**Source reorganisation:**
+
+- Create `code/` with three subtrees:
+  - `code/backend/` — move `engine/` and `application/` into it
+  - `code/frontend/` — move `dashboard/` and `workflow-editor/` into it
+  - `code/mcp/` — move `mcp/` into it
+- `vendor/`, `test/`, `scripts/`, `packaging/`, `integration/`, `tools/` stay at the root (or move under `code/` — decide later; simpler to leave alone for the first pass)
+- `premake5.lua` paths and the Studio / Engine `removefiles` patterns all need retargeting (`application/**` → `code/backend/application/**` etc.)
+- Dashboard + editor build scripts (`cd dashboard/ui && npm run build`) — every doc/script touch point
+- CI workflow path filters (`.github/workflows/*.yml`)
+- CLAUDE.md, DEVELOPMENT.md, INSTALL.md, README.md — update all references
+- Doc sweep: `doc/architecture.md`, `doc/cloud-integration.md`, `doc/jarvisagent.md` / `.1` / `.html` — hundreds of `application/` / `engine/` / `dashboard/` / `workflow-editor/` mentions
+- WebServer static-file paths for dashboard + editor UIs (`dashboard/ui/dist/`, `workflow-editor/ui/dist/`) — update to new locations
+- IDE workspace configs if any (`.vscode/` is gitignored so probably fine)
+
+**Runtime folders (remove from git tree, keep on disk at runtime):**
+
+- `queue/` — tracked only via an empty `.gitignore` placeholder. `git rm -r --cached queue/`, then add `/queue/` to the top-level `.gitignore`. The backend creates the folder on first start from `config.json`'s `"queue folder"` value.
+- `workflows/` — same story. `git rm -r --cached workflows/`, add `/workflows/` to `.gitignore`.
+- `_adhoc/` — already gitignored; already not tracked. No change needed.
+
+**Root-level cleanup:**
+
+- `.npm-tools/package.json` — 12-byte stub listing `@mermaid-js/mermaid-cli` as a dep. The only reference in the repo (`packaging/Linux/jarvisagent-launcher.sh`) installs into `$USER_HOME/.npm-tools`, *not* the repo's `.npm-tools/`. The checked-in copy is a leftover. Delete the folder + add `/.npm-tools/` to `.gitignore` for safety.
+- `jarvis_agent.example.env` — 56 bytes, only referenced as a commented-out example in `docker-compose.example.yml`. Functionally unused. Delete.
+- Docker files in root: `Dockerfile`, `docker-compose.example.yml`, `docker-entrypoint.sh`, `.dockerignore`. Consider moving to `packaging/Docker/` to declutter the root. Touch points: `.github/workflows/docker-publish.yml` (`file: ./Dockerfile`), `scripts/run-docker.sh`, any `.flatpak-builder` snapshots. Minor, but reduces visual noise in the root.
+
+**Out of scope (already verified correct):**
+
+- `vendor/tracy/include/` stays unconditionally in include paths. `defines { "TRACY_ENABLE" }` is only added when `--tracy` is passed to premake, and no Tracy `.cpp` is compiled into the binary. Tracy macros are no-ops without the define. Ahmet's Docker memory-leak concern does not apply to default builds.
+
+**Rollout order:**
+
+1. Runtime folders (`queue/`, `workflows/`) — tiny change, no code impact.
+2. Root-level cleanup (`.npm-tools/`, `jarvis_agent.example.env`) — tiny change.
+3. Docker file relocation — coordinated with CI + launcher + Flatpak.
+4. Source tree reorg — biggest diff, leave for last. One commit or a branch with multiple logical commits (move → premake5.lua update → doc sweep → CI filters).
+
+Reference: this item captured after the 2026-04-18 MCP 1.0 commit landed +10,602 / -1,866 lines; the reorg will be bigger still in line-count but almost all `git mv` + path-string edits.
+
 ### 5c. Post-1.0 — runtime-driven `ai_call` dispatch (Option E)
 
 - Today `ai_call` completion relies on the `FileWatcher → FileAddedEvent → file categorizer → SessionManager → AiRequestPool` chain. That round-trip is elegant for the original file-drop use case (user drops PROB files into `queue/` manually) but increasingly awkward for runtime-authored workflows where the runtime already knows exactly what to dispatch.
