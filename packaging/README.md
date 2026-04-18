@@ -644,9 +644,11 @@ mcp:
   depends_on: [jarvisagent]
   environment:
     J9T_URL: http://jarvisagent:8080
-    J9T_TOKEN_FILE: /app/engine_api_token.txt
+    # Provide the MCP API key via a mounted secret file, or inline as J9T_TOKEN=mcp_...
+    J9T_TOKEN_FILE: /secrets/mcp_key
   volumes:
     - ./data:/app:ro
+    - ./secrets:/secrets:ro
 ```
 
 Note: `http://jarvisagent:8080` is the default. Check `config.json` for the actual port (`"port"` field) and whether TLS is enabled (`TlsCert`/`TlsKey`) — if TLS is configured, use `https://` and the corresponding port (default 8443).

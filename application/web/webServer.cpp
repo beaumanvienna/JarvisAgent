@@ -41,6 +41,8 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #endif
+#include <openssl/sha.h>
+
 #include "simdjson/simdjson.h"
 
 #include "core.h"
@@ -582,6 +584,30 @@ namespace AIAssistant
 #ifdef J9T_STUDIO
         m_AssistantController.SetWorkflowRegistry(workflowRegistry);
 #endif
+        // Now that the registry is available, build the adhoc manager and attach it
+        // to the base `_adhoc/` folder under the launch cwd. The reaper thread is
+        // started so TTL-based cleanup kicks in every 60 s.
+        if (workflowRegistry != nullptr && !m_AdhocManager)
+        {
+            // Thread the JarvisAgent's queue FileWatcher through so each staged
+            // adhoc run's queue folder gets registered / unregistered dynamically
+            // (see doc/architecture.md "Adhoc submission" subsection).
+            FileWatcher* queueWatcher =
+                (App::g_App != nullptr) ? App::g_App->GetQueueFileWatcher() : nullptr;
+            m_AdhocManager = std::make_unique<AdhocWorkflowManager>(m_McpKeyManager, *workflowRegistry,
+                                                                    queueWatcher);
+            auto const adhocBase = Core::g_Core->GetLaunchCWDAbsolute() / "_adhoc";
+            m_AdhocManager->Init(adhocBase);
+            m_AdhocManager->StartReaperThread();
+            LOG_APP_INFO("[adhoc] Manager ready — base='{}'", adhocBase.string());
+        }
+
+        // Script catalog — scan scripts/ so MCP agents can discover what's
+        // available before composing an adhoc JCWF. Cheap; idempotent.
+        {
+            auto const scriptsBase = Core::g_Core->GetLaunchCWDAbsolute() / "scripts";
+            m_ScriptCatalog.Refresh(scriptsBase);
+        }
     }
 
     void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
@@ -591,6 +617,20 @@ namespace AIAssistant
 #ifdef J9T_STUDIO
         m_AssistantController.SetWorkflowRuntimeManager(workflowRuntimeManager);
 #endif
+        // Plumb terminal-state notifications through to the adhoc manager so
+        // on_completion runs are cleaned up the moment they finish.
+        if (workflowRuntimeManager && m_AdhocManager)
+        {
+            AdhocWorkflowManager* adhoc = m_AdhocManager.get();
+            workflowRuntimeManager->SetRunTerminalObserver(
+                [adhoc](std::string const& runId, WorkflowRunState /*state*/)
+                {
+                    if (runId.rfind("adhoc_", 0) == 0)
+                    {
+                        adhoc->OnRunCompleted(runId);
+                    }
+                });
+        }
     }
 
     void WebServer::SetTriggerEngine(TriggerEngine* triggerEngine)
@@ -998,11 +1038,6 @@ namespace AIAssistant
     // Admin authentication (Engine edition only)
     // =========================================================================
 
-    // Token file and expiry constants.
-    static constexpr char kTokenFileName[] = "engine_api_token.txt";
-    static constexpr int kTokenMaxAgeDays = 90;
-    static constexpr int kTokenExpiryWarningDays = 7;
-
     // Failed auth lockout constants.
     static constexpr size_t kMaxAuthFailures = 10;
     static constexpr auto kAuthFailureWindow = std::chrono::minutes(5);
@@ -1022,10 +1057,116 @@ namespace AIAssistant
         return RoleLevel(auth.m_Role) >= RoleLevel(requiredRole);
     }
 
+    std::string WebServer::ExtractBearerToken(crow::request const& req)
+    {
+        std::string const& authHeader = req.get_header_value("Authorization");
+        static constexpr std::string_view kBearerPrefix = "Bearer ";
+        if (authHeader.size() <= kBearerPrefix.size()) return {};
+        if (authHeader.compare(0, kBearerPrefix.size(), kBearerPrefix) != 0) return {};
+        return authHeader.substr(kBearerPrefix.size());
+    }
+
+    std::string WebServer::ExtractSessionCookie(crow::request const& req)
+    {
+        std::string const& cookieHeader = req.get_header_value("Cookie");
+        if (cookieHeader.empty()) return {};
+        // Cookie header is a ';'-separated list of "name=value" pairs.
+        size_t pos = 0;
+        while (pos < cookieHeader.size())
+        {
+            size_t end = cookieHeader.find(';', pos);
+            if (end == std::string::npos) end = cookieHeader.size();
+            size_t start = pos;
+            while (start < end && (cookieHeader[start] == ' ' || cookieHeader[start] == '\t')) ++start;
+            size_t eq = cookieHeader.find('=', start);
+            if (eq != std::string::npos && eq < end)
+            {
+                std::string_view name(cookieHeader.data() + start, eq - start);
+                if (name == "session")
+                {
+                    return std::string(cookieHeader.data() + eq + 1, end - eq - 1);
+                }
+            }
+            pos = end + 1;
+        }
+        return {};
+    }
+
+    std::optional<WebServer::AuthResult> WebServer::TryMcpAuth(crow::request const& req) const
+    {
+        std::string token = ExtractBearerToken(req);
+        if (token.rfind("mcp_", 0) != 0)
+        {
+            return std::nullopt; // not an MCP token — caller should continue with other paths
+        }
+
+        std::string const& ip = req.remote_ip_address;
+        auto result = m_McpKeyManager.Authenticate(token);
+        if (!result)
+        {
+            LOG_SECURITY_WARN("[security] mcp_auth_failure reason=invalid_key ip={}", ip);
+            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
+            return AuthResult{"invalid_token", "", ""};
+        }
+        if (!result->m_Record.m_Enabled)
+        {
+            LOG_SECURITY_WARN("[security] mcp_auth_failure reason=key_disabled ip={} user={}",
+                              ip, result->m_Record.m_User);
+            return AuthResult{"key_disabled", "", ""};
+        }
+        if (result->m_DaysUntilExpiry < 0)
+        {
+            LOG_SECURITY_WARN("[security] mcp_auth_failure reason=token_expired ip={} user={}",
+                              ip, result->m_Record.m_User);
+            return AuthResult{"token_expired", "", ""};
+        }
+
+        LOG_SECURITY_INFO("[security] mcp_auth_success ip={} user={} role={} endpoint={}",
+                          ip, result->m_Record.m_User, result->m_Record.m_Role, req.url);
+        AuthResult out{"", result->m_Record.m_User, result->m_Record.m_Role};
+        out.m_DaysUntilExpiry = result->m_DaysUntilExpiry;
+        return out;
+    }
+
+    void WebServer::AttachMcpExpiryHeader(crow::response& resp, crow::request const& req) const
+    {
+        // Re-run the bearer-token extraction; the auth cache is not exposed by Crow per-response,
+        // so we look up once more. McpKeyManager::Authenticate is a cheap hash + map lookup.
+        std::string const token = ExtractBearerToken(req);
+        if (token.rfind("mcp_", 0) != 0) return;
+        auto result = m_McpKeyManager.Authenticate(token);
+        if (!result) return;
+        int const days = result->m_DaysUntilExpiry;
+        if (days < 0 || days > 30) return;
+        resp.add_header("X-Key-Expires-In", std::to_string(days) + "d");
+        resp.add_header("X-Key-Self-Renew", "POST /api/auth/mcp-keys/self-renew");
+    }
+
+    std::optional<WebServer::AuthResult> WebServer::TrySessionAuth(crow::request const& req) const
+    {
+        std::string sessionId = ExtractSessionCookie(req);
+        if (sessionId.empty()) return std::nullopt;
+        auto session = m_WebSessionManager.Validate(sessionId);
+        if (!session) return std::nullopt; // stale/unknown cookie — fall through to other paths
+        return AuthResult{"", session->m_User, session->m_Role};
+    }
+
     WebServer::AuthResult WebServer::Authenticate(crow::request const& req) const
     {
+        // ---- MCP key (both editions) — takes precedence over everything else ----
+        if (auto mcp = TryMcpAuth(req); mcp.has_value())
+        {
+            return *mcp;
+        }
+
+        // ---- Dashboard session cookie (both editions; Engine issues, Studio ignores) ----
+        if (auto session = TrySessionAuth(req); session.has_value())
+        {
+            return *session;
+        }
+
 #ifdef J9T_STUDIO
-        // Studio edition: no auth required — full admin.
+        // Studio edition: no auth required for non-MCP, non-session requests (browser UI, localhost).
         (void)req;
         return {"", "studio", "admin"};
 #else
@@ -1080,85 +1221,41 @@ namespace AIAssistant
             // Gateway header not present — fall through to bearer token check.
         }
 
-        // ---- Bearer token authentication ----
-        if (m_AdminToken.empty())
-        {
-            // No token configured — auth disabled (backward compat during migration).
-            return {"", "anonymous", "admin"};
-        }
-
+        // No auth mechanism matched. MCP key, session cookie, and gateway header
+        // are the only supported paths — anything else (including an Authorization
+        // header that did not begin with "mcp_") is rejected.
         std::string const& authHeader = req.get_header_value("Authorization");
         if (authHeader.empty())
         {
-            // Missing token = no auth attempt (e.g. dashboard polling before login).
-            // Do NOT count toward lockout — only wrong tokens should trigger lockout.
             LOG_SECURITY_WARN("[security] auth_failure reason=missing_token ip={} endpoint={}", ip, endpoint);
             return {"missing", "", ""};
         }
-
-        static constexpr std::string_view kBearerPrefix = "Bearer ";
-        if (authHeader.size() <= kBearerPrefix.size() ||
-            authHeader.compare(0, kBearerPrefix.size(), kBearerPrefix) != 0)
-        {
-            // Malformed header = not a real auth attempt.
-            LOG_SECURITY_WARN("[security] auth_failure reason=malformed_header ip={} endpoint={}", ip, endpoint);
-            return {"malformed", "", ""};
-        }
-
-        std::string const providedToken = authHeader.substr(kBearerPrefix.size());
-
-        // Constant-time comparison to prevent timing attacks.
-        if (providedToken.size() != m_AdminToken.size())
-        {
-            LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
-            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return {"forbidden", "", ""};
-        }
-        unsigned char result = 0;
-        for (size_t i = 0; i < providedToken.size(); ++i)
-        {
-            result |= static_cast<unsigned char>(providedToken[i]) ^
-                       static_cast<unsigned char>(m_AdminToken[i]);
-        }
-        if (result != 0)
-        {
-            LOG_SECURITY_WARN("[security] auth_failure reason=wrong_token ip={} endpoint={}", ip, endpoint);
-            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
-            return {"forbidden", "", ""};
-        }
-
-        // Check token age — reject if expired, auto-rotate.
-        if (m_TokenIssuedAt.time_since_epoch().count() > 0)
-        {
-            auto const age = std::chrono::system_clock::now() - m_TokenIssuedAt;
-            auto const ageDays = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
-            if (ageDays > kTokenMaxAgeDays)
-            {
-                LOG_SECURITY_WARN("[security] token_expired ip={} endpoint={} age_days={}", ip, endpoint, ageDays);
-                const_cast<WebServer*>(this)->GenerateAndPersistApiToken();
-                return {"token_expired", "", ""};
-            }
-        }
-
-        // Successful bearer auth — clear any failure record for this IP.
-        {
-            auto* self = const_cast<WebServer*>(this);
-            std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
-            self->m_AuthFailures.erase(ip);
-        }
-
-        // Bearer token always grants admin role.
-        // Note: successful bearer auth is NOT logged to avoid flooding the security log
-        // with routine dashboard polling. Failures, lockouts, and gateway auth are logged.
-        return {"", "token", "admin"};
+        LOG_SECURITY_WARN("[security] auth_failure reason=unrecognised_token ip={} endpoint={}", ip, endpoint);
+        return {"forbidden", "", ""};
 #endif
     }
 
-    // Legacy wrapper — used by existing route lambdas.
+    // Legacy wrapper — used by existing route lambdas that require admin.
+    // Returns empty string if the request is authenticated with admin-equivalent privileges,
+    // or an error code ("forbidden", "missing", ...) otherwise.
     std::string WebServer::CheckAdminAuth(crow::request const& req) const
     {
+        return CheckAuth(req, "admin");
+    }
+
+    std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole) const
+    {
         auto auth = Authenticate(req);
-        return auth.m_Error;
+        if (!auth.m_Error.empty()) return auth.m_Error;
+        if (!HasRole(auth, minRole))
+        {
+            // Authenticated but lacks the required role.
+            LOG_SECURITY_WARN("[security] forbidden reason=insufficient_role ip={} user={} role={} "
+                              "required={} endpoint={}",
+                              req.remote_ip_address, auth.m_User, auth.m_Role, minRole, req.url);
+            return "forbidden";
+        }
+        return "";
     }
 
     void WebServer::RecordAuthFailure(std::string const& ip)
@@ -1190,10 +1287,6 @@ namespace AIAssistant
         (void)req;
         return false;
 #else
-        if (m_AdminToken.empty())
-        {
-            return false; // auth disabled → rate limiting disabled
-        }
 
         std::string const ip = req.remote_ip_address;
         auto const now = std::chrono::steady_clock::now();
@@ -1251,179 +1344,8 @@ namespace AIAssistant
 #endif
     }
 
-    // Format a system_clock::time_point as ISO-8601 UTC string.
-    static std::string FormatIssuedAt(std::chrono::system_clock::time_point tp)
-    {
-        std::time_t t = std::chrono::system_clock::to_time_t(tp);
-        std::tm utc{};
-#ifdef _WIN32
-        gmtime_s(&utc, &t);
-#else
-        gmtime_r(&t, &utc);
-#endif
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc);
-        return buf;
-    }
-
-#ifndef J9T_STUDIO
-    // Parse an ISO-8601 UTC string back to system_clock::time_point.
-    // Returns epoch (time_t=0) on failure.
-    static std::chrono::system_clock::time_point ParseIssuedAt(std::string const& str)
-    {
-        std::tm tm{};
-        std::istringstream ss(str);
-        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-        if (ss.fail())
-        {
-            return {};
-        }
-#ifdef _WIN32
-        std::time_t t = _mkgmtime(&tm);
-#else
-        std::time_t t = timegm(&tm);
-#endif
-        return std::chrono::system_clock::from_time_t(t);
-    }
-#endif // !J9T_STUDIO
-
-    void WebServer::GenerateAndPersistApiToken()
-    {
-        // Generate 32 random bytes → 64-char hex string.
-        unsigned char randomBytes[32];
-        if (RAND_bytes(randomBytes, sizeof(randomBytes)) != 1)
-        {
-            LOG_APP_CRITICAL("[web] Failed to generate random API token — OpenSSL RAND_bytes failed");
-            return;
-        }
-
-        static constexpr char hexDigits[] = "0123456789abcdef";
-        std::string token;
-        token.reserve(64);
-        for (unsigned char b : randomBytes)
-        {
-            token.push_back(hexDigits[(b >> 4) & 0x0F]);
-            token.push_back(hexDigits[b & 0x0F]);
-        }
-
-        m_AdminToken = token;
-        m_TokenIssuedAt = std::chrono::system_clock::now();
-
-        std::string const issuedAtStr = FormatIssuedAt(m_TokenIssuedAt);
-
-        // Persist to engine_api_token.txt (separate from config.json — credentials stay out of config).
-        std::ofstream ofs(kTokenFileName, std::ios::binary | std::ios::trunc);
-        if (ofs)
-        {
-            ofs << token << "\nissued_at=" << issuedAtStr << "\n";
-            LOG_APP_INFO("[web] Generated and saved engine API token to '{}'", kTokenFileName);
-
-            // Set restrictive file permissions (owner read/write only).
-#ifndef _WIN32
-            std::filesystem::permissions(kTokenFileName,
-                                         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                                         std::filesystem::perm_options::replace);
-#endif
-        }
-        else
-        {
-            LOG_APP_CRITICAL("[web] Failed to write engine API token to '{}'", kTokenFileName);
-        }
-
-        LOG_APP_INFO("[web] ╔══════════════════════════════════════════════════════════════════╗");
-        LOG_APP_INFO("[web] ║  Engine API Token (use this for admin access):                  ║");
-        LOG_APP_INFO("[web] ║  {}  ║", token);
-        LOG_APP_INFO("[web] ║  Stored in: {}                            ║", kTokenFileName);
-        LOG_APP_INFO("[web] ╚══════════════════════════════════════════════════════════════════╝");
-    }
-
     void WebServer::RegisterRoutes()
     {
-        // ---- Initialize admin auth token (Engine only) ----
-        // Token is stored in engine_api_token.txt, not in config.json (credentials stay separate).
-#ifndef J9T_STUDIO
-        if (std::filesystem::exists(kTokenFileName))
-        {
-            std::ifstream ifs(kTokenFileName, std::ios::binary);
-            if (ifs)
-            {
-                std::string token;
-                std::getline(ifs, token);
-                // Trim whitespace/newlines
-                while (!token.empty() && (token.back() == '\n' || token.back() == '\r' || token.back() == ' '))
-                {
-                    token.pop_back();
-                }
-                if (!token.empty())
-                {
-                    m_AdminToken = token;
-
-                    // Parse optional issued_at timestamp (line 2).
-                    std::string issuedAtLine;
-                    bool hasIssuedAt = false;
-                    if (std::getline(ifs, issuedAtLine))
-                    {
-                        static constexpr std::string_view kPrefix = "issued_at=";
-                        if (issuedAtLine.size() > kPrefix.size() &&
-                            issuedAtLine.compare(0, kPrefix.size(), kPrefix) == 0)
-                        {
-                            m_TokenIssuedAt = ParseIssuedAt(issuedAtLine.substr(kPrefix.size()));
-                            if (m_TokenIssuedAt.time_since_epoch().count() > 0)
-                            {
-                                hasIssuedAt = true;
-                            }
-                        }
-                    }
-
-                    if (!hasIssuedAt)
-                    {
-                        // Legacy file without timestamp — stamp it now and rewrite.
-                        m_TokenIssuedAt = std::chrono::system_clock::now();
-                        std::ofstream ofs2(kTokenFileName, std::ios::binary | std::ios::trunc);
-                        if (ofs2)
-                        {
-                            ofs2 << m_AdminToken << "\nissued_at=" << FormatIssuedAt(m_TokenIssuedAt) << "\n";
-                        }
-                        LOG_APP_INFO("[web] Added issued_at timestamp to legacy token file");
-                    }
-
-                    LOG_APP_INFO("[web] Engine API token loaded from {} ({} chars)", kTokenFileName, m_AdminToken.size());
-
-                    // Check token age and warn if near expiry.
-                    auto const age = std::chrono::system_clock::now() - m_TokenIssuedAt;
-                    auto const ageDays = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
-                    auto const daysRemaining = kTokenMaxAgeDays - ageDays;
-
-                    if (daysRemaining <= 0)
-                    {
-                        LOG_APP_WARN("[web] Engine API token has expired ({} days old, max {} days) — "
-                                     "auto-generating new token",
-                                     ageDays, kTokenMaxAgeDays);
-                        LOG_SECURITY_WARN("[security] token_expired age_days={} max_days={}", ageDays, kTokenMaxAgeDays);
-                        GenerateAndPersistApiToken();
-                    }
-                    else if (daysRemaining <= kTokenExpiryWarningDays)
-                    {
-                        LOG_APP_WARN("[web] Engine API token expires in {} day(s) — consider rotating", daysRemaining);
-                        LOG_SECURITY_INFO("[security] token_expiry_warning days_remaining={}", daysRemaining);
-                    }
-                }
-                else
-                {
-                    GenerateAndPersistApiToken();
-                }
-            }
-            else
-            {
-                GenerateAndPersistApiToken();
-            }
-        }
-        else
-        {
-            GenerateAndPersistApiToken();
-        }
-#endif
-
         RegisterCommonRoutes();
         RegisterEngineRoutes();
 #ifdef J9T_STUDIO
@@ -1445,12 +1367,124 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/mcp/heartbeat")
             .methods("POST"_method)([this](crow::request const& req) { return HandleMcpHeartbeatPost(); });
 
-        // ---- Admin: Workflow list + detail (read-only but exposes internal logic) ----
-        CROW_ROUTE(m_Server, "/api/workflows")
+        // ---- MCP API keys + dashboard auth (both editions) ----
+        // Activation is public: the enrollment token IS the auth.
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys/activate")
+            .methods("POST"_method)(
+                [this](crow::request const& req) { return HandleMcpKeysActivatePost(req); });
+
+        // Login is public: the MCP key (or gateway header) IS the auth.
+        CROW_ROUTE(m_Server, "/api/auth/login")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleLoginPost(req); });
+
+        // Logout only needs a session cookie — validation happens inside the handler.
+        CROW_ROUTE(m_Server, "/api/auth/logout")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleLogoutPost(req); });
+
+        // Key store lifecycle — reachable in both editions (Engine also needs
+        // to unlock mcp_keys.json.enc on startup). Public: the submitted master
+        // password is itself the credential, so no prior auth is required.
+        CROW_ROUTE(m_Server, "/api/settings/keys/status")
+            .methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
+        CROW_ROUTE(m_Server, "/api/settings/keys/unlock")
+            .methods("POST"_method)([this](crow::request const& req) { return HandleKeysUnlockPost(req); });
+
+        // whoami returns identity for the current auth (any successful auth path).
+        CROW_ROUTE(m_Server, "/api/auth/whoami")
+            ([this](crow::request const& req) { return HandleWhoamiGet(req); });
+
+        // Self-renew requires a still-valid MCP key (not session).
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys/self-renew")
+            .methods("POST"_method)(
+                [this](crow::request const& req) { return HandleMcpKeysSelfRenewPost(req); });
+
+        // Adhoc workflow submission — MCP key with adhoc_enabled, role ≥ operator.
+        CROW_ROUTE(m_Server, "/api/workflows/run-adhoc")
+            .methods("POST"_method)(
+                [this](crow::request const& req) { return HandleAdhocRunPost(req); });
+
+        // Run artifact discovery — list files produced by a workflow run.
+        // Adhoc-only today; registered-workflow attribution arrives with Phase 6+.
+        // Authorisation enforced inside the handler (own-run or admin).
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/files")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& runId)
+                {
+                    return HandleRunFilesListGet(req, runId);
+                });
+
+        // Script catalog — discovery endpoint for MCP agents composing adhoc JCWFs.
+        // Viewer+ is enough; there's no sensitive metadata surfaced.
+        CROW_ROUTE(m_Server, "/api/scripts")
+            .methods("GET"_method)(
+                [this](crow::request const& req) { return HandleScriptsListGet(req); });
+
+        // Run artifact download — stream a single file's bytes.
+        // <path> captures the entire remaining URL so folder-nested paths work
+        // verbatim from the download_url field returned by the list endpoint.
+        CROW_ROUTE(m_Server, "/api/workflow-runs/<string>/files/<path>")
+            .methods("GET"_method)(
+                [this](crow::request const& req,
+                       std::string const& runId,
+                       std::string const& relPath)
+                {
+                    return HandleRunFileGet(req, runId, relPath);
+                });
+
+#ifdef DEBUG
+        // Debug introspection endpoint — registered only in debug builds.
+        // Release builds have the whole #ifdef block compiled out; the route simply
+        // doesn't exist and any request to it returns 404.
+        CROW_ROUTE(m_Server, "/api/debug/signals")
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
                     auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleDebugSignalsGet();
+                });
+#endif
+
+        // Admin CRUD on MCP keys.
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleMcpKeysListGet();
+                });
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys/enroll")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleMcpKeysEnrollPost(req);
+                });
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys/<string>")
+            .methods("PUT"_method)(
+                [this](crow::request const& req, std::string const& keyId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleMcpKeysUpdatePut(req, keyId);
+                });
+        CROW_ROUTE(m_Server, "/api/auth/mcp-keys/<string>")
+            .methods("DELETE"_method)(
+                [this](crow::request const& req, std::string const& keyId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleMcpKeysDelete(keyId);
+                });
+
+        // ---- Viewer+: Workflow list + detail (read-only) ----
+        CROW_ROUTE(m_Server, "/api/workflows")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAuth(req, "viewer");
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleWorkflowsListGet();
@@ -1460,18 +1494,18 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req, std::string const& workflowId)
                 {
-                    auto err = CheckAdminAuth(req);
+                    auto err = CheckAuth(req, "viewer");
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleWorkflowGet(workflowId);
                 });
 
-        // ---- Admin: Run monitoring + control ----
+        // ---- Viewer+: Run monitoring (read-only). Operator+ for run-control below. ----
         CROW_ROUTE(m_Server, "/api/workflow-runs/active")
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto err = CheckAdminAuth(req);
+                    auto err = CheckAuth(req, "viewer");
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleWorkflowRunsActiveGet();
@@ -1481,7 +1515,7 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto err = CheckAdminAuth(req);
+                    auto err = CheckAuth(req, "viewer");
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleWorkflowRunsLastGet();
@@ -1491,7 +1525,7 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto err = CheckAdminAuth(req);
+                    auto err = CheckAuth(req, "viewer");
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
                     return HandleWorkflowRunGet(runId);
@@ -1849,13 +1883,6 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/api/settings/config/reload")
             .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
 
-        // ---- Key management API ----
-        CROW_ROUTE(m_Server, "/api/settings/keys/status")
-            .methods("GET"_method)([this]() { return HandleKeysStatusGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/keys/unlock")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleKeysUnlockPost(req); });
-
         // ---- Provider settings API ----
         CROW_ROUTE(m_Server, "/api/settings/providers")
             .methods("GET"_method)([this]() { return HandleProvidersListGet(); });
@@ -1984,6 +2011,26 @@ namespace AIAssistant
 #endif
 
         status["tls"] = m_TlsEnabled;
+
+        // Key unlock state — both the provider keys and the MCP key store.
+        {
+            auto const& keyManager = Core::g_Core->GetKeyManager();
+            status["keys_unlocked"] = (keyManager.GetKeyLoadStatus() == KeyManager::KeyLoadStatus::Ok);
+            status["mcp_keys_loaded"] = m_McpKeysLoaded.load();
+        }
+
+        // Adhoc workflow submission stats (plan §6).
+        if (m_AdhocManager)
+        {
+            status["adhoc_runs_active"] = static_cast<int64_t>(m_AdhocManager->GetActiveRunCount());
+            status["adhoc_disk_usage_bytes"] =
+                static_cast<int64_t>(m_AdhocManager->GetTotalDiskUsageBytes());
+        }
+        else
+        {
+            status["adhoc_runs_active"] = 0;
+            status["adhoc_disk_usage_bytes"] = 0;
+        }
 
         // Workflows
         size_t registeredWorkflows = 0;
@@ -4265,6 +4312,22 @@ namespace AIAssistant
     void WebServer::RegisterWebSocket()
     {
         CROW_WEBSOCKET_ROUTE(m_Server, "/ws")
+#ifndef J9T_STUDIO
+            // Engine: validate the dashboard session cookie at upgrade time.
+            // Studio has no auth; Crow's .onaccept is omitted there to allow all local upgrades.
+            .onaccept(
+                [this](crow::request const& req, void**)
+                {
+                    auto auth = Authenticate(req);
+                    if (!auth.Ok())
+                    {
+                        LOG_SECURITY_WARN("[security] ws_upgrade_rejected ip={} reason={}",
+                                          req.remote_ip_address, auth.m_Error);
+                        return false;
+                    }
+                    return true;
+                })
+#endif
             .onopen(
                 [this](crow::websocket::connection& conn)
                 {
@@ -4310,7 +4373,6 @@ namespace AIAssistant
                 {
                     std::lock_guard<std::mutex> lock(m_Mutex);
                     m_Clients.erase(&conn);
-                    m_AuthenticatedClients.erase(&conn);
                     m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
                     ++m_WsTotalDisconnects;
                     LOG_APP_INFO("WebSocket client disconnected ({}, code {}) (remaining: {}, lifetime disconnects: {})",
@@ -4327,57 +4389,8 @@ namespace AIAssistant
 
                         std::string type = std::string(doc["type"].get_string().value());
 
-#ifndef J9T_STUDIO
-                        // Engine mode: require auth before processing any other message.
-                        if (type == "auth")
-                        {
-                            auto tokenResult = doc["token"].get_string();
-                            if (tokenResult.error() == simdjson::SUCCESS)
-                            {
-                                std::string token = std::string(tokenResult.value());
-                                bool valid = false;
-                                if (!m_AdminToken.empty() && token.size() == m_AdminToken.size())
-                                {
-                                    unsigned char result = 0;
-                                    for (size_t i = 0; i < token.size(); ++i)
-                                    {
-                                        result |= static_cast<unsigned char>(token[i]) ^
-                                                   static_cast<unsigned char>(m_AdminToken[i]);
-                                    }
-                                    valid = (result == 0);
-                                }
-                                else if (m_AdminToken.empty())
-                                {
-                                    valid = true; // no token configured — auth disabled
-                                }
-
-                                if (valid)
-                                {
-                                    std::lock_guard<std::mutex> lock(m_Mutex);
-                                    m_AuthenticatedClients.insert(&conn);
-                                    conn.send_text(R"({"type":"auth","ok":true})");
-                                    LOG_APP_INFO("[ws] WebSocket client authenticated");
-                                }
-                                else
-                                {
-                                    conn.send_text(R"({"type":"auth","ok":false,"error":"invalid_token"})");
-                                    conn.close("Unauthorized", 4001);
-                                }
-                            }
-                            return;
-                        }
-
-                        // Check if this connection is authenticated.
-                        if (!m_AdminToken.empty())
-                        {
-                            std::lock_guard<std::mutex> lock(m_Mutex);
-                            if (m_AuthenticatedClients.find(&conn) == m_AuthenticatedClients.end())
-                            {
-                                conn.send_text(R"({"type":"auth","ok":false,"error":"not_authenticated"})");
-                                return;
-                            }
-                        }
-#endif
+                        // Auth happens at the upgrade handshake (.onaccept) in Engine; by the
+                        // time we are in onmessage, the connection is already trusted.
 
                         // Heartbeat from dashboard — no response needed, but must
                         // NOT return early so DrainPendingBroadcasts() at the end
@@ -4752,6 +4765,22 @@ namespace AIAssistant
         if (m_TlsEnabled)
         {
             m_Server.ssl_file(config.m_TlsCert, config.m_TlsKey);
+        }
+
+        // Try to initialise the MCP key store if the master password is already cached
+        // (from engine-level keys.json.enc load at startup). If the password isn't
+        // cached yet, the store is lazily initialised on HandleKeysUnlockPost().
+        {
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            std::string const cachedPwd = keyManager.GetCachedMasterPassword();
+            if (!cachedPwd.empty())
+            {
+                InitMcpKeyStore(cachedPwd);
+            }
+            else
+            {
+                LOG_CORE_INFO("MCP key store deferred — awaiting master password via /api/settings/keys/unlock");
+            }
         }
 
         m_Running = true;
@@ -5809,8 +5838,10 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
+#endif // J9T_STUDIO
+
     // =========================================================================
-    // Key management API handlers
+    // Key management API handlers (both editions — Engine also needs unlock)
     // =========================================================================
 
     crow::response WebServer::HandleKeysStatusGet()
@@ -5883,22 +5914,93 @@ namespace AIAssistant
             return MakeJsonResponse(400, err);
         }
 
-        if (keyManager.Unlock(masterPassword))
+        auto const& keysPath = keyManager.GetKeysFilePath();
+        bool const keysFileExists = !keysPath.empty() && std::filesystem::exists(keysPath);
+
+        bool bootstrapped = false;
+        if (keysFileExists)
         {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = true;
-            responseJson["status"] = "ok";
-            responseJson["message"] = "Keys unlocked successfully.";
-            return MakeJsonResponse(200, responseJson);
+            // Existing install — try to decrypt with the submitted password.
+            if (!keyManager.Unlock(masterPassword))
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["status"] = "wrong_password";
+                err["message"] = "Incorrect master password. Please try again.";
+                return MakeJsonResponse(401, err);
+            }
+        }
+        else
+        {
+            // First-run bootstrap — no encrypted keys file exists yet. Treat the
+            // submitted password as the *new* master password for this install:
+            // write an empty encrypted keys file so later provider additions go
+            // straight into the same encrypted store.
+            if (keysPath.empty())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["status"] = "internal_error";
+                err["message"] = "Keys file path not configured.";
+                return MakeJsonResponse(500, err);
+            }
+            if (!keyManager.Save(keysPath, masterPassword))
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["status"] = "bootstrap_failed";
+                err["message"] = "Failed to create encrypted keys file.";
+                return MakeJsonResponse(500, err);
+            }
+            keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
+            LOG_SECURITY_INFO(
+                "[security] bootstrap: master password set, encrypted keys store created at '{}'",
+                keysPath.string());
+            bootstrapped = true;
         }
 
-        crow::json::wvalue err;
-        err["ok"] = false;
-        err["status"] = "wrong_password";
-        err["message"] = "Incorrect master password. Please try again.";
-        return MakeJsonResponse(401, err);
+        // Same master password unlocks (or creates) the MCP key store.
+        InitMcpKeyStore(masterPassword);
+
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        responseJson["status"] = "ok";
+        responseJson["message"] = bootstrapped
+                                      ? "Master password set. Encrypted key stores created."
+                                      : "Keys unlocked successfully.";
+        responseJson["bootstrapped"] = bootstrapped;
+        responseJson["mcp_keys_loaded"] = m_McpKeysLoaded.load();
+
+        // If the MCP key store is empty at this point — either because this is
+        // a truly fresh install (bootstrap) or because mcp_keys.json.enc was
+        // deleted without keys.json.enc — hand the admin an MCP key in the
+        // response. CreateBootstrapAdminKey is a no-op when the store already
+        // has keys, so the call is idempotent and safe outside the `bootstrapped`
+        // branch.
+        if (m_McpKeysLoaded.load())
+        {
+            auto admin = m_McpKeyManager.CreateBootstrapAdminKey();
+            if (admin)
+            {
+                SaveMcpKeyStore();
+                LOG_SECURITY_INFO(
+                    "[security] bootstrap: first admin MCP key issued (key_id={}, user={})",
+                    admin->m_KeyId, admin->m_Record.m_User);
+
+                crow::json::wvalue admWval;
+                admWval["key_id"] = admin->m_KeyId;
+                admWval["api_key"] = admin->m_RawKey;
+                admWval["user"] = admin->m_Record.m_User;
+                admWval["role"] = admin->m_Record.m_Role;
+                admWval["expires_at"] = admin->m_Record.m_ExpiresAt;
+                responseJson["admin_key"] = std::move(admWval);
+            }
+        }
+
+        return MakeJsonResponse(200, responseJson);
     }
 
+#ifdef J9T_STUDIO
     // =========================================================================
     // Provider settings API handlers
     // =========================================================================
@@ -6165,7 +6267,8 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        // Master password: try request body first, then env var
+        // Master password: request body or already-cached password from a prior unlock.
+        // There is no env-var fallback — see doc/cyber security.md §"Master password after restart".
         std::string masterPassword;
         {
             simdjson::ondemand::parser parser;
@@ -6182,17 +6285,13 @@ namespace AIAssistant
             }
             catch (...)
             {
-                // Body might be empty or not JSON — fall through to env var
+                // Body might be empty or not JSON — fall through to cached password.
             }
         }
 
         if (masterPassword.empty())
         {
-            char const* envPassword = std::getenv("JARVIS_MASTER_PASSWORD");
-            if (envPassword && std::strlen(envPassword) > 0)
-            {
-                masterPassword = std::string(envPassword);
-            }
+            masterPassword = keyManager.GetCachedMasterPassword();
         }
 
         if (masterPassword.empty())
@@ -6200,7 +6299,8 @@ namespace AIAssistant
             crow::json::wvalue err;
             err["ok"] = false;
             err["error"] = "no_password";
-            err["message"] = "Master password required. Provide in request body or set JARVIS_MASTER_PASSWORD env var.";
+            err["message"] = "Master password required. Include it in the request body, or unlock the key "
+                              "store first via POST /api/settings/keys/unlock.";
             return MakeJsonResponse(400, err);
         }
 
@@ -6978,14 +7078,10 @@ namespace AIAssistant
                 keyManager.AddProvider(connection->m_KeyName, std::move(updated));
             }
 
+            // Persist OAuth tokens if the key store has been unlocked this session.
+            // If the admin never unlocked (/api/settings/keys/unlock), the tokens stay
+            // in memory only and the user gets a warning below. No env-var fallback.
             std::string cachedPassword = keyManager.GetCachedMasterPassword();
-            if (cachedPassword.empty())
-            {
-                if (char const* envPwd = std::getenv("JARVIS_MASTER_PASSWORD"); envPwd && *envPwd)
-                {
-                    cachedPassword = envPwd;
-                }
-            }
 
             auto const& keysPath = keyManager.GetKeysFilePath();
             if (!cachedPassword.empty() && !keysPath.empty())
@@ -7024,5 +7120,1577 @@ namespace AIAssistant
         return response;
     }
 #endif // J9T_STUDIO
+
+    // ========================================================================
+    // MCP key store lifecycle + auth endpoints (both editions)
+    // ========================================================================
+
+    bool WebServer::InitMcpKeyStore(std::string_view masterPassword)
+    {
+        if (m_McpKeysFilePath.empty())
+        {
+            auto const& config = Core::g_Core->GetConfig();
+            m_McpKeysFilePath = Core::g_Core->GetLaunchCWDAbsolute() / config.m_McpKeysFilePath;
+            m_WebSessionManager.SetTimeoutHours(config.m_SessionTimeoutHours);
+        }
+
+        bool loaded = false;
+        if (std::filesystem::exists(m_McpKeysFilePath))
+        {
+            loaded = m_McpKeyManager.Load(m_McpKeysFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("MCP key store present at '{}' but decryption failed — master password mismatch?",
+                               m_McpKeysFilePath.string());
+                m_McpKeysLoaded.store(false);
+                return false;
+            }
+        }
+        else
+        {
+            // No file yet — treat as empty-but-ready. Save() will create it on first change.
+            loaded = m_McpKeyManager.Save(m_McpKeysFilePath, masterPassword);
+            if (!loaded)
+            {
+                LOG_CORE_ERROR("Failed to create initial empty MCP key store at '{}'",
+                               m_McpKeysFilePath.string());
+                m_McpKeysLoaded.store(false);
+                return false;
+            }
+            LOG_CORE_INFO("Created empty MCP key store at '{}'", m_McpKeysFilePath.string());
+        }
+
+        m_McpKeysLoaded.store(true);
+        // The dashboard bootstrap flow (HandleKeysUnlockPost) handles first-run
+        // admin provisioning by calling CreateBootstrapAdminKey on its own path —
+        // we deliberately do not emit a log-banner enrollment token here because
+        // the UI now surfaces the admin key directly in the response.
+        return true;
+    }
+
+    bool WebServer::SaveMcpKeyStore()
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            LOG_CORE_WARN("SaveMcpKeyStore called before init — ignoring");
+            return false;
+        }
+        auto& keyManager = Core::g_Core->GetKeyManager();
+        std::string const pwd = keyManager.GetCachedMasterPassword();
+        if (pwd.empty())
+        {
+            LOG_CORE_WARN("SaveMcpKeyStore: master password not cached — cannot persist");
+            return false;
+        }
+        return m_McpKeyManager.Save(m_McpKeysFilePath, pwd);
+    }
+
+
+    // ---- Route handlers ---------------------------------------------------------
+
+    crow::response WebServer::HandleMcpKeysListGet()
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            err["message"] = "MCP key store not unlocked. POST the master password to /api/settings/keys/unlock.";
+            return MakeJsonResponse(503, err);
+        }
+        auto const records = m_McpKeyManager.ListKeys();
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+        crow::json::wvalue::list list;
+        list.reserve(records.size());
+        for (auto const& r : records)
+        {
+            crow::json::wvalue entry;
+            entry["key_id"] = r.m_KeyId;
+            entry["user"] = r.m_User;
+            entry["role"] = r.m_Role;
+            entry["adhoc_enabled"] = r.m_AdhocEnabled;
+            entry["disk_quota_mb"] = r.m_DiskQuotaMb;
+            entry["default_cleanup_policy"] = r.m_DefaultCleanupPolicy;
+            entry["created_at"] = r.m_CreatedAt;
+            entry["expires_at"] = r.m_ExpiresAt;
+            entry["last_used_at"] = r.m_LastUsedAt;
+            entry["enabled"] = r.m_Enabled;
+            entry["description"] = r.m_Description;
+            list.push_back(std::move(entry));
+        }
+        responseJson["keys"] = std::move(list);
+        return MakeJsonResponse(200, responseJson);
+    }
+
+    crow::response WebServer::HandleMcpKeysEnrollPost(crow::request const& req)
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            err["message"] = "MCP key store not unlocked.";
+            return MakeJsonResponse(503, err);
+        }
+
+        McpKeyManager::EnrollmentRequest enrollReq;
+        enrollReq.m_Role = "operator";
+        enrollReq.m_AdhocEnabled = false;
+        enrollReq.m_DiskQuotaMb = 1024;
+        enrollReq.m_DefaultCleanupPolicy = "ttl_72h";
+        enrollReq.m_KeyExpiryDays = 90;
+        enrollReq.m_EnrollmentTtlMinutes = 30;
+
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+            std::string_view sv;
+            if (doc["user"].get_string().get(sv) == simdjson::SUCCESS) enrollReq.m_User = std::string(sv);
+            if (doc["role"].get_string().get(sv) == simdjson::SUCCESS) enrollReq.m_Role = std::string(sv);
+            bool b = false;
+            if (doc["adhoc_enabled"].get_bool().get(b) == simdjson::SUCCESS) enrollReq.m_AdhocEnabled = b;
+            int64_t n = 0;
+            if (doc["disk_quota_mb"].get_int64().get(n) == simdjson::SUCCESS) enrollReq.m_DiskQuotaMb = static_cast<int>(n);
+            if (doc["default_cleanup_policy"].get_string().get(sv) == simdjson::SUCCESS)
+                enrollReq.m_DefaultCleanupPolicy = std::string(sv);
+            if (doc["description"].get_string().get(sv) == simdjson::SUCCESS) enrollReq.m_Description = std::string(sv);
+            if (doc["key_expiry_days"].get_int64().get(n) == simdjson::SUCCESS)
+                enrollReq.m_KeyExpiryDays = static_cast<int>(n);
+            if (doc["enrollment_ttl_minutes"].get_int64().get(n) == simdjson::SUCCESS)
+                enrollReq.m_EnrollmentTtlMinutes = static_cast<int>(n);
+        }
+        catch (...)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "malformed_body";
+            return MakeJsonResponse(400, err);
+        }
+
+        if (enrollReq.m_User.empty() ||
+            (enrollReq.m_Role != "admin" && enrollReq.m_Role != "operator" && enrollReq.m_Role != "viewer"))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_request";
+            err["message"] = "Fields 'user' and 'role' (admin|operator|viewer) are required.";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Attribute the creator based on the authenticated caller.
+        auto auth = Authenticate(req);
+        enrollReq.m_CreatedBy = auth.m_User.empty() ? std::string("unknown") : auth.m_User;
+
+        std::string const rawToken = m_McpKeyManager.CreateEnrollment(enrollReq);
+        if (rawToken.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "enrollment_failed";
+            return MakeJsonResponse(500, err);
+        }
+        SaveMcpKeyStore();
+
+        LOG_SECURITY_INFO("[security] enrollment_created user={} role={} by={} adhoc={}",
+                          enrollReq.m_User, enrollReq.m_Role, enrollReq.m_CreatedBy, enrollReq.m_AdhocEnabled);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["enrollment_token"] = rawToken;
+        body["expires_in_minutes"] = enrollReq.m_EnrollmentTtlMinutes;
+        body["user"] = enrollReq.m_User;
+        body["role"] = enrollReq.m_Role;
+        body["message"] = "Share this token with the user. You will not see their final API key.";
+        return MakeJsonResponse(201, body);
+    }
+
+    crow::response WebServer::HandleMcpKeysActivatePost(crow::request const& req)
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            return MakeJsonResponse(503, err);
+        }
+
+        std::string rawToken;
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+            std::string_view sv;
+            if (doc["enrollment_token"].get_string().get(sv) == simdjson::SUCCESS)
+                rawToken = std::string(sv);
+        }
+        catch (...) { /* malformed */ }
+
+        if (rawToken.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_token";
+            err["message"] = "Request body must contain 'enrollment_token'.";
+            return MakeJsonResponse(400, err);
+        }
+
+        auto result = m_McpKeyManager.ActivateEnrollment(rawToken);
+        if (!result)
+        {
+            LOG_SECURITY_WARN("[security] activation_failed ip={}", req.remote_ip_address);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_or_expired";
+            err["message"] = "Enrollment token is invalid or expired.";
+            return MakeJsonResponse(401, err);
+        }
+        SaveMcpKeyStore();
+
+        LOG_SECURITY_INFO("[security] activation_success user={} role={} key_id={}",
+                          result->m_Record.m_User, result->m_Record.m_Role, result->m_KeyId);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["key_id"] = result->m_KeyId;
+        body["api_key"] = result->m_RawKey;
+        body["user"] = result->m_Record.m_User;
+        body["role"] = result->m_Record.m_Role;
+        body["expires_at"] = result->m_Record.m_ExpiresAt;
+        body["message"] = "Save this key — it will not be shown again.";
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleMcpKeysSelfRenewPost(crow::request const& req)
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            return MakeJsonResponse(503, err);
+        }
+        std::string const token = ExtractBearerToken(req);
+        if (token.rfind("mcp_", 0) != 0)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "unauthorized";
+            err["message"] = "Self-renew requires a valid MCP key in the Authorization header.";
+            return MakeJsonResponse(401, err);
+        }
+        auto renew = m_McpKeyManager.SelfRenew(token);
+        if (!renew)
+        {
+            LOG_SECURITY_WARN("[security] self_renew_failed ip={}", req.remote_ip_address);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_or_expired";
+            err["message"] = "Your key is invalid or expired. Ask your admin for a new enrollment token.";
+            return MakeJsonResponse(401, err);
+        }
+        SaveMcpKeyStore();
+
+        LOG_SECURITY_INFO("[security] self_renew_success new_key_id={}", renew->m_KeyId);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["key_id"] = renew->m_KeyId;
+        body["api_key"] = renew->m_RawKey;
+        body["expires_at"] = renew->m_ExpiresAt;
+        body["message"] = "New key activated. Old key remains valid for 24 hours. Update your config now.";
+        // No expiry header on self-renew response — the old key is now irrelevant and the
+        // new key is fresh (90 days); the client should switch to the new api_key immediately.
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleMcpKeysUpdatePut(crow::request const& req, std::string const& keyId)
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            return MakeJsonResponse(503, err);
+        }
+
+        McpKeyManager::UpdateFields fields;
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+            std::string_view sv;
+            if (doc["role"].get_string().get(sv) == simdjson::SUCCESS) fields.m_Role = std::string(sv);
+            bool b = false;
+            if (doc["adhoc_enabled"].get_bool().get(b) == simdjson::SUCCESS) fields.m_AdhocEnabled = b;
+            int64_t n = 0;
+            if (doc["disk_quota_mb"].get_int64().get(n) == simdjson::SUCCESS)
+                fields.m_DiskQuotaMb = static_cast<int>(n);
+            if (doc["default_cleanup_policy"].get_string().get(sv) == simdjson::SUCCESS)
+                fields.m_DefaultCleanupPolicy = std::string(sv);
+            if (doc["enabled"].get_bool().get(b) == simdjson::SUCCESS) fields.m_Enabled = b;
+            if (doc["description"].get_string().get(sv) == simdjson::SUCCESS)
+                fields.m_Description = std::string(sv);
+            if (doc["expires_at"].get_string().get(sv) == simdjson::SUCCESS)
+                fields.m_ExpiresAt = std::string(sv);
+        }
+        catch (...)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "malformed_body";
+            return MakeJsonResponse(400, err);
+        }
+
+        if (!m_McpKeyManager.UpdateKey(keyId, fields))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            return MakeJsonResponse(404, err);
+        }
+        SaveMcpKeyStore();
+        LOG_SECURITY_INFO("[security] mcp_key_updated key_id={}", keyId);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleMcpKeysDelete(std::string const& keyId)
+    {
+        if (!m_McpKeysLoaded.load())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_keys_not_loaded";
+            return MakeJsonResponse(503, err);
+        }
+        if (!m_McpKeyManager.RevokeKey(keyId))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_found";
+            return MakeJsonResponse(404, err);
+        }
+        SaveMcpKeyStore();
+        LOG_SECURITY_INFO("[security] mcp_key_revoked key_id={}", keyId);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleWhoamiGet(crow::request const& req)
+    {
+        auto auth = Authenticate(req);
+        crow::json::wvalue body;
+        body["ok"] = auth.m_Error.empty();
+        body["user"] = auth.m_User;
+        body["role"] = auth.m_Role;
+        if (auth.m_DaysUntilExpiry >= 0)
+        {
+            body["days_until_expiry"] = auth.m_DaysUntilExpiry;
+        }
+        if (!auth.m_Error.empty())
+        {
+            body["error"] = auth.m_Error;
+            return MakeJsonResponse(401, body);
+        }
+        auto resp = MakeJsonResponse(200, body);
+        AttachMcpExpiryHeader(resp, req);
+        return resp;
+    }
+
+    crow::response WebServer::HandleLoginPost(crow::request const& req)
+    {
+        // Login path: either gateway-injected identity, or MCP API key in body.
+        auto const& config = Core::g_Core->GetConfig();
+        if (!config.m_TrustedProxyHeader.empty())
+        {
+            std::string const& userHeader = req.get_header_value(config.m_TrustedProxyHeader);
+            if (!userHeader.empty())
+            {
+                std::string role = "viewer";
+                if (!config.m_TrustedRoleHeader.empty())
+                {
+                    std::string const& roleHeader = req.get_header_value(config.m_TrustedRoleHeader);
+                    if (roleHeader == "admin" || roleHeader == "operator" || roleHeader == "viewer")
+                        role = roleHeader;
+                }
+                auto session = m_WebSessionManager.Create(userHeader, role);
+                crow::json::wvalue body;
+                body["ok"] = true;
+                body["user"] = userHeader;
+                body["role"] = role;
+                auto resp = MakeJsonResponse(200, body);
+                std::string cookie = "session=" + session.m_SessionId + "; HttpOnly; SameSite=Strict; Path=/; Max-Age=" +
+                                      std::to_string(config.m_SessionTimeoutHours * 3600);
+                if (m_TlsEnabled) cookie += "; Secure";
+                resp.add_header("Set-Cookie", cookie);
+                LOG_SECURITY_INFO("[security] login_success user={} role={} method=gateway ip={}",
+                                  userHeader, role, req.remote_ip_address);
+                return resp;
+            }
+        }
+
+        std::string apiKey;
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+            std::string_view sv;
+            if (doc["api_key"].get_string().get(sv) == simdjson::SUCCESS) apiKey = std::string(sv);
+        }
+        catch (...) { /* malformed */ }
+
+        if (apiKey.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_api_key";
+            err["message"] = "Request body must contain 'api_key'.";
+            return MakeJsonResponse(400, err);
+        }
+
+        auto result = m_McpKeyManager.Authenticate(apiKey);
+        if (!result || !result->m_Record.m_Enabled || result->m_DaysUntilExpiry < 0)
+        {
+            LOG_SECURITY_WARN("[security] login_failed ip={}", req.remote_ip_address);
+            RecordAuthFailure(req.remote_ip_address);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_key";
+            err["message"] = "Invalid, disabled, or expired MCP API key.";
+            return MakeJsonResponse(401, err);
+        }
+
+        auto session = m_WebSessionManager.Create(result->m_Record.m_User, result->m_Record.m_Role);
+        LOG_SECURITY_INFO("[security] login_success user={} role={} method=mcp_key ip={}",
+                          result->m_Record.m_User, result->m_Record.m_Role, req.remote_ip_address);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["user"] = result->m_Record.m_User;
+        body["role"] = result->m_Record.m_Role;
+        auto resp = MakeJsonResponse(200, body);
+        std::string cookie = "session=" + session.m_SessionId + "; HttpOnly; SameSite=Strict; Path=/; Max-Age=" +
+                              std::to_string(config.m_SessionTimeoutHours * 3600);
+        if (m_TlsEnabled) cookie += "; Secure";
+        resp.add_header("Set-Cookie", cookie);
+        return resp;
+    }
+
+    std::optional<McpKeyManager::Record> WebServer::TryGetMcpRecord(crow::request const& req) const
+    {
+        std::string const token = ExtractBearerToken(req);
+        if (token.rfind("mcp_", 0) != 0) return std::nullopt;
+        auto result = m_McpKeyManager.Authenticate(token);
+        if (!result) return std::nullopt;
+        return result->m_Record;
+    }
+
+    crow::response WebServer::HandleAdhocRunPost(crow::request const& req)
+    {
+        if (!m_AdhocManager)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "adhoc_unavailable";
+            err["message"] = "Adhoc manager not initialised (workflow registry not attached).";
+            return MakeJsonResponse(503, err);
+        }
+
+        auto auth = Authenticate(req);
+        if (!auth.Ok()) return MakeAuthErrorResponse(auth.m_Error);
+        if (!HasRole(auth, "operator"))
+        {
+            LOG_SECURITY_WARN("[security] adhoc_denied reason=insufficient_role ip={} user={} role={}",
+                              req.remote_ip_address, auth.m_User, auth.m_Role);
+            return MakeAuthErrorResponse("insufficient_role");
+        }
+
+        auto mcpRecord = TryGetMcpRecord(req);
+        if (!mcpRecord)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "mcp_key_required";
+            err["message"] = "Adhoc submission requires an MCP API key (Bearer mcp_...).";
+            return MakeJsonResponse(403, err);
+        }
+        if (!mcpRecord->m_AdhocEnabled)
+        {
+            LOG_SECURITY_WARN("[security] adhoc_denied reason=adhoc_not_enabled user={} key_id={}",
+                              mcpRecord->m_User, mcpRecord->m_KeyId);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "adhoc_not_enabled";
+            err["message"] = "This MCP key is not authorised for adhoc submission. Ask your admin to enable it.";
+            return MakeJsonResponse(403, err);
+        }
+
+        // Parse body: { jcwf: {...}, context: {k:v}, cleanup_policy: "..." }.
+        std::string jcwfJson;
+        std::string cleanupPolicy;
+        std::map<std::string, std::string> context;
+
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+
+            // jcwf — serialise the object back to a string for staging.
+            simdjson::ondemand::object jcwfObj;
+            if (doc["jcwf"].get_object().get(jcwfObj) != simdjson::SUCCESS)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "missing_jcwf";
+                err["message"] = "Request body must contain a 'jcwf' object (canvas JSON).";
+                return MakeJsonResponse(400, err);
+            }
+            auto rawJson = jcwfObj.raw_json();
+            if (rawJson.error() == simdjson::SUCCESS)
+            {
+                jcwfJson = std::string(rawJson.value());
+            }
+
+            // cleanup_policy — optional; default to the MCP key's configured policy.
+            std::string_view sv;
+            if (doc["cleanup_policy"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                cleanupPolicy = std::string(sv);
+            }
+            else
+            {
+                cleanupPolicy = mcpRecord->m_DefaultCleanupPolicy;
+            }
+
+            // context — optional map of string→string.
+            simdjson::ondemand::object ctxObj;
+            if (doc["context"].get_object().get(ctxObj) == simdjson::SUCCESS)
+            {
+                for (auto field : ctxObj)
+                {
+                    std::string_view key = field.unescaped_key();
+                    std::string_view val;
+                    if (field.value().get_string().get(val) == simdjson::SUCCESS)
+                    {
+                        context[std::string(key)] = std::string(val);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "malformed_body";
+            return MakeJsonResponse(400, err);
+        }
+
+        if (jcwfJson.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "empty_jcwf";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Script-existence pre-check: external callers cannot submit scripts, so every
+        // shell `params.command` and python `params.module` referenced by the JCWF must
+        // already exist on disk under scripts/. This is the hard security boundary from
+        // "Adhoc Workflow Submission and MCP plan.md" §2. Runs through the top-level
+        // tasks object only — sub-workflow canvases inside an adhoc submission are not
+        // supported today.
+        std::vector<std::string> missingScripts;
+        {
+            fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
+            try
+            {
+                simdjson::ondemand::parser scanParser;
+                simdjson::padded_string const scanPadded(jcwfJson);
+                auto scanDoc = scanParser.iterate(scanPadded);
+
+                simdjson::ondemand::object tasksObj;
+                if (scanDoc["tasks"].get_object().get(tasksObj) == simdjson::SUCCESS)
+                {
+                    for (auto field : tasksObj)
+                    {
+                        simdjson::ondemand::object task;
+                        if (field.value().get_object().get(task) != simdjson::SUCCESS) continue;
+
+                        std::string_view taskType;
+                        if (task["type"].get_string().get(taskType) != simdjson::SUCCESS) continue;
+
+                        simdjson::ondemand::object params;
+                        if (task["params"].get_object().get(params) != simdjson::SUCCESS) continue;
+
+                        if (taskType == "shell")
+                        {
+                            std::string_view cmd;
+                            if (params["command"].get_string().get(cmd) != simdjson::SUCCESS) continue;
+                            std::string cmdStr(cmd);
+                            if (cmdStr.rfind("scripts/", 0) != 0) continue;
+                            fs::path const normalized = fs::path(cmdStr).lexically_normal();
+                            if (normalized.string().rfind("scripts/", 0) != 0)
+                            {
+                                missingScripts.emplace_back(cmdStr + " (escapes scripts/)");
+                                continue;
+                            }
+                            fs::path const abs = (launchCWD / normalized).lexically_normal();
+                            if (!fs::exists(abs))
+                            {
+                                missingScripts.emplace_back(cmdStr);
+                            }
+                        }
+                        else if (taskType == "python")
+                        {
+                            std::string_view mod;
+                            if (params["module"].get_string().get(mod) != simdjson::SUCCESS) continue;
+                            std::string modStr(mod);
+                            std::string modPath = modStr;
+                            if (modPath.rfind("scripts.", 0) == 0) modPath = modPath.substr(std::string("scripts.").size());
+                            std::replace(modPath.begin(), modPath.end(), '.', '/');
+                            fs::path const base = launchCWD / "scripts" / modPath;
+                            fs::path const asFile = fs::path(base.string() + ".py");
+                            fs::path const asPackage = base / "__init__.py";
+                            if (!fs::exists(asFile) && !fs::exists(asPackage))
+                            {
+                                missingScripts.emplace_back(modStr + " (expected scripts/" + modPath + ".py)");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Parsing failure here is not fatal — the JCWF parser downstream will
+                // raise a more descriptive error when Stage() calls SaveOrUpdateWorkflowFromJson.
+            }
+        }
+        if (!missingScripts.empty())
+        {
+            LOG_SECURITY_WARN("[security] adhoc_missing_scripts user={} count={}",
+                              mcpRecord->m_User, missingScripts.size());
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_scripts";
+            err["message"] = "One or more scripts referenced by the JCWF do not exist under scripts/. "
+                             "Adhoc submissions cannot ship scripts — they must be pre-deployed by an admin.";
+            crow::json::wvalue::list missingList;
+            for (auto const& entry : missingScripts) missingList.emplace_back(entry);
+            err["missing"] = std::move(missingList);
+            return MakeJsonResponse(400, err);
+        }
+
+        // Retention policies from shortest-lived to longest-lived. The order matters:
+        // a submission may pick any policy at or below the user's configured ceiling.
+        static constexpr std::array<std::string_view, 6> kPoliciesShortToLong = {
+            "on_completion", "ttl_1h", "ttl_24h", "ttl_48h", "ttl_72h", "retain"};
+        auto policyRank = [&](std::string const& p) -> int
+        {
+            for (size_t i = 0; i < kPoliciesShortToLong.size(); ++i)
+            {
+                if (p == kPoliciesShortToLong[i]) return static_cast<int>(i);
+            }
+            return -1;
+        };
+        int const submittedRank = policyRank(cleanupPolicy);
+        if (submittedRank < 0)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_cleanup_policy";
+            err["message"] = "cleanup_policy must be one of: on_completion, ttl_1h, ttl_24h, ttl_48h, ttl_72h, retain";
+            return MakeJsonResponse(400, err);
+        }
+        int const ceilingRank = policyRank(mcpRecord->m_DefaultCleanupPolicy);
+        if (ceilingRank >= 0 && submittedRank > ceilingRank)
+        {
+            LOG_SECURITY_WARN("[security] adhoc_policy_rejected user={} submitted={} ceiling={}",
+                              mcpRecord->m_User, cleanupPolicy, mcpRecord->m_DefaultCleanupPolicy);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "policy_exceeds_ceiling";
+            err["message"] = "Requested cleanup_policy exceeds this key's configured maximum (" +
+                              mcpRecord->m_DefaultCleanupPolicy + "). Pick a shorter TTL or the ceiling itself.";
+            err["ceiling"] = mcpRecord->m_DefaultCleanupPolicy;
+            return MakeJsonResponse(403, err);
+        }
+
+        AdhocWorkflowManager::StageRequest stageReq;
+        stageReq.m_JcwfJson = jcwfJson;
+        stageReq.m_User = mcpRecord->m_User;
+        stageReq.m_Role = mcpRecord->m_Role;
+        stageReq.m_CleanupPolicy = cleanupPolicy;
+        stageReq.m_DiskQuotaMb = mcpRecord->m_DiskQuotaMb;
+
+        auto stageOut = m_AdhocManager->Stage(stageReq);
+        if (std::holds_alternative<std::string>(stageOut))
+        {
+            std::string const errMsg = std::get<std::string>(stageOut);
+            LOG_SECURITY_WARN("[security] adhoc_stage_failed user={} error={}", mcpRecord->m_User, errMsg);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = errMsg == "quota_exceeded" ? "quota_exceeded" : "stage_failed";
+            err["message"] = errMsg;
+            return MakeJsonResponse(errMsg == "quota_exceeded" ? 413 : 400, err);
+        }
+
+        auto result = std::get<AdhocWorkflowManager::StageResult>(stageOut);
+
+        WorkflowRuntimeManager* runtime = nullptr;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            runtime = m_WorkflowRuntimeManager;
+        }
+        if (runtime == nullptr)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "runtime_unavailable";
+            return MakeJsonResponse(503, err);
+        }
+
+        // Convert parsed context to the runtime's ContextMap (string → ContextValue).
+        ContextMap runtimeContext;
+        for (auto const& [k, v] : context)
+        {
+            ContextValue cv;
+            cv.m_Value = v;
+            runtimeContext[k] = cv;
+        }
+        runtime->EnqueueWorkflowRunWithContextAndGetRunId(result.m_WorkflowId, result.m_RunId, runtimeContext);
+
+        LOG_SECURITY_INFO("[security] adhoc_submitted user={} key_id={} runId={} workflowId={} policy={}",
+                          mcpRecord->m_User, mcpRecord->m_KeyId, result.m_RunId, result.m_WorkflowId, cleanupPolicy);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["runId"] = result.m_RunId;
+        body["workflowId"] = result.m_WorkflowId;
+        body["cleanup_policy"] = cleanupPolicy;
+        body["folder_path"] = result.m_FolderPath.string();
+        auto resp = MakeJsonResponse(202, body);
+        AttachMcpExpiryHeader(resp, req);
+        return resp;
+    }
+
+    crow::response WebServer::HandleRunFilesListGet(crow::request const& req, std::string const& runId)
+    {
+        auto auth = Authenticate(req);
+        if (!auth.Ok()) return MakeAuthErrorResponse(auth.m_Error);
+        // Viewer is not permitted — artifact retrieval follows the same role floor
+        // as the run-adhoc endpoint that produced the data. Operators can read their
+        // own runs; admins can read any run.
+        if (!HasRole(auth, "operator"))
+        {
+            LOG_SECURITY_WARN("[security] run_files_denied reason=insufficient_role ip={} user={} role={}",
+                              req.remote_ip_address, auth.m_User, auth.m_Role);
+            return MakeAuthErrorResponse("insufficient_role");
+        }
+
+        if (m_AdhocManager == nullptr)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "adhoc_unavailable";
+            return MakeJsonResponse(503, err);
+        }
+
+        auto info = m_AdhocManager->GetRunInfo(runId);
+        if (!info)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "run_not_found";
+            err["message"] = "No run with that id is currently tracked. "
+                             "Either it never existed or its folder has been reaped.";
+            return MakeJsonResponse(404, err);
+        }
+
+        bool const isAdmin = auth.m_Role == "admin";
+        std::string const callerSlug = AdhocWorkflowManager::SanitizeUserSlug(auth.m_User);
+        if (!isAdmin && callerSlug != info->m_OwnerSlug)
+        {
+            LOG_SECURITY_WARN("[security] run_files_denied reason=not_owner caller={} owner={} runId={}",
+                              auth.m_User, info->m_User, runId);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_owner";
+            err["message"] = "This run belongs to another user.";
+            return MakeJsonResponse(403, err);
+        }
+        if (isAdmin && callerSlug != info->m_OwnerSlug)
+        {
+            // Cross-user admin read — durable audit trail for compliance.
+            LOG_SECURITY_INFO("[security] admin_cross_user_read kind=list caller={} owner={} runId={}",
+                              auth.m_User, info->m_User, runId);
+        }
+
+        // Terminal? We don't hold a direct pointer to the runtime manager for this
+        // check — the existing status endpoint already does, but for Phase 5 we
+        // derive terminality from folder state. The presence of manifest.json is
+        // the signal: OnRunCompleted writes it for non-`on_completion` runs. While
+        // the run is active, the manifest isn't there yet.
+        std::filesystem::path const manifestPath = info->m_FolderPath / "manifest.json";
+        bool const terminal = std::filesystem::exists(manifestPath);
+
+        // Retention — parse delete-at from the folder name; surface seconds_remaining.
+        std::string deleteAtStr;
+        int64_t secondsRemaining = -1;
+        {
+            std::string const folderName = info->m_FolderPath.filename().string();
+            auto pos = folderName.rfind("_del-");
+            if (pos != std::string::npos)
+            {
+                std::string const tail = folderName.substr(pos + std::string("_del-").size());
+                if (tail == "retain")
+                {
+                    deleteAtStr = "retain";
+                }
+                else if (tail == "on_completion")
+                {
+                    deleteAtStr = "on_completion";
+                    secondsRemaining = 0;
+                }
+                else
+                {
+                    // YYYYMMDDTHHMMSS → ISO pretty + seconds-remaining delta.
+                    std::tm tm{};
+                    std::istringstream iss(tail);
+                    iss >> std::get_time(&tm, "%Y%m%dT%H%M%S");
+                    if (!iss.fail())
+                    {
+#ifdef _WIN32
+                        std::time_t t = _mkgmtime(&tm);
+#else
+                        std::time_t t = timegm(&tm);
+#endif
+                        if (t != static_cast<std::time_t>(-1))
+                        {
+                            auto deleteAt = std::chrono::system_clock::from_time_t(t);
+                            auto now = std::chrono::system_clock::now();
+                            auto delta = std::chrono::duration_cast<std::chrono::seconds>(deleteAt - now).count();
+                            secondsRemaining = delta < 0 ? 0 : delta;
+                            std::tm utc{};
+#ifdef _WIN32
+                            gmtime_s(&utc, &t);
+#else
+                            gmtime_r(&t, &utc);
+#endif
+                            std::ostringstream iso;
+                            iso << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+                            deleteAtStr = iso.str();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Optional prefix filter — lexically normalised to avoid client tricks.
+        std::string prefix;
+        if (auto const* p = req.url_params.get("prefix"); p != nullptr)
+        {
+            prefix = fs::path(std::string(p)).lexically_normal().generic_string();
+            if (prefix.find("..") != std::string::npos)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_prefix";
+                err["message"] = "prefix may not contain '..'";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
+        // Extension → content-type (conservative defaults; anything unrecognised
+        // falls through to application/octet-stream so clients never guess).
+        auto const contentTypeFor = [](std::string const& ext) -> std::string {
+            if (ext == ".json") return "application/json";
+            if (ext == ".txt" || ext == ".log") return "text/plain; charset=utf-8";
+            if (ext == ".csv") return "text/csv; charset=utf-8";
+            if (ext == ".md") return "text/markdown; charset=utf-8";
+            if (ext == ".html" || ext == ".htm") return "text/html; charset=utf-8";
+            if (ext == ".xml") return "application/xml";
+            if (ext == ".yaml" || ext == ".yml") return "application/yaml";
+            if (ext == ".pdf") return "application/pdf";
+            if (ext == ".png") return "image/png";
+            if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+            if (ext == ".svg") return "image/svg+xml";
+            if (ext == ".zip") return "application/zip";
+            return "application/octet-stream";
+        };
+
+        auto const taskIdFor = [](std::string const& relPath) -> std::optional<std::string> {
+            // Paths live under queue/<workflowId>/<taskId>/<file...> for task outputs.
+            // Anything else (workflows/..., manifest.json, meta.json) has no task.
+            constexpr std::string_view queuePrefix = "queue/";
+            if (relPath.rfind(queuePrefix, 0) != 0) return std::nullopt;
+            auto firstSlash = relPath.find('/', queuePrefix.size());
+            if (firstSlash == std::string::npos) return std::nullopt;
+            auto secondSlash = relPath.find('/', firstSlash + 1);
+            if (secondSlash == std::string::npos) return std::nullopt;
+            return relPath.substr(firstSlash + 1, secondSlash - firstSlash - 1);
+        };
+
+        // Walk the run folder live. Manifest-backed listing is a Phase 5 optimisation
+        // that can come later; the live walk is always correct and fast enough for
+        // typical adhoc folder sizes (low-hundreds of files).
+        crow::json::wvalue::list filesJson;
+        std::error_code ec;
+        for (auto const& e : fs::recursive_directory_iterator(info->m_FolderPath, ec))
+        {
+            if (ec) break;
+            if (!e.is_regular_file()) continue;
+            std::string const name = e.path().filename().string();
+            // Skip bookkeeping files — meta.json and manifest.json aren't task outputs.
+            if (name == "meta.json" || name == "manifest.json") continue;
+
+            auto rel = fs::relative(e.path(), info->m_FolderPath, ec);
+            if (ec) continue;
+            std::string const relPath = rel.generic_string();
+
+            if (!prefix.empty() && relPath.rfind(prefix, 0) != 0) continue;
+
+            crow::json::wvalue entry;
+            entry["path"] = relPath;
+            auto size = e.file_size(ec);
+            entry["size_bytes"] = ec ? 0 : static_cast<int64_t>(size);
+
+            // mtime → ISO8601 UTC.
+            auto ftime = fs::last_write_time(e.path(), ec);
+            if (!ec)
+            {
+                auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                    ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+                std::time_t t = std::chrono::system_clock::to_time_t(sctp);
+                std::tm utc{};
+#ifdef _WIN32
+                gmtime_s(&utc, &t);
+#else
+                gmtime_r(&t, &utc);
+#endif
+                std::ostringstream iso;
+                iso << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+                entry["modified_at"] = iso.str();
+            }
+
+            auto taskId = taskIdFor(relPath);
+            if (taskId) entry["task_id"] = *taskId;
+
+            entry["content_type"] = contentTypeFor(e.path().extension().string());
+            entry["local_path"] = e.path().string();
+            entry["download_url"] = std::string("/api/workflow-runs/") + runId + "/files/" + relPath;
+
+            filesJson.push_back(std::move(entry));
+        }
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["runId"] = runId;
+        body["owner"] = info->m_User;
+        body["owner_slug"] = info->m_OwnerSlug;
+        body["terminal"] = terminal;
+
+        crow::json::wvalue retention;
+        retention["policy"] = info->m_CleanupPolicy;
+        if (!deleteAtStr.empty()) retention["delete_at"] = deleteAtStr;
+        if (secondsRemaining >= 0) retention["seconds_remaining"] = static_cast<int64_t>(secondsRemaining);
+        body["retention"] = std::move(retention);
+
+        body["files"] = std::move(filesJson);
+
+        auto resp = MakeJsonResponse(200, body);
+        AttachMcpExpiryHeader(resp, req);
+        return resp;
+    }
+
+    crow::response WebServer::HandleRunFileGet(crow::request const& req,
+                                               std::string const& runId,
+                                               std::string const& relPath)
+    {
+        // Shared max — agents fetching terabyte files through one HTTP response
+        // is an anti-pattern. Range requests remain available for larger files.
+        constexpr uint64_t kMaxSingleResponseBytes = 10ull * 1024 * 1024;
+
+        auto auth = Authenticate(req);
+        if (!auth.Ok()) return MakeAuthErrorResponse(auth.m_Error);
+        if (!HasRole(auth, "operator"))
+        {
+            LOG_SECURITY_WARN("[security] run_file_denied reason=insufficient_role ip={} user={} role={}",
+                              req.remote_ip_address, auth.m_User, auth.m_Role);
+            return MakeAuthErrorResponse("insufficient_role");
+        }
+
+        if (m_AdhocManager == nullptr)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "adhoc_unavailable";
+            return MakeJsonResponse(503, err);
+        }
+
+        auto info = m_AdhocManager->GetRunInfo(runId);
+        if (!info)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "run_not_found";
+            err["message"] = "No run with that id is currently tracked.";
+            return MakeJsonResponse(404, err);
+        }
+
+        bool const isAdmin = auth.m_Role == "admin";
+        std::string const callerSlug = AdhocWorkflowManager::SanitizeUserSlug(auth.m_User);
+        if (!isAdmin && callerSlug != info->m_OwnerSlug)
+        {
+            LOG_SECURITY_WARN("[security] run_file_denied reason=not_owner caller={} owner={} runId={} path={}",
+                              auth.m_User, info->m_User, runId, relPath);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_owner";
+            err["message"] = "This run belongs to another user.";
+            return MakeJsonResponse(403, err);
+        }
+        if (isAdmin && callerSlug != info->m_OwnerSlug)
+        {
+            LOG_SECURITY_INFO("[security] admin_cross_user_read kind=file caller={} owner={} runId={} path={}",
+                              auth.m_User, info->m_User, runId, relPath);
+        }
+
+        // --- Path safety ---
+        // Reject absolute paths, '..' segments, and null bytes up front — cheaper
+        // to bail before touching the filesystem. The lexical normalisation pass
+        // catches URL-encoded traversal (%2E%2E) since Crow URL-decodes before
+        // handing us the string.
+        if (relPath.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "missing_path";
+            return MakeJsonResponse(400, err);
+        }
+        if (relPath.find('\0') != std::string::npos)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid_path";
+            return MakeJsonResponse(400, err);
+        }
+        fs::path const requested(relPath);
+        if (requested.is_absolute())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "absolute_path_rejected";
+            err["message"] = "path must be relative to the run folder";
+            return MakeJsonResponse(400, err);
+        }
+        fs::path const normalized = requested.lexically_normal();
+        {
+            std::string const normStr = normalized.generic_string();
+            if (normStr == ".." ||
+                normStr.rfind("../", 0) == 0 ||
+                normStr.find("/../") != std::string::npos ||
+                (normStr.size() >= 3 && normStr.substr(normStr.size() - 3) == "/.."))
+            {
+                LOG_SECURITY_WARN("[security] run_file_path_escape user={} runId={} path={}",
+                                  auth.m_User, runId, relPath);
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "path_escape";
+                err["message"] = "Resolved path escapes the run folder.";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
+        fs::path const absPath = (info->m_FolderPath / normalized).lexically_normal();
+
+        // Belt-and-braces: confirm the absolute path starts with the run folder.
+        {
+            std::string const base = info->m_FolderPath.lexically_normal().generic_string();
+            std::string const target = absPath.generic_string();
+            if (target.rfind(base, 0) != 0)
+            {
+                LOG_SECURITY_WARN("[security] run_file_path_escape (prefix) user={} runId={} path={}",
+                                  auth.m_User, runId, relPath);
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "path_escape";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
+        // meta.json / manifest.json are bookkeeping — not task outputs.
+        // Refusing to serve them matches the listing endpoint's filtering and
+        // keeps the file endpoint from leaking internal attribution metadata.
+        std::string const filename = absPath.filename().string();
+        if (filename == "meta.json" || filename == "manifest.json")
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "reserved_file";
+            err["message"] = "meta.json and manifest.json are internal bookkeeping files.";
+            return MakeJsonResponse(403, err);
+        }
+
+        // Symlink check WITHOUT following — closes a TOCTOU class where a
+        // malicious task could swap a regular file for a symlink pointing
+        // outside the run folder between listing and download.
+        std::error_code ec;
+        auto symStatus = fs::symlink_status(absPath, ec);
+        if (ec || !fs::exists(symStatus))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "file_not_found";
+            err["message"] = "No file at that path in the run folder.";
+            return MakeJsonResponse(404, err);
+        }
+        if (fs::is_symlink(symStatus))
+        {
+            LOG_SECURITY_WARN("[security] run_file_symlink_rejected user={} runId={} path={}",
+                              auth.m_User, runId, relPath);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "symlink_rejected";
+            err["message"] = "Symlinks are not served.";
+            return MakeJsonResponse(400, err);
+        }
+        if (fs::is_directory(symStatus))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "is_directory";
+            err["message"] = "Use GET /api/workflow-runs/<id>/files to list directory contents.";
+            return MakeJsonResponse(400, err);
+        }
+        if (!fs::is_regular_file(symStatus))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "not_regular_file";
+            return MakeJsonResponse(400, err);
+        }
+
+        uint64_t const fileSize = static_cast<uint64_t>(fs::file_size(absPath, ec));
+        if (ec)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "stat_failed";
+            return MakeJsonResponse(500, err);
+        }
+
+        // --- Content-type lookup (same table the listing endpoint uses) ---
+        auto const contentTypeFor = [](std::string const& ext) -> std::string {
+            if (ext == ".json") return "application/json";
+            if (ext == ".txt" || ext == ".log") return "text/plain; charset=utf-8";
+            if (ext == ".csv") return "text/csv; charset=utf-8";
+            if (ext == ".md") return "text/markdown; charset=utf-8";
+            if (ext == ".html" || ext == ".htm") return "text/html; charset=utf-8";
+            if (ext == ".xml") return "application/xml";
+            if (ext == ".yaml" || ext == ".yml") return "application/yaml";
+            if (ext == ".pdf") return "application/pdf";
+            if (ext == ".png") return "image/png";
+            if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+            if (ext == ".svg") return "image/svg+xml";
+            if (ext == ".zip") return "application/zip";
+            return "application/octet-stream";
+        };
+        std::string const contentType = contentTypeFor(absPath.extension().string());
+
+        // --- Range request parsing (if present) ---
+        // Only `bytes=start-end` is supported (single range). Multipart byte-ranges
+        // are not needed for the agent use case.
+        bool isRange = false;
+        uint64_t rangeStart = 0;
+        uint64_t rangeEnd = 0; // inclusive
+        {
+            auto const* rangeHeader = req.get_header_value("Range").data();
+            std::string rangeValue = rangeHeader ? std::string(rangeHeader) : std::string();
+            if (!rangeValue.empty())
+            {
+                constexpr std::string_view kPrefix = "bytes=";
+                if (rangeValue.rfind(kPrefix, 0) == 0)
+                {
+                    std::string const spec = rangeValue.substr(kPrefix.size());
+                    auto dash = spec.find('-');
+                    if (dash != std::string::npos)
+                    {
+                        std::string const startStr = spec.substr(0, dash);
+                        std::string const endStr = spec.substr(dash + 1);
+                        bool ok = true;
+                        try
+                        {
+                            if (startStr.empty())
+                            {
+                                // "bytes=-N" → last N bytes.
+                                uint64_t const suffix = std::stoull(endStr);
+                                if (suffix == 0 || fileSize == 0) { ok = false; }
+                                else
+                                {
+                                    rangeStart = suffix >= fileSize ? 0 : fileSize - suffix;
+                                    rangeEnd = fileSize - 1;
+                                }
+                            }
+                            else if (endStr.empty())
+                            {
+                                rangeStart = std::stoull(startStr);
+                                rangeEnd = fileSize == 0 ? 0 : fileSize - 1;
+                            }
+                            else
+                            {
+                                rangeStart = std::stoull(startStr);
+                                rangeEnd = std::stoull(endStr);
+                            }
+                        }
+                        catch (...) { ok = false; }
+
+                        if (!ok || rangeStart >= fileSize || rangeEnd < rangeStart)
+                        {
+                            crow::response resp(416);
+                            resp.set_header("Content-Range",
+                                            std::string("bytes */") + std::to_string(fileSize));
+                            SetSecurityHeaders(resp);
+                            return resp;
+                        }
+                        if (rangeEnd >= fileSize) rangeEnd = fileSize - 1;
+                        isRange = true;
+                    }
+                }
+            }
+        }
+
+        // --- Size cap enforcement ---
+        // Full-file request above the cap → 413 with a suggested Range so the
+        // agent can slice the download without guessing the correct header.
+        if (!isRange && fileSize > kMaxSingleResponseBytes)
+        {
+            crow::response resp(413);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "file_too_large";
+            err["message"] = "Use a Range request to fetch this file in slices.";
+            err["size_bytes"] = static_cast<int64_t>(fileSize);
+            err["max_single_response_bytes"] = static_cast<int64_t>(kMaxSingleResponseBytes);
+            resp.body = crow::json::wvalue(err).dump();
+            resp.set_header("Content-Type", "application/json; charset=utf-8");
+            resp.set_header("X-Suggested-Range",
+                            std::string("bytes=0-") +
+                                std::to_string(kMaxSingleResponseBytes - 1));
+            SetSecurityHeaders(resp);
+            return resp;
+        }
+
+        uint64_t const toRead = isRange ? (rangeEnd - rangeStart + 1) : fileSize;
+        if (toRead > kMaxSingleResponseBytes)
+        {
+            crow::response resp(413);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "range_too_large";
+            err["message"] = "Requested range exceeds the single-response cap.";
+            err["size_bytes"] = static_cast<int64_t>(fileSize);
+            err["max_single_response_bytes"] = static_cast<int64_t>(kMaxSingleResponseBytes);
+            resp.body = crow::json::wvalue(err).dump();
+            resp.set_header("Content-Type", "application/json; charset=utf-8");
+            SetSecurityHeaders(resp);
+            return resp;
+        }
+
+        // --- Read bytes ---
+        std::ifstream ifs(absPath, std::ios::binary);
+        if (!ifs)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "read_failed";
+            return MakeJsonResponse(500, err);
+        }
+        if (isRange && rangeStart > 0)
+        {
+            ifs.seekg(static_cast<std::streamoff>(rangeStart), std::ios::beg);
+            if (!ifs)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "seek_failed";
+                return MakeJsonResponse(500, err);
+            }
+        }
+        std::string body;
+        body.resize(static_cast<size_t>(toRead));
+        if (toRead > 0)
+        {
+            ifs.read(body.data(), static_cast<std::streamsize>(toRead));
+            auto const got = static_cast<uint64_t>(ifs.gcount());
+            if (got != toRead)
+            {
+                body.resize(static_cast<size_t>(got));
+            }
+        }
+
+        // --- SHA-256 (full file only — the hash covers the whole artifact, so
+        //     partial responses omit it and rely on the listing endpoint for the
+        //     canonical digest).
+        std::string sha256Hex;
+        if (!isRange && fileSize > 0)
+        {
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            ::SHA256(reinterpret_cast<unsigned char const*>(body.data()), body.size(), digest);
+            static constexpr char const* kHex = "0123456789abcdef";
+            sha256Hex.reserve(SHA256_DIGEST_LENGTH * 2);
+            for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i)
+            {
+                sha256Hex.push_back(kHex[(digest[i] >> 4) & 0xF]);
+                sha256Hex.push_back(kHex[digest[i] & 0xF]);
+            }
+        }
+        else if (!isRange && fileSize == 0)
+        {
+            // Canonical hash of the empty string.
+            sha256Hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        }
+
+        crow::response resp(isRange ? 206 : 200);
+        resp.set_header("Content-Type", contentType);
+        resp.set_header("Content-Length", std::to_string(body.size()));
+        resp.set_header("Accept-Ranges", "bytes");
+        resp.set_header("X-Run-Id", runId);
+        resp.set_header("X-Run-Owner", info->m_User);
+        if (!sha256Hex.empty())
+        {
+            resp.set_header("X-Content-SHA256", sha256Hex);
+        }
+        if (isRange)
+        {
+            resp.set_header("Content-Range",
+                            std::string("bytes ") + std::to_string(rangeStart) + "-" +
+                                std::to_string(rangeEnd) + "/" + std::to_string(fileSize));
+        }
+
+        // Retention echo — tells streaming clients how long their fetch URL will
+        // stay valid without a second round-trip to the listing endpoint.
+        {
+            std::string const folderName = info->m_FolderPath.filename().string();
+            auto pos = folderName.rfind("_del-");
+            if (pos != std::string::npos)
+            {
+                std::string const tail = folderName.substr(pos + std::string("_del-").size());
+                if (!tail.empty()) resp.set_header("X-Retention-Delete-At", tail);
+            }
+        }
+
+        // Inline by default; ?download=1 forces attachment-style browsers.
+        std::string const dispositionFilename = absPath.filename().string();
+        bool const forceDownload = req.url_params.get("download") != nullptr;
+        resp.set_header("Content-Disposition",
+                        std::string(forceDownload ? "attachment" : "inline") +
+                            "; filename=\"" + dispositionFilename + "\"");
+
+        SetSecurityHeaders(resp);
+        resp.body = std::move(body);
+        AttachMcpExpiryHeader(resp, req);
+
+        LOG_SECURITY_INFO("[security] run_file_read user={} runId={} path={} bytes={}{}",
+                          auth.m_User, runId, relPath, resp.body.size(),
+                          isRange ? " (range)" : "");
+        return resp;
+    }
+
+    crow::response WebServer::HandleScriptsListGet(crow::request const& req)
+    {
+        auto auth = Authenticate(req);
+        if (!auth.Ok()) return MakeAuthErrorResponse(auth.m_Error);
+        // viewer is the floor — any authenticated caller can see what's available.
+
+        // `?type=shell` or `?type=python` to narrow; `?refresh=1` to re-scan
+        // (useful after an admin drops new scripts onto the host without a restart).
+        std::string typeFilter;
+        if (auto const* t = req.url_params.get("type"); t != nullptr)
+        {
+            std::string v(t);
+            if (v == "shell" || v == "python") typeFilter = std::move(v);
+        }
+        if (req.url_params.get("refresh") != nullptr)
+        {
+            m_ScriptCatalog.Refresh(Core::g_Core->GetLaunchCWDAbsolute() / "scripts");
+        }
+
+        auto const entries = m_ScriptCatalog.List(typeFilter);
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["count"] = static_cast<int64_t>(entries.size());
+
+        crow::json::wvalue::list arr;
+        arr.reserve(entries.size());
+        for (auto const& e : entries)
+        {
+            crow::json::wvalue j;
+            j["path"] = e.m_Path;
+            j["type"] = e.m_Type;
+            if (!e.m_Module.empty()) j["module"] = e.m_Module;
+            j["short"] = e.m_Short;
+            if (!e.m_Description.empty()) j["description"] = e.m_Description;
+            if (!e.m_Outputs.empty()) j["outputs"] = e.m_Outputs;
+            j["has_shebang"] = e.m_HasShebang;
+            j["has_jarvis_marker"] = e.m_HasJarvisMarker;
+            j["executable"] = e.m_Executable;
+
+            crow::json::wvalue::list params;
+            for (auto const& p : e.m_Params) params.emplace_back(p);
+            j["params"] = std::move(params);
+
+            arr.push_back(std::move(j));
+        }
+        body["scripts"] = std::move(arr);
+
+        auto resp = MakeJsonResponse(200, body);
+        AttachMcpExpiryHeader(resp, req);
+        return resp;
+    }
+
+#ifdef DEBUG
+    crow::response WebServer::HandleDebugSignalsGet()
+    {
+        // Live engine introspection. Only compiled in debug builds. Admin-gated at
+        // the route level (see RegisterCommonRoutes). Extend freely with whatever
+        // counter JC is investigating — keep it cheap, don't hold mutexes across
+        // expensive work. See memory/reference_debug_signals.md for the convention.
+        crow::json::wvalue body;
+        body["ok"] = true;
+
+        crow::json::wvalue signals;
+
+        // ---- Uptime ----
+        auto const uptime = std::chrono::steady_clock::now() - m_ProcessStart;
+        signals["uptime_seconds"] =
+            static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(uptime).count());
+
+        // ---- WebSocket / broadcast state ----
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            signals["websocket_clients"] = static_cast<int64_t>(m_Clients.size());
+            signals["websocket_total_connects"] = static_cast<int64_t>(m_WsTotalConnects);
+            signals["websocket_total_disconnects"] = static_cast<int64_t>(m_WsTotalDisconnects);
+            signals["websocket_peak_clients"] = static_cast<int64_t>(m_WsPeakClients);
+            signals["websocket_peak_pending_broadcasts"] =
+                static_cast<int64_t>(m_WsPeakPendingBroadcasts);
+            signals["websocket_pending_broadcasts"] = static_cast<int64_t>(m_PendingBroadcasts.size());
+        }
+
+        // ---- Key store state ----
+        {
+            auto const& keyManager = Core::g_Core->GetKeyManager();
+            signals["keys_unlocked"] = (keyManager.GetKeyLoadStatus() == KeyManager::KeyLoadStatus::Ok);
+            signals["mcp_keys_loaded"] = m_McpKeysLoaded.load();
+            signals["mcp_keys_count"] = static_cast<int64_t>(m_McpKeyManager.ListKeys().size());
+        }
+
+        // ---- Rate-limit + auth-failure buckets ----
+        {
+            std::lock_guard<std::mutex> lock(m_RateLimitMutex);
+            signals["rate_limit_buckets_tracked"] = static_cast<int64_t>(m_RateLimitBuckets.size());
+            signals["auth_failure_records"] = static_cast<int64_t>(m_AuthFailures.size());
+        }
+
+        // ---- Workflow runs ----
+        size_t activeRuns = 0;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRuntimeManager != nullptr)
+            {
+                auto snapshot = m_WorkflowRuntimeManager->GetActiveRunsSnapshot();
+                activeRuns = snapshot.size();
+                size_t paused = 0;
+                for (auto const& run : snapshot)
+                {
+                    if (run.m_State == WorkflowRunState::Paused) ++paused;
+                }
+                signals["workflow_runs_paused"] = static_cast<int64_t>(paused);
+
+                uint64_t completed = 0;
+                uint64_t failed = 0;
+                m_WorkflowRuntimeManager->GetRunCounters(completed, failed);
+                signals["workflow_runs_total_completed"] = static_cast<int64_t>(completed);
+                signals["workflow_runs_total_failed"] = static_cast<int64_t>(failed);
+            }
+        }
+        signals["workflow_runs_active"] = static_cast<int64_t>(activeRuns);
+
+        // ---- Session manager (AI queue) state ----
+        JarvisAgent* app = App::g_App;
+        if (app != nullptr)
+        {
+            signals["session_managers_total"] = static_cast<int64_t>(app->GetSessionManagerCount());
+            signals["session_managers_with_inflight"] =
+                static_cast<int64_t>(app->GetSessionManagersWithInflight());
+            signals["ai_calls_inflight"] =
+                static_cast<int64_t>(app->GetSessionManagerInflightTotal());
+        }
+
+        // ---- Python engine pool ----
+        if (app != nullptr)
+        {
+            PythonEnginePool* pyPool = app->GetPythonEnginePool();
+            if (pyPool != nullptr)
+            {
+                size_t const engineCount = pyPool->GetEngineCount();
+                signals["python_engines_total"] = static_cast<int64_t>(engineCount);
+                crow::json::wvalue::list perEngineCompleted;
+                perEngineCompleted.reserve(engineCount);
+                for (size_t i = 0; i < engineCount; ++i)
+                {
+                    perEngineCompleted.push_back(
+                        crow::json::wvalue(static_cast<int64_t>(pyPool->GetTasksCompleted(i))));
+                }
+                signals["python_tasks_completed"] = std::move(perEngineCompleted);
+                // Queue depth per engine needs a per-engine accessor we don't expose yet;
+                // extend PythonEnginePool with a GetQueueDepth(idx) helper when that
+                // becomes the investigation target.
+            }
+        }
+
+        // ---- Dashboard session store ----
+        signals["dashboard_sessions_timeout_hours"] =
+            static_cast<int64_t>(m_WebSessionManager.GetTimeoutHours());
+
+        // ---- Adhoc manager ----
+        if (m_AdhocManager)
+        {
+            signals["adhoc_runs_active"] = static_cast<int64_t>(m_AdhocManager->GetActiveRunCount());
+            signals["adhoc_disk_usage_bytes"] =
+                static_cast<int64_t>(m_AdhocManager->GetTotalDiskUsageBytes());
+        }
+
+        body["signals"] = std::move(signals);
+        return MakeJsonResponse(200, body);
+    }
+#endif  // DEBUG
+
+    crow::response WebServer::HandleLogoutPost(crow::request const& req)
+    {
+        std::string sessionId = ExtractSessionCookie(req);
+        if (!sessionId.empty())
+        {
+            m_WebSessionManager.Destroy(sessionId);
+        }
+        LOG_SECURITY_INFO("[security] logout ip={}", req.remote_ip_address);
+        crow::json::wvalue body;
+        body["ok"] = true;
+        auto resp = MakeJsonResponse(200, body);
+        resp.add_header("Set-Cookie", "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        return resp;
+    }
 
 } // namespace AIAssistant

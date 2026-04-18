@@ -11,7 +11,7 @@ AI Client (Claude Desktop, Claude Code, etc.)
     |
 j9t MCP Server (this package)
     |
-    | REST API (localhost, Bearer token auth)
+    | REST API (localhost, Authorization: Bearer mcp_...)
     |
 j9t Engine / Studio
 ```
@@ -19,6 +19,8 @@ j9t Engine / Studio
 The MCP server is a thin proxy — it translates MCP tool calls into j9t REST API requests and returns the results.
 
 ## Tools
+
+### Run plane
 
 | Tool | j9t API | Description |
 |------|---------|-------------|
@@ -28,6 +30,31 @@ The MCP server is a thin proxy — it translates MCP tool calls into j9t REST AP
 | `get_run_output` | `GET /api/workflow-runs/<runId>` | Retrieve completed workflow results |
 | `list_active_runs` | `GET /api/workflow-runs/active` | Currently running workflows |
 | `cancel_run` | `POST /api/workflow-runs/<runId>/cancel` | Cancel a running workflow |
+| `run_adhoc_workflow` | `POST /api/workflows/run-adhoc` | Submit a JCWF for one-shot execution (requires `adhoc_enabled`). Supports shell, python, internal, and `ai_call` tasks end-to-end. For `ai_call` tasks set `working_directory` to `"../../queue/<task_id>"` so queue-binding files land in the per-run queue folder (the runtime registers it with the file watcher at stage time). |
+
+### Artifact plane
+
+| Tool | j9t API | Description |
+|------|---------|-------------|
+| `list_run_files` | `GET /api/workflow-runs/<runId>/files` | Discover files a run produced. Returns path, size, mtime, content-type, task attribution, `local_path` (same-host agents) and `download_url` (remote agents), plus retention so the caller knows how long the artefacts live. Honours ownership: operator reads own runs, admin reads any. |
+| `get_run_file` | `GET /api/workflow-runs/<runId>/files/<path>` | Stream a single artefact. Text content is returned inline; binary content is base64-encoded. Range is supported for large files; single response capped at 10 MB server-side. Responses carry `X-Content-SHA256` for integrity verification. |
+| `list_scripts` | `GET /api/scripts` | Catalog of scripts under `scripts/` with `@jarvis-script` metadata (short, params, outputs). Use before composing a `run_adhoc_workflow` payload — the adhoc submit rejects JCWFs that reference scripts not on disk. Viewer+ access. |
+
+### Configure plane
+
+| Tool | j9t API | Min role |
+|------|---------|----------|
+| `manage_connections` | CRUD + test on `/api/connections` | admin |
+| `manage_keys` | CRUD + set-default on `/api/settings/providers` (Studio) | admin |
+| `upload_workflow` | `POST /api/workflows` (Studio) | admin |
+| `validate_workflow` | `POST /api/workflows/validate` (Studio) | operator |
+
+### Observability / auth
+
+| Tool | j9t API |
+|------|---------|
+| `get_run_logs` | `GET /api/log?tail=N` |
+| `whoami` | `GET /api/auth/whoami` |
 
 ## Resources
 
@@ -46,11 +73,33 @@ npm install
 npm run build
 
 # Run (connects to j9t on localhost:8080 by default)
-npm start
+J9T_TOKEN=mcp_... npm start
 
 # Or run in dev mode (auto-recompile)
-npm run dev
+J9T_TOKEN=mcp_... npm run dev
 ```
+
+## Authentication
+
+j9t accepts only MCP API keys (`mcp_` + 64 hex chars) as the bearer credential for programmatic access. The legacy shared admin token has been removed — every machine credential is per-user and individually revocable.
+
+### Getting your first MCP key
+
+On j9t's first run with an empty key store, it prints a bootstrap enrollment token to stderr. Activate it to receive your MCP admin key:
+
+```bash
+# Copy the enroll_... token from j9t's stderr output, then:
+curl -sS -X POST http://localhost:8080/api/auth/mcp-keys/activate \
+     -H 'Content-Type: application/json' \
+     -d '{"enrollment_token":"enroll_..."}'
+
+# Response:
+# { "ok": true, "key_id": "mcp_a1b2c3d4",
+#   "api_key": "mcp_a1b2c3d4e5f6...",  <-- save this; shown exactly once
+#   ... }
+```
+
+For subsequent users, an admin creates an enrollment via the Settings > MCP Keys tab or `POST /api/auth/mcp-keys/enroll`, and the user activates it with the same endpoint.
 
 ## Configuration
 
@@ -59,12 +108,12 @@ Configuration is via environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `J9T_URL` | `http://localhost:8080` | j9t REST API base URL |
-| `J9T_TOKEN` | *(empty)* | Bearer token for j9t Engine auth |
-| `J9T_TOKEN_FILE` | *(none)* | Path to a file containing the Bearer token |
+| `J9T_TOKEN` | *(empty)* | MCP API key (must start with `mcp_`) |
+| `J9T_TOKEN_FILE` | *(none)* | Path to a file containing the MCP API key |
 
 For TLS-enabled j9t instances, use `https://localhost:8443` as `J9T_URL`.
 
-If neither `J9T_TOKEN` nor `J9T_TOKEN_FILE` is set, requests are sent without authentication (works with j9t Studio on localhost).
+If neither `J9T_TOKEN` nor `J9T_TOKEN_FILE` is set, the sidecar connects without auth. j9t **rejects** all authenticated endpoints in that case — the sidecar will only succeed on the public health check. Set a real MCP key for any real work.
 
 ## Claude Desktop Integration
 
@@ -77,7 +126,8 @@ Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json`
       "command": "node",
       "args": ["/path/to/jarvisAgent/mcp/dist/index.js"],
       "env": {
-        "J9T_URL": "https://localhost:8443"
+        "J9T_URL": "https://localhost:8443",
+        "J9T_TOKEN": "mcp_..."
       }
     }
   }
@@ -95,7 +145,8 @@ Add to your Claude Code settings (`.claude/settings.json` or project `CLAUDE.md`
       "command": "node",
       "args": ["/path/to/jarvisAgent/mcp/dist/index.js"],
       "env": {
-        "J9T_URL": "https://localhost:8443"
+        "J9T_URL": "https://localhost:8443",
+        "J9T_TOKEN": "mcp_..."
       }
     }
   }
@@ -104,7 +155,7 @@ Add to your Claude Code settings (`.claude/settings.json` or project `CLAUDE.md`
 
 ## Docker Deployment
 
-The MCP server can run as a sidecar container alongside j9t:
+The MCP server can run as a sidecar container alongside j9t. Point it at a mounted file containing the MCP key:
 
 ```yaml
 # docker-compose.yml
@@ -113,9 +164,9 @@ mcp:
   depends_on: [jarvisagent]
   environment:
     J9T_URL: http://jarvisagent:8080
-    J9T_TOKEN_FILE: /app/engine_api_token.txt
+    J9T_TOKEN_FILE: /secrets/mcp_key
   volumes:
-    - ./data:/app:ro
+    - ./secrets:/secrets:ro
 ```
 
 Build the image:
@@ -128,10 +179,10 @@ docker build -t j9t-mcp .
 
 ## Production Notes
 
-- The MCP sidecar targets **j9t Engine** for production deployment (security-hardened, RBAC-enforced)
-- It also works with **j9t Studio** during development and testing
-- RBAC: MCP tools respect j9t roles — viewers can list/get, operators can run/cancel
-- Bearer token auth is required when connecting to j9t Engine
+- The MCP sidecar targets **j9t Engine** for production deployment (security-hardened, RBAC-enforced, no workflow CRUD exposed).
+- It also works with **j9t Studio** during development and testing — Studio adds `upload_workflow`, `validate_workflow`, and `manage_keys` tools that are unavailable on Engine.
+- **RBAC is key-scoped.** Each MCP user gets their own key with a role (admin / operator / viewer) and an `adhoc_enabled` flag set by the admin at enrollment time. Routes enforce the minimum required role; calls from under-privileged keys return HTTP 403.
+- **Audit.** Every MCP-authenticated request appears in `log/security.txt` tagged with the user, role, and endpoint.
 
 ## Source Files
 

@@ -4,14 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-# Detect edition: --engine or --studio flag, or script name containing "-engine"
+# Detect edition: --engine or --studio flag, or script name containing "-engine".
+# Detect build config: --debug selects bin/Debug/ (with debug_signals endpoint enabled),
+# otherwise the default bin/Release/ binary is used.
 EDITION="studio"
+BUILD_CONFIG="Release"
 PASSTHROUGH_ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--engine" ]]; then
         EDITION="engine"
     elif [[ "$arg" == "--studio" ]]; then
         EDITION="studio"
+    elif [[ "$arg" == "--debug" ]]; then
+        BUILD_CONFIG="Debug"
     else
         PASSTHROUGH_ARGS+=("$arg")
     fi
@@ -22,18 +27,26 @@ if [[ "$SCRIPT_NAME" == *"-engine"* ]]; then
 fi
 
 if [[ "$EDITION" == "engine" ]]; then
-    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent-engine"
+    BINARY="$SCRIPT_DIR/bin/$BUILD_CONFIG/jarvisAgent-engine"
     EDITION_LABEL="Engine"
 else
-    BINARY="$SCRIPT_DIR/bin/Release/jarvisAgent-studio"
+    BINARY="$SCRIPT_DIR/bin/$BUILD_CONFIG/jarvisAgent-studio"
     EDITION_LABEL="Studio"
+fi
+if [[ "$BUILD_CONFIG" == "Debug" ]]; then
+    EDITION_LABEL="$EDITION_LABEL (debug)"
 fi
 set -- "${PASSTHROUGH_ARGS[@]}"
 
-# ── Check release binary exists ──────────────────────────────────────────────
+# ── Check binary exists ──────────────────────────────────────────────────────
 if [ ! -f "$BINARY" ]; then
     echo "[jarvisagent.sh] ERROR: $EDITION_LABEL binary not found at $BINARY"
-    echo "  JarvisAgent must be compiled first. See README.md for build instructions."
+    if [[ "$BUILD_CONFIG" == "Debug" ]]; then
+        echo "  Build it with:  make config=debug"
+        echo "  (Release binaries live in bin/Release/; --debug selects bin/Debug/.)"
+    else
+        echo "  JarvisAgent must be compiled first. See README.md for build instructions."
+    fi
     exit 1
 fi
 

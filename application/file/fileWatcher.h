@@ -46,16 +46,39 @@ namespace AIAssistant
         void SignalStop();
         void WaitStop();
 
+        // Dynamic watch set — register an additional root to observe. Thread-safe,
+        // idempotent on duplicates. Returns false if the path is empty, does not
+        // exist, or duplicates the primary / an already-added root. The new root
+        // becomes observable on the next watch tick (<= m_Interval).
+        bool AddPath(fs::path const& root);
+
+        // Unregister a root previously added via AddPath. Thread-safe. Does NOT
+        // fire FileRemovedEvent for files under the removed root — the caller is
+        // responsible for any cleanup signaling. The primary root (ctor argument)
+        // cannot be removed.
+        bool RemovePath(fs::path const& root);
+
     private:
         void Watch();
         bool IsValidFile(fs::directory_entry const& entry);
+        std::vector<fs::path> SnapshotAllRoots() const;
+        std::vector<fs::path> DrainPendingRemovals();
 
-        fs::path m_PathToWatch;
+        fs::path m_PrimaryRoot;
         std::chrono::milliseconds m_Interval;
         std::atomic<bool> m_Running{false};
         std::future<void> m_WatchTask;
 
         std::mutex m_StopMutex;
         std::condition_variable m_StopCV;
+
+        // Additional roots registered at runtime. The primary root is NOT stored
+        // here; it always watches for the watcher's lifetime. Removals are
+        // deferred to the watch thread via m_PendingRemovals so files under the
+        // dropped root can be pruned from the tracked-file map without firing
+        // spurious FileRemovedEvent.
+        mutable std::mutex m_RootsMutex;
+        std::vector<fs::path> m_AdditionalRoots;
+        std::vector<fs::path> m_PendingRemovals;
     };
 } // namespace AIAssistant

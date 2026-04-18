@@ -208,14 +208,39 @@ See also:
 - ~~Test end-to-end: `sudo add-apt-repository ppa:beauman/marley && sudo apt install jarvisagent`~~
 - **Done (v0.8.2):** published, installed, and tested end-to-end. Shared launcher creates `~/JarvisAgent` with user-space Python venv on first run.
 
-### 5. Unified auth model — migrate Engine REST API from shared admin token to MCP keys
-- Currently Engine uses a single shared bearer token (`engine_api_token.txt`) for all REST API auth — no per-user identity
-- Studio has no REST auth at all — the localhost-only assumption breaks once j9t is deployed in teams or the cloud
-- Migrate all REST authentication (both editions) to MCP API keys so every request has per-user identity, RBAC, and audit trail
-- Deprecate `engine_api_token.txt` as the primary auth mechanism (retain as bootstrap credential for first admin enrollment)
-- Touches: webhook HMAC flow, n8n integration, gateway trust model, WebSocket auth
-- Prerequisite: MCP API key system from `Adhoc Workflow Submission and MCP.md` Phase 1
-- See `Adhoc Workflow Submission and MCP.md` for the full MCP key design (enrollment tokens, self-renewal, encrypted store, dashboard login)
+### ~~5. Unified auth model — MCP API keys + sessions, legacy admin token removed~~ ✅
+- All Engine REST auth migrated to MCP API keys (per-user identity, RBAC admin/operator/viewer, audit trail)
+- Studio authenticates MCP clients via the same MCP key store — browser UI still open on localhost
+- Dashboard login flow: `POST /api/auth/login` with an MCP key → HttpOnly + SameSite=Strict session cookie (8h sliding timeout)
+- WebSocket auth moved to Crow's `.onaccept` handshake — no in-band auth messages
+- `engine_api_token.txt` and the shared bearer-token code path **removed entirely** — no legacy fallback in `Authenticate()`
+- `SecureString` RAII buffer (`mlock()` / `explicit_bzero()`) holds the master password; one password unlocks both `keys.json.enc` and `mcp_keys.json.enc`
+- First-run admin enrollment token auto-generated and logged to stderr when `mcp_keys.json.enc` is empty
+- MCP sidecar expects `J9T_TOKEN=mcp_...`; shared service-credential pattern deliberately unsupported
+- See `Adhoc Workflow Submission and MCP plan.md` and `doc/cyber security.md` for the full design
+
+### ~~5a. Adhoc workflow submission + MCP configure-plane tools~~ ✅
+- `POST /api/workflows/run-adhoc` — one-shot JCWF execution without permanent registration; scripts must pre-exist under `scripts/` (no script upload through this endpoint, hard security boundary)
+- `AdhocWorkflowManager` — per-run isolated folder `_adhoc/<ts>_<counter>_del-<ts>/`, restart-safe reaper thread (60s interval) using the delete-at suffix, per-user disk quota via `McpKeyManager`, `meta.json` attribution
+- Per-run AI call cap (`max_ai_calls_per_jcwf` in config; default 0 = unlimited; bumped inflight default 100→1000, clamp widened to [1, 10000])
+- `on_completion` cleanup wired through `WorkflowRuntimeManager::SetRunTerminalObserver` so folders wipe the moment the run ends; TTL policies handled by the reaper; `retain` skipped entirely
+- MCP configure-plane tools: `manage_connections`, `manage_keys`, `upload_workflow`, `validate_workflow`, `get_run_logs`, `whoami`, `run_adhoc_workflow`
+- Dashboard: `LastRunsBar` with rolling last-3 runs, "adhoc" pill, relative time; MCP Keys admin panel with enrollment dialog
+
+### ~~5b. Adhoc `ai_call` tasks hang — FileWatcher doesn't watch per-run adhoc queue folders~~ ✅
+
+Fixed via Option A — extend `FileWatcher` with dynamic `AddPath`/`RemovePath`; `AdhocWorkflowManager` registers each run's `_adhoc/<user>/<run>/queue/` at stage time and unregisters on completion / reap. Adhoc `ai_call` end-to-end verified live: submit → dispatch → provider → `succeeded` in ~2 s; `session_managers_total` increments properly (was perpetually 0 before the fix). Integration test `test_adhoc_aicall_roundtrip` in `test/test_auth_mcp.py` locks this down (gated on `--with-ai` so clean installs without a provider still pass the rest of the suite — 104/104 with the flag).
+
+Spec clarification landed at the same time (`doc/JC_Workflow_Specification.md` §3.3.6.3, `doc/jcwf_generation_guide.md`): `file_outputs` on `ai_call` is allowed — Pattern A (zero-copy `outputs` slot) and Pattern B (`file_outputs` → external destination, e.g. adhoc agents writing to `~/dev/<project>/...`) are both valid. Validator emits `file_output_outside_working_tree` as Info (portability note; external-project agent use supported) and `file_output_triggers_extra_ai_query` as Warning (the real forbidden case — destination inside own queue folder with a requirement-firing filename).
+
+Related cleanup flagged but not fixed in this pass (post-1.0): `FireBranchIfReady` log line fires with `completedState=6` (`WaitingExternal`) — misleading; `TimeoutWaitingExternalTasks()` didn't catch these stalls and should be revisited when Option E lands.
+
+### 5c. Post-1.0 — runtime-driven `ai_call` dispatch (Option E)
+
+- Today `ai_call` completion relies on the `FileWatcher → FileAddedEvent → file categorizer → SessionManager → AiRequestPool` chain. That round-trip is elegant for the original file-drop use case (user drops PROB files into `queue/` manually) but increasingly awkward for runtime-authored workflows where the runtime already knows exactly what to dispatch.
+- **Direction:** replace the file-watcher-mediated dispatch for runtime-initiated `ai_call` tasks with a direct path: `AiCallTaskExecutor` assembles the `SessionManager` environment, calls `AiRequestPool::Submit` directly, receives the response via callback, no synthetic file events. Keeps the file-watcher for the manual drop workflow only (or deletes it if the drop workflow is deprecated).
+- Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
+- Target: post-1.0. Track in `application/workflow/doc/todo.md` under the "future refactors" section when it's time to start.
 
 ### 6. Landing page for new users
 - Create a welcoming landing page / website for JarvisAgent
@@ -473,9 +498,9 @@ Dedicated security log for all auth-related events. `Security` spdlog logger wri
 
 `CROW_ENABLE_SSL` defined in `premake5.lua` (OpenSSL already linked). `TlsCert`/`TlsKey` fields in `EngineConfig` + `configParser.cpp`. When both set and files exist, `m_Server.ssl_file(cert, key)` serves HTTPS on port 8443. Missing/invalid files refuse to start. `GET /api/status` includes `"tls": true/false`. Both editions supported.
 
-### ~~14. Token expiration and rotation~~ ✅
+### ~~14. Token expiration and rotation~~ ✅ (superseded — see item 5)
 
-`engine_api_token.txt` extended: line 1 = token, line 2 = `issued_at=<ISO-8601>`. Backward compatible (legacy files get timestamped on load). `CheckAdminAuth` rejects tokens > 90 days old with `"token_expired"` (403). Auto-generates new token on expiry. Startup warning logged if token expires within 7 days.
+Historical: the former `engine_api_token.txt` admin bearer token had a 90-day expiry + auto-rotation cycle. Superseded by the MCP API key system (item 5 above). The entire `engine_api_token.txt` code path has been removed; key expiry is now a per-user property of each MCP key with self-renewal via `POST /api/auth/mcp-keys/self-renew`.
 
 ### ~~15. Failed auth lockout~~ ✅
 

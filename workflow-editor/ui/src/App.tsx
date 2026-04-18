@@ -1,16 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import WorkflowEditorView, { type WorkflowPersistEvent } from "./editor/WorkflowEditorView";
 import WorkflowListView, { type WorkflowListItem } from "./views/WorkflowListView";
-import ProvidersSettingsView from "./views/ProvidersSettingsView";
-import AiManagerView from "./views/AiManagerView";
 import AssistantView from "./views/AssistantView";
-import ConnectionsView from "./views/ConnectionsView";
-import SettingsModal from "./components/SettingsModal";
+import SettingsModal, { type SettingsTab } from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
 import StatusLeds from "./components/StatusLeds";
 import { useStatusWebSocket } from "./hooks/useStatusWebSocket";
 import { getKeysStatus, type KeysStatusResponse } from "./api/keys";
 import { listAiInterfaces } from "./api/aiInterfaces";
+import { whoami } from "./api/auth";
 import type { JcwfFile } from "./jcwf/types";
 
 export type EditorSettings = {
@@ -41,7 +39,7 @@ function saveSettings(settings: EditorSettings): void {
   }
 }
 
-type RouteKey = "workflows" | "editor" | "ai-manager" | "settings" | "connections" | "assistant";
+type RouteKey = "workflows" | "editor" | "assistant";
 
 export default function App(): JSX.Element
 {
@@ -52,12 +50,21 @@ export default function App(): JSX.Element
   const [initialJcwf, setInitialJcwf] = useState<JcwfFile | null>(null);
   const [settings, setSettings] = useState<EditorSettings>(loadSettings);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [initialSettingsTab, setInitialSettingsTab] = useState<SettingsTab>("general");
   const [keysStatus, setKeysStatus] = useState<KeysStatusResponse | null>(null);
   const [masterPassword, setMasterPassword] = useState<string | null>(null);
   const [aiManagerDirty, setAiManagerDirty] = useState<boolean>(false);
   const [keysDirty, setKeysDirty] = useState<boolean>(false);
   const [connectionsDirty, setConnectionsDirty] = useState<boolean>(false);
   const [hasAiProvider, setHasAiProvider] = useState<boolean>(true);
+  // Default to "admin" so Studio (which has no auth gate) gets full UI.
+  // whoami overrides this when Engine + MCP-key auth reports a real role.
+  const [role, setRole] = useState<"admin" | "operator" | "viewer">("admin");
+
+  const openSettings = useCallback((tab: SettingsTab = "general") => {
+    setInitialSettingsTab(tab);
+    setShowSettingsModal(true);
+  }, []);
   const statusWs = useStatusWebSocket();
 
   // Check master password / keys status on mount
@@ -70,6 +77,9 @@ export default function App(): JSX.Element
     listAiInterfaces()
       .then((resp) => setHasAiProvider(resp.ok && resp.api_index >= 0 && resp.interfaces.length > 0))
       .catch(() => setHasAiProvider(false));
+    whoami().then((resp) => {
+      if (resp?.ok && resp.role) setRole(resp.role);
+    });
   }, []);
 
   const onSettingsChange = useCallback((newSettings: EditorSettings) => {
@@ -93,14 +103,17 @@ export default function App(): JSX.Element
         return;
       }
     }
-    if (route === "ai-manager" && nextRoute !== "ai-manager")
-    {
-      listAiInterfaces()
-        .then((resp) => setHasAiProvider(resp.ok && resp.api_index >= 0 && resp.interfaces.length > 0))
-        .catch(() => {});
-    }
     setRoute(nextRoute);
   }, [route, confirmLoseChanges]);
+
+  // Re-check AI provider availability whenever the Settings modal closes —
+  // the user may have added or removed an interface on the AI Interfaces tab.
+  useEffect(() => {
+    if (showSettingsModal) return;
+    listAiInterfaces()
+      .then((resp) => setHasAiProvider(resp.ok && resp.api_index >= 0 && resp.interfaces.length > 0))
+      .catch(() => {});
+  }, [showSettingsModal]);
 
   useEffect(() => {
     if (!editorDirty)
@@ -183,21 +196,6 @@ export default function App(): JSX.Element
       return <AssistantView />;
     }
 
-    if (route === "ai-manager")
-    {
-      return <AiManagerView appMasterPassword={masterPassword} onDirtyStateChange={setAiManagerDirty} />;
-    }
-
-    if (route === "settings")
-    {
-      return <ProvidersSettingsView appMasterPassword={masterPassword} onDirtyStateChange={setKeysDirty} />;
-    }
-
-    if (route === "connections")
-    {
-      return <ConnectionsView appMasterPassword={masterPassword} onDirtyStateChange={setConnectionsDirty} />;
-    }
-
     return (
       <WorkflowListView
         refreshToken={workflowListRefreshToken}
@@ -206,7 +204,7 @@ export default function App(): JSX.Element
         onCreateFromTemplate={onCreateFromTemplate}
       />
     );
-  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, navigate, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate, settings.hideTierDWarnings, masterPassword, connectionsDirty]);
+  }, [route, selectedWorkflow, initialJcwf, onWorkflowCreated, onWorkflowPersisted, workflowListRefreshToken, onOpenWorkflow, onCreateNew, onCreateFromTemplate, settings.hideTierDWarnings]);
 
   return (
     <div className="appShell">
@@ -214,11 +212,15 @@ export default function App(): JSX.Element
         <button
           className="btn settingsBtn"
           type="button"
-          onClick={() => setShowSettingsModal(true)}
-          title="Settings"
+          onClick={() => openSettings("general")}
+          title={
+            aiManagerDirty || keysDirty || connectionsDirty
+              ? "Settings (unsaved changes)"
+              : "Settings"
+          }
           style={{ marginRight: 12, fontSize: 18, padding: "4px 10px" }}
         >
-          ⚙
+          {aiManagerDirty || keysDirty || connectionsDirty ? "⚙*" : "⚙"}
         </button>
 
         <div className="brand">
@@ -248,35 +250,11 @@ export default function App(): JSX.Element
           </button>
 
           <button
-            className={`btn ${route === "ai-manager" ? "btnActive" : ""}`}
-            onClick={() => { navigate("ai-manager"); }}
-            type="button"
-          >
-            AI Manager{aiManagerDirty ? "*" : ""}
-          </button>
-
-          <button
-            className={`btn ${route === "settings" ? "btnActive" : ""}`}
-            onClick={() => { navigate("settings"); }}
-            type="button"
-          >
-            Keys{keysDirty ? "*" : ""}
-          </button>
-
-          <button
-            className={`btn ${route === "connections" ? "btnActive" : ""}`}
-            onClick={() => { navigate("connections"); }}
-            type="button"
-          >
-            Connections{connectionsDirty ? "*" : ""}
-          </button>
-
-          <button
             className={`btn ${route === "assistant" ? "btnActive" : ""}`}
             onClick={() => { navigate("assistant"); }}
             type="button"
             disabled={!hasAiProvider && route !== "assistant"}
-            title={!hasAiProvider && route !== "assistant" ? "No AI provider configured. Add one in AI Manager." : undefined}
+            title={!hasAiProvider && route !== "assistant" ? "No AI provider configured. Open Settings > AI Interfaces." : undefined}
           >
             Assistant
           </button>
@@ -306,6 +284,12 @@ export default function App(): JSX.Element
           settings={settings}
           onSettingsChange={onSettingsChange}
           onClose={() => setShowSettingsModal(false)}
+          initialTab={initialSettingsTab}
+          masterPassword={masterPassword}
+          role={role}
+          onAiManagerDirty={setAiManagerDirty}
+          onKeysDirty={setKeysDirty}
+          onConnectionsDirty={setConnectionsDirty}
         />
       )}
 

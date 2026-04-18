@@ -418,3 +418,61 @@ Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was ca
 - [x] ~~`operator`+: run cancel/pause/resume/stop, application log~~ ✅
 - [x] ~~`viewer`+: workflow list, workflow detail, run monitoring~~ ✅
 - [x] ~~`insufficient_role` → 403 error response~~ ✅
+
+## ~~MCP API keys + dashboard sessions + legacy admin-token rip-out~~ ✅
+
+Per the "Adhoc Workflow Submission and MCP plan.md" Phase 1. Auth now has exactly three paths (MCP key / session cookie / gateway header); no legacy fallback.
+
+- [x] ~~`SecureString` RAII buffer (`mlock()` / `explicit_bzero()`) replaces `std::string m_CachedMasterPassword` in `KeyManager`~~ ✅ `engine/keys/secureString.{h,cpp}`
+- [x] ~~`McpKeyManager` encrypted store (`mcp_keys.json.enc`, AES-256-GCM + PBKDF2, same KeyEncryption format as keys.json.enc)~~ ✅ `application/web/mcpKeyManager.{h,cpp}`
+- [x] ~~Enrollment-token provisioning: `POST /api/auth/mcp-keys/enroll` (admin) + `POST /api/auth/mcp-keys/activate` (user, no auth required — enrollment token *is* the auth)~~ ✅
+- [x] ~~Self-renewal: `POST /api/auth/mcp-keys/self-renew` — user-driven, old key enters 24h grace period~~ ✅
+- [x] ~~Key CRUD: `GET /api/auth/mcp-keys`, `PUT`, `DELETE` (admin-only)~~ ✅
+- [x] ~~`WebSessionManager` server-side sessions — 256-bit random id, HttpOnly + SameSite=Strict cookie, 8h sliding timeout~~ ✅ `application/web/webSessionManager.{h,cpp}`
+- [x] ~~`POST /api/auth/login` + `POST /api/auth/logout` routes; also supports gateway-header login~~ ✅
+- [x] ~~`Authenticate()` path ordering: MCP key → session cookie → gateway header → reject (no anonymous admin)~~ ✅
+- [x] ~~WebSocket upgrade auth moved to Crow's `.onaccept` handshake; no in-band `type:"auth"` message~~ ✅
+- [x] ~~Removed `m_AdminToken`, `m_TokenIssuedAt`, `GenerateAndPersistApiToken`, `engine_api_token.txt` handling, `FormatIssuedAt`/`ParseIssuedAt`, `m_AuthenticatedClients`~~ ✅
+- [x] ~~Config: `mcp_keys_file`, `session_timeout_hours` fields~~ ✅
+- [x] ~~Status endpoint: `keys_unlocked`, `mcp_keys_loaded`~~ ✅
+- [x] ~~First-run admin enrollment auto-created and logged to stderr when `mcp_keys.json.enc` is empty~~ ✅
+- [x] ~~Frontend: LoginDialog (MCP-key only), session-aware routing via `whoami`, logout via `/api/auth/logout`, StatusBar shows user + role pill, MCP Keys admin tab with enrollment dialog~~ ✅
+
+## ~~MCP configure-plane tools~~ ✅
+
+- [x] ~~`mcp/src/j9tClient.ts`: `put()`, `delete()`, `getText()`~~ ✅
+- [x] ~~`mcp/src/tools.ts`: `whoami`, `get_run_logs`, `validate_workflow`, `upload_workflow`, `manage_connections`, `manage_keys`, `run_adhoc_workflow`~~ ✅
+
+## ~~Adhoc workflow submission~~ ✅
+
+Per the "Adhoc Workflow Submission and MCP plan.md" Phase 3.
+
+- [x] ~~Config: `max_ai_calls_per_jcwf` (0 = no cap); bumped `max inflight ai calls` default 100→1000, clamp widened to [1, 10000]~~ ✅ `engine/json/configParser.{h,cpp}`, `configChecker.cpp`
+- [x] ~~`AdhocWorkflowManager` — staging, per-user disk quota via `McpKeyManager::RecordDiskUsage`, 60s reaper thread, `meta.json` attribution, restart-safe folder naming `<ts>_<counter>_del-<ts>`~~ ✅ `application/workflow/adhocWorkflowManager.{h,cpp}`
+- [x] ~~Per-run AI call cap enforced in `WorkflowRuntimeManager` dispatch loop (`ActiveRun::m_AiCallsDispatched`)~~ ✅
+- [x] ~~`WorkflowRuntimeManager::SetRunTerminalObserver` hook fires inline `on_completion` cleanup~~ ✅
+- [x] ~~`POST /api/workflows/run-adhoc` REST endpoint — MCP key + adhoc_enabled + role≥operator + quota check + cleanup policy validation~~ ✅
+- [x] ~~Dashboard `LastRunsBar` with rolling last-3 runs + adhoc pill + relative time~~ ✅
+
+## ~~Adhoc — known follow-ups~~ ✅
+
+- [x] ~~Enforce "user's `default_cleanup_policy` is the maximum TTL" ceiling~~ — `HandleAdhocRunPost` compares the submitted policy's rank against the MCP key's `default_cleanup_policy`; longer TTLs rejected with 403 `policy_exceeds_ceiling`.
+- [x] ~~Server-side 2-second minimum visibility for sub-second adhoc runs (plan §6)~~ — `WorkflowRuntimeManager::OnUpdate` holds completed runs in `m_ActiveRuns` until 2 s elapsed since `m_StartedAtSteady`, so fast runs always reach at least one snapshot broadcast.
+- [x] ~~Explicit pre-stage script-existence check (plan §2)~~ — `HandleAdhocRunPost` walks `tasks`, extracts `params.command` (shell) and `params.module` (python), and rejects with 400 `missing_scripts` if any referenced file is absent under `scripts/`.
+
+## UX — sign-in onboarding ✅
+
+- [x] ~~Auto-switch to activation dialog when user pastes an `enroll_` token into sign-in~~ — `AdminLoginDialog` detects the prefix on change, opens `ActivationDialog` with the token prefilled. Zero extra clicks, no "invalid key" error flash.
+
+## ~~Adhoc `ai_call` dispatch — FileWatcher dynamic watch set~~ ✅ (Option A)
+
+Fixed the regression where adhoc `ai_call` tasks hung indefinitely in `waiting_external`. Root cause: the `FileWatcher` only observed the single top-level `queue/` folder from `config.json`, so queue-binding files in `_adhoc/<user>/<run>/queue/<task>/` were invisible — no `SessionManager` was ever created, no HTTP dispatch.
+
+- [x] ~~`FileWatcher::AddPath` / `RemovePath`~~ — thread-safe dynamic watch set. Single watch thread, snapshot roots per tick, prune tracked-file entries under a removed root without firing spurious `FileRemovedEvent`s.
+- [x] ~~`AdhocWorkflowManager` integration~~ — `Stage()` adds the run's `queue/` path; `OnRunCompleted()` (on_completion) and `Reap()` remove the path before `remove_all`; `Init()` rehydrates pre-existing run queues at startup.
+- [x] ~~`JarvisAgent::GetQueueFileWatcher()` getter~~ — `WebServer::SetWorkflowRegistry` threads the pointer into the `AdhocWorkflowManager` constructor.
+- [x] ~~Integration test~~ — `test_auth_mcp.py::test_adhoc_aicall_roundtrip` submits an adhoc ai_call, polls to `succeeded`, asserts `session_managers_total >= 1` and that a `*.output.txt` appears in the run folder. Gated on `--with-ai` so clean installs without a provider still pass. 104/104 tests with the flag.
+- [x] ~~Spec clarification~~ — `file_outputs` on `ai_call` is allowed. Pattern A (`outputs` slot for zero-copy downstream refs) and Pattern B (`file_outputs` → external destination, e.g. for adhoc agents writing to external projects) are both valid. The narrow forbidden case (destination inside own queue folder with a requirement-firing filename) stays warned. `doc/JC_Workflow_Specification.md` §3.3.6.3 + `doc/jcwf_generation_guide.md` updated.
+- [x] ~~Validator warnings~~ — `file_output_outside_working_tree` (Info; portability note, external-project agent use is supported) and `file_output_triggers_extra_ai_query` (Warning; real bug — destination inside own queue folder).
+
+Post-1.0: Option E (`JarvisAgent TODO List.md` §5c) — remove the file-watcher round-trip for runtime-initiated `ai_call` tasks entirely by having `AiCallTaskExecutor` call `AiRequestPool::Submit` directly.

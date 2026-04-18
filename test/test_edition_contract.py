@@ -5,7 +5,7 @@ Edition Contract Tests — verifies the Engine/Studio route split and security f
 Tests cover:
   - Edition detection and capability flags
   - Route availability per edition (Engine vs Studio)
-  - Bearer token authentication (Engine)
+  - MCP API key authentication (Engine)
   - Security response headers (CSP, X-Frame-Options, Referrer-Policy, etc.)
   - Security audit log endpoint (GET /api/log/security)
   - Auth lockout response format, RBAC, TLS status field (Engine)
@@ -15,12 +15,15 @@ Usage:
     python3 test/test_edition_contract.py --edition engine  # assert Engine
     python3 test/test_edition_contract.py --edition studio  # assert Studio
     python3 test/test_edition_contract.py --base-url http://host:port
+    python3 test/test_edition_contract.py --token mcp_...   # MCP admin key
 
-The script assumes JarvisAgent is already running.
+The script assumes JarvisAgent is already running. For Engine edition, an admin
+MCP API key is required (--token or J9T_TOKEN env var).
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -67,6 +70,7 @@ class TestRunner:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.verify_ssl = not base_url.startswith("https://localhost")
+        self.edition = None  # set by main() once /api/status has been polled
         self.passed = 0
         self.failed = 0
         self.skipped = 0
@@ -232,8 +236,12 @@ def test_common(t, status_data):
     t.assert_status("get", "/api/log", 200)
     t.assert_status("get", "/", 200, label="GET / (dashboard, public)")
 
-    # Main WebSocket
-    t.assert_ws_connectable("/ws", True, "WS /ws (main)")
+    # /ws upgrade in Engine requires a session cookie or bearer token on the upgrade
+    # request (per the MCP auth plan — no more in-band "type:auth" first message).
+    # The test helper doesn't set auth headers on the upgrade, so Engine refuses.
+    # Studio has no auth on /ws, so it stays connectable.
+    is_engine = t.edition == "engine"
+    t.assert_ws_connectable("/ws", not is_engine, "WS /ws (main)")
 
 
 # ---------------------------------------------------------------------------
@@ -273,10 +281,14 @@ def test_engine(t, status_data):
     # Versioning → 404
     t.assert_status("get", "/api/workflows/__test__/versions", 404)
 
-    # Settings API → 404
+    # Settings API → 404 in Engine (capabilities.settings_api: false). Exception:
+    # /api/settings/keys/{status,unlock} are shared across editions because both
+    # editions need to unlock the encrypted key stores (keys + mcp_keys) after a
+    # restart. Those routes live in RegisterCommonRoutes().
     t.assert_status("get", "/api/settings/config", 404)
     t.assert_status("get", "/api/settings/ai-interfaces", 404)
-    t.assert_status("get", "/api/settings/keys/status", 404)
+    t.assert_status("get", "/api/settings/keys/status", 200,
+                    label="/api/settings/keys/status (shared, public)")
     t.assert_status("get", "/api/settings/providers", 404)
 
     # Script/file check → 404
@@ -590,28 +602,15 @@ def main():
     parser.add_argument("--base-url", default="http://localhost:8080",
                         help="JarvisAgent base URL")
     parser.add_argument("--token", default=None,
-                        help="Admin API token for Engine auth (default: read from config.json)")
+                        help="MCP admin API key for Engine auth (default: J9T_TOKEN env var)")
     args = parser.parse_args()
 
-    # Auto-load token: try engine_api_token.txt first, then config.json fallback.
-    token = args.token
-    if not token:
-        token_file = SCRIPT_DIR.parent / "engine_api_token.txt"
-        if token_file.exists():
-            try:
-                with open(token_file) as f:
-                    token = f.readline().strip()
-            except Exception:
-                pass
-    if not token:
-        config_path = SCRIPT_DIR.parent / "config.json"
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    cfg = json.load(f)
-                token = cfg.get("engine_api_token")
-            except Exception:
-                pass
+    # MCP admin key — passed via --token or J9T_TOKEN env var (same convention as the
+    # MCP sidecar). There is no file-based token — ripped out alongside the legacy
+    # admin bearer-token system.
+    token = args.token or os.environ.get("J9T_TOKEN") or ""
+    if token and not token.startswith("mcp_"):
+        warn(f"Provided token does not start with 'mcp_' — Engine auth will reject it")
 
     t = TestRunner(args.base_url, token=token)
 
@@ -639,6 +638,7 @@ def main():
         sys.exit(1)
 
     edition = args.edition or detected_edition
+    t.edition = edition
 
     # Run tests
     test_common(t, status_data)

@@ -11,20 +11,27 @@ All JSON endpoints return `application/json`. Errors follow the shape:
 
 JarvisAgent ships in two editions: **Engine** (lean production server) and **Studio** (full developer IDE). Each endpoint section is annotated with its edition availability. Studio-only endpoints return 404 in Engine mode.
 
-### Authentication (Engine edition)
+### Authentication
 
-Engine mode protects all endpoints except health checks and static assets with Bearer token authentication. Studio mode has no authentication (developer workstation).
+j9t accepts exactly three auth mechanisms; there is no legacy bearer-token fallback:
 
-| Tier | Endpoints | Engine Auth | Studio Auth |
-|------|-----------|-------------|-------------|
-| Public | `GET /api/status`, `POST /api/mcp/heartbeat`, `GET /`, `/dash-assets/*` | None | None |
+1. **`Authorization: Bearer mcp_...`** — MCP API key validated against the encrypted `mcp_keys.json.enc` store. Carries per-user identity, role, and adhoc-submission flag. Used by MCP sidecars, automation, and the browser login flow.
+2. **Session cookie** (`session=...`, HttpOnly + SameSite=Strict + `Secure` when TLS is on) — set by `POST /api/auth/login` after the user submitted a valid MCP key. 256-bit random, server-side only, 8-hour sliding timeout. Used by the dashboard browser UI.
+3. **Gateway-injected identity headers** (`X-Forwarded-User` + `X-Forwarded-Role`) — trusted when `TrustedProxyHeader` / `TrustedRoleHeader` are configured. For deployments behind an OIDC/SAML API gateway.
+
+| Tier | Endpoints | Engine | Studio |
+|------|-----------|--------|--------|
+| Public | `GET /api/status`, `POST /api/mcp/heartbeat`, `GET /`, `/dash-assets/*` | No auth | No auth |
+| Auth bootstrap | `POST /api/auth/mcp-keys/activate`, `POST /api/auth/login` | No auth | No auth |
 | Webhook | `POST /api/webhook/<id>` | HMAC-SHA256 (required) | HMAC-SHA256 (optional) |
-| Admin | All other endpoints | `Authorization: Bearer <token>` | None |
-| WebSocket | `WS /ws` | Token-as-first-message | None |
+| Programmatic / admin | All other endpoints | MCP key / session / gateway | Same for `mcp_` tokens; browser UI open on localhost |
+| WebSocket | `WS /ws` | Session cookie validated at `.onaccept` handshake | No auth (localhost browser) |
 
-On first Engine start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600`), and logged to stdout.
+**First-run bootstrap:** on Engine's first start with an empty key store, j9t prints an admin enrollment token to stderr (60-minute TTL). Activate it with `POST /api/auth/mcp-keys/activate` to receive your MCP admin key. Subsequent keys are created via `POST /api/auth/mcp-keys/enroll` from an admin session or MCP admin key.
 
-Unauthenticated admin requests return `401 Unauthorized` with `WWW-Authenticate: Bearer` header. Wrong tokens return `403 Forbidden`. Rate-limited requests return `429 Too Many Requests` with `Retry-After` header.
+**Role hierarchy:** `admin > operator > viewer`. Routes enforce minimum required role — a viewer attempting admin-only endpoints receives HTTP 403 `insufficient_role`.
+
+**Error responses:** unauthenticated requests return `401 Unauthorized` (`WWW-Authenticate: Bearer`); invalid or expired keys return `403 Forbidden` with `"error":"forbidden"` / `"token_expired"` / `"key_disabled"`; rate-limited requests return `429 Too Many Requests` with `Retry-After`.
 
 ---
 
@@ -221,7 +228,53 @@ Each finding has: `code`, `message`, `path` (JSON pointer), `taskId`, `tier`.
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/api/scripts` | List the script catalog (metadata parsed from `@jarvis-script` headers). |
 | GET | `/api/scripts/check?path=<scriptPath>` | Check if a script exists and is executable. |
+
+### GET /api/scripts
+
+Returns the catalog of scripts under `scripts/` that adhoc JCWFs and MCP agents can reference. Metadata is parsed from each script's `@jarvis-script` comment block. The server scans on startup; use `?refresh=1` to re-scan after deploying new scripts without a full j9t restart.
+
+Auth: any authenticated role (viewer+).
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `type` | No | Filter by script type: `shell` or `python`. Omit to list everything. |
+| `refresh` | No | When present, triggers an on-demand rescan of `scripts/` before returning. |
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "count": 35,
+  "scripts": [
+    {
+      "path": "scripts/parseOpenSshLog.sh",
+      "type": "shell",
+      "short": "Extract structured OpenSSH attack stats from logs",
+      "description": "Parses OpenSSH auth logs and outputs per-IP attack stats…",
+      "params": ["input_log", "output_json"],
+      "outputs": "Structured JSON stats to output_json",
+      "has_shebang": true,
+      "has_jarvis_marker": true,
+      "executable": true
+    },
+    {
+      "path": "scripts/extractChapters.py",
+      "module": "scripts.extractChapters",
+      "type": "python",
+      "short": "Extract chapter titles from a Markdown file",
+      "params": ["input_file"],
+      "has_jarvis_marker": true,
+      "executable": false
+    }
+  ]
+}
+```
+
+`has_jarvis_marker: false` flags scripts that lack the `@jarvis-script` header — typically helper modules that aren't JCWF entry points. `module` is only populated for python scripts and matches the name a JCWF references via `params.module`.
 
 ### GET /api/scripts/check
 
@@ -317,6 +370,7 @@ Security: only relative paths are accepted. The resolved path must remain inside
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
 | POST | `/api/workflows/<id>/run` | Studio | Start a workflow run. Requires `manual_start: true`. |
+| POST | `/api/workflows/run-adhoc` | Both | Submit a JCWF for one-shot execution (MCP key with `adhoc_enabled`, role ≥ operator). |
 | DELETE | `/api/workflows/<id>/clean` | Studio | Clean a workflow's queue output directory. |
 | GET | `/api/workflow-runs/active` | Both | List all currently active (running/queued) runs. |
 | GET | `/api/workflow-runs/last` | Both | Get the last completed run for each workflow. |
@@ -325,6 +379,8 @@ Security: only relative paths are accepted. The resolved path must remain inside
 | POST | `/api/workflow-runs/<runId>/pause` | Both | Pause an active run (suspend new task dispatch). |
 | POST | `/api/workflow-runs/<runId>/resume` | Both | Resume a paused run. |
 | POST | `/api/workflow-runs/<runId>/stop` | Both | Graceful stop: finish in-flight tasks, no new dispatch. |
+| GET | `/api/workflow-runs/<runId>/files` | Both | List files a run produced (operator reads own; admin any). |
+| GET | `/api/workflow-runs/<runId>/files/<path>` | Both | Download a single artifact file (Range supported, 10 MB cap). |
 
 ### POST /api/workflows/\<id\>/run
 
@@ -344,6 +400,120 @@ When provided, the `context` key-value pairs are seeded into the workflow run's 
 { "ok": true, "enqueued": true, "id": "jarvisCppDocu", "runId": "jarvisCppDocu_1771127438" }
 ```
 Returns 403 if `manual_start` is false. Also broadcasts a `workflow-runs-snapshot` to WebSocket clients.
+
+### POST /api/workflows/run-adhoc
+
+Submit a JCWF canvas for one-shot execution without permanent registration. Requires an MCP API key with `adhoc_enabled=true` and role ≥ `operator`. The payload **cannot** include shell/python scripts — any script referenced by the JCWF must already exist under `scripts/`.
+
+**Request body:**
+```json
+{
+  "jcwf": { "id": "my_one_shot", "version": "1.0", "tasks": { ... }, ... },
+  "context": { "customer": "acme", "region": "us-east-1" },
+  "cleanup_policy": "ttl_72h"
+}
+```
+
+- `jcwf` (required) — complete canvas JSON (same shape as `POST /api/workflows`). The server rewrites the top-level `id` to a unique `_adhoc_<timestamp>_<counter>` so runs don't collide with registered workflows.
+- `context` (optional) — key-value pairs seeded into the run's `ContextMap`.
+- `cleanup_policy` (optional) — one of `on_completion`, `ttl_1h`, `ttl_24h`, `ttl_48h`, `ttl_72h`, `retain`. Defaults to the key's configured `default_cleanup_policy`.
+
+**Response (202):**
+```json
+{
+  "ok": true,
+  "runId": "adhoc_20260417T183022_0001",
+  "workflowId": "_adhoc_20260417T183022_0001",
+  "cleanup_policy": "ttl_72h",
+  "folder_path": ".../_adhoc/20260417T183022_0001_del-20260420T183022"
+}
+```
+
+**Error responses:**
+- `400 malformed_body` / `empty_jcwf` / `invalid_cleanup_policy` — bad submission payload.
+- `400 missing_scripts` — a shell `params.command` or python `params.module` referenced by the JCWF does not exist under `scripts/`. The response `"missing"` array lists the offending references (for python it includes the expected `scripts/<mod>.py` path). Scripts cannot be submitted inline — they must be deployed by an admin.
+- `403 adhoc_not_enabled` — the MCP key has `adhoc_enabled=false`; ask your admin.
+- `403 insufficient_role` — your role is `viewer`.
+- `403 mcp_key_required` — session cookie or gateway header is not sufficient; adhoc needs an MCP key.
+- `403 policy_exceeds_ceiling` — the requested `cleanup_policy` is longer than the key's `default_cleanup_policy` (admin-configured maximum). Response includes `"ceiling"` with the maximum-allowed policy.
+- `413 quota_exceeded` — cumulative adhoc disk usage for your user would exceed `disk_quota_mb`.
+- `503 adhoc_unavailable` — WorkflowRegistry not yet attached (server startup race — retry).
+
+The run dispatches through the standard `WorkflowRuntimeManager`. Monitor via `GET /api/workflow-runs/<runId>`. AI calls are capped per run by `max_ai_calls_per_jcwf` in `config.json` (0 = unlimited).
+
+**Folder layout:** adhoc runs are staged under `_adhoc/<user_slug>/<timestamp>_<counter>_del-<delete-at>/`. `user_slug` is derived from the MCP key's `user` field (`[A-Za-z0-9._@-]`, other characters collapsed to `_`, capped at 64 bytes) so authorisation for artifact retrieval can be enforced by filesystem path prefix as well as in the handler.
+
+**`ai_call` tasks.** Set each `ai_call` task's `working_directory` to a queue-relative path — e.g. `"../../queue/<task_id>"`. This is resolved relative to the run's workflow base directory (`_adhoc/<user>/<run>/workflows/_adhoc_.../`), so queue-binding files land in `_adhoc/<user>/<run>/queue/<task_id>/`. The runtime registers the adhoc run's queue folder with the file watcher at stage time, so these files trigger the normal AI dispatch pipeline. See `doc/JC_Workflow_Specification.md` §3.3.6 for the queue-binding format and §3.3.6.3 for `file_outputs` semantics on `ai_call` (Pattern A: `outputs` slot for downstream JCWF wiring; Pattern B: `file_outputs` with a destination path for terminal delivery).
+
+### GET /api/workflow-runs/\<runId\>/files
+
+List every file a workflow run produced. Returns both retrieval modes (local filesystem path for same-host agents; download URL for remote agents) plus retention so the caller knows how long the artefacts will live.
+
+Authorization: operator can read own runs; admin can read any run (cross-user reads are audit-logged). Viewer → 403.
+
+**Query parameters:**
+- `prefix` (optional) — narrow the listing to entries whose path starts with this value (after lexical normalisation; `..` rejected).
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "runId": "adhoc_20260418T174752_0006",
+  "owner": "alice@company.com",
+  "owner_slug": "alice@company.com",
+  "terminal": true,
+  "retention": {
+    "policy": "ttl_1h",
+    "delete_at": "2026-04-18T18:47:52Z",
+    "seconds_remaining": 2931
+  },
+  "files": [
+    {
+      "path": "workflows/_adhoc_.../attack_stats.json",
+      "size_bytes": 33307,
+      "modified_at": "2026-04-18T17:47:54Z",
+      "task_id": "parse",
+      "content_type": "application/json",
+      "local_path": "/home/.../_adhoc/alice@.../workflows/.../attack_stats.json",
+      "download_url": "/api/workflow-runs/adhoc_.../files/workflows/.../attack_stats.json"
+    }
+  ]
+}
+```
+
+**Error responses:**
+- `400 invalid_prefix` — prefix contained `..`.
+- `403 insufficient_role` — caller is `viewer`.
+- `403 not_owner` — run belongs to another user and the caller is not admin.
+- `404 run_not_found` — no such run.
+
+### GET /api/workflow-runs/\<runId\>/files/\<path\>
+
+Stream a single file's bytes. `path` is URL-encoded and resolved lexically relative to the run folder — any escape attempt (`..`, absolute paths, symlinks, directories) is rejected before we touch the filesystem. Range requests are supported; a full-file response is capped at 10 MB to protect the server.
+
+**Response headers (200 / 206):**
+- `Content-Type` — detected from extension; `application/octet-stream` fallback.
+- `Content-Length` — exact byte count served.
+- `X-Content-SHA256` — hex digest of the full file (full-file responses only; Range responses omit it — use the listing endpoint for the canonical hash).
+- `X-Run-Id`, `X-Run-Owner` — echoed back for correlation.
+- `X-Retention-Delete-At` — compact ISO from the folder name, so streaming clients know how long the URL stays valid.
+- `Content-Range` — when the request carried a `Range` header.
+- `Content-Disposition` — `inline` by default; pass `?download=1` to force `attachment`.
+- `Accept-Ranges: bytes` — always.
+
+**Error responses:**
+- `400 path_escape` — resolved path escapes the run folder (even if the landing point is accidentally inside).
+- `400 absolute_path_rejected` — path starts with `/`.
+- `400 symlink_rejected` — target is a symlink. Never followed, regardless of where it points (closes a TOCTOU class).
+- `400 is_directory` — use the listing endpoint instead.
+- `400 not_regular_file` — target is a FIFO/socket/device.
+- `400 invalid_path` / `missing_path` — malformed input.
+- `403 reserved_file` — `meta.json` and `manifest.json` are internal bookkeeping; not served through this endpoint.
+- `403 insufficient_role` / `403 not_owner` — same rules as the listing endpoint.
+- `404 file_not_found` / `404 run_not_found`.
+- `413 file_too_large` — file exceeds the 10 MB single-response cap. Response includes `X-Suggested-Range: bytes=0-10485759`.
+- `413 range_too_large` — explicit Range request exceeds the cap.
+- `416` — Range header is syntactically valid but outside the file's byte count. Response carries `Content-Range: bytes */<size>`.
 
 ### DELETE /api/workflows/\<id\>/clean
 **Response (200):**
@@ -592,12 +762,12 @@ Returns 400 if a required field is missing or malformed. Validation errors (e.g.
 
 ---
 
-## Settings — Key Management — Studio only
+## Settings — Key Management — Both editions
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/settings/keys/status` | Check whether API keys are loaded. |
-| POST | `/api/settings/keys/unlock` | Provide the master password to decrypt stored keys. |
+| GET | `/api/settings/keys/status` | Check whether the encrypted key stores are loaded. |
+| POST | `/api/settings/keys/unlock` | Provide the master password; unlocks both `keys.json.enc` and `mcp_keys.json.enc`. |
 
 ### GET /api/settings/keys/status
 **Response (200):**
@@ -612,9 +782,71 @@ Returns 400 if a required field is missing or malformed. Validation errors (e.g.
 ```
 **Response (200):**
 ```json
-{ "ok": true, "status": "ok", "message": "Keys unlocked successfully." }
+{ "ok": true, "status": "ok", "message": "Keys unlocked successfully.", "mcp_keys_loaded": true }
 ```
-Returns 401 on wrong password.
+The same master password decrypts `keys.json.enc` (AI provider credentials) and `mcp_keys.json.enc` (MCP API keys). Returns 401 on wrong password.
+
+---
+
+## Auth — MCP keys + sessions — Both editions
+
+MCP API keys and dashboard sessions share the auth plane. See [Authentication](#authentication) for the three-path model.
+
+| Method | Path | Min role | Description |
+|--------|------|----------|-------------|
+| GET | `/api/auth/whoami` | any auth | Identity + role for the current request |
+| POST | `/api/auth/login` | public (validates MCP key or gateway header) | Exchange an MCP key for a session cookie |
+| POST | `/api/auth/logout` | session | Destroy the session + clear cookie |
+| GET | `/api/auth/mcp-keys` | admin | List all MCP keys (hashes only, no raw keys) |
+| POST | `/api/auth/mcp-keys/enroll` | admin | Create a single-use enrollment token |
+| POST | `/api/auth/mcp-keys/activate` | public (enrollment token *is* the auth) | Exchange an enrollment token for a real MCP key |
+| POST | `/api/auth/mcp-keys/self-renew` | current MCP key | Generate a fresh key inheriting all metadata; old key enters 24h grace |
+| PUT | `/api/auth/mcp-keys/<key_id>` | admin | Update role / adhoc flag / quota / enabled / description / expires_at |
+| DELETE | `/api/auth/mcp-keys/<key_id>` | admin | Revoke a key immediately |
+
+### POST /api/auth/login
+**Request body:** `{ "api_key": "mcp_..." }`
+**Response (200):** `{ "ok": true, "user": "alice@example.com", "role": "operator" }`
+Also sets a `session` cookie (`HttpOnly; SameSite=Strict; Path=/; Max-Age=<session_timeout_hours*3600>`; `Secure` when TLS is enabled). Gateway deployments bypass the body and rely on `X-Forwarded-User` / `X-Forwarded-Role` headers.
+
+### POST /api/auth/logout
+No body required. Destroys the server-side session and returns a cookie with `Max-Age=0`.
+
+### GET /api/auth/whoami
+**Response (200):** `{ "ok": true, "user": "...", "role": "admin|operator|viewer" }`. Returns 401 when no valid auth is present.
+
+### POST /api/auth/mcp-keys/enroll
+**Request body:**
+```json
+{
+  "user": "alice@example.com",
+  "role": "operator",
+  "adhoc_enabled": true,
+  "disk_quota_mb": 1024,
+  "default_cleanup_policy": "ttl_72h",
+  "description": "Alice's Claude Code key",
+  "key_expiry_days": 90,
+  "enrollment_ttl_minutes": 30
+}
+```
+**Response (201):** `{ "ok": true, "enrollment_token": "enroll_...", "expires_in_minutes": 30, "user": "...", "role": "..." }`. The admin shares the enrollment token with the user through a secure channel; the admin never sees the final API key.
+
+### POST /api/auth/mcp-keys/activate
+**Request body:** `{ "enrollment_token": "enroll_..." }`
+**Response (200):** `{ "ok": true, "key_id": "mcp_...", "api_key": "mcp_...", "user": "...", "role": "...", "expires_at": "..." }`. The `api_key` is shown **exactly once** — persist it client-side immediately.
+
+### POST /api/auth/mcp-keys/self-renew
+Caller must authenticate with the still-valid MCP key. **Response (200):** `{ "ok": true, "key_id": "mcp_...", "api_key": "mcp_...", "expires_at": "...", "message": "..." }`. Old key is moved to a 24-hour grace period then disabled.
+
+### GET /api/auth/mcp-keys
+**Response (200):** `{ "ok": true, "keys": [{ "key_id": "...", "user": "...", "role": "...", "adhoc_enabled": false, "disk_quota_mb": 1024, "default_cleanup_policy": "ttl_72h", "created_at": "...", "expires_at": "...", "last_used_at": "...", "enabled": true, "description": "..." }, ...] }`. Raw keys are never exposed.
+
+### PUT /api/auth/mcp-keys/<key_id>
+**Request body:** partial — include any subset of `role`, `adhoc_enabled`, `disk_quota_mb`, `default_cleanup_policy`, `enabled`, `description`, `expires_at`.
+**Response (200):** `{ "ok": true }`.
+
+### DELETE /api/auth/mcp-keys/<key_id>
+**Response (200):** `{ "ok": true }`. All subsequent requests using the revoked key return 403.
 
 ---
 
@@ -660,7 +892,7 @@ Manage AI provider configurations (name, endpoint, API key, model, type).
 ```json
 { "master_password": "my-secret" }
 ```
-Falls back to `JARVIS_MASTER_PASSWORD` environment variable if not provided in body. Verifies password against existing keys file before overwriting. Returns 403 on wrong password.
+If the body omits `master_password`, the server falls back to the password cached in memory from an earlier `POST /api/settings/keys/unlock` call. Verifies the password against the existing encrypted file before overwriting. Returns 403 on wrong password, 400 if no password is cached and the body is empty.
 
 ---
 
@@ -790,17 +1022,20 @@ Triggers the same shutdown sequence as pressing `q` or Ctrl+C: global shutdown s
 
 ## Security considerations — Engine edition
 
-All admin endpoints in Engine mode require **Bearer token authentication** (`Authorization: Bearer <token>`). The token is auto-generated on first run and stored in `engine_api_token.txt` (permissions `0600`).
+All non-public endpoints require authentication via one of the three supported mechanisms (MCP key, session cookie, or gateway header). See the [Authentication](#authentication) section for details.
 
 **Security features:**
+- **MCP API keys:** Per-user credentials (`mcp_` + 64 hex chars) stored only as SHA-256 hashes in the encrypted `mcp_keys.json.enc`. Created via the enrollment flow (`POST /api/auth/mcp-keys/enroll` → `POST /api/auth/mcp-keys/activate`). Each key carries an identity, role, adhoc flag, disk quota, and retention ceiling.
+- **Master password in `mlock`'d memory:** `SecureString` buffer prevents swap-to-disk and zeroes on destruction. Unlocked via `POST /api/settings/keys/unlock` after each restart.
+- **Dashboard sessions:** HttpOnly + SameSite=Strict + `Secure` (when TLS) cookie; 8-hour sliding timeout; invalidated on restart. `POST /api/auth/login` to create, `POST /api/auth/logout` to destroy.
+- **WebSocket auth:** Session cookie validated at the `.onaccept` handshake (Engine). Studio allows browser upgrades without auth.
 - **Rate limiting:** 100 req/min per IP, burst of 20 (token bucket)
 - **Failed auth lockout:** 10 failures in 5 minutes = 15-minute IP lockout (403 + `Retry-After: 900`)
-- **Token expiration:** Tokens older than 90 days are auto-rotated; 7-day expiry warning at startup
-- **Audit logging:** All auth events logged to `log/security.txt` (viewable via `GET /api/log/security`)
+- **Key expiry and self-renewal:** 90-day default; users renew themselves via `POST /api/auth/mcp-keys/self-renew` within the window; admin re-enrollment required after expiry
+- **Audit logging:** All auth events logged to `log/security.txt` with user identity and role (viewable via `GET /api/log/security`)
 - **Built-in TLS:** Optional `TlsCert`/`TlsKey` in config.json serves HTTPS on port 8443
-- **WebSocket auth:** First message must be `{"type":"auth","token":"..."}` (constant-time comparison)
 - **Webhook HMAC:** Per-workflow HMAC-SHA256 signature verification (mandatory in Engine mode)
-- **RBAC (Role-Based Access Control):** Three roles — `admin`, `operator`, `viewer`. In gateway mode (`TrustedProxyHeader`/`TrustedRoleHeader` config), role comes from gateway-injected header. Bearer token grants `admin`. Routes enforce minimum role.
+- **RBAC:** Three roles — `admin`, `operator`, `viewer` — carried on MCP keys, session cookies derived from them, or gateway `X-Forwarded-Role` (default `viewer`). Routes enforce minimum role; violations return 403 `insufficient_role`.
 - **Request body limit:** `MaxRequestBodyMB` config field (default 10 MB). Oversized requests → 413.
 - **Security headers:** CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy on all responses. HSTS when TLS enabled.
 
@@ -808,9 +1043,9 @@ All admin endpoints in Engine mode require **Bearer token authentication** (`Aut
 
 | Minimum role | Endpoints |
 |-------------|-----------|
-| `viewer` | `GET /api/workflows`, `GET /api/workflows/<id>`, `GET /api/workflow-runs/*` |
-| `operator` | `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop`, `GET /api/log` |
-| `admin` | `POST /api/shutdown`, `GET /api/log/security` |
+| `viewer` | `GET /api/workflows`, `GET /api/workflows/<id>`, `GET /api/workflow-runs/*`, `GET /api/auth/whoami`, `GET /api/scripts` |
+| `operator` | `POST /api/workflow-runs/<id>/cancel\|pause\|resume\|stop`, `GET /api/log`, `POST /api/workflows/run-adhoc` (plus `adhoc_enabled` on the key), `GET /api/workflow-runs/<id>/files[/<path>]` (own runs only), `POST /api/auth/mcp-keys/self-renew` |
+| `admin` | `POST /api/shutdown`, `GET /api/log/security`, `GET \| POST \| PUT \| DELETE /api/auth/mcp-keys/*` (except activate/self-renew), AI interface / connections / provider CRUD |
 
 **Data-sensitive endpoints** (protected by auth + RBAC but contain sensitive information when exposed):
 

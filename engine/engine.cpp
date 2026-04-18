@@ -162,27 +162,15 @@ int engine(int argc, char* argv[])
 
         if (std::filesystem::exists(keysFilePathAbsolute))
         {
-            // Try master password from environment variable
-            char const* masterPasswordEnv = std::getenv("JARVIS_MASTER_PASSWORD");
-            if (masterPasswordEnv && std::strlen(masterPasswordEnv) > 0)
-            {
-                keysLoaded = keyManager.Load(keysFilePathAbsolute, masterPasswordEnv);
-                if (!keysLoaded)
-                {
-                    keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::WrongPassword);
-                    LOG_CORE_WARN("KeyManager: failed to decrypt '{}' — wrong password?", keysFilePathAbsolute.string());
-                }
-                else
-                {
-                    keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::Ok);
-                }
-            }
-            else
-            {
-                keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::NoPassword);
-                LOG_CORE_WARN("KeyManager: '{}' exists but JARVIS_MASTER_PASSWORD is not set",
-                              keysFilePathAbsolute.string());
-            }
+            // The master password is supplied at runtime via POST /api/settings/keys/unlock
+            // (see doc/cyber security.md §"Master password after restart"). There is no
+            // environment-variable auto-unlock path — that was removed so the password is
+            // held exclusively in mlock()-protected memory (SecureString) and never leaks
+            // through env vars, process listings, or docker inspect.
+            keyManager.SetKeyLoadStatus(KeyManager::KeyLoadStatus::NoPassword);
+            LOG_CORE_INFO("KeyManager: '{}' present — awaiting master password via "
+                          "POST /api/settings/keys/unlock",
+                          keysFilePathAbsolute.string());
         }
 
         // Try plaintext keys.json (development convenience)
@@ -195,8 +183,13 @@ int engine(int argc, char* argv[])
             }
         }
 
-        // Fall back to OPENAI_API_KEY environment variable (backward compatibility)
-        if (!keysLoaded)
+        // Fall back to OPENAI_API_KEY environment variable (bootstrap convenience).
+        // We only consider this fallback when there is NO encrypted keys file at
+        // all — otherwise the env-var-loaded provider would silently mask the
+        // sealed-store state, and the dashboard's status endpoint would report
+        // "ok" while the MCP key store is still locked (breaking the master-
+        // password prompt flow and leaving every MCP auth request rejected).
+        if (!keysLoaded && !std::filesystem::exists(keysFilePathAbsolute))
         {
             std::string endpoint;
             std::string model;
@@ -217,7 +210,7 @@ int engine(int argc, char* argv[])
             }
         }
 
-        if (!keysLoaded)
+        if (!keysLoaded && keyManager.GetKeyLoadStatus() != KeyManager::KeyLoadStatus::NoPassword)
         {
             LOG_CORE_WARN("KeyManager: no API keys configured — AI tasks will fail at dispatch time");
         }

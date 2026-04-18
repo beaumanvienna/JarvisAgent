@@ -27,6 +27,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "keys/secureString.h"
+
 namespace AIAssistant
 {
     class KeyManager
@@ -134,7 +136,7 @@ namespace AIAssistant
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};
         std::filesystem::path m_KeysFilePath;
-        std::string m_CachedMasterPassword;
+        SecureString m_CachedMasterPassword;
         bool m_Dirty{false};
     };
 } // namespace AIAssistant

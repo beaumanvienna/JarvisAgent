@@ -1,5 +1,7 @@
 # Adhoc Workflow Submission and MCP — Planning Document
 
+> **Status: implemented (2026-04-18).** Phases 1-3 landed the core MCP + adhoc surface in both editions. Phases 4-7 (post-1.0 section 14 below) added per-user folder namespacing, the artifact retrieval download plane (list + single-file with Range + SHA-256), and the script discovery catalog — so MCP agents can now compose → submit → monitor → enumerate outputs → download end-to-end. This file is kept as the design-of-record; the canonical references for current behaviour are `doc/api-endpoints.md`, `doc/cyber security.md`, `doc/architecture.md`, `mcp/README.md`, `application/workflow/doc/todo.md`, and the 100-test suite in `test/test_auth_mcp.py`.
+
 This document explores the two 1.0 Release features from `doc/roadmap.md`: **Adhoc Workflow Submission** and **MCP Configure-Plane Tools**. It examines what capabilities they unlock, what functions they require, security implications, UI updates, and — critically — how MCP authorization must work for enterprise deployment.
 
 ---
@@ -19,7 +21,8 @@ This document explores the two 1.0 Release features from `doc/roadmap.md`: **Adh
 11. [Dashboard Login — Enterprise Mode](#11-dashboard-login--enterprise-mode)
 12. [Implementation Phases](#12-implementation-phases)
 13. [Design Decisions](#13-design-decisions)
-14. [Appendix A — Detailed Development Plan](#appendix-a--detailed-development-plan)
+14. [Artifact Retrieval — Download-Plane (post-1.0 design)](#14-artifact-retrieval--download-plane-post-10-design)
+15. [Appendix A — Detailed Development Plan](#appendix-a--detailed-development-plan)
 
 ---
 
@@ -958,6 +961,206 @@ Everything else requires a valid session cookie or MCP bearer token.
 | **Master password** | Same password for both `keys.json.enc` and `mcp_keys.json.enc`. Admin provides it once after each restart via dashboard or `POST /api/settings/keys/unlock`. `JARVIS_MASTER_PASSWORD` env var removed. j9t does not process MCP-authenticated requests or AI calls until unlocked. `GET /api/status` includes `"keys_unlocked": false`. |
 | **Adhoc JCWF size** | 1 GB. Per-user disk quota is the real safeguard. `MaxRequestBodyMB` (default 10 MB) caps individual HTTP requests. |
 | **Adhoc run visibility** | Visible to all for 1.0, with user identity shown on each run. Per-user run privacy deferred to post-1.0. |
+
+---
+
+## 14. Artifact Retrieval — Download-Plane (post-1.0 design)
+
+### Why we need it
+
+The 1.0 surface gives callers submit (`run_adhoc_workflow`) and status (`get_run_status`) — but no way to pull the bytes a task produced. Closing that gap is the only goal of this section. We aim for fast, secure, and convenient from an agent's perspective. Everything else is out of scope.
+
+### Two retrieval modes, one answer
+
+An agent may live on the same host as j9t (Claude Code on a dev machine) or on a different one (remote deployment). We support both by returning **both** a local path and a download URL in the discovery response. The agent picks.
+
+- **Local path** — `file:///…` absolute path into the run folder. Fast: zero-copy disk read. Requires the agent to share a filesystem with j9t.
+- **Download URL** — `GET /api/workflow-runs/<runId>/files/<path>`. Works anywhere. Goes through the same auth as every other request.
+
+The discovery response includes the run's retention policy and `delete_at` so the agent knows how long the artifacts will be available in either mode — it can race the reaper if it needs to, or pull immediately.
+
+### Folder reorganization — per-user namespace
+
+Today: `_adhoc/<ts>_<counter>_del-<ts>/`
+Proposed: `_adhoc/<user_slug>/<ts>_<counter>_del-<ts>/`
+
+- `<user_slug>` is derived from the MCP key's `user` field: allowed chars `[A-Za-z0-9._@-]`, everything else collapsed to `_`, length ≤ 64. Cross-platform safe.
+- Sanitiser is a pure function, unit-tested.
+- Stored once at stage time in `meta.json`.
+
+Authorization then becomes a filesystem prefix check: `_adhoc/<caller_slug>/` must prefix the requested folder — admin bypasses. Belt-and-braces: even if a bug skips the ownership check in code, the folder layout still prevents cross-tenant reads via path traversal alone.
+
+Legacy top-level folders (from pre-feature builds) are treated as admin-owned on the `Init()` scan.
+
+### Discovery — `GET /api/workflow-runs/<runId>/files`
+
+Lists every regular file in the run folder. Returns both retrieval modes plus retention.
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "runId": "adhoc_20260418T174752_0006",
+  "owner": "alice@company.com",
+  "terminal": true,
+  "retention": {
+    "policy": "ttl_1h",
+    "delete_at": "2026-04-18T18:47:52Z",
+    "seconds_remaining": 2931
+  },
+  "files": [
+    {
+      "path": "workflows/_adhoc_.../attack_stats.json",
+      "size_bytes": 33307,
+      "modified_at": "2026-04-18T17:47:54Z",
+      "task_id": "parse",
+      "content_type": "application/json",
+      "sha256": "9f1a…",
+      "local_path": "/home/beaumanvienna/dev/jarvisAgent/_adhoc/alice@company.com/20260418T174752_0006_del-20260418T184752/workflows/_adhoc_.../attack_stats.json",
+      "download_url": "/api/workflow-runs/adhoc_20260418T174752_0006/files/workflows/_adhoc_.../attack_stats.json"
+    }
+  ]
+}
+```
+
+- `retention.seconds_remaining` is computed at response time — the agent can see "I've got 49 minutes left" without reasoning about TTL strings.
+- `local_path` is always the absolute path (not `file://` URL) so the agent can hand it straight to stdlib `open()`. Included regardless of whether the caller seems local — the agent decides.
+- `terminal: false` means the run is still active and file contents may still change.
+- Query params: `prefix=<subdir>` or `glob=<pattern>` to narrow the listing server-side.
+
+### Download — `GET /api/workflow-runs/<runId>/files/<path>`
+
+Returns the file's bytes. Path is URL-encoded, resolved relative to the run folder, must stay inside it.
+
+- `Content-Type` detected from extension (JSON / CSV / PNG / PDF / text / octet-stream fallback)
+- `Content-Length` exact
+- `X-Content-SHA256` hex digest — agent compares against the manifest
+- `X-Retention-Delete-At` echoes the `delete_at` so streaming clients see it without a second request
+- Supports `Range: bytes=start-end` → 206 Partial Content (large files don't need a 10 MB pipe)
+- Single-response cap 10 MB; above that the response is 413 with a suggested `Range`
+
+### Manifest — machine-readable record
+
+At run completion, `AdhocWorkflowManager::OnRunCompleted()` writes `manifest.json` in the run folder:
+
+```json
+{
+  "runId": "adhoc_20260418T174752_0006",
+  "owner": "alice@company.com",
+  "state": "succeeded",
+  "submitted_at": "2026-04-18T17:47:52Z",
+  "completed_at": "2026-04-18T17:47:54Z",
+  "retention": { "policy": "ttl_1h", "delete_at": "2026-04-18T18:47:52Z" },
+  "files": [
+    {
+      "path": "workflows/_adhoc_.../attack_stats.json",
+      "task_id": "parse",
+      "size_bytes": 33307,
+      "sha256": "9f1a…",
+      "content_type": "application/json"
+    }
+  ]
+}
+```
+
+The listing endpoint reads from the manifest when present — no directory walk, no on-the-fly hashing. Restart-safe. If the run is still active, the endpoint falls back to a live filesystem walk and omits `sha256`.
+
+### Authorization
+
+| Role | Own runs | Others' runs |
+|------|----------|--------------|
+| `viewer` | — (viewers can't submit adhoc) | 403 `insufficient_role` |
+| `operator` | list + download | 403 `not_owner` |
+| `admin` | list + download | list + download |
+
+Sequence per request: `Authenticate()` → extract user + role → resolve `runId` → compare caller's user-slug to the folder's user-slug → allow or 403. Admin cross-user reads are audit-logged at INFO; denials at WARN.
+
+### Edge cases
+
+| Scenario | Behaviour |
+|----------|-----------|
+| `runId` never existed | 404 `run_not_found` |
+| Run folder already reaped | 404 `run_cleaned_up` + `cleaned_at` (in-memory ledger retained 24 h after reaping) |
+| File doesn't exist in run folder | 404 `file_not_found` with the current `files:` summary so the agent can self-recover |
+| `..` path segment escaping the run folder | 400 `path_escape` — always, regardless of the resolved landing point |
+| Absolute path sent by client | 400 `absolute_path_rejected` |
+| Target is a symlink (even one pointing inside) | 400 `symlink_rejected` — no symlink following, closes a TOCTOU class |
+| Target is a FIFO / socket / device | 400 `not_regular_file` |
+| File > 10 MB with no `Range:` | 413 `file_too_large` + `X-Suggested-Range: bytes=0-10485759` |
+| File mid-write (mtime < now - 500 ms and run active) | 409 `still_writing` + `Retry-After: 1` |
+| Zero-byte file | 200 + `Content-Length: 0` + SHA-256 of the empty string |
+| URL-encoded traversal (`.%2E/foo`) | Normalisation happens after URL-decode, so the path-escape check still fires |
+| Reaper deletes folder mid-read | File handler holds the run's mutex while opening the fd. POSIX keeps the fd alive until close; Windows holds the mutex through the read |
+
+### Agent loop — worked example
+
+```
+Agent  →  MCP sidecar              →  j9t
+─────────────────────────────────────────────────────────────────
+1.  run_adhoc_workflow(jcwf)       →  POST /api/workflows/run-adhoc
+2.  get_run_status(runId)           →  state="running" (agent loops)
+3.  get_run_status(runId)           →  state="succeeded"
+4.  list_run_files(runId)           →  {
+                                         retention: { delete_at: "…18:47:52Z", seconds_remaining: 2931 },
+                                         files: [{ path, sha256, local_path, download_url, … }]
+                                       }
+5a. If local:  agent reads local_path directly from disk      (fast path)
+5b. If remote: get_run_file(runId, path)  →  bytes + X-Content-SHA256
+                                         (agent compares against manifest sha256)
+6.  agent processes the file
+```
+
+### MCP tools
+
+```typescript
+server.tool("list_run_files", "Discover outputs of a run (paths, retention, hashes, both local path and download URL)", {
+    runId: z.string(),
+    prefix: z.string().optional(),
+    glob: z.string().optional(),
+}, …);
+
+server.tool("get_run_file", "Download a single artifact (honours the caller's MCP identity; respects Range for large files)", {
+    runId: z.string(),
+    path: z.string(),
+    range_start: z.number().optional(),
+    range_end: z.number().optional(),
+}, …);
+```
+
+### Implementation phases (post-1.0)
+
+> Phases 4-7 landed on **2026-04-18**. Phase 7 (script catalog) was added after 4-6 when we realised agents had no way to discover which scripts are available to reference. Each phase listed here is implemented, tested, and documented.
+
+**Phase 4 — Folder reorg + manifest (backend-only, no new tools):**
+- `SanitizeUserSlug()` pure function + unit tests.
+- `Stage()` writes under `_adhoc/<slug>/`, records owner+slug in `meta.json`.
+- `Init()` scans both layouts; legacy top-level treated as admin-owned.
+- `OnRunCompleted()` writes `manifest.json`; SHA-256 computed off the tick thread.
+- In-memory `runId → owner` map.
+- Extend `test_auth_mcp.py`: new layout, manifest-on-completion, cross-user 403.
+
+**Phase 5 — Listing endpoint + `list_run_files` MCP tool:**
+- `GET /api/workflow-runs/<runId>/files` — reads manifest if present, walks otherwise.
+- Shared `ResolveSafeRunPath()` helper — path escape, symlink rejection, normalisation.
+
+**Phase 6 — Download endpoint + `get_run_file` MCP tool:**
+- `GET /api/workflow-runs/<runId>/files/<path>` with `Range:` support and `X-Content-SHA256`.
+- Edge cases per the table above.
+- MCP sidecar handles binary payloads (base64) vs text pass-through.
+
+**Phase 7 — Script catalog endpoint + `list_scripts` MCP tool (added after 4-6):**
+- `ScriptCatalog` (`application/workflow/scriptCatalog.{h,cpp}`) — scans `scripts/` on startup; on-demand refresh via `?refresh=1`. Parses `@jarvis-script` headers (short / params / description / outputs) into structured metadata.
+- `GET /api/scripts` — viewer+, filters by `?type=shell|python`. Returns the catalog including `has_jarvis_marker` and `executable` flags per entry.
+- `list_scripts` MCP tool — thin wrapper. Agents call this first to discover what's available before composing an adhoc JCWF.
+- Dashboard: Scripts tab in Settings modal with a table view, type filter, and manual Refresh button (calls `?refresh=1`).
+- Metadata backfilled on existing scripts so 29/35 carry the `@jarvis-script` header (the remaining 6 are internal helpers / entry-point facades, correctly excluded from agent-visible discovery).
+
+### Non-goals for this feature
+
+- Write access through the API — read-only, always. Mutation stays with the workflow runtime.
+- Artefact versioning — the manifest records latest state; overwrites aren't tracked.
+- Cross-run search — listing is per-run only.
+- Archive / ZIP download, signed URLs, replication, scanning, encryption-at-rest, streaming stdout — none of these are on the roadmap for this feature. Revisit if a concrete need appears.
 
 ---
 

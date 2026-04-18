@@ -62,7 +62,8 @@ namespace AIAssistant
                                                      std::string const& apiType);
 
             size_t m_MaxThreads{0};
-            size_t m_MaxInflightAiCalls{100};
+            size_t m_MaxInflightAiCalls{1000};
+            size_t m_MaxAiCallsPerJcwf{0};  // 0 = no cap; per-run safety limit
             size_t m_PythonEngines{4};
             std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
@@ -74,6 +75,8 @@ namespace AIAssistant
             size_t m_JcwfBatchSize{10};
             int m_JcwfAiInterfaceIndex{-1}; // -1 = use global default (m_ApiIndex)
             std::string m_KeysFilePath{"keys.json.enc"};
+            std::string m_McpKeysFilePath{"mcp_keys.json.enc"};
+            int m_SessionTimeoutHours{8};
             std::string m_TlsCert;
             std::string m_TlsKey;
             std::string m_TrustedProxyHeader;
@@ -116,8 +119,11 @@ namespace AIAssistant
             TrustedRoleHeader,
             MaxRequestBodyMB,
             MaxInflightAiCalls,
+            MaxAiCallsPerJcwf,
             PythonEngines,
             Port,
+            McpKeysFile,
+            SessionTimeoutHours,
             NumConfigFields
         };
 
@@ -151,8 +157,11 @@ namespace AIAssistant
                 "TrustedRoleHeader",    //
                 "MaxRequestBodyMB",     //
                 "MaxInflightAiCalls",   //
+                "MaxAiCallsPerJcwf",    //
                 "PythonEngines",        //
-                "Port"                  //
+                "Port",                 //
+                "McpKeysFile",          //
+                "SessionTimeoutHours"   //
         };
 
     public:

@@ -110,6 +110,20 @@ Tasks without mutual dependencies run in parallel via the shared thread pool.
 
 See [JC_Workflow_Specification.md](JC_Workflow_Specification.md) for the full format definition and execution model.
 
+### Adhoc submission + artifact retrieval
+
+Beyond registered workflows, external MCP agents can submit one-shot JCWFs via `POST /api/workflows/run-adhoc`. The `AdhocWorkflowManager` (`application/workflow/adhocWorkflowManager.h`) stages each submission into a per-user folder — `_adhoc/<user_slug>/<timestamp>_<counter>_del-<delete-at>/` — with a `meta.json` (owner attribution) and, at completion, a `manifest.json` (file inventory). Scripts referenced by the JCWF must already exist under `scripts/`; the submit handler verifies every `params.command` / `params.module` up front and rejects missing ones with `400 missing_scripts`.
+
+Once a run is staged, its artefacts are discoverable and retrievable through dedicated endpoints:
+
+- `GET /api/workflow-runs/<runId>/files` — lists every regular file in the run folder with path, size, mtime, content-type, plus both a `local_path` (same-host agents) and a `download_url` (remote agents). Retention (`policy`, `delete_at`, `seconds_remaining`) is echoed so callers know how long the artefacts will live.
+- `GET /api/workflow-runs/<runId>/files/<path>` — streams a single file. Supports `Range:` for large files; single-response cap is 10 MB. Full-file responses carry `X-Content-SHA256` for integrity verification.
+- `GET /api/scripts` — the `ScriptCatalog` (`application/workflow/scriptCatalog.h`) scans `scripts/` at startup and parses each script's `@jarvis-script` metadata header (short / params / outputs / description) so agents can discover what's pre-deployed before composing a JCWF.
+
+Authorization: operators can read their own runs; admins can read any run (with an `admin_cross_user_read` audit line). Path traversal (`..`, absolute paths, symlinks) is rejected before the filesystem is touched. A background reaper thread sweeps runs whose `delete-at` has passed; empty user-slug directories are pruned at the same time so the `_adhoc/` root stays tidy.
+
+**`ai_call` dispatch for adhoc runs.** The queue `FileWatcher` supports a dynamic watch set (`AddPath` / `RemovePath`, thread-safe). `AdhocWorkflowManager::Stage()` registers each run's `_adhoc/<user>/<run>/queue/` with the watcher at stage time so queue-binding files (STNG/CNTX/TASK/PROB) materialised by the `ai_call` executor trigger the same categoriser → SessionManager → `CurlMultiDispatcher` pipeline that registered workflows use. `OnRunCompleted` (on-completion policy) and the reaper each call `RemovePath` *before* `remove_all` so the watcher doesn't emit spurious `FileRemovedEvent`s during folder teardown. Per-run queue folders are pruned from the tracked-file map when `RemovePath` fires, keeping the map bounded. Post-1.0 direction: drop the file-watcher round-trip for runtime-initiated `ai_call` tasks entirely in favour of a direct `AiRequestPool::Submit` path (Option E in `JarvisAgent TODO List.md` §5c).
+
 ---
 
 ## Queue File Processing
@@ -171,7 +185,7 @@ Real-time push channel for:
 - log streaming (up to 100k lines, color-coded severity)
 - outputs and errors
 
-Engine mode requires `{"type":"auth","token":"<token>"}` as the first WebSocket message.
+Engine validates the dashboard session cookie at the WebSocket upgrade handshake via Crow's `.onaccept` hook — no in-band auth message is used. Browser clients must have logged in via `POST /api/auth/login` before the upgrade; unauthenticated upgrades are rejected.
 
 ---
 
@@ -195,21 +209,27 @@ See [cloud-integration.md](cloud-integration.md) for the full architecture and p
 
 ---
 
-## Security Architecture (Engine)
+## Security Architecture
 
-Engine edition includes a full security stack. Studio has no auth (developer workstation — localhost only).
+Studio has no browser-UI auth (developer workstation — localhost only); MCP / programmatic access in Studio uses the same MCP API key store as Engine. Engine additionally requires auth for the browser UI via a login cookie.
 
-**Authentication:**
+**Authentication — exactly three paths, no legacy fallback:**
 
-- **Token lifecycle:** auto-generated 256-bit random hex on first Engine start, stored in `engine_api_token.txt` (file permissions `600`), logged to stdout once at startup. Tokens auto-expire after 90 days and auto-rotate.
-- **REST endpoints:** protected via `Authorization: Bearer <token>` header. `CheckAdminAuth()` validates with constant-time comparison. Returns 401 (missing/malformed) or 403 (wrong token).
-- **WebSocket:** token sent as first message `{"type":"auth","token":"..."}`. Unauthenticated connections can only send auth messages.
-- **Webhooks:** HMAC-SHA256 via `X-Webhook-Signature` header. In Engine mode, a webhook secret is mandatory per workflow.
-- **Public endpoints:** `GET /api/status`, `GET /`, `/dash-assets/*` — no auth required (health checks, dashboard SPA shell).
+- **MCP API keys** (`Authorization: Bearer mcp_...`) — per-user credentials stored only as SHA-256 hashes in `mcp_keys.json.enc` (AES-256-GCM + PBKDF2, same master password as `keys.json.enc`). Each key carries identity, role, adhoc flag, disk quota, and retention policy. Raw keys are shown exactly once at activation; comparison uses `CRYPTO_memcmp`.
+- **Dashboard session cookie** — `POST /api/auth/login` validates an MCP key and returns an `HttpOnly + SameSite=Strict` cookie (plus `Secure` when TLS is enabled). Server-side session store, 8-hour sliding timeout, destroyed on restart. `POST /api/auth/logout` tears down both cookie and server state.
+- **Gateway-trusted identity headers** — when `TrustedProxyHeader` / `TrustedRoleHeader` are configured in `config.json`, j9t trusts `X-Forwarded-User` / `X-Forwarded-Role` injected by an upstream API gateway. Role defaults to `viewer` if the header is absent.
 
-**Gateway integration:** when deployed behind an API gateway (Kong, AWS API Gateway, Traefik), `TrustedProxyHeader` and `TrustedRoleHeader` in `config.json` let j9t read the authenticated user identity and role from gateway-injected headers.
+**Provisioning** — admin creates a single-use enrollment token (`POST /api/auth/mcp-keys/enroll`, 30-min TTL), shares it out-of-band; user activates (`POST /api/auth/mcp-keys/activate`) and receives their real key once. Self-renewal (`POST /api/auth/mcp-keys/self-renew`) lets users refresh before the 90-day expiry without admin help; old key enters a 24-hour grace period. On j9t's first run with an empty store, a bootstrap admin enrollment token is logged to stderr.
 
-**RBAC:** three roles — `admin` (full access incl. shutdown, security logs), `operator` (run control, app logs), `viewer` (read-only monitoring). Gateway mode maps roles from headers; bearer token grants admin.
+**REST endpoints:** all non-public routes go through `Authenticate()`, which tries MCP key → session cookie → gateway header in that order. `CheckAdminAuth()` additionally requires `role >= admin`. Non-matching requests return 401 (missing) or 403 (forbidden / `insufficient_role` / `token_expired` / `key_disabled`).
+
+**WebSocket:** upgrade-time validation via Crow's `.onaccept` hook — the same `Authenticate()` logic that guards REST is applied to the upgrade request, so the session cookie (or MCP bearer) must already be valid when the handshake happens. No in-band `type:"auth"` message.
+
+**Webhooks:** HMAC-SHA256 via `X-Webhook-Signature` header. In Engine mode, a webhook secret is mandatory per workflow.
+
+**Public endpoints:** `GET /api/status`, `GET /`, `/dash-assets/*`, `POST /api/auth/mcp-keys/activate` (enrollment token *is* the auth), `POST /api/auth/login` (MCP key *is* the auth).
+
+**RBAC:** three roles — `admin` (full access incl. shutdown, security logs, MCP key CRUD), `operator` (run control, app logs, adhoc submission when `adhoc_enabled`), `viewer` (read-only monitoring). The role is carried on the MCP key itself, on the session cookie derived from it, or on `X-Forwarded-Role`.
 
 **Defense layers:**
 
@@ -245,6 +265,29 @@ The Python engine is embedded via the CPython C API and runs N **sub-interpreter
 - **Operator-friendly** — terminal status line + browser dashboard with live updates.
 - **Idempotent** — files are skipped efficiently when outputs are newer.
 - **Secure by default in Engine** — auth, RBAC, TLS, audit log, HMAC webhooks.
+
+---
+
+## Key Design Decisions
+
+Reference record for why things are the way they are. Reading current code is authoritative for behaviour; this table explains rationale a fresh contributor wouldn't recover from the code alone.
+
+| Decision | Resolution | Rationale |
+|----------|------------|-----------|
+| **MCP key provisioning** | Always manual via single-use enrollment tokens; no auto-generation | Admins make deliberate per-user access decisions. Auto-generated keys would blur the audit trail back to "some bootstrap process". |
+| **Unified credential model** | The same `mcp_`-prefixed key serves the dashboard login *and* MCP programmatic access | Agents act on behalf of a human — one issuance, one revocation, one audit trail. No service-account sprawl. |
+| **Key storage** | SHA-256 hashes only in `mcp_keys.json.enc`, raw key shown to the user exactly once | Admin never sees the real key — containment if the admin account itself is compromised. Mirrors HashiCorp Vault / Auth0 / AWS IAM enrolment patterns. |
+| **Master password handling** | Single master password unlocks both `keys.json.enc` and `mcp_keys.json.enc`; held exclusively in `mlock()`-protected `SecureString`; no `JARVIS_MASTER_PASSWORD` env var | Reduces admin burden (one password) while keeping the secret out of process listings, `docker inspect`, crash dumps, and core files. Unlock is deliberate per-restart so the key material cannot be re-accessed without a human present. |
+| **MCP transport security** | TLS required for SSE; stdio assumed local-only and unencrypted | stdio cannot be intercepted across a network; SSE over HTTP would expose keys on the wire. |
+| **Rate limiting scope** | Per-IP only for 1.0; per-key limits deferred | Simpler implementation and matches the primary DoS vector (automated probing from single sources). Per-key limits can layer on later without breaking the wire protocol. |
+| **Adhoc JCWF size** | Soft cap of 1 GB; per-user disk quota is the real safeguard; `MaxRequestBodyMB` caps individual HTTP requests at 10 MB | JCWF canvases are typically tens of KB — the 10 MB request cap is generous. The 1 GB ceiling accommodates attached binary data if we ever expand that surface. Per-user disk quota is the only actual resource-protection mechanism. |
+| **Adhoc run visibility** | Runs visible to all authenticated users for 1.0, with owner identity shown on each entry; per-user privacy deferred | Operator tier is already a trust boundary — hiding peer activity buys little and complicates debugging. Can tighten post-1.0 if a customer asks. |
+| **Artifact plane (download/list/catalog) is read-only** | No API path mutates run folders after staging | Mutation routes are an attack surface we don't need. Write access is in the workflow runtime only. |
+| **Symlinks never followed on artifact download** | `fs::symlink_status` check, then reject; never `fs::exists` alone | Closes a TOCTOU class where a malicious task could swap a regular file for a symlink pointing outside the run folder between listing and read. |
+| **Per-user folder namespace for adhoc** | `_adhoc/<user_slug>/<run>/` | Authorisation is enforced twice — handler ownership check *and* filesystem path prefix. Defence in depth. |
+| **Scripts cannot be submitted via API** | Adhoc submit rejects JCWFs whose `params.command` / `params.module` doesn't already exist under `scripts/` | Hard boundary against code injection. Scripts are the only arbitrary-code path in a workflow — gating them to admin-deployed content keeps adhoc submission a safe capability. |
+| **FileWatcher dynamic watch set for adhoc runs** | `AddPath` / `RemovePath` on a single watcher instance; adhoc runs register their per-run queue folder at stage time and unregister on teardown | Reuses the one code path for AI dispatch (registered runs drop into `queue/`, adhoc runs drop into `_adhoc/<user>/<run>/queue/`, both feed `FileAddedEvent → categoriser → SessionManager → HTTP`). Staying with the file-watcher-mediated dispatch for 1.0 avoids rewriting the AI completion wakeup path. Post-1.0: runtime-driven dispatch removes the round-trip entirely. |
+| **`file_outputs` on `ai_call` is allowed, with a portability note** | Validator emits Info for outside-tree destinations, Warning for destinations inside the task's own queue folder with requirement-firing filenames | Supports external-project agent workflows (Studio or Engine-without-Docker writing to `~/dev/<project>/...`) while still flagging the real bug (duplicate AI query when a file_output lands inside its own queue folder as e.g. `summary.txt`). |
 
 ---
 

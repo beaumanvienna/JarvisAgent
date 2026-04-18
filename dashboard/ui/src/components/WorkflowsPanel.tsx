@@ -68,8 +68,7 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
       {!hasProviders && topLevelWorkflows.some((wf) => wf.has_ai_call) && (
         <div className="no-keys-banner">
           No AI providers configured — workflows with ai_call tasks have been
-          skipped. Set <code>OPENAI_API_KEY</code> or{" "}
-          <code>JARVIS_MASTER_PASSWORD</code>, or add providers in the Settings
+          skipped. Unlock the master password, or add providers in the Settings
           UI in the workflow editor, then reload workflows.
         </div>
       )}

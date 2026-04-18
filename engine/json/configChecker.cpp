@@ -140,12 +140,14 @@ namespace AIAssistant
                 engineConfig.m_MaxFileSizekB = 20;
             }
 
-            // max inflight ai calls: clamp to [1, 1000]
-            if (engineConfig.m_MaxInflightAiCalls == 0 || engineConfig.m_MaxInflightAiCalls > 1000)
+            // max inflight ai calls: clamp to [1, 10000]. The reactive 429 handling in
+            // CurlMultiDispatcher is the real backstop — this cap only prevents runaway
+            // local resource use.
+            if (engineConfig.m_MaxInflightAiCalls == 0 || engineConfig.m_MaxInflightAiCalls > 10000)
             {
-                LOG_APP_ERROR("Max inflight AI calls out of range. Fixing to 100. The config file should have a field "
-                              "similar to '\"max inflight ai calls\": 100'");
-                engineConfig.m_MaxInflightAiCalls = 100;
+                LOG_APP_ERROR("Max inflight AI calls out of range. Fixing to 1000. The config file should have a field "
+                              "similar to '\"max inflight ai calls\": 1000'");
+                engineConfig.m_MaxInflightAiCalls = 1000;
             }
 
             // port: range validation is done at parse time in configParser.cpp

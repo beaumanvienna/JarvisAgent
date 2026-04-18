@@ -16,6 +16,9 @@ interface Props {
   onTabChange: (tab: Tab) => void;
   isStudio: boolean;
   onLogout?: () => void;
+  authUser?: string | null;
+  authRole?: string | null;
+  onOpenSettings?: () => void;
 }
 
 function Led({ color, label }: { color: string; label: string }) {
@@ -47,6 +50,9 @@ export default function StatusBar({
   onTabChange,
   isStudio,
   onLogout,
+  authUser,
+  authRole,
+  onOpenSettings,
 }: Props) {
   const anyInflight = Array.from(sessions.values()).some(
     (s) => s.inflight > 0
@@ -127,6 +133,17 @@ export default function StatusBar({
             Log
           </button>
         </div>
+        {onOpenSettings && (
+          <button
+            className="btn"
+            type="button"
+            onClick={onOpenSettings}
+            title="Settings"
+            style={{ fontSize: 18, padding: "4px 10px" }}
+          >
+            ⚙
+          </button>
+        )}
         {isStudio && (
           <a href="/editor" className="btn btn-editor">
             Workflow Editor
@@ -135,8 +152,34 @@ export default function StatusBar({
         <button className="btn btn-quit" onClick={onQuit}>
           Quit
         </button>
+        {authUser && (
+          <span
+            style={{
+              fontSize: 12,
+              color: "rgba(255,255,255,0.6)",
+              marginLeft: 8,
+            }}
+            title="Signed-in identity"
+          >
+            {authUser}
+            {authRole && (
+              <span
+                style={{
+                  marginLeft: 6,
+                  padding: "1px 5px",
+                  borderRadius: 2,
+                  background: authRole === "admin" ? "#7c3aed" : "#334155",
+                  color: "#fff",
+                  fontSize: 10,
+                }}
+              >
+                {authRole}
+              </span>
+            )}
+          </span>
+        )}
         {onLogout && (
-          <button className="btn btn-quit" onClick={onLogout} title="Clear admin token">
+          <button className="btn btn-quit" onClick={onLogout} title="Sign out">
             Logout
           </button>
         )}

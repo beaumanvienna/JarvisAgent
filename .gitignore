@@ -11,7 +11,12 @@ build
 /config.json
 /keys.json
 /keys.json.enc
-/engine_api_token.txt
+/mcp_keys.json.enc
+/.mcp_admin_token
+# .mcp.json is per-developer MCP sidecar config: paths and J9T_TOKEN_FILE point
+# at local files, and keeping it tracked leaks user/home info. Each dev keeps
+# their own copy; consider a template .mcp.json.example for onboarding later.
+/.mcp.json
 
 # Python cache
 __pycache__/
@@ -52,3 +57,4 @@ vendor/pdcursesmod/bin-int
 .venv
 .claude/
 connections.json
+_adhoc

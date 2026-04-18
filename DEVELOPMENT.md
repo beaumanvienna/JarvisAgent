@@ -265,31 +265,44 @@ export MAKEFLAGS=-j$(sysctl -n hw.ncpu) # macOS
 
 ## Engine Security
 
-Engine edition includes a full security stack. Studio has no auth (developer workstation — localhost only).
+Engine edition includes a full security stack. Studio has no browser-UI auth (developer workstation — localhost only) but uses the same MCP API key store for programmatic access.
 
-**Authentication:** on first start, a 256-bit random token is auto-generated, saved to `engine_api_token.txt` (file permissions `600`), and printed to stdout. Tokens auto-expire after 90 days and auto-rotate. Include the token in every request:
+**Authentication — exactly three paths, no legacy fallback:**
+
+1. **MCP API key** — `Authorization: Bearer mcp_...`. Per-user credentials stored only as SHA-256 hashes in `mcp_keys.json.enc`. On first run with an empty store, j9t prints a bootstrap admin enrollment token to stderr.
+2. **Dashboard session cookie** — set by `POST /api/auth/login` after the browser submits a valid MCP key. HttpOnly + SameSite=Strict (plus `Secure` under TLS), 8-hour sliding timeout.
+3. **Gateway-trusted headers** — `X-Forwarded-User` / `X-Forwarded-Role` when `TrustedProxyHeader` / `TrustedRoleHeader` are configured.
+
+Example: issue yourself the first admin key, then call the API:
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://host:8080/api/workflows
+# On first Engine start, copy the enroll_... token from j9t's stderr:
+curl -sS -X POST http://host:8080/api/auth/mcp-keys/activate \
+     -H 'Content-Type: application/json' \
+     -d '{"enrollment_token":"enroll_..."}'
+# Response contains "api_key":"mcp_...", shown exactly once — save it.
+
+# Then authenticate subsequent requests:
+curl -H "Authorization: Bearer mcp_..." http://host:8080/api/workflows
 ```
 
-**Gateway integration:** when deployed behind an API gateway (Kong, AWS API Gateway, Traefik), configure `TrustedProxyHeader` and `TrustedRoleHeader` in `config.json` so j9t reads the authenticated user identity and role from gateway-injected headers.
+**RBAC:** three roles — `admin` (full access incl. shutdown, security logs, MCP key CRUD), `operator` (run control, app logs, adhoc submission when `adhoc_enabled`), `viewer` (read-only monitoring). The role travels on the key, session cookie, or gateway header.
 
-**RBAC:** three roles — `admin` (full access incl. shutdown, security logs), `operator` (run control, app logs), `viewer` (read-only monitoring). Gateway mode maps roles from headers; bearer token grants admin.
+**Key expiry + self-renewal:** MCP keys expire 90 days after activation. Users can self-renew within the window via `POST /api/auth/mcp-keys/self-renew` without admin involvement; old keys enter a 24-hour grace period. Expired keys require a fresh admin enrollment.
 
 **Defense layers:** per-IP rate limiting (100 req/min, burst 20), failed auth lockout (10 failures → 15-min IP ban), request body size limit (configurable, default 10 MB), security response headers (CSP, X-Frame-Options, HSTS, Referrer-Policy).
 
-**Audit logging:** all auth events, webhook decisions, and run control actions logged to `log/security.txt` with IP, user identity, role, and endpoint. Viewable in the dashboard's Security tab.
+**Audit logging:** all auth events, webhook decisions, adhoc submissions, and run control actions logged to `log/security.txt` with IP, user identity, role, and endpoint. Viewable in the dashboard's Security tab.
 
 **TLS:** built-in HTTPS via `TlsCert`/`TlsKey` in `config.json` (port 8443), or deploy behind a TLS-terminating reverse proxy.
 
-**Dashboard:** prompts for the admin token on first load, stores it in `localStorage`. A **Logout** button clears it.
+**Dashboard:** the login page accepts MCP keys only; successful login sets a session cookie that flows automatically on subsequent requests. A **Logout** button calls `POST /api/auth/logout` to destroy the server-side session.
 
-**WebSocket:** clients must send `{"type":"auth","token":"<token>"}` as the first message.
+**WebSocket:** browser upgrades are validated at the handshake via the session cookie (`.onaccept` hook); no in-band auth message.
 
-**Public endpoints** (no auth): `GET /api/status`, `GET /` (dashboard HTML shell).
+**Public endpoints** (no auth): `GET /api/status`, `GET /` (dashboard HTML shell), `POST /api/auth/mcp-keys/activate` (enrollment token *is* the auth), `POST /api/auth/login` (MCP key *is* the auth).
 
-**Webhook endpoints** use per-workflow HMAC-SHA256 signatures (separate from the admin token). In Engine mode, a webhook secret is mandatory.
+**Webhook endpoints** use per-workflow HMAC-SHA256 signatures (separate from MCP auth). In Engine mode, a webhook secret is mandatory.
 
 See [doc/cyber security.md](doc/cyber%20security.md) for the full threat model, deployment architecture, and operator responsibilities.
 

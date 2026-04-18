@@ -1,3 +1,11 @@
+# @jarvis-script
+# @short: Convert a Redmine issues JSON response into a CSV for filter tasks
+# @params: input_json — path to the Redmine /issues.json response (file_inputs[0])
+# @description: Reads a Redmine issues response payload and writes issues.csv
+#   with id / subject / description / tracker columns into the task working
+#   directory. Description text is truncated to 500 characters and stripped of
+#   newlines so the output is safe to consume from a csv filter task.
+# @outputs: issues.csv — one row per Redmine issue
 """Convert Redmine issues JSON to CSV for filter consumption.
 
 Called as a python task with file_inputs[0] = response.json, file_outputs[0] = issues.csv.

@@ -1,4 +1,11 @@
-# run-docker.ps1 — Pull and run JarvisAgent via Docker (Windows PowerShell).
+# @jarvis-script
+# @short: Pull and run JarvisAgent via Docker on Windows PowerShell
+# @params: [-DataDir <path>]
+# @description: Windows PowerShell equivalent of run-docker.sh. Pulls the
+#   jarvisagent container image, mounts a per-user data directory (default
+#   ~/JarvisAgent, overridable with -DataDir), and starts the container with
+#   the web UI exposed on localhost:8080/8443.
+# @outputs: A running JarvisAgent container on Windows
 #
 # Usage:
 #   .\scripts\run-docker.ps1                    # uses ~/JarvisAgent as data directory

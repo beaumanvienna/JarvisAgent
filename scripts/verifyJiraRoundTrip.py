@@ -1,3 +1,11 @@
+# @jarvis-script
+# @short: Verify the Jira round-trip demo: create → get → field-match assertions
+# @description: Reads response.json from the create_issue and get_issue tasks
+#   of the jiraIssueDemo workflow and asserts that the retrieved issue matches
+#   the payload that was submitted. Walks Atlassian Document Format trees to
+#   compare description text, and reports any mismatches or missing fields as
+#   a structured result.
+# @outputs: verify_result — dict with success flag and per-field mismatch details
 """Verify the Jira round-trip demo: create → get → field-match assertions.
 
 Called as a python task after get_issue.  Reads the response.json files written

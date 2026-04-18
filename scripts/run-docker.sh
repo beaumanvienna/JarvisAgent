@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# run-docker.sh — Pull and run JarvisAgent via Docker.
+# @jarvis-script
+# @short: Pull and run JarvisAgent via Docker (interactive or headless)
+# @params: [--headless] [data_dir]
+# @description: Wrapper around `docker run ghcr.io/.../jarvisagent`. Handles
+#   docker group membership (re-execs with the group activated when needed),
+#   mounts a per-user data directory so workflows persist across restarts, and
+#   supports both interactive-TUI and headless (web-only) modes. data_dir
+#   defaults to ~/JarvisAgent; pass --headless to disable the ncurses TUI.
+# @outputs: A running JarvisAgent container with web UI on localhost:8080/8443
 #
 # Usage:
 #   ./scripts/run-docker.sh                    # interactive with TUI

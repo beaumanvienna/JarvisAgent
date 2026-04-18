@@ -1,3 +1,12 @@
+# @jarvis-script
+# @short: Pre-process a single portfolio position (uppercase text + metadata)
+# @params: pos.Symbol pos.Name pos.Sector (injected by CSV filter fan-out)
+# @description: Called per-row by the portfolioPythonAnalysis workflow to
+#   demonstrate parallel Python execution across the PythonEnginePool. Takes
+#   a CSV row's symbol / name / sector fields, uppercases the text, and
+#   computes a short hash for downstream deduplication. Runs once per item
+#   in parallel on separate sub-interpreters.
+# @outputs: dict with uppercased text + hash metadata per position
 """Pre-process a portfolio position: uppercase all text, compute metadata.
 
 Used by the portfolioPythonAnalysis workflow to demonstrate parallel Python

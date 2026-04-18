@@ -73,6 +73,9 @@ namespace AIAssistant
         AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
         CurlMultiDispatcher* GetCurlMultiDispatcher() const { return m_CurlMultiDispatcher.get(); }
         WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
+        // Exposed so AdhocWorkflowManager can register each run's queue folder
+        // with the live watcher at stage-time (see log/AdhocQueueFolderMonitoring.md).
+        FileWatcher* GetQueueFileWatcher() const { return m_FileWatcher.get(); }
 
         IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
 

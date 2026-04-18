@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <future>
 #include <queue>
 #include <unordered_map>
@@ -111,6 +113,11 @@ namespace AIAssistant
         void RegisterSubWorkflowLink(std::string const& childRunId, std::string const& parentRunId,
                                      std::string const& parentTaskInstanceId);
 
+        // Optional observer invoked each time a run reaches a terminal state.
+        // Used by AdhocWorkflowManager to clean up `on_completion` folders.
+        using RunTerminalObserver = std::function<void(std::string const& runId, WorkflowRunState finalState)>;
+        void SetRunTerminalObserver(RunTerminalObserver observer);
+
     private:
         struct TaskExecutionResult
         {
@@ -165,6 +172,17 @@ namespace AIAssistant
             bool m_CancelRequested{false};
             bool m_PauseRequested{false};
             bool m_StopRequested{false};
+
+            // Count of ai_call tasks this run has dispatched so far. Enforced against
+            // EngineConfig::m_MaxAiCallsPerJcwf (0 = no cap) in the dispatch path.
+            // Single-threaded access from the tick loop — no atomic needed.
+            size_t m_AiCallsDispatched{0};
+
+            // Steady-clock start time for the 2-second minimum-visibility hold.
+            // Sub-second runs (common for adhoc) would otherwise flash through m_ActiveRuns
+            // faster than the dashboard's snapshot broadcast can deliver them.
+            std::chrono::steady_clock::time_point m_StartedAtSteady{
+                std::chrono::steady_clock::now()};
         };
 
     private:
@@ -223,6 +241,10 @@ namespace AIAssistant
 
         uint64_t m_TotalCompletedRuns{0};
         uint64_t m_TotalFailedRuns{0};
+
+        // Optional one-shot observer fired on terminal state transitions. Set by WebServer
+        // at startup to let AdhocWorkflowManager clean up `on_completion` runs inline.
+        RunTerminalObserver m_RunTerminalObserver;
 
         std::vector<AiRequestCompletion> m_DeferredAiCompletions;
 

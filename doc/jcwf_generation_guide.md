@@ -172,23 +172,63 @@ Each entry is either:
 The SessionManager writes the AI response to `<stem>.output.<ext>`:
 - `PROB_hello.txt` → `PROB_hello.output.txt`
 
-#### Exposing the AI response to downstream non-ai_call tasks
+#### Exposing the AI response — two patterns
 
-When a downstream `cloud_*`, `shell`, or `python` task needs the AI response as a file path (via `{{taskId.output_file}}` or `{{taskId.<slot>}}`), declare an `outputs` slot on the `ai_call` task — do **NOT** use `file_outputs`:
+The AI response is always written to `PROB_*.output.*` in the task's queue folder. Two valid ways to expose it.
+
+**Pattern A — zero-copy reference (preferred for downstream JCWF tasks).** Declare an `outputs` slot:
 
 ```jsonc
 "ai_bug_report": {
   "type": "ai_call",
   "working_directory": "../../queue/myWorkflow/01_generate",
   "outputs": { "bug_report": { "type": "string" } },  // ✓ slot auto-maps to PROB_*.output.txt
-  // NOT: "file_outputs": ["bug_report.txt"]            // ✗ writes a second file inside queue/
   "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
 }
 ```
 
-The runtime maps the declared slot to the natural `PROB_*.output.txt` file the SessionManager produces. Downstream tasks then use `{{ai_bug_report.output_file}}` or `{{ai_bug_report.bug_report}}` — both resolve to the absolute path of the AI response.
+Downstream `cloud_*` / `shell` / `python` tasks reach it via `{{ai_bug_report.output_file}}` or `{{ai_bug_report.bug_report}}` — both resolve to the absolute path of the AI response. Zero duplication, no extra AI call.
 
-**Why not `file_outputs` on `ai_call`?** `file_outputs` paths are resolved against the task's `working_directory`. For `ai_call` that directory is inside `queue/`, so the output file lands inside a watched queue folder. The file categorizer treats any file in a queue folder that doesn't match STNG/CNTX/TASK/PROB/PROV/`*.output.*` as a new requirements file and fires an **extra AI call** — wasted tokens and latency. Always use the `outputs` slot pattern on `ai_call`.
+**Pattern B — deliver to a specific path (preferred for terminal artefacts).** Declare `file_outputs` with paths that resolve **outside the task's own queue folder** but still **inside the JarvisAgent working tree** — typically somewhere under `workflows/`:
+
+```jsonc
+"gen_main": {
+  "type": "ai_call",
+  "working_directory": "../../queue/gen_main",
+  "file_outputs": ["workflows/build/main.cpp"],   // ✓ inside the tree, outside any queue folder
+  "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
+}
+```
+
+The runtime copies `PROB_*.output.*` to each declared `file_outputs` path once the AI response lands. Typical uses:
+- **Portable delivery within the project tree.** A JCWF writes a report to `workflows/<project>/reports/summary.md`, or an adhoc run emits generated source to `workflows/build/main.cpp`. Runs identically across Studio, Engine, Docker, and per-user installs.
+- **External-project agent workflows** (Studio / Engine without Docker). An agent operating on a codebase outside the j9t tree — e.g. `~/dev/polarionMockup/src/` — writes AI-generated patches straight into that project. Skipping copy-in / copy-out round-trips is meaningfully faster than staging everything through `workflows/`.
+
+Paths above the launch CWD (`/tmp/...`, `~/...`, `../../outside`) work fine locally but fail in Engine-in-Docker where the filesystem above the mount is read-only. The runtime does not reject them — it emits an informational validator finding so authors who care about cross-edition portability see the flag. Deliberate local-dev and external-project use is supported.
+
+You can combine both patterns: declare `outputs` (for downstream JCWF wiring) AND `file_outputs` (for terminal delivery). The slot still maps to the original `PROB_*.output.*`; the `file_outputs` copies go to the declared external paths.
+
+**What `file_outputs` on `ai_call` MUST NOT do.** A `file_outputs` path that resolves inside the task's own queue folder AND whose filename would be categorized as a requirement file fires an **extra AI query**. The forbidden filenames inside the task's own folder are:
+
+- Anything matching `PROB_*` (categorizer treats it as a fresh prompt)
+- Anything that does not match a recognized queue prefix at all (default category is "requirement")
+
+The runtime MUST warn; implementations MAY reject. Filenames starting with `STNG_` / `CNTX_` / `TASK_` / `PROV_` or ending with `.output.*` are not categorized as requirements and therefore do not fire extra AI queries — but writing such files via `file_outputs` is unusual and typically indicates the wrong tool for the job.
+
+Quick reference (assume `ai_call`'s `working_directory` = `../../queue/myFlow/gen_main`):
+
+| file_outputs path | Verdict | Why |
+|---|---|---|
+| `"workflows/build/main.cpp"` | ✓ | inside project tree, outside any queue folder — portable everywhere |
+| `"../../../workflows/myFlow/gen_main/output.cpp"` | ✓ | outside the queue tree but still inside the project — portable |
+| `"../other_task/cntx.txt"` | ✓ | outside own queue folder; OK if `other_task` won't pick it up as its own requirement |
+| `"/tmp/build/main.cpp"` | ⚠ | works in Studio / Engine without Docker; fails in Engine-in-Docker (mount is read-only above the root). Informational only — deliberate use is supported |
+| `"/home/alice/dev/myProject/src/gen.cpp"` | ⚠ | same: supported for external-project agent workflows, not portable to Dockerised Engine |
+| `"summary.txt"` (own queue folder, no recognized prefix) | ✗ | fires extra AI query |
+| `"helper.md"` (own queue folder, no recognized prefix) | ✗ | fires extra AI query |
+| `"PROB_another.txt"` (own queue folder, PROB prefix) | ✗ | categorizer treats as a fresh prompt, fires extra AI query |
+
+If you genuinely need two consecutive AI calls on what feels like "the same task", split into two `ai_call` tasks with their own queue folders and chain via Pattern A (downstream task declares `cntx_files` referencing the upstream's `PROB_*.output.txt`).
 
 #### Consuming upstream AI outputs as context
 

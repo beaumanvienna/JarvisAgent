@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { RunSnapshot, SessionStatus, LastRunInfo } from "../types";
-import { getToken } from "../auth";
 
 interface WebSocketState {
   connected: boolean;
@@ -40,12 +39,9 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setState((prev) => ({ ...prev, connected: true }));
-      // Send auth message if we have a token (Engine mode).
-      const token = getToken();
-      if (token) {
-        ws.send(JSON.stringify({ type: "auth", token }));
-      }
-      // Periodic ping triggers server-side broadcast drain (must run on Crow's I/O thread).
+      // Engine validates the session cookie at the WebSocket upgrade handshake
+      // (.onaccept); by the time we are connected, auth is already done. Studio
+      // has no auth. Either way the client does not send an auth message.
       const pingId = window.setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));

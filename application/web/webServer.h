@@ -22,6 +22,11 @@
 #pragma once
 #include "crow.h"
 #include "auxiliary/threadPool.h"
+#include "web/mcpKeyManager.h"
+#include "web/webSessionManager.h"
+#include "workflow/adhocWorkflowManager.h"
+#include "workflow/scriptCatalog.h"
+#include <memory>
 #ifdef J9T_STUDIO
 #include "web/aiJcwfService.h"
 #include "assistant/assistantController.h"
@@ -29,6 +34,7 @@
 #include <atomic>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <string>
 #include <unordered_map>
@@ -90,30 +96,71 @@ namespace AIAssistant
         // Authentication result — returned by Authenticate().
         struct AuthResult
         {
-            std::string m_Error; // empty on success
-            std::string m_User;  // identity from gateway header or "token" for bearer auth
-            std::string m_Role;  // "admin", "operator", or "viewer"
+            std::string m_Error;        // empty on success
+            std::string m_User;         // identity from gateway header, session, or MCP key
+            std::string m_Role;         // "admin", "operator", or "viewer"
+            int m_DaysUntilExpiry{-1};  // MCP key only — negative means "not applicable"
 
             bool Ok() const { return m_Error.empty(); }
         };
+
+        // Attach `X-Key-Expires-In` and `X-Key-Self-Renew` headers when the request
+        // was authenticated via an MCP key whose remaining lifetime is <= 30 days.
+        // No-op when the request was not MCP-authenticated or the key is healthy.
+        void AttachMcpExpiryHeader(crow::response& resp, crow::request const& req) const;
 
         // Authenticate the request. Returns AuthResult with error/user/role.
         AuthResult Authenticate(crow::request const& req) const;
         // Check if the auth result's role meets the minimum required level.
         static bool HasRole(AuthResult const& auth, std::string_view requiredRole);
 
-        // Legacy wrapper — returns empty string on success, error code on failure.
+        // Wrapper for routes that require admin role — returns empty string on success,
+        // or an error code ("missing", "forbidden", "locked_out", ...) for MakeAuthErrorResponse.
         std::string CheckAdminAuth(crow::request const& req) const;
-        // Generate a cryptographically random hex token and persist it to config.json.
-        void GenerateAndPersistApiToken();
+        // Role-parametrized auth check. Used by viewer/operator routes that would
+        // otherwise over-restrict themselves to admin via CheckAdminAuth.
+        // Returns "" on success, error code on failure.
+        std::string CheckAuth(crow::request const& req, std::string_view minRole) const;
+
+        // MCP key store lifecycle (shared with the existing KeyManager master password).
+        // Returns true if the store is now initialised (loaded from disk, or empty-ready).
+        bool InitMcpKeyStore(std::string_view masterPassword);
+        // Persist pending changes using the cached master password.
+        bool SaveMcpKeyStore();
+
+        // Lookup an MCP auth result from a raw bearer token; returns nullopt if not MCP.
+        std::optional<AuthResult> TryMcpAuth(crow::request const& req) const;
+        // Lookup a session result from the request cookie; returns nullopt if no cookie.
+        std::optional<AuthResult> TrySessionAuth(crow::request const& req) const;
+        // Extract the "session=" value from the Cookie header, or empty if not present.
+        static std::string ExtractSessionCookie(crow::request const& req);
+        // Extract the token after "Bearer " from the Authorization header, or empty.
+        static std::string ExtractBearerToken(crow::request const& req);
         // Record a failed auth attempt for lockout tracking.
         void RecordAuthFailure(std::string const& ip);
         // Returns true if the request should be rate-limited (429).
         bool IsRateLimited(crow::request const& req);
-        // Cached token for constant-time comparison (loaded from config at startup).
-        std::string m_AdminToken;
-        // When the current token was issued (for expiry checks).
-        std::chrono::system_clock::time_point m_TokenIssuedAt{};
+
+        // ---- MCP keys + dashboard sessions ----
+        mutable McpKeyManager m_McpKeyManager;
+        mutable WebSessionManager m_WebSessionManager;
+        std::filesystem::path m_McpKeysFilePath;
+        std::atomic<bool> m_McpKeysLoaded{false};
+
+        // ---- Adhoc workflow submission ----
+        // Held by unique_ptr because construction depends on WorkflowRegistry,
+        // which is set via SetWorkflowRegistry() after WebServer is constructed.
+        std::unique_ptr<AdhocWorkflowManager> m_AdhocManager;
+
+        // ---- Script catalog ----
+        // Scans scripts/ at startup + on-demand refreshes; served via
+        // GET /api/scripts so MCP agents can pick pre-deployed scripts when
+        // composing adhoc workflows (the same scripts/ contents enforced by
+        // the security boundary in HandleAdhocRunPost).
+        ScriptCatalog m_ScriptCatalog;
+
+        // ---- Uptime for debug_signals ----
+        std::chrono::steady_clock::time_point m_ProcessStart{std::chrono::steady_clock::now()};
 
         // ---- Rate limiting (Engine edition only) ----
         struct TokenBucket
@@ -142,6 +189,50 @@ namespace AIAssistant
         crow::response HandleMcpHeartbeatPost();
         std::chrono::steady_clock::time_point m_McpLastHeartbeat{}; // guarded by m_Mutex
         std::string m_McpVersion;                                   // guarded by m_Mutex
+
+        // ---- MCP key management + session handlers (both editions) ----
+        crow::response HandleMcpKeysListGet();
+        crow::response HandleMcpKeysEnrollPost(crow::request const& req);
+        crow::response HandleMcpKeysActivatePost(crow::request const& req);
+        crow::response HandleMcpKeysSelfRenewPost(crow::request const& req);
+        crow::response HandleMcpKeysUpdatePut(crow::request const& req, std::string const& keyId);
+        crow::response HandleMcpKeysDelete(std::string const& keyId);
+        crow::response HandleWhoamiGet(crow::request const& req);
+        crow::response HandleLoginPost(crow::request const& req);
+        crow::response HandleLogoutPost(crow::request const& req);
+
+        // ---- Adhoc workflow submission (both editions, MCP key required) ----
+        crow::response HandleAdhocRunPost(crow::request const& req);
+
+        // ---- Run artifact discovery (both editions; only adhoc runs are resolvable
+        //      today — registered runs return 404 until we extend attribution). ----
+        crow::response HandleRunFilesListGet(crow::request const& req, std::string const& runId);
+        crow::response HandleRunFileGet(crow::request const& req,
+                                        std::string const& runId,
+                                        std::string const& relPath);
+
+        // ---- Script catalog (both editions, viewer+; any authenticated user). ----
+        crow::response HandleScriptsListGet(crow::request const& req);
+
+        // ---- Key store unlock (both editions — Engine also needs this to
+        //      unlock mcp_keys.json.enc). Public: the submitted master password
+        //      itself is the credential, so no prior auth is required. ----
+        crow::response HandleKeysStatusGet();
+        crow::response HandleKeysUnlockPost(crow::request const& req);
+
+#ifdef DEBUG
+        // ---- Debug introspection (debug builds only, admin role required) ----
+        //
+        // Live dump of in-memory counters used to investigate runtime behavior.
+        // Extend this handler with new counters when debugging — see
+        // `reference_debug_signals.md` in the memory/ folder for the convention.
+        // The release build has this entire path stripped at compile time.
+        crow::response HandleDebugSignalsGet();
+#endif
+
+        // Look up the MCP record backing the request, or nullopt if not MCP-auth.
+        // Used by handlers that need adhoc_enabled / quota / identity metadata.
+        std::optional<McpKeyManager::Record> TryGetMcpRecord(crow::request const& req) const;
 
         // ---- Engine handlers (both editions) ----
         crow::response HandleStatusGet();
@@ -208,10 +299,6 @@ namespace AIAssistant
         crow::response HandleConfigSettingsGet();
         crow::response HandleConfigSettingsPut(crow::request const& req);
 
-        // Key management API
-        crow::response HandleKeysStatusGet();
-        crow::response HandleKeysUnlockPost(crow::request const& req);
-
         // Provider settings API
         crow::response HandleProvidersListGet();
         crow::response HandleProviderCreatePost(crow::request const& req);
@@ -241,7 +328,6 @@ namespace AIAssistant
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
-        std::unordered_set<crow::websocket::connection*> m_AuthenticatedClients; // Engine: WS clients that sent valid auth
         std::atomic<size_t> m_ClientCount{0}; // lock-free mirror of m_Clients.size() for EnqueueLogLine
 
         // WebSocket accumulation statistics (all guarded by m_Mutex)

@@ -773,6 +773,12 @@ namespace AIAssistant
         m_WorkflowRegistry = workflowRegistry;
     }
 
+    void WorkflowRuntimeManager::SetRunTerminalObserver(RunTerminalObserver observer)
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        m_RunTerminalObserver = std::move(observer);
+    }
+
     void WorkflowRuntimeManager::Start()
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -1230,6 +1236,18 @@ namespace AIAssistant
 
             if (m_ActiveRuns[index].m_Run.m_IsCompleted)
             {
+                // 2-second minimum-visibility hold (plan §6): sub-second runs — common for adhoc
+                // submissions — would otherwise slip through m_ActiveRuns between snapshot
+                // broadcasts and never surface on the dashboard. Keep completed entries in the
+                // active list until at least 2 s have elapsed since the run started, then let
+                // the regular erase path run on a subsequent tick.
+                auto const elapsed = std::chrono::steady_clock::now() - m_ActiveRuns[index].m_StartedAtSteady;
+                if (elapsed < std::chrono::seconds(2))
+                {
+                    ++index;
+                    continue;
+                }
+
                 {
                     std::scoped_lock<std::mutex> const lock(m_Mutex);
 
@@ -1280,6 +1298,20 @@ namespace AIAssistant
 
                 // Fire completion callback (async, fire-and-forget) if callbackUrl is in context.
                 FireCompletionCallback(m_ActiveRuns[index].m_Run);
+
+                // Fire terminal observer (AdhocWorkflowManager listens for on_completion cleanup).
+                if (m_RunTerminalObserver)
+                {
+                    try
+                    {
+                        m_RunTerminalObserver(m_ActiveRuns[index].m_Run.m_RunId,
+                                              m_ActiveRuns[index].m_Run.m_State);
+                    }
+                    catch (std::exception const& ex)
+                    {
+                        LOG_APP_ERROR("[runtime] RunTerminalObserver threw: {}", ex.what());
+                    }
+                }
 
                 m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
                 stateChanged = true;
@@ -1350,6 +1382,7 @@ namespace AIAssistant
             activeRun.m_Run.m_Context = pendingRun.m_Context;
             activeRun.m_Run.m_State = WorkflowRunState::Running;
             activeRun.m_Run.m_StartedAtIso8601 = GetIso8601NowUTC();
+            activeRun.m_StartedAtSteady = std::chrono::steady_clock::now();
             activeRun.m_Run.m_CancellationToken = std::make_shared<TaskCancellationToken>();
             activeRun.m_Run.m_TaskStates = BuildInitialTaskStates(activeRun.m_Definition);
 
@@ -1769,6 +1802,25 @@ namespace AIAssistant
             if (activeRun.m_RunningTasks.find(taskId) != activeRun.m_RunningTasks.end())
             {
                 continue;
+            }
+
+            // Per-run AI call cap — "max_ai_calls_per_jcwf" (0 = no cap). Guards against
+            // a single runaway JCWF (especially adhoc) consuming the entire AI budget.
+            if (taskDefinition.m_Type == TaskType::AiCall)
+            {
+                size_t const cap = Core::g_Core->GetConfig().m_MaxAiCallsPerJcwf;
+                if (cap > 0 && activeRun.m_AiCallsDispatched >= cap)
+                {
+                    std::string const msg = "AI call cap exceeded (max_ai_calls_per_jcwf=" +
+                                            std::to_string(cap) + ")";
+                    LOG_APP_WARN("[runtime] {} — failing task '{}' in run '{}'",
+                                 msg, taskId, workflowRun.m_RunId);
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    taskState.m_LastErrorMessage = msg;
+                    dispatchedAny = true;
+                    continue;
+                }
+                ++activeRun.m_AiCallsDispatched;
             }
 
             taskState.m_State = TaskInstanceStateKind::Running;
@@ -2226,8 +2278,8 @@ namespace AIAssistant
         if (!keyManager.HasProviders())
         {
             LOG_APP_WARN("Blocked workflow run '{}': contains ai_call tasks but no AI providers "
-                         "are configured. Set OPENAI_API_KEY or JARVIS_MASTER_PASSWORD, or "
-                         "configure providers via the Settings UI, then reload workflows.",
+                         "are configured. Unlock the key store via POST /api/settings/keys/unlock "
+                         "or configure providers via the Settings UI, then reload workflows.",
                          workflowDefinition.m_Id);
             return false;
         }

@@ -228,6 +228,15 @@ namespace AIAssistant
                 engineConfig.m_MaxInflightAiCalls = static_cast<size_t>(maxInflight);
                 ++fieldOccurances[ConfigFields::MaxInflightAiCalls];
             }
+            else if (jsonObjectKey == "max_ai_calls_per_jcwf")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto cap = static_cast<int64_t>(jsonObject.value().get_int64());
+                if (cap < 0) cap = 0;
+                LOG_CORE_INFO("max_ai_calls_per_jcwf: {}", cap);
+                engineConfig.m_MaxAiCallsPerJcwf = static_cast<size_t>(cap);
+                ++fieldOccurances[ConfigFields::MaxAiCallsPerJcwf];
+            }
             else if (jsonObjectKey == "python engines")
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
@@ -248,6 +257,26 @@ namespace AIAssistant
                 LOG_CORE_INFO("port: {}", port);
                 engineConfig.m_Port = static_cast<uint16_t>(port);
                 ++fieldOccurances[ConfigFields::Port];
+            }
+            else if (jsonObjectKey == "mcp_keys_file")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
+                engineConfig.m_McpKeysFilePath = std::string(jsonObject.value().get_string().value());
+                LOG_CORE_INFO("mcp_keys_file: {}", engineConfig.m_McpKeysFilePath);
+                ++fieldOccurances[ConfigFields::McpKeysFile];
+            }
+            else if (jsonObjectKey == "session_timeout_hours")
+            {
+                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
+                auto hours = static_cast<int64_t>(jsonObject.value().get_int64());
+                if (hours < 1 || hours > 168)
+                {
+                    LOG_CORE_WARN("session_timeout_hours {} out of range [1, 168], defaulting to 8", hours);
+                    hours = 8;
+                }
+                LOG_CORE_INFO("session_timeout_hours: {}", hours);
+                engineConfig.m_SessionTimeoutHours = static_cast<int>(hours);
+                ++fieldOccurances[ConfigFields::SessionTimeoutHours];
             }
             else
             {

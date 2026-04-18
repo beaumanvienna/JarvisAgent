@@ -74,3 +74,114 @@ export async function fetchLogAnalyzeLastRun(index?: number): Promise<AnalyzeLas
   const res = await authFetch(`${BASE}/api/log/analyze-last-run${params}`);
   return res.json();
 }
+
+// ---- MCP API keys ---------------------------------------------------------
+
+export interface McpKeyRecord {
+  key_id: string;
+  user: string;
+  role: "admin" | "operator" | "viewer";
+  adhoc_enabled: boolean;
+  disk_quota_mb: number;
+  default_cleanup_policy: string;
+  created_at: string;
+  expires_at: string;
+  last_used_at: string;
+  enabled: boolean;
+  description: string;
+}
+
+export interface McpKeysListResponse {
+  ok: boolean;
+  keys: McpKeyRecord[];
+  error?: string;
+}
+
+export interface McpEnrollmentRequest {
+  user: string;
+  role: "admin" | "operator" | "viewer";
+  adhoc_enabled?: boolean;
+  disk_quota_mb?: number;
+  default_cleanup_policy?: string;
+  description?: string;
+  key_expiry_days?: number;
+  enrollment_ttl_minutes?: number;
+}
+
+export interface McpEnrollmentResponse {
+  ok: boolean;
+  enrollment_token: string;
+  expires_in_minutes: number;
+  user: string;
+  role: string;
+  message: string;
+}
+
+export interface ScriptEntry {
+  path: string;
+  type: "shell" | "python";
+  module?: string;
+  short?: string;
+  description?: string;
+  outputs?: string;
+  params?: string[];
+  has_shebang?: boolean;
+  has_jarvis_marker?: boolean;
+  executable?: boolean;
+}
+
+export interface ScriptsListResponse {
+  ok: boolean;
+  count?: number;
+  scripts?: ScriptEntry[];
+  error?: string;
+  message?: string;
+}
+
+export async function fetchScripts(opts: { type?: "shell" | "python"; refresh?: boolean } = {}): Promise<ScriptsListResponse> {
+  const qs = new URLSearchParams();
+  if (opts.type) qs.set("type", opts.type);
+  if (opts.refresh) qs.set("refresh", "1");
+  const query = qs.toString() ? `?${qs.toString()}` : "";
+  const res = await authFetch(`${BASE}/api/scripts${query}`);
+  return res.json();
+}
+
+export async function fetchMcpKeys(): Promise<McpKeysListResponse> {
+  const res = await authFetch(`${BASE}/api/auth/mcp-keys`);
+  return res.json();
+}
+
+export async function createMcpEnrollment(
+  req: McpEnrollmentRequest
+): Promise<McpEnrollmentResponse> {
+  const res = await authFetch(`${BASE}/api/auth/mcp-keys/enroll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function revokeMcpKey(keyId: string): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/auth/mcp-keys/${encodeURIComponent(keyId)}`,
+    { method: "DELETE" }
+  );
+  return res.json();
+}
+
+export async function updateMcpKey(
+  keyId: string,
+  fields: Partial<Pick<McpKeyRecord, "role" | "adhoc_enabled" | "disk_quota_mb" | "default_cleanup_policy" | "enabled" | "description" | "expires_at">>
+): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/auth/mcp-keys/${encodeURIComponent(keyId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }
+  );
+  return res.json();
+}

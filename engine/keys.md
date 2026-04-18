@@ -209,8 +209,11 @@ private:
 ```
 1. ConfigParser parses config.json → reads "keys_file" (default: "keys.json.enc")
 2. If keys_file exists:
-   a. Prompt for master password (stdin) or read from JARVIS_MASTER_PASSWORD env var
-   b. KeyManager::Load() decrypts and populates the provider registry
+   a. Mark KeyLoadStatus = NoPassword; the store stays sealed until the admin calls
+      POST /api/settings/keys/unlock (or submits the dashboard login flow, which
+      threads the password through the same unlock handler).
+   b. On unlock: KeyManager::Load() decrypts, populates the provider registry, and
+      also unlocks mcp_keys.json.enc with the same password (WebServer::InitMcpKeyStore).
 3. Else if OPENAI_API_KEY env var is set:
    a. KeyManager::LoadFromEnvironment() creates a single "openai" provider entry
       using the existing config.json API interfaces/index for endpoint/model/api_type
@@ -437,8 +440,10 @@ The selection is stored as `api_interface` on the task and preserved in `.jcwf` 
 
 - **Plaintext `keys.json`** is gitignored and only used for development convenience.
   Production uses `keys.json.enc` exclusively.
-- **Master password** is never stored on disk. It is either entered interactively at startup
-  or provided via the `JARVIS_MASTER_PASSWORD` environment variable.
+- **Master password** is never stored on disk and never read from an environment variable.
+  It is supplied at runtime via `POST /api/settings/keys/unlock` (or the dashboard login
+  flow, which posts to the same endpoint) and held in an `mlock()`-protected
+  `SecureString` buffer that zeroes on destruction.
 - **In-memory keys** live in `KeyManager` for the lifetime of the process. No disk caching
   of decrypted material.
 - **API responses** always mask keys (first 3 + last 4 characters). Full keys are write-only

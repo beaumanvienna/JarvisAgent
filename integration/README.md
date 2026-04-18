@@ -254,7 +254,6 @@ See `example/workflows/hamburg-tourist-day-planner.jcwf` and its companion `hamb
 
 | File | Description |
 |------|-------------|
-| `IntegrationPlan.md` | Development plan for webhook trigger type + n8n integration |
 | `README.md` | This file — quick-start guide |
-| `jarvisAgentN8nRoundTripWeatherWorkflow.md` | *(Legacy)* Early design notes for the Hamburg round-trip demo. Superseded by `example/workflows/hamburg-tourist-day-planner.md`. |
 | `n8n-node/` | n8n custom node bundle |
+| `completions/` | Shell tab-completion scripts |

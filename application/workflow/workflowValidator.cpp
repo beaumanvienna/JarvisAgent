@@ -1038,6 +1038,119 @@ namespace
         }
     }
 
+    // ---- Tier C: ai_call file_outputs hygiene ----
+    //
+    // Rule 1 (outside-tree): a file_outputs path must resolve inside the JarvisAgent
+    // launch CWD. Paths above the tree (absolute /tmp/..., ../../outside, etc.)
+    // break in Docker and per-user installs where the filesystem above the mount
+    // point is inaccessible. Warn; caller can still opt in by ignoring the warning.
+    //
+    // Rule 2 (duplicate-AI): a file_outputs path that lands INSIDE the task's own
+    // queue folder AND whose filename would be categorized as a requirement by the
+    // SessionManager file categorizer would fire an additional AI query. Forbidden
+    // filenames: anything starting with PROB_, or anything not matching any
+    // recognized queue prefix (STNG_/CNTX_/TASK_/PROV_/*.output.*). See
+    // doc/JC_Workflow_Specification.md §3.3.6.3.
+    void ValidateAiCallFileOutputs(std::vector<WorkflowValidationIssue>& issues,
+                                   WorkflowDefinition const& workflow)
+    {
+        if (Core::g_Core == nullptr) return;
+        fs::path const launchCwd = Core::g_Core->GetLaunchCWDAbsolute();
+        if (launchCwd.empty()) return;
+
+        auto const filenameFiresRequirement = [](std::string const& filename) -> bool {
+            // Matches the file categorizer's rules: STNG_/CNTX_/TASK_/PROV_ and
+            // anything matching *.output.* are NOT requirement files; everything
+            // else — including PROB_* and plain names with no prefix — would fire
+            // an AI query if written into a watched queue folder.
+            if (StartsWith(filename, "STNG_")) return false;
+            if (StartsWith(filename, "CNTX_")) return false;
+            if (StartsWith(filename, "TASK_")) return false;
+            if (StartsWith(filename, "PROV_")) return false;
+            if (filename.find(".output.") != std::string::npos) return false;
+            if (filename.size() >= 7 && filename.rfind(".output") == filename.size() - 7) return false;
+            return true;
+        };
+
+        for (auto const& [taskId, task] : workflow.m_Tasks)
+        {
+            if (task.m_Type != TaskType::AiCall) continue;
+            if (task.m_FileOutputs.empty()) continue;
+
+            std::string const taskPath = "$.tasks." + taskId;
+
+            // Resolve the task's working directory to an absolute path for
+            // prefix comparison. Uses the workflow base directory when present;
+            // falls back to launchCwd/workflows when the WorkflowDefinition
+            // predates path population (e.g. a freshly-parsed in-memory JCWF).
+            fs::path const workflowBase = [&]() {
+                fs::path base = TaskPathResolver::ResolveWorkflowBaseDirectory(workflow);
+                if (base.empty()) base = launchCwd / "workflows";
+                return base;
+            }();
+            fs::path const ownQueueDirAbs = task.m_WorkingDirectory.empty()
+                ? workflowBase
+                : (workflowBase / task.m_WorkingDirectory).lexically_normal();
+
+            for (size_t i = 0; i < task.m_FileOutputs.size(); ++i)
+            {
+                std::string const& rawOutput = task.m_FileOutputs[i];
+                if (rawOutput.empty()) continue;
+
+                fs::path const outputRaw(rawOutput);
+                fs::path const outputAbs = outputRaw.is_absolute()
+                    ? outputRaw.lexically_normal()
+                    : (ownQueueDirAbs / outputRaw).lexically_normal();
+
+                std::string const outputFieldPath = taskPath + ".file_outputs[" + std::to_string(i) + "]";
+
+                // Rule 1: must stay inside launchCwd so Docker / per-user installs work.
+                std::string const outputAbsStr = outputAbs.generic_string();
+                std::string const launchCwdStr = launchCwd.generic_string();
+                bool const insideTree = outputAbsStr.rfind(launchCwdStr, 0) == 0;
+                if (!insideTree)
+                {
+                    AddIssueEx(
+                        issues, WorkflowValidationSeverity::Info, WorkflowValidationTier::C,
+                        "file_output_outside_working_tree",
+                        std::string("ai_call file_outputs path lands outside the JarvisAgent working tree ('") +
+                            rawOutput + "' resolves to '" + outputAbsStr +
+                            "'). This works for Studio and for agents operating on external projects, but will "
+                            "not work in Engine-in-Docker deployments where the filesystem above the mount is "
+                            "inaccessible. If cross-edition portability matters, place the destination under "
+                            "workflows/ instead.",
+                        outputFieldPath, taskId,
+                        "Intentional? Ignore this note. If not, move the path under workflows/ (e.g. 'workflows/build/" +
+                            outputRaw.filename().string() + "').");
+                    continue;
+                }
+
+                // Rule 2: inside own queue folder + requirement-firing filename → extra AI call.
+                std::string const ownDirStr = ownQueueDirAbs.generic_string();
+                bool const insideOwnQueue = outputAbsStr.rfind(ownDirStr + "/", 0) == 0 ||
+                                            outputAbsStr == ownDirStr;
+                if (!insideOwnQueue) continue;
+
+                std::string const filename = outputAbs.filename().string();
+                if (filenameFiresRequirement(filename))
+                {
+                    AddIssueEx(
+                        issues, WorkflowValidationSeverity::Warning, WorkflowValidationTier::C,
+                        "file_output_triggers_extra_ai_query",
+                        std::string("ai_call file_outputs '") + rawOutput +
+                            "' lands inside the task's own queue folder with a filename the categorizer "
+                            "treats as a requirement (either starting with 'PROB_' or not matching any "
+                            "recognized queue prefix). This will fire an additional AI query on top of the "
+                            "intended PROB file.",
+                        outputFieldPath, taskId,
+                        "Move the destination outside the task's queue folder (e.g. 'workflows/<project>/" +
+                            filename + "'), or drop file_outputs and use an 'outputs' slot instead "
+                            "(see JC Workflow Spec §3.3.6.3 pattern A).");
+                }
+            }
+        }
+    }
+
     // ---- Tier C: working_directory conventions ----
     void ValidateWorkingDirectoryConventions(std::vector<WorkflowValidationIssue>& issues,
                                              WorkflowDefinition const& workflow)
@@ -1769,6 +1882,9 @@ namespace AIAssistant
 
         // ---- Tier C: working_directory conventions ----
         ValidateWorkingDirectoryConventions(issues, workflow);
+
+        // ---- Tier C: ai_call file_outputs hygiene ----
+        ValidateAiCallFileOutputs(issues, workflow);
 
         // ---- Tier C: file_inputs reachability ----
         ValidateFileInputReachability(issues, workflow, workflowFileIndex);

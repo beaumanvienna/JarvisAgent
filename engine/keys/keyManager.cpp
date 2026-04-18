@@ -63,14 +63,14 @@ namespace AIAssistant
         }
 
         m_Dirty = false;
-        m_CachedMasterPassword = masterPassword;
+        m_CachedMasterPassword.Set(masterPassword);
         LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }
 
     std::string KeyManager::GetCachedMasterPassword() const
     {
-        return m_CachedMasterPassword;
+        return std::string(m_CachedMasterPassword.Get());
     }
 
     bool KeyManager::Save(std::filesystem::path const& keysFilePath, std::string const& masterPassword)
@@ -99,7 +99,7 @@ namespace AIAssistant
         file.close();
 
         m_Dirty = false;
-        m_CachedMasterPassword = masterPassword;
+        m_CachedMasterPassword.Set(masterPassword);
         LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
         return true;
     }

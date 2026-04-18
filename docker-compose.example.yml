@@ -9,6 +9,17 @@ services:
     container_name: jarvis_agent
     restart: unless-stopped
 
+    # Container hardening — recommended for production deployments.
+    # - no-new-privileges blocks setuid/setgid escalation inside the container.
+    # - Docker's default capability set already excludes CAP_SYS_PTRACE, so the
+    #   master-password SecureString mlock protection holds against in-container
+    #   attackers by default. Critical: do NOT run with `--privileged`, do NOT
+    #   `cap_add: SYS_PTRACE`, and do NOT add --security-opt apparmor=unconfined
+    #   unless you fully understand the consequences (rationale in
+    #   `doc/cyber security.md`).
+    security_opt:
+      - no-new-privileges:true
+
     # Optional: Use environment file for API keys
     # env_file:
     #   - ./jarvis_agent.env
@@ -47,11 +58,16 @@ services:
       - jarvis_agent
     environment:
       J9T_URL: http://jarvis_agent:8080
-      J9T_TOKEN_FILE: /app/engine_api_token.txt
+      # j9t authenticates MCP clients with per-user MCP API keys (Authorization: Bearer mcp_...).
+      # Mount a secret file containing the key into /secrets/mcp_key, or set J9T_TOKEN inline
+      # with the key string. On j9t's first run an admin enrollment token is printed to stderr —
+      # activate it at POST /api/auth/mcp-keys/activate to obtain a real key.
+      J9T_TOKEN_FILE: /secrets/mcp_key
       J9T_MCP_TRANSPORT: sse
       J9T_MCP_PORT: "3100"
     volumes:
       - jarvis-queue:/app:ro
+      - ./secrets:/secrets:ro
     ports:
       - "3100:3100"
     networks:

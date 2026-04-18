@@ -58,8 +58,10 @@ l l l.
 Binary	jarvisAgent\-studio	jarvisAgent\-engine
 Purpose	Developer workstation	Production server
 Network	Localhost only	LAN / internet
-Auth	None	Bearer token, HMAC\-SHA256
-RBAC	N/A	admin, operator, viewer
+Browser UI auth	None (localhost)	Session cookie (after MCP key login)
+MCP / API auth	MCP API key	MCP API key
+Webhook auth	HMAC\-SHA256 (optional)	HMAC\-SHA256 (mandatory)
+RBAC	3 roles on MCP keys	3 roles on MCP keys / sessions / gateway
 Rate limit	None	100 req/min per IP, burst 20
 Audit log	None	log/security.txt (10 MB x 5)
 Body limit	None	Configurable (default 10 MB)
@@ -287,26 +289,25 @@ Auto\-generated from URL domain + model if omitted.
 .
 .SH ENVIRONMENT
 .TP
-.B JARVIS_MASTER_PASSWORD
-Master password for decrypting the encrypted API keys file
-.RB ( keys.json.enc ).
-When this variable is set, JarvisAgent decrypts the keys file automatically
-at startup without prompting.
-This is especially useful for Docker containers and CI environments.
-The master password is never stored on disk.
-.TP
 .B OPENAI_API_KEY
-Backward\-compatible fallback.
+Bootstrapping fallback.
 If no encrypted keys file is found and this variable is set, JarvisAgent
-creates a single "openai" provider entry using the key value.
-This is a convenience for simple single\-provider setups.
+creates a single \fBopenai\fR provider entry using the key value.
+Intended for simple single\-provider setups \(em encrypt keys as soon as practical.
+.PP
+The master password for \fBkeys.json.enc\fR and \fBmcp_keys.json.enc\fR is
+supplied only at runtime via the dashboard login flow or
+\fBPOST /api/settings/keys/unlock\fR.
+There is no environment\-variable shortcut: the password is held exclusively
+in \fBmlock()\fR\-protected memory (\fBSecureString\fR) and never lands in
+process listings, \fIdocker inspect\fR, or crash dumps.
 .PP
 API key priority order:
 .IP 1. 4
 Encrypted keys file
 .RB ( keys.json.enc )
-decrypted with
-.BR JARVIS_MASTER_PASSWORD .
+unlocked at runtime via dashboard login or
+.BR "POST /api/settings/keys/unlock" .
 .IP 2.
 Plaintext keys file
 .RB ( keys.json )
@@ -314,6 +315,289 @@ Plaintext keys file
 .IP 3.
 .B OPENAI_API_KEY
 environment variable.
+.
+.SH FIRST STEPS AFTER RESTART
+Every time JarvisAgent starts (cold boot, systemctl restart, container
+restart), the encrypted key stores
+.RB ( keys.json.enc
+and
+.BR mcp_keys.json.enc )
+are sealed \(em the master password is held only in
+.BR mlock() \-protected
+memory and is never persisted. An admin must unlock them before any
+credential\-dependent work can proceed.
+.PP
+\fBWhat does not work until you unlock:\fR
+.IP \(bu 3
+MCP API key authentication \(em all
+.B "Authorization: Bearer mcp_..."
+requests return 401 / 403 because the key hashes can't be compared.
+.IP \(bu
+AI provider API calls \(em workflows with
+.B ai_call
+tasks fail at dispatch time with a "no providers configured" error.
+.IP \(bu
+OAuth token refresh (OneDrive, Google Sheets, etc.) \(em access tokens
+won't be re\-issued when they expire.
+.IP \(bu
+Cloud connections that depend on encrypted credentials (Snowflake
+key\-pair, Postgres/SMTP BasicAuth, Slack bot token, etc.).
+.PP
+\fBWhat does work:\fR
+.IP \(bu 3
+\fIGET /api/status\fR \(em reports \fB"keys_unlocked": false\fR so monitors
+can alert.
+.IP \(bu
+\fIPOST /api/auth/mcp-keys/activate\fR \(em new users can exchange an
+enrollment token without the store being unlocked (the token itself is
+the auth).
+.IP \(bu
+\fIPOST /api/settings/keys/unlock\fR \(em the endpoint that unseals
+everything.
+.IP \(bu
+Studio browser UI on localhost (no auth required).
+.PP
+\fBHow to unlock:\fR
+.IP 1. 4
+\fBDashboard\fR: load the Engine dashboard in a browser, enter your MCP
+key on the login page. If the key store is sealed, the Settings modal
+prompts for the master password; provide it once and the session
+proceeds normally afterwards.
+.IP 2.
+\fBREST\fR:
+.EX
+curl -sS -X POST https://host:8443/api/settings/keys/unlock \\
+     -H 'Content-Type: application/json' \\
+     -d '{"master_password":"..."}'
+.EE
+Returns 200 with
+.B "mcp_keys_loaded": true
+on success, 401 on wrong password.
+.IP 3.
+\fBCI / Docker / automation\fR: call the unlock endpoint from a startup
+script using a secret you mount in (Docker secrets, AWS Secrets Manager,
+HashiCorp Vault). The old
+.B JARVIS_MASTER_PASSWORD
+environment variable was removed on purpose \(em the password never
+appears in process listings or
+.BR "docker inspect" .
+.PP
+\fBFirst-run only:\fR on the very first start with an empty MCP key
+store, JarvisAgent prints a bootstrap admin enrollment token to the
+application log
+.RB ( log/log.txt
+plus the TUI). Activate it via
+.I POST /api/auth/mcp-keys/activate
+to obtain the initial admin MCP key, then unlock as above on subsequent
+restarts.
+.
+.SH MCP API KEYS \(em ENROLLMENT, ACTIVATION, USE
+Every credential in JarvisAgent is an MCP API key \(em a per\-user,
+individually\-revocable bearer token. Keys are prefixed
+.B mcp_
+because the same credential is used by the \fBM\fRodel \fBC\fRontext
+\fBP\fRrotocol sidecar (the machine path: Claude Code, CI bots, custom
+agents) \fIand\fR by humans signing into the dashboard in a browser (the
+user path). Each key carries an identity, role, adhoc flag, disk quota,
+and retention ceiling on the server side.
+.PP
+\fBWhy one credential type for both paths.\fR An agent holding Alice's
+key is authorised \fIexactly\fR as Alice is. If Alice can submit adhoc
+workflows, so can her Claude Code instance; if Alice cannot shut down
+the server, neither can her agent. Every action \(em whether it
+originated from a browser click or an LLM tool call \(em traces back to
+a single human user in the audit log. Agents genuinely act \fBon behalf
+of\fR their user, without a separate service\-account pattern. One
+issuance, one revocation, one audit trail.
+.PP
+Three actors participate in the flows below: the \fBadmin\fR who issues
+credentials, the \fBuser\fR who activates and uses them, and the
+\fBagent\fR process (Claude Code, a CI bot, a custom script) that holds
+the final key on behalf of that user.
+.
+.SS I'm a new user \(em how do I get a key?
+Your admin hands you an enrollment token (\fBenroll_...\fR) out\-of\-band
+\(em Slack DM, email, in person. The token is single\-use and expires
+within 30 minutes of creation (60 minutes for the first\-run bootstrap
+token).
+.IP 1. 4
+Open the JarvisAgent dashboard (\fIhttps://<host>:8443/\fR).
+.IP 2.
+At the Sign\-in dialog, paste the \fBenroll_...\fR token into the input
+field. The dialog auto\-switches to \fBActivate enrollment token\fR with
+your token pre\-filled.
+.IP 3.
+Click \fBActivate\fR. Your real MCP API key appears on screen. \fBIt is
+shown exactly once.\fR
+.IP 4.
+Tick the "I have saved this MCP API key" checkbox. The \fBSign in with
+this key\fR button flips from red to green.
+.IP 5.
+Copy the key into your password manager (or Claude Code config), then
+click \fBSign in with this key\fR to enter the dashboard.
+.PP
+If you lose the key there is no recovery path \(em ask the admin for a
+fresh enrollment token. Don't share your key; treat it like a password.
+.
+.SS I'm a user \(em how do I use my key with Claude Code?
+The MCP sidecar
+.RB ( mcp/dist/index.js )
+reads the key from
+.B J9T_TOKEN
+or from a file pointed to by
+.B J9T_TOKEN_FILE
+(recommended; chmod 600, gitignored).
+.PP
+Minimal
+.B .mcp.json
+snippet:
+.EX
+{
+  "mcpServers": {
+    "j9t": {
+      "command": "node",
+      "args": ["/abs/path/to/jarvisAgent/mcp/dist/index.js"],
+      "env": {
+        "J9T_URL": "https://localhost:8443",
+        "J9T_TOKEN_FILE": "/abs/path/to/.mcp_admin_token"
+      }
+    }
+  }
+}
+.EE
+Restart Claude Code after editing. Verify with the
+.B whoami
+MCP tool \(em it should return your user and role.
+.
+.SS I'm a user \(em my key is about to expire
+MCP keys expire 90 days after activation by default. Within 30 days of
+expiry, responses carry an
+.B "X-Key-Expires-In: <N>d"
+header. Renew yourself at
+.I POST /api/auth/mcp-keys/self-renew
+with your current (still\-valid) key \(em a fresh key is issued, the old
+one enters a 24\-hour grace period then disables. The same role / adhoc
+flag / quota carry over; self\-renewal cannot escalate privilege. If
+your key has already expired, the admin must issue a new enrollment
+token.
+.
+.SS I'm an admin \(em how do I onboard a new user?
+.IP 1. 4
+Sign into the dashboard with your admin MCP key.
+.IP 2.
+Open \fBSettings\fR (gear icon) \(rA \fBMCP Keys\fR tab.
+.IP 3.
+Click \fB+ Create enrollment\fR.
+.IP 4.
+Fill in the user's email/username, role (admin/operator/viewer), adhoc
+flag, disk quota, default retention, and expiry. Click \fBCreate\fR.
+.IP 5.
+Copy the \fBenroll_...\fR token and share it over a secure channel. You
+never see the user's real MCP key \(em by design.
+.PP
+To \fBrevoke\fR: Settings \(rA MCP Keys \(rA \fBRevoke\fR on the row.
+Immediate; subsequent requests 401 and are audit\-logged. To
+\fBre-enroll\fR (rotate key or change role/quota): issue a fresh
+enrollment token; the user activates it and the previous key enters the
+24\-hour grace period.
+.
+.SS I'm an admin \(em how do I deploy scripts?
+Scripts under
+.B scripts/
+are the only way for adhoc workflows to execute shell / Python code \(em
+agents can reference them but cannot upload code.
+.IP 1. 4
+Drop the file into
+.B scripts/
+on the j9t host. Shell scripts are
+.B .sh
+/
+.BR .ps1 ;
+Python modules are
+.B .py
+importable as
+.BR scripts.<name> .
+.IP 2.
+Add a metadata header so it surfaces in the catalog:
+.EX
+#!/usr/bin/env bash
+# @jarvis-script
+# @short: One-line description
+# @params: ARG1 ARG2 ARG3
+# @description: Longer explanation, possibly wrapping
+#   onto indented continuation lines.
+# @outputs: Free-text description of produced artifacts
+.EE
+.IP 3.
+Make it executable:
+.B chmod +x scripts/my-script.sh
+(shell only).
+.IP 4.
+In the dashboard, open \fBSettings \(rA Scripts\fR and click
+\fBRefresh\fR to trigger an on\-demand rescan. No j9t restart required.
+The
+.B list_scripts
+MCP tool and
+.I GET /api/scripts
+endpoint now surface the new script; agents can reference it in adhoc
+submissions.
+.PP
+Scripts without the
+.B @jarvis-script
+marker still appear in the catalog but are flagged \(em useful for
+internal helper modules
+.RB ( scripts/helpers/*.py )
+that agents shouldn't reference directly as task entries.
+.
+.SS I'm an admin \(em how do agents use adhoc workflows?
+An authorised agent (MCP key with
+.B adhoc_enabled
+and role >= operator) composes a JCWF referencing pre\-deployed
+scripts and submits it via
+.BR run_adhoc_workflow .
+The full loop:
+.IP 1. 4
+\fBDiscover\fR \(em
+.B list_scripts
+returns the catalog; the LLM picks scripts it needs.
+.IP 2.
+\fBCompose\fR \(em agent assembles a JCWF canvas referencing those
+scripts.
+.IP 3.
+\fBSubmit\fR \(em
+.B run_adhoc_workflow
+stages the JCWF under
+.B _adhoc/<user_slug>/<ts>_<counter>_del-<ts>/
+and kicks off execution. Missing script references return 400
+.BR missing_scripts .
+.IP 4.
+\fBMonitor\fR \(em
+.B get_run_status
+polls until terminal.
+.IP 5.
+\fBEnumerate\fR \(em
+.B list_run_files
+returns outputs with size, content\-type, SHA\-256, a local
+.B path
+(for same\-host agents) and a
+.B download_url
+(for remote agents).
+.IP 6.
+\fBRetrieve\fR \(em
+.B get_run_file
+streams an artefact. Text inline, binary base64; Range requests
+supported for files over the 10 MB single\-response cap.
+.IP 7.
+\fBCleanup\fR \(em
+.B on_completion
+wipes the folder inline; TTL policies are swept by the reaper;
+.B retain
+needs admin action.
+.PP
+Every step is audit\-logged with the agent's identity, role, and (for
+file reads) bytes served. Admins can read any user's run folders with an
+.B admin_cross_user_read
+audit trail; operators see only their own.
 .
 .SH AI SETUP
 To use AI\-powered workflows, you need at least one API key configured.
@@ -494,16 +778,46 @@ secure.
 Engine is designed for production deployments and includes comprehensive
 security:
 .IP \(bu 3
-\fBBearer token authentication.\fR
-All admin endpoints require an \fIAuthorization: Bearer <token>\fR header.
-The token is a 256\-bit cryptographically random hex string, auto\-generated on
-first start and stored in \fBengine_api_token.txt\fR (file permissions 600).
-Token comparison uses constant\-time logic.
+\fBMCP API key authentication.\fR
+All programmatic endpoints require \fIAuthorization: Bearer mcp_...\fR.
+Keys are per\-user (identity, role, adhoc flag, disk quota, retention policy)
+and stored only as SHA\-256 hashes in the encrypted \fBmcp_keys.json.enc\fR.
+Provisioning uses a single\-use enrollment token: admin calls
+\fIPOST /api/auth/mcp\-keys/enroll\fR; user activates at
+\fIPOST /api/auth/mcp\-keys/activate\fR and receives their real key \fBonce\fR.
+On j9t's first run with an empty key store, a bootstrap admin enrollment
+token is logged to stderr.
 .IP \(bu
-\fBToken expiration and auto\-rotation.\fR
-Tokens expire after 90 days and are auto\-rotated.
-A startup warning is logged 7 days before expiry.
-Manual rotation: delete \fBengine_api_token.txt\fR and restart.
+\fBDashboard sessions.\fR
+Browser users sign in at the login page by pasting their MCP key
+(\fIPOST /api/auth/login\fR) \(em the server returns an \fIHttpOnly\fR +
+\fISameSite=Strict\fR cookie (plus \fISecure\fR when TLS is enabled), 8\-hour
+sliding timeout. \fIPOST /api/auth/logout\fR destroys the session.
+.IP \(bu
+\fBKey expiry and self\-renewal.\fR
+MCP keys expire 90 days after activation by default.
+Users can renew themselves at \fIPOST /api/auth/mcp\-keys/self\-renew\fR without
+admin help; old keys enter a 24\-hour grace period.
+.IP \(bu
+\fBAdhoc artefact retrieval.\fR
+Files produced by adhoc runs are discoverable via
+\fIGET /api/workflow\-runs/<runId>/files\fR and downloadable via
+\fIGET /api/workflow\-runs/<runId>/files/<path>\fR.
+Each adhoc run lives under \fB_adhoc/<user_slug>/<ts>_<counter>_del\-<ts>/\fR
+so ownership is enforced by the filesystem layout as well as the handler \(em
+operators see only their own runs; admins can read any run and every
+cross\-user read is audit\-logged.
+The download endpoint rejects path traversal, symlinks, directories, and
+non\-regular files; full\-file responses carry \fBX\-Content\-SHA256\fR and are
+capped at 10 MB (use \fIRange:\fR for larger files).
+.IP \(bu
+\fBScript catalog.\fR
+\fIGET /api/scripts\fR returns the inventory of scripts under \fBscripts/\fR
+that adhoc JCWFs can reference, parsed from each script's \fB@jarvis\-script\fR
+metadata header.
+The dashboard's \fBSettings > Scripts\fR tab displays the same catalog with a
+manual \fBRefresh\fR button \(em admins who just deployed a new script can
+pick it up without a j9t restart.
 .IP \(bu
 \fBFailed auth lockout.\fR
 10 failed attempts from the same IP within 5 minutes triggers a 15\-minute
@@ -511,13 +825,14 @@ lockout (HTTP 403 with Retry\-After: 900).
 .IP \(bu
 \fBRBAC (Role\-Based Access Control).\fR
 Three roles with descending privilege:
-\fBadmin\fR \(em full access including shutdown, security logs, and all
-operations;
-\fBoperator\fR \(em run control, workflow monitoring, application logs;
+\fBadmin\fR \(em full access including shutdown, security logs, MCP key CRUD,
+and configuration endpoints;
+\fBoperator\fR \(em run control, workflow monitoring, application logs,
+adhoc submission (when \fBadhoc_enabled\fR is granted on the key);
 \fBviewer\fR \(em read\-only dashboard, workflow list, run status.
-In gateway mode, the role comes from the \fBTrustedRoleHeader\fR (default:
-viewer if missing).
-In bearer\-token mode, the token grants admin.
+The role travels on the MCP key, on the session cookie derived from it, or on
+the gateway\-injected \fBX\-Forwarded\-Role\fR header (default viewer when
+absent).
 .IP \(bu
 \fBPer\-IP rate limiting.\fR
 Token bucket algorithm: 100 requests/minute per IP, burst of 20.
@@ -530,7 +845,8 @@ the raw request body.
 In Engine mode, webhooks without a configured secret are rejected.
 .IP \(bu
 \fBWebSocket authentication.\fR
-Clients must send \fI{"type":"auth","token":"<token>"}\fR as the first message.
+Browser upgrades are validated at the handshake via the session cookie
+(.onaccept hook); no in\-band auth message is used.
 .IP \(bu
 \fBBuilt\-in TLS (HTTPS).\fR
 Set \fBTlsCert\fR and \fBTlsKey\fR in config.json to serve HTTPS (default
@@ -571,14 +887,18 @@ responsibilities, see
 Main configuration file (must exist in the working directory).
 .TP
 .B keys.json.enc
-Encrypted API keys (AES\-256, master\-password protected).
+Encrypted AI provider credentials (AES\-256\-GCM, master\-password protected).
 .TP
 .B keys.json
 Plaintext API keys (development fallback, gitignored).
 .TP
-.B engine_api_token.txt
-Auto\-generated admin bearer token (Engine edition only, file permissions 600).
-Contains the token on line 1 and \fIissued_at=<ISO\-8601>\fR on line 2.
+.B mcp_keys.json.enc
+Encrypted MCP API key store (same master password as keys.json.enc;
+only SHA\-256 hashes of keys are persisted).
+.TP
+.B _adhoc/
+Per\-run folders for adhoc workflow submissions, auto\-cleaned according to
+the configured retention policy.
 .TP
 .B workflows/
 Directory containing

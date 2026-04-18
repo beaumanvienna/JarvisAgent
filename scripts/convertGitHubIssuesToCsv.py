@@ -1,3 +1,12 @@
+# @jarvis-script
+# @short: Convert a GitHub issues JSON response into a CSV for filter tasks
+# @params: input_json — path to the GitHub API /issues response (file_inputs[0])
+# @description: Reads the GitHub API issues response, drops pull requests
+#   (GitHub returns PRs in the /issues endpoint), and writes issues.csv with
+#   number / title / body / labels columns into the task working directory.
+#   Body text is truncated to 500 characters with newlines collapsed so the CSV
+#   stays parseable by downstream filter tasks.
+# @outputs: issues.csv — one row per open or closed issue (PRs excluded)
 """Convert GitHub issues JSON to CSV for filter consumption.
 
 Called as a python task with file_inputs[0] = response.json, file_outputs[0] = issues.csv.

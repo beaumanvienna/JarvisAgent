@@ -119,6 +119,18 @@ export interface KeysUnlockResponse {
   status?: string;
   message?: string;
   error?: string;
+  bootstrapped?: boolean;
+  mcp_keys_loaded?: boolean;
+  // Populated when the MCP key store was empty after unlock — the server has
+  // created a fresh admin key and handed it back so the UI can display it
+  // without the user fishing an enrollment token out of log/log.txt.
+  admin_key?: {
+    key_id: string;
+    api_key: string;
+    user: string;
+    role: string;
+    expires_at: string;
+  };
 }
 
 export interface AnalyzeLastRunResponse {

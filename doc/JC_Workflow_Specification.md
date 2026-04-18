@@ -1209,20 +1209,42 @@ For `ai_call` tasks, the **PROB files are the requirement files**.  The
 workflow executor writes PROB files to the task's queue folder; the
 SessionManager dispatches them.
 
-**Exposing the AI response to downstream tasks.** When a downstream task (cloud, shell, python) needs the AI response as a file path, the `ai_call` task MUST declare an `outputs` slot and MUST NOT declare `file_outputs`:
+**Exposing the AI response — two valid patterns.** The AI response is written by the SessionManager to `<PROB_stem>.output.<ext>` in the task's queue folder. Downstream consumers can reach it in two ways:
+
+*Pattern A — zero-copy reference (preferred for downstream JCWF tasks).* Declare an `outputs` slot and skip `file_outputs`:
 
 ```jsonc
 "summarize": {
   "type": "ai_call",
   "working_directory": "../../queue/myWorkflow/01_summarize",
-  "outputs": { "summary": { "type": "string" } },  // REQUIRED for downstream piping
+  "outputs": { "summary": { "type": "string" } },
   "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
 }
 ```
 
-The runtime maps the declared output slot to the natural `<PROB_stem>.output.<ext>` file the SessionManager produces. Downstream tasks reference it as `{{summarize.output_file}}` or `{{summarize.summary}}`, which resolve to the absolute path of the AI response.
+The runtime maps the declared slot to the natural `PROB_*.output.*` file already produced by the SessionManager. Downstream tasks reference it via `{{summarize.output_file}}` or `{{summarize.summary}}`, both resolving to the absolute path of the AI response. No duplication, no extra AI call.
 
-**Why `file_outputs` is forbidden on `ai_call`:** `file_outputs` paths resolve against the task's `working_directory`, which for `ai_call` is inside a watched queue folder. A file written there that does not match any recognized prefix (STNG/CNTX/TASK/PROB/PROV/`*.output.*`) is categorized as a new requirement file and triggers an additional AI query. The runtime MUST warn (or, implementations MAY reject) `ai_call` tasks that declare `file_outputs`.
+*Pattern B — delivery to a specific path (preferred for terminal artefacts).* Declare `file_outputs` with paths that resolve OUTSIDE the task's own queue folder. The runtime copies `PROB_*.output.*` to each declared path once the AI response lands. Typical uses:
+
+- **Portable delivery within the project tree.** A JCWF writes a report to `workflows/<project>/reports/summary.md`, or an adhoc run emits generated source to `workflows/build/main.cpp`. Works identically across Studio, Engine, Docker, and per-user installs.
+- **External-project agent workflows** (Studio and Engine-without-Docker only). An agent operating on a codebase outside the j9t tree — say a local Polarion mockup at `~/dev/polarionMockup/src/` — writes AI-generated patches directly into that project. Skipping a copy-in-copy-out dance is meaningfully faster than round-tripping through `workflows/`.
+
+```jsonc
+"summarize": {
+  "type": "ai_call",
+  "working_directory": "../../queue/myWorkflow/01_summarize",
+  "file_outputs": ["workflows/build/main.cpp"],
+  "queue_binding": { /* STNG + CNTX + TASK + PROB */ }
+}
+```
+
+**Portability note.** Paths above the launch CWD (e.g. `/tmp/...`, `~/...`, `../../outside`) work fine locally but fail in Engine-in-Docker where the filesystem above the mount is read-only. The runtime does not hard-reject them — that's an intentional trade — but the validator raises an informational finding so authors who care about cross-edition portability see the flag.
+
+**What `file_outputs` on `ai_call` MUST NOT do.** A `file_outputs` path that resolves INSIDE the task's own `working_directory` (which, for `ai_call`, is a watched queue folder) AND whose filename would be categorized as a requirement file — i.e. the filename matches `PROB_*` or does not match any recognized prefix (`STNG_*` / `CNTX_*` / `TASK_*` / `PROV_*` / `*.output.*`) — will fire an **extra AI query** because the categorizer treats it as a new prompt. The equivalently wasteful pattern of copying `PROB_foo.output.txt` into the same folder under a new name is forbidden for the same reason. The runtime MUST warn about these cases; implementations MAY reject them.
+
+The legitimate same-folder case exists only for `PROB_*` files that are intentionally meant to trigger *another* AI call — typically not something you'd express via `file_outputs`. If you truly need to chain two AI calls on the same task, add a second task with its own queue folder.
+
+Patterns A and B can be combined: declare both an `outputs` slot (for downstream JCWF references) and `file_outputs` (for terminal artefact delivery). The slot always maps to the original `PROB_*.output.*`; `file_outputs` copies go to the declared external paths.
 
 ##### 3.3.6.4 `queue_binding` — Declaring Queue Files in JCWF
 

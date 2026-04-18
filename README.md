@@ -78,11 +78,11 @@ See [doc/cloud-integration.md](doc/cloud-integration.md) for the full architectu
 
 - **[INSTALL.md](INSTALL.md)** — install pre-built packages on all platforms
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — build from source, dependencies, editions, running
+- **[User Manual](doc/jarvisagent.md)** — MCP key enrollment, admin tasks, scripts, adhoc workflows (also available as `man jarvisagent` on Linux/macOS)
 - [doc/architecture.md](doc/architecture.md) — system architecture and runtime layers
 - [doc/JC_Workflow_Specification.md](doc/JC_Workflow_Specification.md) — complete JCWF format
 - [doc/cloud-integration.md](doc/cloud-integration.md) — cloud connector framework
 - [doc/api-endpoints.md](doc/api-endpoints.md) — REST API reference
-- [doc/jarvisagent.md](doc/jarvisagent.md) — full user manual (also available as `man jarvisagent` on Linux/macOS)
 - [doc/cyber security.md](doc/cyber%20security.md) — Engine security model
 - [integration/README.md](integration/README.md) — webhook triggers, n8n integration, HMAC signing
 
