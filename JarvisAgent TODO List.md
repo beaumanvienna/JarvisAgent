@@ -286,6 +286,49 @@ Reference: this item captured after the 2026-04-18 MCP 1.0 commit landed +10,602
 - Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
 - Target: post-1.0. Track in `application/workflow/doc/todo.md` under the "future refactors" section when it's time to start.
 
+### 5e. Native LLM tool-calling — Assistant (priority) + post-1.0 JCWF `ai_call`
+
+**Background.** Modern LLM APIs (OpenAI `tool_calls[]`, Gemini `functionCall`, Anthropic `tool_use` content blocks) support structured tool-calling natively: the request carries a list of tools (name + description + parameters JSON-schema); the model can choose to emit a structured call instead of text; the client executes the tool locally and feeds the result back for another turn. This is what agl and pydantic-ai are built around. The "AI Dispatch Refactor" (AiInvocation) makes native tool-calling trivial to plumb in once the envelope is typed.
+
+**5e.1 — AI Assistant: replace the `<tool_call>` regex parser with native tool-calling.** Priority item, not post-1.0.
+- Today `application/assistant/assistantTools.h:98` `ParseToolCalls()` regex-extracts `<tool_call>name(arg=value, ...)</tool_call>` tags from free-text replies. Hand-rolled, breaks when the model gets chatty inside the tags, escapes a quote wrong, or nests a tag inside a code fence.
+- After AiInvocation lands: the assistant builds an invocation with `m_Tools = [...]` (one per registered `ToolDef`); providers return native tool calls via `ReplyParser::GetToolCalls()`; the assistant controller loops exactly as today, but from real structured fields instead of regex. Tag parser can stay as a fallback for interfaces that don't expose tools.
+- Scope: extend `ReplyParser` with `GetToolCalls()`, add tool declarations to request builders (API1/API2/API3/API4), swap `AssistantController` over to structured calls. L3 approval flow (`requiresApproval`) unchanged.
+
+**5e.2 — Post-1.0: bring tool-calling to JCWF `ai_call` tasks.** Pairs with 5c.
+- JCWF `ai_call` gains optional `tools: [...]`. Each tool has `{name, description, parameters_schema, handler_task}` where `handler_task` is a normal JCWF task (python/shell/internal).
+- When the model emits a tool call, `AiCallTaskExecutor` enqueues the handler task synchronously with the tool arguments, awaits its `.output.txt`, appends a `ToolReturn` message to the invocation, and re-dispatches — same loop pattern as the Assistant, inside one `ai_call` task.
+- Most existing example JCWFs don't benefit (explicit DAGs already make the decisions the author wants). Real candidates: `slackQAndABot` (classic tool-using Q&A bot), `redmineTriageBot` / `gitHubIssueDemo` / `jiraIssueDemo` (triage decisions that benefit from looking up related items mid-call), `hamburg-tourist-day-planner` (live lookups).
+- New design work: bounded `max_tool_turns`, deterministic-replay story (record-and-replay of tool choices for tests), interaction with JCWF freshness model (an `ai_call` that took tool paths A→B today vs A→C tomorrow), transcript format extension to capture tool turns.
+- Target: post-1.0. Track in `application/workflow/doc/todo.md` under "future refactors" when it's time to start.
+
+### 5f. j9t as orchestrator of other AI tools — Claude Code PoC
+
+**Background.** Today, `ai_call` tasks hit an LLM chat/completions endpoint and get text back. The LLM is a *reasoning primitive*. But there's a richer class of backends out there — **coding agents** like Claude Code, Cursor Agent, Aider, OpenAI Codex — that are themselves orchestrators: they read files, edit code, run shell commands, iterate until a goal is met. Wiring j9t to call into these tools turns JarvisAgent from "workflow engine that calls LLMs" into "workflow engine that orchestrates *other AI orchestrators*." That's a meaningful expansion of what a j9t workflow can do in one step.
+
+**PoC scope — Claude Code as an AI backend.**
+- Claude Code has a headless mode: `claude -p "<prompt>"` runs non-interactively and prints the response to stdout. Permission mode flags (`--permission-mode=plan` / `acceptEdits` / `default`) control whether it's allowed to modify files. Working directory is whatever the process starts in.
+- Auth is piggybacked on the user's existing Claude subscription (Claude Max / Pro), via the CLI's login state. **No API key management needed from j9t** — the user authenticates `claude` once, j9t just spawns it. Nice ergonomic win.
+- Proposed integration path: new `InterfaceType::ClaudeCode` ("API5") handled differently from HTTP-based interfaces. Instead of building an HTTP body, the `AiCallTaskExecutor` path writes STNG/CNTX/TASK/PROB as today, concatenates them into a single prompt, spawns `claude -p "<prompt>"` in the task's working directory, captures stdout, wraps it in an `AiReply`. No `CurlMultiDispatcher` involvement — the process is the transport.
+- Lives behind the same `AiInvocation` envelope as HTTP interfaces; a workflow author just selects `api_interface: claude-code` on the task. Rest of the workflow is unchanged.
+
+**Risks / open questions to settle during the PoC.**
+- Concurrency: `claude` is a heavy process. Spawning 60 in parallel for a CSV fan-out workflow would not be fine. Cap concurrent Claude Code instances per workflow run (new config: `max_concurrent_claude_code`).
+- Permission safety: default to `--permission-mode=plan` (read-only) unless the task explicitly opts into mutation. Engine edition should probably refuse mutation mode entirely.
+- Determinism: Claude Code is even more non-deterministic than a raw LLM call (it makes multiple internal tool choices). No `seed`, no `system_fingerprint`. The `.transcript.json` from the dispatch refactor captures the top-level prompt/response; what the Claude Code session does internally is opaque to us. That's fine for a PoC, limiting for production.
+- Cost: Claude Max / Pro usage, not per-API-token. Different billing model than API1/API4.
+- Cross-platform: `claude` CLI availability on Linux/macOS/Windows varies. May need a config flag to point at a specific binary path.
+
+**Longer term — other candidates beyond Claude Code.**
+- **j9t → j9t** (cross-instance orchestration) via the existing MCP sidecar — already possible, just hasn't been wired as a PoC.
+- **Cursor Agent** (headless mode, if/when exposed) — similar shape to Claude Code.
+- **Aider** — open-source, scriptable, git-aware. Good natural fit since j9t is git-friendly.
+- **OpenAI Codex CLI** — same shape; different auth.
+
+**Target: post-1.0, after the dispatch refactor lands.** The `InterfaceType` seam we're building in the refactor is what makes this PoC cheap — add a new variant + a new `IRequestBuilder`-equivalent (or a parallel `IAiTransport` abstraction since the transport isn't HTTP) + a new reply parser that just wraps stdout text. Most of the machinery (queue files, envelope, retry, transcript) is reused.
+
+Claude's joke-but-not-a-joke tagline for this one: *"j9t orchestrates the orchestrators."*
+
 ### 6. Landing page for new users
 - Create a welcoming landing page / website for JarvisAgent
 - Should explain what JarvisAgent is, key features, screenshots, and download links
