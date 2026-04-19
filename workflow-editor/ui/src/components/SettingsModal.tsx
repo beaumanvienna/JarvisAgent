@@ -127,7 +127,7 @@ function GeneralTab({
         }}
       >
         Global configuration — AI interfaces, API keys, connections, and server
-        settings — has moved to the <strong>Dashboard</strong>. Click the
+        settings — can be found in the <strong>Dashboard</strong>. Click the
         <strong>&nbsp;Dashboard&nbsp;</strong>button in the top bar and open its
         Settings gear.
       </div>

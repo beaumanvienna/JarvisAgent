@@ -19,8 +19,12 @@ cd JarvisAgent
 
 JarvisAgent depends on:
 
+- **C++ toolchain** — gcc/g++ or clang, plus `make`
 - **Python 3** and development headers (on Ubuntu/Debian: `python3`, `python3-dev`)
 - **libz** (Linux — linked at build time; vendored on Windows; included in Xcode SDK on macOS)
+- **libpq** — PostgreSQL client library, required by the DB-query cloud connector on all platforms
+- **pkg-config** — used by premake5 to discover libpq
+- **Node.js + npm** — to build the React UIs (dashboard + workflow editor)
 - **premake5**
 - **markitdown** (document conversion)
 - **pandoc + pdflatex** (Markdown → PDF, required for PDF workflows; see platform-specific install commands below)
@@ -30,10 +34,24 @@ JarvisAgent depends on:
 
 ---
 
-## Linux (Ubuntu / Debian)
+## Linux
+
+Package names vary by distribution; the list you need is:
+
+- C++ compiler and `make` (e.g. `build-essential` or `gcc-c++`)
+- `pkg-config`
+- Python 3 + development headers + venv + pip
+- zlib development headers
+- libpq development headers (PostgreSQL client)
+- Node.js + npm
+- premake5 (not packaged on most distros — build from source)
+
+### Ubuntu / Debian (concrete example)
 
 ```bash
-sudo apt install -y python3 python3-pip python3-dev python3-venv zlib1g-dev
+sudo apt install -y build-essential pkg-config \
+                    python3 python3-pip python3-dev python3-venv \
+                    zlib1g-dev libpq-dev nodejs npm
 ```
 
 Premake5 — clone, bootstrap, install:
@@ -45,40 +63,27 @@ cd premake-core
 sudo cp bin/release/premake5 /usr/bin/
 ```
 
----
-
-## Linux (Fedora / RHEL / Rocky)
-
-```bash
-sudo dnf install -y gcc-c++ make python3 python3-devel python3-pip zlib-devel nodejs npm
-```
-
-On RHEL / Rocky you may need EPEL:
-
-```bash
-sudo dnf install -y epel-release
-sudo dnf makecache
-```
-
-Premake5 is not in the Fedora/EPEL repos — build from source:
-
-```bash
-git clone https://github.com/premake/premake-core
-cd premake-core
-sudo dnf install -y libuuid-devel   # required by Bootstrap.sh
-./Bootstrap.sh
-sudo cp bin/release/premake5 /usr/bin/
-```
+Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way (Fedora needs `libuuid-devel` for `Bootstrap.sh`).
 
 ---
 
 ## macOS
 
+Install the build prerequisites via Homebrew:
+
 ```bash
-brew install python3 node
+brew install premake node python3 libpq pkg-config
 ```
 
-Premake5: download from [premake.github.io](https://premake.github.io/download) or build from source as above.
+`libpq` is keg-only on Homebrew (avoids clashing with a full PostgreSQL install), so you must expose it to `pkg-config` before running premake:
+
+```bash
+export PKG_CONFIG_PATH="$(brew --prefix libpq)/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+
+Add that `export` line to your `~/.zshrc` (or `~/.bash_profile`) so it persists across sessions. A successful `premake5 gmake` will print `>>> libpq (macOS): -I/opt/homebrew/opt/libpq/include …` — if it prints "libpq: not found via pkg-config" instead, the env var is missing and the build will fail with `fatal error: 'libpq-fe.h' file not found`.
+
+> Optional: `export MAKEFLAGS=-j$(sysctl -n hw.ncpu)` in your shell rc so every `make` invocation parallelizes across your cores.
 
 ---
 
@@ -200,6 +205,20 @@ npm run build
 ```
 
 The build output lands in `dashboard/ui/dist/` and `workflow-editor/ui/dist/` respectively. JarvisAgent serves these automatically at `http://localhost:8080` (dashboard) and `http://localhost:8080/editor`. With TLS enabled (`"TlsCert"` and `"TlsKey"` in `config.json`), the default port changes to `8443` — configurable via `"port"`.
+
+---
+
+## MCP Sidecar (optional)
+
+The `mcp/` directory contains a Node-based sidecar that exposes j9t workflows to Claude Desktop, Claude Code, and other MCP clients. Build it only if you plan to use MCP integration — it is not required for running j9t itself.
+
+```bash
+cd mcp
+npm install
+npm run build
+```
+
+The build output lands in `mcp/dist/`. See [mcp/README.md](mcp/README.md) for Claude Desktop / Claude Code integration snippets, environment variables (`J9T_URL`, `J9T_TOKEN`, `NODE_EXTRA_CA_CERTS` for self-signed TLS), and the full tool catalog (run plane, artifact plane, configure plane, observability).
 
 ---
 

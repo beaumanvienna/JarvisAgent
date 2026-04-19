@@ -27,7 +27,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
-    wget \
+    git \
+    uuid-dev \
     ca-certificates \
     python3 \
     python3-dev \
@@ -35,13 +36,14 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# premake5
-RUN cd /tmp && \
-    wget -q https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz && \
-    tar -xzf premake-5.0.0-beta2-linux.tar.gz && \
-    mv premake5 /usr/local/bin/ && \
+# premake5 — built from source so the same recipe works on both linux/amd64
+# and linux/arm64 (no official arm64 prebuilt in the v5.0.0-beta2 release).
+RUN git clone --depth 1 --branch v5.0.0-beta2 https://github.com/premake/premake-core.git /tmp/premake-core && \
+    cd /tmp/premake-core && \
+    ./Bootstrap.sh && \
+    cp bin/release/premake5 /usr/local/bin/ && \
     chmod +x /usr/local/bin/premake5 && \
-    rm premake-5.0.0-beta2-linux.tar.gz
+    rm -rf /tmp/premake-core
 
 WORKDIR /app
 COPY . .

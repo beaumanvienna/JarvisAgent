@@ -1041,7 +1041,7 @@ namespace AIAssistant
     // Failed auth lockout constants.
     static constexpr size_t kMaxAuthFailures = 10;
     static constexpr auto kAuthFailureWindow = std::chrono::minutes(5);
-    static constexpr auto kLockoutDuration = std::chrono::minutes(15);
+    [[maybe_unused]] static constexpr auto kLockoutDuration = std::chrono::minutes(15);
 
     // Role hierarchy: admin > operator > viewer.
     static int RoleLevel(std::string_view role)

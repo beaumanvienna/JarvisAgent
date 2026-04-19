@@ -49,7 +49,6 @@ namespace AIAssistant
     namespace
     {
         static constexpr uint64_t AI_CALL_TIMEOUT_MS = 120000; // 2 minutes per AI call
-        static constexpr int MAX_GENERATE_RETRIES = 2;
 
         // Workflow IDs used for logging (visible in Run Analyser).
         static constexpr char const* WF_ID_EXPLAIN = "_ai_explain";

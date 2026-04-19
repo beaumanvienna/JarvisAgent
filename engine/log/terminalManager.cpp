@@ -416,6 +416,12 @@ namespace AIAssistant
             for (; lineIndex < statusRows && lineIndex < static_cast<int>(lines.size()); ++lineIndex)
             {
                 std::string const safe = SanitizeForCurses(lines[static_cast<size_t>(lineIndex)]);
+                // Clear the row before rewriting. If a previous render placed a wide char
+                // (e.g. an emoji from an AI status line) at cols N–N+1 and the new line is
+                // shorter, overwriting only col N leaves the MAX_UNICODE continuation cell
+                // at N+1 orphaned — PDC_transform_line_sliced then asserts on the next refresh.
+                wmove(m_StatusWindow, lineIndex, 0);
+                wclrtoeol(m_StatusWindow);
                 mvwprintw(m_StatusWindow, lineIndex, 0, "%s", safe.c_str());
             }
 

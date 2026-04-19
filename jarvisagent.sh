@@ -36,7 +36,7 @@ fi
 if [[ "$BUILD_CONFIG" == "Debug" ]]; then
     EDITION_LABEL="$EDITION_LABEL (debug)"
 fi
-set -- "${PASSTHROUGH_ARGS[@]}"
+set -- "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"
 
 # ── Check binary exists ──────────────────────────────────────────────────────
 if [ ! -f "$BINARY" ]; then
@@ -61,7 +61,10 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 # ── Install mmdc (mermaid-cli) if missing ───────────────────────────────────
-if ! command -v mmdc &>/dev/null; then
+# Check both the local install dir and system PATH — previous runs drop mmdc
+# into .npm-tools/node_modules/.bin/, which isn't on PATH yet at this point.
+MMDC_LOCAL="$SCRIPT_DIR/.npm-tools/node_modules/.bin/mmdc"
+if [[ ! -x "$MMDC_LOCAL" ]] && ! command -v mmdc &>/dev/null; then
     echo "[jarvisagent.sh] Installing mmdc (mermaid-cli) for PDF workflows ..."
     npm install --prefix "$SCRIPT_DIR/.npm-tools" @mermaid-js/mermaid-cli@10.x 2>/dev/null \
         || echo "[jarvisagent.sh] WARNING: mmdc install failed (npm required)"

@@ -194,20 +194,39 @@ project "jarvisAgent"
     
         --
         -- Robust Python discovery on macOS:
-        -- Uses whatever "python3" is on PATH (e.g. provided by actions/setup-python),
-        -- and queries sysconfig for include/lib locations and the link library name.
+        -- Queries sysconfig for include/lib locations and the link library name.
+        -- Uses the python3 that matches python3-config on PATH (via --prefix),
+        -- falling back to plain "python3" if python3-config is unavailable.
+        --
+        -- Why: `brew install python` installs Homebrew's python3-config first in
+        -- PATH but does not necessarily override Apple's /usr/bin/python3 (from
+        -- Command Line Tools), which advertises "Python3.framework" and ships no
+        -- Python.h. Trusting PATH for python3 breaks embedding builds.
+        -- On CI, actions/setup-python installs both consistently, so the
+        -- python3-config --prefix lookup still resolves to the intended install.
         --
         -- IMPORTANT:
         -- Premake executes Lua at generation-time, even inside a filter.
         -- So we must guard macOS-only host calls to avoid crashing when premake runs elsewhere.
         --
         if os.ishost("macosx") then
-            local pythonInfo = os.outputof([[python3 -c "import sys, sysconfig; 
-print(sysconfig.get_path('include') or ''); 
-print(sysconfig.get_config_var('LIBDIR') or ''); 
-print(sys.base_prefix or ''); 
-print(sysconfig.get_config_var('LDLIBRARY') or ''); 
-print(sysconfig.get_config_var('PYTHONFRAMEWORK') or ''); 
+            local py_bin = "python3"
+            local py_prefix = os.outputof("python3-config --prefix 2>/dev/null")
+            if py_prefix and py_prefix ~= "" then
+                py_prefix = py_prefix:gsub("%s+$", "")
+                local candidate = py_prefix .. "/bin/python3"
+                if os.isfile(candidate) then
+                    py_bin = candidate
+                end
+            end
+            print(">>> Python (macOS): using " .. py_bin)
+
+            local pythonInfo = os.outputof(py_bin .. [[ -c "import sys, sysconfig;
+print(sysconfig.get_path('include') or '');
+print(sysconfig.get_config_var('LIBDIR') or '');
+print(sys.base_prefix or '');
+print(sysconfig.get_config_var('LDLIBRARY') or '');
+print(sysconfig.get_config_var('PYTHONFRAMEWORK') or '');
 print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
 
             if not pythonInfo then
@@ -470,6 +489,14 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         ----------------------------------------------------
         os.rmdir("vendor/miniz/bin")
         os.rmdir("vendor/miniz/bin-int")
+
+        ----------------------------------------------------
+        -- React apps (Dashboard + Workflow Editor)
+        ----------------------------------------------------
+        os.rmdir("dashboard/ui/dist")
+        os.rmdir("dashboard/ui/node_modules")
+        os.rmdir("workflow-editor/ui/dist")
+        os.rmdir("workflow-editor/ui/node_modules")
 
         print("done.")
     end
