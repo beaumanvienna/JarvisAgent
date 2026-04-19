@@ -104,12 +104,20 @@ See [doc/cloud-integration.md](doc/cloud-integration.md) for the full architectu
 
 See **[INSTALL.md](INSTALL.md)** for full installation. Fastest path:
 
+**Prerequisites:** Docker (Docker Desktop on macOS/Windows, or Docker Engine on Linux).
+
 ```bash
-docker pull ghcr.io/beaumanvienna/jarvisagent:latest
-./scripts/run-docker.sh
+git clone https://github.com/beaumanvienna/JarvisAgent.git
+cd JarvisAgent
+./scripts/run-docker.sh              # Linux / macOS
+scripts\run-docker.ps1               # Windows (PowerShell)
 ```
 
+The helper script pulls `ghcr.io/beaumanvienna/jarvisagent:latest` and starts the container with a persistent data directory at `~/JarvisAgent`.
+
 Then open the dashboard at `http://localhost:8080` (or `https://localhost:8443` with TLS) and the workflow editor at `/editor`.
+
+The image is published for `linux/amd64` and `linux/arm64` — runs natively on Intel/AMD hosts, Apple Silicon (via Docker Desktop), and ARM Linux.
 
 ---
 

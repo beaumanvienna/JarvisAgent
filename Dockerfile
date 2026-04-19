@@ -1,6 +1,10 @@
 # ---- Dashboard build stage ----
+# Both apps import from ../../shared-ui via the @shared/* alias. shared-ui is
+# source-only (no package.json / node_modules); tsconfig paths + Vite dedupe
+# pin react/react-dom to the consumer's node_modules.
 FROM node:20-slim AS dashboard-builder
 WORKDIR /ui
+COPY shared-ui/ /shared-ui/
 COPY dashboard/ui/package.json dashboard/ui/package-lock.json ./
 RUN npm ci
 COPY dashboard/ui/ ./
@@ -9,6 +13,7 @@ RUN npm run build
 # ---- Workflow Editor build stage ----
 FROM node:20-slim AS editor-builder
 WORKDIR /ui
+COPY shared-ui/ /shared-ui/
 COPY workflow-editor/ui/package.json workflow-editor/ui/package-lock.json ./
 RUN npm ci
 COPY workflow-editor/ui/ ./
@@ -142,8 +147,12 @@ COPY example/workflows/aiCarMaintenancePipeline.jcwf \
      example/workflows/gcsDemo.jcwf \
      /opt/jarvisagent/.image-defaults/workflows/
 
-# Default config for first-run seeding
-COPY config.json /opt/jarvisagent/.image-defaults/config.json
+# Default config for first-run seeding.
+# Uses the tracked canonical template (HTTP on port 0 → 8080, no TLS) rather
+# than the developer's local config.json (which is gitignored and may point at
+# TLS certs that aren't in the image). The entrypoint injects TLS fields on
+# first-run seed when J9T_TLS=1.
+COPY packaging/config.json.example /opt/jarvisagent/.image-defaults/config.json
 
 # Image version marker for upgrade detection (entrypoint re-seeds workflows on version change)
 RUN echo "0.8.5" > /opt/jarvisagent/.image-defaults/.image-version
@@ -155,9 +164,13 @@ RUN chmod +x /opt/jarvisagent/docker-entrypoint.sh
 # /app is the data directory (volume mount point)
 WORKDIR /app
 
-EXPOSE 8080
+EXPOSE 8080 8443
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')" || exit 1
+    CMD if [ "${J9T_TLS:-0}" = "1" ]; then \
+            python3 -c "import urllib.request, ssl; urllib.request.urlopen('https://localhost:8443/api/status', context=ssl._create_unverified_context())"; \
+        else \
+            python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')"; \
+        fi
 
 ENTRYPOINT ["/opt/jarvisagent/docker-entrypoint.sh"]

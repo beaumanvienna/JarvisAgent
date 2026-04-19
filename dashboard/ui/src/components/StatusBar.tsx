@@ -74,21 +74,6 @@ export default function StatusBar({
     <header className="status-bar">
       <div className="status-bar-left">
         <span className="title">JarvisAgent Dashboard</span>
-        <span
-          className="edition-badge"
-          style={{
-            fontSize: "0.65rem",
-            padding: "1px 6px",
-            borderRadius: 3,
-            background: isStudio ? "#3b82f6" : "#64748b",
-            color: "#fff",
-            marginLeft: 8,
-            verticalAlign: "middle",
-            letterSpacing: "0.04em",
-          }}
-        >
-          {isStudio ? "Studio" : "Engine"}
-        </span>
         <div className="led-row">
           <Led
             color={connectionColor}

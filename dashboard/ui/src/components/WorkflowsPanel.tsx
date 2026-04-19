@@ -1,5 +1,6 @@
+import { useState } from "react";
 import type { WorkflowEntry, RunSnapshot, LastRunInfo } from "../types";
-import { runWorkflow } from "../api";
+import { reloadWorkflows, runWorkflow } from "../api";
 
 interface Props {
   workflows: WorkflowEntry[];
@@ -41,7 +42,20 @@ function stateClass(state: string): string {
 }
 
 export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh, canRunWorkflows }: Props) {
+  const [reloading, setReloading] = useState(false);
   const topLevelWorkflows = workflows.filter((wf) => !wf.is_sub_workflow);
+
+  const handleReload = async () => {
+    setReloading(true);
+    try {
+      await reloadWorkflows();
+      onRefresh();
+    } catch {
+      // silent — toast/status would go here if we had one
+    } finally {
+      setReloading(false);
+    }
+  };
 
   const runsByWorkflow = new Map<string, RunSnapshot>();
   for (const run of runs) {
@@ -64,7 +78,18 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
 
   return (
     <section className="panel">
-      <h2>Workflows</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+        <h2 style={{ margin: 0 }}>Workflows</h2>
+        <button
+          className="btn"
+          type="button"
+          onClick={handleReload}
+          disabled={reloading}
+          title="Re-scan the workflows folder for new or modified .jcwf files"
+        >
+          {reloading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
       {!hasProviders && topLevelWorkflows.some((wf) => wf.has_ai_call) && (
         <div className="no-keys-banner">
           No AI providers configured — workflows with ai_call tasks have been

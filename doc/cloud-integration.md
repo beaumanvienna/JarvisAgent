@@ -219,8 +219,8 @@ New "Connections" nav button between "Keys" and "Assistant" in the workflow edit
 - Dirty state indicator (`*`) in the nav button
 
 **Files:**
-- `workflow-editor/ui/src/views/ConnectionsView.tsx`
-- `workflow-editor/ui/src/api/connections.ts`
+- `shared-ui/views/ConnectionsView.tsx`
+- `shared-ui/api/connections.ts`
 
 ---
 

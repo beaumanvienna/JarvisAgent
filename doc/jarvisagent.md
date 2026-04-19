@@ -120,6 +120,62 @@ Shell completion scripts for the launcher are included in `integration/completio
 
 GitHub repository: https://github.com/beaumanvienna/JarvisAgent
 
+### Docker
+
+The published image `ghcr.io/beaumanvienna/jarvisagent:latest` ships both editions
+(Studio is launched by default). The `scripts/run-docker.sh` wrapper handles docker
+group membership, data-directory persistence, and the HTTP/TLS mode switch.
+
+**Default: plain HTTP on port 8080.** Out of the box the container serves the
+dashboard and editor over plain HTTP:
+
+```bash
+./scripts/run-docker.sh              # interactive with TUI
+./scripts/run-docker.sh --headless   # headless (web only)
+```
+
+Open `http://localhost:8080` (dashboard) and `http://localhost:8080/editor`
+(workflow editor). Workflows, logs, keys, and `config.json` persist in
+`~/JarvisAgent` — pass a trailing path to use a different directory.
+
+On Windows, use `scripts\run-docker.ps1` with the same semantics.
+
+**TLS mode: HTTPS on port 8443.** For HTTPS, generate a certificate (or supply one
+from your PKI) and place the files under `<data_dir>/certs/`:
+
+```bash
+mkdir -p ~/JarvisAgent/certs
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout ~/JarvisAgent/certs/j9t-key.pem \
+  -out    ~/JarvisAgent/certs/j9t-cert.pem \
+  -days 365 \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+chmod 600 ~/JarvisAgent/certs/j9t-key.pem
+```
+
+Then launch the container in TLS mode:
+
+```bash
+./scripts/run-docker.sh --tls              # interactive + TUI, HTTPS on 8443
+./scripts/run-docker.sh --tls --headless   # headless, HTTPS on 8443
+```
+
+Open `https://localhost:8443`. Self-signed certificates produce a browser warning —
+accept it to proceed. On Windows, use `scripts\run-docker.ps1 -Tls`.
+
+**Switching modes after first run.** On the very first start, the container seeds
+`/app/config.json` from the image defaults. Subsequent starts reuse the existing
+file. If you later want to switch between HTTP and TLS, do one of the following:
+
+- Edit `~/JarvisAgent/config.json` directly: for TLS, set `"port": 8443` and add
+  `"TlsCert": "certs/j9t-cert.pem"` + `"TlsKey": "certs/j9t-key.pem"`; for HTTP,
+  remove those three fields.
+- Delete `~/JarvisAgent/config.json` so the entrypoint re-seeds it on next start.
+
+The entrypoint refuses to launch when the `--tls` flag disagrees with the config
+file on disk and prints instructions matching your case.
+
 ## CONFIGURATION
 
 JarvisAgent reads `config.json` from the current working directory at startup.

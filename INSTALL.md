@@ -153,21 +153,27 @@ Extract the `.zip` and run `jarvisagent.bat` from the extracted folder.
 
 ## Docker
 
-Helper scripts:
+The image is multi-arch (`linux/amd64` + `linux/arm64`) — runs natively on Intel/AMD hosts, Apple Silicon (via Docker Desktop), and ARM Linux.
+
+Helper scripts (Linux / macOS):
 
 ```bash
-./scripts/run-docker.sh                    # interactive with TUI
+./scripts/run-docker.sh                    # interactive with TUI, HTTP on 8080
 ./scripts/run-docker.sh --headless         # headless (no TUI, web only)
+./scripts/run-docker.sh --tls              # interactive + TUI, HTTPS on 8443
+./scripts/run-docker.sh --headless --tls   # headless, HTTPS on 8443
 ./scripts/run-docker.sh /custom/path       # custom data directory
-./scripts/run-docker.sh --headless /path   # headless + custom data dir
 ```
 
-PowerShell:
+PowerShell (Windows):
 
 ```powershell
-.\scripts\run-docker.ps1                    # Windows PowerShell
+.\scripts\run-docker.ps1                    # HTTP on 8080
+.\scripts\run-docker.ps1 -Tls               # HTTPS on 8443
 .\scripts\run-docker.ps1 -DataDir C:\path   # custom data directory
 ```
+
+TLS mode requires cert files under `<data_dir>/certs/` — see the DOCKER section of `doc/jarvisagent.md` for cert generation.
 
 Or manually:
 

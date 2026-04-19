@@ -50,10 +50,91 @@ if [ "$NEED_SEED" = true ]; then
     fi
 fi
 
-# Copy example config on first run
+# Copy example config on first run. When J9T_TLS=1 we inject the TLS fields
+# into the seeded config so port/cert paths are coherent from the start.
 if [ ! -f /app/config.json ] && [ -f "$IMAGE_DIR/.image-defaults/config.json" ]; then
     cp "$IMAGE_DIR/.image-defaults/config.json" /app/config.json
-    echo "==> Created /app/config.json from defaults"
+    if [ "${J9T_TLS:-0}" = "1" ]; then
+        python3 - <<'PY'
+import json
+path = "/app/config.json"
+with open(path) as f:
+    cfg = json.load(f)
+cfg["port"] = 8443
+cfg["TlsCert"] = "certs/j9t-cert.pem"
+cfg["TlsKey"] = "certs/j9t-key.pem"
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=4)
+PY
+        echo "==> Seeded /app/config.json with TLS defaults (port 8443)"
+    else
+        echo "==> Created /app/config.json from defaults"
+    fi
+fi
+
+# Detect mode/config mismatch — we fail fast with instructions rather than
+# let the binary crash with a cryptic TLS-cert-not-found error.
+HAS_TLS=no
+if grep -q '"TlsCert"' /app/config.json 2>/dev/null; then
+    HAS_TLS=yes
+fi
+
+if [ "${J9T_TLS:-0}" = "1" ] && [ "$HAS_TLS" = "no" ]; then
+    cat <<'EOF' >&2
+
+==============================================================================
+ERROR: TLS mode requested, but /app/config.json has no TLS configuration.
+
+You ran the container with --tls (J9T_TLS=1), but the existing config file
+disables TLS. The config was seeded on an earlier run without --tls and is
+not re-seeded automatically (your data directory is persistent).
+
+Your config file on the host is at:
+    ~/JarvisAgent/config.json   (or whichever data dir you passed)
+
+Fix ONE of the following:
+
+  1. Enable TLS in the config — add these fields (before the closing brace):
+         "port": 8443,
+         "TlsCert": "certs/j9t-cert.pem",
+         "TlsKey": "certs/j9t-key.pem"
+
+  2. Delete ~/JarvisAgent/config.json and re-run with --tls; the entrypoint
+     will re-seed it with TLS defaults.
+
+See the DOCKER section of the user manual for details:
+    doc/jarvisagent.md   (or `man jarvisagent` on Linux/macOS)
+==============================================================================
+EOF
+    exit 1
+fi
+
+if [ "${J9T_TLS:-0}" != "1" ] && [ "$HAS_TLS" = "yes" ]; then
+    cat <<'EOF' >&2
+
+==============================================================================
+ERROR: /app/config.json enables TLS, but the container was not started with
+--tls. The server would try to bind HTTPS on 8443, but the host mapped 8080
+and the certs directory is not expected to be present.
+
+Your config file on the host is at:
+    ~/JarvisAgent/config.json   (or whichever data dir you passed)
+
+Fix ONE of the following:
+
+  1. Re-run the container with TLS enabled:
+         ./scripts/run-docker.sh --tls
+
+  2. Disable TLS in the config — remove these lines from the file:
+         "port": 8443,
+         "TlsCert": ...,
+         "TlsKey": ...
+
+See the DOCKER section of the user manual for details:
+    doc/jarvisagent.md   (or `man jarvisagent` on Linux/macOS)
+==============================================================================
+EOF
+    exit 1
 fi
 
 # Ensure writable directories exist
@@ -71,8 +152,13 @@ fi
 
 # ---- Launch ----
 echo "==> Starting JarvisAgent"
-echo "    Dashboard: http://localhost:8080"
-echo "    Editor:    http://localhost:8080/editor"
+if [ "${J9T_TLS:-0}" = "1" ]; then
+    echo "    Dashboard: https://localhost:8443"
+    echo "    Editor:    https://localhost:8443/editor"
+else
+    echo "    Dashboard: http://localhost:8080"
+    echo "    Editor:    http://localhost:8080/editor"
+fi
 echo ""
 
 # Drop privileges to match the host user's UID/GID so all runtime-created

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { unlockKeys } from "../api/keys";
+import { unlockKeys } from "@shared/api/keys";
 
 type MasterPasswordDialogProps = {
   reason: "no_password" | "wrong_password";

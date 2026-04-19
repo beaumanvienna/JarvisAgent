@@ -46,7 +46,7 @@ import {
 } from "../api/workflows";
 import CreateWorkflowModal from "../components/CreateWorkflowModal";
 import VersionHistoryModal from "../components/VersionHistoryModal";
-import { listAiInterfaces, type AiInterface } from "../api/aiInterfaces";
+import { listAiInterfaces, type AiInterface } from "@shared/api/aiInterfaces";
 import AiPromptArea from "./AiPromptArea";
 import type { AiPromptAreaHandle } from "./AiPromptArea";
 
