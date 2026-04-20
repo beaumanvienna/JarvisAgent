@@ -59,11 +59,11 @@ Premake5 — clone, bootstrap, install:
 ```bash
 git clone https://github.com/premake/premake-core
 cd premake-core
-./Bootstrap.sh
+make -f Bootstrap.mak linux
 sudo cp bin/release/premake5 /usr/bin/
 ```
 
-Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way (Fedora needs `libuuid-devel` for `Bootstrap.sh`).
+Other distros (Fedora / RHEL / Arch / …): install the equivalent packages from the list above, then build premake5 the same way (Fedora needs `libuuid-devel` for the Bootstrap compile).
 
 ---
 

@@ -3,9 +3,28 @@
 
 -- premake5.lua
 workspace "AIAssistant"
-    architecture "x86_64"
+    -- Default to x86_64 (emits -m64 under gmake). On ARM hosts (Apple Silicon,
+    -- linux/arm64 Docker) switch to ARM64 so premake doesn't pass -m64 to GCC
+    -- — clang on macOS tolerates -m64 as a no-op, but GCC on linux/arm64
+    -- rejects it with "unrecognized command-line option '-m64'".
+    local uname_m = os.outputof("uname -m 2>/dev/null") or ""
+    uname_m = uname_m:gsub("%s+$", "")
+    if uname_m == "arm64" or uname_m == "aarch64" then
+        architecture "ARM64"
+    else
+        architecture "x86_64"
+    end
     configurations { "Debug", "Release" }
     startproject "jarvisAgent"
+
+    -- Wrap static libs with --start-group/--end-group so the linker re-scans
+    -- archives for cross-TU references (e.g. cipher_idea_hw.o in libcrypto.a
+    -- calls IDEA_*_encrypt defined in i_*.o in the same libcrypto.a; a single
+    -- left-to-right scan misses this on strict linkers like Ubuntu arm64's).
+    -- GNU ld (Linux) only — Apple's ld on macOS rejects these flags as unknown.
+    filter "system:linux"
+        linkgroups "On"
+    filter {}
 
 -- ================================================================
 -- Options
@@ -115,7 +134,12 @@ project "jarvisAgent"
 
         linkoptions {
             "-fno-pie -no-pie",
-            "-rdynamic"
+            "-rdynamic",
+            -- Let ld resolve versioned symbols via transitive shared-lib deps
+            -- (e.g. libpq → libcrypto.so.3 provides RC2_cfb64_encrypt@@OPENSSL_3.0.0).
+            -- Required on Ubuntu arm64 where the default is --no-copy-dt-needed-entries;
+            -- on amd64 the older default lets this work without the flag.
+            "-Wl,--copy-dt-needed-entries"
         }
 
         --

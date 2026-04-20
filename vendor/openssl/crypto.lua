@@ -17,6 +17,11 @@ project "crypto"
 		"OPENSSLDIR=\"\"",
 		"ENGINESDIR=\"\"",
 		"MODULESDIR=\"\"",
+		-- IDEA is patent-encumbered in many jurisdictions and Ubuntu arm64
+		-- ships libssl-dev without it; that asymmetry breaks our link when
+		-- libpq pulls in a transitive libcrypto.so.3 that lacks IDEA. j9t
+		-- uses AES/ChaCha20 via TLS, so IDEA is never needed.
+		"OPENSSL_NO_IDEA",
     }
 
     includedirs
@@ -484,11 +489,7 @@ project "crypto"
 		"crypto/http/http_client.c",
 		"crypto/http/http_err.c",
 		"crypto/http/http_lib.c",
-		"crypto/idea/i_cbc.c",
-		"crypto/idea/i_cfb64.c",
-		"crypto/idea/i_ecb.c",
-		"crypto/idea/i_ofb64.c",
-		"crypto/idea/i_skey.c",
+		-- crypto/idea/*.c removed — see OPENSSL_NO_IDEA define above.
 		"crypto/kdf/kdf_err.c",
 		"crypto/lhash/lh_stats.c",
 		"crypto/lhash/lhash.c",
@@ -1010,8 +1011,7 @@ project "crypto"
 		"providers/implementations/ciphers/cipher_des_hw.c",
 		"providers/implementations/ciphers/cipher_desx.c",
 		"providers/implementations/ciphers/cipher_desx_hw.c",
-		"providers/implementations/ciphers/cipher_idea.c",
-		"providers/implementations/ciphers/cipher_idea_hw.c",
+		-- cipher_idea[_hw].c removed — see OPENSSL_NO_IDEA define above.
 		"providers/implementations/ciphers/cipher_rc2.c",
 		"providers/implementations/ciphers/cipher_rc2_hw.c",
 		"providers/implementations/ciphers/cipher_rc4.c",
@@ -1092,13 +1092,13 @@ project "crypto"
         }
 
 filter { "action:gmake*", "configurations:Debug"}
-        buildoptions { "-ggdb -fPIC -pthread -m64 -Wall" }
+        buildoptions { "-ggdb -fPIC -pthread -Wall" }
 
     filter { "action:gmake*", "configurations:Release"}
-        buildoptions { "-fPIC -pthread -m64 -Wall" }
+        buildoptions { "-fPIC -pthread -Wall" }
 
     filter { "action:gmake*", "configurations:Dist"}
-        buildoptions { "-fPIC -pthread -m64 -Wall" }
+        buildoptions { "-fPIC -pthread -Wall" }
 
     filter "configurations:Debug"
         defines { "DEBUG" }

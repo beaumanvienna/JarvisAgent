@@ -131,13 +131,13 @@ project "ssl"
         }
 
     filter { "action:gmake*", "configurations:Debug"}
-        buildoptions { "-ggdb -fPIC -pthread -m64 -Wall" }
+        buildoptions { "-ggdb -fPIC -pthread -Wall" }
 
     filter { "action:gmake*", "configurations:Release"}
-        buildoptions { "-fPIC -pthread -m64 -Wall" }
+        buildoptions { "-fPIC -pthread -Wall" }
 
     filter { "action:gmake*", "configurations:Dist"}
-        buildoptions { "-fPIC -pthread -m64 -Wall" }
+        buildoptions { "-fPIC -pthread -Wall" }
 
     filter "configurations:Debug"
         defines { "DEBUG" }

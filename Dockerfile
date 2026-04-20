@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y \
 # and linux/arm64 (no official arm64 prebuilt in the v5.0.0-beta2 release).
 RUN git clone --depth 1 --branch v5.0.0-beta2 https://github.com/premake/premake-core.git /tmp/premake-core && \
     cd /tmp/premake-core && \
-    ./Bootstrap.sh && \
+    make -f Bootstrap.mak linux && \
     cp bin/release/premake5 /usr/local/bin/ && \
     chmod +x /usr/local/bin/premake5 && \
     rm -rf /tmp/premake-core
