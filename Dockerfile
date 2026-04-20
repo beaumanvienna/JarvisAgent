@@ -46,13 +46,32 @@ RUN git clone --depth 1 --branch v5.0.0-beta2 https://github.com/premake/premake
     rm -rf /tmp/premake-core
 
 WORKDIR /app
-COPY . .
 
-# Build Engine edition
-RUN premake5 gmake --engine && make -j$(nproc) config=release verbose=1
+# --- Vendor static-library layer (cached across runs) ---
+# Copy ONLY the inputs needed to build the third-party static libs so this
+# layer's cache key is independent of application source changes. Touching a
+# .cpp under application/ no longer invalidates this 20+ min OpenSSL compile.
+COPY premake5.lua ./
+COPY vendor/ ./vendor/
+
+RUN premake5 gmake && \
+    make -j$(nproc) config=release \
+        crypto ssl curl nghttp2 pdcursesmod miniz
+
+# --- Application layer ---
+# vendor/ mtimes are preserved (we don't re-copy it), so the vendor .a files
+# stay "up-to-date" from make's perspective and are not rebuilt.
+COPY application/ ./application/
+COPY engine/ ./engine/
+
+# Build Engine edition (re-runs premake with --engine to switch jarvisAgent
+# objdir to bin-int/engine/; vendor projects are unchanged and skipped).
+RUN premake5 gmake --engine && \
+    make -j$(nproc) config=release verbose=1 jarvisAgent
 
 # Build Studio edition (default)
-RUN premake5 gmake && make -j$(nproc) config=release verbose=1
+RUN premake5 gmake && \
+    make -j$(nproc) config=release verbose=1 jarvisAgent
 
 # ---- Runtime stage ----
 FROM ubuntu:24.04
