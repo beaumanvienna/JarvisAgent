@@ -105,6 +105,7 @@ jobs:
             workflow-editor/ui/dist/
 
   package-deb:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     runs-on: ubuntu-latest
 
@@ -129,6 +130,7 @@ jobs:
           if-no-files-found: warn
 
   package-appimage:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     runs-on: ubuntu-latest
 
@@ -290,6 +292,7 @@ jobs:
           if-no-files-found: warn
 
   package-flatpak:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

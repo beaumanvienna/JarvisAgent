@@ -152,13 +152,16 @@ jobs:
           exit 0
 
       # ---- Packaging (both editions in each package) ----
+      # Packaging steps only run on push to main; PRs and feature branches compile only.
 
       - name: Package ZIP
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           packaging\Windows\11\build-zip.ps1
 
       - name: Upload ZIP artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-zip
@@ -166,6 +169,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Install WiX v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           $wixUrl = "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip"
@@ -179,11 +183,13 @@ jobs:
           Write-Host "WiX installed: $(& heat.exe 2>&1 | Select-Object -First 1)"
 
       - name: Package MSI
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
           packaging\Windows\11\build-msi.ps1
 
       - name: Upload MSI artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: JarvisAgent-${{ steps.version.outputs.version }}-Windows-msi
