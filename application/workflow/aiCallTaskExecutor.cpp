@@ -33,6 +33,8 @@
 
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "content/chunkPlanner.h"
+#include "workflow/aiInvocation.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/taskPathResolver.h"
 
@@ -1160,6 +1162,174 @@ namespace AIAssistant
             return false;
         }
         requestPool->KickFileActivityWatchdog(requestHandle);
+
+        // ------------------------------------------------------------
+        // Direct envelope dispatch (§4 of AI dispatch refactor).
+        // Concatenates STNG + CNTX + TASK + first PROB content into a
+        // single user message and submits directly via AiRequestPool.
+        // SessionManager's IsQueryRequired gates on IsDirectDispatchActive
+        // and skips its file-event-driven DispatchQuery for these PROBs.
+        // Completion still flows through the path-based OnOutputFileCreated
+        // mechanism — Submit's callback writes <prob>.output.txt.
+        // ------------------------------------------------------------
+        {
+            std::string combinedMessage;
+            auto const appendContent = [&combinedMessage](std::vector<QueueFileRef> const& fileRefs)
+            {
+                for (auto const& fileRef : fileRefs)
+                {
+                    if (!fileRef.m_Content.empty())
+                    {
+                        if (!combinedMessage.empty())
+                        {
+                            combinedMessage += "\n";
+                        }
+                        combinedMessage += fileRef.m_Content;
+                    }
+                }
+            };
+            appendContent(localizedQueueBinding.m_StngFiles);
+            appendContent(localizedQueueBinding.m_TaskFiles);
+            appendContent(localizedQueueBinding.m_CntxFiles);
+
+            bool hasStng = false;
+            for (auto const& fileRef : localizedQueueBinding.m_StngFiles)
+            {
+                if (!fileRef.m_Content.empty()) { hasStng = true; break; }
+            }
+            bool hasTask = false;
+            for (auto const& fileRef : localizedQueueBinding.m_TaskFiles)
+            {
+                if (!fileRef.m_Content.empty()) { hasTask = true; break; }
+            }
+            bool hasCntx = false;
+            for (auto const& fileRef : localizedQueueBinding.m_CntxFiles)
+            {
+                if (!fileRef.m_Content.empty()) { hasCntx = true; break; }
+            }
+            if (!hasStng)
+            {
+                LOG_APP_INFO("[ai_call] no STNG content for task '{}' — default settings apply", taskIdForBinding);
+            }
+            if (!hasTask)
+            {
+                LOG_APP_INFO("[ai_call] no TASK content for task '{}' — relying on PROB self-description",
+                             taskIdForBinding);
+            }
+            if (!hasCntx)
+            {
+                LOG_APP_INFO("[ai_call] no CNTX content for task '{}' — results may be less precise",
+                             taskIdForBinding);
+            }
+
+            std::string probRelativeName;
+            for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
+            {
+                std::filesystem::path const probPath(probFile.m_Path);
+                std::string baseName = probPath.filename().string();
+                if (!probFile.m_HasInlineContent && baseName.rfind("PROB_", 0) != 0)
+                {
+                    baseName = "PROB_" + baseName;
+                }
+                probRelativeName = baseName;
+                if (!probFile.m_Content.empty())
+                {
+                    if (!combinedMessage.empty())
+                    {
+                        combinedMessage += "\n";
+                    }
+                    combinedMessage += probFile.m_Content;
+                }
+                break;
+            }
+
+            bool hasNonWhitespace = false;
+            for (char const character : combinedMessage)
+            {
+                if (!std::isspace(static_cast<unsigned char>(character)))
+                {
+                    hasNonWhitespace = true;
+                    break;
+                }
+            }
+
+            if (hasNonWhitespace && !probRelativeName.empty())
+            {
+                // Resolve per-task api_interface override (JCWF "provider" param), if any.
+                std::string interfaceOverrideError;
+                std::optional<std::string> const rawProviderOpt =
+                    TryExtractStringParam(taskDefinition.m_ParamsJson, "provider", interfaceOverrideError);
+                auto const defaultsMapEnvelope = BuildDefaultsMap(workflowDefinition.m_DefaultsJson);
+                std::string envelopeInterfaceName;
+                if (rawProviderOpt.has_value())
+                {
+                    envelopeInterfaceName = ExpandWithDefaults(*rawProviderOpt, defaultsMapEnvelope);
+                }
+
+                AiInvocation envelope;
+                envelope.m_InterfaceName = envelopeInterfaceName;
+                envelope.m_QueueFolder = taskWorkingDirectoryPath;
+                envelope.m_ProbName = probRelativeName;
+                if (!taskDefinition.m_OutputSchemaJson.empty())
+                {
+                    envelope.m_OutputSchemaJson = taskDefinition.m_OutputSchemaJson;
+                }
+                if (taskDefinition.m_OutputSchemaMaxAttempts > 0)
+                {
+                    envelope.m_Retry.m_OutputSchemaMaxAttempts =
+                        static_cast<int>(taskDefinition.m_OutputSchemaMaxAttempts);
+                }
+
+                Message userMessage;
+                userMessage.m_Role = MessageRole::User;
+                userMessage.m_Content = std::move(combinedMessage);
+                envelope.m_Messages.push_back(std::move(userMessage));
+
+                // Chunking advisory (§8 Phase 6 — planner wired, fan-out is a follow-up).
+                // Warn when the body likely overruns the interface's max_context_tokens.
+                {
+                    auto const& configForChunk = Core::g_Core->GetConfig();
+                    uint64_t maxContextTokens = 0;
+                    for (auto const& apiCandidate : configForChunk.m_ApiInterfaces)
+                    {
+                        bool const matchesRequested =
+                            envelopeInterfaceName.empty()
+                                ? (&apiCandidate == &configForChunk.m_ApiInterfaces[configForChunk.m_ApiIndex])
+                                : (apiCandidate.m_Name == envelopeInterfaceName);
+                        if (matchesRequested && apiCandidate.m_MaxContextTokens > 0)
+                        {
+                            maxContextTokens = apiCandidate.m_MaxContextTokens;
+                            break;
+                        }
+                    }
+                    if (maxContextTokens > 0)
+                    {
+                        uint64_t const estimatedTokens = ChunkPlanner::EstimateTokens(envelope.m_Messages.back().m_Content);
+                        if (estimatedTokens > maxContextTokens)
+                        {
+                            LOG_APP_WARN("[ai_call] task '{}' prompt est ~{} tokens exceeds interface "
+                                          "max_context_tokens={} — chunking fan-out not yet wired; request will be "
+                                          "sent as-is and may be rejected by the provider",
+                                          taskIdForBinding, estimatedTokens, maxContextTokens);
+                        }
+                    }
+                }
+
+                // Fire-and-forget — completion is handled via the path-based
+                // OnOutputFileCreated matching when Submit's callback writes .output.txt.
+                if (!requestPool->Submit(envelope, nullptr))
+                {
+                    LOG_APP_WARN("[ai_call] direct dispatch Submit rejected envelope for task '{}' — "
+                                 "falling back to SessionManager file-event path",
+                                 taskIdForBinding);
+                }
+            }
+            else
+            {
+                LOG_APP_WARN("[ai_call] task '{}' has no PROB content or prob file — skipping direct dispatch",
+                             taskIdForBinding);
+            }
+        }
 
         // ------------------------------------------------------------
         // Asynchronous completion (event-driven)

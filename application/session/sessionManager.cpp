@@ -178,6 +178,23 @@ namespace AIAssistant
         fs::path outputPath = requirementPath;
         outputPath.replace_filename(requirementPath.stem().string() + ".output" + requirementPath.extension().string());
 
+        // If AiRequestPool has a direct-dispatch in flight for this PROB, the SessionManager's
+        // file-event-driven dispatch would race and double-fire.  Skip.
+        {
+            JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+            AiRequestPool* const requestPool = (jarvisAgent != nullptr) ? jarvisAgent->GetAiRequestPool() : nullptr;
+            if (requestPool != nullptr)
+            {
+                std::string const probAbsolutePath = fs::absolute(requirementPath).lexically_normal().generic_string();
+                if (requestPool->IsDirectDispatchActive(probAbsolutePath))
+                {
+                    LOG_APP_INFO("SessionManager: skipping dispatch for '{}' — direct-dispatch in flight",
+                                 probAbsolutePath);
+                    return false;
+                }
+            }
+        }
+
         try
         {
             // Requirement timestamp

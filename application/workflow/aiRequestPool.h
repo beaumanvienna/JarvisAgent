@@ -21,15 +21,20 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <memory>
 #include <queue>
 #include <vector>
+
+#include "workflow/aiInvocation.h"
+#include "workflow/aiReply.h"
 
 namespace AIAssistant
 {
@@ -150,6 +155,33 @@ namespace AIAssistant
         // Removes any pending entry (safe to call even if the entry does not exist).
         void Forget(AiRequestHandle const& requestHandle);
 
+        // Direct envelope-driven dispatch (§4 of AI dispatch refactor).
+        // Builds the HTTP body via the existing per-provider inline assembly, submits to the
+        // shared CurlMultiDispatcher, and invokes `onReply` on the I/O thread when the response
+        // arrives.  Does not touch FileWatcher, FileCategorizer, or SessionManager state.
+        //
+        // While direct dispatch is in flight for a given PROB file, `IsDirectDispatchActive`
+        // returns true for its canonical path; SessionManager consults this to avoid the
+        // double-dispatch hazard during the Phase 1 transition.  The flag is cleared on
+        // reply (success or failure).
+        //
+        // Writes <prob>.output.txt on success (preserving current file-drop consumers). Phase 3
+        // will extend this with schema validation + .output.json.
+        //
+        // Returns false if dispatch could not be submitted (no dispatcher, invalid interface,
+        // empty body). On false, `onReply` is not invoked.
+        using ReplyCallback = std::function<void(AiReply const&)>;
+        bool Submit(AiInvocation const& envelope, ReplyCallback onReply);
+
+        // Returns true if Submit was called for a PROB file whose canonical path matches the
+        // argument and the reply has not yet been processed.  Callers should pass an absolute,
+        // lexically-normalized path.
+        bool IsDirectDispatchActive(std::string const& probAbsolutePath) const;
+
+        // Count of envelope-based dispatches currently in flight.  Consumed by the TUI/dashboard
+        // "queries in flight" LED alongside SessionManager's inflight total.
+        size_t GetDirectDispatchInflight() const { return m_DirectDispatchInflight.load(); }
+
     private:
         struct RequestContext
         {
@@ -231,6 +263,10 @@ namespace AIAssistant
 
         std::mutex m_OutputPathMutex;
         std::unordered_map<std::string, std::shared_ptr<PendingEntry>> m_PendingByOutputPath;
+
+        mutable std::mutex m_DirectDispatchMutex;
+        std::unordered_map<std::string, int> m_DirectDispatchActive;
+        std::atomic<size_t> m_DirectDispatchInflight{0};
 
         std::mutex m_IdMutex;
         int64_t m_NextRequestId = 1;

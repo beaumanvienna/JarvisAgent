@@ -542,9 +542,11 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                 value={editing.api_type}
                 onChange={(e) => setEditing((prev) => prev ? { ...prev, api_type: e.target.value } : prev)}
               >
-                <option value="API1">API1 (OpenAI-compatible)</option>
-                <option value="API2">API2 (Anthropic-style)</option>
+                <option value="API1">API1 (OpenAI chat.completions)</option>
+                <option value="API2">API2 (OpenAI Responses)</option>
                 <option value="API3">API3 (Gemini native)</option>
+                <option value="API4">API4 (Anthropic Messages)</option>
+                <option value="Test">Test (no-network fixture)</option>
               </select>
             </div>
 

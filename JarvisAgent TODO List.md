@@ -265,6 +265,7 @@ The repository grew organically and the root is crowded. Group sources under a s
 - `.npm-tools/package.json` — 12-byte stub listing `@mermaid-js/mermaid-cli` as a dep. The only reference in the repo (`packaging/Linux/jarvisagent-launcher.sh`) installs into `$USER_HOME/.npm-tools`, *not* the repo's `.npm-tools/`. The checked-in copy is a leftover. Delete the folder + add `/.npm-tools/` to `.gitignore` for safety.
 - `jarvis_agent.example.env` — 56 bytes, only referenced as a commented-out example in `docker-compose.example.yml`. Functionally unused. Delete.
 - Docker files in root: `Dockerfile`, `docker-compose.example.yml`, `docker-entrypoint.sh`, `.dockerignore`. Consider moving to `packaging/Docker/` to declutter the root. Touch points: `.github/workflows/docker-publish.yml` (`file: ./Dockerfile`), `scripts/run-docker.sh`, any `.flatpak-builder` snapshots. Minor, but reduces visual noise in the root.
+- `application/workflow/doc/aiCallArchitecture.md` — superseded by the AI Dispatch Refactor (§5g). Describes the file-watcher-driven completion flow that no longer exists. Delete as part of the cleanup sweep (no historical-note preamble left in its place — per the no-legacy rule).
 
 **Out of scope (already verified correct):**
 
@@ -287,21 +288,61 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - **Direction:** replace the file-watcher-mediated dispatch for runtime-initiated `ai_call` tasks with a direct path: `AiCallTaskExecutor` assembles the `SessionManager` environment, calls `AiRequestPool::Submit` directly, receives the response via callback, no synthetic file events. Keeps the file-watcher for the manual drop workflow only (or deletes it if the drop workflow is deprecated).
 - Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
 
-### 5g. AI dispatch refactor (pre-1.0 — priority)
+### 5g. AI dispatch refactor (pre-1.0 — priority) — **in progress on `refactor/ai-dispatch`**
 
-- Typed `AiInvocation` envelope replaces the opaque STNG/CNTX/TASK/PROB file-drop seam; missing-field errors surface at envelope construction, not as 60-second watchdog timeouts.
-- Schema-enforced structured output as the default (`output_schema` on `ai_call`); bounded `output_retries` feed validator errors back to the model. Free-text remains explicit opt-out for code/Makefile/prose.
-- `IRequestBuilder` symmetric to `ReplyParser`; extend `ReplyParser` virtuals (GetError / GetUsage / GetFinishReason / GetSystemFingerprint / GetStructuredOutput). Adds API4 (Anthropic `/v1/messages`); OpenAI-compatible providers (xAI, Groq, OpenRouter, Ollama, ...) keep working through API1.
-- Determinism defaults (`temperature=0`, optional `seed`, `system_fingerprint` logging) + `.transcript.json` per PROB for replay and audit.
-- `TestInterface` as a new `InterfaceType` — no-network, deterministic JCWF integration tests.
-- Editor-side `AiJcwfService::GenerateAsync` uses the JCWF schema for schema-enforced output. Extract the embedded schema from `doc/JC_Workflow_Specification.md` §9 into `doc/jcwf.schema.json` and compile it into the binary via a Premake prebuild step (`jcwfSchema.generated.h`). Same compile-time embed for `doc/jcwf_generation_guide.md`.
-- Relaxed env: STNG / CNTX / TASK optional (warning only); PROB still required; empty body still rejected. PROV sidecar optional (falls back to default interface). Manual queue-drop semantics retired.
-- Markitdown auto-conversion of office files preserved.
-- Structure-aware chunking: markdown-section boundaries, per-interface `max_context_tokens` config (GPT-4=128k, GPT-5=200k, Gemini 2.5=1M, Claude=200k).
-- Subsumes §5c (Option E): queue-folder `FileWatcher` retired entirely from runtime dispatch; `m_ScriptFileWatcher` stays; `TriggerEngine` gains its own dedicated `FileWatcher` so JCWF `file_watch` triggers work on any declared path (latent-bug fix).
-- HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — **all unchanged**.
+**Landed and validated live** (exampleMakefile4 + aiZipDemo runs green via both OpenAI and Anthropic):
+- [x] Typed `AiInvocation` envelope (`application/workflow/aiInvocation.h`) + typed `AiReply` (`aiReply.h`).
+- [x] `AiRequestPool::Submit(AiInvocation, callback)` — direct envelope dispatch through `CurlMultiDispatcher`.
+- [x] `AiCallTaskExecutor` builds an envelope and calls `Submit` after writing queue files; `SessionManager::IsQueryRequired` gates on `IsDirectDispatchActive` so the legacy file-event path skips PROBs being handled directly (no double-dispatch).
+- [x] Relaxed env rule: STNG / CNTX / TASK optional (warning-only); empty concatenated body still rejected; PROV sidecar remains optional (default interface applies when absent).
+- [x] `IRequestBuilder` + `RequestBuilderAPI1/2/3/4`; `ReplyParser` base extended with `GetError`/`GetUsage`/`GetFinishReason`/`GetSystemFingerprint`/`GetStructuredOutput` virtuals, concretes implement; `ReplyParserAPI4` for Anthropic `/v1/messages`.
+- [x] `CurlWrapper::AuthStyle::AnthropicXApiKey` (`x-api-key` + `anthropic-version: 2023-06-01`) wired in both `curlWrapper.cpp` (single-call) and `curlMultiDispatcher.cpp` (async).
+- [x] `SchemaValidator` (simdjson-backed Draft 2020-12 subset: type, properties, required, additionalProperties, items, enum, min/max{,Length}, pattern, oneOf, anyOf, $ref, $defs). Unsupported keywords rejected at schema-load time.
+- [x] `output_schema` + `output_retries` parsed on `ai_call`; Submit's reply path validates, retries with validator feedback up to budget, writes `<prob>.output.json` on structured success or `<prob>.output.txt` on free-text path.
+- [x] Determinism defaults (`m_DeterminismTemperature`, `m_DeterminismSeed`, `m_DeterminismRecordSystemFingerprint` on `EngineConfig`).
+- [x] `<prob>.transcript.json` per PROB — request + response turns with interface/model/settings/messages/usage/finish_reason.
+- [x] `TestInterface` as new `InterfaceType::Test` — short-circuits curl, loads reply from fixture path (`m_Url`).
+- [x] `EventCategoryAi` + `AiCallStartedEvent` / `AiCallCompletedEvent` / `AiCallFailedEvent` posted from Submit lifecycle.
+- [x] `max_context_tokens` parsed on `ApiInterface`; `MarkdownSectionSplitter` + `ChunkPlanner` utilities live; advisory warning fires when prompt exceeds budget.
+- [x] `AiRequestPool::GetDirectDispatchInflight` feeds into `GetSessionManagerInflightTotal` so the "queries in flight" LED includes envelope dispatches.
+- [x] MCP: new `reload_workflows` tool in `mcp/src/tools.ts` so JCWF edits on disk can be picked up without restart.
+- [x] Adjacent fixes: `./jarvisagent.sh` surfaces errors + log tail instead of exec'ing silently; `FileCategorizer` ignores `.transcript` stems; `AiJcwfService::TestAiInterface` uses `IRequestBuilder` (was hand-rolled switch missing API4); help text updated.
+
+**Still pending on this branch** — no-legacy cleanup (per `feedback_no_legacy.md`, rip rather than gate):
+
+The runtime `ai_call` path is already envelope-direct. What remains is migrating the editor-side AI pipelines off the legacy file-drop, then deleting the legacy machinery wholesale. These must land **as a set** to avoid gated half-states:
+
+- [ ] Migrate `AiJcwfService::RunSingleAiCall` + `GenerateAsync` / `ExplainAsync` / `FixFailedScriptAsync` to direct `AiRequestPool::Submit` (they still write `PROB_<id>_<ts>.txt` and depend on `OnProbFileEvent` for completion).
+- [ ] After the above, **delete** `SessionManager::DispatchQuery`, `SessionManager::IsQueryRequired`, `SessionManager::OnEvent`, the `m_FileCategorizer` subscription, and `AiRequestPool::IsDirectDispatchActive` + the `IsQueryRequired` gate that currently suppresses double-dispatch.
+- [ ] **Delete** `AiRequestPool::OnProbFileEvent` and the `PROB_<id>_<ts>` naming convention callsite in `aiJcwfService.cpp`.
+- [ ] `TriggerEngine` gains its own dedicated `FileWatcher` for `file_watch` triggers on arbitrary paths (fixes the latent bug where triggers work only on paths that happen to fall under `queue/`).
+- [ ] `AdhocWorkflowManager` drops the `FileWatcher*` reference.
+- [ ] Retire the queue-folder `FileWatcher` construction in `JarvisAgent` (possible once `TriggerEngine` + `AdhocWorkflowManager` + editor pipelines no longer depend on it).
+- [ ] **Delete** `application/workflow/doc/aiCallArchitecture.md` (see §5d — lists legacy files for removal).
+
+Independent remaining features:
+- [ ] Chunking fan-out (emit N envelopes per oversized PROB, concat replies into one output). Planner + advisory already in.
+- [ ] JCWF schema gap-close: close gaps in `doc/jcwf.schema.json` vs. `workflowJsonParser` + parser↔schema contract test. `tools/generateEmbeddedHeaders.py` prebuild + `kJcwfSchemaJson` already compiled into the binary.
+- [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry (depends on the editor-pipeline direct-dispatch migration above).
+- [ ] TUI / dashboard consumers subscribing to `EventCategoryAi` (events are posted; consumed only by the aggregated "in flight" LED today).
+- [ ] Contract tests under `test/dispatch/`.
+- [ ] Docs sweep (JC spec §3.3.6 — document relaxed-env rule + new `output_schema` / `output_retries` fields on `ai_call`; `doc/jcwf_generation_guide.md` — mention `output_schema` so the editor AI emits it when generating structured-output tasks).
+
+**Known live-observed issues not yet fixed:**
+- [ ] **60-second `WaitingExternal` timeout kills slow Claude calls** — observed 2026-04-20 with `ai-zip-demo` on Anthropic Sonnet 4.6: one of three concurrent ai_calls took ~65 s, the runtime gave up at 60 s, the real reply landed 5 s later and was orphaned. Fix: bump the default in `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` and/or honour `AiInvocation.m_Timeout` (envelope already carries 120 s default). Separate from the refactor; easy follow-up.
+- [ ] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk, not a refactor bug. Two mitigation paths: (a) strengthen STNG wording in example JCWFs, (b) post-process to strip fences. Documented as a prompting issue.
+
+**Session-handoff checklist** (if a fresh Claude picks this up):
+1. Branch `refactor/ai-dispatch`, uncommitted. Start with `git status` to see the full change set.
+2. Core dispatch is live and validated (OpenAI + Anthropic Haiku/Sonnet/Opus end-to-end).
+3. This `§5g` section is the accurate scoreboard of landed vs. pending. `AI dispatch refactor.md` is the original dev plan — don't treat it as a status doc.
+4. Follow the no-legacy rule (`feedback_no_legacy.md`): rip the old path when the new one lands, don't gate.
+5. Python portability rule (`feedback_python_portability.md`): detect `python3` vs `python` in premake/packaging, don't hardcode.
+6. Editor-side legacy removal (top pending item) must land as a set — migrating `AiJcwfService` is the hard prerequisite for deleting `SessionManager::DispatchQuery` + gate + `OnProbFileEvent`.
+
+- HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
 - Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0).
-- See `AI dispatch refactor.md` for the full dev plan (decisions A–H locked, 8 phases ordered, file-level diffs, contract tests, per-phase docs sweeps). Status: ready to start Phase 1.
+- See `AI dispatch refactor.md` for the original dev plan.
 
 ### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
 

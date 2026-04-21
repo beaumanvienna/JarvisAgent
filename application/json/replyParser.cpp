@@ -24,6 +24,7 @@
 #include "json/replyParserAPI1.h"
 #include "json/replyParserAPI2.h"
 #include "json/replyParserAPI3.h"
+#include "json/replyParserAPI4.h"
 
 namespace AIAssistant
 {
@@ -31,6 +32,25 @@ namespace AIAssistant
     ReplyParser::ReplyParser(std::string const& jsonString) : m_JsonString(jsonString) {}
 
     bool ReplyParser::HasError() const { return m_HasError; }
+
+    AiError ReplyParser::GetError() const
+    {
+        AiError error;
+        if (m_HasError)
+        {
+            error.m_Kind = AiError::Kind::Provider;
+            error.m_Message = "reply parser reported error";
+        }
+        return error;
+    }
+
+    AiUsage ReplyParser::GetUsage() const { return AiUsage{}; }
+
+    std::string ReplyParser::GetFinishReason() const { return {}; }
+
+    std::string ReplyParser::GetSystemFingerprint() const { return {}; }
+
+    std::optional<std::string> ReplyParser::GetStructuredOutput() const { return std::nullopt; }
 
     std::unique_ptr<ReplyParser> ReplyParser::Create(ConfigParser::EngineConfig::InterfaceType const& interfaceType,
                                                      std::string const& jsonString)
@@ -52,6 +72,11 @@ namespace AIAssistant
             case ConfigParser::EngineConfig::InterfaceType::API3:
             {
                 replyParser = std::make_unique<ReplyParserAPI3>(jsonString);
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API4:
+            {
+                replyParser = std::make_unique<ReplyParserAPI4>(jsonString);
                 break;
             }
             default:

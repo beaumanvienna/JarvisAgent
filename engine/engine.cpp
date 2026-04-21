@@ -39,9 +39,9 @@ static void PrintHelp()
 {
     PrintVersion();
     std::cout << "\n"
-              << "JarvisAgent is a C++ backend that monitors a queue folder for input files,\n"
-              << "dispatches AI requests in parallel, runs DAG-based workflows (AI, Python,\n"
-              << "shell, C++), and serves a React dashboard plus a visual workflow editor.\n"
+              << "JarvisAgent is a C++ backend that runs DAG-based workflows (AI, Python,\n"
+              << "shell, C++), dispatches AI requests in parallel over HTTP/2, and serves\n"
+              << "a React dashboard plus a visual workflow editor.\n"
               << "\n"
               << "Usage:\n"
               << "  jarvisAgent              Start the agent (requires config.json in the working directory)\n"

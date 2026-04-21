@@ -132,16 +132,25 @@ namespace AIAssistant
 
         // Build authentication header based on provider style.
         std::string authHeader;
-        if (req.m_QueryData.m_AuthStyle == CurlWrapper::AuthStyle::Bearer)
+        switch (req.m_QueryData.m_AuthStyle)
         {
-            authHeader = "Authorization: Bearer " + req.m_QueryData.m_ApiKey;
-        }
-        else // XGoogApiKey (Gemini native)
-        {
-            authHeader = "x-goog-api-key: " + req.m_QueryData.m_ApiKey;
+            case CurlWrapper::AuthStyle::XGoogApiKey:
+                authHeader = "x-goog-api-key: " + req.m_QueryData.m_ApiKey;
+                break;
+            case CurlWrapper::AuthStyle::AnthropicXApiKey:
+                authHeader = "x-api-key: " + req.m_QueryData.m_ApiKey;
+                break;
+            case CurlWrapper::AuthStyle::Bearer:
+            default:
+                authHeader = "Authorization: Bearer " + req.m_QueryData.m_ApiKey;
+                break;
         }
         req.m_Headers = curl_slist_append(req.m_Headers, authHeader.c_str());
         req.m_Headers = curl_slist_append(req.m_Headers, "Content-Type: application/json");
+        if (req.m_QueryData.m_AuthStyle == CurlWrapper::AuthStyle::AnthropicXApiKey)
+        {
+            req.m_Headers = curl_slist_append(req.m_Headers, "anthropic-version: 2023-06-01");
+        }
 
         // HTTP/2 for HTTPS (ALPN negotiation); falls back to HTTP/1.1 if unsupported.
         curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,     CURL_HTTP_VERSION_2TLS);

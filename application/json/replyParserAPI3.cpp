@@ -49,6 +49,37 @@ namespace AIAssistant
         return {};
     }
 
+    AiError ReplyParserAPI3::GetError() const
+    {
+        AiError error;
+        if (!m_HasError)
+        {
+            return error;
+        }
+        error.m_Kind = AiError::Kind::Provider;
+        error.m_Message = m_ErrorInfo.m_Message;
+        error.m_HttpStatus = m_ErrorInfo.m_Code;
+        return error;
+    }
+
+    AiUsage ReplyParserAPI3::GetUsage() const
+    {
+        AiUsage usage;
+        usage.m_InputTokens = static_cast<int32_t>(m_Reply.m_UsageMetadata.m_PromptTokenCount);
+        usage.m_OutputTokens = static_cast<int32_t>(m_Reply.m_UsageMetadata.m_CandidatesTokenCount);
+        usage.m_TotalTokens = static_cast<int32_t>(m_Reply.m_UsageMetadata.m_TotalTokenCount);
+        return usage;
+    }
+
+    std::string ReplyParserAPI3::GetFinishReason() const
+    {
+        if (!m_Reply.m_Candidates.empty())
+        {
+            return m_Reply.m_Candidates.front().m_FinishReason;
+        }
+        return {};
+    }
+
     void ReplyParserAPI3::Parse()
     {
         using namespace simdjson;

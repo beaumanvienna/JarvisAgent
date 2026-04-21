@@ -159,6 +159,12 @@ namespace AIAssistant
             return FileCategory::Ignored;
         }
 
+        if (filePath.stem().string().ends_with(".transcript"))
+        {
+            LOG_APP_INFO("Ignoring transcript file: {}", filePath.string());
+            return FileCategory::Ignored;
+        }
+
         if (filename.starts_with("STNG"))
         {
             return FileCategory::Settings;

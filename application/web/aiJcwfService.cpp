@@ -33,10 +33,13 @@
 #include "curlWrapper/curlManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/scriptRegistry.h"
+#include "json/jcwfGenerationGuide.generated.h"
 #include "json/replyParser.h"
+#include "json/requestBuilder.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 #include "workflow/aiCallTaskExecutor.h"
+#include "workflow/aiInvocation.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowJsonParser.h"
 #include "workflow/workflowFileIndex.h"
@@ -167,19 +170,6 @@ namespace AIAssistant
             }
             return "Linux (distro unknown)";
 #endif
-        }
-
-        static bool ReadFile(fs::path const& filePath, std::string& outContent)
-        {
-            std::ifstream stream(filePath, std::ios::in | std::ios::binary);
-            if (!stream)
-            {
-                return false;
-            }
-            std::ostringstream ss;
-            ss << stream.rdbuf();
-            outContent = ss.str();
-            return true;
         }
 
         // Build a simple JSON string for WebSocket broadcast.
@@ -1112,30 +1102,10 @@ namespace AIAssistant
 
     std::string AiJcwfService::LoadGenerationGuide()
     {
-        // Try several candidate paths for the generation guide.
-        std::vector<fs::path> candidates;
-
-        if (Core::g_Core != nullptr)
-        {
-            fs::path const launchCwd = Core::g_Core->GetLaunchCWDAbsolute();
-            candidates.push_back(launchCwd / "doc" / "jcwf_generation_guide.md");
-            candidates.push_back(launchCwd / ".." / "doc" / "jcwf_generation_guide.md");
-        }
-
-        candidates.push_back(fs::path("doc") / "jcwf_generation_guide.md");
-
-        for (auto const& path : candidates)
-        {
-            std::string content;
-            if (ReadFile(path, content) && !content.empty())
-            {
-                LOG_APP_INFO("[AiJcwfService] Loaded generation guide from '{}'", path.string());
-                return content;
-            }
-        }
-
-        LOG_APP_WARN("[AiJcwfService] Could not load jcwf_generation_guide.md from any candidate path");
-        return "(Generation guide not available — generate valid JCWF JSON based on your knowledge of the spec.)";
+        // Compiled-in via Phase 4 prebuild step (tools/generateEmbeddedHeaders.py reads
+        // doc/jcwf_generation_guide.md at build time).  No more disk lookups, no more
+        // silent-fallback-to-placeholder path.
+        return std::string{kJcwfGenerationGuide};
     }
 
     bool AiJcwfService::ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
@@ -1253,35 +1223,26 @@ namespace AIAssistant
             return false;
         }
 
-        // Build request payload and URL based on API type.
+        // Delegate request-body assembly to IRequestBuilder so every interface type
+        // (including API4 Anthropic and the Test fixture) is handled uniformly.
         std::string const prompt = "Say hello";
-        std::string requestData;
-        std::string queryUrl = iface.m_Url;
-        CurlWrapper::AuthStyle authStyle = CurlWrapper::AuthStyle::Bearer;
+        AiInvocation probeEnvelope;
+        probeEnvelope.m_InterfaceName = iface.m_Name;
+        Message probeMessage;
+        probeMessage.m_Role = MessageRole::User;
+        probeMessage.m_Content = prompt;
+        probeEnvelope.m_Messages.push_back(std::move(probeMessage));
 
-        switch (iface.m_InterfaceType)
+        auto const probeBuilder = IRequestBuilder::Create(iface.m_InterfaceType);
+        if (!probeBuilder)
         {
-            case ConfigParser::EngineConfig::InterfaceType::API3:
-            {
-                // Gemini native: model in URL, different body format.
-                requestData = R"({"contents":[{"parts":[{"text":")" + prompt + R"("}],"role":"user"}]})";
-                queryUrl = iface.m_Url + "/models/" + iface.m_Model + ":generateContent";
-                authStyle = CurlWrapper::AuthStyle::XGoogApiKey;
-                break;
-            }
-            case ConfigParser::EngineConfig::InterfaceType::API2:
-            {
-                requestData = R"({"model":")" + iface.m_Model + R"(","input":")" + prompt + R"(","store":false})";
-                break;
-            }
-            case ConfigParser::EngineConfig::InterfaceType::API1:
-            default:
-            {
-                requestData =
-                    R"({"model":")" + iface.m_Model + R"(","messages":[{"role":"user","content":")" + prompt + R"("}]})";
-                break;
-            }
+            outError = "No request builder available for interface type (index " + std::to_string(interfaceIndex) + ")";
+            return false;
         }
+
+        std::string const requestData = probeBuilder->BuildBody(probeEnvelope, iface.m_Model);
+        std::string const queryUrl = probeBuilder->ResolveUrl(iface.m_Url, iface.m_Model);
+        CurlWrapper::AuthStyle const authStyle = probeBuilder->GetAuthStyle();
 
         // Direct curl POST with short timeout — no queue files, no SessionManager.
         CurlWrapper::QueryData queryData = {

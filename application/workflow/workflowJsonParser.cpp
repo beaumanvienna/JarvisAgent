@@ -670,6 +670,25 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "output_schema")
+            {
+                if (!ExtractRawJson(value, taskOut.m_OutputSchemaJson))
+                {
+                    errorMessage = "task field 'output_schema' must be a JSON value";
+                    return false;
+                }
+            }
+            else if (key == "output_retries")
+            {
+                uint64_t retriesValue = 0;
+                auto const retriesResult = value.get_uint64().get(retriesValue);
+                if (retriesResult != simdjson::SUCCESS)
+                {
+                    errorMessage = "task field 'output_retries' must be a non-negative integer";
+                    return false;
+                }
+                taskOut.m_OutputSchemaMaxAttempts = static_cast<uint32_t>(retriesValue);
+            }
             else if (key == "file_inputs")
             {
                 auto arrayResult = value.get_array();

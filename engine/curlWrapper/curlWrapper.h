@@ -70,8 +70,9 @@ namespace AIAssistant
     public:
         enum class AuthStyle
         {
-            Bearer = 0, // Authorization: Bearer <key> (OpenAI, Anthropic, etc.)
-            XGoogApiKey // x-goog-api-key: <key> (Google Gemini native)
+            Bearer = 0,          // Authorization: Bearer <key> (OpenAI chat+Responses APIs)
+            XGoogApiKey,         // x-goog-api-key: <key> (Google Gemini native)
+            AnthropicXApiKey     // x-api-key: <key> + anthropic-version: 2023-06-01 (Anthropic Messages)
         };
 
         struct QueryData

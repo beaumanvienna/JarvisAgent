@@ -900,6 +900,13 @@ namespace AIAssistant
         {
             total += sm->GetInflightCount();
         }
+        // Include envelope-based direct dispatch (§4 of AI dispatch refactor).
+        // The "queries in flight" LED should show every AI request in flight, not only the
+        // SessionManager-mediated ones.
+        if (m_AiRequestPool != nullptr)
+        {
+            total += m_AiRequestPool->GetDirectDispatchInflight();
+        }
         return total;
     }
 
@@ -912,6 +919,10 @@ namespace AIAssistant
             {
                 ++count;
             }
+        }
+        if (m_AiRequestPool != nullptr && m_AiRequestPool->GetDirectDispatchInflight() > 0)
+        {
+            ++count;
         }
         return count;
     }

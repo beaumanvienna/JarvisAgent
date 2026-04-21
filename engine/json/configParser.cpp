@@ -432,6 +432,15 @@ namespace AIAssistant
                     apiInterface.m_Model = model;
                     ++fieldOccurances[ConfigFields::Model];
                 }
+                else if (jsonObjectKey == "max_context_tokens")
+                {
+                    uint64_t value = 0;
+                    if (field.value().get_uint64().get(value) == simdjson::SUCCESS)
+                    {
+                        apiInterface.m_MaxContextTokens = value;
+                        LOG_CORE_INFO("max_context_tokens: {}", value);
+                    }
+                }
                 else if (jsonObjectKey == "API")
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
@@ -448,6 +457,14 @@ namespace AIAssistant
                     else if (api == "API3")
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API3;
+                    }
+                    else if (api == "API4")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API4;
+                    }
+                    else if (api == "Test")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::Test;
                     }
                     else
                     {
@@ -471,6 +488,12 @@ namespace AIAssistant
                         break;
                     case EngineConfig::InterfaceType::API3:
                         apiTypeStr = "API3";
+                        break;
+                    case EngineConfig::InterfaceType::API4:
+                        apiTypeStr = "API4";
+                        break;
+                    case EngineConfig::InterfaceType::Test:
+                        apiTypeStr = "Test";
                         break;
                     default:
                         break;

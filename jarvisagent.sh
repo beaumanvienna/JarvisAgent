@@ -94,4 +94,31 @@ source "$VENV_DIR/bin/activate"
 
 # ── Launch JarvisAgent ───────────────────────────────────────────────────────
 cd "$SCRIPT_DIR"
-exec "$BINARY" "$@"
+
+LOG_FILE="$SCRIPT_DIR/log/log.txt"
+echo "[jarvisagent.sh] Launching $EDITION_LABEL: $BINARY ${*:-(no args)}"
+if [[ -f "$LOG_FILE" ]]; then
+    echo "[jarvisagent.sh]   (application log: $LOG_FILE)"
+fi
+
+# Run as a child (not exec) so we can surface a diagnostic on failure.
+# `set -e` would abort the script before we get to print, so temporarily relax it.
+set +e
+"$BINARY" "$@"
+RC=$?
+set -e
+
+if [[ $RC -ne 0 ]]; then
+    echo ""
+    echo "[jarvisagent.sh] ERROR: $EDITION_LABEL exited with status $RC"
+    echo "  Binary:         $BINARY"
+    echo "  Working dir:    $SCRIPT_DIR"
+    echo "  Args:           ${*:-(none)}"
+    if [[ -f "$LOG_FILE" ]]; then
+        echo "  Application log tail (last 20 lines of $LOG_FILE):"
+        tail -n 20 "$LOG_FILE" 2>/dev/null | sed 's/^/    /'
+    else
+        echo "  Application log: $LOG_FILE (not present — binary may have aborted before logging started)"
+    fi
+    exit $RC
+fi

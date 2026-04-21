@@ -153,11 +153,12 @@ Each `TrackedFiles` object tracks:
 
 ## Interaction Flow
 
-1. **FileWatcher** pushes events into the engine.
-2. **SessionManager** or **JarvisAgent** receives events.
-3. **FileCategorizer** decides how the file should be treated.
+1. **FileWatcher** watches the `queue/` and `scripts/` folders, emitting `FileAddedEvent` / `FileModifiedEvent` / `FileRemovedEvent`.
+2. **JarvisAgent** routes events to `TriggerEngine::NotifyFileEvent` (JCWF `file_watch` triggers) and to the script registry.
+3. **FileCategorizer** classifies queue files by 4-letter prefix (STNG/CNTX/TASK/PROV/PROB); `.output` and `.transcript` stems are ignored.
 4. **TrackedFile** performs hashing and content tracking.
-5. Requirements and PROB files feed into JarvisAgent’s AI workflow.
+
+Runtime `ai_call` tasks dispatch through a typed `AiInvocation` envelope — `AiCallTaskExecutor` writes the queue files to disk for replay/audit and calls `AiRequestPool::Submit` directly; the reply callback writes `<prob>.output.{txt|json}` + `<prob>.transcript.json` and signals completion inline. The `queue/` `FileWatcher` is still in place for `TriggerEngine` and for `AiJcwfService`'s editor-side pipelines (Explain / FixScript / Generate).
 
 ---
 

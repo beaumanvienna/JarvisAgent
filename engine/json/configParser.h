@@ -43,6 +43,8 @@ namespace AIAssistant
                 API1 = 0,
                 API2,
                 API3,
+                API4,
+                Test, // No-network fixture-driven backend for integration tests (§8 Phase 7)
                 NumAPIs,
                 InvalidAPI
             };
@@ -55,6 +57,10 @@ namespace AIAssistant
                 std::string m_Model;
                 std::string m_KeyName;
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
+                // Structure-aware chunking budget (§8 Phase 6). Zero = "no limit known,
+                // fall back to a conservative default". Chars ÷ 4 is the rough token
+                // estimator for English text.
+                uint64_t m_MaxContextTokens{0};
             };
 
             // Generate a unique interface name from URL domain + model
@@ -84,6 +90,14 @@ namespace AIAssistant
             size_t m_MaxRequestBodyMB{10};
             uint16_t m_Port{0}; // 0 = auto (8080 HTTP, 8443 HTTPS)
             bool m_UseBashOnWindows{false};
+
+            // Determinism defaults (§7 of AI dispatch refactor).  Per-task settings on
+            // AiInvocation override these when non-default.
+            double m_DeterminismTemperature{0.0};
+            bool m_DeterminismSeedSet{false};
+            int64_t m_DeterminismSeed{0};
+            bool m_DeterminismRecordSystemFingerprint{true};
+
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
 
