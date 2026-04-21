@@ -1,536 +1,650 @@
-# AI Dispatch Refactor — Exploration
+# AI Dispatch Refactor — Dev Plan
 
-**Status:** exploration / options, not a dev plan yet.
-**Audience:** JC + Claude, for discussion.
-**Convert to dev plan:** after tomorrow's settle-up.
+**Status:** dev plan, rev 1
+**Target:** j9t 1.0
+**Tracking:** `JarvisAgent TODO List.md` §5g (pre-1.0 priority). Subsumes §5c.
 
-This document explores how to refactor j9t's AI call path so it becomes a **typed, validated, retry-aware dispatch layer** on top of the existing HTTP/2 + multithreaded transport. The transport layer itself (libcurl multi, HTTP/2 multiplexing, rate limits, 429 backoff) is **not** in scope — that is already good and we keep it untouched.
-
-Terminology note: **we deliberately do not use the word "agent"** for the new abstraction. JarvisAgent *is* the agent. One call is one call.
+This document is the implementation plan for a typed, schema-validated, retry-aware AI dispatch layer on top of the existing libcurl multi + HTTP/2 transport. Transport is not modified.
 
 ---
 
-## Executive summary
+## 1. Decisions (locked)
 
-**What we're fixing.** An `ai_call` today is an opaque text-in / text-out operation with a brittle file-drop handoff between the JCWF runtime and the core AI dispatcher. Failure modes that JC has felt in practice:
-
-- **Silent-fail on missing environment.** `sessionManager.cpp:742-747` aborts the `Environment::Assemble` step if any of STNG / CNTX / TASK is empty — no warning, no log, no error. The request never dispatches; `AiRequestPool` eventually times out; the operator has no clue what went wrong.
-- **Prompt-hope output contract.** Downstream tasks consume `.output.txt` under the assumption that "the model probably wrote something parseable." A single malformed character breaks a 60-item aggregation at the wrong layer.
-- **No determinism seam.** No standard place to pin `temperature=0`, `seed`, or log `system_fingerprint` drift per call.
-- **No replay / audit.** After-the-fact, there's no typed record of what got sent or returned.
-
-**What changes.**
-1. **Typed `AiInvocation` envelope** replaces the opaque STNG+CNTX+TASK+PROB blob at the dispatch boundary. Missing-field errors surface at JCWF validation time, not as watchdog timeouts at runtime. Single loud warning/error point. The orchestrator calls `AiRequestPool::Submit(envelope)` directly — the file watcher is removed from the runtime-dispatch path (§4).
-2. **Schema-enforced structured output** is the default, with bounded validation-retry. Downstream tasks receive a `.output.json` (not prayer-parsed text) when the task declares `output_schema`; free-text tasks (code, Makefiles, prose) opt in to the legacy `.output.txt`.
-3. **`IRequestBuilder` + extended `ReplyParser`** make provider plumbing symmetric. API4 (Anthropic `/v1/messages`) is added to the existing API1/2/3 set.
-4. **Determinism defaults** (`temperature`, `seed`, `system_fingerprint` logging) + **`.transcript.json`** per call give us replay, audit, and drift detection.
-5. **`TestInterface`** makes JCWF integration tests free of network flakiness and token cost.
-
-**What stays unchanged.**
-- **HTTP/2 multiplexing and the libcurl multi transport.** No perf regression — the envelope serializes once at dispatch time.
-- **Multithreaded dispatch** via the existing thread pool and `CurlMultiDispatcher` instances.
-- **Async completion model.** The envelope is only the *input shape* of `AiRequestPool::Submit`; the completion-queue mechanism, event loop, watchdogs, and callback-based delivery are preserved bit-for-bit. No blocking waits are introduced anywhere.
-- **Disk-first philosophy.** All inputs, outputs, transcripts, and intermediates continue to live on disk.
-- **Queue-folder convention.** One TASK / one STNG / one CNTX / many PROB per `ai_call` task folder, with fan-out producing one dispatch per PROB.
-
-**Stability wins, stated plainly.** The current "orchestrator ↔ core dispatcher" seam silently fails when any queue file is empty; the new seam is a typed struct that either validates or produces an explicit, logged error — before anything touches the network. Missing-context cases (CNTX absent, or ambiguously empty) get graded responses: strict failure for required fields, explicit warnings for recommended-but-absent context ("no CNTX provided — results may be less precise").
-
-**Out of scope** (tracked elsewhere): native LLM tool-calling (`JarvisAgent TODO List.md §5e`), Claude Code / tool-of-tools PoC (`§5f`), sub-workflow task-type additions.
+| Id | Decision |
+|---|---|
+| A | `AiInvocation` is a pure data struct; no inheritance. |
+| B | `IRequestBuilder` is introduced in this refactor, symmetric to `ReplyParser`. |
+| C | `ReplyParser` base class is extended with five virtuals (§5). |
+| D | Structured output ships both modes: native `json_schema` (OpenAI / Gemini) and forced-tool shim (Anthropic). Per-interface selection. |
+| E | Full slice for 1.0: envelope, structured output, transcript, determinism, TestInterface. |
+| F | JCWF schema fully gap-closed in this refactor. Contract test enforces *schema ⊇ parser*. |
+| G | Direct dispatch. Queue-folder `FileWatcher` retired from runtime-initiated `ai_call`. |
+| H | New `EventCategoryAi` bitfield flag. |
+| +1 | STNG / CNTX / TASK are optional. Dispatch if combined body has ≥1 non-whitespace char; PROB remains required. PROV (provider sidecar) is optional — when absent the default interface from `config.json` applies. |
+| +2 | Markitdown auto-conversion of office files preserved as-is. |
+| +3 | Chunking becomes structure-aware (markdown-section boundaries); per-interface `max_context_tokens` config. |
 
 ---
 
-## 1. Goals
-
-1. **Typed request envelope** above `AiRequestPool::Submit` — the JCWF `ai_call` task produces a structured object, not opaque JSON.
-2. **Structured / schema-enforced output** as a first-class feature, not a prompt-hope convention. (We already half-use this — see `example/workflows/aiCarMaintenancePipeline.md` where the classify step is instructed to emit exactly one word from `{engine, tires, rephrase}`.)
-3. **Bounded validation retry** — if the reply fails output-schema validation, feed the error back and retry N times before failing the task.
-4. **Determinism defaults** — `temperature`, `seed`, provider fingerprint logged per call.
-5. **Transcripts on disk** — typed message list per `ai_call` task, for replay and audit.
-6. **Test interface** — a non-network reply source for JCWF integration tests.
-7. **Keep the fastest, most efficient AI dispatch engine** — concretely:
-   - HTTP/2 multiplexing stays (many concurrent requests over one connection per provider).
-   - Multithreaded dispatch stays (thread pool → multiple `CurlMultiDispatcher` instances across hosts).
-   - The new envelope is pure struct → serialized once at dispatch time. Zero hot-path cost beyond what we do today.
-8. **Direct dispatch** — orchestrator → `AiRequestPool::Submit` is a direct call. The file watcher is removed from the runtime-initiated dispatch seam. See §4.
-
-Non-goals (for this refactor):
-
-- Native LLM tool-calling (Assistant + post-1.0 JCWF `ai_call`) — tracked separately in `JarvisAgent TODO List.md` §5e.
-- Adding new providers (covered in §5 — low priority).
-- Streaming / event subscriptions (j9t already exposes run events at the workflow layer).
-
----
-
-## 2. Current state (anchor)
-
-Files that define the current dispatch stack:
-
-| Layer | File | Role |
-|---|---|---|
-| Task executor | `application/workflow/aiCallTaskExecutor.{h,cpp}` | Resolves `{{template}}` vars, writes STNG/CNTX/TASK/PROB queue files. |
-| Request pool | `application/workflow/aiRequestPool.{h,cpp}` | Tracks pending requests by handle + expected-output-path; watchdogs; completion queue. |
-| Session assembly | `application/session/…` | Assembles STNG+CNTX+TASK+PROB into the HTTP body. |
-| Reply parse | `application/json/replyParser.h` + `replyParserAPI1.h` + `replyParserAPI2.h` | Provider-specific JSON → text content + error info. |
-| Transport | libcurl multi (vendored) | HTTP/2 multiplexing, retries, rate limit — **out of scope**. |
-
-Shape of a call today (summarized from `aiRequestPool.h` and `aiCallTaskExecutor.h`):
+## 2. End-state architecture
 
 ```
 JCWF ai_call task
-  → AiCallTaskExecutor (template resolve, write STNG/CNTX/TASK/PROB files)
-  → FileWatcher → FileAddedEvent → categorizer → SessionManager
-  → AiRequestPool tracks the pending request
-  → CurlMultiDispatcher (HTTP/2, fan-out, retries)
-  → response body parsed by ReplyParserAPI1 or API2
-  → written to .output.txt
-  → downstream tasks consume opaque text
+  ↓  AiCallTaskExecutor
+       ├─ template-resolve {{...}} vars
+       ├─ write STNG / CNTX / TASK / PROB / PROV files to queue folder (disk-first)
+       │    PROV = provider sidecar (interface name, model, url, key_name, api_type)
+       ├─ markitdown-convert any office files in queue folder
+       ├─ structure-aware chunker (if body > interface max_context_tokens)
+       └─ construct 1 AiInvocation per PROB × chunk
+            (m_InterfaceName mirrors PROV content; envelope is load-bearing, PROV stays for replay/debug)
+  ↓  AiRequestPool::Submit(envelope)          [direct in-process call]
+  ↓  IRequestBuilder::BuildBody(envelope)      [per-provider]
+  ↓  CurlMultiDispatcher                       [HTTP/2, unchanged]
+  ↑  ReplyParser                               [per-provider, extended]
+  ↑  AiReply
+  ↓  AiRequestPool::OnReply(handle, reply)     [direct callback]
+       ├─ if output_schema: parse+validate with simdjson; retry on failure (≤ output_retries)
+       ├─ write <prob>.output.{json|txt}
+       └─ write <prob>.transcript.json
+  ↓  AiRequestPool::TryPopCompletion()         [existing non-blocking poll]
+  ↓  workflow runtime tick picks up the completion
+
+Event bus (fire-and-forget, observability only):
+  AiCallStartedEvent → AiCallRetryingEvent → AiCallCompletedEvent | AiCallFailedEvent
+  Category: EventCategoryAi
 ```
-
-The contract between an AI step and its consumer today is *"the model probably wrote something parseable."* That is the gap.
-
-What was labeled "Option E" in `JarvisAgent TODO List.md:282-287` (post-1.0) — replacing the file-watcher round trip for runtime-initiated calls with a direct `AiCallTaskExecutor → AiRequestPool::Submit` path — is pulled into this refactor. The envelope is the natural input type for that `Submit`; see §4 for the transport model.
 
 ---
 
-## 3. Naming
+## 3. Scope
 
-The C++ type for "one AI call" is **`AiInvocation`** — no collision with `AiCallTaskExecutor` or JCWF `ai_call`, reads naturally as `IAiInvocation` if we later want a virtual. Shape:
+**In scope**
+- `AiInvocation` envelope + `AiReply` typed result.
+- Direct dispatch (`AiCallTaskExecutor → AiRequestPool::Submit`); retire queue-folder `FileWatcher`.
+- Relaxed env rule (STNG / CNTX / TASK optional).
+- `IRequestBuilder` abstraction + 4 concrete builders (API1, API2, API3, API4).
+- `ReplyParser` base extended with 5 virtuals; API4 (Anthropic) reply parser added.
+- Structured output via `output_schema` / `output_retries` on `ai_call`. Two modes (native + shim).
+- simdjson-based Draft 2020-12 subset schema validator.
+- Output file contract: `<prob>.output.json` when schema set, else `<prob>.output.txt`.
+- Editor-side `AiJcwfService::GenerateAsync` uses schema-enforced output against compiled-in JCWF schema.
+- Extract `doc/jcwf.schema.json`; fully gap-close against parser; contract test.
+- Premake prebuild step compiles schema + generation guide into generated headers.
+- Determinism defaults (`temperature=0`, optional `seed`, `system_fingerprint` logging).
+- `<prob>.transcript.json` per call.
+- Structure-aware chunking + per-interface `max_context_tokens`.
+- `TestInterface` as `InterfaceType::Test` for no-network integration tests.
+- `EventCategoryAi` + 4 lifecycle events.
+
+**Out of scope** (deliberate)
+- Native LLM tool-calling (Assistant + JCWF `ai_call`) — tracked in `JarvisAgent TODO List.md` §5e, post-1.0.
+- Claude Code / agent-of-agents PoC — §5f, post-1.0.
+- Any change to libcurl multi / HTTP/2 transport, adaptive rate limiting, 429 backoff, or `CurlMultiDispatcher` internals.
+- Streaming responses.
+
+**Preserved unchanged**
+- Disk-first philosophy: every input and output on disk, every call replayable.
+- Queue-folder convention: one STNG / one CNTX / one TASK / many PROB / one PROV per `ai_call` task folder. Fan-out = one envelope per PROB.
+- PROV sidecar: written per dispatch, captures which interface / model / URL / key_name / api_type was used. Envelope carries the same info; PROV is kept for debugging and transcript replay. **PROV is write-only from the dispatch code path** — it is never read back during execution. Only replay tooling (`tools/replayTranscript.py`, §9) reads PROV to reconstruct an envelope from disk. This keeps the envelope as the unambiguous source of truth at runtime.
+- `max inflight ai calls` throttle (existing config field, default 1000) — preserved. Applies to `AiRequestPool::Submit` the same way it applied to the old file-event-driven path; envelope construction and dispatch are separate, so the throttle's queueing and rejection behavior are unchanged.
+- Markitdown auto-conversion of office files in queue folders.
+- Script-file watcher (`m_ScriptFileWatcher`) — independent, unchanged.
+- JCWF `file_watch` triggers — continue to work on arbitrary paths declared in the JCWF. **Implementation change**: they gain their own dedicated `FileWatcher` instance (`m_TriggerFileWatcher`) owned by `TriggerEngine`, populated via `AddPath` / `RemovePath` on trigger bind/unbind. Previously rode on the queue-folder watcher de-facto — so this is a correctness improvement as well as a decoupling.
+- `FileWatcher` class itself stays; only the queue-folder *instance* (`m_FileWatcher`) is retired.
+- `AiRequestPool::TryPopCompletion` non-blocking polling model consumed by the workflow runtime tick.
+
+---
+
+## 4. Types
 
 ```cpp
+// application/workflow/aiInvocation.h — new
 namespace AIAssistant
 {
-    struct AiInvocation          // typed envelope (data)
-    {
-        std::string m_InterfaceName;     // resolves to config.json ApiInterface
-        std::optional<std::string> m_ModelOverride;
-        AiSettings m_Settings;           // temperature, seed, max_tokens, ...
-        std::vector<Message> m_Messages; // typed: System | User | Assistant
-        std::optional<JsonSchema> m_OutputSchema;
-        std::chrono::milliseconds m_Timeout;
-        RetryPolicy m_Retry;
+    enum class MessageRole { System, User, Assistant };
 
-        // Transport — see §4
-        std::filesystem::path m_QueueFolder;   // dispatcher reads STNG/CNTX/TASK/PROB here
-        std::string m_ProbName;                // which PROB this invocation targets (fan-out)
+    struct Message
+    {
+        MessageRole m_Role;
+        std::string m_Content;
     };
 
-    struct AiReply               // typed result (data)
+    struct AiSettings
+    {
+        double m_Temperature = 0.0;
+        std::optional<int64_t> m_Seed;
+        std::optional<int32_t> m_MaxTokens;
+    };
+
+    struct RetryPolicy
+    {
+        int m_HttpMaxAttempts = 3;             // transport flakiness (network, 5xx, 429)
+        int m_OutputSchemaMaxAttempts = 3;     // output quality (schema mismatch) — per PROB
+        int m_TotalMaxAttempts = 10;           // hard ceiling across both budgets, prevents runaway compounding
+        std::chrono::milliseconds m_BackoffMs{500};
+    };
+
+    enum class StructuredMode { None, NativeJsonSchema, ForcedToolShim };
+
+    struct AiInvocation
+    {
+        std::string m_InterfaceName;                         // resolves to ApiInterface in config.json
+        std::optional<std::string> m_ModelOverride;
+        AiSettings m_Settings;
+        std::vector<Message> m_Messages;
+        std::optional<std::string> m_OutputSchemaJson;       // raw schema source
+        StructuredMode m_StructuredMode = StructuredMode::None;
+        std::chrono::milliseconds m_Timeout{120000};
+        RetryPolicy m_Retry;
+        std::filesystem::path m_QueueFolder;
+        std::string m_ProbName;
+        std::string m_ProvName;                              // PROV sidecar filename (for replay; optional)
+        std::optional<int32_t> m_ChunkIndex;                 // when chunked, 0..N-1; nullopt otherwise
+        std::optional<int32_t> m_ChunkCount;
+    };
+
+    struct AiUsage
+    {
+        int32_t m_InputTokens = 0;
+        int32_t m_OutputTokens = 0;
+        int32_t m_TotalTokens = 0;
+    };
+
+    struct AiError
+    {
+        enum class Kind { None, Http, Parse, SchemaValidation, Timeout, Transport, Provider };
+        Kind m_Kind = Kind::None;
+        int m_HttpStatus = 0;
+        std::string m_Message;
+    };
+
+    struct AiReply
     {
         enum class Kind { Text, Structured, Error };
-        Kind m_Kind;
-        std::string m_Text;              // when Kind == Text
-        simdjson::dom::element m_Json;   // when Kind == Structured (or store as string)
-        AiError m_Error;                 // when Kind == Error
-        AiUsage m_Usage;                 // tokens, cost estimate
-        std::string m_SystemFingerprint; // drift detection
+        Kind m_Kind = Kind::Error;
+        std::string m_Text;
+        std::string m_StructuredJson;           // when Kind == Structured; store raw for re-parse
+        AiError m_Error;
+        AiUsage m_Usage;
+        std::string m_FinishReason;
+        std::string m_SystemFingerprint;
     };
 }
 ```
 
-Data-struct vs. `IAiInvocation` abstract base is still open for tomorrow (§9.A). The name itself is fixed.
-
 ---
 
-## 4. Runtime transport — request + reply paths
-
-Closes the orchestrator ↔ dispatcher seam in both directions. Today the request path depends on `FileWatcher` noticing queue files as they land on disk, and the reply path depends on it noticing the model's `.output.txt`. After the refactor, both are direct in-process signals; the event system is used only for observability (§4.6), never for correctness.
-
-This section defines what each signal looks like, what guarantees it carries, how `output_schema` scope maps onto the queue-folder convention, and which failure modes collapse as a result.
-
-### 4.1 Decision: direct dispatch for runtime-initiated calls
-
-`AiCallTaskExecutor` still writes STNG/CNTX/TASK/PROB files to the task's queue folder on disk (disk-first philosophy preserved — every input is reconstructible, every call is replayable). But instead of relying on `FileWatcher → FileAddedEvent → categorizer → SessionManager → AiRequestPool`, the executor now:
-
-1. Writes the files to disk.
-2. Constructs one `AiInvocation` per PROB (fan-out replicates the envelope with a different `m_ProbName`, sharing everything else).
-3. Signals `AiRequestPool` directly — `AiRequestPool::Submit(envelope)` or an equivalent in-process event post; exact mechanism is a dev-plan detail.
-
-The **queue-folder `FileWatcher` is retired entirely** — no runtime-dispatch use, no external-drop use. `jarvisAgent.cpp:161-162` (`m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, …)`) goes away, along with the `FileAddedEvent` dispatch path in `sessionManager.cpp:227-228`. The `FileWatcher` class itself stays — `m_ScriptFileWatcher` (live script registry) and the file-watch triggers in `triggerEngine.h` are independent uses with different source folders and continue unchanged.
-
-### 4.2 Dispatch contract: "if it's on disk and the orchestrator says send, send it"
-
-The dispatcher's preconditions on `Submit`:
-
-- **Input reading.** Dispatcher reads STNG + CNTX + TASK + the named PROB from `m_QueueFolder`, concatenates for the provider HTTP body via `IRequestBuilder` (§5.2), and fires.
-- **No enforcement that all four categories are present.** If the combined body is non-empty and the orchestrator submitted the envelope, the call dispatches. The silent-abort path in `sessionManager.cpp:742-747` goes away.
-- **Missing-but-expected categories** are checked at envelope *construction* time in `AiCallTaskExecutor` and surface as explicit warnings/errors — logged, with task name + folder path — not as watchdog timeouts 60 s later.
-- **Unit of work.** One `ai_call` task = one queue folder = N PROBs = N envelopes = N dispatches. The envelope is the unit of work per PROB; fan-out produces multiple envelopes that share the prompt template, interface, schema, and retry policy.
-
-### 4.3 Schema scope: declared once on the task, applied to every PROB
-
-The queue-folder convention — one TASK / one STNG / one CNTX / many PROB — is preserved and made central to the structured-output feature:
-
-- `output_schema` is declared **once on the `ai_call` task**, not per-PROB.
-- Every PROB in the folder is dispatched with that same schema attached.
-- Each PROB produces its own output file — `<prob>.output.json` when schema is present, `<prob>.output.txt` when absent — alongside its own `<prob>.transcript.json` (§7).
-- `output_retries` is **per-PROB** — one malformed reply does not starve the retry budget of its siblings.
-
-This matches the meaning of the `ai_call` task: *"run this prompt template with this expected output shape over these N inputs."* The shape is declared once; fan-out replicates it N times.
-
-### 4.4 Failure modes closed
-
-| Old symptom | Root cause | New behavior |
-|---|---|---|
-| Request never dispatched, watchdog timeout after 60 s | `Environment::Assemble` skipped at `sessionManager.cpp:742-747` when any queue file empty | Envelope construction raises a logged error before `Submit`; missing categories produce graded responses (required vs. recommended-but-absent) |
-| Malformed response crashes downstream task | `.output.txt` prompt-hope | Schema validation + bounded retry (§6); downstream task reads typed `.output.json` |
-| No way to tell why a specific call vanished | File-watcher indirection, no per-call correlation | Envelope carries `m_QueueFolder` + `m_ProbName`; logs, transcripts, and errors are addressable by that pair |
-
-### 4.5 External-drop path — DECIDED: retired
-
-No external "drop files into /queue" path is kept. Webhook triggers and HTTP ingress already cover external-producer use cases cleanly; maintaining a second ingestion route would be code for code's sake. The queue folder is an *internal* runtime artifact — only `AiCallTaskExecutor` writes it, only `AiRequestPool` reads it, both in-process.
-
-Knock-on cleanups this unlocks:
-- `sessionManager.cpp` loses the `FileAddedEvent` dispatcher and the `Environment::Assemble` silent-abort branch at `:742-747`.
-- `jarvisAgent.cpp:161-162` (queue-folder `FileWatcher` construction) and the matching shutdown code at `:800-867` go away for the queue path.
-- The file categorizer for STNG/CNTX/TASK/PROB becomes a pure in-memory helper called from `AiCallTaskExecutor`, not a file-event consumer.
-
-### 4.6 Reply-side transport: dispatcher → runtime
-
-Symmetric with the request side (§4.1). `CurlMultiDispatcher` completes an HTTP call on a worker thread and signals `AiRequestPool` directly — no event-queue round trip, no file-event trigger. The correctness path and the observability path are split deliberately.
-
-**Correctness path — direct, in-process:**
-
-```
-CurlMultiDispatcher (worker thread, HTTP completes)
-    → AiRequestPool::OnReply(handle, AiReply)       // direct call, thread-safe
-        → schema validation + retry loop (§6) if m_OutputSchema set
-        → writes <prob>.output.{json|txt} to m_QueueFolder
-        → writes <prob>.transcript.json  to m_QueueFolder
-        → enqueues AiRequestCompletion on m_Completed
-Workflow runtime tick:
-    AiRequestPool::TryPopCompletion()               // polls, as today
-```
-
-`AiRequestPool`'s existing non-blocking completion queue (`TryPopCompletion`, already consumed by the tick-based workflow runtime) is preserved bit-for-bit. The only thing that changes on the reply side is the *input edge*: replies enter via `OnReply(handle, AiReply)` instead of via `OnOutputFileCreated(path)` triggered by a file event. The legacy `OnProbFileEvent` / `OnOutputFileCreated` entry points in `aiRequestPool.h:112-116` go away along with the queue-folder `FileWatcher`.
-
-**Observability path — event system, fire-and-forget:**
-
-Lightweight lifecycle events posted onto the global `EventQueue` for consumers that want to know but are not load-bearing:
-
-| Event | Posted when | Payload (minimum) |
-|---|---|---|
-| `AiCallStartedEvent` | Envelope accepted by `Submit` | task id, prob name, interface |
-| `AiCallRetryingEvent` | Schema / HTTP retry fires | task id, attempt #, last error |
-| `AiCallCompletedEvent` | Reply validated + written | task id, usage, system fingerprint |
-| `AiCallFailedEvent` | Retries exhausted or hard error | task id, error kind, last message |
-
-New event category `EventCategoryAi` (or fold under the existing `EventCategoryApp` — §9.H). Consumers:
-
-- TUI status row — live "running / retrying / done" per task, replaces the debug-signals polling we fall back to today.
-- Dashboard WebSocket stream — real-time task cards.
-- Python scripts, via `BuildEventDict` (matches how `FileAddedEvent` is bridged today).
-- Future: Tracy zones, audit-log exporters, the `/api/debug/signals` endpoint.
-
-Events are **fire-and-forget**: delivery is best-effort, consumers can come and go, a slow consumer never stalls `AiRequestPool`. Correctness never depends on a subscriber being attached.
-
-**Why split this way.** The event system is explicitly described in `engine/event/event_system.md` as a *notification* mechanism. Driving correctness through it would couple reply latency to the main-loop tick rate and re-create the roundabout dispatcher ↔ FS-event pattern this refactor removes. `PythonCrashedEvent` is the healthy precedent — a notification, not a state-machine signal. `FileAddedEvent` was the one case where an event drove business logic, and eliminating that coupling is the point of §4.
-
----
-
-## 5. Provider surface (ReplyParser + its symmetric twin)
-
-### 5.1 ReplyParser today
-
-Already abstract — `application/json/replyParser.h:29`:
+## 5. Extended `ReplyParser` base
 
 ```cpp
+// application/json/replyParser.h — modified
 class ReplyParser
 {
 public:
+    virtual ~ReplyParser() = default;
     virtual size_t HasContent() const = 0;
     virtual std::string GetContent(size_t index = 0) const = 0;
+
+    // New virtuals — providers that lack a concept return empty/default.
+    virtual AiError GetError() const = 0;
+    virtual AiUsage GetUsage() const = 0;
+    virtual std::string GetFinishReason() const = 0;
+    virtual std::string GetSystemFingerprint() const = 0;
+    virtual std::optional<std::string> GetStructuredOutput() const = 0;
+
     static std::unique_ptr<ReplyParser> Create(InterfaceType const&, std::string const& json);
 };
 ```
 
-Three concrete implementations (dispatched from `replyParser.cpp:35-64`):
-- `ReplyParserAPI1` — OpenAI chat.completions (GPT-4-family), `choices[].message.content`.
-- `ReplyParserAPI2` — OpenAI Responses API (GPT-5-family), `output[].content[].text`, plus reasoning blocks.
-- `ReplyParserAPI3` — Google Gemini native, `candidates[].content.parts[].text`, `finishReason`, `usageMetadata`.
+All four concretes (`ReplyParserAPI1..4`) implement all five. Providers with no native concept:
+- `GetSystemFingerprint()` — returns `""` for API2 (when absent), API3, API4.
+- `GetStructuredOutput()` — returns `std::nullopt` unless the provider emitted structured content (native json_schema response, forced-tool call).
 
-**Answer to JC's question: we do not need to introduce an abstract base — we already have one.** But we probably need to **extend** it for the refactor. Concretely, additions would be:
+---
 
-| New virtual method | Why |
-|---|---|
-| `ErrorInfo const& GetError() const` | Base-class way to get error details (today only concrete classes expose `GetErrorInfo`/`GetErrorType`). |
-| `AiUsage GetUsage() const` | Token accounting without knowing the provider. |
-| `std::string GetFinishReason() const` | `"stop"`, `"length"`, etc. Needed for retry decisions and schema-enforcement. |
-| `std::string GetSystemFingerprint() const` | Drift detection (OpenAI only; others return empty). |
-| `std::optional<simdjson::dom::element> GetStructuredOutput() const` | When the reply used native json_schema mode or the forced-tool shim. |
-
-These are **additive** — the existing `HasContent()`/`GetContent()` stays. Backwards-compatible.
-
-### 5.2 Symmetric `IRequestBuilder` — new?
-
-Today, the provider-specific HTTP request *body* is not behind a polymorphic interface. Assembly happens in SessionManager (+ the STNG/CNTX/TASK file concatenation). For the refactor, we'd want an `IRequestBuilder` symmetric to `ReplyParser`:
+## 6. `IRequestBuilder` abstraction
 
 ```cpp
+// application/json/requestBuilder.h — new
 class IRequestBuilder
 {
 public:
+    virtual ~IRequestBuilder() = default;
     virtual std::string BuildBody(AiInvocation const&) const = 0;
-    virtual std::string GetEndpointPath() const = 0;           // /v1/chat/completions vs /v1/responses
-    virtual std::unordered_map<std::string,std::string> GetExtraHeaders() const = 0;
+    virtual std::string GetEndpointPath() const = 0;
+    virtual std::unordered_map<std::string, std::string> GetExtraHeaders() const = 0;
+    virtual bool SupportsNativeJsonSchema() const = 0;
+    virtual bool SupportsForcedToolShim() const = 0;
     static std::unique_ptr<IRequestBuilder> Create(InterfaceType const&);
 };
 ```
 
-With `RequestBuilderAPI1` (OpenAI chat.completions), `RequestBuilderAPI2` (OpenAI Responses), `RequestBuilderAPI3` (Gemini `generateContent`), and `RequestBuilderAPI4` (Anthropic `/v1/messages`). These mirror the four `ReplyParserAPI*` classes after this refactor.
+Concrete classes:
+- `RequestBuilderAPI1` — OpenAI chat.completions. Native schema supported.
+- `RequestBuilderAPI2` — OpenAI Responses API. Native schema supported.
+- `RequestBuilderAPI3` — Gemini `generateContent`. Native schema via `responseSchema`.
+- `RequestBuilderAPI4` — Anthropic `/v1/messages`. Forced-tool shim only (no native schema).
 
-Net shape post-refactor:
-
-```
-AiInvocation (envelope)
-    ↓  IRequestBuilder (envelope → provider JSON body)
-    ↓  CurlMultiDispatcher (HTTP/2, unchanged)
-    ↑  ReplyParser (provider JSON → AiReply)
-AiReply (typed result)
-```
-
-Pleasingly symmetric. `IRequestBuilder` + extended `ReplyParser` are the only provider-dependent code; everything else is generic.
-
-### 5.3 Providers in scope for this refactor
-
-Existing (three reply parsers, two vendors):
-
-- **API1** — OpenAI chat.completions (GPT-4-family).
-- **API2** — OpenAI Responses API (GPT-5-family).
-- **API3** — Google Gemini native (`generateContent`).
-
-Added by this refactor:
-
-- **API4 — Anthropic `/v1/messages`** (Claude Sonnet / Opus / Haiku). Structured output via the forced-tool shim (Anthropic has no `response_format: json_schema`). No `seed` parameter. Usage fields differ (`input_tokens` / `output_tokens`). Requires `RequestBuilderAPI4` + `ReplyParserAPI4`.
-
-Anything **OpenAI-compatible** (xAI, Groq, Cerebras, OpenRouter, Ollama, LM Studio, local llama.cpp) works through `RequestBuilderAPI1` with base-URL / auth overrides — no new classes needed.
+Structured-mode selection rule: when `AiInvocation.m_OutputSchemaJson` is set, builder picks the best supported mode for its provider (native > shim); if neither is supported, dispatcher falls back to prompted-and-validate.
 
 ---
 
-## 6. Structured output — the biggest lever
+## 7. Schema validator
 
-This is where the refactor pays for itself. Three modes, all worth supporting:
+`application/json/schemaValidator.{h,cpp}` — new. simdjson-based Draft 2020-12 subset:
 
-| Mode | How | Providers |
-|---|---|---|
-| **Native JSON-schema** | `response_format: {type:"json_schema", schema}` in the request. | OpenAI (chat.completions + Responses), Gemini `responseSchema`, Groq. |
-| **Forced-tool shim** | Define a single tool called `output` with the schema; force `tool_choice: {type:"tool", name:"output"}`. | Anthropic; older OpenAI; fallback for anything that supports tools but not json_schema. |
-| **Prompted + validate** | Instruct the model in the system prompt to emit JSON matching the schema; validate locally. | Universal fallback (fragile). |
+Supported keywords:
+- `type` (`string` | `number` | `integer` | `boolean` | `object` | `array` | `null`)
+- `properties`, `required`, `additionalProperties`
+- `items`
+- `enum`
+- `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`
+- `oneOf`, `anyOf`
+- `$ref`, `$defs`
 
-**Validation flow** (identical regardless of mode):
+Rejected keywords (explicit error, so gaps don't fail silently): anything not in the list above.
 
-1. Response arrives.
-2. If `output_schema` is set on the `AiInvocation`, validate the parsed content against it.
-3. On validation failure, append a new `User` message: *"Your previous response failed schema validation: warning/error messages from validator <error>. Please correct it and try again."* and re-dispatch.
-4. Counts toward a separate `output_retries` budget (default 3), not the HTTP retry budget.
-5. After exhaustion, the task fails with a structured `AiError{kind=SchemaValidation, lastErrors=...}`.
-
-**Validator — two-step, both on simdjson:**
-
-1. **Parse** the reply body with **simdjson** — catches malformed JSON up front (truncated output, stray prose outside the structured block, unescaped quotes). Parse failure → retry with hint *"Your previous response was not valid JSON: <simdjson error>. Emit only JSON matching the requested schema."*
-2. **Schema-validate** the parsed simdjson DOM with our own Draft-7 subset validator. Schema mismatch → retry with hint *"Your previous response failed schema validation: <validator errors>. Please correct it and try again."* (§6 step 3 above).
-
-Schema validation is a *different* operation from parsing — simdjson parses, our validator walks the resulting DOM. **No new parser dependency is introduced; simdjson remains the only JSON parser in the project.** Target dialect: **JSON Schema Draft 2020-12** (matches the existing JCWF schema in the spec). The subset we need to support:
-
-- `type` (string / number / integer / boolean / object / array / null)
-- `properties` + `required` + `additionalProperties` (objects)
-- `items` (arrays)
-- `enum` (covers the single-word-classification case in `aiCarMaintenancePipeline`)
-- `minimum` / `maximum` / `minLength` / `maxLength` / `pattern` (optional)
-- `oneOf` / `anyOf` (for union outputs; JCWF schema uses `anyOf` for `doc` and `queue_file_ref`)
-- **`$ref` + `$defs`** (the JCWF schema relies on this for `trigger`, `task`, `dataflow`, `queue_file_ref`, `control_node`)
-
-Estimated ~300–500 lines of C++ against simdjson's DOM (higher than before because of `$ref`/`$defs` resolution). Lives under `application/json/` next to the reply parsers. Reusable for the editor-side JCWF schema validation (§6.6), too.
-
-**JCWF surface change**: one new optional field on `ai_call` tasks, declared at the task level and applied to every PROB in the queue folder (see §4.3):
-
-```json
-"ai_call": {
-  "interface": "gpt-5-nano",
-  "output_schema": { "type": "string", "enum": ["engine", "tires", "rephrase"] },
-  "output_retries": 3,
-  ...
-}
-```
-
-`example/workflows/aiCarMaintenancePipeline.md` (the classify step) becomes a one-line change to use this, and the downstream `buildManual` internal task can trust the classification instead of hoping.
-
-### 6.4 Output file contract — `.output.json` vs `.output.txt`
-
-Structured output becomes the **default** for new `ai_call` tasks; free-text is the explicit opt-out for code / Makefiles / prose. The file written to disk mirrors this:
-
-| `ai_call` declares | Response validated against | Output file (per PROB — see §4.3) |
-|---|---|---|
-| `output_schema: {…}` | The schema, with retry on failure | `<prob>.output.json` |
-| nothing (implicit free-text) | — | `<prob>.output.txt` (today's behavior, unchanged) |
-
-JCWF dataflow wiring accordingly:
-- `{{tasks.classify.output}}` → opaque handle; resolves to whichever sibling exists.
-- `{{tasks.classify.output.category}}` → only valid when the upstream produced JSON; the workflow validator rejects this reference at load time if the upstream task has no `output_schema`.
-
-Consequence: the **workflow validator** needs one new rule — structured-field references are only valid against tasks declaring an `output_schema`. Catches wiring mistakes at load time, before the run.
-
-### 6.5 Default stance — "JSON unless told otherwise"
-
-Structured output is an `AiInvocation` field, not a global flag, but we should pick a **policy for where the refactor sets it by default**. Proposed convention:
-
-| Caller | Default output mode | Rationale |
-|---|---|---|
-| JCWF `ai_call` tasks | **Free text** (current behavior, backwards compatible) | Opt-in per task via `output_schema:` field. Workflows that want structure declare it; workflows that don't keep working. |
-| `AiJcwfService::GenerateAsync` (editor AI → new JCWF) | **JSON with JCWF schema** | The output *is* JCWF JSON. Today we prompt-hope. Tomorrow we validate against the JCWF schema and retry. See §6.6. |
-| `AiJcwfService::ExplainAsync` (editor AI → prose) | **Free text** | Human-readable explanation; structure would hurt. |
-| `AiJcwfService::FixFailedScriptAsync` (editor AI → code) | **Free text** | Output is a Makefile / C++ / Python / shell script. Schema-enforcing JSON would fight the goal. |
-| `AiJcwfService::TestAiInterface` | **Free text** | Smoke test; no structure needed. |
-| Assistant chat | **Free text** | Conversation. Tool-calling surface is tracked separately (`JarvisAgent TODO List.md §5e`). |
-
-So the rule of thumb is: **code/prose → free text; everything we parse programmatically → JSON + schema**. The envelope defaults to free text, and each call site declares a schema when parsing is downstream.
-
-### 6.6 Editor AI generation — `AiJcwfService::GenerateAsync`
-
-`application/web/aiJcwfService.h:66-67`:
+Public API:
 
 ```cpp
-void GenerateAsync(std::string const& prompt, std::string const& currentJcwfJson);
-```
-
-Today: system prompt tells the model to emit JCWF JSON, we parse the response, and if the model strays (wrapped code fences, explanatory prose before/after, missing fields) we surface the error after the round trip. `doc/jcwf_generation_guide.md` is loaded as context to steer it.
-
-With structured output:
-
-1. **Single source of truth: `doc/jcwf.schema.json`.** A Draft 2020-12 schema already exists embedded inside `doc/JC_Workflow_Specification.md:2215-~2490` (§9 of the spec), labeled *"simplified … not exhaustive but suitable for validation and editor tooling"*. Three actions as part of this refactor:
-   - **Extract** the embedded schema to `doc/jcwf.schema.json` as a standalone file. Replace §9 of the spec with a one-line reference to the extracted file. No duplication.
-   - **Bring the schema up to speed.** The embedded draft is behind current JCWF reality — for example, its `task.type` enum is `["python", "shell", "ai_call", "internal"]`, missing `sub_workflow` (your next major feature), and it lacks the new `output_schema` / `output_retries` fields introduced by this refactor. Other gaps exist wherever `workflowJsonParser` / `workflowValidator` accept fields the schema does not describe. Dedicated pass required: diff the schema against the parser, close the gaps, and add a contract test that asserts every field the parser reads is declared in the schema (so the schema stays current).
-   - **Compile the schema into the binary.** Premake gains a prebuild step that reads `doc/jcwf.schema.json` and writes `application/json/jcwfSchema.generated.h` with:
-     ```cpp
-     namespace AIAssistant
-     {
-         inline constexpr char const* kJcwfSchemaJson = R"JSON( …schema… )JSON";
-     }
-     ```
-     The generated header is gitignored and regenerated automatically whenever the `.json` changes. C++ consumers `#include` the header; no runtime file lookup, no packaging risk, no silent fallback. `doc/jcwf.schema.json` stays the one authored source — humans read it there; the generator derives the header from it (same relationship as a `.cpp` to its `.o`). Works in C++20.
-   - **Apply the same compile-time embed to `doc/jcwf_generation_guide.md`.** Today `AiJcwfService::LoadGenerationGuide` (`application/web/aiJcwfService.cpp:1114`) loads the generation guide from disk with a multi-path search and falls back to a placeholder string + `LOG_APP_WARN` if not found — the same silent-degradation pattern that affects the schema. Same fix: extend the Premake prebuild step to also generate `application/json/jcwfGenerationGuide.generated.h` with `inline constexpr char const* kJcwfGenerationGuide = R"MD( …guide… )MD";`. `AiJcwfService` reads the constant, removes the file-search + fallback. One loaded artifact, no packaging risk.
-2. `GenerateAsync` sets `AiInvocation.m_OutputSchema = kJcwfSchemaJson` directly from the compiled-in constant.
-3. Dispatcher requests schema-enforced output from the provider (OpenAI `response_format: {type:"json_schema"}`, Gemini `responseSchema`; forced-tool shim for Anthropic).
-4. On validation failure, the existing retry path (§6) kicks in: send the validator errors back as a follow-up user message. This is strictly better than what we do today, which is "re-prompt blind."
-5. Downstream `WorkflowValidator` still runs (schema says "these fields exist with these types"; validator says "these references resolve, the DAG has no cycles, freshness is coherent"). Both layers useful.
-
-**Ripple on `AiJcwfService::ExplainAsync` and `FixFailedScriptAsync`:** unchanged. Both stay free-text. The *mechanism* they use (queue files → `AiRequestPool`) gets the envelope refactor but doesn't use the `output_schema` field.
-
-**Ripple on the "multi-stage pipeline" (decompose → generate → review):** each stage becomes its own `AiInvocation` with its own schema. Decompose → `{tasks: [...]}` schema. Generate → full JCWF schema. Review → `{issues: [...], severity: ...}` schema. The pipeline becomes a chain of typed transforms instead of a chain of string parsers.
-
----
-
-## 7. Determinism + transcript
-
-### 7.1 Determinism defaults in `EngineConfig`
-
-```cpp
-struct DeterminismDefaults
+struct ValidationError
 {
-    double m_Temperature = 0.0;
-    std::optional<int64_t> m_Seed;            // where provider supports it
-    bool m_RecordSystemFingerprint = true;    // OpenAI only; others log empty
+    std::string m_Path;        // JSON pointer
+    std::string m_Message;
+};
+
+struct ValidationResult
+{
+    bool m_Ok;
+    std::vector<ValidationError> m_Errors;
+};
+
+class SchemaValidator
+{
+public:
+    explicit SchemaValidator(std::string schemaJson);
+    ValidationResult Validate(std::string const& documentJson) const;
+    ValidationResult Validate(simdjson::dom::element const& doc) const;
+    static std::string FormatErrorsForModel(std::vector<ValidationError> const&);
 };
 ```
 
-Per-task overrides in JCWF stay supported. The defaults nudge the whole engine toward reproducibility.
+Used both on the AI reply path (`AiRequestPool::OnReply`) and on the editor-side JCWF generation path (`AiJcwfService::GenerateAsync`).
 
-### 7.2 `.transcript.json` next to `.output.txt`
+---
 
-Same task folder that holds `PROB_*_*.txt`, `STNG_*.txt`, `answer.output.txt` also gets `answer.transcript.json`:
+## 8. Phases
 
-```json
-[
-  {"kind":"request","parts":[{"role":"system","content":"..."},{"role":"user","content":"..."}],"settings":{"temperature":0,"seed":42},"timestamp":"..."},
-  {"kind":"response","parts":[{"role":"assistant","content":"engine"}],"usage":{"in":55,"out":1,"total":56},"system_fingerprint":"fp_abc123","timestamp":"..."}
-]
+Phases are ordered by dependency. Each phase ends with a docs sweep.
+
+### Phase 1 — Envelope + direct dispatch + relaxed env
+
+**Goal.** Introduce `AiInvocation` / `AiReply`, route runtime-initiated `ai_call` through `AiRequestPool::Submit(envelope)` directly, retire queue-folder `FileWatcher`, relax env completeness. PROV sidecar writing preserved (for replay/debug); no longer load-bearing for dispatch.
+
+**Files — add**
+- `application/workflow/aiInvocation.h` (types from §4).
+- `application/workflow/aiReply.h` (if split from above).
+
+**Files — modify**
+- `application/workflow/aiCallTaskExecutor.{h,cpp}` — construct `AiInvocation` after writing queue files; call `AiRequestPool::Submit(envelope)` directly. Warn (not error) on missing STNG / CNTX / TASK. Error only if combined body has no non-whitespace char or PROB missing. PROV sidecar: continue writing it (resolved from task's `api_interface` field, or the global default); envelope's `m_InterfaceName` is the source of truth for dispatch — PROV is the disk mirror.
+- `application/workflow/aiRequestPool.{h,cpp}` — new `Submit(AiInvocation)` and `OnReply(handle, AiReply)`. Remove `OnProbFileEvent` / `OnOutputFileCreated` entry points. Completion queue + `TryPopCompletion` unchanged.
+- `application/session/sessionManager.{h,cpp}` — remove `FileAddedEvent` consumer; remove silent-abort branch (current `:742-747`). Becomes an in-process helper called from `AiCallTaskExecutor`, not a file-event consumer. File-categorizer logic moves with it.
+- `jarvisAgent.cpp` — remove queue-folder `FileWatcher` (`m_FileWatcher`) construction (`:161-162`), shutdown (`:800-867`), and the `OnEvent` → `TriggerEngine::NotifyFileEvent` bridge at `:616` (events now originate from the new `TriggerEngine`-owned watcher, not from a shared queue watcher). `m_ScriptFileWatcher` untouched. `GetQueueFileWatcher()` getter at `jarvisAgent.h:78` removed.
+- `application/workflow/triggerEngine.{h,cpp}` — own a new `std::unique_ptr<FileWatcher> m_TriggerFileWatcher`. On `AddFileWatchTrigger`, `AddPath(normalizedPath)`; on removal, `RemovePath`. `NotifyFileEvent` is now called from a subscription *to this* watcher, not from `JarvisAgent::OnEvent`. File-watch triggers work on any declared path — no longer limited to `queue/`.
+- `application/workflow/adhocWorkflowManager.{h,cpp}` — drop the `FileWatcher* m_QueueWatcher` member, the constructor parameter, `AddPath`/`RemovePath` calls, and `Stage()`/`OnRunCompleted()`/`Reap()`/`Init()` watcher bookkeeping. Adhoc `ai_call` goes through the same direct-dispatch path as runtime-initiated calls.
+- `application/web/webServer.cpp:596` — no longer reads `GetQueueFileWatcher()`; adhoc manager constructed without it.
+
+**Files — delete (or inline)**
+- File-categorizer free-standing event consumer, if it becomes dead after SessionManager collapses.
+
+**Contract tests — add to `test/dispatch/`**
+- `test_envelope_construction.py` — ai_call task with all four env files → envelope populated correctly; single warning-free log.
+- `test_relaxed_env_warnings.py` — ai_call with missing STNG / CNTX / TASK (each combination) → one warning per missing category, dispatch proceeds, succeeds.
+- `test_empty_body_rejected.py` — ai_call with only whitespace in every file → envelope construction fails with explicit error, no HTTP dispatch.
+- `test_prov_sidecar_written.py` — ai_call with explicit `api_interface` → PROV file on disk matches envelope's `m_InterfaceName`; ai_call with no `api_interface` → PROV reflects global default interface.
+- `test_prov_absent_falls_back.py` — delete PROV from queue folder before dispatch — envelope's `m_InterfaceName` drives dispatch regardless (PROV is not load-bearing).
+- `test_direct_dispatch_no_filewatcher.py` — start j9t; verify `queue/` folder is not under any watch (`/api/debug/signals` reports no queue watchers); run a workflow; completes end-to-end.
+- `test_manual_drop_retired.py` — drop STNG/CNTX/TASK/PROB files manually into `queue/` — no dispatch happens (feature retired). Run same content via `ai_call` task — dispatches normally.
+- `test_file_watch_trigger_arbitrary_path.py` — JCWF with `file_watch` trigger on a path *outside* `queue/` (e.g. `/tmp/j9t-trigger-test/`). Touch a file at that path → workflow fires. Previously would not have worked (trigger received no events).
+- `test_file_watch_trigger_inside_queue.py` — regression: JCWF with `file_watch` trigger on a path inside `queue/` still fires. No behavioral change for existing users.
+- `test_adhoc_direct_dispatch.py` — adhoc `ai_call` submitted via MCP → dispatches directly, no `FileWatcher::AddPath` involvement (adhoc manager no longer holds a watcher reference).
+
+Both editions (Studio + Engine) run all tests.
+
+**Docs — update at end of phase**
+- `doc/JC_Workflow_Specification.md` §3.3.6 — STNG / CNTX / TASK marked optional. Add note: "Richer context produces better results; a warning is logged when these are omitted." PROV sidecar documented: generated per dispatch, optional (default interface applies when absent), kept on disk for replay — not load-bearing for dispatch.
+- `doc/JC_Workflow_Specification.md` — removal of manual queue-drop semantics (if documented anywhere).
+- `doc/architecture.md` — diagram + prose updated for direct dispatch.
+- `doc/api-endpoints.md` — no change expected; verify.
+- `application/workflow/doc/todo.md` "future refactors" section — close §5c (Option E) entry with pointer to §5g / this doc.
+- `JarvisAgent TODO List.md` §5c — mark as landed as part of §5g.
+
+**Acceptance**
+- All existing JCWF end-to-end tests pass unchanged.
+- Manual drop no longer triggers dispatch; logged once at startup that feature is retired.
+- `python3 test/run_tests.py --all` green on Studio + Engine.
+
+---
+
+### Phase 2 — Provider abstractions + API4 (Anthropic)
+
+**Goal.** Symmetric `IRequestBuilder` for all four providers; extended `ReplyParser` base; Anthropic `/v1/messages` integration.
+
+**Files — add**
+- `application/json/requestBuilder.h` (interface from §6).
+- `application/json/requestBuilderAPI1.{h,cpp}`
+- `application/json/requestBuilderAPI2.{h,cpp}`
+- `application/json/requestBuilderAPI3.{h,cpp}`
+- `application/json/requestBuilderAPI4.{h,cpp}`
+- `application/json/replyParserAPI4.{h,cpp}` — Anthropic parser.
+
+**Files — modify**
+- `application/json/replyParser.h` — add 5 virtuals from §5.
+- `application/json/replyParserAPI1.{h,cpp}` — implement new virtuals.
+- `application/json/replyParserAPI2.{h,cpp}` — implement new virtuals.
+- `application/json/replyParserAPI3.{h,cpp}` — implement new virtuals.
+- `application/json/replyParser.cpp` — `Create()` dispatches for API4.
+- `engine/json/configParser.{h,cpp}` — add `InterfaceType::API4`; recognize in parser.
+- `application/session/sessionManager.cpp` — route through `IRequestBuilder::Create(...)` instead of inline body assembly.
+- `vendor/curl/curlWrapper.{h,cpp}` — add `AuthStyle::AnthropicXApiKey` (`x-api-key:` + `anthropic-version:` headers).
+- `workflow-editor/ui/src/views/AiManagerView.tsx` — add "API4 (Anthropic Messages)" option in the interface dropdown.
+- `packaging/config.json.example` — add commented-out API4 interface example.
+
+**Contract tests**
+- `test_request_builder_api1..4.py` — known-good envelope → expected HTTP body shape per provider (snapshot tests).
+- `test_reply_parser_virtuals.py` — all four parsers return non-crashing values for GetError / GetUsage / GetFinishReason / GetSystemFingerprint / GetStructuredOutput on canned responses.
+- `test_api4_anthropic_live.py` — gated behind `--with-ai`; round-trip exampleMakefile against Claude Sonnet.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — add API4 to the supported interface list.
+- `doc/jarvisagent.md` / `.1` / `.html` — add API4 to AI setup section.
+- `doc/api-endpoints.md` — AI interface test endpoint lists API4 as valid.
+- `README.md` — "supported providers" list gains Anthropic.
+
+**Acceptance**
+- All four providers exercisable end-to-end through an unchanged JCWF (only `api_interface` changes).
+- Regression suite green; no API1/2/3 behavioral changes.
+
+---
+
+### Phase 3 — Structured output + schema validator
+
+**Goal.** `output_schema` / `output_retries` on `ai_call`; simdjson validator; native schema mode + forced-tool shim; `.output.json` contract; per-PROB retry.
+
+**Files — add**
+- `application/json/schemaValidator.{h,cpp}` (from §7).
+
+**Files — modify**
+- `application/workflow/workflowJsonParser.{h,cpp}` — parse `output_schema` (raw JSON preserved) + `output_retries` on ai_call tasks.
+- `application/workflow/workflowTypes.h` — fields on `TaskDef` for the above.
+- `application/workflow/workflowValidator.{h,cpp}` — (a) reject dataflow references of the form `{{tasks.X.output.field}}` when task X has no `output_schema`; (b) pre-validate that the declared `output_schema` parses and uses only supported keywords.
+- `application/json/requestBuilderAPI{1,2,3}.cpp` — inject `response_format` / `responseSchema` when `m_StructuredMode == NativeJsonSchema`.
+- `application/json/requestBuilderAPI4.cpp` — forced-tool shim: define `output` tool with schema as parameters; `tool_choice: {"type":"tool","name":"output"}`.
+- `application/workflow/aiRequestPool.cpp` — `OnReply` path: if `m_OutputSchemaJson` set, parse with simdjson, validate, on failure append user message with error and re-submit (count against `m_OutputSchemaMaxAttempts`). Write `<prob>.output.json` on success; write `<prob>.output.txt` on free-text path.
+- `application/workflow/aiCallTaskExecutor.cpp` — pick structured mode based on interface capabilities + presence of schema.
+
+**Example workflow update**
+- `example/workflows/aiCarMaintenancePipeline/*` — classify step declares `output_schema: {type:"string", enum:[...]}`. Downstream `buildManual` consumes `<prob>.output.json`.
+
+**Contract tests**
+- `test_schema_validator_positive.py` / `test_schema_validator_negative.py` — Draft 2020-12 subset correctness (all supported keywords).
+- `test_schema_validator_unsupported_keyword.py` — explicit error on `allOf`, `not`, `format`, etc.
+- `test_output_schema_retry.py` — mock provider emits invalid JSON → second attempt succeeds → exactly 2 dispatches logged, `.output.json` written.
+- `test_output_schema_retry_exhausted.py` — provider keeps failing → task fails with `AiError{kind=SchemaValidation}`, N+1 dispatches, `.transcript.json` has full retry chain.
+- `test_output_file_contract.py` — ai_call with schema → `.output.json`; without schema → `.output.txt`; never both.
+- `test_structured_field_ref_rejected.py` — workflow validator rejects `{{tasks.foo.output.bar}}` when foo has no schema.
+- `test_forced_tool_shim_api4.py` — API4 request body uses forced-tool shape when schema set.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — new section under §3.3.6 for `output_schema` / `output_retries` (declaration, scope = task-level applied per PROB, validation behavior, retry budget). Explicitly note: "Schemas use a Draft 2020-12 *subset*; unsupported keywords (`allOf`, `not`, `format`, `dependencies`, ...) are rejected at JCWF load time, not at AI-reply time — so authors see errors before a run starts, never during one."
+- `doc/jcwf_generation_guide.md` — "JSON unless told otherwise" convention for new `ai_call` tasks; enum example.
+- `example/workflows/aiCarMaintenancePipeline.md` — updated narrative reflects schema-enforced classify step.
+
+**Acceptance**
+- Existing free-text `ai_call` tasks unaffected (no `output_schema` → legacy behavior).
+- Structured ai_call tasks produce `.output.json` with validated content.
+- Per-PROB retry budget independent; one bad PROB does not starve siblings.
+
+---
+
+### Phase 4 — JCWF schema gap-close + editor generator
+
+**Goal.** Extract embedded schema, diff against parser, close all gaps, add parser↔schema contract test, compile schema + generation guide into headers, wire `AiJcwfService::GenerateAsync` to schema-enforced output.
+
+**Files — add**
+- `doc/jcwf.schema.json` — extracted from `doc/JC_Workflow_Specification.md` §9, updated to current state.
+- `tools/generateEmbeddedHeaders.py` — reads `doc/jcwf.schema.json` + `doc/jcwf_generation_guide.md`, writes `application/json/jcwfSchema.generated.h` and `application/json/jcwfGenerationGuide.generated.h`. Both generated headers contain `inline constexpr char const* kJcwfSchemaJson = R"JSON(...)JSON";` / `kJcwfGenerationGuide`.
+- `test/dispatch/test_schema_covers_parser.py` — contract test. Walks every field read by `workflowJsonParser` (via a documented allowlist file `test/dispatch/parser_fields.txt` generated/audited once) and asserts each is declared in `jcwf.schema.json`. Fails if the parser reads a field the schema doesn't describe.
+
+**Files — modify**
+- `premake5.lua` — prebuild step invoking `tools/generateEmbeddedHeaders.py`. Outputs gitignored. Runs before C++ compile.
+- `.gitignore` — `application/json/jcwfSchema.generated.h`, `application/json/jcwfGenerationGuide.generated.h`.
+- `doc/JC_Workflow_Specification.md` §9 — replace the embedded schema with a one-line reference: "See `doc/jcwf.schema.json` for the full JCWF JSON Schema."
+- `doc/jcwf.schema.json` — (generated at extraction time) brought up to match parser:
+  - Add `sub_workflow` task type.
+  - Add `output_schema` / `output_retries` on `ai_call`.
+  - Audit every field: `queue_binding`, `filters`, `control_nodes`, `controlflow`, `defaults`, `base_directory`, `file_inputs`/`file_outputs`, dataflow `mapping`, webhook trigger params, cron `timezone`, retry policy, etc.
+- `application/web/aiJcwfService.{h,cpp}`:
+  - Remove `LoadGenerationGuide()` file-search + placeholder fallback; use `kJcwfGenerationGuide` constant.
+  - `GenerateAsync()` sets `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` and `m_StructuredMode = NativeJsonSchema` (or shim, per interface capability).
+  - Multi-stage pipeline (decompose → generate → review) — each stage declares its own schema (decompose → `{tasks:[...]}`; generate → full JCWF schema; review → `{issues:[...]}`).
+  - `ExplainAsync` and `FixFailedScriptAsync` stay free-text; migrate them to envelope only.
+- `application/json/schemaValidator.cpp` — add `$ref` / `$defs` resolution (required by JCWF schema).
+
+**Contract tests — add**
+- `test_schema_covers_parser.py` (described above).
+- `test_generate_with_schema.py` — `GenerateAsync("a simple one-task shell workflow")` → produced JCWF validates against `kJcwfSchemaJson` and passes `WorkflowValidator`.
+- `test_generate_retry_on_schema_mismatch.py` — mock AI first returns malformed JCWF → retry → second attempt valid → saved.
+- `test_prebuild_generates_headers.py` — clean build, inspect that both `.generated.h` files are produced and non-empty.
+- `test_schema_validator_refs.py` — `$ref` / `$defs` resolution correctness.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — §9 replaced; the parser-gap entries audited during extraction get their own sections if missing.
+- `doc/jcwf_generation_guide.md` — reviewed against new schema-driven generation flow; update any passages that assume free-text output.
+- `DEVELOPMENT.md` — add short section on the prebuild step + how to regenerate after editing schema/guide.
+- `application/workflow/doc/todo.md` — note schema-covers-parser contract test added.
+
+**Acceptance**
+- Clean build from scratch produces both generated headers.
+- `test_schema_covers_parser.py` green.
+- Editor "Generate" produces a schema-valid JCWF on canonical prompts, and recovers via retry on one deliberate malform.
+
+---
+
+### Phase 5 — Determinism + transcripts
+
+**Goal.** Config-driven determinism defaults; `<prob>.transcript.json` per call.
+
+**Files — add**
+- `application/workflow/aiTranscript.{h,cpp}` — tiny helper for appending request/response turns to a JSON array on disk.
+
+**Files — modify**
+- `engine/json/configParser.{h,cpp}` — add fields:
+  - `determinism.temperature` (double, default 0.0)
+  - `determinism.seed` (optional int64)
+  - `determinism.record_system_fingerprint` (bool, default true)
+- `application/workflow/aiCallTaskExecutor.cpp` — apply defaults to `AiInvocation.m_Settings` unless the task overrides.
+- `application/workflow/aiRequestPool.cpp` — write transcript entry at `Submit` (request turn) and at `OnReply` (response turn; include `usage`, `system_fingerprint`, `finish_reason`). One file per PROB: `<prob>.transcript.json`.
+- `packaging/config.json.example` — include a `determinism` block with defaults.
+
+**Contract tests**
+- `test_determinism_defaults_applied.py` — config sets temp=0, seed=42 → sent in request body.
+- `test_per_task_override.py` — JCWF `settings.temperature: 0.7` overrides config default.
+- `test_transcript_written.py` — `<prob>.transcript.json` exists, contains ≥2 turns (request + response), valid JSON.
+- `test_transcript_retry_trail.py` — schema retry produces a transcript with all attempt turns in order.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — new section: "Determinism and transcript" (config fields, per-task override, transcript format).
+- `doc/architecture.md` — note the transcript artifact alongside `.output.{json|txt}`.
+- `packaging/config.json.example` — inline comments document determinism block.
+
+**Acceptance**
+- Re-running the same workflow twice with `seed` set produces identical replies (provider permitting — OpenAI honors it; Gemini/Anthropic approximate).
+- Every completed `ai_call` run produces one transcript per PROB.
+
+---
+
+### Phase 6 — Structure-aware chunking
+
+**Goal.** Replace the current context-blind chunker with a markdown-structure-aware splitter. Each provider advertises a context limit in config.
+
+**Placement rationale.** Chunking lives at the executor layer (called from `AiCallTaskExecutor`, not from `AiRequestPool`). The executor already owns the 1:N fan-out contract for per-PROB dispatch; extending it to per-chunk keeps `AiRequestPool::Submit` strictly 1:1 (one envelope → one HTTP call → one reply). Making chunking AI-aware (reads `max_context_tokens` per interface) is deliberate — chunk sizing is provider-dependent, so the layer that holds the interface selection is the right place.
+
+**Files — add**
+- `application/content/markdownSectionSplitter.{h,cpp}` — parse markdown, build a tree of sections by heading level (`#` / `##` / `###`), produce leaf sections in document order. No external dependencies — hand-rolled scanner over line starts.
+- `application/content/chunkPlanner.{h,cpp}` — given (body, max_tokens, prompt_overhead), return N chunks preferring whole-section boundaries; subdivide a section only when it alone exceeds budget (fall through: `#` → `##` → `###` → paragraph → sentence).
+
+**Files — modify**
+- `engine/json/configParser.{h,cpp}` — `ApiInterface` gains `max_context_tokens` (int, default provider-specific; required on user-added interfaces). Documented defaults:
+  - OpenAI GPT-4-family: 128000
+  - OpenAI GPT-5-family: 200000 (conservative until provider publishes)
+  - Gemini 2.5: 1000000
+  - Anthropic Claude Sonnet/Opus: 200000
+- `application/workflow/aiCallTaskExecutor.cpp` — after markitdown conversion, estimate body size (chars ÷ 4 → tokens). If over budget, call `chunkPlanner`; emit one `AiInvocation` per chunk with `m_ChunkIndex` / `m_ChunkCount` set. All chunks share the prompt template.
+- `application/session/sessionManager.cpp` — chunk aggregation logic: chunked responses concatenated into a single `.output.txt` (or for schema case, require schema to be `{type: array}` and concatenate; else chunking is rejected with clear error for that task).
+- Existing chunking path in `sessionManager.cpp` (the line-based splitter) — removed.
+- `application/workflow/aiTranscript.cpp` (from Phase 5) — when a PROB produces multiple dispatches due to chunking, write `<prob>_chunk<N>.transcript.json` per dispatch plus a `<prob>.transcript.json` summary listing the chunk trails. If this phase lands before Phase 5, capture the filename convention as a Phase-5 follow-up note.
+- `workflow-editor/ui/src/views/AiManagerView.tsx` — `max_context_tokens` field with sensible provider-based defaults auto-filled on select.
+
+**Contract tests**
+- `test_section_splitter.py` — fixtures: small doc, h1-only, h1+h2 mix, malformed headings, code fences (headings inside fenced blocks ignored).
+- `test_chunk_planner_whole_section.py` — body fits → one chunk, unchanged.
+- `test_chunk_planner_split_at_h1.py` — body over budget, h1 sections each fit → one chunk per h1.
+- `test_chunk_planner_subdivide.py` — one h1 alone over budget → subdivided at h2; if still over, h3; etc.
+- `test_chunk_context_limit_per_interface.py` — same body, different interface max → different chunk count.
+- `test_markitdown_preserved.py` — `.docx` file in queue folder → auto-converted to markdown → chunked → dispatched.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — new section: "Chunking." Describe section-aware behavior, context-limit config, fan-out model for chunked dispatch.
+- `doc/architecture.md` — content pipeline block (markitdown → chunker → envelope) diagrammed.
+- `README.md` — bullet update if the "supported formats" list mentions chunking.
+
+**Acceptance**
+- Large-document workflows (>context limit) run successfully and produce coherent concatenated output.
+- No regression on small-document workflows (single envelope, same as today).
+
+---
+
+### Phase 7 — TestInterface
+
+**Goal.** A no-network `InterfaceType::Test` backend for JCWF integration tests.
+
+**Files — add**
+- `application/json/requestBuilderTest.{h,cpp}` — stores envelope for inspection; returns a deterministic body.
+- `application/json/replyParserTest.{h,cpp}` — no-op parser over pre-canned replies.
+- `application/workflow/testInterfaceBackend.{h,cpp}` — routes dispatches to either:
+  - **Canned mode:** fixture map `(interface, model, hash(messages)) → AiReply` loaded from `test/fixtures/testInterface/*.json`.
+  - **Schema-driven mode:** when envelope carries `m_OutputSchemaJson`, synthesize a minimal schema-valid JSON reply.
+
+**Files — modify**
+- `engine/json/configParser.{h,cpp}` — recognize `InterfaceType::Test`; interface fields `fixture_path` (optional) and `schema_auto` (bool).
+- `application/workflow/aiRequestPool.cpp` — short-circuit: when interface type is `Test`, bypass `CurlMultiDispatcher`, call `testInterfaceBackend::Dispatch(envelope)` synchronously on a worker thread (preserving the async callback contract).
+- `test/run_tests.py` — accept `--test-interface` flag that rewrites config to swap the declared interface for a `Test` interface backed by fixtures.
+
+**Contract tests**
+- `test_canned_mode.py` — envelope matches fixture key → canned reply returned; mismatched key → clear error.
+- `test_schema_auto_mode.py` — no fixture, schema set → synthesized reply is schema-valid.
+- `test_suite_runs_without_network.py` — run the full JCWF test suite under `--test-interface` with no network egress; all pass.
+
+**Docs**
+- `doc/JC_Workflow_Specification.md` — brief note under "Supported interfaces" that `Test` exists, intended for integration tests only.
+- `test/README.md` — how to use fixtures, how to regenerate canned replies from a real run.
+- `DEVELOPMENT.md` — add the `--test-interface` flow to the contributor onboarding.
+
+**Acceptance**
+- `python3 test/run_tests.py --all --test-interface` green.
+- Studio + Engine CI gains a no-network job that uses `TestInterface`.
+
+---
+
+### Phase 8 — Observability events
+
+**Goal.** AI lifecycle events on the global `EventQueue` under a dedicated category. Consumers: TUI, dashboard WebSocket, Python hooks, debug signals.
+
+**Files — add**
+- `application/workflow/aiCallEvents.{h,cpp}` — four event types with the following payloads:
+  - `AiCallStartedEvent` — task id, prob name, interface name, chunk index/count (if chunked).
+  - `AiCallRetryingEvent` — task id, prob name, attempt number, last error (kind + message).
+  - `AiCallCompletedEvent` — task id, prob name, interface, `AiUsage`, system fingerprint, finish reason.
+  - `AiCallFailedEvent` — task id, prob name, `AiError` (kind + http status + message).
+
+**Files — modify**
+- `engine/event/event.h` — add `EventCategoryAi` to the category bitfield.
+- `application/workflow/aiRequestPool.cpp` — post each event at its lifecycle moment. Fire-and-forget; never block dispatch on event delivery.
+- `application/terminal/terminalManager.cpp` — status row consumer: subscribes to `EventCategoryAi`, updates "queries in flight" LED and per-task state.
+- `application/web/webServer.cpp` — dashboard WebSocket consumer: forwards events as JSON to connected clients.
+- `application/python/pythonEngine.cpp` — `BuildEventDict` handles the four new event types, matching the existing `FileAddedEvent` bridge pattern.
+- `application/web/debugSignals.cpp` — expose counters per event type on `/api/debug/signals`.
+
+**Contract tests**
+- `test_ai_events_emitted.py` — run a workflow, tap `EventQueue` → observe Started → Completed in order per task; retry scenario observes Retrying.
+- `test_ai_events_on_failure.py` — forced failure → Failed emitted with correct error kind.
+- `test_ai_events_fire_and_forget.py` — slow consumer does not stall the dispatcher.
+- `test_python_hook_ai_event.py` — Python hook registered on `EventCategoryAi` receives events with correct payload dict.
+
+**Docs**
+- `engine/event/event_system.md` — document `EventCategoryAi` and the four event types.
+- `doc/architecture.md` — add the event bus row to the pipeline diagram.
+- `doc/api-endpoints.md` — `/api/debug/signals` new fields.
+
+**Acceptance**
+- Every `ai_call` task produces at least Started + (Completed | Failed).
+- TUI and dashboard both show live task state during an AI-heavy workflow run.
+
+---
+
+## 9. Global testing + acceptance
+
+**Regression suite.** After every phase, the full existing test matrix must pass on Studio + Engine builds:
+- `python3 test/run_tests.py --all`
+- `python3 test/assistant/test_assistant.py --with-ai`
+- Contract tests for all previous phases.
+
+**Performance baseline.** Before Phase 1 lands, capture a baseline run of `portfolioDividendAnalysis` (60 parallel ai_calls). After each phase, the same run must complete within +5% of baseline wall-clock time. HTTP/2 multiplexing is the guarantee; any regression indicates a serialization leak in the new layer.
+
+**Transcript replay tool.** By end of Phase 5, a `tools/replayTranscript.py` script takes a `<prob>.transcript.json` and re-emits the request body exactly, for debugging drift.
+
+---
+
+## 10. Post-landing
+
+- Close `JarvisAgent TODO List.md` §5c (subsumed), §5g (landed).
+- Update `JarvisAgent TODO List.md` §5e to note: "dispatch refactor shipped; tool-calling can now ride on top via `m_Tools` field on `AiInvocation` (to be added post-1.0)."
+- Close `application/workflow/doc/todo.md` future-refactor entries for dispatch + chunker + envelope.
+- Update `README.md` changelog.
+- The `AiInvocation` envelope is the seam for future tool-calling, multi-turn, Claude Code orchestration — document this in `doc/architecture.md` so the extension points are visible.
+
+---
+
+## 11. File inventory (quick reference)
+
+| Phase | Added | Modified | Deleted |
+|---|---|---|---|
+| 1 | aiInvocation.h, aiReply.h | aiCallTaskExecutor, aiRequestPool, sessionManager, jarvisAgent, triggerEngine (owns new file-watch instance), adhocWorkflowManager (drops watcher ref), webServer (drops GetQueueFileWatcher call) | queue-folder FileWatcher construction, silent-abort branch, GetQueueFileWatcher getter |
+| 2 | requestBuilder + 4 concretes, replyParserAPI4 | replyParser + API1/2/3, configParser, sessionManager, curlWrapper, AiManagerView, config.example | — |
+| 3 | schemaValidator | workflowJsonParser, workflowTypes, workflowValidator, requestBuilderAPI1/2/3/4, aiRequestPool, aiCallTaskExecutor, aiCarMaintenancePipeline | — |
+| 4 | jcwf.schema.json, generateEmbeddedHeaders.py, parser_fields.txt | premake5.lua, JC spec §9, aiJcwfService, schemaValidator ($ref), .gitignore | `LoadGenerationGuide()` file-search path |
+| 5 | aiTranscript | configParser, aiCallTaskExecutor, aiRequestPool, config.example | — |
+| 6 | markdownSectionSplitter, chunkPlanner | configParser, aiCallTaskExecutor, sessionManager, AiManagerView | legacy line-based chunker |
+| 7 | requestBuilderTest, replyParserTest, testInterfaceBackend, fixtures/ | configParser, aiRequestPool, run_tests.py | — |
+| 8 | aiCallEvents | event.h, aiRequestPool, terminalManager, webServer, pythonEngine, debugSignals | — |
+
+---
+
+## 12. Dependencies between phases
+
+```
+Phase 1 (envelope + direct dispatch)
+  ├─→ Phase 2 (provider abstractions + API4)
+  │     └─→ Phase 3 (structured output)
+  │           ├─→ Phase 4 (JCWF schema + editor)
+  │           └─→ Phase 7 (TestInterface — IRequestBuilder + schema validator for auto-synth mode)
+  ├─→ Phase 5 (determinism + transcript)
+  ├─→ Phase 6 (chunking)
+  └─→ Phase 8 (events)
 ```
 
-Two wins: replay (re-run any task with the exact prior context) and audit (every AI decision reconstructible from disk). Consistent with our disk-first philosophy.
+Parallelizable: 5, 6, 8 all depend only on Phase 1 and can be developed concurrently with 2/3/4 if needed. Phase 7's canned-mode can land after Phase 2; full schema-driven auto-synth needs Phase 3.
 
----
-
-## 8. Test interface
-
-`TestInterface` as a new `InterfaceType` alongside `API1`/`API2`. Backed by a simple map or callback:
-
-- Canned mode: fixture maps `(interface, model, hash(messages)) → AiReply`. Deterministic, no network.
-- Schema-driven mode: if `AiInvocation.m_OutputSchema` is set, auto-generate a minimal valid reply against the schema (for tests that only care about *shape*).
-
-Enables every JCWF integration test to run with zero API tokens and zero flakiness. Opt-in per test via config override.
-
----
-
-## 9. Options & open questions — bring to tomorrow's settle-up
-
-### A. Polymorphism shape
-1. Pure data struct `AiInvocation` + interfaces at `IRequestBuilder`/`ReplyParser` only (simpler).
-2. `IAiInvocation` abstract + concrete subclasses (opens room for `MultiTurnAiInvocation` later).
-
-### B. `IRequestBuilder` — introduce now or later?
-1. Now: symmetric with `ReplyParser`, cleaner layering, forces us to test the shape against Anthropic mentally.
-2. Later: unblock structured output first, factor out request building as a follow-up.
-
-### C. Extend `ReplyParser` base?
-1. Add the virtuals listed in §5.1 to the base class now.
-2. Keep the base minimal, add getters on concrete parsers, upcast at the call site.
-
-### D. Structured-output mode priority
-1. OpenAI `json_schema` native (easiest, covers both API1 and API2).
-2. Forced-tool shim (universal fallback, required for API4 Anthropic).
-3. Ship both at once, mode selected per-interface.
-
-### E. Scope for 1.0
-Claude's proposal (from yesterday's assessment):
-1. (A) typed `AiInvocation` envelope
-2. (C) output-schema enforcement
-3. (D) determinism defaults + transcript log
-4. (F) test interface
-   — *ship as the 1.0 refactor*
-
-Alternative: slice thinner. Just ship (A) + (C) + transcript; defer determinism defaults and test interface to 1.x. Open.
-
-### F. Editor AI generation (§6.6) — schema-update scope
-The schema draft already exists (§9 of the spec). This refactor will extract it to `doc/jcwf.schema.json` and wire `GenerateAsync` to schema-enforced output + retry. Open sub-question:
-
-1. **Bring the schema fully up to speed in this refactor** (close all gaps vs. `workflowJsonParser`, add `sub_workflow`, add `output_schema` / `output_retries`, add contract test that schema ⊇ parser). One-time pass, bigger scope.
-2. **Extract + minimal updates now, full gap-closing as a follow-up.** Ship the envelope with whatever the schema covers today + a TODO to expand. The editor AI will over-reject things the schema forgot, which is a soft failure (validator errors fed back → model fixes it).
-
-Option 1 is cleaner but bigger; option 2 ships earlier. The `sub_workflow` addition probably pairs better with the sub-workflows feature work itself than with this refactor.
-
-### G. Interaction with Option E — DECIDED
-
-Option E (`JarvisAgent TODO List.md:282-287`) is pulled into this refactor. The queue-folder `FileWatcher` is retired entirely — no runtime-dispatch use, no external-drop use. `AiCallTaskExecutor → AiRequestPool::Submit(envelope)` is a direct in-process call. See §4 for the transport contract, `m_QueueFolder` / `m_ProbName` envelope fields, retired code paths, and failure-mode reductions.
-
-The `FileWatcher` class itself survives for `m_ScriptFileWatcher` (live script registry) and file-watch triggers in `triggerEngine.h` — those are independent uses on different folders.
-
-### H. AI lifecycle event category
-
-Observability events (§4.6) need a category flag. Options:
-
-1. Add a new `EventCategoryAi` to the bitfield in `engine/event/event.h:49-58`. Cleanest semantically; gives consumers a single-flag filter.
-2. Fold `AiCall*Event` under the existing `EventCategoryApp`. No new category, matches the "app-level notification" precedent of `AppErrorEvent`; consumers filter by `EventType` instead.
-
-Either works; option 1 is a one-line addition and opens the door to richer filtering if Python hooks grow.
-
----
-
-## 10. Reading list (for tomorrow)
-
-- `application/json/replyParser.h` / `replyParserAPI1.h` / `replyParserAPI2.h` / `replyParserAPI3.h` — existing abstraction to preserve / extend (three providers: OpenAI chat.completions, OpenAI Responses, Gemini native). API4 (Anthropic `/v1/messages`) is added by this refactor.
-- `application/workflow/aiRequestPool.h` — the thing our envelope feeds into.
-- `application/web/aiJcwfService.h` — editor-side AI operations (explain / generate / fix-script); see §6.6.
-- `doc/jcwf_generation_guide.md` — currently steers the editor generator via prompt; becomes a complement to the JCWF JSON Schema once §6.6 lands.
-- `doc/JC_Workflow_Specification.md:2215` (§9) — existing embedded JCWF JSON Schema draft (Draft 2020-12). To be extracted into `doc/jcwf.schema.json` as the single source of truth; spec §9 becomes a one-line reference to the extracted file.
-- `JarvisAgent TODO List.md:282-287` — Option E context (pulled into scope by this refactor; see §4 and §9.G).
-- `example/workflows/aiCarMaintenancePipeline.md` — real workflow that already wants structured output; good test target.
-
----
-
-## 11. Next step
-
-Tomorrow:
-1. Settle items A–F in §9 (G is decided).
-2. Convert this doc into a dev plan:
-   - one section per chosen item, with file-level diffs sketched
-   - ordered work breakdown
-   - contract tests (Studio + Engine) to add
-3. Open tracking entry under `application/workflow/doc/todo.md` "future refactors" + bump `JarvisAgent TODO List.md §5c` status.
+Critical path: 1 → 2 → 3 → 4.

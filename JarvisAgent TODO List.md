@@ -279,23 +279,40 @@ The repository grew organically and the root is crowded. Group sources under a s
 
 Reference: this item captured after the 2026-04-18 MCP 1.0 commit landed +10,602 / -1,866 lines; the reorg will be bigger still in line-count but almost all `git mv` + path-string edits.
 
-### 5c. Post-1.0 — runtime-driven `ai_call` dispatch (Option E)
+### 5c. Runtime-driven `ai_call` dispatch (Option E) — pulled into §5g (pre-1.0)
+
+Absorbed into the AI dispatch refactor (§5g below). Original scope kept here for reference:
 
 - Today `ai_call` completion relies on the `FileWatcher → FileAddedEvent → file categorizer → SessionManager → AiRequestPool` chain. That round-trip is elegant for the original file-drop use case (user drops PROB files into `queue/` manually) but increasingly awkward for runtime-authored workflows where the runtime already knows exactly what to dispatch.
 - **Direction:** replace the file-watcher-mediated dispatch for runtime-initiated `ai_call` tasks with a direct path: `AiCallTaskExecutor` assembles the `SessionManager` environment, calls `AiRequestPool::Submit` directly, receives the response via callback, no synthetic file events. Keeps the file-watcher for the manual drop workflow only (or deletes it if the drop workflow is deprecated).
 - Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
-- Target: post-1.0. Track in `application/workflow/doc/todo.md` under the "future refactors" section when it's time to start.
 
-### 5e. Native LLM tool-calling — Assistant (priority) + post-1.0 JCWF `ai_call`
+### 5g. AI dispatch refactor (pre-1.0 — priority)
 
-**Background.** Modern LLM APIs (OpenAI `tool_calls[]`, Gemini `functionCall`, Anthropic `tool_use` content blocks) support structured tool-calling natively: the request carries a list of tools (name + description + parameters JSON-schema); the model can choose to emit a structured call instead of text; the client executes the tool locally and feeds the result back for another turn. This is what agl and pydantic-ai are built around. The "AI Dispatch Refactor" (AiInvocation) makes native tool-calling trivial to plumb in once the envelope is typed.
+- Typed `AiInvocation` envelope replaces the opaque STNG/CNTX/TASK/PROB file-drop seam; missing-field errors surface at envelope construction, not as 60-second watchdog timeouts.
+- Schema-enforced structured output as the default (`output_schema` on `ai_call`); bounded `output_retries` feed validator errors back to the model. Free-text remains explicit opt-out for code/Makefile/prose.
+- `IRequestBuilder` symmetric to `ReplyParser`; extend `ReplyParser` virtuals (GetError / GetUsage / GetFinishReason / GetSystemFingerprint / GetStructuredOutput). Adds API4 (Anthropic `/v1/messages`); OpenAI-compatible providers (xAI, Groq, OpenRouter, Ollama, ...) keep working through API1.
+- Determinism defaults (`temperature=0`, optional `seed`, `system_fingerprint` logging) + `.transcript.json` per PROB for replay and audit.
+- `TestInterface` as a new `InterfaceType` — no-network, deterministic JCWF integration tests.
+- Editor-side `AiJcwfService::GenerateAsync` uses the JCWF schema for schema-enforced output. Extract the embedded schema from `doc/JC_Workflow_Specification.md` §9 into `doc/jcwf.schema.json` and compile it into the binary via a Premake prebuild step (`jcwfSchema.generated.h`). Same compile-time embed for `doc/jcwf_generation_guide.md`.
+- Relaxed env: STNG / CNTX / TASK optional (warning only); PROB still required; empty body still rejected. PROV sidecar optional (falls back to default interface). Manual queue-drop semantics retired.
+- Markitdown auto-conversion of office files preserved.
+- Structure-aware chunking: markdown-section boundaries, per-interface `max_context_tokens` config (GPT-4=128k, GPT-5=200k, Gemini 2.5=1M, Claude=200k).
+- Subsumes §5c (Option E): queue-folder `FileWatcher` retired entirely from runtime dispatch; `m_ScriptFileWatcher` stays; `TriggerEngine` gains its own dedicated `FileWatcher` so JCWF `file_watch` triggers work on any declared path (latent-bug fix).
+- HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — **all unchanged**.
+- Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0).
+- See `AI dispatch refactor.md` for the full dev plan (decisions A–H locked, 8 phases ordered, file-level diffs, contract tests, per-phase docs sweeps). Status: ready to start Phase 1.
 
-**5e.1 — AI Assistant: replace the `<tool_call>` regex parser with native tool-calling.** Priority item, not post-1.0.
+### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
+
+**Background.** Modern LLM APIs (OpenAI `tool_calls[]`, Gemini `functionCall`, Anthropic `tool_use` content blocks) support structured tool-calling natively: the request carries a list of tools (name + description + parameters JSON-schema); the model can choose to emit a structured call instead of text; the client executes the tool locally and feeds the result back for another turn. This is what agl and pydantic-ai are built around. The "AI Dispatch Refactor" (§5g) makes native tool-calling trivial to plumb in once the envelope is typed.
+
+**5e.1 — AI Assistant: replace the `<tool_call>` regex parser with native tool-calling.** Target: post-1.0.
 - Today `application/assistant/assistantTools.h:98` `ParseToolCalls()` regex-extracts `<tool_call>name(arg=value, ...)</tool_call>` tags from free-text replies. Hand-rolled, breaks when the model gets chatty inside the tags, escapes a quote wrong, or nests a tag inside a code fence.
 - After AiInvocation lands: the assistant builds an invocation with `m_Tools = [...]` (one per registered `ToolDef`); providers return native tool calls via `ReplyParser::GetToolCalls()`; the assistant controller loops exactly as today, but from real structured fields instead of regex. Tag parser can stay as a fallback for interfaces that don't expose tools.
 - Scope: extend `ReplyParser` with `GetToolCalls()`, add tool declarations to request builders (API1/API2/API3/API4), swap `AssistantController` over to structured calls. L3 approval flow (`requiresApproval`) unchanged.
 
-**5e.2 — Post-1.0: bring tool-calling to JCWF `ai_call` tasks.** Pairs with 5c.
+**5e.2 — Post-1.0: bring tool-calling to JCWF `ai_call` tasks.** Pairs with §5g (AI dispatch refactor).
 - JCWF `ai_call` gains optional `tools: [...]`. Each tool has `{name, description, parameters_schema, handler_task}` where `handler_task` is a normal JCWF task (python/shell/internal).
 - When the model emits a tool call, `AiCallTaskExecutor` enqueues the handler task synchronously with the tool arguments, awaits its `.output.txt`, appends a `ToolReturn` message to the invocation, and re-dispatches — same loop pattern as the Assistant, inside one `ai_call` task.
 - Most existing example JCWFs don't benefit (explicit DAGs already make the decisions the author wants). Real candidates: `slackQAndABot` (classic tool-using Q&A bot), `redmineTriageBot` / `gitHubIssueDemo` / `jiraIssueDemo` (triage decisions that benefit from looking up related items mid-call), `hamburg-tourist-day-planner` (live lookups).
@@ -329,17 +346,12 @@ Reference: this item captured after the 2026-04-18 MCP 1.0 commit landed +10,602
 
 Claude's joke-but-not-a-joke tagline for this one: *"j9t orchestrates the orchestrators."*
 
-### 6. Landing page for new users
+### 6. Landing page for new users (pre-1.0)
 - Create a welcoming landing page / website for JarvisAgent
 - Should explain what JarvisAgent is, key features, screenshots, and download links
 - Target audience: first-time visitors who discover the project
 
-### 7. Self-hosted Docker registry
-- Evaluate hosting our own server for the Docker package instead of relying solely on GHCR
-- Benefits: custom domain, no GitHub dependency, potential for private images
-- Alternatives: self-hosted Docker registry, Harbor, or a simple VPS with registry
-
-### 8. Promotion video
+### 7. Promotion video (pre-1.0)
 - Create a demo / promotion video showcasing JarvisAgent
 - Cover: workflow creation in the editor, running workflows, dashboard monitoring, multi-platform support
 - Target: GitHub README embed, YouTube, social media
