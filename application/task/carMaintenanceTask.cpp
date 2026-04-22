@@ -21,10 +21,10 @@
 
 #include "task/carMaintenanceTask.h"
 
-#include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <system_error>
+
+#include <simdjson/simdjson.h>
 
 namespace fs = std::filesystem;
 
@@ -54,30 +54,30 @@ namespace AIAssistant
             return false;
         }
 
-        bool const containsEngine = ContainsCaseInsensitive(inputText, "engine");
-        bool const containsTire = ContainsCaseInsensitive(inputText, "tire");
+        std::string category;
+        if (!ExtractCategoryFromStructuredJson(inputText, category, errorMessageOut))
+        {
+            return false;
+        }
 
         std::string outputText;
-        if (containsEngine || containsTire)
+        if (category == "engine")
         {
-            if (containsEngine)
-            {
-                outputText += MakeEngineManualText();
-            }
-
-            if (containsTire)
-            {
-                if (!outputText.empty())
-                {
-                    outputText += "\n\n";
-                }
-
-                outputText += MakeTireMaintenanceText();
-            }
+            outputText = MakeEngineManualText();
+        }
+        else if (category == "tires")
+        {
+            outputText = MakeTireMaintenanceText();
+        }
+        else if (category == "rephrase")
+        {
+            outputText = MakeRephraseRequestText();
         }
         else
         {
-            outputText = MakeRephraseRequestText();
+            errorMessageOut = "CarMaintenanceTask: unexpected category value '" + category +
+                              "' (expected engine | tires | rephrase).";
+            return false;
         }
 
         if (!TryWriteAllText(outputFilePath, outputText, errorMessageOut))
@@ -104,7 +104,6 @@ namespace AIAssistant
         fileContentsOut.clear();
         if (!fileSizeErrorCode)
         {
-            // Reserve the exact size when available; +1 to avoid edge cases in some allocators.
             if (fileSizeBytes > 0U)
             {
                 std::size_t const reserveSize = static_cast<std::size_t>(fileSizeBytes) + 1U;
@@ -112,7 +111,6 @@ namespace AIAssistant
             }
         }
 
-        // Read using stream iterators to avoid exceptions and to keep it simple.
         fileContentsOut.assign(std::istreambuf_iterator<char>(inputStream), std::istreambuf_iterator<char>());
 
         if (inputStream.bad())
@@ -156,31 +154,57 @@ namespace AIAssistant
         return true;
     }
 
-    bool CarMaintenanceTask::ContainsCaseInsensitive(std::string const& haystack, std::string const& needle)
+    bool CarMaintenanceTask::ExtractCategoryFromStructuredJson(std::string const& fileContents,
+                                                               std::string& categoryOut,
+                                                               std::string& errorMessageOut)
     {
-        if (needle.empty())
+        categoryOut.clear();
+
+        if (fileContents.empty())
         {
-            return true;
+            errorMessageOut = "CarMaintenanceTask: classification file is empty.";
+            return false;
         }
 
-        std::string haystackLower;
-        haystackLower.resize(haystack.size());
+        // The classifier task declares output_schema so the runtime writes a validated
+        // JSON object of the form {"category": "engine" | "tires" | "rephrase"}.
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string padded(fileContents);
 
-        std::transform(haystack.begin(), haystack.end(), haystackLower.begin(),
-                       [](unsigned char const characterValue) { return static_cast<char>(std::tolower(characterValue)); });
+        simdjson::ondemand::document doc;
+        if (parser.iterate(padded).get(doc) != simdjson::SUCCESS)
+        {
+            errorMessageOut = "CarMaintenanceTask: failed to parse structured classification JSON.";
+            return false;
+        }
 
-        std::string needleLower;
-        needleLower.resize(needle.size());
+        simdjson::ondemand::object obj;
+        if (doc.get_object().get(obj) != simdjson::SUCCESS)
+        {
+            errorMessageOut = "CarMaintenanceTask: classification JSON is not an object.";
+            return false;
+        }
 
-        std::transform(needle.begin(), needle.end(), needleLower.begin(),
-                       [](unsigned char const characterValue) { return static_cast<char>(std::tolower(characterValue)); });
+        simdjson::ondemand::value categoryValue;
+        if (obj["category"].get(categoryValue) != simdjson::SUCCESS)
+        {
+            errorMessageOut = "CarMaintenanceTask: classification JSON missing required field 'category'.";
+            return false;
+        }
 
-        return haystackLower.find(needleLower) != std::string::npos;
+        std::string_view categoryView;
+        if (categoryValue.get_string().get(categoryView) != simdjson::SUCCESS)
+        {
+            errorMessageOut = "CarMaintenanceTask: classification JSON field 'category' is not a string.";
+            return false;
+        }
+
+        categoryOut.assign(categoryView);
+        return true;
     }
 
     std::string CarMaintenanceTask::MakeEngineManualText()
     {
-        // Mock content (placeholder).
         return "Engine manual (quick notes):\n"
                "- Check the oil level on a level surface and top up only with the correct oil grade.\n"
                "- If you see an engine warning light, avoid heavy acceleration and schedule a diagnostic scan.\n"
@@ -190,7 +214,6 @@ namespace AIAssistant
 
     std::string CarMaintenanceTask::MakeTireMaintenanceText()
     {
-        // Mock content (placeholder).
         return "Tire maintenance (quick notes):\n"
                "- Check tire pressure monthly and before long trips; adjust when the tires are cold.\n"
                "- Inspect tread depth and wear patterns; uneven wear often points to alignment issues.\n"

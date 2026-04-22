@@ -50,11 +50,10 @@
 #include "jarvisAgent.h"
 #include "python/pythonEnginePool.h"
 #include "web/webServer.h"
-#include "web/chatMessages.h"
 #include "file/scriptRegistry.h"
 #include "workflow/taskPathResolver.h"
 
-#include "session/sessionManager.h"
+#include "workflow/aiRequestPool.h"
 #include "workflow/jcwfContainer.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowJsonParser.h"
@@ -589,13 +588,7 @@ namespace AIAssistant
         // started so TTL-based cleanup kicks in every 60 s.
         if (workflowRegistry != nullptr && !m_AdhocManager)
         {
-            // Thread the JarvisAgent's queue FileWatcher through so each staged
-            // adhoc run's queue folder gets registered / unregistered dynamically
-            // (see doc/architecture.md "Adhoc submission" subsection).
-            FileWatcher* queueWatcher =
-                (App::g_App != nullptr) ? App::g_App->GetQueueFileWatcher() : nullptr;
-            m_AdhocManager = std::make_unique<AdhocWorkflowManager>(m_McpKeyManager, *workflowRegistry,
-                                                                    queueWatcher);
+            m_AdhocManager = std::make_unique<AdhocWorkflowManager>(m_McpKeyManager, *workflowRegistry);
             auto const adhocBase = Core::g_Core->GetLaunchCWDAbsolute() / "_adhoc";
             m_AdhocManager->Init(adhocBase);
             m_AdhocManager->StartReaperThread();
@@ -1696,10 +1689,6 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/editor/<path>")
         ([this](std::string const& path) { return ServeWorkflowEditorStatic("/editor/" + path); });
 
-        // ---- Chat ----
-        CROW_ROUTE(m_Server, "/api/chat")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleChatPost(req); });
-
         // ---- Workflow CRUD ----
         CROW_ROUTE(m_Server, "/api/workflows")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
@@ -1938,44 +1927,6 @@ namespace AIAssistant
     }
 #endif // J9T_STUDIO
 
-#ifdef J9T_STUDIO
-    crow::response WebServer::HandleChatPost(const crow::request& req)
-    {
-        simdjson::ondemand::parser parser;
-        try
-        {
-            simdjson::padded_string json(req.body);
-            auto doc = parser.iterate(json);
-
-            std::string subsystem = std::string(doc["subsystem"].get_string().value());
-            std::string message = std::string(doc["message"].get_string().value());
-
-            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
-
-            fs::create_directories(queuePath);
-
-            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, message);
-            fs::path filename = queuePath / ("ISSUE_" + std::to_string(id) + ".txt");
-
-            std::ofstream out(filename);
-            out << message;
-            out.close();
-
-            crow::json::wvalue response;
-            response["status"] = "queued";
-            response["id"] = id;
-            response["file"] = filename.string();
-            return MakeJsonResponse(200, response);
-        }
-        catch (const std::exception& e)
-        {
-            crow::json::wvalue error;
-            error["error"] = e.what();
-            return MakeJsonResponse(400, error);
-        }
-    }
-#endif // J9T_STUDIO
-
     crow::response WebServer::HandleMcpHeartbeatPost()
     {
         {
@@ -2053,11 +2004,12 @@ namespace AIAssistant
         }
         status["workflow_runs_active"] = static_cast<int64_t>(activeWorkflowRuns);
 
-        // Session managers
+        // AI dispatch
         JarvisAgent* app = App::g_App;
-        status["session_managers_total"] = static_cast<int64_t>(app ? app->GetSessionManagerCount() : 0);
-        status["session_managers_with_inflight"] = static_cast<int64_t>(app ? app->GetSessionManagersWithInflight() : 0);
-        status["session_managers_inflight_total"] = static_cast<int64_t>(app ? app->GetSessionManagerInflightTotal() : 0);
+        {
+            AiRequestPool const* pool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+            status["ai_calls_inflight"] = static_cast<int64_t>(pool != nullptr ? pool->GetDirectDispatchInflight() : 0);
+        }
 
         // WebSocket clients and accumulation stats
         {
@@ -4341,25 +4293,6 @@ namespace AIAssistant
                             m_WsPeakClients = m_Clients.size();
                         }
 
-                        // Queue current session manager states for the new client.
-                        // Cannot call conn.send_text() from onopen (CROW_ENFORCE_WS_SPEC).
-                        // Broadcasting to all clients is harmless — existing clients just get a refresh.
-                        JarvisAgent* app = App::g_App;
-                        if (app)
-                        {
-                            app->ForEachSessionManager(
-                                [this](SessionManager& sm)
-                                {
-                                    crow::json::wvalue msg;
-                                    msg["type"] = "status";
-                                    msg["name"] = sm.GetName();
-                                    msg["state"] = std::string(sm.GetStateName());
-                                    msg["outputs"] = sm.GetOutputsCount();
-                                    msg["inflight"] = sm.GetInflightCount();
-                                    msg["completed"] = sm.GetCompletedCount();
-                                    m_PendingBroadcasts.push_back(msg.dump());
-                                });
-                        }
                     }
                     LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})", m_Clients.size(),
                                  m_WsTotalConnects, m_WsPeakClients);
@@ -4400,35 +4333,7 @@ namespace AIAssistant
                             // fall through to drain
                         }
 
-                        if (type == "chat")
-                        {
-                            std::string subsystem = std::string(doc["subsystem"].get_string().value());
-                            std::string text = std::string(doc["message"].get_string().value());
-
-                            // add to chat message pool
-                            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, text);
-                            auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-
-                            // determine queue directory
-                            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
-                            fs::create_directories(queuePath);
-
-                            // write the PROB_<id>_<timestamp>.txt file
-                            fs::path filename =
-                                queuePath / ("PROB_" + std::to_string(id) + "_" + std::to_string(timestamp) + ".txt");
-
-                            std::ofstream out(filename);
-                            out << text;
-
-                            // respond to browser
-                            crow::json::wvalue response;
-                            response["type"] = "queued";
-                            response["id"] = id; // <-- RETURN UNIQUE ID
-                            response["file"] = filename.string();
-                            conn.send_text(response.dump());
-                        }
-
-                        else if (type == "workflow-runs-request")
+                        if (type == "workflow-runs-request")
                         {
                             WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
                             {
@@ -5072,6 +4977,41 @@ namespace AIAssistant
         BroadcastJSON(msg.dump());
     }
 
+    void WebServer::BroadcastAiCallStarted(std::string const& probName, std::string const& interfaceName)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-started";
+        msg["prob"] = probName;
+        msg["interface"] = interfaceName;
+        BroadcastJSON(msg.dump());
+    }
+
+    void WebServer::BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
+                                             int32_t outputTokens, int32_t totalTokens,
+                                             std::string const& finishReason)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-completed";
+        msg["prob"] = probName;
+        msg["input_tokens"] = static_cast<int64_t>(inputTokens);
+        msg["output_tokens"] = static_cast<int64_t>(outputTokens);
+        msg["total_tokens"] = static_cast<int64_t>(totalTokens);
+        msg["finish_reason"] = finishReason;
+        BroadcastJSON(msg.dump());
+    }
+
+    void WebServer::BroadcastAiCallFailed(std::string const& probName, int errorKind,
+                                          int httpStatus, std::string const& errorMessage)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-failed";
+        msg["prob"] = probName;
+        msg["error_kind"] = static_cast<int64_t>(errorKind);
+        msg["http_status"] = static_cast<int64_t>(httpStatus);
+        msg["error_message"] = errorMessage;
+        BroadcastJSON(msg.dump());
+    }
+
 #ifdef J9T_STUDIO
     // =========================================================================
     // AI interfaces API handlers (config.json "API interfaces")
@@ -5132,9 +5072,14 @@ namespace AIAssistant
             item["description"] = iface.m_Description;
             item["url"] = iface.m_Url;
             item["model"] = iface.m_Model;
-            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
-                               : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
-                                                                                                            : "API1";
+            switch (iface.m_InterfaceType)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API2: item["api_type"] = "API2"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API3: item["api_type"] = "API3"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API4: item["api_type"] = "API4"; break;
+                case ConfigParser::EngineConfig::InterfaceType::Test: item["api_type"] = "Test"; break;
+                default: item["api_type"] = "API1"; break;
+            }
             item["key_name"] = iface.m_KeyName;
             items.push_back(std::move(item));
         }
@@ -5213,10 +5158,14 @@ namespace AIAssistant
                 ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
                 : name;
 
-        if (apiTypeStr == "API3")
+        if (apiTypeStr == "API4")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
+        else if (apiTypeStr == "API3")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
         else if (apiTypeStr == "API2")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+        else if (apiTypeStr == "Test")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
 
@@ -5299,10 +5248,14 @@ namespace AIAssistant
                     if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
                     {
                         std::string apiTypeStr(sv);
-                        if (apiTypeStr == "API3")
+                        if (apiTypeStr == "API4")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
+                        else if (apiTypeStr == "API3")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
                         else if (apiTypeStr == "API2")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+                        else if (apiTypeStr == "Test")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
                         else
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
                     }
@@ -5398,9 +5351,15 @@ namespace AIAssistant
         for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
         {
             auto const& iface = config.m_ApiInterfaces[i];
-            std::string apiStr = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
-                                 : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
-                                                                                                              : "API1";
+            std::string apiStr;
+            switch (iface.m_InterfaceType)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API2: apiStr = "API2"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
+                case ConfigParser::EngineConfig::InterfaceType::Test: apiStr = "Test"; break;
+                default: apiStr = "API1"; break;
+            }
 
             newArray += "        {\n";
             newArray += "            \"name\": \"" + iface.m_Name + "\",\n";
@@ -8628,15 +8587,30 @@ namespace AIAssistant
         }
         signals["workflow_runs_active"] = static_cast<int64_t>(activeRuns);
 
-        // ---- Session manager (AI queue) state ----
+        // ---- AI dispatch state ----
         JarvisAgent* app = App::g_App;
         if (app != nullptr)
         {
-            signals["session_managers_total"] = static_cast<int64_t>(app->GetSessionManagerCount());
-            signals["session_managers_with_inflight"] =
-                static_cast<int64_t>(app->GetSessionManagersWithInflight());
-            signals["ai_calls_inflight"] =
-                static_cast<int64_t>(app->GetSessionManagerInflightTotal());
+            AiRequestPool const* pool = app->GetAiRequestPool();
+            if (pool != nullptr)
+            {
+                signals["ai_calls_inflight"] = static_cast<int64_t>(pool->GetDirectDispatchInflight());
+                // Lifetime-monotonic counters — confirm structured submissions,
+                // schema retries/failures, chunking fan-out, and fence-strip are
+                // firing in live runs without parsing transcripts or logs.
+                signals["ai_structured_submissions"] =
+                    static_cast<int64_t>(pool->GetStructuredSubmissions());
+                signals["ai_schema_validation_retries"] =
+                    static_cast<int64_t>(pool->GetSchemaValidationRetries());
+                signals["ai_schema_validation_failures"] =
+                    static_cast<int64_t>(pool->GetSchemaValidationFailures());
+                signals["ai_chunked_dispatches"] = static_cast<int64_t>(pool->GetChunkedDispatches());
+                signals["ai_fence_strips"] = static_cast<int64_t>(pool->GetFenceStrips());
+            }
+            else
+            {
+                signals["ai_calls_inflight"] = 0;
+            }
         }
 
         // ---- Python engine pool ----

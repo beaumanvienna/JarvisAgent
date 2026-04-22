@@ -73,7 +73,7 @@ Used to signal CURL failures.
 ### Input
 - **KeyPressedEvent(key)**
 
-### AI Dispatch (post AI Dispatch Refactor)
+### AI Dispatch
 - **AiCallStartedEvent(probName, interfaceName)** — posted when `AiRequestPool::Submit` accepts an envelope.
 - **AiCallCompletedEvent(probName, usage, finishReason)** — posted when a reply is parsed successfully.
 - **AiCallFailedEvent(probName, error)** — posted when the pool gives up after retries/HTTP errors.
@@ -91,7 +91,7 @@ EventCategoryTimer
 EventCategoryFileSys
 EventCategoryApp
 EventCategoryEngine
-EventCategoryAi       // AI dispatch lifecycle (Phase 8 of AI dispatch refactor)
+EventCategoryAi       // AI dispatch lifecycle events
 ```
 
 Each event can belong to one or more categories.

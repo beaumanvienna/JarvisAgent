@@ -3,7 +3,6 @@ import "./App.css";
 import StatusBar from "./components/StatusBar";
 import LastRunsBar from "./components/LastRunsBar";
 import WorkflowsPanel from "./components/WorkflowsPanel";
-import SessionManagersPanel from "./components/SessionManagersPanel";
 import LogViewerPanel from "./components/LogViewerPanel";
 import SettingsModal from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
@@ -178,7 +177,7 @@ export default function App() {
       <StatusBar
         connected={ws.connected}
         runs={ws.runs}
-        sessions={ws.sessions}
+        aiCallsInflight={status?.ai_calls_inflight ?? 0}
         pythonRunning={ws.pythonRunning}
         mcpConnected={status?.mcp_connected ?? false}
         connectionHealth={status?.connection_health}
@@ -204,7 +203,6 @@ export default function App() {
             onRefresh={refresh}
             canRunWorkflows={canRunWorkflows}
           />
-          <SessionManagersPanel sessions={ws.sessions} />
         </main>
       )}
       {activeTab === "log" && (

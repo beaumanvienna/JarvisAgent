@@ -288,13 +288,13 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - **Direction:** replace the file-watcher-mediated dispatch for runtime-initiated `ai_call` tasks with a direct path: `AiCallTaskExecutor` assembles the `SessionManager` environment, calls `AiRequestPool::Submit` directly, receives the response via callback, no synthetic file events. Keeps the file-watcher for the manual drop workflow only (or deletes it if the drop workflow is deprecated).
 - Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
 
-### 5g. AI dispatch refactor (pre-1.0 — priority) — **in progress on `refactor/ai-dispatch`**
+### 5g. AI dispatch refactor (pre-1.0 — priority) — **landed on `refactor/ai-dispatch`**
 
-**Landed and validated live** (exampleMakefile4 + aiZipDemo runs green via both OpenAI and Anthropic):
+**Core dispatch + legacy rip** (exampleMakefile4, aiZipDemo, jarvisCppDocu and ~15 other JCWFs live-validated on OpenAI + Anthropic):
 - [x] Typed `AiInvocation` envelope (`application/workflow/aiInvocation.h`) + typed `AiReply` (`aiReply.h`).
 - [x] `AiRequestPool::Submit(AiInvocation, callback)` — direct envelope dispatch through `CurlMultiDispatcher`.
-- [x] `AiCallTaskExecutor` builds an envelope and calls `Submit` after writing queue files; `SessionManager::IsQueryRequired` gates on `IsDirectDispatchActive` so the legacy file-event path skips PROBs being handled directly (no double-dispatch).
-- [x] Relaxed env rule: STNG / CNTX / TASK optional (warning-only); empty concatenated body still rejected; PROV sidecar remains optional (default interface applies when absent).
+- [x] `AiCallTaskExecutor` builds an envelope and calls `Submit` directly.  Fails the task immediately on Submit rejection (no legacy fallback).
+- [x] Relaxed env rule: STNG / CNTX / TASK optional (warning-only); empty concatenated body still rejected; PROV sidecar is write-only (replay tooling only).
 - [x] `IRequestBuilder` + `RequestBuilderAPI1/2/3/4`; `ReplyParser` base extended with `GetError`/`GetUsage`/`GetFinishReason`/`GetSystemFingerprint`/`GetStructuredOutput` virtuals, concretes implement; `ReplyParserAPI4` for Anthropic `/v1/messages`.
 - [x] `CurlWrapper::AuthStyle::AnthropicXApiKey` (`x-api-key` + `anthropic-version: 2023-06-01`) wired in both `curlWrapper.cpp` (single-call) and `curlMultiDispatcher.cpp` (async).
 - [x] `SchemaValidator` (simdjson-backed Draft 2020-12 subset: type, properties, required, additionalProperties, items, enum, min/max{,Length}, pattern, oneOf, anyOf, $ref, $defs). Unsupported keywords rejected at schema-load time.
@@ -304,45 +304,56 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - [x] `TestInterface` as new `InterfaceType::Test` — short-circuits curl, loads reply from fixture path (`m_Url`).
 - [x] `EventCategoryAi` + `AiCallStartedEvent` / `AiCallCompletedEvent` / `AiCallFailedEvent` posted from Submit lifecycle.
 - [x] `max_context_tokens` parsed on `ApiInterface`; `MarkdownSectionSplitter` + `ChunkPlanner` utilities live; advisory warning fires when prompt exceeds budget.
-- [x] `AiRequestPool::GetDirectDispatchInflight` feeds into `GetSessionManagerInflightTotal` so the "queries in flight" LED includes envelope dispatches.
+- [x] `AiRequestPool::GetDirectDispatchInflight` drives the dashboard "AI queries in flight" LED (via `/api/status` → `ai_calls_inflight`) and the `/api/debug/signals` counter.
 - [x] MCP: new `reload_workflows` tool in `mcp/src/tools.ts` so JCWF edits on disk can be picked up without restart.
-- [x] Adjacent fixes: `./jarvisagent.sh` surfaces errors + log tail instead of exec'ing silently; `FileCategorizer` ignores `.transcript` stems; `AiJcwfService::TestAiInterface` uses `IRequestBuilder` (was hand-rolled switch missing API4); help text updated.
+- [x] Editor-side migration: `AiJcwfService::RunSingleAiCall` (used by `GenerateAsync` / `ExplainAsync` / `FixFailedScriptAsync`) and `AssistantController::RunSingleAiCall` both switched to envelope + `std::promise`.  Dropped the `PROB_<id>_<ts>.txt` naming everywhere.
+- [x] **Deleted** `SessionManager` class and the chat dispatch that rode on it (dormant — no UI consumer).  `ChatMessagePool` + `HandleChatPost` + WebSocket `type == "chat"` handler all gone.
+- [x] **Deleted** `AiRequestPool::OnProbFileEvent`, `IsDirectDispatchActive`, `m_DirectDispatchActive`, `OnCurlDispatched`.  Submit calls `ActivateDeadlineForOutputPath` internally so the file-activity watchdog disarms correctly for workflow-bound envelopes.
+- [x] `TriggerEngine` owns its own dedicated `FileWatcher` (empty primary root, paths added dynamically via `AddFileWatchTrigger` → `AddPath` and removed on `ClearAll` / `ClearWorkflowTriggers`).  `FileWatcher` now supports an empty primary root (skips initial scan + primary-gone-shutdown check).
+- [x] `AdhocWorkflowManager` no longer takes a `FileWatcher*` — direct dispatch obsoletes the per-run-queue watch registrations.
+- [x] Retired queue-folder `FileWatcher` in `JarvisAgent`.  `GetQueueFileWatcher()` and the PROB-handling/SessionManager-forwarding blocks in `OnEvent` removed.
+- [x] Bonus fix — `MaterializeCntxFilesFromQueueBinding` now promotes path-reference CNTX files to inline with content populated so the envelope's user message actually includes them (this was a latent bug surfaced by jarvisCppDocu after the cutover).
+- [x] Dashboard UI — `SessionManagersPanel` + `SessionStatus` deleted; StatusBar LED reads `ai_calls_inflight` from the status poll directly; `session_managers_*` status/debug fields dropped and replaced with `ai_calls_inflight`.
+- [x] Deleted `application/workflow/doc/aiCallArchitecture.md`.
+- [x] Docs sweep: architecture.md, api-endpoints.md, JC_Workflow_Specification.md §3.3.6, jcwf_generation_guide.md (embedded into the binary at build time), application/README.md, webServer.md, session/README.md + renamed fileWriter.md, file/README.md, logging.md, assistant/README.md — all scrubbed of SessionManager / ChatMessagePool / OnProbFileEvent references and "refactor" callouts.  `combinedDocumentation.md` is auto-generated by jarvisCppDocu — not hand-edited; regenerate on next run.
 
-**Still pending on this branch** — no-legacy cleanup (per `feedback_no_legacy.md`, rip rather than gate):
-
-The runtime `ai_call` path is already envelope-direct. What remains is migrating the editor-side AI pipelines off the legacy file-drop, then deleting the legacy machinery wholesale. These must land **as a set** to avoid gated half-states:
-
-- [ ] Migrate `AiJcwfService::RunSingleAiCall` + `GenerateAsync` / `ExplainAsync` / `FixFailedScriptAsync` to direct `AiRequestPool::Submit` (they still write `PROB_<id>_<ts>.txt` and depend on `OnProbFileEvent` for completion).
-- [ ] After the above, **delete** `SessionManager::DispatchQuery`, `SessionManager::IsQueryRequired`, `SessionManager::OnEvent`, the `m_FileCategorizer` subscription, and `AiRequestPool::IsDirectDispatchActive` + the `IsQueryRequired` gate that currently suppresses double-dispatch.
-- [ ] **Delete** `AiRequestPool::OnProbFileEvent` and the `PROB_<id>_<ts>` naming convention callsite in `aiJcwfService.cpp`.
-- [ ] `TriggerEngine` gains its own dedicated `FileWatcher` for `file_watch` triggers on arbitrary paths (fixes the latent bug where triggers work only on paths that happen to fall under `queue/`).
-- [ ] `AdhocWorkflowManager` drops the `FileWatcher*` reference.
-- [ ] Retire the queue-folder `FileWatcher` construction in `JarvisAgent` (possible once `TriggerEngine` + `AdhocWorkflowManager` + editor pipelines no longer depend on it).
-- [ ] **Delete** `application/workflow/doc/aiCallArchitecture.md` (see §5d — lists legacy files for removal).
-
-Independent remaining features:
+**Independent remaining features (carry into post-1.0 or follow-ups):**
 - [ ] Chunking fan-out (emit N envelopes per oversized PROB, concat replies into one output). Planner + advisory already in.
 - [ ] JCWF schema gap-close: close gaps in `doc/jcwf.schema.json` vs. `workflowJsonParser` + parser↔schema contract test. `tools/generateEmbeddedHeaders.py` prebuild + `kJcwfSchemaJson` already compiled into the binary.
-- [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry (depends on the editor-pipeline direct-dispatch migration above).
+- [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry.
 - [ ] TUI / dashboard consumers subscribing to `EventCategoryAi` (events are posted; consumed only by the aggregated "in flight" LED today).
 - [ ] Contract tests under `test/dispatch/`.
-- [ ] Docs sweep (JC spec §3.3.6 — document relaxed-env rule + new `output_schema` / `output_retries` fields on `ai_call`; `doc/jcwf_generation_guide.md` — mention `output_schema` so the editor AI emits it when generating structured-output tasks).
 
 **Known live-observed issues not yet fixed:**
-- [ ] **60-second `WaitingExternal` timeout kills slow Claude calls** — observed 2026-04-20 with `ai-zip-demo` on Anthropic Sonnet 4.6: one of three concurrent ai_calls took ~65 s, the runtime gave up at 60 s, the real reply landed 5 s later and was orphaned. Fix: bump the default in `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` and/or honour `AiInvocation.m_Timeout` (envelope already carries 120 s default). Separate from the refactor; easy follow-up.
-- [ ] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk, not a refactor bug. Two mitigation paths: (a) strengthen STNG wording in example JCWFs, (b) post-process to strip fences. Documented as a prompting issue.
-
-**Session-handoff checklist** (if a fresh Claude picks this up):
-1. Branch `refactor/ai-dispatch`, uncommitted. Start with `git status` to see the full change set.
-2. Core dispatch is live and validated (OpenAI + Anthropic Haiku/Sonnet/Opus end-to-end).
-3. This `§5g` section is the accurate scoreboard of landed vs. pending. `AI dispatch refactor.md` is the original dev plan — don't treat it as a status doc.
-4. Follow the no-legacy rule (`feedback_no_legacy.md`): rip the old path when the new one lands, don't gate.
-5. Python portability rule (`feedback_python_portability.md`): detect `python3` vs `python` in premake/packaging, don't hardcode.
-6. Editor-side legacy removal (top pending item) must land as a set — migrating `AiJcwfService` is the hard prerequisite for deleting `SessionManager::DispatchQuery` + gate + `OnProbFileEvent`.
+- [ ] **60-second `WaitingExternal` timeout kills slow Claude calls** — observed 2026-04-20 with `ai-zip-demo` on Anthropic Sonnet 4.6: one of three concurrent ai_calls took ~65 s, the runtime gave up at 60 s, the real reply landed 5 s later and was orphaned. Fix: bump the default in `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` and/or honour `AiInvocation.m_Timeout` (envelope already carries 120 s default). Easy follow-up.
+- [ ] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk. Mitigation: strengthen STNG wording in example JCWFs, or post-process to strip fences.
 
 - HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
-- Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0).
-- See `AI dispatch refactor.md` for the original dev plan.
+- Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0), additional cloud-native AI adapters (§5h — post-1.0 / pre-1.0 for enterprise).
+- Dev-plan doc `AI dispatch refactor.md` has been mined into `doc/architecture.md` §"AI Dispatch Pipeline" and is safe to delete.
+- Loose follow-up: `tools/replayTranscript.py` — nominally-planned dispatch debugging tool that reads a `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; add when first real replay need comes up.
+
+### 5h. Additional AI backend adapters (Bedrock + Azure OpenAI)
+
+Both are real gaps for customers who can't bring OpenAI/Anthropic API keys through procurement but already have cloud contracts.  Both fit cleanly on top of the envelope architecture — new `InterfaceType` variant + per-provider `RequestBuilder` / `ReplyParser` + new `AuthStyle` on `CurlWrapper`.  Reply parsing is mostly trivial because Bedrock and Azure OpenAI both return OpenAI-compatible response bodies for chat-completion-shaped routes.
+
+**5h.1 — AWS Bedrock adapter (new `InterfaceType::API5`).**  Post-1.0, pre-1.0 if an enterprise customer pulls.
+- Endpoint: `POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke`.  Routes to Claude / Llama / Titan / Nova depending on `modelId`.
+- Auth: **SigV4 signed requests** (AWS access key + secret + region).  New `CurlWrapper::AuthStyle::AwsSigV4` that computes the signature from the request body + headers + timestamp.  Not a small piece — canonical request, string-to-sign, HMAC-SHA256 chain — but bounded (~300 lines, well-documented).
+- Request body shape varies per underlying model family (Anthropic-inside-Bedrock ≠ Llama-inside-Bedrock).  `RequestBuilderAPI5` needs a per-family selector — cleanest done by sniffing `modelId` prefix (`anthropic.claude-*` vs `meta.llama*` vs `amazon.titan*`).
+- Reply parser: Bedrock wraps each family's native response in its own envelope; unwrap and delegate to the matching existing family parser (e.g. for anthropic-inside-bedrock, reuse `ReplyParserAPI4` logic).
+- Chunking / max_context_tokens: pick up automatically from the model-name fallback table (`claude*` → 200 K, `llama*` → 128 K, etc.).
+- Target: post-1.0, bump to pre-1.0 when first enterprise customer asks.
+
+**5h.2 — Azure OpenAI adapter.**  Post-1.0.
+- Endpoint: `POST https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`.
+- Auth: **`api-key:` header** (not `Authorization: Bearer`).  New `CurlWrapper::AuthStyle::AzureApiKey`.
+- Request body: identical to OpenAI Chat Completions — reuse `RequestBuilderAPI1`'s body, just override URL composition and auth style.  Either a new `InterfaceType` (say `API1Azure`) that shares the builder/parser with API1 but picks a different URL template and auth style, or a flag on the existing API1 config.
+- Reply parser: reuse `ReplyParserAPI1` as-is.
+- The `?api-version=` query parameter is deployment-specific; carry it in the interface config (`"api_version": "2024-08-01-preview"`).
+- Smaller lift than Bedrock — ~100 lines.
+
+Both land without touching the envelope, schema validator, chunking, reduce pass, transcripts, or event layer.  The envelope architecture was designed for exactly this kind of additive backend expansion.
 
 ### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
 

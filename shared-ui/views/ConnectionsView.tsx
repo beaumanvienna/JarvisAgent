@@ -255,6 +255,9 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     setEditing({ ...editing, params: newParams });
   }, [editing]);
 
+  // Pass = blue, fail = saturated red.  Blue-vs-red stays distinguishable under
+  // red-green color blindness (deutan/protan), where the default green-vs-red
+  // pairing tends to collapse into indistinguishable brown/yellow tones.
   const ledStyle = (result: TestResult): React.CSSProperties => ({
     display: "inline-block",
     width: 10,
@@ -262,8 +265,8 @@ export default function ConnectionsView({ appMasterPassword, onDirtyStateChange 
     borderRadius: "50%",
     marginRight: 8,
     flexShrink: 0,
-    background: result === "pass" ? "#4ade80" : result === "fail" ? "#f87171" : "transparent",
-    boxShadow: result === "pass" ? "0 0 6px rgba(74,222,128,0.5)" : result === "fail" ? "0 0 6px rgba(248,113,113,0.5)" : "none",
+    background: result === "pass" ? "#3b82f6" : result === "fail" ? "#dc2626" : "transparent",
+    boxShadow: result === "pass" ? "0 0 6px rgba(59,130,246,0.7)" : result === "fail" ? "0 0 6px rgba(220,38,38,0.8)" : "none",
   });
 
   return (

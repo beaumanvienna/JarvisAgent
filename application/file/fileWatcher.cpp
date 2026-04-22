@@ -44,7 +44,12 @@ namespace AIAssistant
         if (ec) return false;
 
         std::scoped_lock<std::mutex> const lock(m_RootsMutex);
-        if (canonical == fs::canonical(m_PrimaryRoot, ec)) return false;
+        if (!m_PrimaryRoot.empty())
+        {
+            std::error_code primaryEc;
+            fs::path const canonicalPrimary = fs::canonical(m_PrimaryRoot, primaryEc);
+            if (!primaryEc && canonical == canonicalPrimary) return false;
+        }
         for (auto const& existing : m_AdditionalRoots)
         {
             if (fs::canonical(existing, ec) == canonical) return false;
@@ -82,7 +87,10 @@ namespace AIAssistant
         std::scoped_lock<std::mutex> const lock(m_RootsMutex);
         std::vector<fs::path> roots;
         roots.reserve(1 + m_AdditionalRoots.size());
-        roots.push_back(m_PrimaryRoot);
+        if (!m_PrimaryRoot.empty())
+        {
+            roots.push_back(m_PrimaryRoot);
+        }
         for (auto const& r : m_AdditionalRoots) roots.push_back(r);
         return roots;
     }
@@ -195,7 +203,10 @@ namespace AIAssistant
         // --- Initial scan of the primary root ---
         // Fires FileAddedEvent for pre-existing files so the file-drop queue is
         // processed even if they were dropped while j9t was stopped.
-        scanRoot(m_PrimaryRoot, /*fireAdd=*/true);
+        if (!m_PrimaryRoot.empty())
+        {
+            scanRoot(m_PrimaryRoot, /*fireAdd=*/true);
+        }
 
         while (m_Running)
         {
@@ -229,7 +240,8 @@ namespace AIAssistant
 
             // 2) Primary-root existence check — if it's gone, shut down the
             //    engine. Additional roots disappearing is fine (runs get reaped).
-            if (!fs::is_directory(m_PrimaryRoot))
+            //    Watchers constructed with an empty primary root skip this.
+            if (!m_PrimaryRoot.empty() && !fs::is_directory(m_PrimaryRoot))
             {
                 LOG_APP_INFO("folder '{}' no longer exists, requesting shutdown", m_PrimaryRoot.string());
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);

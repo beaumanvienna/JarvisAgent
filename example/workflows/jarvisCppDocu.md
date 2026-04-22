@@ -64,11 +64,7 @@ Total AI tasks: **73**
 |---|---:|---|---|
 
 | `application/application.h` | no | `doc_application_application_h` | `../queue/jarvisCppDocu/01_doc_application_application_h` |
-| `application/file/fileCategorizer.h` | yes | `doc_application_file_fileCategorizer_h` | `../queue/jarvisCppDocu/02_doc_application_file_fileCategorizer_h` |
-| `application/file/fileCategory.h` | no | `doc_application_file_fileCategory_h` | `../queue/jarvisCppDocu/03_doc_application_file_fileCategory_h` |
 | `application/file/fileWatcher.h` | yes | `doc_application_file_fileWatcher_h` | `../queue/jarvisCppDocu/04_doc_application_file_fileWatcher_h` |
-| `application/file/probUtils.h` | yes | `doc_application_file_probUtils_h` | `../queue/jarvisCppDocu/05_doc_application_file_probUtils_h` |
-| `application/file/trackedFile.h` | yes | `doc_application_file_trackedFile_h` | `../queue/jarvisCppDocu/06_doc_application_file_trackedFile_h` |
 | `application/jarvisAgent.h` | yes | `doc_application_jarvisAgent_h` | `../queue/jarvisCppDocu/07_doc_application_jarvisAgent_h` |
 | `application/json/jsonObjectParser.h` | yes | `doc_application_json_jsonObjectParser_h` | `../queue/jarvisCppDocu/08_doc_application_json_jsonObjectParser_h` |
 | `application/json/replyParser.h` | yes | `doc_application_json_replyParser_h` | `../queue/jarvisCppDocu/11_doc_application_json_replyParser_h` |

@@ -52,6 +52,37 @@ JarvisAgent ships in two editions, both included in every package:
 
 ---
 
+## Supported AI Backends
+
+JarvisAgent talks to AI providers through four interface adapters, covering every major hosted provider and every common self-hosted runtime. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`.
+
+| Adapter | Endpoint | Providers that work today |
+|---|---|---|
+| **API1** — OpenAI Chat Completions | `POST /v1/chat/completions` | **OpenAI** (gpt-4.1, gpt-4o, gpt-4-turbo, gpt-5, mini variants) · **Google Gemini** (OpenAI-compat mode) · **Groq**, **Together AI**, **Fireworks**, **DeepInfra**, **Perplexity**, **xAI Grok**, **Mistral Platform**, **GitHub Models**, **OpenRouter** · self-hosted: **Ollama**, **LM Studio**, **llama.cpp server**, **vLLM**, **text-generation-webui** |
+| **API2** — OpenAI Responses | `POST /v1/responses` | OpenAI (Responses API — newer endpoint, used for sequential chunk throughput) |
+| **API3** — Gemini native | `POST /v1beta/models/{model}:generateContent` | Google Gemini (native endpoint with `x-goog-api-key` auth) |
+| **API4** — Anthropic Messages | `POST /v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus, all generations with 200 K context) |
+
+**Chunking is per-interface.** Each interface advertises `max_context_tokens`; if you don't set it explicitly a curated model-name fallback table picks a safe default (GPT-4-family 128 K, Claude 200 K, Gemini 1.5/2 1 M, Llama/Qwen/DeepSeek/Phi 128 K, Mistral/Mixtral 32 K, unknown model 50 K). When a prompt exceeds the budget the runtime splits only the context portion at markdown section boundaries, fans out N parallel envelopes, then submits a reduce pass that consolidates the partial answers into one unified reply.
+
+**Self-hosted example — Ollama on localhost:**
+
+```json
+{
+  "name": "ollama/llama3.1/API1",
+  "url": "http://localhost:11434/v1/chat/completions",
+  "model": "llama3.1",
+  "API": "API1",
+  "key_name": "ollama"
+}
+```
+
+Plus an `ollama` provider in the KeyManager with any string as the API key — Ollama doesn't check it, but our dispatcher currently requires a non-empty bearer. Same pattern works for LM Studio, llama.cpp, vLLM, etc.
+
+**On the roadmap** (tracked in `JarvisAgent TODO List.md`): AWS Bedrock (SigV4 signing), Azure OpenAI (deployment-based URLs + `api-key:` header). Both land when we need enterprise-cloud-native deployments.
+
+---
+
 ## Cloud Integrations
 
 Workflows read from and write to external systems through a unified `ICloudConnector` framework. Credentials are stored encrypted, never appear in workflow files, and a single connection definition is reused across tasks.

@@ -12,9 +12,7 @@ export interface StatusResponse {
   capabilities?: StatusCapabilities;
   workflows_registered: number;
   workflow_runs_active: number;
-  session_managers_total: number;
-  session_managers_with_inflight: number;
-  session_managers_inflight_total: number;
+  ai_calls_inflight: number;
   websocket_clients: number;
   mcp_connected?: boolean;
   mcp_last_heartbeat_secs_ago?: number;
@@ -60,17 +58,6 @@ export interface WorkflowRunsSnapshot {
   runs: RunSnapshot[];
 }
 
-export interface SessionStatus {
-  name: string;
-  state: string;
-  outputs: number;
-  inflight: number;
-  completed: number;
-  failed: number;
-  last_error_code?: number;
-  last_error_message?: string;
-}
-
 export interface PythonStatus {
   type: "python-status";
   running: boolean;
@@ -90,7 +77,7 @@ export interface LastRunsResponse {
   runs: LastRunInfo[];
 }
 
-export type WsMessage = WorkflowRunsSnapshot | SessionStatus | PythonStatus;
+export type WsMessage = WorkflowRunsSnapshot | PythonStatus;
 
 export interface LogResponse {
   ok: boolean;

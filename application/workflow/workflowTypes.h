@@ -215,9 +215,9 @@ namespace AIAssistant
         // CNTX_* files (context).
         std::vector<QueueFileRef> m_CntxFiles;
 
-        // PROV_* files (provider configuration — never sent to AI).
-        // Written by AiCallTaskExecutor when a task specifies "provider" / "model".
-        // Read by SessionManager to resolve endpoint/key/model from KeyManager.
+        // PROV_* files (provider sidecar — never sent to AI).  Written by
+        // AiCallTaskExecutor when a task specifies "provider" / "model", read
+        // only by replay tooling; the envelope is authoritative for dispatch.
 
         // PROB_* files (problem / request payload).
         std::vector<QueueFileRef> m_ProbFiles;

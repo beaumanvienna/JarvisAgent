@@ -59,7 +59,7 @@ namespace AIAssistant
         EventCategoryFileSys = 1 << 3,  //
         EventCategoryApp = 1 << 4,      //
         EventCategoryEngine = 1 << 5,   //
-        EventCategoryAi = 1 << 6,       // AI dispatch lifecycle (§4.6 of AI dispatch refactor)
+        EventCategoryAi = 1 << 6,       // AI dispatch lifecycle events
     };
 
     // ---------------------------------

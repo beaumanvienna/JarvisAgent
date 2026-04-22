@@ -78,8 +78,8 @@ in the response actually exist in the workspace.
 - **File-based transparency.** All persistence uses human-readable text files (JSON, JSONL). Easy to
   debug, diff, and inspect. Every memory entry, conversation turn, and file index
   is written to disk. Open `assistant/` to see exactly what the AI knows.
-- **Reuse existing AI provider stack.** Same `AiRequestPool` / `SessionManager` /
-  `CurlWrapper` pipeline that workflows use.
+- **Reuse existing AI provider stack.** Same `AiRequestPool` + `CurlMultiDispatcher`
+  pipeline that workflow `ai_call` tasks use.
 - **Separate WebSocket route.** `/ws/assistant` is independent of the existing `/ws`
   broadcast channel.
 

@@ -32,7 +32,6 @@
 #include "core.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "curlWrapper/curlWrapper.h"
-#include "file/probUtils.h"
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/jsonHelper.h"
@@ -364,49 +363,31 @@ namespace AIAssistant
         return registered;
     }
 
-    void AiRequestPool::OnCurlDispatched(std::string const& probFilePath)
+    void AiRequestPool::ActivateDeadlineForOutputPath(std::string const& outputAbsolutePath)
     {
-        // Derive expected output path from PROB path: PROB_x.txt → PROB_x.output.txt
-        fs::path const probPath(probFilePath);
-        fs::path expectedOutputPath = probPath;
-        expectedOutputPath.replace_filename(probPath.stem().string() + ".output" + probPath.extension().string());
-
-        std::string const canonicalPath = fs::absolute(expectedOutputPath).lexically_normal().generic_string();
-
+        if (outputAbsolutePath.empty())
+        {
+            return;
+        }
         std::shared_ptr<PendingEntry> pendingEntry;
-
         {
             std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
-
-            auto const iterator = m_PendingByOutputPath.find(canonicalPath);
+            auto const iterator = m_PendingByOutputPath.find(outputAbsolutePath);
             if (iterator == m_PendingByOutputPath.end())
             {
-                LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: no pending request for '{}'", canonicalPath);
                 return;
             }
-
             pendingEntry = iterator->second;
         }
-
+        std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+        pendingEntry->m_CurlDispatched = true;
+        pendingEntry->m_FileActivityWatchdogActive = false;
+        if (!pendingEntry->m_HasDeadline && pendingEntry->m_TimeoutMs > 0)
         {
-            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-            pendingEntry->m_CurlDispatched = true;
-            pendingEntry->m_FileActivityWatchdogActive = false;
-
-            // Activate the main deadline now that curl has been dispatched.
-            // This gives the AI backend the full timeout window from the moment
-            // the HTTP request is sent, rather than from task registration.
-            if (!pendingEntry->m_HasDeadline && pendingEntry->m_TimeoutMs > 0)
-            {
-                pendingEntry->m_HasDeadline = true;
-                pendingEntry->m_Deadline =
-                    std::chrono::steady_clock::now() + std::chrono::milliseconds(pendingEntry->m_TimeoutMs);
-            }
+            pendingEntry->m_HasDeadline = true;
+            pendingEntry->m_Deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(pendingEntry->m_TimeoutMs);
         }
-
-        LOG_APP_INFO("[AiRequestPool] OnCurlDispatched: curl issued for PROB '{}' (expected output '{}') — "
-                     "file-activity watchdog cleared, deadline set to {}ms",
-                     probFilePath, canonicalPath, pendingEntry->m_TimeoutMs);
     }
 
     void AiRequestPool::KickFileActivityWatchdog(AiRequestHandle const& requestHandle)
@@ -586,90 +567,6 @@ namespace AIAssistant
         }
     }
 
-    bool AiRequestPool::OnProbFileEvent(ProbUtils::ProbFileInfo const& probFileInfo, std::string const& fullFilePath)
-    {
-        // We only care about output artifacts.
-        if (!probFileInfo.isOutput)
-        {
-            return false;
-        }
-
-        // NOTE: ProbUtils::ProbFileInfo::timestamp is treated as "timestampNs" by convention in your codebase.
-        RequestKey const requestKey{static_cast<int64_t>(probFileInfo.id), probFileInfo.timestamp};
-
-        LOG_APP_INFO("[paths debug] debug reason=probFileEvent requestId='{}' timestampNs='{}' fullFilePathAbsolute='{}'",
-                     requestKey.requestId, requestKey.requestTimestampNs, fullFilePath);
-
-        std::shared_ptr<PendingEntry> pendingEntry;
-
-        {
-            std::scoped_lock<std::mutex> const lock(m_MapMutex);
-
-            auto const iterator = m_PendingRequests.find(requestKey);
-            if (iterator == m_PendingRequests.end())
-            {
-                LOG_APP_WARN("[AiRequestPool] OnProbFileEvent: no pending entry for requestId={} timestampNs={} "
-                             "(map size={}, file='{}')",
-                             requestKey.requestId, requestKey.requestTimestampNs, m_PendingRequests.size(), fullFilePath);
-                return false;
-            }
-
-            pendingEntry = iterator->second;
-        }
-
-        // Skip if already completed (e.g. file deletion event after the creation event was already handled).
-        {
-            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-            if (pendingEntry->m_IsCompleted)
-            {
-                return true;
-            }
-        }
-
-        // Read file content. If file can't be read, fail this request but still consume the event.
-        std::string fileContent;
-        {
-            std::ifstream inputStream(fullFilePath, std::ios::binary);
-            if (!inputStream.is_open())
-            {
-                {
-                    std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-                    pendingEntry->m_IsCompleted = true;
-                    pendingEntry->m_IsFailed = true;
-                    pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
-                    pendingEntry->conditionVariable.notify_all();
-                }
-                QueueCompletionIfNeeded(pendingEntry);
-                return true;
-            }
-
-            inputStream.seekg(0, std::ios::end);
-            std::streamoff const size = inputStream.tellg();
-            inputStream.seekg(0, std::ios::beg);
-
-            if (size > 0)
-            {
-                fileContent.resize(static_cast<std::size_t>(size));
-                inputStream.read(fileContent.data(), static_cast<std::streamsize>(size));
-            }
-        }
-
-        LOG_APP_INFO("[paths debug] debug reason=probFileReadCompleted fullFilePathAbsolute='{}' bytesRead={}", fullFilePath,
-                     fileContent.size());
-
-        {
-            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
-            pendingEntry->m_IsCompleted = true;
-            pendingEntry->m_IsFailed = false;
-            pendingEntry->m_ResponseText = std::move(fileContent);
-            pendingEntry->m_SourceOutputFilePath = fullFilePath;
-            pendingEntry->conditionVariable.notify_all();
-        }
-
-        QueueCompletionIfNeeded(pendingEntry);
-        return true;
-    }
-
     bool AiRequestPool::TryConsumeResult(AiRequestHandle const& requestHandle, bool& outWasFailed,
                                          std::string& outResponseText, std::string& outErrorMessage)
     {
@@ -769,17 +666,16 @@ namespace AIAssistant
                     continue;
                 }
 
-                // --- File-activity watchdog (t1 phase) ---
-                // Fires quickly (5 s) if the executor placed files but the
-                // SessionManager never dispatched a curl request.
+                // --- File-activity watchdog ---
+                // Fires quickly (5 s) if the executor placed queue files but
+                // Submit was never called (e.g. envelope rejected before dispatch).
                 if (entry->m_FileActivityWatchdogActive && !entry->m_CurlDispatched && now >= entry->m_FileActivityDeadline)
                 {
                     entry->m_IsCompleted = true;
                     entry->m_IsFailed = true;
                     entry->m_ErrorMessage = "ai_call file-activity watchdog expired: no curl dispatch within " +
                                             std::to_string(kFileActivityWatchdogMs / 1000) +
-                                            "s of last queue-file write "
-                                            "(check that the environment is complete: STNG + CNTX + TASK files present)";
+                                            "s of last queue-file write";
 
                     std::string const& taskId = entry->m_Context.m_TaskId;
                     if (!taskId.empty())
@@ -804,8 +700,8 @@ namespace AIAssistant
 
                     if (!entry->m_CurlDispatched)
                     {
-                        entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched by SessionManager "
-                                                "(files placed in queue but SessionManager did not pick them up)";
+                        entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched "
+                                                "(envelope rejected before reaching the dispatcher)";
                     }
                     else
                     {
@@ -973,18 +869,59 @@ namespace AIAssistant
             }
             return trimmed;
         }
-    } // anonymous namespace
 
-    bool AiRequestPool::IsDirectDispatchActive(std::string const& probAbsolutePath) const
-    {
-        if (probAbsolutePath.empty())
+        // Best-effort strip of a single triple-backtick fence that wraps the entire reply.
+        // Models (notably Claude Haiku) occasionally ignore STNG rules and emit e.g.:
+        //     ```cpp
+        //     <real content>
+        //     ```
+        // Downstream consumers (compilers, make, python-exec) choke on those three
+        // leading backticks.  We only strip when the whole content is a single fenced
+        // block with no intermediate ``` sequences — anything more complex we leave
+        // alone so embedded code blocks in legitimately markdown replies survive.
+        std::string StripWholeReplyFence(std::string const& text)
         {
-            return false;
+            auto firstNonSpace = text.find_first_not_of(" \t\r\n");
+            if (firstNonSpace == std::string::npos) return text;
+            auto lastNonSpace = text.find_last_not_of(" \t\r\n");
+            if (lastNonSpace == std::string::npos || lastNonSpace < firstNonSpace) return text;
+
+            if (text.compare(firstNonSpace, 3, "```") != 0) return text;
+            if (lastNonSpace < 2 || text.compare(lastNonSpace - 2, 3, "```") != 0) return text;
+
+            // Reject if there's an intermediate ``` inside the body — that means
+            // the reply contains nested code blocks, not just a single wrapper.
+            size_t const innerStart = firstNonSpace + 3;
+            size_t const innerEnd = lastNonSpace - 2;
+            if (innerEnd <= innerStart) return text;
+            size_t const scanFrom = innerStart;
+            size_t const scanTo = innerEnd;
+            size_t searchPos = scanFrom;
+            while (searchPos < scanTo)
+            {
+                size_t const found = text.find("```", searchPos);
+                if (found == std::string::npos || found >= scanTo) break;
+                return text; // nested fence — leave content alone
+            }
+
+            // Skip the opening fence line (optional language tag + newline).
+            size_t bodyStart = firstNonSpace + 3;
+            size_t const firstNewline = text.find('\n', bodyStart);
+            if (firstNewline == std::string::npos || firstNewline >= innerEnd) return text;
+            bodyStart = firstNewline + 1;
+
+            // Trim trailing whitespace before the closing fence so the result doesn't
+            // end with a bare newline from the line that held the closing backticks.
+            size_t bodyEnd = innerEnd;
+            while (bodyEnd > bodyStart && (text[bodyEnd - 1] == '\n' || text[bodyEnd - 1] == '\r' ||
+                                            text[bodyEnd - 1] == ' ' || text[bodyEnd - 1] == '\t'))
+            {
+                --bodyEnd;
+            }
+
+            return text.substr(bodyStart, bodyEnd - bodyStart);
         }
-        std::scoped_lock<std::mutex> const lock(m_DirectDispatchMutex);
-        auto const iterator = m_DirectDispatchActive.find(probAbsolutePath);
-        return (iterator != m_DirectDispatchActive.end()) && (iterator->second > 0);
-    }
+    } // anonymous namespace
 
     bool AiRequestPool::Submit(AiInvocation const& envelopeInput, ReplyCallback onReply)
     {
@@ -1002,6 +939,15 @@ namespace AIAssistant
             {
                 envelope.m_Settings.m_Seed = config.m_DeterminismSeed;
             }
+        }
+
+        // Count the first chunk of a chunked dispatch as one "chunked dispatch"
+        // event — not every chunk envelope, so the signal reflects distinct PROBs
+        // that required fan-out rather than the raw chunk count.
+        if (envelope.m_ChunkIndex.has_value() && envelope.m_ChunkCount.has_value() &&
+            *envelope.m_ChunkIndex == 0)
+        {
+            ++m_ChunkedDispatches;
         }
 
         auto const* api = ResolveInterface(envelope.m_InterfaceName);
@@ -1067,10 +1013,11 @@ namespace AIAssistant
                 Core::g_Core->PushEvent(startedEvent);
             }
 
+            fs::path writtenOutputPath;
             if (!queueFolderCopy.empty() && !probNameCopy.empty())
             {
-                fs::path outputPath = queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".output.txt");
-                FileWriter::Get().WriteWithHeader(outputPath, replyText, modelLocal);
+                writtenOutputPath = queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".output.txt");
+                FileWriter::Get().WriteWithHeader(writtenOutputPath, replyText, modelLocal);
             }
 
             AiReply testReply;
@@ -1081,6 +1028,16 @@ namespace AIAssistant
             if (!transcriptPathLocal.empty())
             {
                 AiTranscript::AppendResponse(transcriptPathLocal, testReply);
+            }
+
+            // Signal completion so workflow-bound tasks release from waiting_external.
+            // The real-provider path does this from its curl callback; the Test short-circuit
+            // must do it explicitly since there is no dispatcher callback.
+            if (!writtenOutputPath.empty())
+            {
+                std::string const normalizedPath =
+                    fs::absolute(writtenOutputPath).lexically_normal().generic_string();
+                OnOutputFileCreated(normalizedPath);
             }
 
             if (Core::g_Core != nullptr)
@@ -1133,12 +1090,11 @@ namespace AIAssistant
         std::string const modelCapture = model;
         ReplyCallback callbackCopy = std::move(onReply);
 
-        std::string probAbsolutePath;
+        std::string expectedOutputPath;
         if (!queueFolder.empty() && !probName.empty())
         {
-            probAbsolutePath = fs::absolute(queueFolder / probName).lexically_normal().generic_string();
-            std::scoped_lock<std::mutex> const lock(m_DirectDispatchMutex);
-            ++m_DirectDispatchActive[probAbsolutePath];
+            fs::path outputPath = queueFolder / (fs::path(probName).stem().string() + ".output.txt");
+            expectedOutputPath = fs::absolute(outputPath).lexically_normal().generic_string();
         }
         ++m_DirectDispatchInflight;
 
@@ -1157,7 +1113,7 @@ namespace AIAssistant
 
         AiInvocation envelopeForRetry = envelope;
 
-        auto curlCallback = [this, interfaceType, queueFolder, probName, modelCapture, probAbsolutePath,
+        auto curlCallback = [this, interfaceType, queueFolder, probName, modelCapture, expectedOutputPath,
                              transcriptPath, callbackCopy,
                              envelopeForRetry](QueryResult curlResult, std::string responseBody) mutable
         {
@@ -1198,17 +1154,34 @@ namespace AIAssistant
                     else
                     {
                         aiReply.m_Kind = AiReply::Kind::Text;
-                        aiReply.m_Text = replyParser->GetContent(0);
+                        {
+                            std::string const raw = replyParser->GetContent(0);
+                            aiReply.m_Text = StripWholeReplyFence(raw);
+                            if (aiReply.m_Text.size() != raw.size())
+                            {
+                                ++m_FenceStrips;
+                            }
+                        }
                         aiReply.m_Usage = replyParser->GetUsage();
                         aiReply.m_FinishReason = replyParser->GetFinishReason();
                         aiReply.m_SystemFingerprint = replyParser->GetSystemFingerprint();
                     }
                 }
 
-                // Schema validation + bounded retry (§6 of AI dispatch refactor).
+                // Schema validation + bounded retry.
                 // Applies only when the task declared output_schema AND we got text content back.
-                if (aiReply.m_Kind == AiReply::Kind::Text && envelopeForRetry.m_OutputSchemaJson.has_value())
+                // Skip schema validation for chunked replies — each chunk is only a
+                // slice of the final response, not a complete schema-conforming object.
+                bool const skipSchemaForChunk =
+                    envelopeForRetry.m_ChunkIndex.has_value() && envelopeForRetry.m_ChunkCount.has_value();
+                if (aiReply.m_Kind == AiReply::Kind::Text && envelopeForRetry.m_OutputSchemaJson.has_value() &&
+                    !skipSchemaForChunk)
                 {
+                    // Count the first attempt of each structured submission (not retries).
+                    if (envelopeForRetry.m_SchemaAttemptNumber == 0)
+                    {
+                        ++m_StructuredSubmissions;
+                    }
                     std::string const extractedJson = ExtractJsonFromText(aiReply.m_Text);
                     SchemaValidator validator(*envelopeForRetry.m_OutputSchemaJson);
                     if (!validator.IsLoaded())
@@ -1231,6 +1204,7 @@ namespace AIAssistant
                             int const nextAttempt = envelopeForRetry.m_SchemaAttemptNumber + 1;
                             if (nextAttempt < maxAttempts)
                             {
+                                ++m_SchemaValidationRetries;
                                 std::string const errorSummary =
                                     SchemaValidator::FormatErrorsForModel(validation.m_Errors);
                                 LOG_APP_INFO("AiRequestPool: schema validation failed (attempt {}/{}) for prob='{}' — "
@@ -1251,18 +1225,6 @@ namespace AIAssistant
                                     AiTranscript::AppendResponse(transcriptPath, aiReply);
                                 }
 
-                                if (!probAbsolutePath.empty())
-                                {
-                                    std::scoped_lock<std::mutex> const lock(m_DirectDispatchMutex);
-                                    auto const iterator = m_DirectDispatchActive.find(probAbsolutePath);
-                                    if (iterator != m_DirectDispatchActive.end())
-                                    {
-                                        if (--iterator->second <= 0)
-                                        {
-                                            m_DirectDispatchActive.erase(iterator);
-                                        }
-                                    }
-                                }
                                 if (m_DirectDispatchInflight.load() > 0)
                                 {
                                     --m_DirectDispatchInflight;
@@ -1271,6 +1233,7 @@ namespace AIAssistant
                                 Submit(retryEnvelope, callbackCopy);
                                 return;
                             }
+                            ++m_SchemaValidationFailures;
                             aiReply.m_Kind = AiReply::Kind::Error;
                             aiReply.m_Error.m_Kind = AiError::Kind::SchemaValidation;
                             aiReply.m_Error.m_Message =
@@ -1280,10 +1243,26 @@ namespace AIAssistant
                     }
                 }
 
+                // Chunked envelopes: write a per-chunk file for replay/debug but DON'T
+                // signal completion here — the executor's aggregator is responsible for
+                // writing the final <prob>.output.txt once all chunks arrive.
+                bool const isChunked =
+                    envelopeForRetry.m_ChunkIndex.has_value() && envelopeForRetry.m_ChunkCount.has_value();
+
                 fs::path writtenOutputPath;
                 if (aiReply.m_Kind == AiReply::Kind::Text && !queueFolder.empty() && !probName.empty())
                 {
-                    writtenOutputPath = queueFolder / (fs::path(probName).stem().string() + ".output.txt");
+                    if (isChunked)
+                    {
+                        std::string const suffix = ".output.chunk" +
+                                                   std::to_string(*envelopeForRetry.m_ChunkIndex) + "-of-" +
+                                                   std::to_string(*envelopeForRetry.m_ChunkCount) + ".txt";
+                        writtenOutputPath = queueFolder / (fs::path(probName).stem().string() + suffix);
+                    }
+                    else
+                    {
+                        writtenOutputPath = queueFolder / (fs::path(probName).stem().string() + ".output.txt");
+                    }
                     FileWriter::Get().WriteWithHeader(writtenOutputPath, aiReply.m_Text, modelCapture);
                 }
 
@@ -1298,7 +1277,10 @@ namespace AIAssistant
                 // the .output.* file we just wrote.  This makes completion deterministic and
                 // lets the queue-folder FileWatcher be retired (its events were the only other
                 // path into OnOutputFileCreated for runtime-dispatched ai_call).
-                if (!writtenOutputPath.empty())
+                //
+                // For chunked dispatches, the executor aggregates and writes the final
+                // <prob>.output.txt itself, so skip that signal here.
+                if (!writtenOutputPath.empty() && !isChunked)
                 {
                     std::string const normalizedPath =
                         fs::absolute(writtenOutputPath).lexically_normal().generic_string();
@@ -1343,18 +1325,6 @@ namespace AIAssistant
                 }
             }
 
-            if (!probAbsolutePath.empty())
-            {
-                std::scoped_lock<std::mutex> const lock(m_DirectDispatchMutex);
-                auto const iterator = m_DirectDispatchActive.find(probAbsolutePath);
-                if (iterator != m_DirectDispatchActive.end())
-                {
-                    if (--iterator->second <= 0)
-                    {
-                        m_DirectDispatchActive.erase(iterator);
-                    }
-                }
-            }
             if (m_DirectDispatchInflight.load() > 0)
             {
                 --m_DirectDispatchInflight;
@@ -1362,6 +1332,12 @@ namespace AIAssistant
         };
 
         dispatcher->Submit(queryData, std::move(curlCallback));
+
+        // Disarm the file-activity watchdog and activate the main deadline for
+        // workflow-bound entries (no-op for AiJcwfService / assistant calls that
+        // don't register a workflow binding).
+        ActivateDeadlineForOutputPath(expectedOutputPath);
+
         return true;
     }
 } // namespace AIAssistant

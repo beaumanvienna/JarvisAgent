@@ -1,11 +1,11 @@
-import type { RunSnapshot, SessionStatus, ConnectionHealthEntry } from "../types";
+import type { RunSnapshot, ConnectionHealthEntry } from "../types";
 
 type Tab = "dashboard" | "log";
 
 interface Props {
   connected: boolean;
   runs: RunSnapshot[];
-  sessions: Map<string, SessionStatus>;
+  aiCallsInflight: number;
   pythonRunning: boolean;
   mcpConnected: boolean;
   connectionHealth?: ConnectionHealthEntry[];
@@ -39,7 +39,7 @@ function Led({ color, label }: { color: string; label: string }) {
 export default function StatusBar({
   connected,
   runs,
-  sessions,
+  aiCallsInflight,
   pythonRunning,
   mcpConnected,
   connectionHealth,
@@ -54,9 +54,7 @@ export default function StatusBar({
   authRole,
   onOpenSettings,
 }: Props) {
-  const anyInflight = Array.from(sessions.values()).some(
-    (s) => s.inflight > 0
-  );
+  const anyInflight = aiCallsInflight > 0;
   const anyRunning = runs.some(
     (r) => r.state === "running" || r.state === "queued" || r.state === "pending"
   );
@@ -81,7 +79,7 @@ export default function StatusBar({
           />
           <Led
             color={inflightColor}
-            label={anyInflight ? "Queries in flight" : "No queries"}
+            label={anyInflight ? `AI queries in flight (${aiCallsInflight})` : "No queries"}
           />
           <Led
             color={workflowColor}

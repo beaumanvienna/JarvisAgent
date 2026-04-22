@@ -38,11 +38,6 @@
 
 namespace AIAssistant
 {
-    namespace ProbUtils
-    {
-        struct ProbFileInfo;
-    }
-
     struct AiRequestHandle
     {
         int64_t requestId = 0;
@@ -66,13 +61,8 @@ namespace AIAssistant
         std::unordered_map<std::string, std::string> m_OutputValues;
     };
 
-    // Tracks pending ai_call requests and allows reacting to their corresponding
-    // output artifacts.  Supports two completion mechanisms:
-    //
-    //  1. PROB_<id>_<ts> naming — legacy path via OnProbFileEvent().
-    //  2. Path-based matching  — new path via OnOutputFileCreated().
-    //     The executor registers the expected output path (e.g. PROB_NVDA.output.txt);
-    //     the pool matches incoming file events by canonical path.
+    // Tracks pending ai_call requests and delivers completions back to the workflow
+    // runtime (non-blocking) or directly to the caller via Submit's reply callback.
     //
     // IMPORTANT:
     //  - This pool must not require blocking waits for the workflow runtime.
@@ -113,17 +103,11 @@ namespace AIAssistant
                                                     std::vector<std::string> const& outputSlotNames,
                                                     uint64_t const timeoutMs, std::string const& expectedOutputPath = "");
 
-        // Returns true if the event was consumed by this pool.
-        bool OnProbFileEvent(ProbUtils::ProbFileInfo const& probFileInfo, std::string const& fullFilePath);
-
-        // Path-based completion: called for any .output.txt file event.
-        // Returns true if the path matches a registered expected output.
+        // Path-based completion: called by Submit's reply callback once the .output.*
+        // artifact has been written.  Looks up the pending entry by canonical path
+        // and signals completion to blocking waiters / the workflow runtime queue.
+        // Returns true if the path matched a registered expected output.
         bool OnOutputFileCreated(std::string const& fullFilePath);
-
-        // Signal that the SessionManager has dispatched a curl request for a PROB file.
-        // Confirms the handoff from file-placement to HTTP dispatch actually happened.
-        // probFilePath: absolute path of the PROB file being sent.
-        void OnCurlDispatched(std::string const& probFilePath);
 
         // Resets the file-activity watchdog for the given request.
         // Call after each queue-file write so the watchdog knows the executor is still making progress.
@@ -155,32 +139,30 @@ namespace AIAssistant
         // Removes any pending entry (safe to call even if the entry does not exist).
         void Forget(AiRequestHandle const& requestHandle);
 
-        // Direct envelope-driven dispatch (§4 of AI dispatch refactor).
-        // Builds the HTTP body via the existing per-provider inline assembly, submits to the
-        // shared CurlMultiDispatcher, and invokes `onReply` on the I/O thread when the response
-        // arrives.  Does not touch FileWatcher, FileCategorizer, or SessionManager state.
+        // Direct envelope-driven dispatch.  Builds the HTTP body via the per-provider
+        // IRequestBuilder, submits to the shared CurlMultiDispatcher, and invokes `onReply`
+        // on the I/O thread when the response arrives.
         //
-        // While direct dispatch is in flight for a given PROB file, `IsDirectDispatchActive`
-        // returns true for its canonical path; SessionManager consults this to avoid the
-        // double-dispatch hazard during the Phase 1 transition.  The flag is cleared on
-        // reply (success or failure).
-        //
-        // Writes <prob>.output.txt on success (preserving current file-drop consumers). Phase 3
-        // will extend this with schema validation + .output.json.
+        // Writes <prob>.output.{txt,json} on success and calls OnOutputFileCreated so any
+        // workflow binding registered via RegisterPendingWorkflowTask completes deterministically.
         //
         // Returns false if dispatch could not be submitted (no dispatcher, invalid interface,
         // empty body). On false, `onReply` is not invoked.
         using ReplyCallback = std::function<void(AiReply const&)>;
         bool Submit(AiInvocation const& envelope, ReplyCallback onReply);
 
-        // Returns true if Submit was called for a PROB file whose canonical path matches the
-        // argument and the reply has not yet been processed.  Callers should pass an absolute,
-        // lexically-normalized path.
-        bool IsDirectDispatchActive(std::string const& probAbsolutePath) const;
-
         // Count of envelope-based dispatches currently in flight.  Consumed by the TUI/dashboard
-        // "queries in flight" LED alongside SessionManager's inflight total.
+        // "queries in flight" LED and the `/api/status` endpoint.
         size_t GetDirectDispatchInflight() const { return m_DirectDispatchInflight.load(); }
+
+        // Observability counters for /api/debug/signals — confirm that schema
+        // enforcement and chunking are actually firing in live runs without
+        // needing to parse transcripts or logs.
+        uint64_t GetStructuredSubmissions() const { return m_StructuredSubmissions.load(); }
+        uint64_t GetSchemaValidationRetries() const { return m_SchemaValidationRetries.load(); }
+        uint64_t GetSchemaValidationFailures() const { return m_SchemaValidationFailures.load(); }
+        uint64_t GetChunkedDispatches() const { return m_ChunkedDispatches.load(); }
+        uint64_t GetFenceStrips() const { return m_FenceStrips.load(); }
 
     private:
         struct RequestContext
@@ -210,7 +192,7 @@ namespace AIAssistant
             std::string m_ResponseText;
             std::string m_ErrorMessage;
 
-            // Path of the .output.txt file that triggered completion (set by OnProbFileEvent).
+            // Path of the .output.{txt,json} file that triggered completion (set by OnOutputFileCreated).
             std::string m_SourceOutputFilePath;
 
             bool m_HasDeadline = false;
@@ -219,9 +201,9 @@ namespace AIAssistant
 
             bool m_CurlDispatched = false;
 
-            // File-activity watchdog (t1 phase).
-            // Active from registration until OnCurlDispatched.  Fires if no file
-            // writes and no curl dispatch happen within the watchdog window.
+            // File-activity watchdog.  Active from registration until Submit hands
+            // off to curl.  Fires if no file writes and no curl dispatch happen
+            // within the watchdog window.
             bool m_FileActivityWatchdogActive = true;
             std::chrono::steady_clock::time_point m_FileActivityDeadline;
 
@@ -254,6 +236,11 @@ namespace AIAssistant
 
         void QueueCompletionIfNeeded(std::shared_ptr<PendingEntry> const& pendingEntry);
 
+        // Disarm the file-activity watchdog and activate the main deadline for the
+        // workflow-bound entry registered at `outputAbsolutePath`.  No-op when no
+        // binding exists (e.g. non-workflow AiJcwfService / assistant calls).
+        void ActivateDeadlineForOutputPath(std::string const& outputAbsolutePath);
+
     private:
         std::mutex m_MapMutex;
         std::unordered_map<RequestKey, std::shared_ptr<PendingEntry>, RequestKeyHasher> m_PendingRequests;
@@ -264,9 +251,14 @@ namespace AIAssistant
         std::mutex m_OutputPathMutex;
         std::unordered_map<std::string, std::shared_ptr<PendingEntry>> m_PendingByOutputPath;
 
-        mutable std::mutex m_DirectDispatchMutex;
-        std::unordered_map<std::string, int> m_DirectDispatchActive;
         std::atomic<size_t> m_DirectDispatchInflight{0};
+
+        // Observability counters — lifetime-monotonic increments.
+        std::atomic<uint64_t> m_StructuredSubmissions{0};
+        std::atomic<uint64_t> m_SchemaValidationRetries{0};
+        std::atomic<uint64_t> m_SchemaValidationFailures{0};
+        std::atomic<uint64_t> m_ChunkedDispatches{0};
+        std::atomic<uint64_t> m_FenceStrips{0};
 
         std::mutex m_IdMutex;
         int64_t m_NextRequestId = 1;

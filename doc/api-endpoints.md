@@ -84,9 +84,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
   },
   "workflows_registered": 1,
   "workflow_runs_active": 0,
-  "session_managers_total": 12,
-  "session_managers_with_inflight": 2,
-  "session_managers_inflight_total": 5,
+  "ai_calls_inflight": 2,
   "websocket_clients": 1,
   "mcp_connected": false,
   "mcp_last_heartbeat_secs_ago": 12
@@ -99,9 +97,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 | `capabilities` | Boolean map of feature availability. Engine: all `false`. Studio: all `true`. |
 | `workflows_registered` | Number of JCWF workflows loaded in the registry. |
 | `workflow_runs_active` | Number of currently running or queued workflow runs. |
-| `session_managers_total` | Total number of session managers (one per queue subdirectory). |
-| `session_managers_with_inflight` | Session managers that currently have at least one AI query in flight. |
-| `session_managers_inflight_total` | Total number of AI queries currently in flight across all sessions. |
+| `ai_calls_inflight` | Number of `ai_call` envelopes currently in flight via `AiRequestPool::Submit`. |
 | `websocket_clients` | Number of connected WebSocket clients. |
 | `mcp_connected` | `true` if the MCP sidecar has sent a heartbeat within the last 35 seconds. |
 | `mcp_last_heartbeat_secs_ago` | Seconds since last MCP heartbeat (only present when `mcp_connected` is `true`). |
@@ -654,7 +650,7 @@ Writes the in-memory interfaces back to the `config.json` file by replacing the 
 ```
 
 ### POST /api/settings/ai-interfaces/test
-Sends a minimal prompt ("Say hello") directly to the specified AI interface via curl with a **10-second timeout**. Bypasses the SessionManager queue-file pipeline entirely — this is a lightweight connectivity and authentication check.
+Sends a minimal prompt ("Say hello") directly to the specified AI interface via curl with a **10-second timeout** — a lightweight connectivity and authentication check.
 
 **Request body:**
 ```json

@@ -82,10 +82,15 @@ jobs:
         with:
           node-version: "20"
 
+      # ---- Packaging: main branch only ----
+      # Feature/refactor branches only need the build smoke test.
+
       - name: Package DMG
+        if: github.ref == 'refs/heads/main'
         run: packaging/macOS/Tahoe/build-dmg.sh
 
       - name: Smoke test DMG
+        if: github.ref == 'refs/heads/main'
         run: |
           DMG=$(ls packaging/macOS/Tahoe/build/*.dmg | head -1)
           echo "Mounting $DMG"
@@ -94,6 +99,7 @@ jobs:
           hdiutil detach /Volumes/JarvisAgent
 
       - name: Upload DMG artifact
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: JarvisAgent-${{ steps.version.outputs.version }}-macOS-dmg

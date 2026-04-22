@@ -31,12 +31,9 @@
 #include "jarvisAgent.h"
 #include "event/events.h"
 #include "web/webServer.h"
-#include "session/sessionManager.h"
 #include "log/terminalManager.h"
 #include "file/fileWatcher.h"
-#include "file/probUtils.h"
 #include "file/scriptRegistry.h"
-#include "web/chatMessages.h"
 #include "python/pythonEnginePool.h"
 #include "task/carMaintenanceTask.h"
 #include "workflow/workflowRegistry.h"
@@ -76,6 +73,7 @@
 #include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
+#include "workflow/aiCallEvents.h"
 #include "workflow/aiRequestPool.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "workflow/workflowFileIndex.h"
@@ -155,11 +153,9 @@ namespace AIAssistant
         ShellTaskExecutor::ProbeWindowsShell(Core::g_Core->GetConfig().m_UseBashOnWindows);
 #endif
 
-        const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
-        std::filesystem::path const absoluteQueuePath = std::filesystem::absolute(queuePath);
-
-        m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, 100ms);
-        m_FileWatcher->Start();
+        // The queue folder is no longer watched at the application level — direct
+        // envelope dispatch handles its own output files, and file_watch triggers
+        // use the TriggerEngine-owned watcher instead.
 
         // Script registry: scan scripts/ at startup, keep live via second FileWatcher
         m_ScriptRegistry = std::make_unique<ScriptRegistry>();
@@ -197,8 +193,6 @@ namespace AIAssistant
             Core::g_Core->GetTerminalLogStreamBuf()->SetLogBroadcastCallback([ws](std::string const& line)
                                                                              { ws->EnqueueLogLine(line); });
         }
-
-        m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
         { // initialize Python engine pool (N sub-interpreters, each with own GIL)
             m_PythonEnginePool = std::make_unique<PythonEnginePool>();
@@ -447,41 +441,6 @@ namespace AIAssistant
             return;
         }
 
-        // Update all session managers (state machines for REQ/STNG/TASK)
-        for (auto& sessionManager : m_SessionManagers)
-        {
-            sessionManager.second->OnUpdate();
-        }
-
-        // Remove stale session managers: idle, no tracked files, queue folder gone.
-        {
-            size_t const smCountBefore = m_SessionManagers.size();
-            for (auto it = m_SessionManagers.begin(); it != m_SessionManagers.end();)
-            {
-                auto& sm = *it->second;
-                bool const hasFiles = sm.HasTrackedFiles();
-                bool const dirExists = fs::is_directory(it->first);
-                if (!hasFiles && !dirExists)
-                {
-                    LOG_APP_INFO("Removing stale session manager '{}'", it->first);
-                    m_StatusRenderer.RemoveSession(it->first);
-                    it = m_SessionManagers.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-            size_t const removed = smCountBefore - m_SessionManagers.size();
-            if (removed > 0)
-            {
-                LOG_APP_INFO("Stale session cleanup: removed {} of {} session managers", removed, smCountBefore);
-            }
-        }
-
-        // Clean old chat messages
-        m_ChatMessagePool->RemoveExpired();
-
         // --- Python OnUpdate disabled ---
         // m_PythonEnginePool->OnUpdate();
 
@@ -579,6 +538,35 @@ namespace AIAssistant
                 return true;
             });
 
+        // Bridge AI-call lifecycle events to the dashboard WebSocket so per-task
+        // state is visible beyond the aggregate "queries in flight" LED.
+        if (m_WebServer != nullptr)
+        {
+            dispatcher.Dispatch<AiCallStartedEvent>(
+                [&](AiCallStartedEvent& evt)
+                {
+                    m_WebServer->BroadcastAiCallStarted(evt.GetProbName(), evt.GetInterfaceName());
+                    return false; // allow other consumers (Python, future TUI subscribers)
+                });
+            dispatcher.Dispatch<AiCallCompletedEvent>(
+                [&](AiCallCompletedEvent& evt)
+                {
+                    auto const& usage = evt.GetUsage();
+                    m_WebServer->BroadcastAiCallCompleted(evt.GetProbName(), usage.m_InputTokens,
+                                                          usage.m_OutputTokens, usage.m_TotalTokens,
+                                                          evt.GetFinishReason());
+                    return false;
+                });
+            dispatcher.Dispatch<AiCallFailedEvent>(
+                [&](AiCallFailedEvent& evt)
+                {
+                    auto const& err = evt.GetError();
+                    m_WebServer->BroadcastAiCallFailed(evt.GetProbName(), static_cast<int>(err.m_Kind),
+                                                       err.m_HttpStatus, err.m_Message);
+                    return false;
+                });
+        }
+
         // ---------------------------------------------------------
         // Forward file events into TriggerEngine (file_watch triggers)
         // ---------------------------------------------------------
@@ -618,87 +606,6 @@ namespace AIAssistant
         }
 
         // -----------------------------------------------------------------------------------
-        // PROB handling (ai_call completion consumes output files first, then chat)
-        // -----------------------------------------------------------------------------------
-
-        if (!filePath.empty())
-        {
-            std::string filename = filePath.filename().string();
-
-            std::optional<ProbUtils::ProbFileInfo> parsedProbFileInfo = ProbUtils::ParseProbFilename(filename);
-
-            if (parsedProbFileInfo.has_value())
-            {
-                const ProbUtils::ProbFileInfo& probFileInfo = parsedProbFileInfo.value();
-
-                int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
-                int64_t fileTimestamp = probFileInfo.timestamp;
-
-                // Suppress stale files
-                if (fileTimestamp < startupTimestamp)
-                {
-                    return;
-                }
-
-                // PROB OUTPUT
-                if (probFileInfo.isOutput)
-                {
-                    if (m_AiRequestPool != nullptr)
-                    {
-                        if (m_AiRequestPool->OnProbFileEvent(probFileInfo, filePath.string()))
-                        {
-                            return;
-                        }
-                    }
-
-                    std::ifstream inputStream(filePath);
-                    std::stringstream outputBuffer;
-                    outputBuffer << inputStream.rdbuf();
-
-                    std::string responseText = outputBuffer.str();
-
-                    m_ChatMessagePool->MarkAnswered(probFileInfo.id, responseText);
-
-                    LOG_APP_INFO("ChatMessagePool: answered id {} via {}", probFileInfo.id, filename);
-
-                    return;
-                }
-            }
-        }
-
-        // -----------------------------------------------------------------------------------
-        // Path-based AI completion routing for non-PROB_<id>_<ts> output files
-        // (e.g., PROB_NVDA.output.txt written by SessionManager for workflow ai_call tasks)
-        // -----------------------------------------------------------------------------------
-        if (!filePath.empty() && m_AiRequestPool != nullptr)
-        {
-            std::string const stem = filePath.stem().string();
-            if (stem.ends_with(".output"))
-            {
-                // Guard against stale .output files from previous runs: if the file
-                // was last written before this JA session started, ignore it.
-                bool staleOutputFile = false;
-                {
-                    std::error_code ec;
-                    auto const lwt = std::filesystem::last_write_time(filePath, ec);
-                    if (!ec && ToSystemClock(lwt) < m_StartupTime)
-                    {
-                        staleOutputFile = true;
-                        LOG_APP_INFO("Ignoring stale .output file (pre-startup): '{}'", filePath.string());
-                    }
-                }
-
-                if (!staleOutputFile)
-                {
-                    if (m_AiRequestPool->OnOutputFileCreated(filePath.string()))
-                    {
-                        LOG_APP_INFO("AiRequestPool: path-based completion matched '{}'", filePath.string());
-                    }
-                }
-            }
-        }
-
-        // -----------------------------------------------------------------------------------
         // Script registry: route scripts/ file events to ScriptRegistry
         // -----------------------------------------------------------------------------------
         if (!filePath.empty() && m_ScriptRegistry != nullptr)
@@ -718,22 +625,6 @@ namespace AIAssistant
                 }
                 return;
             }
-        }
-
-        // -----------------------------------------------------------------------------------
-        // Forward remaining file events to correct SessionManager
-        // -----------------------------------------------------------------------------------
-
-        if (!filePath.empty())
-        {
-            auto sessionManagerName = fs::relative(filePath.parent_path()).string();
-
-            if (!m_SessionManagers.contains(sessionManagerName))
-            {
-                m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(sessionManagerName);
-            }
-
-            m_SessionManagers[sessionManagerName]->OnEvent(event);
         }
 
         // Forward event to Python
@@ -798,10 +689,6 @@ namespace AIAssistant
             m_PythonEnginePool->SignalStop();
         }
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::SignalStop...\n");
-        if (m_FileWatcher != nullptr)
-        {
-            m_FileWatcher->SignalStop();
-        }
         if (m_ScriptFileWatcher != nullptr)
         {
             m_ScriptFileWatcher->SignalStop();
@@ -838,14 +725,6 @@ namespace AIAssistant
 
         App::g_App = nullptr;
 
-        RAW_ONSHUTDOWN("[OnShutdown] session managers...\n");
-        for (auto& sessionManager : m_SessionManagers)
-        {
-            sessionManager.second->OnShutdown();
-        }
-        RAW_ONSHUTDOWN("[OnShutdown] session managers stopped\n");
-        LOG_APP_INFO("[shutdown] session managers stopped");
-
         RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool::WaitStop...\n");
         if (m_PythonEnginePool != nullptr)
         {
@@ -856,10 +735,6 @@ namespace AIAssistant
         LOG_APP_INFO("[shutdown] PythonEnginePool stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::WaitStop...\n");
-        if (m_FileWatcher != nullptr)
-        {
-            m_FileWatcher->WaitStop();
-        }
         if (m_ScriptFileWatcher != nullptr)
         {
             m_ScriptFileWatcher->WaitStop();
@@ -874,6 +749,15 @@ namespace AIAssistant
         }
         RAW_ONSHUTDOWN("[OnShutdown] WebServer stopped\n");
         LOG_APP_INFO("[shutdown] WebServer stopped");
+
+        // TriggerEngine owns a FileWatcher whose polling task lives on the
+        // thread pool.  Reset it AFTER WebServer::WaitStop so any in-flight
+        // request that held a raw pointer has returned, and BEFORE the engine
+        // drains the thread pool so the watcher task can exit cleanly.
+        RAW_ONSHUTDOWN("[OnShutdown] TriggerEngine::reset...\n");
+        m_TriggerEngine.reset();
+        RAW_ONSHUTDOWN("[OnShutdown] TriggerEngine stopped\n");
+        LOG_APP_INFO("[shutdown] TriggerEngine stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] done\n");
 #undef RAW_ONSHUTDOWN
@@ -891,40 +775,6 @@ namespace AIAssistant
     int64_t JarvisAgent::GetStartupTimestamp() const
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(m_StartupTime.time_since_epoch()).count();
-    }
-
-    size_t JarvisAgent::GetSessionManagerInflightTotal() const
-    {
-        size_t total = 0;
-        for (auto const& [name, sm] : m_SessionManagers)
-        {
-            total += sm->GetInflightCount();
-        }
-        // Include envelope-based direct dispatch (§4 of AI dispatch refactor).
-        // The "queries in flight" LED should show every AI request in flight, not only the
-        // SessionManager-mediated ones.
-        if (m_AiRequestPool != nullptr)
-        {
-            total += m_AiRequestPool->GetDirectDispatchInflight();
-        }
-        return total;
-    }
-
-    size_t JarvisAgent::GetSessionManagersWithInflight() const
-    {
-        size_t count = 0;
-        for (auto const& [name, sm] : m_SessionManagers)
-        {
-            if (sm->GetInflightCount() > 0)
-            {
-                ++count;
-            }
-        }
-        if (m_AiRequestPool != nullptr && m_AiRequestPool->GetDirectDispatchInflight() > 0)
-        {
-            ++count;
-        }
-        return count;
     }
 
 } // namespace AIAssistant

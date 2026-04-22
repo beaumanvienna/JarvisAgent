@@ -91,8 +91,8 @@ namespace AIAssistant
             uint16_t m_Port{0}; // 0 = auto (8080 HTTP, 8443 HTTPS)
             bool m_UseBashOnWindows{false};
 
-            // Determinism defaults (§7 of AI dispatch refactor).  Per-task settings on
-            // AiInvocation override these when non-default.
+            // Determinism defaults.  Per-task settings on AiInvocation override these
+            // when non-default.
             double m_DeterminismTemperature{0.0};
             bool m_DeterminismSeedSet{false};
             int64_t m_DeterminismSeed{0};

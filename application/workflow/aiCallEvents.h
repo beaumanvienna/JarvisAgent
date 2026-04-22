@@ -38,9 +38,8 @@ namespace AIAssistant
         {
         }
 
-        EventType GetEventType() const override { return EventType::AiCallStarted; }
-        const char* GetName() const override { return "AiCallStartedEvent"; }
-        int GetCategoryFlags() const override { return EventCategoryAi; }
+        EVENT_CLASS_TYPE(AiCallStarted)
+        EVENT_CLASS_CATEGORY(EventCategoryAi)
 
         std::string const& GetProbName() const { return m_ProbName; }
         std::string const& GetInterfaceName() const { return m_InterfaceName; }
@@ -58,9 +57,8 @@ namespace AIAssistant
         {
         }
 
-        EventType GetEventType() const override { return EventType::AiCallCompleted; }
-        const char* GetName() const override { return "AiCallCompletedEvent"; }
-        int GetCategoryFlags() const override { return EventCategoryAi; }
+        EVENT_CLASS_TYPE(AiCallCompleted)
+        EVENT_CLASS_CATEGORY(EventCategoryAi)
 
         std::string const& GetProbName() const { return m_ProbName; }
         AiUsage const& GetUsage() const { return m_Usage; }
@@ -80,9 +78,8 @@ namespace AIAssistant
         {
         }
 
-        EventType GetEventType() const override { return EventType::AiCallFailed; }
-        const char* GetName() const override { return "AiCallFailedEvent"; }
-        int GetCategoryFlags() const override { return EventCategoryAi; }
+        EVENT_CLASS_TYPE(AiCallFailed)
+        EVENT_CLASS_CATEGORY(EventCategoryAi)
 
         std::string const& GetProbName() const { return m_ProbName; }
         AiError const& GetError() const { return m_Error; }

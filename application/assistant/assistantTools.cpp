@@ -740,9 +740,6 @@ namespace AIAssistant
         auto minutes = std::chrono::duration_cast<std::chrono::minutes>(uptime).count() % 60;
         oss << "  Uptime: " << hours << "h " << minutes << "m\n";
 
-        // Session managers
-        oss << "  Session managers: " << app->GetSessionManagerCount() << "\n";
-
         // Workflow registry
         if (m_WorkflowRegistry)
             oss << "  Registered workflows: " << m_WorkflowRegistry->GetWorkflowIds().size() << "\n";
@@ -2089,8 +2086,7 @@ namespace AIAssistant
         auto hours = std::chrono::duration_cast<std::chrono::hours>(uptime).count();
         auto minutes = std::chrono::duration_cast<std::chrono::minutes>(uptime).count() % 60;
         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(uptime).count() % 60;
-        oss << "Uptime: " << hours << "h " << minutes << "m " << seconds << "s\n";
-        oss << "Session managers: " << app->GetSessionManagerCount() << "\n\n";
+        oss << "Uptime: " << hours << "h " << minutes << "m " << seconds << "s\n\n";
 
         // Workflow registry
         if (m_WorkflowRegistry)

@@ -25,7 +25,7 @@ Tracks per-session status and renders lines for the terminal.
 - Thread‑safe updates
 
 ### Key Operations
-- `UpdateSession(...)` — record new status from a `SessionManager`
+- `UpdateSession(...)` — record a status row (name + state + counters)
 - `BuildStatusLines(outLines, maxWidth)`  
   - Safely truncates UTF‑8 using `SafeTruncateUtf8`
   - Emits `[session] STATE: ...` rows sorted alphabetically

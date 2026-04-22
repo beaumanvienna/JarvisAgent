@@ -2025,6 +2025,12 @@ namespace AIAssistant
     void WorkflowRuntimeManager::TimeoutWaitingExternalTasks(ActiveRun& activeRun)
     {
         static constexpr uint64_t kDefaultWaitingExternalTimeoutMs = 300000; // 5 minutes (matches AiRequestPool)
+        // Floor for ai_call tasks — modern AI providers routinely take 60-120 s for
+        // long structured outputs.  User-authored workflow-wide `timeout_ms` values
+        // (often a generic 60 000 ms) would otherwise abort perfectly healthy calls
+        // while the HTTP response was still in flight.  The AiInvocation envelope's
+        // own default is 120 s, so we use that as the floor here for consistency.
+        static constexpr uint64_t kAiCallMinWaitingExternalTimeoutMs = 120000; // 2 minutes
 
         WorkflowRun& workflowRun = activeRun.m_Run;
         WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
@@ -2048,9 +2054,17 @@ namespace AIAssistant
             // Look up task-level timeout; fall back to default.
             std::string const parentId = ParentTaskId(taskId);
             auto defIt = workflowDefinition.m_Tasks.find(parentId);
-            uint64_t const timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
-                                           ? defIt->second.m_TimeoutMs
-                                           : kDefaultWaitingExternalTimeoutMs;
+            uint64_t timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
+                                     ? defIt->second.m_TimeoutMs
+                                     : kDefaultWaitingExternalTimeoutMs;
+
+            // Enforce a minimum timeout for ai_call tasks so short user-authored
+            // `timeout_ms` values don't abort legitimate slow AI responses.
+            if (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_Type == TaskType::AiCall &&
+                timeoutMs < kAiCallMinWaitingExternalTimeoutMs)
+            {
+                timeoutMs = kAiCallMinWaitingExternalTimeoutMs;
+            }
 
             auto const elapsed =
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - taskState.m_WaitingExternalSince).count();

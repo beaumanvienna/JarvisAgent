@@ -43,7 +43,8 @@ namespace AIAssistant
         static bool TryWriteAllText(std::filesystem::path const& filePath, std::string const& fileContents,
                                     std::string& errorMessageOut);
 
-        static bool ContainsCaseInsensitive(std::string const& haystack, std::string const& needle);
+        static bool ExtractCategoryFromStructuredJson(std::string const& fileContents, std::string& categoryOut,
+                                                      std::string& errorMessageOut);
         static std::string MakeEngineManualText();
         static std::string MakeTireMaintenanceText();
         static std::string MakeRephraseRequestText();

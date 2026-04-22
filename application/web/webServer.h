@@ -70,6 +70,15 @@ namespace AIAssistant
         void BroadcastJSON(const std::string& jsonString);
         void BroadcastPythonStatus(bool pythonRunning);
 
+        // AI dispatch lifecycle — forwarded to the dashboard so per-task live state
+        // is visible beyond the aggregate "queries in flight" LED.
+        void BroadcastAiCallStarted(std::string const& probName, std::string const& interfaceName);
+        void BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
+                                      int32_t outputTokens, int32_t totalTokens,
+                                      std::string const& finishReason);
+        void BroadcastAiCallFailed(std::string const& probName, int errorKind,
+                                   int httpStatus, std::string const& errorMessage);
+
         // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
         void EnqueueLogLine(std::string const& line);
 
@@ -257,9 +266,6 @@ namespace AIAssistant
         // Workflow Editor UI
         crow::response ServeWorkflowEditorIndex() const;
         crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
-
-        // Chat
-        crow::response HandleChatPost(crow::request const& req);
 
         // Workflow CRUD
         crow::response HandleWorkflowsReloadPost();

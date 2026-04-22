@@ -352,7 +352,7 @@ class Runner:
             return
         run_id = submit.json().get("runId", "")
 
-        # Poll for success. SessionManager startup + provider round-trip typically
+        # Poll for success. Envelope dispatch + provider round-trip typically
         # < 5 s; give it 45 s to tolerate slow providers under load.
         deadline = time.time() + 45
         terminal_state = None
@@ -367,12 +367,11 @@ class Runner:
         self.expect(terminal_state == "succeeded",
                     f"ai_call run reaches 'succeeded' (got {terminal_state!r})")
 
-        # Verify SessionManager was created for this run — the whole point of
-        # the FileWatcher dynamic path fix. debug_signals surfaces the counter.
+        # Verify the envelope-direct dispatch path accounted the call.
+        # debug_signals' ai_calls_inflight returns to 0 once the call completes; the
+        # assertion here is that the signals endpoint remains reachable for admins.
         dbg = self.get("/api/debug/signals", key=self.admin_key)
-        if dbg.status_code == 200:
-            smt = dbg.json().get("signals", {}).get("session_managers_total", 0)
-            self.expect(smt >= 1, f"session_managers_total >= 1 (got {smt})")
+        self.expect(dbg.status_code == 200, f"debug signals reachable (got {dbg.status_code})")
         # Verify the AI output file exists in the run folder.
         listing = self.get(f"/api/workflow-runs/{run_id}/files",
                            key=self.admin_key)

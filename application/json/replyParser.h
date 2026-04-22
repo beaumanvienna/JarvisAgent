@@ -49,8 +49,8 @@ namespace AIAssistant
         virtual size_t HasContent() const = 0;
         virtual std::string GetContent(size_t index = 0) const = 0;
 
-        // Extended provider-agnostic accessors (§5 of AI dispatch refactor).
-        // Concrete parsers override when the provider exposes the concept; otherwise defaults apply.
+        // Provider-agnostic accessors.  Concrete parsers override when the provider
+        // exposes the concept; otherwise defaults apply.
         virtual AiError GetError() const;
         virtual AiUsage GetUsage() const;
         virtual std::string GetFinishReason() const;

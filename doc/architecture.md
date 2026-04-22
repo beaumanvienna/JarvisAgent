@@ -122,41 +122,96 @@ Once a run is staged, its artefacts are discoverable and retrievable through ded
 
 Authorization: operators can read their own runs; admins can read any run (with an `admin_cross_user_read` audit line). Path traversal (`..`, absolute paths, symlinks) is rejected before the filesystem is touched. A background reaper thread sweeps runs whose `delete-at` has passed; empty user-slug directories are pruned at the same time so the `_adhoc/` root stays tidy.
 
-**`ai_call` dispatch (post AI Dispatch Refactor).** Runtime-initiated `ai_call` tasks are dispatched through the typed `AiInvocation` envelope directly to `AiRequestPool::Submit(envelope, callback)` — no file-event round trip. The executor still writes STNG/CNTX/TASK/PROB/PROV files to the task's queue folder on disk (disk-first philosophy preserved: every input is reconstructible, every call replayable), but the envelope carries the load-bearing state (interface, model, messages, settings, output schema). `Submit` builds the provider-specific HTTP body via `IRequestBuilder`, fires through `CurlMultiDispatcher`, and on reply writes `<prob>.output.{txt|json}` plus `<prob>.transcript.json` to the queue folder. A direct call to `AiRequestPool::OnOutputFileCreated(path)` signals completion on the same thread — the `SessionManager` + queue-folder `FileWatcher` path is now vestigial for `ai_call` completion (a gate in `SessionManager::IsQueryRequired` skips PROBs with in-flight direct dispatch, preventing double-dispatch). Adhoc `ai_call` goes through the same direct path via the shared runtime manager.
+For `ai_call` completion handling (envelope dispatch, chunking, reduce pass, schema validation, transcripts, provider adapters) see **AI Dispatch Pipeline** below.  Adhoc `ai_call` goes through the same path via the shared runtime manager.
 
 ---
 
-## Queue File Processing
+## AI Dispatch Pipeline
 
-Alongside workflows, JarvisAgent also processes a **file-driven queue** of prompt inputs categorized by 4-letter prefix:
+```
+JCWF ai_call task
+  ↓  AiCallTaskExecutor
+       ├─ template-resolve {{...}} vars
+       ├─ write STNG / CNTX / TASK / PROB / PROV files to queue folder (disk-first)
+       │    PROV = provider sidecar (interface name, model, url, key_name, api_type)
+       ├─ markitdown-convert any office files in cntx_files (PDF/DOCX/XLSX/PPTX/ODT)
+       ├─ structure-aware chunker (if body > interface max_context_tokens)
+       └─ construct 1 AiInvocation per PROB × chunk
+            (m_InterfaceName mirrors PROV content; envelope is load-bearing, PROV stays for replay/debug)
+  ↓  AiRequestPool::Submit(envelope)          [direct in-process call]
+  ↓  IRequestBuilder::BuildBody(envelope)     [per-provider: API1/2/3/4]
+  ↓  CurlMultiDispatcher                      [HTTP/2, shared I/O thread]
+  ↑  ReplyParser                              [per-provider; returns AiReply]
+  ↑  AiReply
+  ↓  AiRequestPool::OnReply(handle, reply)    [direct callback]
+       ├─ strip single-fence wrappers around the reply text
+       ├─ if output_schema: parse+validate with simdjson; retry on failure (≤ output_retries)
+       ├─ write <prob>.output.{json|txt}
+       └─ write <prob>.transcript.json
+  ↓  AiRequestPool::TryPopCompletion()        [non-blocking poll]
+  ↓  workflow runtime tick picks up the completion
 
-| Prefix | Category | Purpose |
+Event bus (fire-and-forget, observability only):
+  AiCallStartedEvent → AiCallCompletedEvent | AiCallFailedEvent
+  Category: EventCategoryAi   (TUI / dashboard WebSocket / Python hooks)
+```
+
+### Key types and decisions
+
+- **`AiInvocation`** (`application/workflow/aiInvocation.h`) is a pure data struct — no inheritance. Carries interface name, optional model override, `AiSettings` (temperature, seed, max_tokens), messages, optional `output_schema`, `StructuredMode`, timeout, retry policy, queue folder, prob name, optional chunk index/count. This envelope is the unambiguous source of truth at runtime.
+- **`AiReply`** carries `Kind` (`Text | Structured | Error`), the response payload, `AiUsage` (input/output/total tokens), finish reason, system fingerprint.
+- **`IRequestBuilder`** + **`ReplyParser`** are symmetric per-provider abstractions. Adding a provider means adding one builder and one parser, plus one enum variant — no other code changes.
+
+### Queue-folder convention (disk-first philosophy)
+
+Every input and output is on disk, every call is replayable. A task's queue folder contains:
+
+| Prefix | Role |
+|---|---|
+| `STNG_*` | Settings (style, tone, constraints) |
+| `CNTX_*` | Context (background, source data, upstream task outputs) |
+| `TASK_*` | Task instruction |
+| `PROB_*` | One problem/prompt per fan-out item |
+| `PROV_*` | Provider sidecar — written per dispatch (interface/model/url/key_name/api_type). **Write-only from the dispatch code path**; only replay tooling reads PROV back. |
+| `<prob>.output.{txt,json}` | The AI response |
+| `<prob>.output.chunk<i>-of-<N>.txt` | Per-chunk intermediates when chunking fired |
+| `<prob>.transcript.json` | Request + response turns, usage, finish_reason, system fingerprint — one per PROB |
+
+STNG / CNTX / TASK are all **optional** — a single PROB with non-whitespace content is enough for dispatch. When any section is missing the runtime logs an advisory ("no STNG content — default settings apply") but proceeds. The old strict-environment rule was a holdover from the file-watcher-driven era when incomplete environments silently stalled runs.
+
+### Structured output
+
+`ai_call` tasks may declare `output_schema` (a JSON Schema Draft 2020-12 subset) and `output_retries`. On reply the pool extracts JSON from the text (tolerating ```json``` fences), validates against the schema, and on failure re-dispatches with a correction message up to `output_retries` attempts. Supported keywords: `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `oneOf`, `anyOf`, `$ref`, `$defs`. Unsupported keywords are rejected at schema-load time, not at reply time — authors see errors before a run starts. Structured mode selection is per-provider: native `response_format: json_schema` on OpenAI (API1/API2) and Gemini (API3), forced-tool shim on Anthropic (API4) with `tool_choice: {"type":"tool","name":"output"}`.
+
+### Chunking + reduce
+
+Each `ApiInterface` declares a `max_context_tokens` budget. If not set in `config.json`, a curated model-name fallback table resolves a default (GPT-4-family 128 K, Claude 200 K, Gemini 1.5/2 1 M, Llama/Qwen/DeepSeek/Phi 128 K, Mistral/Mixtral 32 K, unknown 50 K). When an envelope's user message exceeds the budget, `ChunkPlanner` splits only the CNTX portion at markdown section boundaries (preferring `#`/`##`/`###` whole sections, subdividing only when a section alone overruns). N envelopes fan out in parallel — each carries the full STNG/TASK + one slice + original PROB. Once all N replies land, a **reduce envelope** runs: it carries all N partial answers plus the original PROB with an instruction to produce a single unified response. The reduced reply becomes `<prob>.output.txt`. If any chunk fails, the fallback is plain concatenation with HTML comment separators.
+
+Chunking and `output_schema` are mutually exclusive (schema wins — schema enforcement requires a whole-object reply, which a chunked response can't satisfy).
+
+### Embedded schema and generation guide
+
+`doc/jcwf.schema.json` and `doc/jcwf_generation_guide.md` are embedded into the binary at premake time (`tools/embedAsHeader` in `premake5.lua` → `application/json/jcwfSchema.generated.h` / `jcwfGenerationGuide.generated.h`) as `kJcwfSchemaJson` / `kJcwfGenerationGuide` constants. This means:
+
+- The editor's AI-driven JCWF generate flow (`AiJcwfService::GenerateAsync`) declares `kJcwfSchemaJson` on its envelope and the reply is schema-validated (with retry) before being written — invalid JCWFs never reach the user.
+- The generation guide is always at hand for the Generate/Fix pipeline without reading from disk, so it works identically in Studio, Engine-in-Docker, and locked-down installs.
+- A contract test (`test/dispatch/test_schema_covers_parser.py`) enforces **schema ⊇ parser**: every field the JCWF parser reads must be declared somewhere in the schema (as a property, enum value, or `$defs` target). CI fails if a parser field isn't in the schema — keeps the schema authoritative for authors and the generator AI.
+
+Office documents in `cntx_files` (PDF / DOCX / XLSX / PPTX / ODT) are converted to Markdown via `markitdown` synchronously during materialization (before registration with the pending-request pool so the file-activity watchdog doesn't tick while conversion is in flight). The conversion timing is logged at INFO (`markitdown START` / `markitdown END` with elapsed ms + bytes in / markdown bytes out) so operators can see exactly what's taking how long. No artificial timeout on the conversion — the upstream task `timeout_ms` + the `WaitingExternal` 120 s floor for ai_call tasks are the only walls.
+
+### Supported providers
+
+| Adapter | Endpoint | Providers that work today |
 |---|---|---|
-| `STNG` | Settings | Style / behavior / tone modifiers |
-| `CNTX` | Context | Background information for AI prompts |
-| `TASK` | Task | Main instruction for the AI |
-| `PROV` | Provider | AI provider config (never sent to AI) |
-| `REQ` / *(no prefix)* | Requirement | Individual requirements processed against the assembled environment |
+| **API1** — OpenAI Chat Completions | `/v1/chat/completions` | OpenAI · Gemini (OpenAI-compat mode) · Groq · Together AI · Fireworks · DeepInfra · Perplexity · xAI Grok · Mistral Platform · GitHub Models · OpenRouter · self-hosted: Ollama · LM Studio · llama.cpp server · vLLM · text-generation-webui |
+| **API2** — OpenAI Responses | `/v1/responses` | OpenAI (Responses API) |
+| **API3** — Gemini native | `/v1beta/models/{model}:generateContent` | Google Gemini (native) |
+| **API4** — Anthropic Messages | `/v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus) |
+| **Test** — fixture-driven | in-process | no-network integration tests; `m_Url` points at a fixture file |
 
-`STNG`, `CNTX`, and `TASK` are combined into an **environment** used alongside each individual requirement file during processing.
+API keys are stored in an AES-256-GCM encrypted key store with a master password. Interfaces reference keys by `key_name`, resolved at runtime — no plaintext keys in workflow files or `config.json`.
 
-The file watcher monitors additions, modifications, and removals; the categorizer/tracker maintains modification state and triggers selective reprocessing — environment changes cause a full environment rebuild, requirement changes re-query only that file. Outputs are regenerated only when inputs or the environment have changed.
-
-Office documents (PDF, DOCX, XLSX, PPTX, HTML) are detected as binaries and converted to Markdown via [MarkItDown](https://github.com/microsoft/markitdown), then chunked when oversized.
-
----
-
-## AI Request Pool
-
-The AI Request Pool dispatches concurrent AI requests in parallel. All outgoing requests share a single HTTP/2 connection per provider via a dedicated I/O thread, so network overhead stays minimal regardless of how many tasks are in flight.
-
-**Supported providers:**
-
-- OpenAI (GPT-4, GPT-4.1-mini, GPT-5) — `Authorization: Bearer` auth
-- Google Gemini (native API) — `x-goog-api-key` auth, `/models/{model}:generateContent` URL scheme
-- Gemini OpenAI-compatible endpoint
-
-API keys are stored in an AES-256-GCM encrypted key store with master password. Workflow interfaces reference keys by `key_name`, resolved at runtime — no plaintext keys in workflow files or `config.json`.
+Bedrock and Azure OpenAI are on the roadmap (tracked in `JarvisAgent TODO List.md` §5h).
 
 ---
 
@@ -286,7 +341,7 @@ Reference record for why things are the way they are. Reading current code is au
 | **Symlinks never followed on artifact download** | `fs::symlink_status` check, then reject; never `fs::exists` alone | Closes a TOCTOU class where a malicious task could swap a regular file for a symlink pointing outside the run folder between listing and read. |
 | **Per-user folder namespace for adhoc** | `_adhoc/<user_slug>/<run>/` | Authorisation is enforced twice — handler ownership check *and* filesystem path prefix. Defence in depth. |
 | **Scripts cannot be submitted via API** | Adhoc submit rejects JCWFs whose `params.command` / `params.module` doesn't already exist under `scripts/` | Hard boundary against code injection. Scripts are the only arbitrary-code path in a workflow — gating them to admin-deployed content keeps adhoc submission a safe capability. |
-| **FileWatcher dynamic watch set for adhoc runs** | `AddPath` / `RemovePath` on a single watcher instance; adhoc runs register their per-run queue folder at stage time and unregister on teardown | Reuses the one code path for AI dispatch (registered runs drop into `queue/`, adhoc runs drop into `_adhoc/<user>/<run>/queue/`, both feed `FileAddedEvent → categoriser → SessionManager → HTTP`). Staying with the file-watcher-mediated dispatch for 1.0 avoids rewriting the AI completion wakeup path. Post-1.0: runtime-driven dispatch removes the round-trip entirely. |
+| **Envelope-direct AI dispatch** | `ai_call` tasks (registered and adhoc) build an `AiInvocation` and call `AiRequestPool::Submit` in-process | Removes the file-event round-trip that used to mediate AI completion. Disk-first is preserved: STNG/CNTX/TASK/PROB/PROV are still written for replay/debug, but the envelope is authoritative. `TriggerEngine` owns its own `FileWatcher` instance for `file_watch` triggers on arbitrary declared paths. |
 | **`file_outputs` on `ai_call` is allowed, with a portability note** | Validator emits Info for outside-tree destinations, Warning for destinations inside the task's own queue folder with requirement-firing filenames | Supports external-project agent workflows (Studio or Engine-without-Docker writing to `~/dev/<project>/...`) while still flagging the real bug (duplicate AI query when a file_output lands inside its own queue folder as e.g. `summary.txt`). |
 
 ---
