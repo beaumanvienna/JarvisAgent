@@ -607,6 +607,12 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         os.rmdir("workflow-editor/ui/dist")
         os.rmdir("workflow-editor/ui/node_modules")
 
+        ----------------------------------------------------
+        -- MCP sidecar (TypeScript → dist/, npm → node_modules/)
+        ----------------------------------------------------
+        os.rmdir("mcp/dist")
+        os.rmdir("mcp/node_modules")
+
         print("done.")
     end
 

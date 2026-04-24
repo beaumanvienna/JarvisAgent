@@ -61,6 +61,10 @@ RUN premake5 gmake && \
 # --- Application layer ---
 # vendor/ mtimes are preserved (we don't re-copy it), so the vendor .a files
 # stay "up-to-date" from make's perspective and are not rebuilt.
+# doc/ is needed at premake-generation time: embedAsHeader reads
+# doc/jcwf.schema.json + doc/jcwf_generation_guide.md and writes the generated
+# headers that aiJcwfService.cpp (Studio) and the validator (both editions) include.
+COPY doc/ ./doc/
 COPY application/ ./application/
 COPY engine/ ./engine/
 
