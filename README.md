@@ -13,11 +13,26 @@
 
 # JarvisAgent (j9t)
 
-**Massively parallel AI workflow orchestration in modern C++ with a React visual editor.**
+**Orchestrate and scale AI-driven operations across your organization.**
 
-JarvisAgent combines **AI calls, Python, shell scripts, and internal C++ tasks** into visual DAG workflows that execute hundreds of tasks in parallel. It is fast for two reasons: concurrent AI requests run simultaneously rather than serially, and all outgoing requests share a single HTTP/2 connection per provider — so network overhead stays minimal no matter how many tasks are in flight.
+j9t is a platform for scaling AI-driven work. It transforms AI calls, Python, shell scripts, and native C++ into visual workflows that execute hundreds of tasks in parallel — enabling teams to automate complex processes and accelerate analysis, while integrating directly with their existing cloud systems and data sources.
 
-JarvisAgent ships in two editions, both included in every package:
+A modern backend with multithreading and HTTP/2 multiplexing ensures fast execution whether running locally or in the cloud. On top of this engine, j9t provides a React-based workflow editor with AI-assisted generation, structured outputs and automatic retry on failure for predictable automation, 14 cloud connectors across 5 categories, and MCP integration with external AI systems.
+
+Workflows fire on cron schedules, file-watch events, HMAC-signed webhooks, or on demand — the same pipeline can run once from a button, every hour, or whenever a file lands in a folder.
+
+**Use cases** — a single workflow can:
+
+- Score 60 portfolio positions in seconds and roll them into one summary
+- Triage a backlog of GitHub / Jira / Redmine issues into bug / feature / question buckets with automatic assignee routing
+- Assess procurement requirements against a platform spec and push the verdicts back into Polarion
+- Grade a classroom of quizzes and write the grades back to a Google Sheet
+- Generate a diagram-rich troubleshooting PDF from schema-validated AI calls
+- Describe a new workflow in plain English and let the assistant generate, validate, and auto-fix it with `branch-on-error` until it's valid
+
+**Why these chained pipelines beat a single prompt.** Breaking a hard problem into a DAG of small AI calls gives each call a tighter scope — and higher accuracy — than one monolithic prompt. And because any step can be a compiler, `make`, a linter, or a test runner, deterministic tools close the loop: a failed `make` feeds its error back into the next AI call, which rewrites the broken file and loops until green. The same agent-loop pattern coding assistants use — encoded as a reusable, auditable pipeline your team designs once and reruns on schedule.
+
+A dual-edition architecture lets organizations move from prototyping to secure, controlled deployment. Both editions are included in every package:
 
 - **j9t Studio** — visual workflow editor with AI generation, explain, and auto-fix; AI assistant with 31 tools; workflow versioning and live debugging.
 - **j9t Engine** — lean production runtime with bearer-token auth, RBAC (admin/operator/viewer), TLS, HMAC webhooks, rate limiting, and a security audit log. Ready for private cloud or behind an API gateway.
@@ -34,20 +49,13 @@ JarvisAgent ships in two editions, both included in every package:
 
 ---
 
-## Core Capabilities
+## Further Capabilities
 
-- **Massively parallel AI execution** — hundreds of concurrent requests sharing a single HTTP/2 connection per provider
-- **Visual DAG workflow editor** — drag-and-drop nodes, dependency and dataflow edges, live run status with stdout/stderr on each node
-- **Mixed task types** — AI calls, Python scripts (embedded engine), shell commands, internal C++ tasks; freely mixed in serial and parallel
 - **Per-item fan-out** — CSV / text_lines / Polarion filters spawn one parallel AI call per item, with downstream glob-based aggregation
-- **Triggers & scheduling** — cron (IANA timezone), file-watch, webhook (HMAC-SHA256), manual, auto-start
-- **AI workflow generation** — describe a workflow in natural language; the assistant decomposes, generates JCWF + scripts, validates, and auto-fixes
 - **AI assistant** — 31 specialized tools for reading/writing workflows, running tasks, inspecting logs, and querying the running engine
 - **Structured AI output** — declare a JSON schema on any AI call; the runtime validates the reply and self-heals on mismatch, so downstream tasks receive type-safe fields
 - **Document conversion** — PDF, DOCX, XLSX, PPTX, HTML converted to Markdown via [MarkItDown](https://github.com/microsoft/markitdown), auto-chunked when a prompt exceeds the provider's context window
 - **Live dashboard** — React UI with run monitoring, log streaming (up to 100k lines), Run Analyzer for warnings/errors
-- **Workflow versioning** — auto-backup on every save, browse and restore from the editor
-- **Run control** — pause, resume, stop running workflows via REST API or editor UI
 - **Enterprise security (Engine)** — bearer token auth, RBAC, TLS, HMAC webhooks, rate limiting, auth lockout, token auto-rotation, audit log
 - **Cross-platform** — Linux (DEB/RPM/Arch/AppImage/Flatpak), macOS (DMG/Homebrew), Windows (MSI/ZIP), Docker
 
