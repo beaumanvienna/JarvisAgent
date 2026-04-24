@@ -49,18 +49,6 @@ A dual-edition architecture lets organizations move from prototyping to secure, 
 
 ---
 
-## Further Capabilities
-
-- **Per-item fan-out** — CSV / text_lines / Polarion filters spawn one parallel AI call per item, with downstream glob-based aggregation
-- **AI assistant** — 31 specialized tools for reading/writing workflows, running tasks, inspecting logs, and querying the running engine
-- **Structured AI output** — declare a JSON schema on any AI call; the runtime validates the reply and self-heals on mismatch, so downstream tasks receive type-safe fields
-- **Document conversion** — PDF, DOCX, XLSX, PPTX, HTML converted to Markdown via [MarkItDown](https://github.com/microsoft/markitdown), auto-chunked when a prompt exceeds the provider's context window
-- **Live dashboard** — React UI with run monitoring, log streaming (up to 100k lines), Run Analyzer for warnings/errors
-- **Enterprise security (Engine)** — bearer token auth, RBAC, TLS, HMAC webhooks, rate limiting, auth lockout, token auto-rotation, audit log
-- **Cross-platform** — Linux (DEB/RPM/Arch/AppImage/Flatpak), macOS (DMG/Homebrew), Windows (MSI/ZIP), Docker
-
----
-
 ## Supported AI Backends
 
 JarvisAgent talks to AI providers through four interface adapters, covering every major hosted provider and every common self-hosted runtime. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`.
