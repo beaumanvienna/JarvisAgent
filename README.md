@@ -82,7 +82,7 @@ Workflows read from and write to external systems through a unified `ICloudConne
 
 Typical round-trip: **read from cloud → fan out per item → AI processes each → write results back**.
 
-An **MCP sidecar** also exposes workflows to Claude Desktop, Claude Code, and other MCP clients.
+An **MCP sidecar** also exposes workflows to MCP clients such as Claude Code.
 
 See [doc/cloud-integration.md](doc/cloud-integration.md) for the full architecture and per-connector details.
 
