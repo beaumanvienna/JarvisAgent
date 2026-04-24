@@ -5,6 +5,8 @@ import { reloadWorkflows, runWorkflow } from "../api";
 interface Props {
   workflows: WorkflowEntry[];
   hasProviders: boolean;
+  keysSealed: boolean;
+  onRequestUnlock: () => void;
   runs: RunSnapshot[];
   lastRuns: LastRunInfo[];
   onRefresh: () => void;
@@ -41,7 +43,16 @@ function stateClass(state: string): string {
   }
 }
 
-export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns, onRefresh, canRunWorkflows }: Props) {
+export default function WorkflowsPanel({
+  workflows,
+  hasProviders,
+  keysSealed,
+  onRequestUnlock,
+  runs,
+  lastRuns,
+  onRefresh,
+  canRunWorkflows,
+}: Props) {
   const [reloading, setReloading] = useState(false);
   const topLevelWorkflows = workflows.filter((wf) => !wf.is_sub_workflow);
 
@@ -92,9 +103,29 @@ export default function WorkflowsPanel({ workflows, hasProviders, runs, lastRuns
       </div>
       {!hasProviders && topLevelWorkflows.some((wf) => wf.has_ai_call) && (
         <div className="no-keys-banner">
-          No AI providers configured — workflows with ai_call tasks have been
-          skipped. Unlock the master password, or add providers in the Settings
-          UI in the workflow editor, then reload workflows.
+          {keysSealed ? (
+            <>
+              <span>
+                Master password not entered — AI provider keys are encrypted in
+                <code> keys.json.enc</code> and unreachable until you unlock.
+                Workflows with <code>ai_call</code> tasks have been skipped.
+              </span>
+              <button
+                className="btn btn-editor"
+                type="button"
+                onClick={onRequestUnlock}
+                style={{ marginLeft: 12 }}
+              >
+                Unlock master password
+              </button>
+            </>
+          ) : (
+            <>
+              No AI provider keys configured — workflows with <code>ai_call</code>
+              {" "}tasks have been skipped. Add a provider in the AI Manager in the
+              workflow editor, then reload workflows.
+            </>
+          )}
         </div>
       )}
       {topLevelWorkflows.length === 0 ? (

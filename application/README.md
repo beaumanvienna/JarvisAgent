@@ -176,7 +176,7 @@ Maps `TaskType` → `ITaskExecutor`. Registered executors:
 - cloud task executors — see `application/cloud/README.md`
 
 ### StatusRenderer
-Draws dynamic ncurses terminal status window showing workflow run state, active queries, and completed queries.
+Drives the ncurses terminal status window. One aggregate AI row (`[AI] In flight / Completed / Failed` + spinner, fed from `EventCategoryAi` dispatcher hooks) followed by up to 3 last-run rows (`✓ workflowId (12s ago)`, same shape as the dashboard's `LastRunsBar`, sourced from `WorkflowRuntimeManager::GetLastRunsSnapshot`).
 
 ---
 

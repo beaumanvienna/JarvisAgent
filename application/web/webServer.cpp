@@ -557,8 +557,44 @@ namespace AIAssistant
 
     } // namespace
 
+    namespace
+    {
+        // Forwards Crow's logger to our spdlog. Crow's default CerrLogHandler writes
+        // directly to std::cerr, which bypasses ncurses and corrupts the TUI status
+        // window (raw writes overpaint the bottom rows). Routing through spdlog sends
+        // the output to log.txt and the ncurses LOG window, same as our own logs.
+        class CrowSpdlogHandler : public crow::ILogHandler
+        {
+          public:
+            void log(std::string const& message, crow::LogLevel level) override
+            {
+                // Benign; every untrusted-cert client (browser prefetch, stale curl) triggers it.
+                if (message.find("Could not start adaptor") != std::string::npos)
+                {
+                    return;
+                }
+
+                switch (level)
+                {
+                    case crow::LogLevel::Debug:    LOG_CORE_INFO("[crow] {}", message);      break;
+                    case crow::LogLevel::Info:     LOG_CORE_INFO("[crow] {}", message);      break;
+                    case crow::LogLevel::Warning:  LOG_CORE_WARN("[crow] {}", message);      break;
+                    case crow::LogLevel::Error:    LOG_CORE_ERROR("[crow] {}", message);     break;
+                    case crow::LogLevel::Critical: LOG_CORE_CRITICAL("[crow] {}", message);  break;
+                }
+            }
+        };
+
+        CrowSpdlogHandler& GetCrowLogHandler()
+        {
+            static CrowSpdlogHandler instance;
+            return instance;
+        }
+    } // namespace
+
     WebServer::WebServer()
     {
+        crow::logger::setHandler(&GetCrowLogHandler());
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
@@ -2053,20 +2089,44 @@ namespace AIAssistant
             }
         }
 
-        // Connection health from circuit breaker
+        // Connection health.  The dashboard LED wants a view of ALL configured
+        // connections (otherwise you see "Cloud: no connections" until the
+        // circuit breaker has been exercised).  Build the list from the
+        // configured connections and overlay any breaker state we have.
         {
+            auto const& connectionManager = Core::g_Core->GetCloudConnectionManager();
             auto const& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
-            auto health = circuitBreaker.GetHealthSummary();
-            if (!health.empty())
+            auto configuredNames = connectionManager.GetConnectionNames();
+            if (!configuredNames.empty())
             {
+                std::sort(configuredNames.begin(), configuredNames.end());
                 crow::json::wvalue::list connections;
-                for (auto const& ch : health)
+                for (auto const& name : configuredNames)
                 {
                     crow::json::wvalue entry;
-                    entry["name"] = ch.m_Name;
-                    entry["circuit_state"] = CloudCircuitBreaker::StateToString(ch.m_State);
-                    entry["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                    entry["name"] = name;
+                    entry["circuit_state"] =
+                        CloudCircuitBreaker::StateToString(circuitBreaker.GetState(name));
+                    entry["consecutive_failures"] = 0;
+                    // confirmed_healthy: true once a successful Test click or JCWF
+                    // cloud task has proved this connection.  Drives the LED so
+                    // merely-configured connections stay "unknown" instead of
+                    // showing as healthy until we have actual evidence.
+                    entry["confirmed_healthy"] = circuitBreaker.HasEverSucceeded(name);
                     connections.push_back(std::move(entry));
+                }
+                // Overlay the breaker's own summary so `consecutive_failures` is
+                // filled in for connections that have actually been exercised.
+                auto health = circuitBreaker.GetHealthSummary();
+                for (auto const& ch : health)
+                {
+                    // linear scan is fine — N ~= 20 connections in realistic deployments
+                    for (size_t i = 0; i < configuredNames.size(); ++i)
+                    {
+                        if (configuredNames[i] != ch.m_Name) continue;
+                        connections[i]["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                        break;
+                    }
                 }
                 status["connection_health"] = std::move(connections);
             }
@@ -4977,6 +5037,14 @@ namespace AIAssistant
         BroadcastJSON(msg.dump());
     }
 
+    bool WebServer::IsMcpConnected()
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        if (m_McpLastHeartbeat.time_since_epoch().count() == 0) return false;
+        auto const elapsed = std::chrono::steady_clock::now() - m_McpLastHeartbeat;
+        return elapsed < std::chrono::seconds(35);
+    }
+
     void WebServer::BroadcastAiCallStarted(std::string const& probName, std::string const& interfaceName)
     {
         crow::json::wvalue msg;
@@ -5092,6 +5160,7 @@ namespace AIAssistant
         auto& config = Core::g_Core->GetMutableConfig();
 
         std::string name, description, url, model, apiTypeStr, keyName;
+        uint64_t maxContextTokensOverride = 0; // 0 = fall back to model-name resolution
 
         {
             simdjson::ondemand::parser parser;
@@ -5128,6 +5197,14 @@ namespace AIAssistant
                     if (d2["key_name"].get_string().get(sv) == simdjson::SUCCESS)
                         keyName = std::string(sv);
                 }
+                {
+                    auto d2 = parser.iterate(json);
+                    int64_t ctxVal = 0;
+                    if (d2["max_context_tokens"].get_int64().get(ctxVal) == simdjson::SUCCESS && ctxVal > 0)
+                    {
+                        maxContextTokensOverride = static_cast<uint64_t>(ctxVal);
+                    }
+                }
             }
             catch (...)
             {
@@ -5157,6 +5234,10 @@ namespace AIAssistant
             name.empty()
                 ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
                 : name;
+        newIface.m_MaxContextTokens =
+            maxContextTokensOverride > 0
+                ? maxContextTokensOverride
+                : ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(model);
 
         if (apiTypeStr == "API4")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
@@ -5921,6 +6002,13 @@ namespace AIAssistant
         // Same master password unlocks (or creates) the MCP key store.
         InitMcpKeyStore(masterPassword);
 
+        // Re-hydrate OAuth tokens now that providers are readable. The initial
+        // HydrateFromKeyManager call in Core::Initialize ran before unlock, so
+        // it saw an empty provider map; without this call, persisted OAuth
+        // refresh_tokens (Google Sheets, OneDrive) would never be restored
+        // across restarts and every provider would need re-authorisation.
+        Core::g_Core->GetOAuthTokenManager().HydrateFromKeyManager();
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["status"] = "ok";
@@ -6551,6 +6639,19 @@ namespace AIAssistant
         std::string errorMessage;
         bool success = connector->TestConnection(*connection, errorMessage);
 
+        // Record the outcome on the circuit breaker so the dashboard Cloud LED
+        // lights up as soon as a Test button (not just a JCWF cloud task) has
+        // proved a connection works end-to-end.
+        auto& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
+        if (success)
+        {
+            circuitBreaker.RecordSuccess(connectionName);
+        }
+        else
+        {
+            circuitBreaker.RecordFailure(connectionName);
+        }
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = success;
         if (!success)
@@ -6944,9 +7045,20 @@ namespace AIAssistant
         if (httpCode != 200)
         {
             std::string errMsg = "Token exchange returned HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
+            if (!responseBody.empty())
             {
-                errMsg += ": " + responseBody;
+                // Always include the provider's error body — Microsoft/Google
+                // put the actionable message (AADSTS code, invalid_client, etc.)
+                // there.  Truncate to keep logs readable.
+                constexpr size_t kMaxBodyInLog = 1500;
+                if (responseBody.size() <= kMaxBodyInLog)
+                {
+                    errMsg += ": " + responseBody;
+                }
+                else
+                {
+                    errMsg += ": " + responseBody.substr(0, kMaxBodyInLog) + "…(truncated)";
+                }
             }
             LOG_CORE_ERROR("OAuth callback for '{}': {}", connectionName, errMsg);
             return crow::response(500, errMsg);

@@ -22,10 +22,10 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace AIAssistant
@@ -33,39 +33,58 @@ namespace AIAssistant
     class StatusRenderer
     {
     public:
-        struct SessionStatus
+        // Mirrors the signals the dashboard consumes from /api/status +
+        // /api/settings/keys/status so the TUI and web views stay in sync.
+        struct RuntimeSnapshot
         {
-            std::string name;
-            std::string state;
-            size_t outputs{0};
-            size_t inflight{0};
-            size_t completed{0};
-            size_t failed{0};
-            int lastErrorCode{0};
-            std::string lastErrorMessage;
-
-            size_t spinnerIndex{0};
-            std::chrono::steady_clock::time_point lastSpinnerUpdate{std::chrono::steady_clock::now()};
+            std::string keysStatus;        // "ok" | "no_password" | "wrong_password" | "no_keys_file"
+            bool hasProviders{false};      // keyManager has at least one provider loaded
+            size_t aiInflight{0};          // AiRequestPool::GetDirectDispatchInflight()
+            size_t activeRuns{0};          // WorkflowRuntimeManager::GetActiveRunsSnapshot().size()
+            bool mcpConnected{false};      // WebServer::IsMcpConnected()
+            size_t cloudHealthy{0};
+            size_t cloudRecovering{0};
+            size_t cloudOpen{0};
+            uint64_t totalCompleted{0};    // WorkflowRuntimeManager::GetRunCounters
+            uint64_t totalFailed{0};
+            bool pythonRunning{true};      // PythonEnginePool health
         };
 
-    public:
+        struct LastRunSummary
+        {
+            std::string displayId;
+            std::string state;             // succeeded | failed | cancelled | running | pending | queued | stopped | paused
+            std::string completedAtIso;    // ISO 8601 UTC; empty for still-running
+            bool isAdhoc{false};
+        };
+
+        using RuntimeSnapshotProvider = std::function<RuntimeSnapshot()>;
+        using LastRunsProvider = std::function<std::vector<LastRunSummary>(size_t maxCount)>;
+
         StatusRenderer() = default;
 
-        void UpdateSession(std::string const& name, std::string_view state, size_t outputs, size_t inflight,
-                           size_t completed, size_t failed, int lastErrorCode, std::string const& lastErrorMessage);
-        void RemoveSession(std::string const& name);
+        // Providers are called once per redraw.  Keep them cheap.
+        void SetRuntimeSnapshotProvider(RuntimeSnapshotProvider provider);
+        void SetLastRunsProvider(LastRunsProvider provider);
 
         void Start();
         void Stop();
 
-        // Build human-readable status lines for the terminal status window.
-        // maxColumns is the available width; implementation must be UTF-8 safe.
+        // Builds two rows:
+        //   Row 1 — status LEDs: Keys / AI in flight / Active runs / MCP / Cloud / succeeded / failed
+        //   Row 2 — "Last runs:" + up to 3 entries laid out horizontally
+        // When keys are locked, row 1 highlights that and row 2 carries a short
+        // "Unlock in the dashboard" hint (the TUI itself has no unlock affordance).
         void BuildStatusLines(std::vector<std::string>& outLines, int maxColumns);
 
-        size_t GetSessionCount();
+        // Always returns 2.
+        size_t GetRowCount();
 
     private:
         std::mutex m_Mutex;
-        std::unordered_map<std::string, SessionStatus> m_Sessions;
+        size_t m_SpinnerIndex{0};
+        std::chrono::steady_clock::time_point m_LastSpinnerUpdate{std::chrono::steady_clock::now()};
+        RuntimeSnapshotProvider m_SnapshotProvider;
+        LastRunsProvider m_LastRunsProvider;
     };
 } // namespace AIAssistant

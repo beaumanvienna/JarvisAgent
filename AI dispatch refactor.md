@@ -1,8 +1,151 @@
 # AI Dispatch Refactor — Dev Plan
 
-**Status:** dev plan, rev 1
+**Status:** dev plan, rev 1 — **MERGE-READY** as of 2026-04-24
 **Target:** j9t 1.0
 **Tracking:** `JarvisAgent TODO List.md` §5g (pre-1.0 priority). Subsumes §5c.
+
+---
+
+> ## Session end — 2026-04-24 (merge-ready hand-off)
+>
+> **State:** branch `refactor/ai-dispatch`. All refactor acceptance criteria met, full regression green, stress test green, new cross-workflow concurrency test green. Safe to merge to `main` once CI is green. Delete this file as part of the merge commit (per JC's earlier instruction — all long-term content already in `doc/architecture.md`, `doc/JC_Workflow_Specification.md`, `doc/jcwf_generation_guide.md`).
+>
+> **Fixes landed today (on top of yesterday's uncommitted work):**
+> 1. **Concurrency bug** (the only real merge blocker): `WorkflowRuntimeManager::m_ActiveRuns` switched from `std::vector<ActiveRun>` to `std::vector<std::unique_ptr<ActiveRun>>` — stable element addresses across `push_back` keep `&workflowDefinition` references inside worker lambdas alive. Mechanical change across ~15 access sites. Locked down with new `test/dispatch/test_cross_workflow_parallel.py` (fires N=12 parallel adhoc runs and verifies each lands its own output in its own folder — green at N=25 in local stress).
+> 2. **TUI paint regression + Crow noise:** Crow's default logger wrote straight to stderr, bypassing ncurses and overpainting the status rows, and produced 3×/minute "Could not start adaptor: ssl/tls alert certificate unknown" warnings from untrusted-cert clients (browser tabs). Installed a `crow::ILogHandler` shim in `webServer.cpp` that routes Crow through `LOG_CORE_*` (so entries land in log.txt + ncurses LOG window like everything else) and silences the specific benign-but-noisy adaptor warning. Defensive: `SanitizeForCurses` now maps C0 control chars (newline/CR/etc.) to spaces so embedded tracebacks in log payloads can't reposition the ncurses cursor.
+> 3. **Mermaid fence-strip regression:** `StripWholeReplyFence` had eaten the ```mermaid fence around AI-generated flowcharts in `vehicleTroubleshootingGuide`, leaving raw Mermaid source to render as text in the PDF. Added a language-tag keep-list (`mermaid`, `dot`, `plantuml`, `graphviz`, `latex`, `tex`, `markdown`, `md`) that preserves the fence when the content is a diagram/markdown-authored block — Haiku's accidental `cpp`/`python`/bare-fence wrapping is still stripped.
+> 4. **Structured-output template wiring:** `InjectUpstreamOutputs` extended to parse any `.json` file in an upstream ai_call's `m_OutputValues` and flatten it into `{{A.json.PATH}}`, symmetric with cloud tasks' `response.json` handling. Unlocks structured output as a first-class template source for downstream tasks.
+>
+> **JCWF upgrades showcasing structured output:**
+> - `vehicleTroubleshootingGuide` — 3 ai_call tasks now emit `{title, mermaid}` JSON validated by schema; combiner script owns the ```mermaid fence wrapping so the fence-strip regression above can't recur for this workflow regardless of heuristic. Tightened TASK instructions + defensive regex normalization in the python combiner for Haiku's occasional `--|` (missing `>` arrow) quirk.
+> - `redmineTriageBot` — `ai_classify` emits `{user_id: enum["5","6"]}`, `update_issue.assigned_to_id` reads `{{ai_classify.json.user_id}}` via the new `.json.PATH` resolver.
+> - `snowflakeQueryDemo` — `ai_analyze` emits `{verdict: enum[STRONG|MODERATE|WEAK]}`, SQL INSERT uses `{{ai_analyze.json.verdict}}`.
+> - `goKartComplianceCheck` — `assessRequirement` emits `{verdict, summary, cost_estimate_eur, difficulty}`, Polarion update uses `[{{json.verdict}}] {{json.summary}}`.
+> - `gitHubIssueDemo` — `ai_triage` emits `{category, priority, next_action, labels_ok}`, comment body composed from the fields.
+> - `aiCarMaintenancePipeline` — already structured; verified end-to-end.
+>
+> All 5 upgraded JCWFs plus `.md` docs copied back to `example/workflows/`.
+>
+> **Test results (2026-04-24):**
+> - 31-call stress burst (27 example workflows + 4 adhoc generate/build pipeline) in one tool-call message: **0 unexpected failures** (1 deliberate exampleMakefile5 shell failure handled by Rule A; 1 expected negative-path inputResolutionTest without context, re-run green with context).
+> - Hermetic dispatch suite: `test_schema_covers_parser`, `test_direct_dispatch_signals`, `test_envelope_empty_body_rejected`, `test_testinterface_hermetic`, `test_relaxed_env_warnings`, new `test_cross_workflow_parallel` (N=25 parallel) — **all green**.
+> - Peak WebSocket broadcast burst: 115 queued, drained cleanly.
+> - `ai_structured_submissions: 1+`, `ai_schema_validation_retries: 0`, `ai_schema_validation_failures: 0` — schema validator never needed to retry in any of the runs.
+>
+> **TODO updates (same commit as the merge):**
+> - `JarvisAgent TODO List.md` §5g: 60-second `WaitingExternal` timeout entry marked resolved (the refactor already used 300 s default + 120 s ai_call floor); Haiku fence quirk entry marked with mitigation-in-place, contract-tests entry annotated with today's additions.
+> - §5g contract-tests checkbox kept open for post-1.0 slices (live-backed retry/chunking/markitdown, automated assistant tool-call tests).
+>
+> **Not touched (deliberate, post-merge or post-1.0):**
+> - §5d repo-layout hygiene (`code/` subtree move, `.npm-tools/` + `jarvis_agent.example.env` deletion, Docker-file relocation).
+> - §5h Bedrock + Azure OpenAI adapters.
+> - §5e / §5f tool-calling + Claude Code PoC.
+> - Open §5g follow-ups: chunking fan-out, JCWF schema gap-close, GenerateAsync wire-up to `kJcwfSchemaJson`, EventCategoryAi consumers beyond the aggregate LED.
+>
+> --- (prior session handoffs preserved below for historical reference) ---
+>
+> ## Session handoff — 2026-04-23 → 2026-04-24 (fresh session read this first)
+>
+> **Where we are:** branch `refactor/ai-dispatch`, several uncommitted changes in the working tree (see "Uncommitted work" below). j9t is stopped. Merge to main has NOT happened yet (blocked on resolving the concurrency bug below or deciding to defer it).
+>
+> **Today's wins (2026-04-23):**
+> - Closed §5g follow-ups: §5g tasks 1–10 resolved (most were stale — already in 62a55be), `#9 replayTranscript.py` cancelled per JC.  Task #5 shipped the TUI status window (2-line: edition + LEDs + last-runs; sealed-keys hint appended).  Task #6 added 5 new `test/dispatch/` contract tests (signals, hermetic TestInterface, relaxed env, output-schema roundtrip, chunking, markitdown).  Task #8 shipped 3 live-backed E2E tests.
+> - Side task: UI/TUI revision — dashboard-style signals, 2-banner variants in WorkflowsPanel, Cloud LED rework (only green when a connection has been confirmed via Test button or JCWF success), hidden Studio anon "admin" pill, auto-open MasterPasswordDialog on reconnect, consistent button spacing.
+> - Side task: ran full connection regression across 14 cloud connectors. 12 green immediately, fixed 4 (greenmail creds, jira API token, azurite container start, sheets OAuth re-registration). OneDrive OAuth tokens survive restart now (added `OAuthTokenManager::HydrateFromKeyManager()` call after unlock in `HandleKeysUnlockPost`).
+> - Side task: ran full example-workflow regression sweep. **25/27 green** (1 skipped — `hamburg-tourist-day-planner` is n8n-driven, not manual).
+>
+> **Bugs surfaced + fixed during testing today (all committed-to-worktree, not yet committed to git):**
+> - `FileWatcher::WaitStop` logged "File watcher stopped" on every call; second call (from `~FileWatcher` after OnShutdown returns) fired after Core::Shutdown had torn down the TUI → stray log line on raw terminal. Fix in `application/file/fileWatcher.cpp`: invalidate `m_WatchTask` after first wait so subsequent `Stop()` is a no-op.
+> - `WorkflowRuntimeManager::TickActiveRun` re-entered the "[workflow] run '{}' completed" log ~120×/run during the 2 s minimum-visibility hold (make-example auto-trigger made this very visible). Fix: early return from TickActiveRun when `m_Run.m_IsCompleted`.
+> - `POST /api/settings/ai-interfaces` didn't populate `max_context_tokens` — stayed 0, chunking never fired for REST-created Test interfaces. Fix: accept optional `max_context_tokens` in body, else fall back to newly-public `ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel`.
+> - OAuth token persistence across restart was broken (`HydrateFromKeyManager` ran at startup before unlock, saw empty provider map, never re-ran). Fix: call `HydrateFromKeyManager` from `HandleKeysUnlockPost` after successful unlock.
+> - OAuth error handling truncated Microsoft/Google error bodies below 500 chars — sometimes the actionable error was missed. Fix: include up to 1500 chars of response body in the logged error.
+> - Dashboard: `AdminLoginDialog` could appear in Studio on transient 401s. Fix: guard `j9t-auth-required` handler and dialog condition with `isEngine`.
+> - Dashboard Cloud LED was meaningless (read circuit-breaker map, empty until connections were exercised). Now keyed on `confirmed_healthy` per connection (set via `RecordSuccess` — both Test button and JCWF success increment it). Grey until ≥1 connection proved, then "Cloud: N healthy".
+>
+> **CONCURRENCY BUG found during regression sweep — serious, pre-existing (not a §5g regression):**
+> - `WorkflowRuntimeManager::TickActiveRun` at line ~1841 captures `&workflowDefinition` **by reference** into a thread-pool lambda. `workflowDefinition` refs an element of `std::vector<ActiveRun> m_ActiveRuns`. When a new run is added while another is executing, `vector::push_back` can reallocate → all references dangle → thread pool worker reads the wrong workflow's base directory.
+> - Evidence: during batch-4 of the regression sweep, jira's `create_issue` task wrote `response.json` to `workflows/cyber2/jiraIssueDemo/02_create/` (cyber2 happened to occupy the slot jiraIssueDemo used to). github's `list_issues` similarly scattered. Log line that proves it: `TaskPathResolver::ResolveTaskWorkingDirectoryPath … baseDirectoryAbsolute='workflows/cyber2' taskWorkingDirectoryRelative='jiraIssueDemo/02_create'`.
+> - `gitHubIssueDemo` + `jiraIssueDemo` **run green when executed serially** (not yet verified — the solo rerun was cut short). Everything else in the sweep was green.
+> - Fix options discussed, none applied yet:
+>   - (a) `std::vector<std::unique_ptr<ActiveRun>>` — stable element addresses, smallest blast radius, touches every `m_ActiveRuns[idx].m_X` call site.
+>   - (b) `std::list<ActiveRun>` — stable refs but breaks `m_ActiveRuns[idx]` API.
+>   - (c) `WorkflowRun const workflowRunSnapshot = workflowRun;` pattern is already used for the RUN; extend it to WorkflowDefinition. But `WorkflowDefinition` is heavy (tasks map, dataflow, filters, control nodes) — copying per task submission costs cycles. Likely fine for human-scale workflows but worth measuring.
+>   - (d) Pre-resolve everything the worker needs (workflowBaseDir, etc.) at submission time, capture those small derived values by value. Least-invasive but doesn't fix other uses of the dangling ref.
+> - Recommendation: **(a) `std::vector<std::unique_ptr<ActiveRun>>`**. Stable addresses, minimal overhead, explicit about ownership. ~30–50 edit sites but mechanical.
+>
+> **Uncommitted changes on disk (all in `refactor/ai-dispatch` worktree):**
+> - `application/file/fileWatcher.cpp` — WaitStop idempotency
+> - `application/workflow/workflowRuntimeManager.cpp` — TickActiveRun early-return on completed
+> - `application/web/webServer.cpp` — improved OAuth error body logging, `IsMcpConnected()` getter, `max_context_tokens` in POST /api/settings/ai-interfaces, OAuth rehydrate after unlock, `confirmed_healthy` in connection_health, Test-endpoint RecordSuccess/Failure wiring, two-banner Workflows panel, tab-bar button hiding in StatusBar
+> - `application/web/webServer.h` — `IsMcpConnected()` declaration
+> - `application/cloud/cloudCircuitBreaker.{h,cpp}` — `m_EverSucceeded` flag + `HasEverSucceeded()` accessor
+> - `application/log/statusRenderer.{h,cpp}` — new 2-line dashboard-style status (rewrite)
+> - `application/log/terminalManager.*` — (if touched — check)
+> - `application/jarvisAgent.{cpp,h}` — StatusRenderer wiring, RuntimeSnapshot + LastRuns providers, EventCategoryAi wiring
+> - `application/logging.md`, `application/README.md` — doc sweep for StatusRenderer rewrite
+> - `engine/json/configParser.{h,cpp}` — `EngineConfig::ResolveMaxContextTokensFromModel` now public
+> - `dashboard/ui/src/App.tsx`, `components/StatusBar.tsx`, `components/WorkflowsPanel.tsx`, `types.ts`, CSS — dashboard UI rework (all described above)
+> - `workflow-editor/ui/src/App.tsx` — hide Workflows button when on the Workflows view
+> - `test/dispatch/`: 5 new Python tests + fixture + README update
+> - Memory updates: added `feedback_build_studio_debug.md`.
+>
+> **Regression sweep state (2026-04-23):**
+> - 25/27 workflows pass. 2 failing (`gitHubIssueDemo`, `jiraIssueDemo`) — both blocked by the concurrency bug above. Symptom: `response.json` from a `jira_issue create` / `github_issue list_issues` task lands in the wrong workflow's folder, so downstream `{{taskId.json.PATH}}` template resolution fails.
+> - Not investigated: test pass/fail when the same two run serially instead of in-batch.
+> - `hamburg-tourist-day-planner` skipped per JC ("I need to run that one from n8n").
+>
+> **Tomorrow's plan (rough, JC to confirm):**
+> 1. Decide on concurrency-bug fix (recommend option a) and apply it.
+> 2. Re-run gitHubIssueDemo + jiraIssueDemo; confirm 27/27 green.
+> 3. Walk uncommitted-changes list, review, commit in logical chunks.
+> 4. CI on green → merge `refactor/ai-dispatch` → `main`. Watch `package-*` jobs fire on main for the first time.
+> 5. Consider adding a regression test that exercises cross-workflow parallel runs with template resolution, to lock this class of bug down.
+>
+> **Local-env state:**
+> - j9t is stopped.
+> - `workflows/` has 27 JCWFs copied from `example/workflows/` (clean-slate regression baseline), plus `in.pdf`, plus `.history/` (stale auto-backups).
+> - `queue/` empty. `_adhoc/` empty.
+> - 14 cloud connections all registered and (previously confirmed) healthy — sheets/onedrive will survive restart thanks to the OAuth rehydrate fix.
+> - MCP admin token used today: `mcp_8bd14deb8d4353ef39622d47b07d3f991e593efedd6e934328717b9cacda28b8` (may have rotated; ask JC if auth fails).
+>
+> --- (pre-today handoff preserved below for reference) ---
+>
+> ## Session handoff — 2026-04-21 → 2026-04-22 (fresh session read this first)
+>
+> **Where we are:** branch `refactor/ai-dispatch`, HEAD `62a55be` ("AI dispatch refactor (second part)") pushed to origin. Clean working tree.
+>
+> **Tomorrow's plan (JC):** merge `refactor/ai-dispatch` → `main` once CI is green.
+>
+> **Before merging, do this:**
+> 1. **Delete this file.** JC's instruction: "we can remove it before we move everything onto the main branch." All long-term info has already been merged into `doc/architecture.md`, `doc/JC_Workflow_Specification.md`, and `doc/jcwf_generation_guide.md`.
+> 2. Check CI on `62a55be` — feature-branch smoke builds only (`build-linux` / `build-macOS` / `build-windows`). The `package-*` jobs are gated to `refs/heads/main` via `if: github.ref == 'refs/heads/main'` and will only fire on the post-merge push.
+> 3. After merge, the `package-*` jobs will run on `main` for the first time with the refactor's changes — watch them.
+>
+> **Refactor wins that are fully tested:**
+> - Envelope-direct dispatch (`AiRequestPool::Submit(env, cb)`) — automated: `test/dispatch/test_envelope_empty_body_rejected.py` + `test_api4_anthropic_live.py`.
+> - API4 Anthropic adapter — live Opus round-trip.
+> - API1 OpenAI, chunking + reduce pass, auto-markitdown, fence-strip, debug signals, event broadcasting, model-name fallback table, 120 s `WaitingExternal` floor, late `RegisterPendingWorkflowTask` — manually validated this session.
+> - **Structured output E2E on a workflow-bound task** — validated via `example/workflows/aiCarMaintenancePipeline.jcwf` (classify step declares `output_schema` with enum {engine, tires, rephrase}, downstream `CarMaintenanceTask` parses the JSON via simdjson). End-to-end green: `ai_structured_submissions: 1`, zero retries, zero failures.
+> - **TestInterface hermetic fixture** — `POST /api/settings/ai-interfaces` + adhoc JCWF routed via `params.provider`, canned reply from `test/dispatch/fixtures/hermetic_reply.txt` landed byte-exact. Zero network calls.
+>
+> **Bugs surfaced + fixed during testing (all in `62a55be`):**
+> - `expectedOutputPath` used `.output.txt` even when `output_schema` was declared, but Submit writes `.output.json` → workflow-bound structured tasks would have hung in `waiting_external` forever. Fix: `aiCallTaskExecutor.cpp` derives `.json` when `m_OutputSchemaJson` is non-empty.
+> - TestInterface short-circuit wrote `<stem>.output.txt` but never called `OnOutputFileCreated` → workflow-bound tasks using Test interface hung. Fix: `aiRequestPool.cpp` Test branch now signals completion symmetrically with the real-provider path.
+> - Four `webServer.cpp` handlers (create / update / list / **save**) silently downgraded `api_type: "Test"` and `api_type: "API4"` to `"API1"`. The save handler was the nastiest — persisted the corruption to disk, so a restart loaded API4 entries back as API1 and breakage only surfaced on the second run. Fix: all four handlers extended with explicit cases.
+>
+> **Open follow-ups to add to `JarvisAgent TODO List.md` after merge:**
+> - Live-backed E2E tests for schema-validation retry, chunking, and markitdown (currently manual-only).
+> - Automated hermetic test driving `InterfaceType::Test` (the interface exists, validated by hand, but no regression test asserts the path).
+> - Bedrock (SigV4, `InterfaceType::API5`) + Azure OpenAI — already in TODO §5h.
+> - `replayTranscript.py` tool — already in TODO.
+>
+> **Local-env gotchas worth remembering:**
+> - `config.json` in the working tree matches upstream (reverted pre-commit — the local Test interface addition and the API4-corrupted entries were left out of the commit). If you want to re-exercise the Test interface in a fresh session, POST it via `/api/settings/ai-interfaces` with `api_type: "Test"` and `url: /home/beaumanvienna/dev/jarvisAgent/test/dispatch/fixtures/hermetic_reply.txt`, then `/save`. The save-handler fix in `62a55be` means it will persist as `"API": "Test"` correctly.
+> - Use `python3` on the CLI. `make` has `MAKEFLAGS=-j32` set; never pass `-j`.
+> - The previous session's MCP admin token may have rotated — ask for a fresh one if auth fails.
+
+---
 
 This document is the implementation plan for a typed, schema-validated, retry-aware AI dispatch layer on top of the existing libcurl multi + HTTP/2 transport. Transport is not modified.
 

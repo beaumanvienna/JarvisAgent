@@ -877,16 +877,18 @@ Available template variables on a declared dependency:
 - `{{A.output_file}}` — absolute path to A's first output file (sorted alphabetically by slot name).
 - `{{A.captured_stdout}}` — captured stdout of A (up to 1024 characters).
 - `{{A.<slotName>}}` — each named output slot from A individually.
-- `{{A.json.<path>}}` — for cloud tasks that write `response.json`, the JSON response is parsed and flattened into dotted-path entries. Example: `{{create_issue.json.key}}`, `{{create_issue.json.fields.summary}}`, `{{list_issues.json.items[0].id}}`.
+- `{{A.json.<path>}}` — JSON response from upstream A is parsed and flattened into dotted-path entries. Works for two upstream types:
+  - **Cloud tasks** that write `response.json` (regular) or `response_<N>.json` (per-item child). Example: `{{create_issue.json.key}}`, `{{create_issue.json.fields.summary}}`, `{{list_issues.json.items[0].id}}`.
+  - **Schema-validated `ai_call` tasks** whose validated reply lands in an upstream `.output.json` file (any `.json` path registered in A's output values). Example: `{{ai_classify.json.user_id}}` resolves from the structured `{"user_id":"5"}` reply.
 
-**Per-child response files:** Cloud task executors write their HTTP response to `response.json` for regular tasks and to `response_<N>.json` for per-item children (where `N` is the item index). The JSON-path resolver reads the appropriate file based on the caller's instance — so chained per_item cloud operations get their own matching-index response without races between concurrent children.
+**Per-child response files:** Cloud task executors write their HTTP response to `response.json` for regular tasks and to `response_<N>.json` for per-item children (where `N` is the item index). The JSON-path resolver reads the appropriate file based on the caller's instance — so chained per_item cloud operations get their own matching-index response without races between concurrent children. Structured-output `ai_call` children get the same per-instance treatment via their per-child `<prob>.output.json` files.
 
-This enables chained pipelines where each downstream task consumes structured fields from its corresponding upstream response:
+This enables chained pipelines where each downstream task consumes structured fields from its corresponding upstream reply:
 
 ```
-filter(N items) → per_item ai_call(N) → per_item cloud_write(N)
-                                              ↑
-                              {{ai_call.captured_stdout}} from matching instance
+filter(N items) → per_item ai_call(N, output_schema) → per_item cloud_write(N)
+                                                           ↑
+                                    {{ai_call.json.FIELD}} from matching instance
 ```
 
 For cloud task executors, template variables in `params` JSON are expanded with JSON-safe escaping (double quotes, backslashes, and newlines are escaped before substitution) so that piped output text does not break JSON structure.

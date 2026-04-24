@@ -155,6 +155,11 @@ namespace AIAssistant
 #ifndef NDEBUG
             LOG_APP_INFO("File watcher stopped");
 #endif
+            // Invalidate the future so a subsequent Stop() / ~FileWatcher()
+            // doesn't log again — previously that second log fired after
+            // Core::Shutdown had torn down the TUI and restored cout, spilling
+            // a stray "File watcher stopped" line into the raw terminal.
+            m_WatchTask = std::future<void>{};
         }
     }
 

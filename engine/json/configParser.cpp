@@ -52,7 +52,7 @@ namespace AIAssistant
         // than happily sending an oversized request into the abyss.
         constexpr uint64_t kUnknownModelFallbackTokens = 50000;
 
-        uint64_t ResolveMaxContextTokensFromModel(std::string const& modelName)
+        uint64_t ResolveMaxContextTokensFromModelImpl(std::string const& modelName)
         {
             std::string lower = modelName;
             std::transform(lower.begin(), lower.end(), lower.begin(),
@@ -95,6 +95,11 @@ namespace AIAssistant
             return kUnknownModelFallbackTokens;
         }
     } // namespace
+
+    uint64_t ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(std::string const& modelName)
+    {
+        return ResolveMaxContextTokensFromModelImpl(modelName);
+    }
 
     ConfigParser::ConfigParser(std::string const& filepathAndFilename)
         : m_ConfigFilepathAndFilename(filepathAndFilename), m_State{ConfigParser::State::Undefined}
@@ -578,7 +583,7 @@ namespace AIAssistant
             // than dispatching an oversized request that the provider may reject.
             if (apiInterface.m_MaxContextTokens == 0 && !apiInterface.m_Model.empty())
             {
-                uint64_t const resolved = ResolveMaxContextTokensFromModel(apiInterface.m_Model);
+                uint64_t const resolved = ResolveMaxContextTokensFromModelImpl(apiInterface.m_Model);
                 apiInterface.m_MaxContextTokens = resolved;
                 bool const matched = (resolved != kUnknownModelFallbackTokens);
                 LOG_CORE_INFO("max_context_tokens for '{}' model='{}': {} (source: {})",

@@ -162,6 +162,15 @@ Event bus (fire-and-forget, observability only):
 - **`AiReply`** carries `Kind` (`Text | Structured | Error`), the response payload, `AiUsage` (input/output/total tokens), finish reason, system fingerprint.
 - **`IRequestBuilder`** + **`ReplyParser`** are symmetric per-provider abstractions. Adding a provider means adding one builder and one parser, plus one enum variant — no other code changes.
 
+**Extension seams.** The envelope is deliberately designed to accept additive post-1.0 capabilities without structural change:
+
+- **Native tool-calling** — a future `m_Tools: vector<ToolDef>` field on `AiInvocation` plumbs directly into provider tool-call protocols (OpenAI `tools`, Gemini `functionDeclarations`, Anthropic `tools`). `ReplyParser` gains a `GetToolCalls()` virtual, `AiReply::Kind` gains `ToolCall`. Tracked in `JarvisAgent TODO List.md` §5e.
+- **Multi-turn conversation** — `m_Messages` already carries a full message list; a multi-turn executor keeps appending to it across tool-return rounds inside one `ai_call` task.
+- **Agent-of-agents / Claude Code orchestration** — the same envelope path drives outbound calls into sub-agents. Tracked in §5f.
+- **Additional providers** — Bedrock (SigV4), Azure OpenAI (deployment URLs + `api-key:` header) each need one new `InterfaceType` + builder + parser + auth style. Tracked in §5h.
+
+All four build on the existing `AiInvocation → IRequestBuilder → CurlMultiDispatcher → ReplyParser → AiReply` pipeline; none require touching transport, schema validation, chunking, reduce pass, transcripts, or the event layer.
+
 ### Queue-folder convention (disk-first philosophy)
 
 Every input and output is on disk, every call is replayable. A task's queue folder contains:
@@ -183,11 +192,19 @@ STNG / CNTX / TASK are all **optional** — a single PROB with non-whitespace co
 
 `ai_call` tasks may declare `output_schema` (a JSON Schema Draft 2020-12 subset) and `output_retries`. On reply the pool extracts JSON from the text (tolerating ```json``` fences), validates against the schema, and on failure re-dispatches with a correction message up to `output_retries` attempts. Supported keywords: `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `oneOf`, `anyOf`, `$ref`, `$defs`. Unsupported keywords are rejected at schema-load time, not at reply time — authors see errors before a run starts. Structured mode selection is per-provider: native `response_format: json_schema` on OpenAI (API1/API2) and Gemini (API3), forced-tool shim on Anthropic (API4) with `tool_choice: {"type":"tool","name":"output"}`.
 
+Validated replies land in a `<stem>.output.json` file. Downstream tasks can reference any field via the standard `{{upstreamTaskId.json.PATH}}` template resolver — the runtime parses any `.json` file registered in the upstream's output values and flattens it into dotted-path entries, symmetric with the cloud-task `response.json` mechanism. This lets a schema-validated `ai_call` feed concrete fields into cloud writes, SQL inserts, or other `ai_call` prompts without an intermediate parser task.
+
 ### Chunking + reduce
 
 Each `ApiInterface` declares a `max_context_tokens` budget. If not set in `config.json`, a curated model-name fallback table resolves a default (GPT-4-family 128 K, Claude 200 K, Gemini 1.5/2 1 M, Llama/Qwen/DeepSeek/Phi 128 K, Mistral/Mixtral 32 K, unknown 50 K). When an envelope's user message exceeds the budget, `ChunkPlanner` splits only the CNTX portion at markdown section boundaries (preferring `#`/`##`/`###` whole sections, subdividing only when a section alone overruns). N envelopes fan out in parallel — each carries the full STNG/TASK + one slice + original PROB. Once all N replies land, a **reduce envelope** runs: it carries all N partial answers plus the original PROB with an instruction to produce a single unified response. The reduced reply becomes `<prob>.output.txt`. If any chunk fails, the fallback is plain concatenation with HTML comment separators.
 
 Chunking and `output_schema` are mutually exclusive (schema wins — schema enforcement requires a whole-object reply, which a chunked response can't satisfy).
+
+### Reply-fence heuristic
+
+Some models (notably Claude Haiku) occasionally ignore "no fences" STNG instructions and wrap the entire reply in a triple-backtick block — e.g. ```` ```cpp … ``` ````. Downstream compilers, Make, and Python execution choke on those leading backticks, so `AiRequestPool` applies a best-effort `StripWholeReplyFence` pass: if the whole reply is a single fenced block with no nested ```` ``` ```` sequences, the outer fence (plus optional language tag line) is removed. The stripped-count is exposed as `ai_fence_strips` on `/api/debug/signals`.
+
+Diagram / markdown authoring formats keep their fence wrapper — the strip pass honours a language-tag keep-list (`mermaid`, `dot`, `plantuml`, `graphviz`, `latex`, `tex`, `markdown`, `md`) so an AI task emitting a ```` ```mermaid … ``` ```` flowchart for embedding into a larger markdown document survives intact through downstream renderers (`scripts/mermaidMdToPdf.sh`, pandoc, etc.). For workflows where the AI is asked to produce a diagram, the recommended pattern is still `output_schema` with a `mermaid` string field — the combiner then owns the ```` ```mermaid ```` wrapping and the strip pass has nothing to act on.
 
 ### Embedded schema and generation guide
 

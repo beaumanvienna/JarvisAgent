@@ -82,6 +82,10 @@ namespace AIAssistant
         // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
         void EnqueueLogLine(std::string const& line);
 
+        // MCP sidecar heartbeat: true when the sidecar sent a heartbeat within the last 35 s.
+        // Same threshold the dashboard's `mcp_connected` LED uses.
+        bool IsMcpConnected();
+
 #ifdef J9T_STUDIO
         // Shut down the assistant controller early (before WRM/AiRequestPool are reset).
         void ShutdownAssistantController();

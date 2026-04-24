@@ -127,13 +127,13 @@ namespace AIAssistant
                     // Compute status window height dynamically
                     [this](int totalRows) -> int
                     {
-                        size_t sessionCount = m_StatusRenderer.GetSessionCount();
-                        if (sessionCount == 0)
+                        size_t rowCount = m_StatusRenderer.GetRowCount();
+                        if (rowCount == 0)
                         {
-                            sessionCount = 1;
+                            rowCount = 1;
                         }
 
-                        int statusHeight = static_cast<int>(sessionCount);
+                        int statusHeight = static_cast<int>(rowCount);
 
                         // ensure at least 1 line, and leave at least 1 for log
                         if (statusHeight >= totalRows)
@@ -399,6 +399,136 @@ namespace AIAssistant
 
         m_WebServer->SetWorkflowRuntimeManager(m_WorkflowRuntimeManager.get());
 
+        // Feed the TUI status window the same signals the dashboard consumes so
+        // both stay in sync (keys / AI in flight / runs / MCP / cloud / totals).
+        {
+            WorkflowRuntimeManager* runtime = m_WorkflowRuntimeManager.get();
+            WebServer* webServer = m_WebServer.get();
+            AiRequestPool* requestPool = m_AiRequestPool.get();
+            PythonEnginePool* pythonPool = m_PythonEnginePool.get();
+
+            m_StatusRenderer.SetRuntimeSnapshotProvider(
+                [runtime, webServer, requestPool, pythonPool]() -> StatusRenderer::RuntimeSnapshot
+                {
+                    StatusRenderer::RuntimeSnapshot snap;
+
+                    if (Core::g_Core != nullptr)
+                    {
+                        auto const& keyManager = Core::g_Core->GetKeyManager();
+                        switch (keyManager.GetKeyLoadStatus())
+                        {
+                            case KeyManager::KeyLoadStatus::Ok: snap.keysStatus = "ok"; break;
+                            case KeyManager::KeyLoadStatus::NoPassword:
+                                snap.keysStatus = "no_password";
+                                break;
+                            case KeyManager::KeyLoadStatus::WrongPassword:
+                                snap.keysStatus = "wrong_password";
+                                break;
+                            case KeyManager::KeyLoadStatus::NoKeysFile:
+                                snap.keysStatus = "no_keys_file";
+                                break;
+                        }
+                        snap.hasProviders = keyManager.HasProviders();
+
+                        auto const& breaker = Core::g_Core->GetCloudCircuitBreaker();
+                        auto health = breaker.GetHealthSummary();
+                        for (auto const& h : health)
+                        {
+                            switch (h.m_State)
+                            {
+                                case CloudCircuitBreaker::State::Closed: ++snap.cloudHealthy; break;
+                                case CloudCircuitBreaker::State::HalfOpen:
+                                    ++snap.cloudRecovering;
+                                    break;
+                                case CloudCircuitBreaker::State::Open: ++snap.cloudOpen; break;
+                            }
+                        }
+                    }
+
+                    if (requestPool != nullptr)
+                    {
+                        snap.aiInflight = requestPool->GetDirectDispatchInflight();
+                    }
+
+                    if (runtime != nullptr)
+                    {
+                        snap.activeRuns = runtime->GetActiveRunsSnapshot().size();
+                        runtime->GetRunCounters(snap.totalCompleted, snap.totalFailed);
+                    }
+
+                    if (webServer != nullptr)
+                    {
+                        snap.mcpConnected = webServer->IsMcpConnected();
+                    }
+
+                    if (pythonPool != nullptr)
+                    {
+                        snap.pythonRunning = pythonPool->IsRunning();
+                    }
+
+                    return snap;
+                });
+
+            // Rolling last-3 runs (same shape the dashboard's LastRunsBar shows).
+            m_StatusRenderer.SetLastRunsProvider(
+                [runtime](size_t maxCount) -> std::vector<StatusRenderer::LastRunSummary>
+                {
+                    std::vector<StatusRenderer::LastRunSummary> out;
+                    if (runtime == nullptr) return out;
+
+                    auto snapshot = runtime->GetLastRunsSnapshot();
+                    std::vector<WorkflowRun> runs;
+                    runs.reserve(snapshot.size());
+                    for (auto& entry : snapshot)
+                    {
+                        runs.push_back(std::move(entry.second));
+                    }
+                    std::sort(runs.begin(), runs.end(),
+                              [](WorkflowRun const& a, WorkflowRun const& b)
+                              { return a.m_CompletedAtIso8601 > b.m_CompletedAtIso8601; });
+                    if (runs.size() > maxCount) runs.resize(maxCount);
+
+                    for (auto const& run : runs)
+                    {
+                        StatusRenderer::LastRunSummary summary;
+                        summary.isAdhoc = run.m_RunId.rfind("adhoc_", 0) == 0
+                                          || run.m_WorkflowId.rfind("_adhoc_", 0) == 0;
+                        if (summary.isAdhoc)
+                        {
+                            size_t const lastUnderscore = run.m_WorkflowId.find_last_of('_');
+                            if (lastUnderscore != std::string::npos
+                                && lastUnderscore + 1 < run.m_WorkflowId.size())
+                            {
+                                summary.displayId =
+                                    "adhoc #" + run.m_WorkflowId.substr(lastUnderscore + 1);
+                            }
+                            else
+                            {
+                                summary.displayId = run.m_WorkflowId;
+                            }
+                        }
+                        else
+                        {
+                            summary.displayId = run.m_WorkflowId;
+                        }
+                        switch (run.m_State)
+                        {
+                            case WorkflowRunState::Succeeded: summary.state = "succeeded"; break;
+                            case WorkflowRunState::Failed: summary.state = "failed"; break;
+                            case WorkflowRunState::Cancelled: summary.state = "cancelled"; break;
+                            case WorkflowRunState::Stopped: summary.state = "stopped"; break;
+                            case WorkflowRunState::Running: summary.state = "running"; break;
+                            case WorkflowRunState::Pending: summary.state = "pending"; break;
+                            case WorkflowRunState::Paused: summary.state = "paused"; break;
+                            case WorkflowRunState::Stopping: summary.state = "stopping"; break;
+                        }
+                        summary.completedAtIso = run.m_CompletedAtIso8601;
+                        out.push_back(std::move(summary));
+                    }
+                    return out;
+                });
+        }
+
         m_TriggerEngine = std::make_unique<TriggerEngine>(
             [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)
             {
@@ -538,15 +668,18 @@ namespace AIAssistant
                 return true;
             });
 
-        // Bridge AI-call lifecycle events to the dashboard WebSocket so per-task
-        // state is visible beyond the aggregate "queries in flight" LED.
+        // Forward AI-call lifecycle events to the dashboard WebSocket so per-call
+        // detail (interface, tokens, finish reason, error) is visible beyond the
+        // aggregate "queries in flight" LED.  The TUI reads the same counters the
+        // dashboard does via the runtime snapshot provider set during startup —
+        // no separate event wiring needed.
         if (m_WebServer != nullptr)
         {
             dispatcher.Dispatch<AiCallStartedEvent>(
                 [&](AiCallStartedEvent& evt)
                 {
                     m_WebServer->BroadcastAiCallStarted(evt.GetProbName(), evt.GetInterfaceName());
-                    return false; // allow other consumers (Python, future TUI subscribers)
+                    return false;
                 });
             dispatcher.Dispatch<AiCallCompletedEvent>(
                 [&](AiCallCompletedEvent& evt)

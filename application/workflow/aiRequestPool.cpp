@@ -23,9 +23,11 @@
 #include "workflow/aiRequestPool.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -879,6 +881,12 @@ namespace AIAssistant
         // leading backticks.  We only strip when the whole content is a single fenced
         // block with no intermediate ``` sequences — anything more complex we leave
         // alone so embedded code blocks in legitimately markdown replies survive.
+        //
+        // Exception: diagram/markdown formats (mermaid, dot, plantuml, graphviz, latex,
+        // markdown/md) are MEANT to live inside a fenced block when embedded in a .md
+        // output — downstream renderers (mmdc, pandoc) match on ```<tag>. Stripping
+        // those fences silently destroys the diagram. Keep the fence whenever the
+        // language tag matches such a format.
         std::string StripWholeReplyFence(std::string const& text)
         {
             auto firstNonSpace = text.find_first_not_of(" \t\r\n");
@@ -908,6 +916,45 @@ namespace AIAssistant
             size_t bodyStart = firstNonSpace + 3;
             size_t const firstNewline = text.find('\n', bodyStart);
             if (firstNewline == std::string::npos || firstNewline >= innerEnd) return text;
+
+            // Language tag lives between the opening ``` and the first newline.
+            // Carriage-returns and surrounding whitespace may appear on that line.
+            std::string languageTag;
+            {
+                size_t const tagBegin = firstNonSpace + 3;
+                size_t tagEnd = firstNewline;
+                while (tagEnd > tagBegin && (text[tagEnd - 1] == '\r' || text[tagEnd - 1] == ' ' ||
+                                             text[tagEnd - 1] == '\t'))
+                {
+                    --tagEnd;
+                }
+                size_t tagStart = tagBegin;
+                while (tagStart < tagEnd && (text[tagStart] == ' ' || text[tagStart] == '\t'))
+                {
+                    ++tagStart;
+                }
+                if (tagStart < tagEnd)
+                {
+                    languageTag.reserve(tagEnd - tagStart);
+                    for (size_t i = tagStart; i < tagEnd; ++i)
+                    {
+                        unsigned char const c = static_cast<unsigned char>(text[i]);
+                        languageTag.push_back(static_cast<char>(std::tolower(c)));
+                    }
+                }
+            }
+
+            // Formats that are authored to live inside a fenced block in the final
+            // markdown artifact. Stripping the fence here would silently break the
+            // downstream renderer (mmdc / pandoc / Mermaid-aware viewers).
+            static constexpr std::string_view kKeepFenceTags[] = {
+                "mermaid", "dot", "plantuml", "graphviz", "latex", "tex", "markdown", "md"
+            };
+            for (auto const& tag : kKeepFenceTags)
+            {
+                if (languageTag == tag) return text;
+            }
+
             bodyStart = firstNewline + 1;
 
             // Trim trailing whitespace before the closing fence so the result doesn't

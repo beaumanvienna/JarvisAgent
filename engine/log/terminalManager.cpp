@@ -61,8 +61,21 @@ namespace AIAssistant
 
             if (c < 0x80)
             {
-                // ASCII
-                output.push_back(input[i]);
+                // ASCII. Strip C0 control chars (except TAB) — newlines and CR would
+                // move the ncurses cursor mid-line and corrupt the log window layout
+                // when a log payload contains an embedded traceback.
+                if (c < 0x20 && c != '\t')
+                {
+                    output.push_back(' ');
+                }
+                else if (c == 0x7F)
+                {
+                    output.push_back(' ');
+                }
+                else
+                {
+                    output.push_back(input[i]);
+                }
                 ++i;
                 continue;
             }

@@ -43,7 +43,8 @@ JarvisAgent ships in two editions, both included in every package:
 - **Triggers & scheduling** — cron (IANA timezone), file-watch, webhook (HMAC-SHA256), manual, auto-start
 - **AI workflow generation** — describe a workflow in natural language; the assistant decomposes, generates JCWF + scripts, validates, and auto-fixes
 - **AI assistant** — 31 specialized tools for reading/writing workflows, running tasks, inspecting logs, and querying the running engine
-- **Document conversion** — PDF, DOCX, XLSX, PPTX, HTML converted to Markdown via [MarkItDown](https://github.com/microsoft/markitdown), chunked when oversized
+- **Structured AI output** — declare a JSON schema on any AI call; the runtime validates the reply and self-heals on mismatch, so downstream tasks receive type-safe fields
+- **Document conversion** — PDF, DOCX, XLSX, PPTX, HTML converted to Markdown via [MarkItDown](https://github.com/microsoft/markitdown), auto-chunked when a prompt exceeds the provider's context window
 - **Live dashboard** — React UI with run monitoring, log streaming (up to 100k lines), Run Analyzer for warnings/errors
 - **Workflow versioning** — auto-backup on every save, browse and restore from the editor
 - **Run control** — pause, resume, stop running workflows via REST API or editor UI
@@ -63,21 +64,7 @@ JarvisAgent talks to AI providers through four interface adapters, covering ever
 | **API3** — Gemini native | `POST /v1beta/models/{model}:generateContent` | Google Gemini (native endpoint with `x-goog-api-key` auth) |
 | **API4** — Anthropic Messages | `POST /v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus, all generations with 200 K context) |
 
-**Chunking is per-interface.** Each interface advertises `max_context_tokens`; if you don't set it explicitly a curated model-name fallback table picks a safe default (GPT-4-family 128 K, Claude 200 K, Gemini 1.5/2 1 M, Llama/Qwen/DeepSeek/Phi 128 K, Mistral/Mixtral 32 K, unknown model 50 K). When a prompt exceeds the budget the runtime splits only the context portion at markdown section boundaries, fans out N parallel envelopes, then submits a reduce pass that consolidates the partial answers into one unified reply.
-
-**Self-hosted example — Ollama on localhost:**
-
-```json
-{
-  "name": "ollama/llama3.1/API1",
-  "url": "http://localhost:11434/v1/chat/completions",
-  "model": "llama3.1",
-  "API": "API1",
-  "key_name": "ollama"
-}
-```
-
-Plus an `ollama` provider in the KeyManager with any string as the API key — Ollama doesn't check it, but our dispatcher currently requires a non-empty bearer. Same pattern works for LM Studio, llama.cpp, vLLM, etc.
+Self-hosted runtimes (Ollama, LM Studio, llama.cpp, vLLM) plug into API1 — see [User Manual](doc/jarvisagent.md) for the config shape. Context-window handling and chunking behavior are documented in [doc/architecture.md](doc/architecture.md).
 
 **On the roadmap** (tracked in `JarvisAgent TODO List.md`): AWS Bedrock (SigV4 signing), Azure OpenAI (deployment-based URLs + `api-key:` header). Both land when we need enterprise-cloud-native deployments.
 

@@ -67,6 +67,13 @@ namespace AIAssistant
             static std::string GenerateInterfaceName(std::string const& url, std::string const& model,
                                                      std::string const& apiType);
 
+            // Best-effort context window for a model name using the built-in
+            // fallback table (gpt-5 / gpt-4 / claude / gemini / llama / etc.).
+            // Returns kUnknownModelFallbackTokens when the model is not
+            // recognised.  Called on JSON load; exposed so runtime-added
+            // interfaces (REST POST) pick up the same default.
+            static uint64_t ResolveMaxContextTokensFromModel(std::string const& modelName);
+
             size_t m_MaxThreads{0};
             size_t m_MaxInflightAiCalls{1000};
             size_t m_MaxAiCallsPerJcwf{0};  // 0 = no cap; per-run safety limit

@@ -383,6 +383,20 @@ Supported providers include OpenAI (API1 or API2), Google Gemini (API1 via OpenA
 Anthropic (API4 native), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
 The OpenAI Responses API (GPT-5+) uses API2.
 
+**Self-hosted example — Ollama on localhost** (same pattern works for LM Studio, llama.cpp server, vLLM, text-generation-webui):
+
+```json
+{
+  "name": "ollama/llama3.1/API1",
+  "url": "http://localhost:11434/v1/chat/completions",
+  "model": "llama3.1",
+  "API": "API1",
+  "key_name": "ollama"
+}
+```
+
+Register an `ollama` provider in the KeyManager with any non-empty string as the API key — Ollama itself ignores the bearer, but the j9t dispatcher requires one.
+
 ## WORKFLOWS
 
 JarvisAgent uses **JC Workflow** files (`.jcwf`) to describe automation pipelines as directed acyclic graphs (DAGs). A `.jcwf` file is a **zip container** that bundles JSON workflow definitions and any input data files into a single portable package.

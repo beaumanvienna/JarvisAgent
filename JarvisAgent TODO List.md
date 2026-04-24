@@ -322,11 +322,11 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - [ ] JCWF schema gap-close: close gaps in `doc/jcwf.schema.json` vs. `workflowJsonParser` + parser↔schema contract test. `tools/generateEmbeddedHeaders.py` prebuild + `kJcwfSchemaJson` already compiled into the binary.
 - [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry.
 - [ ] TUI / dashboard consumers subscribing to `EventCategoryAi` (events are posted; consumed only by the aggregated "in flight" LED today).
-- [ ] Contract tests under `test/dispatch/`.
+- [ ] Contract tests under `test/dispatch/` — many landed in 5g (hermetic, relaxed env, output-schema roundtrip, chunking, markitdown, cross-workflow concurrency 2026-04-23); remaining slices tracked as follow-ups.
 
-**Known live-observed issues not yet fixed:**
-- [ ] **60-second `WaitingExternal` timeout kills slow Claude calls** — observed 2026-04-20 with `ai-zip-demo` on Anthropic Sonnet 4.6: one of three concurrent ai_calls took ~65 s, the runtime gave up at 60 s, the real reply landed 5 s later and was orphaned. Fix: bump the default in `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` and/or honour `AiInvocation.m_Timeout` (envelope already carries 120 s default). Easy follow-up.
-- [ ] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk. Mitigation: strengthen STNG wording in example JCWFs, or post-process to strip fences.
+**Known live-observed issues:**
+- [x] ~~60-second `WaitingExternal` timeout kills slow Claude calls~~ — resolved in refactor. `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` now uses 300 s default with a 120 s floor for `ai_call` tasks (matching `AiInvocation.m_Timeout`).
+- [x] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk. Mitigation in place: `StripWholeReplyFence` in `aiRequestPool.cpp` removes the outer fence, with a keep-list for diagram formats (mermaid / dot / plantuml / graphviz / latex / markdown) so fence-wrapped Mermaid diagrams survive. Fence-strip counter exposed on `/api/debug/signals` as `ai_fence_strips`.
 
 - HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
 - Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0), additional cloud-native AI adapters (§5h — post-1.0 / pre-1.0 for enterprise).
