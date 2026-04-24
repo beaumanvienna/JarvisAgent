@@ -4,7 +4,7 @@
 
 The **redmineTriageBot** workflow is a true Redmine round-trip demo with AI-driven assignee routing. It lists open issues from a Redmine project (`redmine_issue/list_issues`), per-item asks an AI to classify each one as backend (JC) or frontend (Ahmet) and to write a triage comment, then updates each issue back in Redmine with the assigned user ID and the comment in a single `PUT /issues/{id}.json` call. Round-trip = read external → process → write back to the same external system.
 
-The classifier AI is constrained to output a single digit (the numeric Redmine user ID) so its `captured_stdout` can be wired straight into the downstream `assigned_to_id` template variable -- no python parsing step needed.
+The classifier AI uses **structured output** — it emits a schema-validated JSON object `{"user_id": "5"|"6"}`, and the downstream `update_issue` task reads the field via `{{ai_classify.json.user_id}}`. No prompt-engineering kludge (the previous version prompt-forced the AI to emit a single digit so `captured_stdout` could carry it); the schema now guarantees the shape and bounded retries handle transient drift.
 
 ---
 
@@ -120,7 +120,7 @@ Source: `02_convert/issues.csv`, binding: `issue`. Each downstream `mode: per_it
 
 ### ai_classify -- `ai_call`, per_item, one_shot
 
-Strict-output classifier. The system prompt (`STNG_router.txt`) hard-codes the team mapping (JC = id 5, Ahmet = id 6) and instructs the AI to emit exactly one digit -- no words, no punctuation, no newlines. The PROB file is templated per item with the issue's id / tracker / subject / description from the filter binding. `captured_stdout` ends up as the literal string `"5"` or `"6"`, which feeds straight into the downstream `update_issue` task's `assigned_to_id` param.
+Schema-validated classifier. The `output_schema` declares `{"user_id": enum["5","6"]}` with `additionalProperties:false`. The runtime validates the AI reply against the schema and retries up to `output_retries:3` on mismatch — the validator's error list is appended to the envelope as a correction message, so the second attempt almost always lands correct. The downstream `update_issue` task reads `{{ai_classify.json.user_id}}` via the engine's structured-output template resolution (symmetric with cloud tasks' `{{A.json.PATH}}`).
 
 ### ai_comment -- `ai_call`, per_item, one_shot
 
@@ -128,7 +128,7 @@ Triage-comment writer. Different persona (senior engineer doing PM-style triage)
 
 ### update_issue -- `redmine_issue/update_issue`, per_item
 
-`PUT /issues/{{issue.id}}.json` with body `{"issue":{"notes":"...","assigned_to_id":N}}`. Both the assignee ID and the note text are pulled per-item from the matching `ai_classify` and `ai_comment` instance via `{{ai_classify.captured_stdout}}` / `{{ai_comment.captured_stdout}}`. Redmine returns 204 No Content on success; the executor synthesizes a `{ok:true}` payload so downstream tasks (or the dashboard) see something useful.
+`PUT /issues/{{issue.id}}.json` with body `{"issue":{"notes":"...","assigned_to_id":N}}`. The assignee ID is pulled from the structured AI output via `{{ai_classify.json.user_id}}`; the triage note text is piped from `{{ai_comment.captured_stdout}}` (free-text output — no schema). Both resolve to the matching per-item instance. Redmine returns 204 No Content on success; the executor synthesizes a `{ok:true}` payload so downstream tasks (or the dashboard) see something useful.
 
 ---
 

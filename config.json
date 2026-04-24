@@ -68,6 +68,30 @@
             "model": "gpt-4.1",
             "API": "API1",
             "key_name": "openai"
+        },
+        {
+            "name": "api.anthropic.com/claude-haiku-4-5/API4",
+            "description": "Anthropic Claude Haiku 4.5 via native /v1/messages endpoint. Cheapest Claude tier — good for smoke tests and high-volume throughput. Use API index 7.",
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-haiku-4-5-20251001",
+            "API": "API4",
+            "key_name": "Anthropic"
+        },
+        {
+            "name": "api.anthropic.com/claude-opus-4-7/API4",
+            "description": "Anthropic Claude Opus 4.7 via native /v1/messages endpoint. Maximum reasoning quality in the Claude family — slowest and most expensive. Use for architecture, hard debugging, and critical technical writing. Use API index 8.",
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-opus-4-7",
+            "API": "API4",
+            "key_name": "Anthropic"
+        },
+        {
+            "name": "api.anthropic.com/claude-sonnet-4-6/API4",
+            "description": "Anthropic Claude Sonnet 4.6 via native /v1/messages endpoint. Balanced tier — strong reasoning at moderate cost and latency. Good default for most technical work. Use API index 9.",
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-sonnet-4-6",
+            "API": "API4",
+            "key_name": "Anthropic"
         }
     ],
 

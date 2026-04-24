@@ -24,11 +24,13 @@
 
 #include <algorithm>
 #include <ctime>
+#include <filesystem>
 #include <unordered_set>
 
 // Bring in logging and core types.
 #include "core.h"
 #include "engine.h"
+#include "file/fileWatcher.h"
 #include "cloud/emailConnector.h"
 
 // MSVC natively supports C++20 chrono timezone (time_zone, zoned_time, etc.).
@@ -222,7 +224,19 @@ namespace AIAssistant
     // TriggerEngine
     // ========================================================================
 
-    TriggerEngine::TriggerEngine(TriggerCallback const& triggerCallback) : m_TriggerCallback{triggerCallback} {}
+    TriggerEngine::TriggerEngine(TriggerCallback const& triggerCallback)
+        : m_TriggerCallback{triggerCallback}, m_TriggerFileWatcher{std::make_unique<FileWatcher>(std::filesystem::path{})}
+    {
+        m_TriggerFileWatcher->Start();
+    }
+
+    TriggerEngine::~TriggerEngine()
+    {
+        if (m_TriggerFileWatcher)
+        {
+            m_TriggerFileWatcher->Stop();
+        }
+    }
 
     void TriggerEngine::AddAutoTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled,
                                        bool fireImmediately)
@@ -291,23 +305,34 @@ namespace AIAssistant
                                             std::string const& path, std::vector<FileEventType> const& events,
                                             uint32_t debounceMilliseconds, bool isEnabled)
     {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
         std::string const normalizedPath = NormalizePath(path);
 
-        FileWatchTriggerInstance fileTriggerInstance{};
-        fileTriggerInstance.m_WorkflowId = workflowId;
-        fileTriggerInstance.m_TriggerId = triggerId;
-        fileTriggerInstance.m_WatchedPath = normalizedPath;
-        fileTriggerInstance.m_Events = events;
-        fileTriggerInstance.m_DebounceInterval = std::chrono::milliseconds(debounceMilliseconds);
-        fileTriggerInstance.m_IsEnabled = isEnabled;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        size_t triggerIndex = m_FileWatchTriggers.size();
-        m_FileWatchTriggers.push_back(std::move(fileTriggerInstance));
+            FileWatchTriggerInstance fileTriggerInstance{};
+            fileTriggerInstance.m_WorkflowId = workflowId;
+            fileTriggerInstance.m_TriggerId = triggerId;
+            fileTriggerInstance.m_WatchedPath = normalizedPath;
+            fileTriggerInstance.m_Events = events;
+            fileTriggerInstance.m_DebounceInterval = std::chrono::milliseconds(debounceMilliseconds);
+            fileTriggerInstance.m_IsEnabled = isEnabled;
 
-        // Update index map.
-        auto& indexVector = m_FileWatchIndex[normalizedPath];
-        indexVector.push_back(triggerIndex);
+            size_t triggerIndex = m_FileWatchTriggers.size();
+            m_FileWatchTriggers.push_back(std::move(fileTriggerInstance));
+
+            // Update index map.
+            auto& indexVector = m_FileWatchIndex[normalizedPath];
+            indexVector.push_back(triggerIndex);
+        }
+
+        // Register the path with the owned watcher so file events flow to the global
+        // event queue and back into NotifyFileEvent.  AddPath is idempotent — multiple
+        // triggers on the same directory are fine, the watcher tracks it once.
+        if (m_TriggerFileWatcher && !normalizedPath.empty())
+        {
+            m_TriggerFileWatcher->AddPath(std::filesystem::path{normalizedPath});
+        }
 
         LOG_APP_INFO("[paths debug] debug TriggerEngine::AddFileWatchTrigger: reason=bindTrigger workflowId='{}' "
                      "triggerId='{}' watchedPathProvided='{}' watchedPathNormalized='{}'",
@@ -479,49 +504,93 @@ namespace AIAssistant
 
     void TriggerEngine::ClearAll()
     {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        m_CronTriggers.clear();
-        m_FileWatchTriggers.clear();
-        m_ManualTriggers.clear();
-        m_WebhookTriggers.clear();
-        m_S3WatchTriggers.clear();
-        m_OneDriveWatchTriggers.clear();
-        m_EmailWatchTriggers.clear();
-        m_AzureBlobWatchTriggers.clear();
-        m_GcsWatchTriggers.clear();
-        m_FileWatchIndex.clear();
-        m_WebhookIndex.clear();
+        std::vector<std::string> pathsToDrop;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            pathsToDrop.reserve(m_FileWatchIndex.size());
+            for (auto const& [path, indices] : m_FileWatchIndex) pathsToDrop.push_back(path);
+
+            m_CronTriggers.clear();
+            m_FileWatchTriggers.clear();
+            m_ManualTriggers.clear();
+            m_WebhookTriggers.clear();
+            m_S3WatchTriggers.clear();
+            m_OneDriveWatchTriggers.clear();
+            m_EmailWatchTriggers.clear();
+            m_AzureBlobWatchTriggers.clear();
+            m_GcsWatchTriggers.clear();
+            m_FileWatchIndex.clear();
+            m_WebhookIndex.clear();
+        }
+
+        if (m_TriggerFileWatcher)
+        {
+            for (auto const& path : pathsToDrop)
+            {
+                m_TriggerFileWatcher->RemovePath(std::filesystem::path{path});
+            }
+        }
+
         LOG_APP_INFO("TriggerEngine::ClearAll: all triggers cleared");
     }
 
     void TriggerEngine::ClearWorkflowTriggers(std::string const& workflowId)
     {
-        std::scoped_lock<std::mutex> const lock(m_Mutex);
-        LOG_APP_INFO("TriggerEngine::ClearWorkflowTriggers: clearing triggers for workflow '{}'", workflowId);
-
-        EraseWorkflowFromVector(m_CronTriggers, workflowId);
-        EraseWorkflowFromVector(m_FileWatchTriggers, workflowId);
-        EraseWorkflowFromVector(m_ManualTriggers, workflowId);
-        EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
-        EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
-        EraseWorkflowFromVector(m_OneDriveWatchTriggers, workflowId);
-        EraseWorkflowFromVector(m_EmailWatchTriggers, workflowId);
-        EraseWorkflowFromVector(m_AzureBlobWatchTriggers, workflowId);
-        EraseWorkflowFromVector(m_GcsWatchTriggers, workflowId);
-
-        // Rebuild file-watch index because indices may have changed.
-        m_FileWatchIndex.clear();
-        for (size_t index = 0; index < m_FileWatchTriggers.size(); ++index)
+        std::vector<std::string> pathsToDrop;
         {
-            FileWatchTriggerInstance const& instance = m_FileWatchTriggers[index];
-            m_FileWatchIndex[instance.m_WatchedPath].push_back(index);
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            LOG_APP_INFO("TriggerEngine::ClearWorkflowTriggers: clearing triggers for workflow '{}'", workflowId);
+
+            // Capture the file-watch paths that are about to go away so we can
+            // unregister them from the owned watcher after rebuilding the index.
+            std::unordered_set<std::string> surviving;
+            for (auto const& instance : m_FileWatchTriggers)
+            {
+                if (instance.m_WorkflowId != workflowId)
+                {
+                    surviving.insert(instance.m_WatchedPath);
+                }
+            }
+            for (auto const& instance : m_FileWatchTriggers)
+            {
+                if (instance.m_WorkflowId == workflowId && !surviving.contains(instance.m_WatchedPath))
+                {
+                    pathsToDrop.push_back(instance.m_WatchedPath);
+                }
+            }
+
+            EraseWorkflowFromVector(m_CronTriggers, workflowId);
+            EraseWorkflowFromVector(m_FileWatchTriggers, workflowId);
+            EraseWorkflowFromVector(m_ManualTriggers, workflowId);
+            EraseWorkflowFromVector(m_WebhookTriggers, workflowId);
+            EraseWorkflowFromVector(m_S3WatchTriggers, workflowId);
+            EraseWorkflowFromVector(m_OneDriveWatchTriggers, workflowId);
+            EraseWorkflowFromVector(m_EmailWatchTriggers, workflowId);
+            EraseWorkflowFromVector(m_AzureBlobWatchTriggers, workflowId);
+            EraseWorkflowFromVector(m_GcsWatchTriggers, workflowId);
+
+            // Rebuild file-watch index because indices may have changed.
+            m_FileWatchIndex.clear();
+            for (size_t index = 0; index < m_FileWatchTriggers.size(); ++index)
+            {
+                FileWatchTriggerInstance const& instance = m_FileWatchTriggers[index];
+                m_FileWatchIndex[instance.m_WatchedPath].push_back(index);
+            }
+
+            // Rebuild webhook index.
+            m_WebhookIndex.clear();
+            for (size_t index = 0; index < m_WebhookTriggers.size(); ++index)
+            {
+                m_WebhookIndex[m_WebhookTriggers[index].m_WorkflowId] = index;
+            }
         }
 
-        // Rebuild webhook index.
-        m_WebhookIndex.clear();
-        for (size_t index = 0; index < m_WebhookTriggers.size(); ++index)
+        if (m_TriggerFileWatcher)
         {
-            m_WebhookIndex[m_WebhookTriggers[index].m_WorkflowId] = index;
+            for (auto const& path : pathsToDrop)
+            {
+                m_TriggerFileWatcher->RemovePath(std::filesystem::path{path});
+            }
         }
     }
 

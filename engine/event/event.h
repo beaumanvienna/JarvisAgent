@@ -43,7 +43,11 @@ namespace AIAssistant
         FileModified,        //
         AppError,            //
         EngineEvent,         //
-        PythonCrashed        //
+        PythonCrashed,       //
+        AiCallStarted,       // AI dispatch lifecycle
+        AiCallRetrying,      //
+        AiCallCompleted,     //
+        AiCallFailed         //
     };
 
     enum EventCategory
@@ -55,6 +59,7 @@ namespace AIAssistant
         EventCategoryFileSys = 1 << 3,  //
         EventCategoryApp = 1 << 4,      //
         EventCategoryEngine = 1 << 5,   //
+        EventCategoryAi = 1 << 6,       // AI dispatch lifecycle events
     };
 
     // ---------------------------------

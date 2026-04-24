@@ -265,6 +265,7 @@ The repository grew organically and the root is crowded. Group sources under a s
 - `.npm-tools/package.json` — 12-byte stub listing `@mermaid-js/mermaid-cli` as a dep. The only reference in the repo (`packaging/Linux/jarvisagent-launcher.sh`) installs into `$USER_HOME/.npm-tools`, *not* the repo's `.npm-tools/`. The checked-in copy is a leftover. Delete the folder + add `/.npm-tools/` to `.gitignore` for safety.
 - `jarvis_agent.example.env` — 56 bytes, only referenced as a commented-out example in `docker-compose.example.yml`. Functionally unused. Delete.
 - Docker files in root: `Dockerfile`, `docker-compose.example.yml`, `docker-entrypoint.sh`, `.dockerignore`. Consider moving to `packaging/Docker/` to declutter the root. Touch points: `.github/workflows/docker-publish.yml` (`file: ./Dockerfile`), `scripts/run-docker.sh`, any `.flatpak-builder` snapshots. Minor, but reduces visual noise in the root.
+- `application/workflow/doc/aiCallArchitecture.md` — superseded by the AI Dispatch Refactor (§5g). Describes the file-watcher-driven completion flow that no longer exists. Delete as part of the cleanup sweep (no historical-note preamble left in its place — per the no-legacy rule).
 
 **Out of scope (already verified correct):**
 
@@ -287,21 +288,72 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - **Direction:** replace the file-watcher-mediated dispatch for runtime-initiated `ai_call` tasks with a direct path: `AiCallTaskExecutor` assembles the `SessionManager` environment, calls `AiRequestPool::Submit` directly, receives the response via callback, no synthetic file events. Keeps the file-watcher for the manual drop workflow only (or deletes it if the drop workflow is deprecated).
 - Removes: the dependency on a dynamically-mutating `FileWatcher` watch set for adhoc (superseded by this refactor), the `m_PendingByOutputPath` passive-registration scheme, a full directory-scan tick every 100 ms.
 
-### 5g. AI dispatch refactor (pre-1.0 — priority)
+### 5g. AI dispatch refactor (pre-1.0 — priority) — **landed on `refactor/ai-dispatch`**
 
-- Typed `AiInvocation` envelope replaces the opaque STNG/CNTX/TASK/PROB file-drop seam; missing-field errors surface at envelope construction, not as 60-second watchdog timeouts.
-- Schema-enforced structured output as the default (`output_schema` on `ai_call`); bounded `output_retries` feed validator errors back to the model. Free-text remains explicit opt-out for code/Makefile/prose.
-- `IRequestBuilder` symmetric to `ReplyParser`; extend `ReplyParser` virtuals (GetError / GetUsage / GetFinishReason / GetSystemFingerprint / GetStructuredOutput). Adds API4 (Anthropic `/v1/messages`); OpenAI-compatible providers (xAI, Groq, OpenRouter, Ollama, ...) keep working through API1.
-- Determinism defaults (`temperature=0`, optional `seed`, `system_fingerprint` logging) + `.transcript.json` per PROB for replay and audit.
-- `TestInterface` as a new `InterfaceType` — no-network, deterministic JCWF integration tests.
-- Editor-side `AiJcwfService::GenerateAsync` uses the JCWF schema for schema-enforced output. Extract the embedded schema from `doc/JC_Workflow_Specification.md` §9 into `doc/jcwf.schema.json` and compile it into the binary via a Premake prebuild step (`jcwfSchema.generated.h`). Same compile-time embed for `doc/jcwf_generation_guide.md`.
-- Relaxed env: STNG / CNTX / TASK optional (warning only); PROB still required; empty body still rejected. PROV sidecar optional (falls back to default interface). Manual queue-drop semantics retired.
-- Markitdown auto-conversion of office files preserved.
-- Structure-aware chunking: markdown-section boundaries, per-interface `max_context_tokens` config (GPT-4=128k, GPT-5=200k, Gemini 2.5=1M, Claude=200k).
-- Subsumes §5c (Option E): queue-folder `FileWatcher` retired entirely from runtime dispatch; `m_ScriptFileWatcher` stays; `TriggerEngine` gains its own dedicated `FileWatcher` so JCWF `file_watch` triggers work on any declared path (latent-bug fix).
-- HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — **all unchanged**.
-- Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0).
-- See `AI dispatch refactor.md` for the full dev plan (decisions A–H locked, 8 phases ordered, file-level diffs, contract tests, per-phase docs sweeps). Status: ready to start Phase 1.
+**Core dispatch + legacy rip** (exampleMakefile4, aiZipDemo, jarvisCppDocu and ~15 other JCWFs live-validated on OpenAI + Anthropic):
+- [x] Typed `AiInvocation` envelope (`application/workflow/aiInvocation.h`) + typed `AiReply` (`aiReply.h`).
+- [x] `AiRequestPool::Submit(AiInvocation, callback)` — direct envelope dispatch through `CurlMultiDispatcher`.
+- [x] `AiCallTaskExecutor` builds an envelope and calls `Submit` directly.  Fails the task immediately on Submit rejection (no legacy fallback).
+- [x] Relaxed env rule: STNG / CNTX / TASK optional (warning-only); empty concatenated body still rejected; PROV sidecar is write-only (replay tooling only).
+- [x] `IRequestBuilder` + `RequestBuilderAPI1/2/3/4`; `ReplyParser` base extended with `GetError`/`GetUsage`/`GetFinishReason`/`GetSystemFingerprint`/`GetStructuredOutput` virtuals, concretes implement; `ReplyParserAPI4` for Anthropic `/v1/messages`.
+- [x] `CurlWrapper::AuthStyle::AnthropicXApiKey` (`x-api-key` + `anthropic-version: 2023-06-01`) wired in both `curlWrapper.cpp` (single-call) and `curlMultiDispatcher.cpp` (async).
+- [x] `SchemaValidator` (simdjson-backed Draft 2020-12 subset: type, properties, required, additionalProperties, items, enum, min/max{,Length}, pattern, oneOf, anyOf, $ref, $defs). Unsupported keywords rejected at schema-load time.
+- [x] `output_schema` + `output_retries` parsed on `ai_call`; Submit's reply path validates, retries with validator feedback up to budget, writes `<prob>.output.json` on structured success or `<prob>.output.txt` on free-text path.
+- [x] Determinism defaults (`m_DeterminismTemperature`, `m_DeterminismSeed`, `m_DeterminismRecordSystemFingerprint` on `EngineConfig`).
+- [x] `<prob>.transcript.json` per PROB — request + response turns with interface/model/settings/messages/usage/finish_reason.
+- [x] `TestInterface` as new `InterfaceType::Test` — short-circuits curl, loads reply from fixture path (`m_Url`).
+- [x] `EventCategoryAi` + `AiCallStartedEvent` / `AiCallCompletedEvent` / `AiCallFailedEvent` posted from Submit lifecycle.
+- [x] `max_context_tokens` parsed on `ApiInterface`; `MarkdownSectionSplitter` + `ChunkPlanner` utilities live; advisory warning fires when prompt exceeds budget.
+- [x] `AiRequestPool::GetDirectDispatchInflight` drives the dashboard "AI queries in flight" LED (via `/api/status` → `ai_calls_inflight`) and the `/api/debug/signals` counter.
+- [x] MCP: new `reload_workflows` tool in `mcp/src/tools.ts` so JCWF edits on disk can be picked up without restart.
+- [x] Editor-side migration: `AiJcwfService::RunSingleAiCall` (used by `GenerateAsync` / `ExplainAsync` / `FixFailedScriptAsync`) and `AssistantController::RunSingleAiCall` both switched to envelope + `std::promise`.  Dropped the `PROB_<id>_<ts>.txt` naming everywhere.
+- [x] **Deleted** `SessionManager` class and the chat dispatch that rode on it (dormant — no UI consumer).  `ChatMessagePool` + `HandleChatPost` + WebSocket `type == "chat"` handler all gone.
+- [x] **Deleted** `AiRequestPool::OnProbFileEvent`, `IsDirectDispatchActive`, `m_DirectDispatchActive`, `OnCurlDispatched`.  Submit calls `ActivateDeadlineForOutputPath` internally so the file-activity watchdog disarms correctly for workflow-bound envelopes.
+- [x] `TriggerEngine` owns its own dedicated `FileWatcher` (empty primary root, paths added dynamically via `AddFileWatchTrigger` → `AddPath` and removed on `ClearAll` / `ClearWorkflowTriggers`).  `FileWatcher` now supports an empty primary root (skips initial scan + primary-gone-shutdown check).
+- [x] `AdhocWorkflowManager` no longer takes a `FileWatcher*` — direct dispatch obsoletes the per-run-queue watch registrations.
+- [x] Retired queue-folder `FileWatcher` in `JarvisAgent`.  `GetQueueFileWatcher()` and the PROB-handling/SessionManager-forwarding blocks in `OnEvent` removed.
+- [x] Bonus fix — `MaterializeCntxFilesFromQueueBinding` now promotes path-reference CNTX files to inline with content populated so the envelope's user message actually includes them (this was a latent bug surfaced by jarvisCppDocu after the cutover).
+- [x] Dashboard UI — `SessionManagersPanel` + `SessionStatus` deleted; StatusBar LED reads `ai_calls_inflight` from the status poll directly; `session_managers_*` status/debug fields dropped and replaced with `ai_calls_inflight`.
+- [x] Deleted `application/workflow/doc/aiCallArchitecture.md`.
+- [x] Docs sweep: architecture.md, api-endpoints.md, JC_Workflow_Specification.md §3.3.6, jcwf_generation_guide.md (embedded into the binary at build time), application/README.md, webServer.md, session/README.md + renamed fileWriter.md, file/README.md, logging.md, assistant/README.md — all scrubbed of SessionManager / ChatMessagePool / OnProbFileEvent references and "refactor" callouts.  `combinedDocumentation.md` is auto-generated by jarvisCppDocu — not hand-edited; regenerate on next run.
+
+**Independent remaining features (carry into post-1.0 or follow-ups):**
+- [ ] Chunking fan-out (emit N envelopes per oversized PROB, concat replies into one output). Planner + advisory already in.
+- [ ] JCWF schema gap-close: close gaps in `doc/jcwf.schema.json` vs. `workflowJsonParser` + parser↔schema contract test. `tools/generateEmbeddedHeaders.py` prebuild + `kJcwfSchemaJson` already compiled into the binary.
+- [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry.
+- [ ] TUI / dashboard consumers subscribing to `EventCategoryAi` (events are posted; consumed only by the aggregated "in flight" LED today).
+- [ ] Contract tests under `test/dispatch/` — many landed in 5g (hermetic, relaxed env, output-schema roundtrip, chunking, markitdown, cross-workflow concurrency 2026-04-23); remaining slices tracked as follow-ups.
+
+**Known live-observed issues:**
+- [x] ~~60-second `WaitingExternal` timeout kills slow Claude calls~~ — resolved in refactor. `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` now uses 300 s default with a 120 s floor for `ai_call` tasks (matching `AiInvocation.m_Timeout`).
+- [x] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk. Mitigation in place: `StripWholeReplyFence` in `aiRequestPool.cpp` removes the outer fence, with a keep-list for diagram formats (mermaid / dot / plantuml / graphviz / latex / markdown) so fence-wrapped Mermaid diagrams survive. Fence-strip counter exposed on `/api/debug/signals` as `ai_fence_strips`.
+
+- HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
+- Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0), additional cloud-native AI adapters (§5h — post-1.0 / pre-1.0 for enterprise).
+- Dev-plan doc `AI dispatch refactor.md` has been mined into `doc/architecture.md` §"AI Dispatch Pipeline" and is safe to delete.
+- Loose follow-up: `tools/replayTranscript.py` — nominally-planned dispatch debugging tool that reads a `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; add when first real replay need comes up.
+
+### 5h. Additional AI backend adapters (Bedrock + Azure OpenAI)
+
+Both are real gaps for customers who can't bring OpenAI/Anthropic API keys through procurement but already have cloud contracts.  Both fit cleanly on top of the envelope architecture — new `InterfaceType` variant + per-provider `RequestBuilder` / `ReplyParser` + new `AuthStyle` on `CurlWrapper`.  Reply parsing is mostly trivial because Bedrock and Azure OpenAI both return OpenAI-compatible response bodies for chat-completion-shaped routes.
+
+**5h.1 — AWS Bedrock adapter (new `InterfaceType::API5`).**  Post-1.0, pre-1.0 if an enterprise customer pulls.
+- Endpoint: `POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke`.  Routes to Claude / Llama / Titan / Nova depending on `modelId`.
+- Auth: **SigV4 signed requests** (AWS access key + secret + region).  New `CurlWrapper::AuthStyle::AwsSigV4` that computes the signature from the request body + headers + timestamp.  Not a small piece — canonical request, string-to-sign, HMAC-SHA256 chain — but bounded (~300 lines, well-documented).
+- Request body shape varies per underlying model family (Anthropic-inside-Bedrock ≠ Llama-inside-Bedrock).  `RequestBuilderAPI5` needs a per-family selector — cleanest done by sniffing `modelId` prefix (`anthropic.claude-*` vs `meta.llama*` vs `amazon.titan*`).
+- Reply parser: Bedrock wraps each family's native response in its own envelope; unwrap and delegate to the matching existing family parser (e.g. for anthropic-inside-bedrock, reuse `ReplyParserAPI4` logic).
+- Chunking / max_context_tokens: pick up automatically from the model-name fallback table (`claude*` → 200 K, `llama*` → 128 K, etc.).
+- Target: post-1.0, bump to pre-1.0 when first enterprise customer asks.
+
+**5h.2 — Azure OpenAI adapter.**  Post-1.0.
+- Endpoint: `POST https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`.
+- Auth: **`api-key:` header** (not `Authorization: Bearer`).  New `CurlWrapper::AuthStyle::AzureApiKey`.
+- Request body: identical to OpenAI Chat Completions — reuse `RequestBuilderAPI1`'s body, just override URL composition and auth style.  Either a new `InterfaceType` (say `API1Azure`) that shares the builder/parser with API1 but picks a different URL template and auth style, or a flag on the existing API1 config.
+- Reply parser: reuse `ReplyParserAPI1` as-is.
+- The `?api-version=` query parameter is deployment-specific; carry it in the interface config (`"api_version": "2024-08-01-preview"`).
+- Smaller lift than Bedrock — ~100 lines.
+
+Both land without touching the envelope, schema validator, chunking, reduce pass, transcripts, or event layer.  The envelope architecture was designed for exactly this kind of additive backend expansion.
 
 ### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
 

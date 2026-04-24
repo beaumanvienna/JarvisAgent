@@ -216,13 +216,15 @@ export default function App(): JSX.Element
         <StatusLeds status={statusWs} />
 
         <nav className="navButtons">
-          <button
-            className={`btn ${route === "workflows" ? "btnActive" : ""}`}
-            onClick={() => { navigate("workflows"); }}
-            type="button"
-          >
-            Workflows
-          </button>
+          {route !== "workflows" && (
+            <button
+              className="btn"
+              onClick={() => { navigate("workflows"); }}
+              type="button"
+            >
+              Workflows
+            </button>
+          )}
 
           <button
             className={`btn ${route === "editor" ? "btnActive" : ""}`}

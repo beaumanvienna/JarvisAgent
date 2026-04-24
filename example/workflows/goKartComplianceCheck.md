@@ -178,8 +178,20 @@ After filter evaluation, each child task instance has access to:
   "mode": "per_item",
   "filter": "polarion-reqs",
   "working_directory": "../queue/goKartComplianceCheck/01_assessRequirement",
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "verdict":           { "type": "string", "enum": ["COMPLIANT", "NON_COMPLIANT"] },
+      "summary":           { "type": "string", "minLength": 1, "maxLength": 1500 },
+      "cost_estimate_eur": { "type": "integer", "minimum": 0 },
+      "difficulty":        { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "NONE"] }
+    },
+    "required": ["verdict", "summary", "difficulty"],
+    "additionalProperties": false
+  },
+  "output_retries": 3,
   "queue_binding": {
-    "stng_files": [{ "path": "STNG_succinct.txt", "content": "..." }],
+    "stng_files": [{ "path": "STNG_structured.txt", "content": "..." }],
     "task_files": [{ "path": "TASK_compareRequirement.txt", "content": "..." }],
     "cntx_files": ["../../../workflows/goKartPlatformSpec.md"],
     "prob_files": [{
@@ -191,6 +203,12 @@ After filter evaluation, each child task instance has access to:
 ```
 
 - **`mode: "per_item"`** + **`filter: "polarion-reqs"`** — triggers fan-out.
+- **`output_schema`** — every per-item reply is a schema-validated JSON object with
+  a strict `verdict` enum, a prose `summary`, an integer cost estimate, and a
+  difficulty enum. Downstream `write_status` sends `[{{json.verdict}}] {{json.summary}}`
+  back to Polarion as the complianceAssessment field value.
+- **`output_retries: 3`** — on schema mismatch the runtime re-submits with the
+  validator errors as a correction message, so transient model drift is self-healed.
 - **`cntx_files`** — the platform spec is materialized as `CNTX_goKartPlatformSpec.md`
   in the task working directory. Every child shares this context.
 - **`prob_files`** — template-substituted per child. `PROB_REQ-001_000.txt` through

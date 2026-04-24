@@ -83,8 +83,16 @@ namespace AIAssistant
             std::string m_Name;
             State m_State{State::Closed};
             int m_ConsecutiveFailures{0};
+            // `true` once RecordSuccess has fired at least once for this connection
+            // — lit by a successful Test button click or a JCWF cloud task.  Drives
+            // the dashboard Cloud LED so a merely-configured-but-never-proved
+            // connection is reported as "unknown" instead of "healthy".
+            bool m_EverSucceeded{false};
         };
         std::vector<ConnectionHealth> GetHealthSummary() const;
+
+        // Does the named connection have at least one recorded success?
+        bool HasEverSucceeded(std::string const& connectionName) const;
 
     private:
         struct CircuitState
@@ -93,6 +101,7 @@ namespace AIAssistant
             int m_ConsecutiveFailures{0};
             int m_HalfOpenProbes{0};
             std::chrono::steady_clock::time_point m_OpenedAt{};
+            bool m_EverSucceeded{false};
         };
 
         Config m_Config;

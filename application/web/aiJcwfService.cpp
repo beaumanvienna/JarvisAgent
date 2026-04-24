@@ -25,6 +25,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -33,10 +35,14 @@
 #include "curlWrapper/curlManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "file/scriptRegistry.h"
+#include "json/jcwfGenerationGuide.generated.h"
+#include "json/jcwfSchema.generated.h"
 #include "json/replyParser.h"
+#include "json/requestBuilder.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 #include "workflow/aiCallTaskExecutor.h"
+#include "workflow/aiInvocation.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowJsonParser.h"
 #include "workflow/workflowFileIndex.h"
@@ -61,12 +67,6 @@ namespace AIAssistant
             return workflowId + "_" + std::to_string(static_cast<long long>(nowTimeT));
         }
 
-        static int64_t NowTimestampNs()
-        {
-            auto const now = std::chrono::system_clock::now().time_since_epoch();
-            return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-        }
-
         static fs::path GetQueueBasePath()
         {
             if (Core::g_Core == nullptr)
@@ -81,34 +81,18 @@ namespace AIAssistant
             return AiCallTaskExecutor::WriteTextFile(filePath.string(), content, outError);
         }
 
-        // Build a PROV sidecar JSON string from the configured JCWF AI interface.
-        // Returns empty string when -1 (use global default) or index is out of range.
-        static std::string BuildJcwfProvContent()
+        // Resolve the JCWF-configured AI interface name from config.json.
+        // Returns empty when -1 (use global default) or index is out of range — in which case
+        // AiRequestPool::Submit falls back to the default interface.
+        static std::string ResolveJcwfInterfaceName()
         {
             auto const& config = Core::g_Core->GetConfig();
             int const idx = config.m_JcwfAiInterfaceIndex;
             if (idx < 0 || static_cast<size_t>(idx) >= config.m_ApiInterfaces.size())
             {
-                return {}; // use global default
+                return {};
             }
-
-            auto const& iface = config.m_ApiInterfaces[static_cast<size_t>(idx)];
-
-            std::string apiTypeStr = "API1";
-            if (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2)
-                apiTypeStr = "API2";
-            else if (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)
-                apiTypeStr = "API3";
-
-            std::string json = "{";
-            // Store key_name (not interface name) so SessionManager resolves the API key.
-            std::string const& providerKey = iface.m_KeyName.empty() ? iface.m_Name : iface.m_KeyName;
-            json += "\"provider\":\"" + providerKey + "\"";
-            json += ",\"url\":\"" + iface.m_Url + "\"";
-            json += ",\"api_type\":\"" + apiTypeStr + "\"";
-            json += ",\"model\":\"" + iface.m_Model + "\"";
-            json += "}";
-            return json;
+            return config.m_ApiInterfaces[static_cast<size_t>(idx)].m_Name;
         }
 
         // Detect the host OS/distro for shell script generation prompts.
@@ -167,19 +151,6 @@ namespace AIAssistant
             }
             return "Linux (distro unknown)";
 #endif
-        }
-
-        static bool ReadFile(fs::path const& filePath, std::string& outContent)
-        {
-            std::ifstream stream(filePath, std::ios::in | std::ios::binary);
-            if (!stream)
-            {
-                return false;
-            }
-            std::ostringstream ss;
-            ss << stream.rdbuf();
-            outContent = ss.str();
-            return true;
         }
 
         // Build a simple JSON string for WebSocket broadcast.
@@ -1112,30 +1083,10 @@ namespace AIAssistant
 
     std::string AiJcwfService::LoadGenerationGuide()
     {
-        // Try several candidate paths for the generation guide.
-        std::vector<fs::path> candidates;
-
-        if (Core::g_Core != nullptr)
-        {
-            fs::path const launchCwd = Core::g_Core->GetLaunchCWDAbsolute();
-            candidates.push_back(launchCwd / "doc" / "jcwf_generation_guide.md");
-            candidates.push_back(launchCwd / ".." / "doc" / "jcwf_generation_guide.md");
-        }
-
-        candidates.push_back(fs::path("doc") / "jcwf_generation_guide.md");
-
-        for (auto const& path : candidates)
-        {
-            std::string content;
-            if (ReadFile(path, content) && !content.empty())
-            {
-                LOG_APP_INFO("[AiJcwfService] Loaded generation guide from '{}'", path.string());
-                return content;
-            }
-        }
-
-        LOG_APP_WARN("[AiJcwfService] Could not load jcwf_generation_guide.md from any candidate path");
-        return "(Generation guide not available — generate valid JCWF JSON based on your knowledge of the spec.)";
+        // Compiled-in via Phase 4 prebuild step (tools/generateEmbeddedHeaders.py reads
+        // doc/jcwf_generation_guide.md at build time).  No more disk lookups, no more
+        // silent-fallback-to-placeholder path.
+        return std::string{kJcwfGenerationGuide};
     }
 
     bool AiJcwfService::ValidateJcwf(std::string const& jcwfJsonText, std::string& outValidationSummary,
@@ -1253,37 +1204,28 @@ namespace AIAssistant
             return false;
         }
 
-        // Build request payload and URL based on API type.
+        // Delegate request-body assembly to IRequestBuilder so every interface type
+        // (including API4 Anthropic and the Test fixture) is handled uniformly.
         std::string const prompt = "Say hello";
-        std::string requestData;
-        std::string queryUrl = iface.m_Url;
-        CurlWrapper::AuthStyle authStyle = CurlWrapper::AuthStyle::Bearer;
+        AiInvocation probeEnvelope;
+        probeEnvelope.m_InterfaceName = iface.m_Name;
+        Message probeMessage;
+        probeMessage.m_Role = MessageRole::User;
+        probeMessage.m_Content = prompt;
+        probeEnvelope.m_Messages.push_back(std::move(probeMessage));
 
-        switch (iface.m_InterfaceType)
+        auto const probeBuilder = IRequestBuilder::Create(iface.m_InterfaceType);
+        if (!probeBuilder)
         {
-            case ConfigParser::EngineConfig::InterfaceType::API3:
-            {
-                // Gemini native: model in URL, different body format.
-                requestData = R"({"contents":[{"parts":[{"text":")" + prompt + R"("}],"role":"user"}]})";
-                queryUrl = iface.m_Url + "/models/" + iface.m_Model + ":generateContent";
-                authStyle = CurlWrapper::AuthStyle::XGoogApiKey;
-                break;
-            }
-            case ConfigParser::EngineConfig::InterfaceType::API2:
-            {
-                requestData = R"({"model":")" + iface.m_Model + R"(","input":")" + prompt + R"(","store":false})";
-                break;
-            }
-            case ConfigParser::EngineConfig::InterfaceType::API1:
-            default:
-            {
-                requestData =
-                    R"({"model":")" + iface.m_Model + R"(","messages":[{"role":"user","content":")" + prompt + R"("}]})";
-                break;
-            }
+            outError = "No request builder available for interface type (index " + std::to_string(interfaceIndex) + ")";
+            return false;
         }
 
-        // Direct curl POST with short timeout — no queue files, no SessionManager.
+        std::string const requestData = probeBuilder->BuildBody(probeEnvelope, iface.m_Model);
+        std::string const queryUrl = probeBuilder->ResolveUrl(iface.m_Url, iface.m_Model);
+        CurlWrapper::AuthStyle const authStyle = probeBuilder->GetAuthStyle();
+
+        // Direct curl POST with a short timeout for the connectivity probe.
         CurlWrapper::QueryData queryData = {
             .m_Url = queryUrl,
             .m_Data = requestData,
@@ -1330,21 +1272,11 @@ namespace AIAssistant
 
     bool AiJcwfService::RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
                                         std::string const& taskContent, std::string const& cntxContent,
-                                        std::string const& probContent, std::string& outResponseText, std::string& outError,
-                                        std::string const& provContent)
+                                        std::string const& probContent, std::string& outResponseText,
+                                        std::string& outError, std::string const& outputSchemaJson)
     {
         outResponseText.clear();
         outError.clear();
-
-        // If no explicit PROV override was given, apply the JCWF AI interface setting.
-        std::string const effectiveProv = provContent.empty() ? BuildJcwfProvContent() : provContent;
-
-        fs::path const queueBase = GetQueueBasePath();
-        if (queueBase.empty())
-        {
-            outError = "Queue base path is not configured";
-            return false;
-        }
 
         JarvisAgent* app = App::g_App;
         if (app == nullptr)
@@ -1360,7 +1292,21 @@ namespace AIAssistant
             return false;
         }
 
-        // Create the queue subfolder.
+        if (Core::g_Core == nullptr)
+        {
+            outError = "Core not available";
+            return false;
+        }
+
+        fs::path const queueBase = GetQueueBasePath();
+        if (queueBase.empty())
+        {
+            outError = "Queue base path is not configured";
+            return false;
+        }
+
+        // Create a disk subfolder for transcripts + .output.* files.  Disk-first philosophy
+        // preserved; no longer load-bearing for dispatch — the envelope carries the content.
         fs::path const queueDir = queueBase / "_ai_jcwf_service" / subfolderName;
         std::error_code ec;
         fs::create_directories(queueDir, ec);
@@ -1376,107 +1322,113 @@ namespace AIAssistant
             fs::remove(entry.path(), ec);
         }
 
-        // Register with AiRequestPool BEFORE writing files.
-        int64_t const requestId = requestPool->AllocateRequestId();
-        int64_t const timestampNs = NowTimestampNs();
-
-        AiRequestHandle handle{};
-        handle.requestId = requestId;
-        handle.requestTimestampNs = timestampNs;
-
-        // Use PROB_<requestId>_<timestampNs>.txt naming so OnProbFileEvent matches the output.
-        std::string const probFilename = "PROB_" + std::to_string(requestId) + "_" + std::to_string(timestampNs) + ".txt";
-        fs::path const probPath = queueDir / probFilename;
-
-        AiRequestHandle const registered = requestPool->RegisterPending(handle, AI_CALL_TIMEOUT_MS);
-        if (!registered.IsValid())
-        {
-            outError = "Failed to register AI request";
-            return false;
-        }
-
-        // Write PROV sidecar if a provider override was requested.
-        // Must be written BEFORE the PROB file so the SessionManager picks it up.
+        // Write the environment files to disk for replay/debug.  Empty sections are skipped.
         std::string writeError;
-
-        if (!effectiveProv.empty())
-        {
-            if (!WriteFile(queueDir / "PROV_provider.json", effectiveProv, writeError))
-            {
-                requestPool->Forget(handle);
-                outError = "Failed to write PROV file: " + writeError;
-                return false;
-            }
-            requestPool->KickFileActivityWatchdog(handle);
-        }
-
-        // Write queue files.
-
         if (!stngContent.empty())
         {
             if (!WriteFile(queueDir / "STNG_settings.txt", stngContent, writeError))
             {
-                requestPool->Forget(handle);
                 outError = "Failed to write STNG file: " + writeError;
                 return false;
             }
         }
-        requestPool->KickFileActivityWatchdog(handle);
-
         if (!taskContent.empty())
         {
             if (!WriteFile(queueDir / "TASK_instructions.txt", taskContent, writeError))
             {
-                requestPool->Forget(handle);
                 outError = "Failed to write TASK file: " + writeError;
                 return false;
             }
         }
-        requestPool->KickFileActivityWatchdog(handle);
-
         if (!cntxContent.empty())
         {
             if (!WriteFile(queueDir / "CNTX_context.txt", cntxContent, writeError))
             {
-                requestPool->Forget(handle);
                 outError = "Failed to write CNTX file: " + writeError;
                 return false;
             }
         }
-        requestPool->KickFileActivityWatchdog(handle);
-
-        if (!WriteFile(probPath, probContent, writeError))
+        std::string const probFilename = "prob.txt";
+        if (!WriteFile(queueDir / probFilename, probContent, writeError))
         {
-            requestPool->Forget(handle);
             outError = "Failed to write PROB file: " + writeError;
             return false;
         }
-        requestPool->KickFileActivityWatchdog(handle);
 
-        LOG_APP_INFO("[AiJcwfService] AI call dispatched: subfolder='{}' probFile='{}' requestId={} timestampNs={}",
-                     subfolderName, probPath.string(), handle.requestId, handle.requestTimestampNs);
-
-        // Wait for completion (blocking — we're on a background thread).
-        LOG_APP_INFO("[AiJcwfService] WaitForCompletion: waiting for requestId={} timestampNs={} (timeout={}ms)",
-                     handle.requestId, handle.requestTimestampNs, AI_CALL_TIMEOUT_MS);
-        std::string errorMessage;
-        bool const success = requestPool->WaitForCompletion(handle, AI_CALL_TIMEOUT_MS, outResponseText, errorMessage);
-        LOG_APP_INFO("[AiJcwfService] WaitForCompletion: returned success={} responseLen={} error='{}'", success,
-                     outResponseText.size(), errorMessage);
-
-        requestPool->Forget(handle);
-
-        if (!success)
+        // Build the envelope.  Concatenate STNG + TASK + CNTX + PROB into a single user message.
+        AiInvocation envelope;
+        envelope.m_InterfaceName = ResolveJcwfInterfaceName();
+        envelope.m_QueueFolder = queueDir;
+        envelope.m_ProbName = probFilename;
+        envelope.m_Timeout = std::chrono::milliseconds(AI_CALL_TIMEOUT_MS);
+        if (!outputSchemaJson.empty())
         {
-            outError = errorMessage.empty() ? "AI call timed out or failed" : errorMessage;
+            envelope.m_OutputSchemaJson = outputSchemaJson;
+        }
+
+        std::string combined;
+        auto const appendSection = [&combined](std::string const& section)
+        {
+            if (section.empty()) return;
+            if (!combined.empty()) combined += "\n";
+            combined += section;
+        };
+        appendSection(stngContent);
+        appendSection(taskContent);
+        appendSection(cntxContent);
+        appendSection(probContent);
+
+        Message userMessage;
+        userMessage.m_Role = MessageRole::User;
+        userMessage.m_Content = std::move(combined);
+        envelope.m_Messages.push_back(std::move(userMessage));
+
+        // Blocking wait via std::promise — this runs on a background thread, and Submit's
+        // callback fires on the curl I/O thread (or synchronously for InterfaceType::Test).
+        auto promise = std::make_shared<std::promise<AiReply>>();
+        std::future<AiReply> future = promise->get_future();
+
+        LOG_APP_INFO("[AiJcwfService] AI call dispatched: subfolder='{}' probFile='{}' interface='{}'", subfolderName,
+                     (queueDir / probFilename).string(),
+                     envelope.m_InterfaceName.empty() ? "<default>" : envelope.m_InterfaceName);
+
+        bool const submitted = requestPool->Submit(envelope,
+            [promise](AiReply const& reply) mutable
+            {
+                promise->set_value(reply);
+            });
+
+        if (!submitted)
+        {
+            outError = "AiRequestPool::Submit rejected envelope (no interface, no API key, or empty body)";
             return false;
         }
+
+        std::future_status const status = future.wait_for(std::chrono::milliseconds(AI_CALL_TIMEOUT_MS));
+        if (status != std::future_status::ready)
+        {
+            outError = "AI call timed out after " + std::to_string(AI_CALL_TIMEOUT_MS) + "ms";
+            return false;
+        }
+
+        AiReply const reply = future.get();
+
+        if (reply.m_Kind == AiReply::Kind::Error)
+        {
+            outError = reply.m_Error.m_Message.empty() ? "AI call failed" : reply.m_Error.m_Message;
+            return false;
+        }
+
+        outResponseText = (reply.m_Kind == AiReply::Kind::Structured) ? reply.m_StructuredJson : reply.m_Text;
 
         if (outResponseText.empty())
         {
             outError = "AI returned empty response";
             return false;
         }
+
+        LOG_APP_INFO("[AiJcwfService] AI call completed: subfolder='{}' responseLen={}", subfolderName,
+                     outResponseText.size());
 
         return true;
     }
@@ -1801,11 +1753,9 @@ namespace AIAssistant
                     "cf-out-normal, cf-out-error, dep-target.\n"
                     "- Every ai_call stng_files content MUST include 'No markdown fences, no explanations.' "
                     "because AI output is consumed directly by compilers/tools.\n"
-                    "- ai_call tasks MUST NOT declare 'file_outputs'. Their working_directory is inside a queue "
-                    "folder; any file landing there that is not STNG/CNTX/TASK/PROB/PROV/*.output.* is "
-                    "mis-categorized as a new requirement and triggers an extra wasted AI call. Instead, "
-                    "declare an 'outputs' slot: \"outputs\": { \"<slotName>\": { \"type\": \"string\" } }. "
-                    "The slot auto-maps to the SessionManager's natural PROB_*.output.txt file, and downstream "
+                    "- ai_call tasks MUST NOT declare 'file_outputs'. Instead, declare an 'outputs' slot: "
+                    "\"outputs\": { \"<slotName>\": { \"type\": \"string\" } }. "
+                    "The slot auto-maps to the task's <stem>.output.txt artifact, and downstream "
                     "tasks reference it as {{taskId.output_file}} or {{taskId.<slotName>}}.\n";
 
                 std::string const generateStng = "Output ONLY valid JSON. No markdown fences. No explanations. No comments. "
@@ -1854,7 +1804,7 @@ namespace AIAssistant
 
                     std::string generateError;
                     if (!RunSingleAiCall("gen_" + seqStr + "_generate", generateStng, generateTask, generateCntx,
-                                         generateProb, generatedJcwf, generateError))
+                                         generateProb, generatedJcwf, generateError, kJcwfSchemaJson))
                     {
                         LOG_APP_WARN("[workflow] task 'generate' failed in run '{}': {}", runId, generateError);
                         broadcastResult(false, "Generation failed: " + generateError, 0);
@@ -2618,7 +2568,7 @@ namespace AIAssistant
                         std::string const fixProb = "Fix the JCWF JSON.";
 
                         if (!RunSingleAiCall("gen_" + seqStr + "_fix", fixStng, fixTask, fixCntx, fixProb, fixedJcwf,
-                                             fixError))
+                                             fixError, kJcwfSchemaJson))
                         {
                             LOG_APP_WARN("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
                             ensureMinDisplay(fixStart);

@@ -40,10 +40,10 @@ namespace AIAssistant
 
     // Service for AI-powered JCWF explanation and generation.
     //
-    // Both operations write queue files (STNG/TASK/CNTX/PROB) to a temporary
-    // subfolder under the queue directory, let a SessionManager process them,
-    // and wait for the AI response via AiRequestPool.  Progress and results
-    // are delivered through the BroadcastFn callback (WebSocket).
+    // Both operations build an AiInvocation envelope and submit it via AiRequestPool.
+    // Queue files (STNG/TASK/CNTX/PROB) are written to a per-call subfolder under the
+    // queue directory for replay/debug — the envelope is authoritative for dispatch.
+    // Progress and results are delivered through the BroadcastFn callback (WebSocket).
     //
     // Thread safety: all public methods are safe to call from any thread.
     class AiJcwfService final
@@ -90,13 +90,20 @@ namespace AIAssistant
                                  std::vector<WorkflowValidationIssue>* outIssues = nullptr);
 
     private:
-        // Single AI call: writes queue files, waits for completion, returns response text.
+        // Single AI call: writes queue files to disk (for replay/debug), builds an AiInvocation
+        // envelope, submits it via AiRequestPool::Submit, and waits for the reply.
         // Returns true on success; on failure, outError describes the issue.
-        // If provContent is non-empty, a PROV_provider.json sidecar is written to force
-        // a specific AI interface (otherwise the default provider is used).
+        // The JCWF-configured AI interface (config.json `jcwf_ai_interface_index`) is used —
+        // empty means "default interface".
+        //
+        // outputSchemaJson: when non-empty, the envelope declares this schema on its
+        // m_OutputSchemaJson field and the reply path validates + retries on schema
+        // failure (inside AiRequestPool::Submit).  On structured success, outResponseText
+        // receives the validated JSON payload.
         bool RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
                              std::string const& taskContent, std::string const& cntxContent, std::string const& probContent,
-                             std::string& outResponseText, std::string& outError, std::string const& provContent = "");
+                             std::string& outResponseText, std::string& outError,
+                             std::string const& outputSchemaJson = "");
 
         // Load the generation guide from doc/jcwf_generation_guide.md.
         static std::string LoadGenerationGuide();

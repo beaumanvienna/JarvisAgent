@@ -80,7 +80,7 @@ Additional context set automatically by the webhook handler:
 1. **n8n** fetches weather data for Hamburg (e.g. from Open‑Meteo: `GET https://api.open-meteo.com/v1/forecast?latitude=53.5511&longitude=9.9937&daily=precipitation_sum,weather_code&timezone=Europe%2FBerlin`).
 2. **n8n** sends `POST /api/webhook/hamburg-tourist-day-planner` with weather context.
 3. **JarvisAgent** verifies the webhook trigger, persists the request JSON to disk, creates a workflow run, and seeds the run context with the provided fields.
-4. The `plan` ai_call task writes STNG/TASK/CNTX/PROB files (with `{{variable}}` expansion), and the SessionManager dispatches the AI query.
+4. The `plan` ai_call task writes STNG/TASK/CNTX/PROB files (with `{{variable}}` expansion), and the runtime dispatches the AI query via `AiRequestPool::Submit`.
 5. The AI response is written to `PROB_plan.output.txt`.
 6. If `callbackUrl` was provided, the runtime POSTs the completion payload back to the caller automatically.
 

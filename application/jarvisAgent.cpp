@@ -31,12 +31,9 @@
 #include "jarvisAgent.h"
 #include "event/events.h"
 #include "web/webServer.h"
-#include "session/sessionManager.h"
 #include "log/terminalManager.h"
 #include "file/fileWatcher.h"
-#include "file/probUtils.h"
 #include "file/scriptRegistry.h"
-#include "web/chatMessages.h"
 #include "python/pythonEnginePool.h"
 #include "task/carMaintenanceTask.h"
 #include "workflow/workflowRegistry.h"
@@ -76,6 +73,7 @@
 #include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
+#include "workflow/aiCallEvents.h"
 #include "workflow/aiRequestPool.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "workflow/workflowFileIndex.h"
@@ -129,13 +127,13 @@ namespace AIAssistant
                     // Compute status window height dynamically
                     [this](int totalRows) -> int
                     {
-                        size_t sessionCount = m_StatusRenderer.GetSessionCount();
-                        if (sessionCount == 0)
+                        size_t rowCount = m_StatusRenderer.GetRowCount();
+                        if (rowCount == 0)
                         {
-                            sessionCount = 1;
+                            rowCount = 1;
                         }
 
-                        int statusHeight = static_cast<int>(sessionCount);
+                        int statusHeight = static_cast<int>(rowCount);
 
                         // ensure at least 1 line, and leave at least 1 for log
                         if (statusHeight >= totalRows)
@@ -155,11 +153,9 @@ namespace AIAssistant
         ShellTaskExecutor::ProbeWindowsShell(Core::g_Core->GetConfig().m_UseBashOnWindows);
 #endif
 
-        const auto& queuePath = Core::g_Core->GetConfig().m_QueueFolderFilepath;
-        std::filesystem::path const absoluteQueuePath = std::filesystem::absolute(queuePath);
-
-        m_FileWatcher = std::make_unique<FileWatcher>(absoluteQueuePath, 100ms);
-        m_FileWatcher->Start();
+        // The queue folder is no longer watched at the application level — direct
+        // envelope dispatch handles its own output files, and file_watch triggers
+        // use the TriggerEngine-owned watcher instead.
 
         // Script registry: scan scripts/ at startup, keep live via second FileWatcher
         m_ScriptRegistry = std::make_unique<ScriptRegistry>();
@@ -197,8 +193,6 @@ namespace AIAssistant
             Core::g_Core->GetTerminalLogStreamBuf()->SetLogBroadcastCallback([ws](std::string const& line)
                                                                              { ws->EnqueueLogLine(line); });
         }
-
-        m_ChatMessagePool = std::make_unique<ChatMessagePool>();
 
         { // initialize Python engine pool (N sub-interpreters, each with own GIL)
             m_PythonEnginePool = std::make_unique<PythonEnginePool>();
@@ -405,6 +399,136 @@ namespace AIAssistant
 
         m_WebServer->SetWorkflowRuntimeManager(m_WorkflowRuntimeManager.get());
 
+        // Feed the TUI status window the same signals the dashboard consumes so
+        // both stay in sync (keys / AI in flight / runs / MCP / cloud / totals).
+        {
+            WorkflowRuntimeManager* runtime = m_WorkflowRuntimeManager.get();
+            WebServer* webServer = m_WebServer.get();
+            AiRequestPool* requestPool = m_AiRequestPool.get();
+            PythonEnginePool* pythonPool = m_PythonEnginePool.get();
+
+            m_StatusRenderer.SetRuntimeSnapshotProvider(
+                [runtime, webServer, requestPool, pythonPool]() -> StatusRenderer::RuntimeSnapshot
+                {
+                    StatusRenderer::RuntimeSnapshot snap;
+
+                    if (Core::g_Core != nullptr)
+                    {
+                        auto const& keyManager = Core::g_Core->GetKeyManager();
+                        switch (keyManager.GetKeyLoadStatus())
+                        {
+                            case KeyManager::KeyLoadStatus::Ok: snap.keysStatus = "ok"; break;
+                            case KeyManager::KeyLoadStatus::NoPassword:
+                                snap.keysStatus = "no_password";
+                                break;
+                            case KeyManager::KeyLoadStatus::WrongPassword:
+                                snap.keysStatus = "wrong_password";
+                                break;
+                            case KeyManager::KeyLoadStatus::NoKeysFile:
+                                snap.keysStatus = "no_keys_file";
+                                break;
+                        }
+                        snap.hasProviders = keyManager.HasProviders();
+
+                        auto const& breaker = Core::g_Core->GetCloudCircuitBreaker();
+                        auto health = breaker.GetHealthSummary();
+                        for (auto const& h : health)
+                        {
+                            switch (h.m_State)
+                            {
+                                case CloudCircuitBreaker::State::Closed: ++snap.cloudHealthy; break;
+                                case CloudCircuitBreaker::State::HalfOpen:
+                                    ++snap.cloudRecovering;
+                                    break;
+                                case CloudCircuitBreaker::State::Open: ++snap.cloudOpen; break;
+                            }
+                        }
+                    }
+
+                    if (requestPool != nullptr)
+                    {
+                        snap.aiInflight = requestPool->GetDirectDispatchInflight();
+                    }
+
+                    if (runtime != nullptr)
+                    {
+                        snap.activeRuns = runtime->GetActiveRunsSnapshot().size();
+                        runtime->GetRunCounters(snap.totalCompleted, snap.totalFailed);
+                    }
+
+                    if (webServer != nullptr)
+                    {
+                        snap.mcpConnected = webServer->IsMcpConnected();
+                    }
+
+                    if (pythonPool != nullptr)
+                    {
+                        snap.pythonRunning = pythonPool->IsRunning();
+                    }
+
+                    return snap;
+                });
+
+            // Rolling last-3 runs (same shape the dashboard's LastRunsBar shows).
+            m_StatusRenderer.SetLastRunsProvider(
+                [runtime](size_t maxCount) -> std::vector<StatusRenderer::LastRunSummary>
+                {
+                    std::vector<StatusRenderer::LastRunSummary> out;
+                    if (runtime == nullptr) return out;
+
+                    auto snapshot = runtime->GetLastRunsSnapshot();
+                    std::vector<WorkflowRun> runs;
+                    runs.reserve(snapshot.size());
+                    for (auto& entry : snapshot)
+                    {
+                        runs.push_back(std::move(entry.second));
+                    }
+                    std::sort(runs.begin(), runs.end(),
+                              [](WorkflowRun const& a, WorkflowRun const& b)
+                              { return a.m_CompletedAtIso8601 > b.m_CompletedAtIso8601; });
+                    if (runs.size() > maxCount) runs.resize(maxCount);
+
+                    for (auto const& run : runs)
+                    {
+                        StatusRenderer::LastRunSummary summary;
+                        summary.isAdhoc = run.m_RunId.rfind("adhoc_", 0) == 0
+                                          || run.m_WorkflowId.rfind("_adhoc_", 0) == 0;
+                        if (summary.isAdhoc)
+                        {
+                            size_t const lastUnderscore = run.m_WorkflowId.find_last_of('_');
+                            if (lastUnderscore != std::string::npos
+                                && lastUnderscore + 1 < run.m_WorkflowId.size())
+                            {
+                                summary.displayId =
+                                    "adhoc #" + run.m_WorkflowId.substr(lastUnderscore + 1);
+                            }
+                            else
+                            {
+                                summary.displayId = run.m_WorkflowId;
+                            }
+                        }
+                        else
+                        {
+                            summary.displayId = run.m_WorkflowId;
+                        }
+                        switch (run.m_State)
+                        {
+                            case WorkflowRunState::Succeeded: summary.state = "succeeded"; break;
+                            case WorkflowRunState::Failed: summary.state = "failed"; break;
+                            case WorkflowRunState::Cancelled: summary.state = "cancelled"; break;
+                            case WorkflowRunState::Stopped: summary.state = "stopped"; break;
+                            case WorkflowRunState::Running: summary.state = "running"; break;
+                            case WorkflowRunState::Pending: summary.state = "pending"; break;
+                            case WorkflowRunState::Paused: summary.state = "paused"; break;
+                            case WorkflowRunState::Stopping: summary.state = "stopping"; break;
+                        }
+                        summary.completedAtIso = run.m_CompletedAtIso8601;
+                        out.push_back(std::move(summary));
+                    }
+                    return out;
+                });
+        }
+
         m_TriggerEngine = std::make_unique<TriggerEngine>(
             [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)
             {
@@ -446,41 +570,6 @@ namespace AIAssistant
         {
             return;
         }
-
-        // Update all session managers (state machines for REQ/STNG/TASK)
-        for (auto& sessionManager : m_SessionManagers)
-        {
-            sessionManager.second->OnUpdate();
-        }
-
-        // Remove stale session managers: idle, no tracked files, queue folder gone.
-        {
-            size_t const smCountBefore = m_SessionManagers.size();
-            for (auto it = m_SessionManagers.begin(); it != m_SessionManagers.end();)
-            {
-                auto& sm = *it->second;
-                bool const hasFiles = sm.HasTrackedFiles();
-                bool const dirExists = fs::is_directory(it->first);
-                if (!hasFiles && !dirExists)
-                {
-                    LOG_APP_INFO("Removing stale session manager '{}'", it->first);
-                    m_StatusRenderer.RemoveSession(it->first);
-                    it = m_SessionManagers.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
-            size_t const removed = smCountBefore - m_SessionManagers.size();
-            if (removed > 0)
-            {
-                LOG_APP_INFO("Stale session cleanup: removed {} of {} session managers", removed, smCountBefore);
-            }
-        }
-
-        // Clean old chat messages
-        m_ChatMessagePool->RemoveExpired();
 
         // --- Python OnUpdate disabled ---
         // m_PythonEnginePool->OnUpdate();
@@ -579,6 +668,38 @@ namespace AIAssistant
                 return true;
             });
 
+        // Forward AI-call lifecycle events to the dashboard WebSocket so per-call
+        // detail (interface, tokens, finish reason, error) is visible beyond the
+        // aggregate "queries in flight" LED.  The TUI reads the same counters the
+        // dashboard does via the runtime snapshot provider set during startup —
+        // no separate event wiring needed.
+        if (m_WebServer != nullptr)
+        {
+            dispatcher.Dispatch<AiCallStartedEvent>(
+                [&](AiCallStartedEvent& evt)
+                {
+                    m_WebServer->BroadcastAiCallStarted(evt.GetProbName(), evt.GetInterfaceName());
+                    return false;
+                });
+            dispatcher.Dispatch<AiCallCompletedEvent>(
+                [&](AiCallCompletedEvent& evt)
+                {
+                    auto const& usage = evt.GetUsage();
+                    m_WebServer->BroadcastAiCallCompleted(evt.GetProbName(), usage.m_InputTokens,
+                                                          usage.m_OutputTokens, usage.m_TotalTokens,
+                                                          evt.GetFinishReason());
+                    return false;
+                });
+            dispatcher.Dispatch<AiCallFailedEvent>(
+                [&](AiCallFailedEvent& evt)
+                {
+                    auto const& err = evt.GetError();
+                    m_WebServer->BroadcastAiCallFailed(evt.GetProbName(), static_cast<int>(err.m_Kind),
+                                                       err.m_HttpStatus, err.m_Message);
+                    return false;
+                });
+        }
+
         // ---------------------------------------------------------
         // Forward file events into TriggerEngine (file_watch triggers)
         // ---------------------------------------------------------
@@ -618,87 +739,6 @@ namespace AIAssistant
         }
 
         // -----------------------------------------------------------------------------------
-        // PROB handling (ai_call completion consumes output files first, then chat)
-        // -----------------------------------------------------------------------------------
-
-        if (!filePath.empty())
-        {
-            std::string filename = filePath.filename().string();
-
-            std::optional<ProbUtils::ProbFileInfo> parsedProbFileInfo = ProbUtils::ParseProbFilename(filename);
-
-            if (parsedProbFileInfo.has_value())
-            {
-                const ProbUtils::ProbFileInfo& probFileInfo = parsedProbFileInfo.value();
-
-                int64_t startupTimestamp = App::g_App->GetStartupTimestamp();
-                int64_t fileTimestamp = probFileInfo.timestamp;
-
-                // Suppress stale files
-                if (fileTimestamp < startupTimestamp)
-                {
-                    return;
-                }
-
-                // PROB OUTPUT
-                if (probFileInfo.isOutput)
-                {
-                    if (m_AiRequestPool != nullptr)
-                    {
-                        if (m_AiRequestPool->OnProbFileEvent(probFileInfo, filePath.string()))
-                        {
-                            return;
-                        }
-                    }
-
-                    std::ifstream inputStream(filePath);
-                    std::stringstream outputBuffer;
-                    outputBuffer << inputStream.rdbuf();
-
-                    std::string responseText = outputBuffer.str();
-
-                    m_ChatMessagePool->MarkAnswered(probFileInfo.id, responseText);
-
-                    LOG_APP_INFO("ChatMessagePool: answered id {} via {}", probFileInfo.id, filename);
-
-                    return;
-                }
-            }
-        }
-
-        // -----------------------------------------------------------------------------------
-        // Path-based AI completion routing for non-PROB_<id>_<ts> output files
-        // (e.g., PROB_NVDA.output.txt written by SessionManager for workflow ai_call tasks)
-        // -----------------------------------------------------------------------------------
-        if (!filePath.empty() && m_AiRequestPool != nullptr)
-        {
-            std::string const stem = filePath.stem().string();
-            if (stem.ends_with(".output"))
-            {
-                // Guard against stale .output files from previous runs: if the file
-                // was last written before this JA session started, ignore it.
-                bool staleOutputFile = false;
-                {
-                    std::error_code ec;
-                    auto const lwt = std::filesystem::last_write_time(filePath, ec);
-                    if (!ec && ToSystemClock(lwt) < m_StartupTime)
-                    {
-                        staleOutputFile = true;
-                        LOG_APP_INFO("Ignoring stale .output file (pre-startup): '{}'", filePath.string());
-                    }
-                }
-
-                if (!staleOutputFile)
-                {
-                    if (m_AiRequestPool->OnOutputFileCreated(filePath.string()))
-                    {
-                        LOG_APP_INFO("AiRequestPool: path-based completion matched '{}'", filePath.string());
-                    }
-                }
-            }
-        }
-
-        // -----------------------------------------------------------------------------------
         // Script registry: route scripts/ file events to ScriptRegistry
         // -----------------------------------------------------------------------------------
         if (!filePath.empty() && m_ScriptRegistry != nullptr)
@@ -718,22 +758,6 @@ namespace AIAssistant
                 }
                 return;
             }
-        }
-
-        // -----------------------------------------------------------------------------------
-        // Forward remaining file events to correct SessionManager
-        // -----------------------------------------------------------------------------------
-
-        if (!filePath.empty())
-        {
-            auto sessionManagerName = fs::relative(filePath.parent_path()).string();
-
-            if (!m_SessionManagers.contains(sessionManagerName))
-            {
-                m_SessionManagers[sessionManagerName] = std::make_unique<SessionManager>(sessionManagerName);
-            }
-
-            m_SessionManagers[sessionManagerName]->OnEvent(event);
         }
 
         // Forward event to Python
@@ -798,10 +822,6 @@ namespace AIAssistant
             m_PythonEnginePool->SignalStop();
         }
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::SignalStop...\n");
-        if (m_FileWatcher != nullptr)
-        {
-            m_FileWatcher->SignalStop();
-        }
         if (m_ScriptFileWatcher != nullptr)
         {
             m_ScriptFileWatcher->SignalStop();
@@ -838,14 +858,6 @@ namespace AIAssistant
 
         App::g_App = nullptr;
 
-        RAW_ONSHUTDOWN("[OnShutdown] session managers...\n");
-        for (auto& sessionManager : m_SessionManagers)
-        {
-            sessionManager.second->OnShutdown();
-        }
-        RAW_ONSHUTDOWN("[OnShutdown] session managers stopped\n");
-        LOG_APP_INFO("[shutdown] session managers stopped");
-
         RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool::WaitStop...\n");
         if (m_PythonEnginePool != nullptr)
         {
@@ -856,10 +868,6 @@ namespace AIAssistant
         LOG_APP_INFO("[shutdown] PythonEnginePool stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] FileWatcher::WaitStop...\n");
-        if (m_FileWatcher != nullptr)
-        {
-            m_FileWatcher->WaitStop();
-        }
         if (m_ScriptFileWatcher != nullptr)
         {
             m_ScriptFileWatcher->WaitStop();
@@ -874,6 +882,15 @@ namespace AIAssistant
         }
         RAW_ONSHUTDOWN("[OnShutdown] WebServer stopped\n");
         LOG_APP_INFO("[shutdown] WebServer stopped");
+
+        // TriggerEngine owns a FileWatcher whose polling task lives on the
+        // thread pool.  Reset it AFTER WebServer::WaitStop so any in-flight
+        // request that held a raw pointer has returned, and BEFORE the engine
+        // drains the thread pool so the watcher task can exit cleanly.
+        RAW_ONSHUTDOWN("[OnShutdown] TriggerEngine::reset...\n");
+        m_TriggerEngine.reset();
+        RAW_ONSHUTDOWN("[OnShutdown] TriggerEngine stopped\n");
+        LOG_APP_INFO("[shutdown] TriggerEngine stopped");
 
         RAW_ONSHUTDOWN("[OnShutdown] done\n");
 #undef RAW_ONSHUTDOWN
@@ -891,29 +908,6 @@ namespace AIAssistant
     int64_t JarvisAgent::GetStartupTimestamp() const
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(m_StartupTime.time_since_epoch()).count();
-    }
-
-    size_t JarvisAgent::GetSessionManagerInflightTotal() const
-    {
-        size_t total = 0;
-        for (auto const& [name, sm] : m_SessionManagers)
-        {
-            total += sm->GetInflightCount();
-        }
-        return total;
-    }
-
-    size_t JarvisAgent::GetSessionManagersWithInflight() const
-    {
-        size_t count = 0;
-        for (auto const& [name, sm] : m_SessionManagers)
-        {
-            if (sm->GetInflightCount() > 0)
-            {
-                ++count;
-            }
-        }
-        return count;
     }
 
 } // namespace AIAssistant

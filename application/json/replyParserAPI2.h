@@ -129,6 +129,9 @@ namespace AIAssistant
 
         virtual size_t HasContent() const override;
         virtual std::string GetContent(size_t index = 0) const override;
+        virtual AiError GetError() const override;
+        virtual AiUsage GetUsage() const override;
+        virtual std::string GetFinishReason() const override;
 
     private:
         void Parse();

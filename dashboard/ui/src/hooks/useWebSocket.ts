@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { RunSnapshot, SessionStatus, LastRunInfo } from "../types";
+import type { RunSnapshot, LastRunInfo } from "../types";
 
 interface WebSocketState {
   connected: boolean;
@@ -7,7 +7,6 @@ interface WebSocketState {
   lastRuns: LastRunInfo[];
   totalCompleted: number;
   totalFailed: number;
-  sessions: Map<string, SessionStatus>;
   pythonRunning: boolean;
 }
 
@@ -18,7 +17,6 @@ export function useWebSocket() {
     lastRuns: [],
     totalCompleted: 0,
     totalFailed: 0,
-    sessions: new Map(),
     pythonRunning: true,
   });
 
@@ -70,21 +68,6 @@ export function useWebSocket() {
       }
       if (msg.type === "workflowRunsSnapshot") {
         setState((prev) => ({ ...prev, runs: msg.runs ?? [] }));
-      } else if (msg.type === "status") {
-        setState((prev) => {
-          const next = new Map(prev.sessions);
-          next.set(msg.name, {
-            name: msg.name,
-            state: msg.state,
-            outputs: msg.outputs,
-            inflight: msg.inflight,
-            completed: msg.completed,
-            failed: msg.failed ?? 0,
-            last_error_code: msg.last_error_code,
-            last_error_message: msg.last_error_message,
-          });
-          return { ...prev, sessions: next };
-        });
       } else if (msg.type === "workflowRunsLastSnapshot") {
         setState((prev) => ({
           ...prev,

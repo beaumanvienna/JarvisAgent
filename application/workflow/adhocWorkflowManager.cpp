@@ -118,9 +118,8 @@ namespace AIAssistant
         }
     } // namespace
 
-    AdhocWorkflowManager::AdhocWorkflowManager(McpKeyManager& keyManager, WorkflowRegistry& registry,
-                                               FileWatcher* queueWatcher)
-        : m_KeyManager(keyManager), m_Registry(registry), m_QueueWatcher(queueWatcher)
+    AdhocWorkflowManager::AdhocWorkflowManager(McpKeyManager& keyManager, WorkflowRegistry& registry)
+        : m_KeyManager(keyManager), m_Registry(registry)
     {
     }
 
@@ -222,18 +221,6 @@ namespace AIAssistant
             std::string const runId = "adhoc_" + runIdStem;
             m_RunIdToMeta[runId] = *meta;
 
-            // Rehydrate the watch for this run so late-arriving AI output files
-            // are still observed. We can't resume the in-memory task state from a
-            // previous j9t run, but at minimum the watcher won't silently miss
-            // events on these folders.
-            if (m_QueueWatcher != nullptr)
-            {
-                std::error_code inner;
-                if (std::filesystem::is_directory(runFolder / "queue", inner))
-                {
-                    m_QueueWatcher->AddPath(runFolder / "queue");
-                }
-            }
         };
 
         for (auto const& l1Entry : std::filesystem::directory_iterator(m_BasePath, ec))
@@ -402,14 +389,6 @@ namespace AIAssistant
         std::filesystem::create_directories(folder / "queue", ec);
         if (ec) return std::string("failed to create queue folder: ") + ec.message();
 
-        // Register the run's queue folder with the FileWatcher so queue-binding
-        // files (STNG/CNTX/TASK/PROB) written by ai_call tasks trigger the
-        // existing AI-dispatch pipeline. Unregistered on completion / reap.
-        if (m_QueueWatcher != nullptr)
-        {
-            m_QueueWatcher->AddPath(folder / "queue");
-        }
-
         // Workflow id is the folder stem (prefixed with "_adhoc_"): "<ts>_<counter>".
         std::string const folderStem = folderName.substr(0, folderName.find("_del-"));
         std::string const workflowId = kWorkflowIdPrefix + folderStem;
@@ -468,12 +447,6 @@ namespace AIAssistant
         {
             LOG_APP_INFO("[adhoc] on_completion cleanup for runId={}", runId);
             std::filesystem::path const parentDir = it->second.m_FolderPath.parent_path();
-            // Unregister the watch BEFORE removing the folder so the watcher
-            // doesn't fire a storm of FileRemovedEvents as the tree vanishes.
-            if (m_QueueWatcher != nullptr)
-            {
-                m_QueueWatcher->RemovePath(it->second.m_FolderPath / "queue");
-            }
             RemoveFolder(it->second.m_FolderPath);
             userTotal = userTotal >= finalBytes ? userTotal - finalBytes : 0;
             m_KeyManager.RecordDiskUsage(it->second.m_User, userTotal);
@@ -651,12 +624,6 @@ namespace AIAssistant
         for (auto const& folder : toDelete)
         {
             LOG_APP_INFO("[adhoc] Reaper removing '{}' (past delete-at)", folder.string());
-            // Unregister the watch BEFORE removing the folder so the watcher
-            // doesn't fire spurious FileRemovedEvents for the disappearing tree.
-            if (m_QueueWatcher != nullptr)
-            {
-                m_QueueWatcher->RemovePath(folder / "queue");
-            }
             // Best-effort disk usage cleanup: read meta.json before rm-rf so we can
             // decrement the attribution for the user.
             auto meta = ReadMeta(folder);

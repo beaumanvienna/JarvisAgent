@@ -38,6 +38,12 @@ namespace AIAssistant
     class FileWatcher
     {
     public:
+        // `pathToWatch` is the primary root that is observed for the lifetime of the watcher.
+        // Pass an empty path to create a watcher with no primary root — all paths must then be
+        // registered via `AddPath` (used by `TriggerEngine` so file_watch triggers can observe
+        // arbitrary paths outside any single fixed tree, and by the adhoc manager for per-run
+        // queue folders).  An empty primary root also disables the "primary gone → shut down
+        // the engine" behaviour that the queue-folder watcher relied on.
         explicit FileWatcher(const fs::path& pathToWatch, std::chrono::milliseconds interval = 100ms);
         ~FileWatcher();
 

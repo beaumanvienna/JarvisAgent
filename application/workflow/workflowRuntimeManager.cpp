@@ -105,6 +105,11 @@ namespace AIAssistant
             }
         }
 
+        // Forward declaration — defined below; used by InjectUpstreamOutputs.
+        void InjectUpstreamAiStructuredOutput(std::string const& depIdPrefix,
+                                              TaskInstanceState const& upstreamState,
+                                              std::unordered_map<std::string, std::string>& targetInputValues);
+
         // Inject upstream task outputs into a downstream task's InputValues map.
         // Populates {{depIdPrefix.captured_stdout}}, {{depIdPrefix.output_file}},
         // {{depIdPrefix.SLOT}} for each declared output slot, and flattened
@@ -137,6 +142,9 @@ namespace AIAssistant
                     targetInputValues[depIdPrefix + "." + slotName] = slotValue;
                 }
             }
+
+            // JSON-path expansion from upstream ai_call's structured output (schema-validated reply).
+            InjectUpstreamAiStructuredOutput(depIdPrefix, upstreamState, targetInputValues);
 
             // JSON-path expansion from upstream's response.json (cloud tasks).
             std::filesystem::path const workflowBaseDir =
@@ -194,6 +202,75 @@ namespace AIAssistant
             catch (std::exception const& e)
             {
                 LOG_APP_WARN("[upstream] exception reading response.json for task '{}': {}", depIdPrefix, e.what());
+            }
+        }
+
+        // Flatten an upstream ai_call's structured-output JSON into {{A.json.PATH}}.
+        // When an ai_call declares `output_schema`, the validated reply lands at a
+        // `.json` file recorded in the task's m_OutputValues map (either a PROB-derived
+        // `<stem>.output.json` or an explicit `file_outputs` path). Parsing it here
+        // makes schema-validated fields first-class template sources — symmetric to
+        // the cloud-task `response.json` handling above — so downstream tasks can
+        // reference e.g. `{{classify.json.category}}` instead of parsing raw text
+        // out of `captured_stdout`.
+        void InjectUpstreamAiStructuredOutput(std::string const& depIdPrefix,
+                                              TaskInstanceState const& upstreamState,
+                                              std::unordered_map<std::string, std::string>& targetInputValues)
+        {
+            if (upstreamState.m_OutputValues.empty())
+            {
+                return;
+            }
+
+            std::string jsonFilePath;
+            for (auto const& [slotName, slotValue] : upstreamState.m_OutputValues)
+            {
+                if (slotValue.size() >= 5 &&
+                    slotValue.compare(slotValue.size() - 5, 5, ".json") == 0)
+                {
+                    jsonFilePath = slotValue;
+                    break;
+                }
+            }
+
+            if (jsonFilePath.empty())
+            {
+                return;
+            }
+
+            std::error_code ec;
+            if (!std::filesystem::exists(jsonFilePath, ec) || ec)
+            {
+                return;
+            }
+
+            try
+            {
+                simdjson::dom::parser parser;
+                simdjson::dom::element root;
+                auto err = parser.load(jsonFilePath).get(root);
+                if (err != simdjson::SUCCESS)
+                {
+                    LOG_APP_WARN("[upstream] failed to parse ai_call structured output for task '{}' at '{}': {}",
+                                 depIdPrefix, jsonFilePath, simdjson::error_message(err));
+                    return;
+                }
+
+                std::unordered_map<std::string, std::string> flattened;
+                FlattenJsonDom(root, "", flattened);
+
+                for (auto const& [path, value] : flattened)
+                {
+                    targetInputValues[depIdPrefix + ".json." + path] = value;
+                }
+
+                LOG_APP_INFO("[upstream] injected {} json fields from task '{}' structured output at '{}'",
+                             flattened.size(), depIdPrefix, jsonFilePath);
+            }
+            catch (std::exception const& e)
+            {
+                LOG_APP_WARN("[upstream] exception reading structured output for task '{}' at '{}': {}",
+                             depIdPrefix, jsonFilePath, e.what());
             }
         }
 
@@ -800,9 +877,9 @@ namespace AIAssistant
         std::queue<PendingRun> emptyQueue;
         m_PendingRuns.swap(emptyQueue);
 
-        for (auto& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
-            activeRun.m_CancelRequested = true;
+            activeRunPtr->m_CancelRequested = true;
         }
     }
 
@@ -814,8 +891,9 @@ namespace AIAssistant
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-            for (auto& activeRun : m_ActiveRuns)
+            for (auto& activeRunPtr : m_ActiveRuns)
             {
+                ActiveRun& activeRun = *activeRunPtr;
                 for (auto& [id, future] : activeRun.m_RunningTasks)
                 {
                     taskFutures.push_back(future);
@@ -850,8 +928,9 @@ namespace AIAssistant
             JarvisAgent* app = App::g_App;
             AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
-            for (auto& activeRun : m_ActiveRuns)
+            for (auto& activeRunPtr : m_ActiveRuns)
             {
+                ActiveRun& activeRun = *activeRunPtr;
                 for (auto& [taskId, taskState] : activeRun.m_Run.m_TaskStates)
                 {
                     if (taskState.m_State != TaskInstanceStateKind::WaitingExternal)
@@ -1070,8 +1149,9 @@ namespace AIAssistant
 
     bool WorkflowRuntimeManager::TryApplyAiCompletion(AiRequestCompletion const& completion)
     {
-        for (ActiveRun& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_WorkflowId != completion.m_WorkflowId)
             {
                 continue;
@@ -1232,16 +1312,17 @@ namespace AIAssistant
 
         for (size_t index = 0; index < m_ActiveRuns.size();)
         {
-            TickActiveRun(m_ActiveRuns[index]);
+            ActiveRun& active = *m_ActiveRuns[index];
+            TickActiveRun(active);
 
-            if (m_ActiveRuns[index].m_Run.m_IsCompleted)
+            if (active.m_Run.m_IsCompleted)
             {
                 // 2-second minimum-visibility hold (plan §6): sub-second runs — common for adhoc
                 // submissions — would otherwise slip through m_ActiveRuns between snapshot
                 // broadcasts and never surface on the dashboard. Keep completed entries in the
                 // active list until at least 2 s have elapsed since the run started, then let
                 // the regular erase path run on a subsequent tick.
-                auto const elapsed = std::chrono::steady_clock::now() - m_ActiveRuns[index].m_StartedAtSteady;
+                auto const elapsed = std::chrono::steady_clock::now() - active.m_StartedAtSteady;
                 if (elapsed < std::chrono::seconds(2))
                 {
                     ++index;
@@ -1252,41 +1333,41 @@ namespace AIAssistant
                     std::scoped_lock<std::mutex> const lock(m_Mutex);
 
                     // Finalise the overall run state (was left at Pending/Running by TickActiveRun).
-                    if (m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Cancelled)
+                    if (active.m_Run.m_State == WorkflowRunState::Cancelled)
                     {
                         // Keep Cancelled as-is.
                     }
-                    else if (m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Stopping ||
-                             m_ActiveRuns[index].m_Run.m_State == WorkflowRunState::Stopped)
+                    else if (active.m_Run.m_State == WorkflowRunState::Stopping ||
+                             active.m_Run.m_State == WorkflowRunState::Stopped)
                     {
-                        m_ActiveRuns[index].m_Run.m_State =
-                            m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Stopped;
+                        active.m_Run.m_State =
+                            active.m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Stopped;
                     }
                     else
                     {
-                        m_ActiveRuns[index].m_Run.m_State =
-                            m_ActiveRuns[index].m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
+                        active.m_Run.m_State =
+                            active.m_Run.m_HasFailed ? WorkflowRunState::Failed : WorkflowRunState::Succeeded;
                     }
 
                     // Safety net: ensure completedAt is always set (some paths missed it).
-                    if (m_ActiveRuns[index].m_Run.m_CompletedAtIso8601.empty())
+                    if (active.m_Run.m_CompletedAtIso8601.empty())
                     {
-                        m_ActiveRuns[index].m_Run.m_CompletedAtIso8601 = GetIso8601NowUTC();
+                        active.m_Run.m_CompletedAtIso8601 = GetIso8601NowUTC();
                     }
 
                     // Only update lastRun if this run started later than the existing entry.
                     // Prevents an older stuck/timed-out run from overwriting a newer successful one.
                     {
-                        auto const& workflowId = m_ActiveRuns[index].m_Run.m_WorkflowId;
+                        auto const& workflowId = active.m_Run.m_WorkflowId;
                         auto existingIt = m_LastRuns.find(workflowId);
                         if (existingIt == m_LastRuns.end() ||
-                            m_ActiveRuns[index].m_Run.m_StartedAtIso8601 >= existingIt->second.m_StartedAtIso8601)
+                            active.m_Run.m_StartedAtIso8601 >= existingIt->second.m_StartedAtIso8601)
                         {
-                            m_LastRuns[workflowId] = m_ActiveRuns[index].m_Run;
+                            m_LastRuns[workflowId] = active.m_Run;
                         }
                     }
 
-                    if (m_ActiveRuns[index].m_Run.m_HasFailed)
+                    if (active.m_Run.m_HasFailed)
                     {
                         ++m_TotalFailedRuns;
                     }
@@ -1297,15 +1378,15 @@ namespace AIAssistant
                 }
 
                 // Fire completion callback (async, fire-and-forget) if callbackUrl is in context.
-                FireCompletionCallback(m_ActiveRuns[index].m_Run);
+                FireCompletionCallback(active.m_Run);
 
                 // Fire terminal observer (AdhocWorkflowManager listens for on_completion cleanup).
                 if (m_RunTerminalObserver)
                 {
                     try
                     {
-                        m_RunTerminalObserver(m_ActiveRuns[index].m_Run.m_RunId,
-                                              m_ActiveRuns[index].m_Run.m_State);
+                        m_RunTerminalObserver(active.m_Run.m_RunId,
+                                              active.m_Run.m_State);
                     }
                     catch (std::exception const& ex)
                     {
@@ -1392,7 +1473,7 @@ namespace AIAssistant
 
             {
                 std::scoped_lock<std::mutex> const lock(m_Mutex);
-                m_ActiveRuns.push_back(std::move(activeRun));
+                m_ActiveRuns.push_back(std::make_unique<ActiveRun>(std::move(activeRun)));
             }
         }
     }
@@ -1401,6 +1482,14 @@ namespace AIAssistant
     {
         WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
         WorkflowRun& workflowRun = activeRun.m_Run;
+
+        // The caller holds completed runs in m_ActiveRuns for a 2 s minimum-visibility
+        // window. Re-entering the full tick (harvest → terminal-check → log) during
+        // that hold fired the completion log every frame — ~120× per run.
+        if (workflowRun.m_IsCompleted)
+        {
+            return;
+        }
 
         // ---------------------------------------------------------
         // 0) Harvest filter evaluation completions + aggregate per-item results
@@ -2025,6 +2114,12 @@ namespace AIAssistant
     void WorkflowRuntimeManager::TimeoutWaitingExternalTasks(ActiveRun& activeRun)
     {
         static constexpr uint64_t kDefaultWaitingExternalTimeoutMs = 300000; // 5 minutes (matches AiRequestPool)
+        // Floor for ai_call tasks — modern AI providers routinely take 60-120 s for
+        // long structured outputs.  User-authored workflow-wide `timeout_ms` values
+        // (often a generic 60 000 ms) would otherwise abort perfectly healthy calls
+        // while the HTTP response was still in flight.  The AiInvocation envelope's
+        // own default is 120 s, so we use that as the floor here for consistency.
+        static constexpr uint64_t kAiCallMinWaitingExternalTimeoutMs = 120000; // 2 minutes
 
         WorkflowRun& workflowRun = activeRun.m_Run;
         WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
@@ -2048,9 +2143,17 @@ namespace AIAssistant
             // Look up task-level timeout; fall back to default.
             std::string const parentId = ParentTaskId(taskId);
             auto defIt = workflowDefinition.m_Tasks.find(parentId);
-            uint64_t const timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
-                                           ? defIt->second.m_TimeoutMs
-                                           : kDefaultWaitingExternalTimeoutMs;
+            uint64_t timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
+                                     ? defIt->second.m_TimeoutMs
+                                     : kDefaultWaitingExternalTimeoutMs;
+
+            // Enforce a minimum timeout for ai_call tasks so short user-authored
+            // `timeout_ms` values don't abort legitimate slow AI responses.
+            if (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_Type == TaskType::AiCall &&
+                timeoutMs < kAiCallMinWaitingExternalTimeoutMs)
+            {
+                timeoutMs = kAiCallMinWaitingExternalTimeoutMs;
+            }
 
             auto const elapsed =
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - taskState.m_WaitingExternalSince).count();
@@ -2336,8 +2439,9 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        for (ActiveRun const& activeRun : m_ActiveRuns)
+        for (auto const& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun const& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_RunId == runId)
             {
                 outRun = activeRun.m_Run;
@@ -2357,8 +2461,9 @@ namespace AIAssistant
 
         std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        for (ActiveRun& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_RunId == runId)
             {
                 activeRun.m_CancelRequested = true;
@@ -2383,8 +2488,9 @@ namespace AIAssistant
 
         std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        for (ActiveRun& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_RunId == runId)
             {
                 if (activeRun.m_CancelRequested || activeRun.m_StopRequested)
@@ -2410,8 +2516,9 @@ namespace AIAssistant
 
         std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        for (ActiveRun& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_RunId == runId)
             {
                 if (!activeRun.m_PauseRequested)
@@ -2437,8 +2544,9 @@ namespace AIAssistant
 
         std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        for (ActiveRun& activeRun : m_ActiveRuns)
+        for (auto& activeRunPtr : m_ActiveRuns)
         {
+            ActiveRun& activeRun = *activeRunPtr;
             if (activeRun.m_Run.m_RunId == runId)
             {
                 if (activeRun.m_CancelRequested)
@@ -2484,9 +2592,9 @@ namespace AIAssistant
 
         std::vector<WorkflowRun> runs;
         runs.reserve(m_ActiveRuns.size());
-        for (ActiveRun const& activeRun : m_ActiveRuns)
+        for (auto const& activeRunPtr : m_ActiveRuns)
         {
-            runs.emplace_back(activeRun.m_Run);
+            runs.emplace_back(activeRunPtr->m_Run);
         }
 
         return runs;
@@ -2522,8 +2630,9 @@ namespace AIAssistant
         // Reject if there is an active run for this workflow.
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
-            for (ActiveRun const& activeRun : m_ActiveRuns)
+            for (auto const& activeRunPtr : m_ActiveRuns)
             {
+                ActiveRun const& activeRun = *activeRunPtr;
                 if (activeRun.m_Run.m_WorkflowId == workflowId)
                 {
                     outErrorMessage =
@@ -3254,9 +3363,9 @@ namespace AIAssistant
         {
             // Check if the child run is still active (not yet completed).
             bool childStillActive = false;
-            for (ActiveRun const& activeRun : m_ActiveRuns)
+            for (auto const& activeRunPtr : m_ActiveRuns)
             {
-                if (activeRun.m_Run.m_RunId == childRunId)
+                if (activeRunPtr->m_Run.m_RunId == childRunId)
                 {
                     childStillActive = true;
                     break;
@@ -3291,8 +3400,9 @@ namespace AIAssistant
             }
 
             // Propagate to the parent task.
-            for (ActiveRun& parentActiveRun : m_ActiveRuns)
+            for (auto& parentActiveRunPtr : m_ActiveRuns)
             {
+                ActiveRun& parentActiveRun = *parentActiveRunPtr;
                 if (parentActiveRun.m_Run.m_RunId != link.m_ParentRunId)
                 {
                     continue;
@@ -3353,8 +3463,9 @@ namespace AIAssistant
                 continue;
             }
 
-            for (ActiveRun& activeRun : m_ActiveRuns)
+            for (auto& activeRunPtr : m_ActiveRuns)
             {
+                ActiveRun& activeRun = *activeRunPtr;
                 if (activeRun.m_Run.m_RunId == childRunId)
                 {
                     activeRun.m_CancelRequested = true;

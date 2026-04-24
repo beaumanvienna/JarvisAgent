@@ -3,7 +3,6 @@ import "./App.css";
 import StatusBar from "./components/StatusBar";
 import LastRunsBar from "./components/LastRunsBar";
 import WorkflowsPanel from "./components/WorkflowsPanel";
-import SessionManagersPanel from "./components/SessionManagersPanel";
 import LogViewerPanel from "./components/LogViewerPanel";
 import SettingsModal from "./components/SettingsModal";
 import MasterPasswordDialog from "./components/MasterPasswordDialog";
@@ -73,15 +72,17 @@ export default function App() {
   }, [isEngine]);
 
   // Listen for auth-required events from authFetch (401/403 responses).
-  // We still raise `needsAuth` so the sign-in dialog surfaces once keys are
-  // confirmed unlocked — but the dialog itself is gated on `keysStatus === "ok"`
-  // below, so a 401 from whoami while the store is sealed can't stomp on the
-  // master-password prompt.
+  // Only relevant in Engine — Studio is "open" per the cyber-security spec
+  // (doc/cyber security.md §"j9t Studio — Developer Workstation") and has no
+  // browser-UI authentication, so a transient 401 (e.g. during key-store
+  // unlock or a brief backend restart) must not flip the sign-in dialog on.
   useEffect(() => {
-    const handler = () => setNeedsAuth(true);
+    const handler = () => {
+      if (isEngine) setNeedsAuth(true);
+    };
     window.addEventListener("j9t-auth-required", handler);
     return () => window.removeEventListener("j9t-auth-required", handler);
-  }, []);
+  }, [isEngine]);
 
   const handleAuthenticated = useCallback(async () => {
     setNeedsAuth(false);
@@ -100,12 +101,14 @@ export default function App() {
     setNeedsAuth(true);
   }, []);
 
+  // Re-query on mount AND every time the WebSocket reconnects — a reconnect
+  // means the backend came back up, and after a restart the key store is
+  // sealed again. Without this the dashboard holds the old "ok" status and
+  // neither the master-password modal nor the "locked" banner variant fires.
   useEffect(() => {
+    if (!ws.connected) return;
     fetchKeysStatus()
       .then((data) => {
-        // `no_keys_file` falls through to the same dialog in "set master
-        // password" mode so a fresh install can bootstrap the encrypted store
-        // and receive the first-run enrollment banner.
         if (
           data.status === "ok" ||
           data.status === "no_password" ||
@@ -116,16 +119,22 @@ export default function App() {
         }
       })
       .catch(() => {
-        // Server not ready yet or network hiccup — leave state at "loading"
-        // so neither dialog shows. The usePolling(5000) tick will retry via a
-        // subsequent status refresh.
+        // Transient network hiccup — leave state as-is; next reconnect retries.
       });
-  }, []);
+  }, [ws.connected]);
 
   const handleKeysUnlocked = () => {
     setKeysStatus("ok");
+    setRequestUnlock(false);
     refresh();
   };
+
+  // When the Workflows banner's "Unlock master password" button is clicked we
+  // force the dialog to open even if the backend state isn't yet reporting
+  // sealed — handy when the dashboard loaded while unlocked but a subsequent
+  // restart resealed the store and the one-shot fetchKeysStatus is stale.
+  const [requestUnlock, setRequestUnlock] = useState(false);
+  const handleRequestUnlock = () => setRequestUnlock(true);
 
   const handleQuit = async () => {
     if (!window.confirm("Shut down JarvisAgent?")) return;
@@ -144,13 +153,17 @@ export default function App() {
           entirely while the key store is sealed OR while the status is still
           loading — this closes a mount-time race where a 401 on whoami would
           flip `needsAuth=true` before fetchKeysStatus resolved. */}
-      {keysSealed && (
+      {(keysSealed || requestUnlock) && (
         <MasterPasswordDialog
-          reason={keysStatus as "no_password" | "wrong_password" | "no_keys_file"}
+          reason={
+            keysSealed
+              ? (keysStatus as "no_password" | "wrong_password" | "no_keys_file")
+              : "no_password"
+          }
           onUnlocked={handleKeysUnlocked}
         />
       )}
-      {keysStatus === "ok" && needsAuth && (
+      {keysStatus === "ok" && needsAuth && isEngine && (
         <AdminLoginDialog
           onAuthenticated={handleAuthenticated}
           onOpenActivation={(prefillToken) => {
@@ -178,7 +191,7 @@ export default function App() {
       <StatusBar
         connected={ws.connected}
         runs={ws.runs}
-        sessions={ws.sessions}
+        aiCallsInflight={status?.ai_calls_inflight ?? 0}
         pythonRunning={ws.pythonRunning}
         mcpConnected={status?.mcp_connected ?? false}
         connectionHealth={status?.connection_health}
@@ -190,7 +203,14 @@ export default function App() {
         isStudio={isStudio}
         onLogout={isEngine && authUser ? handleLogout : undefined}
         authUser={authUser}
-        authRole={authRole}
+        // In Studio the backend returns a synthetic "studio"/"admin" identity for
+        // unauthenticated requests (see webServer.cpp Authenticate()). Keep the
+        // edition label visible but drop the "admin" role pill — per the cyber
+        // security spec (doc/cyber security.md §Studio) there is no browser-UI
+        // auth, so surfacing a role grant would be misleading.  Keyed off the
+        // user string alone (no `isStudio` guard) so the pill stays hidden even
+        // while the dashboard is disconnected and /api/status is unavailable.
+        authRole={authUser === "studio" ? null : authRole}
         onOpenSettings={() => setShowSettings(true)}
       />
       <LastRunsBar lastRuns={ws.lastRuns} />
@@ -199,12 +219,13 @@ export default function App() {
           <WorkflowsPanel
             workflows={workflows}
             hasProviders={hasProviders}
+            keysSealed={keysSealed}
+            onRequestUnlock={handleRequestUnlock}
             runs={ws.runs}
             lastRuns={ws.lastRuns}
             onRefresh={refresh}
             canRunWorkflows={canRunWorkflows}
           />
-          <SessionManagersPanel sessions={ws.sessions} />
         </main>
       )}
       {activeTab === "log" && (

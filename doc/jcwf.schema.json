@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JC Workflow File (JCWF) v1.1",
+  "type": "object",
+  "required": ["version", "id", "tasks"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^1\\.[01]$"
+    },
+    "id": { "type": "string" },
+    "label": { "type": "string" },
+    "doc": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "base_directory": { "type": "string" },
+    "manual_start": { "type": "boolean", "default": true },
+    "triggers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/trigger" }
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/task" }
+    },
+    "dataflow": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dataflow" }
+    },
+    "filters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filter" }
+    },
+    "control_nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/control_node" }
+    },
+    "controlflow": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/controlflow_edge" }
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "timeout_ms": { "type": "integer" },
+        "retries": {
+          "type": "object",
+          "properties": {
+            "max_attempts": { "type": "integer" },
+            "backoff_ms": { "type": "integer" }
+          }
+        },
+        "ai": {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "request_params": { "type": "object" }
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+
+  "$defs": {
+    "trigger": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "cron",
+            "file_watch",
+            "structure",
+            "manual",
+            "webhook",
+            "s3_watch",
+            "onedrive_watch",
+            "email_watch",
+            "azure_blob_watch",
+            "gcs_watch"
+          ]
+        },
+        "id": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "params": { "type": "object" }
+      }
+    },
+
+    "task": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": [
+            "python",
+            "shell",
+            "ai_call",
+            "internal",
+            "sub_workflow",
+            "polarion_write",
+            "s3",
+            "db_query",
+            "onedrive_upload",
+            "onedrive_download",
+            "snowflake_query",
+            "slack_message",
+            "slack_read",
+            "email_send",
+            "email_read",
+            "github_issue",
+            "jira_issue",
+            "redmine_issue",
+            "sheets_read",
+            "sheets_write",
+            "azure_blob_upload",
+            "azure_blob_download",
+            "gcs_upload",
+            "gcs_download"
+          ]
+        },
+        "workflow_file": { "type": "string" },
+        "expose_error_signal": { "type": "boolean" },
+        "output_schema": {},
+        "output_retries": { "type": "integer", "minimum": 0 },
+        "label": { "type": "string" },
+        "doc": { "type": "string" },
+        "mode": {
+          "type": "string",
+          "enum": ["single", "per_item"],
+          "default": "single"
+        },
+        "filter": { "type": "string" },
+        "working_directory": { "type": "string" },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "file_inputs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "file_outputs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "materialize": {
+          "type": "object",
+          "description": "Map from source path template (e.g. '{{input[0]}}') to target filename. The runtime copies each resolved source into the task working_directory under the target name before execution. Applies to all task types.",
+          "additionalProperties": { "type": "string" }
+        },
+        "environment": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "assistant_id": { "type": "string" },
+            "variables": {
+              "type": "object",
+              "additionalProperties": { "type": ["string", "number", "boolean"] }
+            }
+          }
+        },
+        "queue_binding": {
+          "type": "object",
+          "properties": {
+            "stng_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "task_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "cntx_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "prob_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            },
+            "prov_files": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/queue_file_ref" }
+            }
+          }
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "command": { "type": "string" },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "provider": { "type": "string" },
+            "model": { "type": "string" },
+            "request_params": { "type": "object" },
+            "mode": {
+              "type": "string",
+              "enum": ["one_shot", "assistant"]
+            },
+            "prompt_template": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" },
+              "required": { "type": "boolean" }
+            }
+          }
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" }
+            }
+          }
+        },
+        "expose_error_signal": { "type": "boolean", "default": false },
+        "timeout_ms": { "type": "integer" },
+        "retries": {
+          "type": "object",
+          "properties": {
+            "max_attempts": { "type": "integer" },
+            "backoff_ms": { "type": "integer" }
+          }
+        }
+      }
+    },
+
+    "queue_file_ref": {
+      "anyOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "required": ["path", "content"],
+          "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          }
+        }
+      ]
+    },
+
+    "dataflow": {
+      "type": "object",
+      "required": ["from_task", "to_task"],
+      "properties": {
+        "from_task": { "type": "string" },
+        "from_output": { "type": "string" },
+        "to_task": { "type": "string" },
+        "to_input": { "type": "string" },
+        "mapping": { "type": "object" }
+      }
+    },
+
+    "control_node": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["branch"]
+        },
+        "label": { "type": "string" }
+      }
+    },
+
+    "controlflow_edge": {
+      "type": "object",
+      "required": ["from", "to", "kind"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["normal", "error_signal", "on_error"]
+        },
+        "from_port": { "type": "string" },
+        "to_port": { "type": "string" }
+      }
+    },
+
+    "filter": {
+      "type": "object",
+      "required": ["id", "source", "binding"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["csv", "text_lines", "query", "polarion_query"]
+            },
+            "path": { "type": "string" },
+            "delimiter": { "type": "string", "default": "," },
+            "has_header": { "type": "boolean", "default": true },
+            "range": { "type": "string" },
+            "skip_empty": { "type": "boolean", "default": true },
+            "index_path": { "type": "string" },
+            "query": { "type": "string" },
+            "fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "base_url": { "type": "string" },
+            "project_id": { "type": "string" },
+            "key_name": { "type": "string" },
+            "page_size": { "type": "integer", "default": 100 },
+            "connection": { "type": "string" }
+          }
+        },
+        "binding": { "type": "string" },
+        "max_items": { "type": "integer", "default": 10000 }
+      }
+    }
+  }
+}

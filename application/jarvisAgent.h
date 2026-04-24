@@ -22,19 +22,15 @@
 #pragma once
 #include <chrono>
 #include <memory>
-#include <unordered_map>
 
 #include "application.h"
-#include "file/fileCategory.h"
 #include "log/statusRenderer.h"
 #include "task/internalTaskRegistry.h"
 
 namespace AIAssistant
 {
-    class SessionManager;
     class FileWatcher;
     class WebServer;
-    class ChatMessagePool;
     class PythonEnginePool;
     class WorkflowRegistry;
     class TriggerEngine;
@@ -61,7 +57,6 @@ namespace AIAssistant
         static std::unique_ptr<Application> Create();
 
         WebServer* GetWebServer() const { return m_WebServer.get(); }
-        ChatMessagePool* GetChatMessagePool() const { return m_ChatMessagePool.get(); }
         std::chrono::system_clock::time_point GetStartupTime() const { return m_StartupTime; }
         int64_t GetStartupTimestamp() const;
         StatusRenderer& GetStatusRenderer() { return m_StatusRenderer; }
@@ -73,23 +68,8 @@ namespace AIAssistant
         AiRequestPool* GetAiRequestPool() const { return m_AiRequestPool.get(); }
         CurlMultiDispatcher* GetCurlMultiDispatcher() const { return m_CurlMultiDispatcher.get(); }
         WorkflowRuntimeManager* GetWorkflowRuntimeManager() const { return m_WorkflowRuntimeManager.get(); }
-        // Exposed so AdhocWorkflowManager can register each run's queue folder
-        // with the live watcher at stage-time (see log/AdhocQueueFolderMonitoring.md).
-        FileWatcher* GetQueueFileWatcher() const { return m_FileWatcher.get(); }
 
         IInternalTaskRegistry* GetInternalTaskRegistry() { return &m_InternalTaskRegistry; }
-
-        size_t GetSessionManagerCount() const { return m_SessionManagers.size(); }
-        size_t GetSessionManagerInflightTotal() const;
-        size_t GetSessionManagersWithInflight() const;
-
-        template <typename Func> void ForEachSessionManager(Func&& func)
-        {
-            for (auto& [name, sm] : m_SessionManagers)
-            {
-                func(*sm);
-            }
-        }
 
     private:
         void CheckIfFinished();
@@ -103,12 +83,9 @@ namespace AIAssistant
         std::chrono::system_clock::time_point m_StartupTime;
 
         // submodules
-        std::unordered_map<std::string, std::unique_ptr<SessionManager>> m_SessionManagers;
-        std::unique_ptr<FileWatcher> m_FileWatcher;
         std::unique_ptr<FileWatcher> m_ScriptFileWatcher;
         std::unique_ptr<ScriptRegistry> m_ScriptRegistry;
         std::unique_ptr<WebServer> m_WebServer;
-        std::unique_ptr<ChatMessagePool> m_ChatMessagePool;
         std::unique_ptr<PythonEnginePool> m_PythonEnginePool;
 
         std::unique_ptr<WorkflowRegistry> m_WorkflowRegistry;

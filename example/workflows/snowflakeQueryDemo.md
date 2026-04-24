@@ -4,7 +4,7 @@
 
 The **snowflakeQueryDemo** workflow is a true Snowflake round-trip demo with AI-driven per-item classification. It creates a database and two tables, inserts 8 sales records, queries aggregated region stats to CSV, fans out to an AI classifier that labels each region STRONG/MODERATE/WEAK, then INSERTs the verdict back into a dedicated analysis table per region. A final verify task SELECTs counts from both tables to confirm the round-trip completed. Round-trip = read external -> process with AI -> write back to the same external system.
 
-The AI classifier is constrained to output a single word (STRONG, MODERATE, or WEAK) so its `captured_stdout` can be wired straight into the downstream `write_analysis` INSERT statement via template variable -- no Python parsing step needed.
+The AI classifier uses **structured output** — it emits a schema-validated JSON object `{"verdict": "STRONG"|"MODERATE"|"WEAK"}`, and the downstream `write_analysis` INSERT reads the field via `{{ai_analyze.json.verdict}}`. The schema enforces the enum and bounded retries handle transient drift — no more one-word-prompt kludge.
 
 ---
 
@@ -207,7 +207,7 @@ Total Revenue: {{region.total_revenue}}
 ...
 ```
 
-The system prompt constrains the AI to output **exactly one word**: STRONG, MODERATE, or WEAK. The thresholds are embedded in the TASK file (STRONG = total above 2500000 or avg above 1000000, WEAK = total below 1000000 or avg below 500000). `captured_stdout` ends up as the literal string `"STRONG"`, `"MODERATE"`, or `"WEAK"`.
+The AI emits structured JSON `{"verdict": "STRONG"|"MODERATE"|"WEAK"}`, validated against an `output_schema` enum with `additionalProperties:false`. The thresholds live in the TASK file (STRONG = total above 2500000 or avg above 1000000, WEAK = total below 1000000 or avg below 500000). On schema mismatch the runtime retries up to `output_retries:3` with the validator error as a correction message — so transient drift from a stricter model is self-healed.
 
 ### 7. write_analysis -- INSERT verdict back to Snowflake (per-item)
 
@@ -217,11 +217,11 @@ The system prompt constrains the AI to output **exactly one word**: STRONG, MODE
 | Mode | `per_item` |
 | Filter | `region-stats` |
 | Connection | `my-snowflake` |
-| Query | `INSERT INTO J9T_DEMO.PUBLIC.j9t_demo_analysis (region, verdict, analysis_file) VALUES ('{{region.region}}', '{{ai_analyze.captured_stdout}}', '{{ai_analyze.output_file}}')` |
+| Query | `INSERT INTO J9T_DEMO.PUBLIC.j9t_demo_analysis (region, verdict, analysis_file) VALUES ('{{region.region}}', '{{ai_analyze.json.verdict}}', '{{ai_analyze.output_file}}')` |
 | Working dir | `snowflakeQueryDemo/05_write_analysis` |
 | Depends on | `ai_analyze` |
 
-Runs once per region, inserting the AI's verdict and the path to its output file. Both `{{ai_analyze.captured_stdout}}` and `{{ai_analyze.output_file}}` resolve to the matching item's output for the same row index -- the runtime tracks per-item correspondence automatically.
+Runs once per region, inserting the AI's verdict and the path to its output file. Both `{{ai_analyze.json.verdict}}` (from the structured-output JSON via the engine's `.json.PATH` resolver) and `{{ai_analyze.output_file}}` (the path to the .output.json) resolve to the matching item's output for the same row index — the runtime tracks per-item correspondence automatically.
 
 ### 8. verify -- confirm round-trip with row counts
 
@@ -272,7 +272,7 @@ Expected output: `j9t_demo` has 8 rows, `j9t_demo_analysis` has 3 rows (one per 
 - **Snowflake SQL REST API async polling** -- `POST /api/v2/statements` returns a `statementHandle`, executor polls `GET /api/v2/statements/{handle}` until completion; each request carries a single SQL statement (Snowflake REST API limitation)
 - **User-Agent header required** -- Snowflake's REST API rejects requests without a `User-Agent` header; the executor sets this automatically
 - **Per-item fan-out with AI classification** -- CSV filter spawns one AI call per region row; strict-output prompt constrains the model to a single word
-- **Per-item output piping for write-back** -- `{{ai_analyze.captured_stdout}}` and `{{ai_analyze.output_file}}` resolve to the matching item's output for the same row index, no Python glue needed
+- **Structured output + per-item template piping** -- `{{ai_analyze.json.verdict}}` (schema-validated enum from the JSON) and `{{ai_analyze.output_file}}` both resolve to the matching item's output for the same row index, no Python glue needed
 - **Fully-qualified table names** -- `J9T_DEMO.PUBLIC.j9t_demo` avoids reliance on connection-level database/schema defaults, making the workflow portable across warehouse configurations
 - **Lowercase quoted column aliases** -- `SELECT region AS "region"` ensures CSV headers match the lowercase template binding names (`{{region.region}}`); without quoting, Snowflake uppercases identifiers and bindings would fail to resolve
 - **Single statement per request** -- the Snowflake SQL REST API does not support multi-statement batches; the workflow uses separate tasks for CREATE DATABASE, CREATE TABLE, INSERT, and SELECT

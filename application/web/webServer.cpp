@@ -50,11 +50,10 @@
 #include "jarvisAgent.h"
 #include "python/pythonEnginePool.h"
 #include "web/webServer.h"
-#include "web/chatMessages.h"
 #include "file/scriptRegistry.h"
 #include "workflow/taskPathResolver.h"
 
-#include "session/sessionManager.h"
+#include "workflow/aiRequestPool.h"
 #include "workflow/jcwfContainer.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowJsonParser.h"
@@ -558,8 +557,44 @@ namespace AIAssistant
 
     } // namespace
 
+    namespace
+    {
+        // Forwards Crow's logger to our spdlog. Crow's default CerrLogHandler writes
+        // directly to std::cerr, which bypasses ncurses and corrupts the TUI status
+        // window (raw writes overpaint the bottom rows). Routing through spdlog sends
+        // the output to log.txt and the ncurses LOG window, same as our own logs.
+        class CrowSpdlogHandler : public crow::ILogHandler
+        {
+          public:
+            void log(std::string const& message, crow::LogLevel level) override
+            {
+                // Benign; every untrusted-cert client (browser prefetch, stale curl) triggers it.
+                if (message.find("Could not start adaptor") != std::string::npos)
+                {
+                    return;
+                }
+
+                switch (level)
+                {
+                    case crow::LogLevel::Debug:    LOG_CORE_INFO("[crow] {}", message);      break;
+                    case crow::LogLevel::Info:     LOG_CORE_INFO("[crow] {}", message);      break;
+                    case crow::LogLevel::Warning:  LOG_CORE_WARN("[crow] {}", message);      break;
+                    case crow::LogLevel::Error:    LOG_CORE_ERROR("[crow] {}", message);     break;
+                    case crow::LogLevel::Critical: LOG_CORE_CRITICAL("[crow] {}", message);  break;
+                }
+            }
+        };
+
+        CrowSpdlogHandler& GetCrowLogHandler()
+        {
+            static CrowSpdlogHandler instance;
+            return instance;
+        }
+    } // namespace
+
     WebServer::WebServer()
     {
+        crow::logger::setHandler(&GetCrowLogHandler());
         m_Server.loglevel(crow::LogLevel::Warning);
         RegisterRoutes();
         RegisterWebSocket();
@@ -589,13 +624,7 @@ namespace AIAssistant
         // started so TTL-based cleanup kicks in every 60 s.
         if (workflowRegistry != nullptr && !m_AdhocManager)
         {
-            // Thread the JarvisAgent's queue FileWatcher through so each staged
-            // adhoc run's queue folder gets registered / unregistered dynamically
-            // (see doc/architecture.md "Adhoc submission" subsection).
-            FileWatcher* queueWatcher =
-                (App::g_App != nullptr) ? App::g_App->GetQueueFileWatcher() : nullptr;
-            m_AdhocManager = std::make_unique<AdhocWorkflowManager>(m_McpKeyManager, *workflowRegistry,
-                                                                    queueWatcher);
+            m_AdhocManager = std::make_unique<AdhocWorkflowManager>(m_McpKeyManager, *workflowRegistry);
             auto const adhocBase = Core::g_Core->GetLaunchCWDAbsolute() / "_adhoc";
             m_AdhocManager->Init(adhocBase);
             m_AdhocManager->StartReaperThread();
@@ -1696,10 +1725,6 @@ namespace AIAssistant
         CROW_ROUTE(m_Server, "/editor/<path>")
         ([this](std::string const& path) { return ServeWorkflowEditorStatic("/editor/" + path); });
 
-        // ---- Chat ----
-        CROW_ROUTE(m_Server, "/api/chat")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleChatPost(req); });
-
         // ---- Workflow CRUD ----
         CROW_ROUTE(m_Server, "/api/workflows")
             .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
@@ -1938,44 +1963,6 @@ namespace AIAssistant
     }
 #endif // J9T_STUDIO
 
-#ifdef J9T_STUDIO
-    crow::response WebServer::HandleChatPost(const crow::request& req)
-    {
-        simdjson::ondemand::parser parser;
-        try
-        {
-            simdjson::padded_string json(req.body);
-            auto doc = parser.iterate(json);
-
-            std::string subsystem = std::string(doc["subsystem"].get_string().value());
-            std::string message = std::string(doc["message"].get_string().value());
-
-            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
-
-            fs::create_directories(queuePath);
-
-            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, message);
-            fs::path filename = queuePath / ("ISSUE_" + std::to_string(id) + ".txt");
-
-            std::ofstream out(filename);
-            out << message;
-            out.close();
-
-            crow::json::wvalue response;
-            response["status"] = "queued";
-            response["id"] = id;
-            response["file"] = filename.string();
-            return MakeJsonResponse(200, response);
-        }
-        catch (const std::exception& e)
-        {
-            crow::json::wvalue error;
-            error["error"] = e.what();
-            return MakeJsonResponse(400, error);
-        }
-    }
-#endif // J9T_STUDIO
-
     crow::response WebServer::HandleMcpHeartbeatPost()
     {
         {
@@ -2053,11 +2040,12 @@ namespace AIAssistant
         }
         status["workflow_runs_active"] = static_cast<int64_t>(activeWorkflowRuns);
 
-        // Session managers
+        // AI dispatch
         JarvisAgent* app = App::g_App;
-        status["session_managers_total"] = static_cast<int64_t>(app ? app->GetSessionManagerCount() : 0);
-        status["session_managers_with_inflight"] = static_cast<int64_t>(app ? app->GetSessionManagersWithInflight() : 0);
-        status["session_managers_inflight_total"] = static_cast<int64_t>(app ? app->GetSessionManagerInflightTotal() : 0);
+        {
+            AiRequestPool const* pool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+            status["ai_calls_inflight"] = static_cast<int64_t>(pool != nullptr ? pool->GetDirectDispatchInflight() : 0);
+        }
 
         // WebSocket clients and accumulation stats
         {
@@ -2101,20 +2089,44 @@ namespace AIAssistant
             }
         }
 
-        // Connection health from circuit breaker
+        // Connection health.  The dashboard LED wants a view of ALL configured
+        // connections (otherwise you see "Cloud: no connections" until the
+        // circuit breaker has been exercised).  Build the list from the
+        // configured connections and overlay any breaker state we have.
         {
+            auto const& connectionManager = Core::g_Core->GetCloudConnectionManager();
             auto const& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
-            auto health = circuitBreaker.GetHealthSummary();
-            if (!health.empty())
+            auto configuredNames = connectionManager.GetConnectionNames();
+            if (!configuredNames.empty())
             {
+                std::sort(configuredNames.begin(), configuredNames.end());
                 crow::json::wvalue::list connections;
-                for (auto const& ch : health)
+                for (auto const& name : configuredNames)
                 {
                     crow::json::wvalue entry;
-                    entry["name"] = ch.m_Name;
-                    entry["circuit_state"] = CloudCircuitBreaker::StateToString(ch.m_State);
-                    entry["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                    entry["name"] = name;
+                    entry["circuit_state"] =
+                        CloudCircuitBreaker::StateToString(circuitBreaker.GetState(name));
+                    entry["consecutive_failures"] = 0;
+                    // confirmed_healthy: true once a successful Test click or JCWF
+                    // cloud task has proved this connection.  Drives the LED so
+                    // merely-configured connections stay "unknown" instead of
+                    // showing as healthy until we have actual evidence.
+                    entry["confirmed_healthy"] = circuitBreaker.HasEverSucceeded(name);
                     connections.push_back(std::move(entry));
+                }
+                // Overlay the breaker's own summary so `consecutive_failures` is
+                // filled in for connections that have actually been exercised.
+                auto health = circuitBreaker.GetHealthSummary();
+                for (auto const& ch : health)
+                {
+                    // linear scan is fine — N ~= 20 connections in realistic deployments
+                    for (size_t i = 0; i < configuredNames.size(); ++i)
+                    {
+                        if (configuredNames[i] != ch.m_Name) continue;
+                        connections[i]["consecutive_failures"] = ch.m_ConsecutiveFailures;
+                        break;
+                    }
                 }
                 status["connection_health"] = std::move(connections);
             }
@@ -4341,25 +4353,6 @@ namespace AIAssistant
                             m_WsPeakClients = m_Clients.size();
                         }
 
-                        // Queue current session manager states for the new client.
-                        // Cannot call conn.send_text() from onopen (CROW_ENFORCE_WS_SPEC).
-                        // Broadcasting to all clients is harmless — existing clients just get a refresh.
-                        JarvisAgent* app = App::g_App;
-                        if (app)
-                        {
-                            app->ForEachSessionManager(
-                                [this](SessionManager& sm)
-                                {
-                                    crow::json::wvalue msg;
-                                    msg["type"] = "status";
-                                    msg["name"] = sm.GetName();
-                                    msg["state"] = std::string(sm.GetStateName());
-                                    msg["outputs"] = sm.GetOutputsCount();
-                                    msg["inflight"] = sm.GetInflightCount();
-                                    msg["completed"] = sm.GetCompletedCount();
-                                    m_PendingBroadcasts.push_back(msg.dump());
-                                });
-                        }
                     }
                     LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})", m_Clients.size(),
                                  m_WsTotalConnects, m_WsPeakClients);
@@ -4400,35 +4393,7 @@ namespace AIAssistant
                             // fall through to drain
                         }
 
-                        if (type == "chat")
-                        {
-                            std::string subsystem = std::string(doc["subsystem"].get_string().value());
-                            std::string text = std::string(doc["message"].get_string().value());
-
-                            // add to chat message pool
-                            uint64_t id = App::g_App->GetChatMessagePool()->AddMessage(subsystem, text);
-                            auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
-
-                            // determine queue directory
-                            fs::path queuePath = fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath) / subsystem;
-                            fs::create_directories(queuePath);
-
-                            // write the PROB_<id>_<timestamp>.txt file
-                            fs::path filename =
-                                queuePath / ("PROB_" + std::to_string(id) + "_" + std::to_string(timestamp) + ".txt");
-
-                            std::ofstream out(filename);
-                            out << text;
-
-                            // respond to browser
-                            crow::json::wvalue response;
-                            response["type"] = "queued";
-                            response["id"] = id; // <-- RETURN UNIQUE ID
-                            response["file"] = filename.string();
-                            conn.send_text(response.dump());
-                        }
-
-                        else if (type == "workflow-runs-request")
+                        if (type == "workflow-runs-request")
                         {
                             WorkflowRuntimeManager* workflowRuntimeManager = nullptr;
                             {
@@ -5072,6 +5037,49 @@ namespace AIAssistant
         BroadcastJSON(msg.dump());
     }
 
+    bool WebServer::IsMcpConnected()
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        if (m_McpLastHeartbeat.time_since_epoch().count() == 0) return false;
+        auto const elapsed = std::chrono::steady_clock::now() - m_McpLastHeartbeat;
+        return elapsed < std::chrono::seconds(35);
+    }
+
+    void WebServer::BroadcastAiCallStarted(std::string const& probName, std::string const& interfaceName)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-started";
+        msg["prob"] = probName;
+        msg["interface"] = interfaceName;
+        BroadcastJSON(msg.dump());
+    }
+
+    void WebServer::BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
+                                             int32_t outputTokens, int32_t totalTokens,
+                                             std::string const& finishReason)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-completed";
+        msg["prob"] = probName;
+        msg["input_tokens"] = static_cast<int64_t>(inputTokens);
+        msg["output_tokens"] = static_cast<int64_t>(outputTokens);
+        msg["total_tokens"] = static_cast<int64_t>(totalTokens);
+        msg["finish_reason"] = finishReason;
+        BroadcastJSON(msg.dump());
+    }
+
+    void WebServer::BroadcastAiCallFailed(std::string const& probName, int errorKind,
+                                          int httpStatus, std::string const& errorMessage)
+    {
+        crow::json::wvalue msg;
+        msg["type"] = "ai-call-failed";
+        msg["prob"] = probName;
+        msg["error_kind"] = static_cast<int64_t>(errorKind);
+        msg["http_status"] = static_cast<int64_t>(httpStatus);
+        msg["error_message"] = errorMessage;
+        BroadcastJSON(msg.dump());
+    }
+
 #ifdef J9T_STUDIO
     // =========================================================================
     // AI interfaces API handlers (config.json "API interfaces")
@@ -5132,9 +5140,14 @@ namespace AIAssistant
             item["description"] = iface.m_Description;
             item["url"] = iface.m_Url;
             item["model"] = iface.m_Model;
-            item["api_type"] = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
-                               : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
-                                                                                                            : "API1";
+            switch (iface.m_InterfaceType)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API2: item["api_type"] = "API2"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API3: item["api_type"] = "API3"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API4: item["api_type"] = "API4"; break;
+                case ConfigParser::EngineConfig::InterfaceType::Test: item["api_type"] = "Test"; break;
+                default: item["api_type"] = "API1"; break;
+            }
             item["key_name"] = iface.m_KeyName;
             items.push_back(std::move(item));
         }
@@ -5147,6 +5160,7 @@ namespace AIAssistant
         auto& config = Core::g_Core->GetMutableConfig();
 
         std::string name, description, url, model, apiTypeStr, keyName;
+        uint64_t maxContextTokensOverride = 0; // 0 = fall back to model-name resolution
 
         {
             simdjson::ondemand::parser parser;
@@ -5183,6 +5197,14 @@ namespace AIAssistant
                     if (d2["key_name"].get_string().get(sv) == simdjson::SUCCESS)
                         keyName = std::string(sv);
                 }
+                {
+                    auto d2 = parser.iterate(json);
+                    int64_t ctxVal = 0;
+                    if (d2["max_context_tokens"].get_int64().get(ctxVal) == simdjson::SUCCESS && ctxVal > 0)
+                    {
+                        maxContextTokensOverride = static_cast<uint64_t>(ctxVal);
+                    }
+                }
             }
             catch (...)
             {
@@ -5212,11 +5234,19 @@ namespace AIAssistant
             name.empty()
                 ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
                 : name;
+        newIface.m_MaxContextTokens =
+            maxContextTokensOverride > 0
+                ? maxContextTokensOverride
+                : ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(model);
 
-        if (apiTypeStr == "API3")
+        if (apiTypeStr == "API4")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
+        else if (apiTypeStr == "API3")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
         else if (apiTypeStr == "API2")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+        else if (apiTypeStr == "Test")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
 
@@ -5299,10 +5329,14 @@ namespace AIAssistant
                     if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
                     {
                         std::string apiTypeStr(sv);
-                        if (apiTypeStr == "API3")
+                        if (apiTypeStr == "API4")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
+                        else if (apiTypeStr == "API3")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
                         else if (apiTypeStr == "API2")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+                        else if (apiTypeStr == "Test")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
                         else
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
                     }
@@ -5398,9 +5432,15 @@ namespace AIAssistant
         for (size_t i = 0; i < config.m_ApiInterfaces.size(); ++i)
         {
             auto const& iface = config.m_ApiInterfaces[i];
-            std::string apiStr = (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API3)   ? "API3"
-                                 : (iface.m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::API2) ? "API2"
-                                                                                                              : "API1";
+            std::string apiStr;
+            switch (iface.m_InterfaceType)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API2: apiStr = "API2"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
+                case ConfigParser::EngineConfig::InterfaceType::Test: apiStr = "Test"; break;
+                default: apiStr = "API1"; break;
+            }
 
             newArray += "        {\n";
             newArray += "            \"name\": \"" + iface.m_Name + "\",\n";
@@ -5961,6 +6001,13 @@ namespace AIAssistant
 
         // Same master password unlocks (or creates) the MCP key store.
         InitMcpKeyStore(masterPassword);
+
+        // Re-hydrate OAuth tokens now that providers are readable. The initial
+        // HydrateFromKeyManager call in Core::Initialize ran before unlock, so
+        // it saw an empty provider map; without this call, persisted OAuth
+        // refresh_tokens (Google Sheets, OneDrive) would never be restored
+        // across restarts and every provider would need re-authorisation.
+        Core::g_Core->GetOAuthTokenManager().HydrateFromKeyManager();
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -6592,6 +6639,19 @@ namespace AIAssistant
         std::string errorMessage;
         bool success = connector->TestConnection(*connection, errorMessage);
 
+        // Record the outcome on the circuit breaker so the dashboard Cloud LED
+        // lights up as soon as a Test button (not just a JCWF cloud task) has
+        // proved a connection works end-to-end.
+        auto& circuitBreaker = Core::g_Core->GetCloudCircuitBreaker();
+        if (success)
+        {
+            circuitBreaker.RecordSuccess(connectionName);
+        }
+        else
+        {
+            circuitBreaker.RecordFailure(connectionName);
+        }
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = success;
         if (!success)
@@ -6985,9 +7045,20 @@ namespace AIAssistant
         if (httpCode != 200)
         {
             std::string errMsg = "Token exchange returned HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
+            if (!responseBody.empty())
             {
-                errMsg += ": " + responseBody;
+                // Always include the provider's error body — Microsoft/Google
+                // put the actionable message (AADSTS code, invalid_client, etc.)
+                // there.  Truncate to keep logs readable.
+                constexpr size_t kMaxBodyInLog = 1500;
+                if (responseBody.size() <= kMaxBodyInLog)
+                {
+                    errMsg += ": " + responseBody;
+                }
+                else
+                {
+                    errMsg += ": " + responseBody.substr(0, kMaxBodyInLog) + "…(truncated)";
+                }
             }
             LOG_CORE_ERROR("OAuth callback for '{}': {}", connectionName, errMsg);
             return crow::response(500, errMsg);
@@ -8628,15 +8699,30 @@ namespace AIAssistant
         }
         signals["workflow_runs_active"] = static_cast<int64_t>(activeRuns);
 
-        // ---- Session manager (AI queue) state ----
+        // ---- AI dispatch state ----
         JarvisAgent* app = App::g_App;
         if (app != nullptr)
         {
-            signals["session_managers_total"] = static_cast<int64_t>(app->GetSessionManagerCount());
-            signals["session_managers_with_inflight"] =
-                static_cast<int64_t>(app->GetSessionManagersWithInflight());
-            signals["ai_calls_inflight"] =
-                static_cast<int64_t>(app->GetSessionManagerInflightTotal());
+            AiRequestPool const* pool = app->GetAiRequestPool();
+            if (pool != nullptr)
+            {
+                signals["ai_calls_inflight"] = static_cast<int64_t>(pool->GetDirectDispatchInflight());
+                // Lifetime-monotonic counters — confirm structured submissions,
+                // schema retries/failures, chunking fan-out, and fence-strip are
+                // firing in live runs without parsing transcripts or logs.
+                signals["ai_structured_submissions"] =
+                    static_cast<int64_t>(pool->GetStructuredSubmissions());
+                signals["ai_schema_validation_retries"] =
+                    static_cast<int64_t>(pool->GetSchemaValidationRetries());
+                signals["ai_schema_validation_failures"] =
+                    static_cast<int64_t>(pool->GetSchemaValidationFailures());
+                signals["ai_chunked_dispatches"] = static_cast<int64_t>(pool->GetChunkedDispatches());
+                signals["ai_fence_strips"] = static_cast<int64_t>(pool->GetFenceStrips());
+            }
+            else
+            {
+                signals["ai_calls_inflight"] = 0;
+            }
         }
 
         // ---- Python engine pool ----

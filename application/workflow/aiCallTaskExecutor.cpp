@@ -33,6 +33,9 @@
 
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "content/chunkPlanner.h"
+#include "session/fileWriter.h"
+#include "workflow/aiInvocation.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/taskPathResolver.h"
 
@@ -263,6 +266,94 @@ namespace AIAssistant
             return true;
         }
 
+        // Office document extensions that markitdown handles.  Lowercased before compare.
+        static bool IsOfficeExtension(std::string extension)
+        {
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            return extension == ".pdf" || extension == ".docx" || extension == ".xlsx" ||
+                   extension == ".pptx" || extension == ".odt";
+        }
+
+        // Runs `markitdown <input>` synchronously and captures stdout.  Returns
+        // true on success with markdown in outMarkdown; false on any error with a
+        // human-readable explanation in outErrorMessage.  Guards against:
+        //  - markitdown CLI not installed (exit != 0 or popen failure)
+        //  - empty output (the tool printed nothing)
+        //  - explicit "# ERROR:" markers (matches the Python helper's convention)
+        static bool ConvertWithMarkitdown(std::filesystem::path const& inputPath, std::string& outMarkdown,
+                                          std::string& outErrorMessage)
+        {
+            outMarkdown.clear();
+            outErrorMessage.clear();
+
+            // Single-arg quoting is enough for well-formed paths; JarvisAgent already
+            // resolves paths via lexically_normal() upstream.  Rejecting quotes in the
+            // path keeps the shell invocation robust.
+            std::string const rawPath = inputPath.string();
+            if (rawPath.find('"') != std::string::npos || rawPath.find('\'') != std::string::npos ||
+                rawPath.find('`') != std::string::npos || rawPath.find('$') != std::string::npos)
+            {
+                outErrorMessage = "markitdown: refusing unsafe input path '" + rawPath + "'";
+                return false;
+            }
+
+            std::string const command = "markitdown \"" + rawPath + "\" 2>/dev/null";
+#if defined(_WIN32)
+            FILE* pipe = _popen(command.c_str(), "r");
+#else
+            FILE* pipe = popen(command.c_str(), "r");
+#endif
+            if (pipe == nullptr)
+            {
+                outErrorMessage = "markitdown: popen failed for '" + rawPath + "'";
+                return false;
+            }
+
+            constexpr size_t kChunkBytes = 16 * 1024;
+            std::array<char, kChunkBytes> buffer{};
+            while (true)
+            {
+                size_t const bytesRead = std::fread(buffer.data(), 1, buffer.size(), pipe);
+                if (bytesRead > 0)
+                {
+                    outMarkdown.append(buffer.data(), bytesRead);
+                }
+                if (bytesRead < buffer.size())
+                {
+                    break;
+                }
+            }
+
+#if defined(_WIN32)
+            int const closeStatus = _pclose(pipe);
+#else
+            int const closeStatus = pclose(pipe);
+#endif
+            if (closeStatus != 0)
+            {
+                outErrorMessage = "markitdown: non-zero exit (" + std::to_string(closeStatus) + ") for '" +
+                                  rawPath + "'";
+                return false;
+            }
+
+            if (outMarkdown.empty())
+            {
+                outErrorMessage = "markitdown: empty output for '" + rawPath + "' — conversion failed silently";
+                return false;
+            }
+
+            // Trim leading whitespace for the error-marker check.
+            size_t const firstNonSpace = outMarkdown.find_first_not_of(" \t\r\n");
+            if (firstNonSpace != std::string::npos && outMarkdown.compare(firstNonSpace, 8, "# ERROR:") == 0)
+            {
+                outErrorMessage = "markitdown: output starts with '# ERROR:' marker for '" + rawPath + "'";
+                return false;
+            }
+
+            return true;
+        }
+
         static bool StartsWith(std::string const& value, std::string const& prefix) { return value.rfind(prefix, 0) == 0; }
 
         static bool ContainsGlobChars(std::string const& path)
@@ -385,14 +476,14 @@ namespace AIAssistant
         }
 
         static bool MaterializeCntxFilesFromQueueBinding(std::filesystem::path const& taskWorkingDirectoryPath,
-                                                         std::vector<AIAssistant::QueueFileRef> const& cntxFiles,
+                                                         std::vector<AIAssistant::QueueFileRef>& cntxFiles,
                                                          std::string& outErrorMessage)
         {
             std::unordered_set<std::string> usedFilenames;
 
             for (size_t index = 0; index < cntxFiles.size(); ++index)
             {
-                AIAssistant::QueueFileRef const& fileRef = cntxFiles[index];
+                AIAssistant::QueueFileRef& fileRef = cntxFiles[index];
 
                 // Inline CNTX files are handled by WriteInlineQueueBindingFiles().
                 if (fileRef.m_HasInlineContent)
@@ -416,8 +507,35 @@ namespace AIAssistant
                     sourcePath = sourcePath.lexically_normal();
                 }
 
+                // Office formats (.pdf/.docx/.xlsx/.pptx/.odt) can't be sent raw to
+                // an AI — convert synchronously via markitdown and substitute the
+                // resulting markdown for the file's text.  Failures fail the task
+                // with a clear message rather than silently dispatching a binary blob.
+                bool const isOffice = IsOfficeExtension(sourcePath.extension().string());
                 std::string sourceText;
-                if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
+                if (isOffice)
+                {
+                    auto const markitdownStart = std::chrono::steady_clock::now();
+                    std::error_code sizeEc;
+                    uintmax_t const bytesOnDisk = std::filesystem::file_size(sourcePath, sizeEc);
+                    LOG_APP_INFO("[ai_call] markitdown START source='{}' bytes-on-disk={}",
+                                 sourcePath.string(), sizeEc ? 0ULL : static_cast<uint64_t>(bytesOnDisk));
+                    std::string convertError;
+                    bool const converted = ConvertWithMarkitdown(sourcePath, sourceText, convertError);
+                    auto const markitdownEnd = std::chrono::steady_clock::now();
+                    auto const elapsedMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(markitdownEnd - markitdownStart).count();
+                    if (!converted)
+                    {
+                        LOG_APP_WARN("[ai_call] markitdown FAIL source='{}' elapsed={}ms error='{}'",
+                                     sourcePath.string(), elapsedMs, convertError);
+                        outErrorMessage = convertError;
+                        return false;
+                    }
+                    LOG_APP_INFO("[ai_call] markitdown END   source='{}' elapsed={}ms markdown-bytes={}",
+                                 sourcePath.string(), elapsedMs, sourceText.size());
+                }
+                else if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
                 {
                     std::ostringstream errorStream;
                     errorStream << "Missing CNTX source '" << sourcePath.string() << "': " << outErrorMessage;
@@ -425,9 +543,10 @@ namespace AIAssistant
                     return false;
                 }
 
-                // Strip ".output" from the stem so the materialized CNTX file is not
-                // ignored by the FileCategorizer (which treats *.output.* as output files).
-                // Example: PROB_NVDA.output.txt  →  CNTX_PROB_NVDA.txt
+                // Strip ".output" from the stem so the materialized CNTX file name reads
+                // naturally on disk (e.g. PROB_NVDA.output.txt → CNTX_PROB_NVDA.txt).
+                // For office-source conversions, rewrite the extension to .md so the
+                // on-disk artifact reflects the converted content.
                 std::string baseName;
                 {
                     std::filesystem::path const srcFilename = sourcePath.filename();
@@ -437,6 +556,11 @@ namespace AIAssistant
                     if (stem.size() > 7 && stem.ends_with(".output"))
                     {
                         stem.erase(stem.size() - 7); // remove ".output"
+                    }
+
+                    if (isOffice)
+                    {
+                        ext = ".md";
                     }
 
                     baseName = stem + ext;
@@ -465,6 +589,12 @@ namespace AIAssistant
                 {
                     return false;
                 }
+
+                // Promote to inline so downstream envelope construction can feed the content
+                // into the user message.  Without this the envelope would send an empty CNTX.
+                fileRef.m_Path = destPath.string();
+                fileRef.m_Content = std::move(sourceText);
+                fileRef.m_HasInlineContent = true;
             }
 
             return true;
@@ -722,8 +852,9 @@ namespace AIAssistant
 
     bool AiCallTaskExecutor::WriteInlineQueueBindingFiles(QueueBinding const& queueBinding, std::string& outErrorMessage)
     {
-        // Write all environment artifacts (STNG/TASK/CNTX) and PROB requirement files.
-        // The SessionManager will categorize them and dispatch AI queries for PROB files.
+        // Write all environment artifacts (STNG/TASK/CNTX) and PROB requirement files
+        // to disk for replay/debug.  The envelope construction below carries the same
+        // content, so these files are no longer load-bearing for dispatch.
         if (!WriteInlineQueueFileRefs(queueBinding.m_StngFiles, outErrorMessage))
         {
             return false;
@@ -894,9 +1025,12 @@ namespace AIAssistant
 
         // ------------------------------------------------------------
         // Determine expected output path from the first PROB file.
-        // The SessionManager writes output as <stem>.output.<ext>.
-        // Computed before file writes so we can register with the pool early.
+        // Submit writes the reply as <stem>.output.txt (text/chunked-reduce) or
+        // <stem>.output.json (structured output via output_schema).
+        // Must match Submit's filename convention exactly so OnOutputFileCreated
+        // matches the pending-path map.
         // ------------------------------------------------------------
+        std::string const outputExtension = taskDefinition.m_OutputSchemaJson.empty() ? ".txt" : ".json";
         std::string expectedOutputPath;
         for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
         {
@@ -923,7 +1057,7 @@ namespace AIAssistant
                 }
 
                 std::filesystem::path outputPath = probPath;
-                outputPath.replace_filename(probPath.stem().string() + ".output" + probPath.extension().string());
+                outputPath.replace_filename(probPath.stem().string() + ".output" + outputExtension);
                 expectedOutputPath = outputPath.lexically_normal().generic_string();
                 break;
             }
@@ -975,12 +1109,10 @@ namespace AIAssistant
             outputPathText = outputPath.lexically_normal().generic_string();
         }
 
-        // ------------------------------------------------------------
-        // Register with AiRequestPool BEFORE writing queue files.
-        // This starts the file-activity watchdog so that stalled
-        // file placement or missing environment files are caught
-        // within seconds instead of waiting for the full timeout.
-        // ------------------------------------------------------------
+        // Allocate the request handle up front but DEFER registration with
+        // AiRequestPool until after the slow materialization steps (markitdown
+        // conversion of PDFs/DOCX/... can legitimately take tens of seconds
+        // and would otherwise trip the 5-second file-activity watchdog).
         int64_t const requestId = requestPool->AllocateRequestId();
         int64_t const timestampNs = NowTimestampNs();
 
@@ -988,22 +1120,9 @@ namespace AIAssistant
         requestHandle.requestId = requestId;
         requestHandle.requestTimestampNs = timestampNs;
 
-        AiRequestHandle const registered = requestPool->RegisterPendingWorkflowTask(
-            requestHandle, workflowRun.m_WorkflowId, workflowRun.m_RunId, taskIdForBinding, resolvedFileOutputs,
-            outputSlotNames, taskDefinition.m_TimeoutMs, expectedOutputPath);
-
-        if (!registered.IsValid())
-        {
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = "AiRequestPool::RegisterPendingWorkflowTask failed";
-            return false;
-        }
-
         // ------------------------------------------------------------
-        // Per-subfolder provider settings (optional).
-        // MUST be written BEFORE any other queue file (STNG, CNTX,
-        // TASK, PROB) so that the SessionManager sees the override
-        // before the environment becomes complete.
+        // Per-subfolder provider settings sidecar (optional, write-only).
+        // Replay tooling reads it; the envelope is authoritative for dispatch.
         // ------------------------------------------------------------
         {
             std::string providerOverrideError;
@@ -1038,8 +1157,8 @@ namespace AIAssistant
 
                     // The JCWF "provider" field is an interface name from config.json
                     // (e.g. "api.openai.com/gpt-4.1-mini/API1"). Look it up by name to get
-                    // URL, model, API type, and key_name. The PROV file stores the key_name
-                    // as "provider" so the SessionManager can resolve the API key.
+                    // URL, model, API type, and key_name. The PROV sidecar stores the
+                    // key_name under "provider" for replay tooling.
                     std::string resolvedUrl;
                     std::string resolvedApiType;
                     std::string effectiveModel;
@@ -1082,7 +1201,7 @@ namespace AIAssistant
                     }
 
                     std::string sidecarJson = "{";
-                    // Store key_name (not interface name) so SessionManager can resolve the API key.
+                    // Store key_name (not interface name) so replay tooling can resolve the API key.
                     std::string const& provForSidecar = keyNameForProv.empty() ? providerOpt.value() : keyNameForProv;
                     sidecarJson += "\"provider\":\"" + provForSidecar + "\"";
 
@@ -1119,17 +1238,17 @@ namespace AIAssistant
         }
 
         // ------------------------------------------------------------
-        // Write queue files.  Kick the file-activity watchdog after
-        // each step so the 5 s inactivity window restarts.
+        // Write queue files and run synchronous materialization (including
+        // markitdown conversion of any office-format cntx_files).  None of
+        // these steps hold a registered pending entry, so failures just set
+        // Failed and return — no Forget needed.
         // ------------------------------------------------------------
         if (!WriteInlineQueueBindingFiles(localizedQueueBinding, errorMessage))
         {
-            requestPool->Forget(requestHandle);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
             return false;
         }
-        requestPool->KickFileActivityWatchdog(requestHandle);
 
         // Expand glob patterns (e.g. "../01_lookupDividend/PROB_*.output.txt") into
         // individual file references before materialization.
@@ -1137,7 +1256,6 @@ namespace AIAssistant
         if (!ExpandCntxFileGlobs(taskWorkingDirectoryPath, localizedQueueBinding.m_CntxFiles, expandedCntxFiles,
                                  errorMessage))
         {
-            requestPool->Forget(requestHandle);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
             return false;
@@ -1145,21 +1263,462 @@ namespace AIAssistant
 
         if (!MaterializeCntxFilesFromQueueBinding(taskWorkingDirectoryPath, expandedCntxFiles, errorMessage))
         {
-            requestPool->Forget(requestHandle);
             taskState.m_State = TaskInstanceStateKind::Failed;
             taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+
+        if (!MaterializeProbFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, errorMessage))
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = errorMessage;
+            return false;
+        }
+
+        // All slow I/O (inline writes, glob expansion, markitdown conversion,
+        // prob-file materialization) is done.  Register the pending entry
+        // now so the 5 s file-activity watchdog only covers the fast phase
+        // between registration and Submit.
+        AiRequestHandle const registered = requestPool->RegisterPendingWorkflowTask(
+            requestHandle, workflowRun.m_WorkflowId, workflowRun.m_RunId, taskIdForBinding, resolvedFileOutputs,
+            outputSlotNames, taskDefinition.m_TimeoutMs, expectedOutputPath);
+
+        if (!registered.IsValid())
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage = "AiRequestPool::RegisterPendingWorkflowTask failed";
             return false;
         }
         requestPool->KickFileActivityWatchdog(requestHandle);
 
-        if (!MaterializeProbFilesFromQueueBinding(taskWorkingDirectoryPath, localizedQueueBinding.m_ProbFiles, errorMessage))
+        // ------------------------------------------------------------
+        // Direct envelope dispatch.  Concatenates STNG + CNTX + TASK + first PROB
+        // content into a single user message and submits via AiRequestPool.  The
+        // callback writes <prob>.output.{txt,json} and calls OnOutputFileCreated,
+        // which releases the workflow-bound pending entry for the runtime tick.
+        // ------------------------------------------------------------
         {
-            requestPool->Forget(requestHandle);
-            taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage = errorMessage;
-            return false;
+            // Build the message in three logical parts so chunking can split only
+            // the CNTX (the typically-oversized part) while keeping STNG/TASK/PROB
+            // intact in every chunk envelope.
+            auto const joinContent = [](std::vector<QueueFileRef> const& fileRefs)
+            {
+                std::string result;
+                for (auto const& fileRef : fileRefs)
+                {
+                    if (!fileRef.m_Content.empty())
+                    {
+                        if (!result.empty()) result += "\n";
+                        result += fileRef.m_Content;
+                    }
+                }
+                return result;
+            };
+            std::string const stngText = joinContent(localizedQueueBinding.m_StngFiles);
+            std::string const taskText = joinContent(localizedQueueBinding.m_TaskFiles);
+            std::string const cntxText = joinContent(expandedCntxFiles);
+            // Build prefix = stng + task joined with newlines, skipping empty parts.
+            std::string stngTaskPrefix;
+            if (!stngText.empty()) stngTaskPrefix += stngText;
+            if (!taskText.empty())
+            {
+                if (!stngTaskPrefix.empty()) stngTaskPrefix += "\n";
+                stngTaskPrefix += taskText;
+            }
+
+            bool const hasStng = !stngText.empty();
+            bool const hasTask = !taskText.empty();
+            bool const hasCntx = !cntxText.empty();
+            if (!hasStng)
+            {
+                LOG_APP_INFO("[ai_call] no STNG content for task '{}' — default settings apply", taskIdForBinding);
+            }
+            if (!hasTask)
+            {
+                LOG_APP_INFO("[ai_call] no TASK content for task '{}' — relying on PROB self-description",
+                             taskIdForBinding);
+            }
+            if (!hasCntx)
+            {
+                LOG_APP_INFO("[ai_call] no CNTX content for task '{}' — results may be less precise",
+                             taskIdForBinding);
+            }
+
+            std::string probRelativeName;
+            std::string probContent;
+            for (auto const& probFile : localizedQueueBinding.m_ProbFiles)
+            {
+                std::filesystem::path const probPath(probFile.m_Path);
+                std::string baseName = probPath.filename().string();
+                if (!probFile.m_HasInlineContent && baseName.rfind("PROB_", 0) != 0)
+                {
+                    baseName = "PROB_" + baseName;
+                }
+                probRelativeName = baseName;
+                probContent = probFile.m_Content;
+                break;
+            }
+
+            // Full single-envelope message: STNG + TASK + CNTX + PROB.
+            auto const joinWithNewline = [](std::initializer_list<std::string const*> parts)
+            {
+                std::string result;
+                for (auto const* part : parts)
+                {
+                    if (!part->empty())
+                    {
+                        if (!result.empty()) result += "\n";
+                        result += *part;
+                    }
+                }
+                return result;
+            };
+            std::string const combinedMessage = joinWithNewline({&stngTaskPrefix, &cntxText, &probContent});
+
+            bool hasNonWhitespace = false;
+            for (char const character : combinedMessage)
+            {
+                if (!std::isspace(static_cast<unsigned char>(character)))
+                {
+                    hasNonWhitespace = true;
+                    break;
+                }
+            }
+
+            if (hasNonWhitespace && !probRelativeName.empty())
+            {
+                // Resolve per-task api_interface override (JCWF "provider" param), if any.
+                std::string interfaceOverrideError;
+                std::optional<std::string> const rawProviderOpt =
+                    TryExtractStringParam(taskDefinition.m_ParamsJson, "provider", interfaceOverrideError);
+                auto const defaultsMapEnvelope = BuildDefaultsMap(workflowDefinition.m_DefaultsJson);
+                std::string envelopeInterfaceName;
+                if (rawProviderOpt.has_value())
+                {
+                    envelopeInterfaceName = ExpandWithDefaults(*rawProviderOpt, defaultsMapEnvelope);
+                }
+
+                AiInvocation envelope;
+                envelope.m_InterfaceName = envelopeInterfaceName;
+                envelope.m_QueueFolder = taskWorkingDirectoryPath;
+                envelope.m_ProbName = probRelativeName;
+                if (!taskDefinition.m_OutputSchemaJson.empty())
+                {
+                    envelope.m_OutputSchemaJson = taskDefinition.m_OutputSchemaJson;
+                }
+                if (taskDefinition.m_OutputSchemaMaxAttempts > 0)
+                {
+                    envelope.m_Retry.m_OutputSchemaMaxAttempts =
+                        static_cast<int>(taskDefinition.m_OutputSchemaMaxAttempts);
+                }
+
+                Message userMessage;
+                userMessage.m_Role = MessageRole::User;
+                userMessage.m_Content = combinedMessage;
+                envelope.m_Messages.push_back(std::move(userMessage));
+
+                // Structure-aware chunking.  When the combined prompt overruns the
+                // interface's max_context_tokens, split it at markdown section boundaries
+                // and fan out one envelope per chunk.  Each chunk writes a per-chunk
+                // .output.chunk<i>-of-<N>.txt; once all chunks arrive, the aggregator
+                // concatenates them into the final <prob>.output.txt and signals
+                // completion via AiRequestPool::OnOutputFileCreated.
+                //
+                // Chunking + output_schema are mutually exclusive — a chunked response
+                // can't satisfy a whole-object schema.  If both are set, schema wins:
+                // single-envelope dispatch proceeds (possibly oversized) and the
+                // provider may reject it.
+                uint64_t maxContextTokens = 0;
+                {
+                    auto const& configForChunk = Core::g_Core->GetConfig();
+                    for (auto const& apiCandidate : configForChunk.m_ApiInterfaces)
+                    {
+                        bool const matchesRequested =
+                            envelopeInterfaceName.empty()
+                                ? (&apiCandidate == &configForChunk.m_ApiInterfaces[configForChunk.m_ApiIndex])
+                                : (apiCandidate.m_Name == envelopeInterfaceName);
+                        if (matchesRequested && apiCandidate.m_MaxContextTokens > 0)
+                        {
+                            maxContextTokens = apiCandidate.m_MaxContextTokens;
+                            break;
+                        }
+                    }
+                }
+
+                std::vector<std::string> chunks;
+                if (maxContextTokens > 0 && !envelope.m_OutputSchemaJson.has_value())
+                {
+                    uint64_t const estimatedTokens = ChunkPlanner::EstimateTokens(combinedMessage);
+                    if (estimatedTokens > maxContextTokens)
+                    {
+                        // Reserve room for STNG/TASK/PROB prefix/suffix (repeated in every
+                        // chunk) plus ~20% overhead for the model response itself.
+                        uint64_t const fixedOverheadTokens =
+                            ChunkPlanner::EstimateTokens(stngTaskPrefix) + ChunkPlanner::EstimateTokens(probContent);
+                        uint64_t const responseOverhead = maxContextTokens / 5;
+                        uint64_t const overhead = fixedOverheadTokens + responseOverhead;
+                        // Chunk only the CNTX text so each chunk envelope keeps the full
+                        // STNG/TASK instructions and trailing PROB intact.
+                        chunks = ChunkPlanner::Plan(cntxText, maxContextTokens, overhead);
+                        LOG_APP_INFO("[ai_call] task '{}' chunking: ~{} tokens > max_context_tokens={} → {} chunks",
+                                     taskIdForBinding, estimatedTokens, maxContextTokens, chunks.size());
+                    }
+                }
+                if (envelope.m_OutputSchemaJson.has_value() && maxContextTokens > 0)
+                {
+                    uint64_t const estimatedTokens = ChunkPlanner::EstimateTokens(combinedMessage);
+                    if (estimatedTokens > maxContextTokens)
+                    {
+                        LOG_APP_WARN("[ai_call] task '{}' prompt est ~{} tokens exceeds max_context_tokens={} but "
+                                     "output_schema is set — chunking is skipped (schema wins), request may be rejected",
+                                     taskIdForBinding, estimatedTokens, maxContextTokens);
+                    }
+                }
+
+                if (chunks.size() <= 1)
+                {
+                    // Single-envelope dispatch (the common case — no chunking needed).
+                    // Fire-and-forget: Submit's callback writes <prob>.output.txt and
+                    // calls OnOutputFileCreated itself.
+                    if (!requestPool->Submit(envelope, nullptr))
+                    {
+                        requestPool->Forget(requestHandle);
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastErrorMessage =
+                            "ai_call Submit rejected envelope (no interface, no API key, or empty body)";
+                        return false;
+                    }
+                }
+                else
+                {
+                    // Chunked fan-out with reduce pass.
+                    //
+                    //   1. Each chunk envelope carries `stngTaskPrefix + <chunk_i_of_cntx> + probContent`,
+                    //      so every chunk sees the full instructions and the original question.
+                    //   2. Aggregator collects N replies.
+                    //   3. Once all N arrive, submit a single "reduce" envelope that consumes
+                    //      the N partial answers and produces ONE unified reply satisfying the
+                    //      original PROB.  This avoids the "5×N bullets" concat-artefact.
+                    //   4. If the reduce envelope is rejected at Submit time, fall back to
+                    //      plain concat of partial replies.
+                    //
+                    // The per-chunk .output.chunk<i>-of-<N>.txt files remain on disk for
+                    // replay; the reduced reply becomes <prob>.output.txt.
+                    struct ChunkAggregator
+                    {
+                        std::mutex m_Mutex;
+                        std::vector<std::string> m_Parts;
+                        size_t m_Remaining;
+                        bool m_AnyFailed{false};
+                        std::string m_FirstErrorMessage;
+                        std::filesystem::path m_QueueFolder;
+                        std::string m_ProbName;
+                        AiRequestPool* m_RequestPool;
+                        std::string m_TaskIdForLog;
+                        // Reduce-pass context: carries instruction prefix/suffix so the
+                        // aggregator can build the reduce envelope without re-reading files.
+                        std::string m_StngTaskPrefix;
+                        std::string m_ProbContent;
+                        AiInvocation m_EnvelopeTemplate;
+                    };
+
+                    auto aggregator = std::make_shared<ChunkAggregator>();
+                    aggregator->m_Parts.assign(chunks.size(), std::string{});
+                    aggregator->m_Remaining = chunks.size();
+                    aggregator->m_QueueFolder = taskWorkingDirectoryPath;
+                    aggregator->m_ProbName = probRelativeName;
+                    aggregator->m_RequestPool = requestPool;
+                    aggregator->m_TaskIdForLog = taskIdForBinding;
+                    aggregator->m_StngTaskPrefix = stngTaskPrefix;
+                    aggregator->m_ProbContent = probContent;
+                    aggregator->m_EnvelopeTemplate = envelope;
+
+                    // Helper: write the plain concatenation fallback when reduce can't run.
+                    auto const writeConcatFallback = [](std::shared_ptr<ChunkAggregator> const& agg,
+                                                         size_t totalChunks, std::string const& reason)
+                    {
+                        std::string combined;
+                        for (size_t i = 0; i < agg->m_Parts.size(); ++i)
+                        {
+                            if (i > 0)
+                            {
+                                combined += "\n\n<!-- chunk " + std::to_string(i + 1) + "/" +
+                                            std::to_string(totalChunks) + " -->\n\n";
+                            }
+                            combined += agg->m_Parts[i];
+                        }
+                        if (!agg->m_QueueFolder.empty() && !agg->m_ProbName.empty())
+                        {
+                            std::filesystem::path const outputPath =
+                                agg->m_QueueFolder /
+                                (std::filesystem::path(agg->m_ProbName).stem().string() + ".output.txt");
+                            FileWriter::Get().WriteWithHeader(outputPath, combined, std::string{});
+                            std::string const normalizedPath =
+                                std::filesystem::absolute(outputPath).lexically_normal().generic_string();
+                            if (agg->m_RequestPool != nullptr)
+                            {
+                                agg->m_RequestPool->OnOutputFileCreated(normalizedPath);
+                            }
+                        }
+                        LOG_APP_WARN("[ai_call] task '{}' reduce pass fallback to plain concat ({})",
+                                     agg->m_TaskIdForLog, reason);
+                    };
+
+                    size_t const totalChunks = chunks.size();
+                    bool allSubmitted = true;
+                    for (size_t chunkIndex = 0; chunkIndex < totalChunks; ++chunkIndex)
+                    {
+                        AiInvocation chunkEnvelope = envelope;
+                        chunkEnvelope.m_ChunkIndex = static_cast<int32_t>(chunkIndex);
+                        chunkEnvelope.m_ChunkCount = static_cast<int32_t>(totalChunks);
+                        chunkEnvelope.m_Messages.clear();
+
+                        // Build chunk user message: stngTaskPrefix + chunk-of-cntx + probContent.
+                        // Each chunk is a self-contained request: full instructions, a slice
+                        // of the context, and the same question.
+                        std::string chunkBody;
+                        auto const appendPart = [&chunkBody](std::string const& s)
+                        {
+                            if (s.empty()) return;
+                            if (!chunkBody.empty()) chunkBody += "\n";
+                            chunkBody += s;
+                        };
+                        appendPart(stngTaskPrefix);
+                        std::string const chunkLabel =
+                            "[context slice " + std::to_string(chunkIndex + 1) + "/" +
+                            std::to_string(totalChunks) +
+                            " — the full input was split; this is one section]\n";
+                        appendPart(chunkLabel + chunks[chunkIndex]);
+                        appendPart(probContent);
+
+                        Message chunkMessage;
+                        chunkMessage.m_Role = MessageRole::User;
+                        chunkMessage.m_Content = std::move(chunkBody);
+                        chunkEnvelope.m_Messages.push_back(std::move(chunkMessage));
+
+                        auto onReply = [aggregator, chunkIndex, totalChunks, writeConcatFallback](
+                                           AiReply const& reply)
+                        {
+                            bool shouldFinalize = false;
+                            {
+                                std::scoped_lock<std::mutex> const lock(aggregator->m_Mutex);
+                                if (reply.m_Kind == AiReply::Kind::Text)
+                                {
+                                    aggregator->m_Parts[chunkIndex] = reply.m_Text;
+                                }
+                                else
+                                {
+                                    aggregator->m_AnyFailed = true;
+                                    if (aggregator->m_FirstErrorMessage.empty())
+                                    {
+                                        aggregator->m_FirstErrorMessage =
+                                            reply.m_Error.m_Message.empty()
+                                                ? "chunk " + std::to_string(chunkIndex) + " failed"
+                                                : reply.m_Error.m_Message;
+                                    }
+                                }
+                                --aggregator->m_Remaining;
+                                shouldFinalize = (aggregator->m_Remaining == 0);
+                            }
+                            if (!shouldFinalize) return;
+
+                            // If any chunk failed, skip the reduce pass — concat what we have.
+                            if (aggregator->m_AnyFailed)
+                            {
+                                LOG_APP_WARN("[ai_call] task '{}' chunked dispatch had errors: {} — "
+                                             "writing plain concat and signalling completion",
+                                             aggregator->m_TaskIdForLog, aggregator->m_FirstErrorMessage);
+                                writeConcatFallback(aggregator, totalChunks, "one or more chunks failed");
+                                return;
+                            }
+
+                            LOG_APP_INFO("[ai_call] task '{}' all {} chunks returned — submitting reduce pass",
+                                         aggregator->m_TaskIdForLog, totalChunks);
+
+                            // Build reduce envelope.  User message shape:
+                            //   [STNG + TASK]
+                            //   [intro framing the partial answers]
+                            //   --- partial 1 --- <reply1>
+                            //   --- partial 2 --- <reply2>
+                            //   ...
+                            //   [reduce instruction]
+                            //   [PROB]
+                            std::string reduceBody;
+                            auto const appendR = [&reduceBody](std::string const& s)
+                            {
+                                if (s.empty()) return;
+                                if (!reduceBody.empty()) reduceBody += "\n";
+                                reduceBody += s;
+                            };
+                            appendR(aggregator->m_StngTaskPrefix);
+                            appendR("The full input was too large for the model's context window, so it "
+                                    "was split into " + std::to_string(totalChunks) + " slices and the "
+                                    "same question was asked of each slice separately.  Here are the "
+                                    "resulting partial answers:");
+                            for (size_t i = 0; i < aggregator->m_Parts.size(); ++i)
+                            {
+                                std::string const header = "\n--- partial answer " + std::to_string(i + 1) +
+                                                           " of " + std::to_string(totalChunks) + " ---\n";
+                                appendR(header + aggregator->m_Parts[i]);
+                            }
+                            appendR("Using ALL the partial answers above as evidence, produce a SINGLE "
+                                    "unified response to the original request.  Do not repeat bullets or "
+                                    "sections across partials; consolidate and deduplicate.  Do not "
+                                    "mention that the input was chunked.  The original request follows:");
+                            appendR(aggregator->m_ProbContent);
+
+                            AiInvocation reduceEnvelope = aggregator->m_EnvelopeTemplate;
+                            reduceEnvelope.m_Messages.clear();
+                            reduceEnvelope.m_ChunkIndex.reset();
+                            reduceEnvelope.m_ChunkCount.reset();
+                            Message reduceMessage;
+                            reduceMessage.m_Role = MessageRole::User;
+                            reduceMessage.m_Content = std::move(reduceBody);
+                            reduceEnvelope.m_Messages.push_back(std::move(reduceMessage));
+
+                            // On successful submit, the reduce envelope's own Submit callback
+                            // will write <prob>.output.txt and signal OnOutputFileCreated for us
+                            // (because m_ChunkIndex is unset).  If Submit rejects the envelope
+                            // synchronously (e.g. interface changed, key missing), fall back.
+                            if (!aggregator->m_RequestPool->Submit(reduceEnvelope, nullptr))
+                            {
+                                writeConcatFallback(aggregator, totalChunks, "reduce Submit rejected");
+                                return;
+                            }
+
+                            LOG_APP_INFO("[ai_call] task '{}' reduce pass submitted", aggregator->m_TaskIdForLog);
+                        };
+
+                        if (!requestPool->Submit(chunkEnvelope, onReply))
+                        {
+                            allSubmitted = false;
+                            break;
+                        }
+                    }
+
+                    if (!allSubmitted)
+                    {
+                        requestPool->Forget(requestHandle);
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        taskState.m_LastErrorMessage =
+                            "ai_call chunked Submit rejected envelope (no interface, no API key, or empty body)";
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                // No dispatchable content.  Fail the task immediately rather than
+                // leaving it in WaitingExternal until the 120 s safety-net fires —
+                // nothing is ever going to produce an output file for this task.
+                requestPool->Forget(requestHandle);
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                taskState.m_LastErrorMessage =
+                    "ai_call has no dispatchable prompt (STNG/TASK/CNTX/PROB combined body "
+                    "is empty or whitespace-only, or no prob file was declared)";
+                return false;
+            }
         }
-        requestPool->KickFileActivityWatchdog(requestHandle);
 
         // ------------------------------------------------------------
         // Asynchronous completion (event-driven)

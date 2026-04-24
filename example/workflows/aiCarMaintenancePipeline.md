@@ -75,30 +75,33 @@ Per the JCWF spec, `depends_on` means:
 
 ## 4. Task-by-task breakdown (what runs, what it reads, what it writes)
 
-### Task 1 — `classifyQuestion` (type: `ai_call`)
-**Goal:** classify the question into exactly one word: `engine`, `tires`, or `rephrase`.
+### Task 1 — `classifyQuestion` (type: `ai_call`, **structured output**)
+**Goal:** classify the question into a validated JSON object
+`{"category": "engine" | "tires" | "rephrase"}`.
+
+This step showcases the JCWF **structured-output** pathway:
+
+- `output_schema` declares a Draft 2020-12 schema with an enum-constrained `category` field.
+- `output_retries: 3` — the runtime validates the AI reply against the schema, and on failure re-dispatches with the validator's error list as a correction message for up to three attempts.
+- The validated JSON lands at `<stem>.output.json` (not `.output.txt`).
+- An `outputs: { category }` slot is declared so future workflows can consume it via dataflow (`{{tasks.classifyQuestion.output.category}}`).
 
 **Working directory:**
 - `../queue/aiCarMaintenancePipeline/01_classifyQuestion`
 
 **Inputs (freshness):**
-- `../../../workflows/message.txt`  
-  (the question source)
+- `../../../workflows/aiCarMaintenancePipeline/message.txt`
 
 **Outputs (freshness):**
-- `classification.output.txt`
+- `classification.output.json`
 
-**Queue artifacts created (observed in the run logs and the directory listing):**
-- `STNG_classifyOneWord.txt`
+**Queue artifacts created:**
+- `STNG_classifyStructured.txt`
 - `CNTX_classifyRules.txt`
 - `TASK_classifyTopic.txt`
-- `PROB_1_<timestamp>.txt`
-- `PROB_1_<timestamp>.output.txt` (raw AI output)
-- `classification.output.txt` (the output file used by the workflow)
-
-> From the run log, you can see JarvisAgent resolving and reading the PROB source:
-> - `debug ai_call: PROB ... resolved='../workflows/message.txt'`
-> - `debug ai_call: PROB read bytes=...`
+- `PROB_message.txt`
+- `PROB_message.output.json` (validated JSON payload — structured-output path)
+- `classification.output.json` (copied by `BuildCompletionOutputs` to match `file_outputs`)
 
 ---
 
@@ -112,17 +115,18 @@ Per the JCWF spec, `depends_on` means:
 - `classifyQuestion`
 
 **Inputs (freshness):**
-- `../../../queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.txt`
+- `../../../queue/aiCarMaintenancePipeline/01_classifyQuestion/classification.output.json`
 
 **Outputs (freshness):**
 - `manual.txt`
 
 **What it does:**
-- Reads `classification.output.txt`
+- Parses `classification.output.json` with simdjson and reads the `category` string.
+- Switches on the enum value (`engine` / `tires` / `rephrase`) — unexpected values cause the task to fail.
 - Writes `manual.txt` with one of:
   - the engine manual
   - the tire maintenance manual
-  - a “rephrase request” context
+  - a "rephrase request" context
 
 ---
 
@@ -217,12 +221,12 @@ From your run output, after the workflow finishes you typically have:
 
 ```
 ../queue/aiCarMaintenancePipeline/01_classifyQuestion/
-  STNG_classifyOneWord.txt
+  STNG_classifyStructured.txt
   CNTX_classifyRules.txt
   TASK_classifyTopic.txt
-  PROB_1_<timestamp>.txt
-  PROB_1_<timestamp>.output.txt
-  classification.output.txt
+  PROB_message.txt
+  PROB_message.output.json
+  classification.output.json
 
 ../workflows/aiCarMaintenancePipeline/02_buildManual/
   manual.txt
@@ -254,7 +258,7 @@ With JCWF freshness semantics, a second run **should skip tasks** when:
 That means (expected behavior):
 
 - If `message.txt` did not change, **Task 1** should be up‑to‑date.
-- If `classification.output.txt` did not change, **Task 2** should be up‑to‑date.
+- If `classification.output.json` did not change, **Task 2** should be up‑to‑date.
 - If `manual.txt` did not change, **Task 3** should be up‑to‑date.
 - If `answer.output.txt` did not change, **Task 4** should be up‑to‑date.
 - If `answer.zip` did not change, **Task 5** should be up‑to‑date.

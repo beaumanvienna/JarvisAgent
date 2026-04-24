@@ -379,9 +379,7 @@ def main():
     print()
     info(f"Workflows registered:    {status.get('workflows_registered', '?')}")
     info(f"Active workflow runs:     {status.get('workflow_runs_active', '?')}")
-    info(f"Session managers:         {status.get('session_managers_total', '?')}")
-    info(f"Sessions with in-flight:  {status.get('session_managers_with_inflight', '?')}")
-    info(f"Total queries in-flight:  {status.get('session_managers_inflight_total', '?')}")
+    info(f"AI queries in-flight:     {status.get('ai_calls_inflight', '?')}")
     info(f"WebSocket clients:        {status.get('websocket_clients', '?')}")
 
     # Show last completed runs if any

@@ -36,7 +36,6 @@
 
 namespace AIAssistant
 {
-    class FileWatcher;
     class McpKeyManager;
     class WorkflowRegistry;
 
@@ -68,12 +67,9 @@ namespace AIAssistant
     class AdhocWorkflowManager
     {
     public:
-        // `queueWatcher` is optional — pass nullptr in tests or when the watcher
-        // isn't relevant. When non-null, each staged run's queue folder is
-        // registered with it at Stage() time and unregistered on completion / reap
-        // so queue-binding files trigger the existing AI-dispatch pipeline.
-        AdhocWorkflowManager(McpKeyManager& keyManager, WorkflowRegistry& registry,
-                             FileWatcher* queueWatcher = nullptr);
+        // Direct envelope dispatch writes each run's .output.* files itself, so the adhoc
+        // manager no longer needs to register/unregister queue folders with a FileWatcher.
+        AdhocWorkflowManager(McpKeyManager& keyManager, WorkflowRegistry& registry);
         ~AdhocWorkflowManager();
 
         AdhocWorkflowManager(AdhocWorkflowManager const&) = delete;
@@ -175,7 +171,6 @@ namespace AIAssistant
 
         McpKeyManager& m_KeyManager;
         WorkflowRegistry& m_Registry;
-        FileWatcher* m_QueueWatcher{nullptr};
 
         mutable std::mutex m_Mutex;
         std::filesystem::path m_BasePath;

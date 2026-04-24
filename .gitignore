@@ -37,6 +37,10 @@ node_modules/
 compile_commands.json
 .cache/
 vendor/curl/lib/curl_config.h
+
+# Generated at build time by the Premake prebuild step.
+# Source of truth: doc/jcwf.schema.json and doc/jcwf_generation_guide.md.
+application/json/*.generated.h
 log/*
 test/log.txt
 *.tsbuildinfo

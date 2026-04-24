@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -32,13 +33,20 @@
 
 namespace AIAssistant
 {
+    class FileWatcher;
+
     // ------------------------------------------------------------------------
     // TriggerEngine
     //
     // Responsible for:
     //  - Evaluating cron expressions on a periodic Tick().
-    //  - Reacting to file events from FileWatcher.
+    //  - Reacting to file events from its own dedicated FileWatcher.
     //  - Handling manual trigger requests from CLI / Web UI.
+    //
+    // File-watch triggers observe arbitrary declared paths via the engine's own
+    // `FileWatcher` (primary root = empty, per-trigger paths added via AddPath).
+    // Events reach `NotifyFileEvent` through the standard JarvisAgent::OnEvent
+    // subscription on the global event queue.
     //
     // It does NOT parse JCWF JSON. The WorkflowJsonParser turns JSON into
     // high-level trigger definitions, and Orchestrator then registers those
@@ -74,7 +82,7 @@ namespace AIAssistant
 
     public:
         explicit TriggerEngine(TriggerCallback const& triggerCallback);
-        ~TriggerEngine() = default;
+        ~TriggerEngine();
 
         TriggerEngine(TriggerEngine const&) = delete;
         TriggerEngine& operator=(TriggerEngine const&) = delete;
@@ -334,6 +342,10 @@ namespace AIAssistant
     private:
         mutable std::mutex m_Mutex;
         TriggerCallback m_TriggerCallback;
+
+        // Dedicated watcher for file_watch triggers.  Primary root is empty; each trigger's
+        // path is registered via AddPath() on bind and RemovePath() on unbind.
+        std::unique_ptr<FileWatcher> m_TriggerFileWatcher;
 
         std::vector<CronTriggerInstance> m_CronTriggers;
         std::vector<FileWatchTriggerInstance> m_FileWatchTriggers;

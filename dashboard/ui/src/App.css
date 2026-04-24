@@ -242,8 +242,7 @@ body {
 /* ---- Tab bar ---- */
 .tab-bar {
   display: flex;
-  gap: 4px;
-  margin-right: 12px;
+  gap: 8px;
 }
 
 .tab-btn {

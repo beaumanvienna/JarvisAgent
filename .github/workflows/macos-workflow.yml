@@ -82,6 +82,9 @@ jobs:
         with:
           node-version: "20"
 
+      # ---- Packaging: main branch only ----
+      # Feature/refactor branches only need the build smoke test.
+
       - name: Package DMG
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: packaging/macOS/Tahoe/build-dmg.sh

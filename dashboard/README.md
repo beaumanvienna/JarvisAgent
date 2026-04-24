@@ -32,7 +32,6 @@ The built `dist/` folder is served by j9t at `http://localhost:8080/`.
 | `src/App.tsx` | Main app, polling, WebSocket, tab management |
 | `src/components/StatusBar.tsx` | Top status bar with LED indicators |
 | `src/components/WorkflowsPanel.tsx` | Workflow list, run actions, task state display |
-| `src/components/SessionManagersPanel.tsx` | Session status cards |
 | `src/components/LogViewerPanel.tsx` | Log viewer with byte-offset pagination |
 | `src/types.ts` | TypeScript interfaces for API responses |
 | `src/hooks/useWebSocket.ts` | WebSocket connection and message parsing |

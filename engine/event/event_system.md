@@ -73,6 +73,13 @@ Used to signal CURL failures.
 ### Input
 - **KeyPressedEvent(key)**
 
+### AI Dispatch
+- **AiCallStartedEvent(probName, interfaceName)** — posted when `AiRequestPool::Submit` accepts an envelope.
+- **AiCallCompletedEvent(probName, usage, finishReason)** — posted when a reply is parsed successfully.
+- **AiCallFailedEvent(probName, error)** — posted when the pool gives up after retries/HTTP errors.
+
+All three carry their PROB name and are **fire-and-forget**: consumers (TUI, dashboard, Python hooks, Tracy zones) can come and go, and a slow consumer never stalls the dispatcher. Correctness never depends on anyone subscribing.
+
 ---
 
 ## Event Categories
@@ -84,6 +91,7 @@ EventCategoryTimer
 EventCategoryFileSys
 EventCategoryApp
 EventCategoryEngine
+EventCategoryAi       // AI dispatch lifecycle events
 ```
 
 Each event can belong to one or more categories.

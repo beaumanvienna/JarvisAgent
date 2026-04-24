@@ -19,6 +19,9 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <algorithm>
+#include <cctype>
+
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
@@ -27,6 +30,77 @@
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Fallback table for `max_context_tokens` when config.json doesn't set it
+        // explicitly.  Matching is case-insensitive substring over the interface's
+        // `model` field; the first matching entry wins.  Keep more-specific patterns
+        // (e.g. "gpt-5") ahead of more-generic ones (e.g. "gpt-4").
+        //
+        // Review these when providers ship new generations with different windows.
+        //   GPT-5-family:    256K (conservative placeholder — provider may publish higher)
+        //   GPT-4-family:    128K (gpt-4.1 / gpt-4o / gpt-4-turbo / gpt-4-mini)
+        //   Claude (any):    200K (all current Anthropic tiers — haiku/sonnet/opus)
+        //   Gemini 1.5 / 2:  1M
+        //   Local/homebrew (Ollama / LM Studio / llama.cpp / etc.):
+        //     Llama 3.1+:    128K
+        //     Mistral/Mixtral: 32K (most common variants)
+        //     Qwen 2.5:      128K
+        //     DeepSeek V3:   128K
+        // Anything else falls through to `kUnknownModelFallbackTokens` — intentionally
+        // small so the chunker fires aggressively on a truly unknown model rather
+        // than happily sending an oversized request into the abyss.
+        constexpr uint64_t kUnknownModelFallbackTokens = 50000;
+
+        uint64_t ResolveMaxContextTokensFromModelImpl(std::string const& modelName)
+        {
+            std::string lower = modelName;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char ch) { return std::tolower(ch); });
+
+            struct Pattern
+            {
+                std::string_view m_Needle;
+                uint64_t m_Tokens;
+            };
+            static constexpr Pattern kPatterns[] = {
+                // Hosted / frontier providers
+                {"gpt-5",        256000},
+                {"gpt-4",        128000},
+                {"gpt-4.1",      128000},
+                {"gpt-4o",       128000},
+                {"gpt-4-turbo",  128000},
+                {"claude",       200000},
+                {"gemini-2",    1000000},
+                {"gemini-1.5",  1000000},
+                // Homebrew / local (Ollama / LM Studio / llama.cpp / vLLM / etc.)
+                // These match whether the model is tagged as "llama3.1" or
+                // "ollama/llama3.1:8b" or "meta-llama-3".  Order: mixtral before
+                // mistral so the MoE variant wins its more-specific match.
+                {"mixtral",       32000},
+                {"mistral",       32000},
+                {"llama",        128000},
+                {"qwen",         128000},
+                {"deepseek",     128000},
+                {"phi",          128000},
+            };
+
+            for (auto const& pattern : kPatterns)
+            {
+                if (lower.find(pattern.m_Needle) != std::string::npos)
+                {
+                    return pattern.m_Tokens;
+                }
+            }
+            return kUnknownModelFallbackTokens;
+        }
+    } // namespace
+
+    uint64_t ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(std::string const& modelName)
+    {
+        return ResolveMaxContextTokensFromModelImpl(modelName);
+    }
+
     ConfigParser::ConfigParser(std::string const& filepathAndFilename)
         : m_ConfigFilepathAndFilename(filepathAndFilename), m_State{ConfigParser::State::Undefined}
     {
@@ -432,6 +506,15 @@ namespace AIAssistant
                     apiInterface.m_Model = model;
                     ++fieldOccurances[ConfigFields::Model];
                 }
+                else if (jsonObjectKey == "max_context_tokens")
+                {
+                    uint64_t value = 0;
+                    if (field.value().get_uint64().get(value) == simdjson::SUCCESS)
+                    {
+                        apiInterface.m_MaxContextTokens = value;
+                        LOG_CORE_INFO("max_context_tokens: {}", value);
+                    }
+                }
                 else if (jsonObjectKey == "API")
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
@@ -448,6 +531,14 @@ namespace AIAssistant
                     else if (api == "API3")
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API3;
+                    }
+                    else if (api == "API4")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API4;
+                    }
+                    else if (api == "Test")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::Test;
                     }
                     else
                     {
@@ -472,12 +563,32 @@ namespace AIAssistant
                     case EngineConfig::InterfaceType::API3:
                         apiTypeStr = "API3";
                         break;
+                    case EngineConfig::InterfaceType::API4:
+                        apiTypeStr = "API4";
+                        break;
+                    case EngineConfig::InterfaceType::Test:
+                        apiTypeStr = "Test";
+                        break;
                     default:
                         break;
                 }
                 apiInterface.m_Name =
                     EngineConfig::GenerateInterfaceName(apiInterface.m_Url, apiInterface.m_Model, apiTypeStr);
                 LOG_CORE_INFO("auto-generated interface name: {}", apiInterface.m_Name);
+            }
+
+            // If config.json didn't set max_context_tokens explicitly, resolve it
+            // from a curated model-name table.  Unknown models fall back to a
+            // conservative 50 K limit so the chunker fires aggressively rather
+            // than dispatching an oversized request that the provider may reject.
+            if (apiInterface.m_MaxContextTokens == 0 && !apiInterface.m_Model.empty())
+            {
+                uint64_t const resolved = ResolveMaxContextTokensFromModelImpl(apiInterface.m_Model);
+                apiInterface.m_MaxContextTokens = resolved;
+                bool const matched = (resolved != kUnknownModelFallbackTokens);
+                LOG_CORE_INFO("max_context_tokens for '{}' model='{}': {} (source: {})",
+                              apiInterface.m_Name, apiInterface.m_Model, resolved,
+                              matched ? "model-name fallback table" : "unknown-model default 50000");
             }
 
             engineConfig.m_ApiInterfaces.push_back(std::move(apiInterface));

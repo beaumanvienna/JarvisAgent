@@ -154,6 +154,9 @@ jobs:
       # ---- Packaging (both editions in each package) ----
       # Packaging steps only run on push to main; PRs and feature branches compile only.
 
+      # ---- Packaging: main branch only ----
+      # Feature/refactor branches only need the build smoke test.
+
       - name: Package ZIP
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh

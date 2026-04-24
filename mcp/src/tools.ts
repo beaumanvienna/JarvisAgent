@@ -393,6 +393,35 @@ export function registerTools(server: McpServer, client: J9tClient): void
         },
     );
 
+    // ---- reload_workflows (Studio only) ----
+    server.tool(
+        "reload_workflows",
+        "Re-scan the workflows folder and reload the WorkflowRegistry. Use after editing JCWF files on disk so j9t picks up the changes without a restart. Requires Studio edition.",
+        {},
+        async () =>
+        {
+            const data = await client.post<{ reloaded: boolean; workflowCount?: number; ok: boolean; error?: string }>(
+                "/api/workflows/reload",
+                {},
+            );
+            if (!data.ok)
+            {
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: `Reload failed: ${data.error ?? "unknown error"}`,
+                    }],
+                };
+            }
+            return {
+                content: [{
+                    type: "text" as const,
+                    text: `Workflows reloaded. Registry now holds **${data.workflowCount ?? "?"}** workflow(s).`,
+                }],
+            };
+        },
+    );
+
     // ---- upload_workflow (Studio only) ----
     server.tool(
         "upload_workflow",

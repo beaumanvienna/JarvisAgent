@@ -211,6 +211,9 @@ The following fields are recognized:
     - `API1` — OpenAI-compatible chat completions (OpenAI, Google Gemini via OpenAI-compat endpoint, Ollama, any `/v1/chat/completions` provider).
     - `API2` — OpenAI Responses API (GPT-5 and later models).
     - `API3` — Google Gemini native API (uses `x-goog-api-key` header and `/models/{model}:generateContent` URL scheme).
+    - `API4` — Anthropic Messages API (uses `x-api-key` + `anthropic-version: 2023-06-01` headers, `/v1/messages` endpoint; Claude Haiku / Sonnet / Opus).
+    - `Test` — no-network fixture backend for integration tests (reads canned reply from the interface's `url` field).
+  - **`"max_context_tokens"`** — (integer, optional) Advisory context-window size for this interface. When set, j9t warns if an `ai_call` prompt is estimated to exceed it. Typical values: OpenAI GPT-4-family = 128000; OpenAI GPT-5-family = 200000; Google Gemini 2.5 = 1000000; Anthropic Claude = 200000.
   - **`"name"`** — (string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.
   - **`"description"`** — (string) Optional description of this interface.
   - **`"key_name"`** — (string) Name of the API key provider to use from the encrypted keys file (e.g. "openai", "google", "anthropic").
@@ -373,12 +376,26 @@ To use AI-powered workflows, you need at least one API key configured.
 ### Setting up AI models
 
 1. In the workflow editor, navigate to the **AI Manager** page.
-2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), or `API3` for Google Gemini native.
+2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), `API3` for Google Gemini native, or `API4` for Anthropic Messages (Claude).
 3. Set the default interface index or override per-task in workflow definitions.
 
-Supported providers include OpenAI (API1), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native endpoint),
-Anthropic (API1), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
+Supported providers include OpenAI (API1 or API2), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native endpoint),
+Anthropic (API4 native), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
 The OpenAI Responses API (GPT-5+) uses API2.
+
+**Self-hosted example — Ollama on localhost** (same pattern works for LM Studio, llama.cpp server, vLLM, text-generation-webui):
+
+```json
+{
+  "name": "ollama/llama3.1/API1",
+  "url": "http://localhost:11434/v1/chat/completions",
+  "model": "llama3.1",
+  "API": "API1",
+  "key_name": "ollama"
+}
+```
+
+Register an `ollama` provider in the KeyManager with any non-empty string as the API key — Ollama itself ignores the bearer, but the j9t dispatcher requires one.
 
 ## WORKFLOWS
 

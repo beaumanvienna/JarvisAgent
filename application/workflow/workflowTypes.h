@@ -215,9 +215,9 @@ namespace AIAssistant
         // CNTX_* files (context).
         std::vector<QueueFileRef> m_CntxFiles;
 
-        // PROV_* files (provider configuration — never sent to AI).
-        // Written by AiCallTaskExecutor when a task specifies "provider" / "model".
-        // Read by SessionManager to resolve endpoint/key/model from KeyManager.
+        // PROV_* files (provider sidecar — never sent to AI).  Written by
+        // AiCallTaskExecutor when a task specifies "provider" / "model", read
+        // only by replay tooling; the envelope is authoritative for dispatch.
 
         // PROB_* files (problem / request payload).
         std::vector<QueueFileRef> m_ProbFiles;
@@ -363,6 +363,15 @@ namespace AIAssistant
         // JCWF: "workflow_file" — for SubWorkflow tasks, path to child .jcwf file
         // (relative to the workflow file directory or absolute).
         std::string m_WorkflowFile;
+
+        // JCWF: "output_schema" (optional, ai_call) — raw Draft 2020-12 subset schema JSON.
+        // When set, the reply is validated against it; on failure we retry up to
+        // m_OutputSchemaMaxAttempts times, feeding the validator errors back to the model.
+        std::string m_OutputSchemaJson;
+
+        // JCWF: "output_retries" (optional, ai_call) — independent retry budget for schema
+        // validation failures, per PROB.  Zero means "use RetryPolicy default".
+        uint32_t m_OutputSchemaMaxAttempts{0};
     };
 
     // Compatibility alias for code that used TaskDefinition naming today

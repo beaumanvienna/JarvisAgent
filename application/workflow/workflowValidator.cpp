@@ -1045,12 +1045,12 @@ namespace
     // break in Docker and per-user installs where the filesystem above the mount
     // point is inaccessible. Warn; caller can still opt in by ignoring the warning.
     //
-    // Rule 2 (duplicate-AI): a file_outputs path that lands INSIDE the task's own
-    // queue folder AND whose filename would be categorized as a requirement by the
-    // SessionManager file categorizer would fire an additional AI query. Forbidden
-    // filenames: anything starting with PROB_, or anything not matching any
-    // recognized queue prefix (STNG_/CNTX_/TASK_/PROV_/*.output.*). See
-    // doc/JC_Workflow_Specification.md §3.3.6.3.
+    // Rule 2 (naming-collision): a file_outputs path that lands INSIDE the task's own
+    // queue folder AND whose filename reuses a queue prefix (PROB_ / STNG_ / CNTX_ /
+    // TASK_ / PROV_) collides with the task's own queue binding on disk and confuses
+    // replay tooling.  Forbidden filenames: anything starting with PROB_, or anything
+    // not matching any recognized queue prefix (STNG_/CNTX_/TASK_/PROV_/*.output.*).
+    // See doc/JC_Workflow_Specification.md §3.3.6.3.
     void ValidateAiCallFileOutputs(std::vector<WorkflowValidationIssue>& issues,
                                    WorkflowDefinition const& workflow)
     {

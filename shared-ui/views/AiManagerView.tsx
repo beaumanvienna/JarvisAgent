@@ -479,14 +479,16 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                     width: 10,
                     height: 10,
                     borderRadius: "50%",
+                    // Success = blue, error = saturated red — blue-vs-red survives
+                    // red-green color blindness where green-vs-red collapses.
                     background:
-                      testStatus[idx] === "success" ? "#4cff72"
-                      : testStatus[idx] === "error" ? "#ff4c4c"
+                      testStatus[idx] === "success" ? "#3b82f6"
+                      : testStatus[idx] === "error" ? "#dc2626"
                       : testStatus[idx] === "testing" ? "#ffcc00"
                       : "#555",
                     boxShadow:
-                      testStatus[idx] === "success" ? "0 0 6px #4cff72"
-                      : testStatus[idx] === "error" ? "0 0 6px #ff4c4c"
+                      testStatus[idx] === "success" ? "0 0 6px #3b82f6"
+                      : testStatus[idx] === "error" ? "0 0 6px #dc2626"
                       : testStatus[idx] === "testing" ? "0 0 6px #ffcc00"
                       : "none",
                     transition: "background 0.3s, box-shadow 0.3s",
@@ -542,9 +544,11 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                 value={editing.api_type}
                 onChange={(e) => setEditing((prev) => prev ? { ...prev, api_type: e.target.value } : prev)}
               >
-                <option value="API1">API1 (OpenAI-compatible)</option>
-                <option value="API2">API2 (Anthropic-style)</option>
+                <option value="API1">API1 (OpenAI chat.completions)</option>
+                <option value="API2">API2 (OpenAI Responses)</option>
                 <option value="API3">API3 (Gemini native)</option>
+                <option value="API4">API4 (Anthropic Messages)</option>
+                <option value="Test">Test (no-network fixture)</option>
               </select>
             </div>
 

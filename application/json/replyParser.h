@@ -20,9 +20,11 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include <string>
 #include <memory>
+#include <optional>
+#include <string>
 #include "json/configParser.h"
+#include "workflow/aiReply.h"
 
 namespace AIAssistant
 {
@@ -46,6 +48,14 @@ namespace AIAssistant
         bool HasError() const;
         virtual size_t HasContent() const = 0;
         virtual std::string GetContent(size_t index = 0) const = 0;
+
+        // Provider-agnostic accessors.  Concrete parsers override when the provider
+        // exposes the concept; otherwise defaults apply.
+        virtual AiError GetError() const;
+        virtual AiUsage GetUsage() const;
+        virtual std::string GetFinishReason() const;
+        virtual std::string GetSystemFingerprint() const;
+        virtual std::optional<std::string> GetStructuredOutput() const;
 
         static std::unique_ptr<ReplyParser> Create(ConfigParser::EngineConfig::InterfaceType const& interfaceType,
                                                    std::string const& jsonString);

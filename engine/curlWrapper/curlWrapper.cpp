@@ -287,12 +287,19 @@ namespace AIAssistant
             case AuthStyle::XGoogApiKey:
                 headers.Append("x-goog-api-key: " + queryData.m_ApiKey);
                 break;
+            case AuthStyle::AnthropicXApiKey:
+                headers.Append("x-api-key: " + queryData.m_ApiKey);
+                break;
             case AuthStyle::Bearer:
             default:
                 headers.Append("Authorization: Bearer " + queryData.m_ApiKey);
                 break;
         }
         headers.Append("Content-Type: application/json");
+        if (queryData.m_AuthStyle == AuthStyle::AnthropicXApiKey)
+        {
+            headers.Append("anthropic-version: 2023-06-01");
+        }
 
         auto& url = queryData.m_Url;
         auto& data = queryData.m_Data;

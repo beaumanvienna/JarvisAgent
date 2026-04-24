@@ -124,7 +124,7 @@ The `tasks` object maps each `taskId` (string key) to a task definition:
 
 ### 3.2 `ai_call` — Call an AI model
 
-AI calls work through a **queue folder** mechanism. The task declares files to write into a queue folder via `queue_binding`. A SessionManager watches the folder and dispatches AI queries.
+AI calls work through a **queue folder** mechanism. The task declares files to write into a queue folder via `queue_binding`. The runtime builds one AI invocation envelope per PROB file and submits it to `AiRequestPool::Submit`; the queue files stay on disk for replay and debugging.
 
 ```jsonc
 {
@@ -169,7 +169,7 @@ Each entry is either:
 
 #### AI Output
 
-The SessionManager writes the AI response to `<stem>.output.<ext>`:
+The runtime writes the AI response to `<stem>.output.<ext>` in the task's queue folder:
 - `PROB_hello.txt` → `PROB_hello.output.txt`
 
 #### Exposing the AI response — two patterns
@@ -244,7 +244,42 @@ The runtime copies the file as `CNTX_PROB_hello.output.txt` in the current task'
 
 #### working_directory for ai_call
 
-Convention: `"../queue/<workflowId>/<NN>_<taskId>"` (e.g., `"../queue/myWorkflow/01_generate"`). The `../queue/` prefix places the folder in the queue directory where SessionManagers watch.
+Convention: `"../queue/<workflowId>/<NN>_<taskId>"` (e.g., `"../queue/myWorkflow/01_generate"`). The `../queue/` prefix keeps per-task scratch under one top-level `queue/` tree for easy cleanup.
+
+#### Structured output (`output_schema` / `output_retries`)
+
+When a downstream task needs a specific JSON shape, declare `output_schema` on the `ai_call` task. The runtime parses the AI reply as JSON, validates it against the schema, and on failure re-dispatches with the validator's errors as a correction message (up to `output_retries` attempts, default 3). A validated reply lands at `<stem>.output.json` instead of `.output.txt`.
+
+Supported schema keywords (Draft 2020-12 subset): `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `oneOf`, `anyOf`, `$ref`, `$defs`. Unsupported keywords are rejected at JCWF load time, not at reply time.
+
+```jsonc
+"classify": {
+  "type": "ai_call",
+  "output_schema": {
+    "type": "object",
+    "required": ["category"],
+    "properties": {
+      "category": { "type": "string", "enum": ["invoice", "receipt", "other"] }
+    },
+    "additionalProperties": false
+  },
+  "output_retries": 3,
+  "outputs": { "category": { "type": "string" } },
+  "queue_binding": { /* STNG with "Respond with JSON only" + usual env */ }
+}
+```
+
+Dataflow references like `{{tasks.classify.output.category}}` are only valid on tasks that declare `output_schema` — the workflow validator rejects the reference otherwise.
+
+**Schema vs. chunking:** `output_schema` and chunking are mutually exclusive. If a prompt declared with a schema exceeds the target interface's context window, chunking is skipped (schema wins) and the provider may reject the oversized request. For large structured output, restructure — e.g. summarize first, then produce structured output on the summary.
+
+#### Context window + chunking (transparent)
+
+Each `ApiInterface` has a `max_context_tokens` budget (explicit in `config.json` or resolved from a curated model-name fallback table: GPT-4 128K, Claude 200K, Gemini 1.5/2 1M, Llama/Qwen/DeepSeek/Phi 128K, Mistral/Mixtral 32K, unknown 50K). When the prompt exceeds the budget and no `output_schema` is set, the runtime auto-splits the CNTX portion at markdown section boundaries, fans out N parallel envelopes (each carrying full STNG/TASK + one slice + original PROB), and then submits a reduce envelope to consolidate the partial answers. This is transparent to the JCWF — just describe the task normally; the runtime picks the right chunking behaviour per interface.
+
+#### Office documents as context (transparent)
+
+Office-format `cntx_files` (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.odt`) are auto-converted to Markdown via `markitdown` during task setup — you can reference a PDF directly in `cntx_files` and the runtime delivers the Markdown text to the model. No shell step needed. Failures (markitdown missing, non-zero exit, empty output, error marker) fail the task with a clear message rather than dispatching a binary blob.
 
 ### 3.3 `python` — Execute a Python function
 
@@ -823,4 +858,4 @@ Same as Example A but the AI deliberately introduces a syntax error. A branch no
 11. **Over-decomposed outputs** — Prefer a single combined JSON output file over splitting into multiple files. If a python task extracts statistics, write everything into ONE JSON file, not separate files per category. This simplifies downstream wiring and cntx_files references.
 12. **Wrong cntx_files path crossing queue↔workflows** — To reach a python/shell task's output from an ai_call's working directory, you need `../../../workflows/<taskWorkDir>/<outputFile>` (3 levels up from `queue/X/Y` to the JarvisAgent root, then into `workflows/`). Using only `../../` reaches `queue/` — not `workflows/`.
 13. **Duplicated literal paths in `args` + `file_inputs`/`file_outputs`** — If a shell task has `file_inputs` and `file_outputs`, do NOT also put the same literal paths in `args`. The executor auto-injects individual `{{input[0]}}`, `{{input[1]}}`, …, `{{output[0]}}`, `{{output[1]}}`, … when no macros are present in args. Either omit `args` entirely (recommended for simple scripts) or use explicit `{{input[i]}}` / `{{output[i]}}` macros.
-14. **`file_outputs` on `ai_call` tasks** — NEVER declare `file_outputs` on an `ai_call`. The paths resolve against the task's `working_directory`, which is inside `queue/` for ai_call tasks, so the output file lands in a watched queue folder. The file categorizer then treats it as a new requirements file and fires a second wasted AI call. Use an `outputs` slot instead — it auto-maps to the natural `PROB_*.output.txt` file the SessionManager produces, and `{{taskId.output_file}}` / `{{taskId.<slot>}}` still resolve correctly for downstream consumers. See §3.2 "Exposing the AI response to downstream non-ai_call tasks" for the canonical pattern.
+14. **`file_outputs` on `ai_call` tasks** — NEVER declare `file_outputs` on an `ai_call`. Use an `outputs` slot instead — it auto-maps to the `PROB_*.output.txt` file the runtime writes, and `{{taskId.output_file}}` / `{{taskId.<slot>}}` resolve to that path for downstream consumers. See §3.2 "Exposing the AI response to downstream non-ai_call tasks" for the canonical pattern.

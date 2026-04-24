@@ -24,6 +24,8 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "python/pythonEnginePool.h"
+#include "workflow/aiInvocation.h"
+#include "workflow/aiReply.h"
 #include "workflow/aiRequestPool.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowRuntimeManager.h"
@@ -31,7 +33,9 @@
 
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <map>
+#include <memory>
 #include <sstream>
 
 // simdjson for incoming message parsing
@@ -95,12 +99,6 @@ namespace
             }
         }
         return out;
-    }
-
-    int64_t NowTimestampNs()
-    {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
-            .count();
     }
 
     fs::path GetQueueBasePath() { return fs::absolute(AIAssistant::Core::g_Core->GetConfig().m_QueueFolderFilepath); }
@@ -1142,13 +1140,6 @@ namespace AIAssistant
         outResponseText.clear();
         outError.clear();
 
-        fs::path const queueBase = GetQueueBasePath();
-        if (queueBase.empty())
-        {
-            outError = "Queue base path is not configured";
-            return false;
-        }
-
         JarvisAgent* app = App::g_App;
         if (!app)
         {
@@ -1163,7 +1154,20 @@ namespace AIAssistant
             return false;
         }
 
-        // Create queue subfolder.
+        if (Core::g_Core == nullptr)
+        {
+            outError = "Core not available";
+            return false;
+        }
+
+        fs::path const queueBase = GetQueueBasePath();
+        if (queueBase.empty())
+        {
+            outError = "Queue base path is not configured";
+            return false;
+        }
+
+        // Disk-first: persist the environment files for replay/debug.
         fs::path const queueDir = queueBase / subfolderName;
         std::error_code ec;
         fs::create_directories(queueDir, ec);
@@ -1172,97 +1176,94 @@ namespace AIAssistant
             outError = "Failed to create queue directory: " + ec.message();
             return false;
         }
-
-        // Clean previous files.
         for (auto const& entry : fs::directory_iterator(queueDir, ec))
             fs::remove(entry.path(), ec);
 
-        // Register with AiRequestPool.
-        int64_t const requestId = requestPool->AllocateRequestId();
-        int64_t const timestampNs = NowTimestampNs();
-
-        AiRequestHandle handle{};
-        handle.requestId = requestId;
-        handle.requestTimestampNs = timestampNs;
-
-        std::string const probFilename = "PROB_" + std::to_string(requestId) + "_" + std::to_string(timestampNs) + ".txt";
-        fs::path const probPath = queueDir / probFilename;
-
-        AiRequestHandle const registered = requestPool->RegisterPending(handle, AI_CALL_TIMEOUT_MS);
-        if (!registered.IsValid())
+        std::string writeError;
+        std::string const effectiveTask = taskContent.empty() ? "Process the request." : taskContent;
+        std::string const effectiveCntx = cntxContent.empty() ? "No prior conversation." : cntxContent;
+        if (!stngContent.empty() && !WriteFile(queueDir / "STNG_settings.txt", stngContent, writeError))
         {
-            outError = "Failed to register AI request";
+            outError = "Failed to write STNG file: " + writeError;
             return false;
         }
-
-        // Write queue files.
-        std::string writeError;
-
-        if (!stngContent.empty())
+        if (!WriteFile(queueDir / "TASK_instructions.txt", effectiveTask, writeError))
         {
-            if (!WriteFile(queueDir / "STNG_settings.txt", stngContent, writeError))
-            {
-                requestPool->Forget(handle);
-                outError = "Failed to write STNG file: " + writeError;
-                return false;
-            }
+            outError = "Failed to write TASK file: " + writeError;
+            return false;
         }
-        requestPool->KickFileActivityWatchdog(handle);
-
-        // TASK file must always be written — the SessionManager
-        // requires STNG + TASK + CNTX + PROB for a complete environment.
+        if (!WriteFile(queueDir / "CNTX_context.txt", effectiveCntx, writeError))
         {
-            std::string const task = taskContent.empty() ? "Process the request." : taskContent;
-            if (!WriteFile(queueDir / "TASK_instructions.txt", task, writeError))
-            {
-                requestPool->Forget(handle);
-                outError = "Failed to write TASK file: " + writeError;
-                return false;
-            }
+            outError = "Failed to write CNTX file: " + writeError;
+            return false;
         }
-        requestPool->KickFileActivityWatchdog(handle);
-
-        // CNTX file must always be written (even if empty) — the SessionManager
-        // requires STNG + TASK + CNTX + PROB for a complete environment.
+        std::string const probFilename = "prob.txt";
+        if (!WriteFile(queueDir / probFilename, probContent, writeError))
         {
-            std::string const cntx = cntxContent.empty() ? "No prior conversation." : cntxContent;
-            if (!WriteFile(queueDir / "CNTX_context.txt", cntx, writeError))
-            {
-                requestPool->Forget(handle);
-                outError = "Failed to write CNTX file: " + writeError;
-                return false;
-            }
-        }
-        requestPool->KickFileActivityWatchdog(handle);
-
-        if (!WriteFile(probPath, probContent, writeError))
-        {
-            requestPool->Forget(handle);
             outError = "Failed to write PROB file: " + writeError;
             return false;
         }
-        requestPool->KickFileActivityWatchdog(handle);
 
-        LOG_APP_INFO("[assistant] AI call dispatched: subfolder='{}' requestId={}", subfolderName, handle.requestId);
+        AiInvocation envelope;
+        envelope.m_QueueFolder = queueDir;
+        envelope.m_ProbName = probFilename;
+        envelope.m_Timeout = std::chrono::milliseconds(AI_CALL_TIMEOUT_MS);
 
-        // Wait for completion (blocking).
-        std::string errorMessage;
-        bool const success = requestPool->WaitForCompletion(handle, AI_CALL_TIMEOUT_MS, outResponseText, errorMessage);
-
-        requestPool->Forget(handle);
-
-        if (!success)
+        std::string combined;
+        auto const appendSection = [&combined](std::string const& section)
         {
-            outError = errorMessage.empty() ? "AI call timed out or failed" : errorMessage;
+            if (section.empty()) return;
+            if (!combined.empty()) combined += "\n";
+            combined += section;
+        };
+        appendSection(stngContent);
+        appendSection(effectiveTask);
+        appendSection(effectiveCntx);
+        appendSection(probContent);
+
+        Message userMessage;
+        userMessage.m_Role = MessageRole::User;
+        userMessage.m_Content = std::move(combined);
+        envelope.m_Messages.push_back(std::move(userMessage));
+
+        auto promise = std::make_shared<std::promise<AiReply>>();
+        std::future<AiReply> future = promise->get_future();
+
+        LOG_APP_INFO("[assistant] AI call dispatched: subfolder='{}' probFile='{}'", subfolderName,
+                     (queueDir / probFilename).string());
+
+        bool const submitted = requestPool->Submit(envelope,
+            [promise](AiReply const& reply) mutable
+            {
+                promise->set_value(reply);
+            });
+
+        if (!submitted)
+        {
+            outError = "AiRequestPool::Submit rejected envelope (no interface, no API key, or empty body)";
             return false;
         }
 
+        std::future_status const status = future.wait_for(std::chrono::milliseconds(AI_CALL_TIMEOUT_MS));
+        if (status != std::future_status::ready)
+        {
+            outError = "AI call timed out after " + std::to_string(AI_CALL_TIMEOUT_MS) + "ms";
+            return false;
+        }
+
+        AiReply const reply = future.get();
+        if (reply.m_Kind == AiReply::Kind::Error)
+        {
+            outError = reply.m_Error.m_Message.empty() ? "AI call failed" : reply.m_Error.m_Message;
+            return false;
+        }
+
+        outResponseText = (reply.m_Kind == AiReply::Kind::Structured) ? reply.m_StructuredJson : reply.m_Text;
         if (outResponseText.empty())
         {
             outError = "AI returned empty response";
             return false;
         }
-
         return true;
     }
 
@@ -1299,11 +1300,13 @@ namespace AIAssistant
         oss << std::string(40, '-') << "\n";
         oss << "Version:            " << JARVIS_AGENT_VERSION << "\n";
 
-        // Session managers
-        size_t smCount = app->GetSessionManagerCount();
-        size_t smInflight = app->GetSessionManagerInflightTotal();
-        oss << "Session managers:   " << smCount << "\n";
-        oss << "AI queries inflight:" << smInflight << "\n";
+        // AI dispatch
+        size_t aiInflight = 0;
+        if (AiRequestPool const* pool = app->GetAiRequestPool(); pool != nullptr)
+        {
+            aiInflight = pool->GetDirectDispatchInflight();
+        }
+        oss << "AI queries inflight:" << aiInflight << "\n";
 
         // Workflows
         if (m_WorkflowRegistry)

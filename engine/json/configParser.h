@@ -43,6 +43,8 @@ namespace AIAssistant
                 API1 = 0,
                 API2,
                 API3,
+                API4,
+                Test, // No-network fixture-driven backend for integration tests (§8 Phase 7)
                 NumAPIs,
                 InvalidAPI
             };
@@ -55,11 +57,22 @@ namespace AIAssistant
                 std::string m_Model;
                 std::string m_KeyName;
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
+                // Structure-aware chunking budget (§8 Phase 6). Zero = "no limit known,
+                // fall back to a conservative default". Chars ÷ 4 is the rough token
+                // estimator for English text.
+                uint64_t m_MaxContextTokens{0};
             };
 
             // Generate a unique interface name from URL domain + model
             static std::string GenerateInterfaceName(std::string const& url, std::string const& model,
                                                      std::string const& apiType);
+
+            // Best-effort context window for a model name using the built-in
+            // fallback table (gpt-5 / gpt-4 / claude / gemini / llama / etc.).
+            // Returns kUnknownModelFallbackTokens when the model is not
+            // recognised.  Called on JSON load; exposed so runtime-added
+            // interfaces (REST POST) pick up the same default.
+            static uint64_t ResolveMaxContextTokensFromModel(std::string const& modelName);
 
             size_t m_MaxThreads{0};
             size_t m_MaxInflightAiCalls{1000};
@@ -84,6 +97,14 @@ namespace AIAssistant
             size_t m_MaxRequestBodyMB{10};
             uint16_t m_Port{0}; // 0 = auto (8080 HTTP, 8443 HTTPS)
             bool m_UseBashOnWindows{false};
+
+            // Determinism defaults.  Per-task settings on AiInvocation override these
+            // when non-default.
+            double m_DeterminismTemperature{0.0};
+            bool m_DeterminismSeedSet{false};
+            int64_t m_DeterminismSeed{0};
+            bool m_DeterminismRecordSystemFingerprint{true};
+
             bool m_ConfigValid{false};
             bool m_InterfacesDirty{false};
 

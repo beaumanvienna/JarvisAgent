@@ -44,6 +44,54 @@ namespace AIAssistant
         return {};
     }
 
+    AiError ReplyParserAPI1::GetError() const
+    {
+        AiError error;
+        if (!m_HasError)
+        {
+            return error;
+        }
+        error.m_Kind = AiError::Kind::Provider;
+        error.m_Message = m_ErrorInfo.m_Message;
+        if (m_ErrorType == ErrorType::RateLimitError)
+        {
+            error.m_HttpStatus = 429;
+        }
+        else if (m_ErrorType == ErrorType::AuthenticationError)
+        {
+            error.m_HttpStatus = 401;
+        }
+        else if (m_ErrorType == ErrorType::PermissionError)
+        {
+            error.m_HttpStatus = 403;
+        }
+        else if (m_ErrorType == ErrorType::ServerError)
+        {
+            error.m_HttpStatus = 500;
+        }
+        return error;
+    }
+
+    AiUsage ReplyParserAPI1::GetUsage() const
+    {
+        AiUsage usage;
+        usage.m_InputTokens = static_cast<int32_t>(m_Reply.m_Usage.m_PromptTokens);
+        usage.m_OutputTokens = static_cast<int32_t>(m_Reply.m_Usage.m_CompletionTokens);
+        usage.m_TotalTokens = static_cast<int32_t>(m_Reply.m_Usage.m_TotalTokens);
+        return usage;
+    }
+
+    std::string ReplyParserAPI1::GetFinishReason() const
+    {
+        if (!m_Reply.m_Choices.empty())
+        {
+            return m_Reply.m_Choices.front().m_FinishReason;
+        }
+        return {};
+    }
+
+    std::string ReplyParserAPI1::GetSystemFingerprint() const { return {}; }
+
     void ReplyParserAPI1::Parse()
     {
         using namespace simdjson;

@@ -24,6 +24,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <memory>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -235,7 +236,11 @@ namespace AIAssistant
         bool m_IsRunning = false;
         std::queue<PendingRun> m_PendingRuns;
 
-        std::vector<ActiveRun> m_ActiveRuns;
+        // Held by std::unique_ptr so element addresses stay stable across push_back
+        // reallocations. Worker-thread lambdas capture `workflowDefinition` (a reference
+        // into ActiveRun::m_Definition) for the duration of task execution — relocating
+        // elements while a worker is running would dangle that reference.
+        std::vector<std::unique_ptr<ActiveRun>> m_ActiveRuns;
 
         std::unordered_map<std::string, WorkflowRun> m_LastRuns;
 

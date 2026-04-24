@@ -3,7 +3,7 @@
 ## Overview
 
 The logging subsystem consists of:
-- **StatusRenderer** — builds session-status lines for terminal UI
+- **StatusRenderer** — aggregates AI-call counters and the last-3-runs bar for the terminal status window
 - **Log** — configures two spdlog loggers into `std::cout`
 - **TerminalLogStreamBuf** — custom `std::streambuf` routing all logs to ncurses + optional file
 - **TerminalManager** — ncurses UI with log window + status window
@@ -15,21 +15,22 @@ All components work together to produce clean, line‑based logging in both the 
 
 # StatusRenderer
 
-Tracks per-session status and renders lines for the terminal.
+Drives the terminal's status window. Two sections:
+
+1. **AI aggregate row** — `[AI] In flight: N | Completed: M | Failed: K` plus a braille spinner while anything is in flight.
+2. **Last runs rows** — up to 3 rolling entries (`✓ workflowId (12s ago)`), same shape the dashboard's `LastRunsBar` shows.
 
 ### Responsibilities
-- Store `SessionStatus` for each session:  
-  `name`, `state`, `outputs`, `inflight`, `completed`
-- Maintain spinner animation when queries are running
-- Generate UTF‑8–safe, width‑limited status lines
-- Thread‑safe updates
+- Count in-flight / completed / failed AI calls from `EventCategoryAi` dispatcher hooks
+- Pull a rolling last-runs snapshot from `WorkflowRuntimeManager::GetLastRunsSnapshot` via an injected provider
+- Emit UTF-8-safe, width-limited status lines
+- Thread-safe
 
 ### Key Operations
-- `UpdateSession(...)` — record new status from a `SessionManager`
-- `BuildStatusLines(outLines, maxWidth)`  
-  - Safely truncates UTF‑8 using `SafeTruncateUtf8`
-  - Emits `[session] STATE: ...` rows sorted alphabetically
-- `GetSessionCount()` — used by TerminalManager to size status window
+- `OnAiCallStarted/Completed/Failed()` — invoked from the event dispatcher in `JarvisAgent::OnEvent`
+- `SetLastRunsProvider(provider)` — called once after `WorkflowRuntimeManager` is up
+- `BuildStatusLines(outLines, maxWidth)` — one AI row + up to 3 last-run rows
+- `GetRowCount()` — used by `TerminalManager` to size the status window (1 + last-runs count)
 
 ---
 
@@ -106,6 +107,12 @@ Python-side mirror of C++ logging formatting.
 
 ---
 
+# Crow web server (WebServer log routing)
+
+The embedded Crow HTTP framework has its own logger with a default `CerrLogHandler` that writes straight to `std::cerr`. On its own that bypasses the ncurses layer and overpaints the status window on every connection event. `WebServer::WebServer` installs a custom `crow::ILogHandler` (`CrowSpdlogHandler` in `webServer.cpp`) that forwards every Crow log line through `LOG_CORE_*`, so Crow output lands in `log.txt` and the ncurses LOG window exactly like our own logs. One specific benign warning — `"Could not start adaptor: ssl/tls alert certificate unknown"`, raised every time an untrusted-cert client attempts TLS — is suppressed at the shim level since it is not actionable in development.
+
+---
+
 # ShellTaskExecutor (Shell task logging)
 
 Shell tasks must not write directly to the terminal (stdout/stderr), because that bypasses the `spdlog → std::cout → TerminalLogStreamBuf` pipeline and can corrupt the ncurses UI.
@@ -161,6 +168,6 @@ The logging system ensures:
 - Shell task output is captured and forwarded into the same pipeline (no direct stdout/stderr to terminal)
 - Every message is line-based, newline-terminated, and ANSI-clean
 - Terminal UI stays responsive and UTF-8 safe
-- Status information is updated per session through StatusRenderer
+- Status information is driven by AI dispatch events + last-runs snapshot through StatusRenderer
 
 This pipeline is deterministic, thread‑safe, and avoids mixing or partial-line output.

@@ -1,0 +1,2 @@
+This is a canned reply from the hermetic Test interface.
+No network call was made.

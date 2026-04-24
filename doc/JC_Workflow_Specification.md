@@ -713,7 +713,7 @@ make
   - `request_params` (object) — Additional request parameters merged into the API call (e.g., `temperature`, `max_tokens`, `top_p`). Provider-specific; unknown keys are passed through verbatim.
 
 - `internal`  
-  Built-in C++ actions, such as updating status, writing to ChatMessagePool, or coordinating queue artifacts.
+  Built-in C++ actions, such as updating status or coordinating queue artifacts.
 
 - `sub_workflow`  
   Executes a referenced child JCWF workflow as a nested run. The parent task enters
@@ -877,16 +877,18 @@ Available template variables on a declared dependency:
 - `{{A.output_file}}` — absolute path to A's first output file (sorted alphabetically by slot name).
 - `{{A.captured_stdout}}` — captured stdout of A (up to 1024 characters).
 - `{{A.<slotName>}}` — each named output slot from A individually.
-- `{{A.json.<path>}}` — for cloud tasks that write `response.json`, the JSON response is parsed and flattened into dotted-path entries. Example: `{{create_issue.json.key}}`, `{{create_issue.json.fields.summary}}`, `{{list_issues.json.items[0].id}}`.
+- `{{A.json.<path>}}` — JSON response from upstream A is parsed and flattened into dotted-path entries. Works for two upstream types:
+  - **Cloud tasks** that write `response.json` (regular) or `response_<N>.json` (per-item child). Example: `{{create_issue.json.key}}`, `{{create_issue.json.fields.summary}}`, `{{list_issues.json.items[0].id}}`.
+  - **Schema-validated `ai_call` tasks** whose validated reply lands in an upstream `.output.json` file (any `.json` path registered in A's output values). Example: `{{ai_classify.json.user_id}}` resolves from the structured `{"user_id":"5"}` reply.
 
-**Per-child response files:** Cloud task executors write their HTTP response to `response.json` for regular tasks and to `response_<N>.json` for per-item children (where `N` is the item index). The JSON-path resolver reads the appropriate file based on the caller's instance — so chained per_item cloud operations get their own matching-index response without races between concurrent children.
+**Per-child response files:** Cloud task executors write their HTTP response to `response.json` for regular tasks and to `response_<N>.json` for per-item children (where `N` is the item index). The JSON-path resolver reads the appropriate file based on the caller's instance — so chained per_item cloud operations get their own matching-index response without races between concurrent children. Structured-output `ai_call` children get the same per-instance treatment via their per-child `<prob>.output.json` files.
 
-This enables chained pipelines where each downstream task consumes structured fields from its corresponding upstream response:
+This enables chained pipelines where each downstream task consumes structured fields from its corresponding upstream reply:
 
 ```
-filter(N items) → per_item ai_call(N) → per_item cloud_write(N)
-                                              ↑
-                              {{ai_call.captured_stdout}} from matching instance
+filter(N items) → per_item ai_call(N, output_schema) → per_item cloud_write(N)
+                                                           ↑
+                                    {{ai_call.json.FIELD}} from matching instance
 ```
 
 For cloud task executors, template variables in `params` JSON are expanded with JSON-safe escaping (double quotes, backslashes, and newlines are escaped before substitution) so that piped output text does not break JSON structure.
@@ -1097,7 +1099,7 @@ The dashboard SHOULD indicate which workflows are blocked due to missing provide
 | `endpoint`      | Full URL to the chat completions endpoint.                     |
 | `api_key`       | API key (empty for local/keyless endpoints like Ollama).       |
 | `default_model` | Default model string sent in the request body.                 |
-| `api_type`      | `"API1"` (OpenAI-compatible) or `"API2"` (Anthropic-style).   |
+| `api_type`      | `"API1"` (OpenAI Chat Completions) · `"API2"` (OpenAI Responses) · `"API3"` (Gemini native) · `"API4"` (Anthropic Messages) · `"Test"` (fixture-driven, integration tests). |
 
 **Example: specialized AI tasks in a single workflow**
 
@@ -1150,29 +1152,38 @@ This example uses three different AI providers in a single workflow — each tas
 
 #### 3.3.6 Environment and Queue Integration (STNG_, TASK_, CNTX_, PROB_, PROV_)
 
-An `ai_call` task maps to a **queue folder** — a directory that the JarvisAgent
-**SessionManager** watches.  Files placed in that folder are categorized by
-filename prefix and together drive the AI query pipeline.
+An `ai_call` task maps to a **queue folder** — the task's `working_directory`.
+For each PROB file the runtime builds an `AiInvocation` envelope (interface,
+model, settings, concatenated STNG/TASK/CNTX/PROB content) and submits it to
+`AiRequestPool::Submit`.  The runtime also writes the STNG/TASK/CNTX/PROB/PROV
+files to the queue folder on disk — disk-first philosophy, every call is
+reconstructible and replayable — but the envelope is authoritative for dispatch.
 
-##### 3.3.6.1 Queue Folder and the SessionManager
+##### 3.3.6.1 Queue Folder
 
 Each `ai_call` task declares a `working_directory` that points to a queue
-folder.  JarvisAgent creates one **SessionManager** instance per watched folder.
-The SessionManager continuously monitors the folder for file changes and
-performs the following:
+folder.  The runtime:
 
-1. **Categorize** every file by its filename prefix (see 3.3.6.2).
-2. **Assemble the environment** from all STNG_, CNTX_, and TASK_ files (concatenated).
-3. **Dispatch an AI query** for every *requirement file* — i.e., any file that
-   is not STNG_, CNTX_, TASK_, PROV_, a `.output.*` file, or a binary file.
-   The query message is `environment + requirement_content`.
-4. **Write the AI response** to `<stem>.output.<ext>` (e.g., `PROB_NVDA.txt` →
-   `PROB_NVDA.output.txt`).
-5. **Track freshness** — a requirement is re-sent only when its own content or
+1. Writes STNG/TASK/CNTX/PROB/PROV files to the folder (disk-first, see 3.3.6.2).
+2. Materializes path-reference CNTX files (e.g. upstream `PROB_*.output.txt`)
+   as `CNTX_*` files in the folder.  Office-format CNTX sources
+   (`.pdf`/`.docx`/`.xlsx`/`.pptx`/`.odt`) are auto-converted to Markdown via
+   `markitdown` at this step; failures abort the task with a clear error rather
+   than dispatching a binary blob.
+3. Builds one envelope per PROB file, with the user message assembled as:
+   `[STNG] + [TASK] + [CNTX] + [PROB]`.
+4. If the combined message exceeds the target interface's `max_context_tokens`
+   budget and no `output_schema` is declared, **chunks the CNTX section** at
+   markdown heading boundaries (§3.3.6.9), fans out N envelopes in parallel,
+   then submits a **reduce envelope** that consolidates the partial answers into
+   one unified reply.  Schema-declared tasks skip chunking (schema enforcement
+   needs a whole-object reply).
+5. Submits each envelope via `AiRequestPool::Submit`, writes the reply to
+   `<stem>.output.<ext>` (e.g. `PROB_NVDA.txt` → `PROB_NVDA.output.txt`;
+   structured replies land as `<stem>.output.json`), and writes a
+   `<stem>.transcript.json` alongside for replay.
+6. Tracks freshness — a requirement is re-sent only when its own content or
    the environment changes (timestamp comparison with the existing output file).
-
-The SessionManager state machine progresses through:
-`CompilingEnvironment` → `SendingQueries` → `AllQueriesSent` → `AllResponsesReceived`.
 
 ##### 3.3.6.2 File Categories
 
@@ -1196,7 +1207,7 @@ own independent AI query.  The full prompt for each query is:
 
 ##### 3.3.6.3 Output Naming Convention
 
-The SessionManager derives the output filename from the requirement filename by
+The runtime derives the output filename from the requirement filename by
 inserting `.output` before the extension:
 
 | Requirement File          | Output File                  |
@@ -1206,10 +1217,10 @@ inserting `.output` before the extension:
 | `my_question.txt`         | `my_question.output.txt`     |
 
 For `ai_call` tasks, the **PROB files are the requirement files**.  The
-workflow executor writes PROB files to the task's queue folder; the
-SessionManager dispatches them.
+runtime builds one envelope per PROB and writes the reply to the corresponding
+`.output.<ext>` file in the same folder.
 
-**Exposing the AI response — two valid patterns.** The AI response is written by the SessionManager to `<PROB_stem>.output.<ext>` in the task's queue folder. Downstream consumers can reach it in two ways:
+**Exposing the AI response — two valid patterns.** The AI response is written to `<PROB_stem>.output.<ext>` in the task's queue folder. Downstream consumers can reach it in two ways:
 
 *Pattern A — zero-copy reference (preferred for downstream JCWF tasks).* Declare an `outputs` slot and skip `file_outputs`:
 
@@ -1222,7 +1233,7 @@ SessionManager dispatches them.
 }
 ```
 
-The runtime maps the declared slot to the natural `PROB_*.output.*` file already produced by the SessionManager. Downstream tasks reference it via `{{summarize.output_file}}` or `{{summarize.summary}}`, both resolving to the absolute path of the AI response. No duplication, no extra AI call.
+The runtime maps the declared slot to the `PROB_*.output.*` file. Downstream tasks reference it via `{{summarize.output_file}}` or `{{summarize.summary}}`, both resolving to the absolute path of the AI response. No duplication, no extra AI call.
 
 *Pattern B — delivery to a specific path (preferred for terminal artefacts).* Declare `file_outputs` with paths that resolve OUTSIDE the task's own queue folder. The runtime copies `PROB_*.output.*` to each declared path once the AI response lands. Typical uses:
 
@@ -1240,17 +1251,17 @@ The runtime maps the declared slot to the natural `PROB_*.output.*` file already
 
 **Portability note.** Paths above the launch CWD (e.g. `/tmp/...`, `~/...`, `../../outside`) work fine locally but fail in Engine-in-Docker where the filesystem above the mount is read-only. The runtime does not hard-reject them — that's an intentional trade — but the validator raises an informational finding so authors who care about cross-edition portability see the flag.
 
-**What `file_outputs` on `ai_call` MUST NOT do.** A `file_outputs` path that resolves INSIDE the task's own `working_directory` (which, for `ai_call`, is a watched queue folder) AND whose filename would be categorized as a requirement file — i.e. the filename matches `PROB_*` or does not match any recognized prefix (`STNG_*` / `CNTX_*` / `TASK_*` / `PROV_*` / `*.output.*`) — will fire an **extra AI query** because the categorizer treats it as a new prompt. The equivalently wasteful pattern of copying `PROB_foo.output.txt` into the same folder under a new name is forbidden for the same reason. The runtime MUST warn about these cases; implementations MAY reject them.
+**What `file_outputs` on `ai_call` MUST NOT do.** A `file_outputs` path that resolves INSIDE the task's own `working_directory` (the queue folder) AND whose filename reuses a queue prefix — i.e. the filename matches `PROB_*` or does not match any recognized prefix (`STNG_*` / `CNTX_*` / `TASK_*` / `PROV_*` / `*.output.*`) — collides with the task's own queue binding on disk and confuses replay tooling. The runtime MUST warn about these cases; implementations MAY reject them.
 
-The legitimate same-folder case exists only for `PROB_*` files that are intentionally meant to trigger *another* AI call — typically not something you'd express via `file_outputs`. If you truly need to chain two AI calls on the same task, add a second task with its own queue folder.
+If you need to chain two AI calls, add a second task with its own queue folder.
 
 Patterns A and B can be combined: declare both an `outputs` slot (for downstream JCWF references) and `file_outputs` (for terminal artefact delivery). The slot always maps to the original `PROB_*.output.*`; `file_outputs` copies go to the declared external paths.
 
 ##### 3.3.6.4 `queue_binding` — Declaring Queue Files in JCWF
 
 The `queue_binding` object on a task definition tells the workflow executor
-which files to create in the queue folder before the SessionManager processes
-them.
+which files to create in the queue folder before the runtime assembles the
+envelope.
 
 ```jsonc
 "queue_binding": {
@@ -1266,7 +1277,7 @@ them.
 - `task_files` (OPTIONAL, array) — Task instruction files. Written once; become part of the environment.
 - `cntx_files` (OPTIONAL, array) — Context files. Written once (or materialized from upstream task outputs); become part of the environment. Entries MAY contain **glob patterns** (`*`, `?`) to dynamically match files at execution time (see 3.3.6.7).
 - `prob_files` (REQUIRED for `ai_call`) — Problem/requirement files. **Each PROB file triggers one AI query.** For `per_item` tasks, each item instance writes its own PROB file with a unique name.
-- `prov_files` (OPTIONAL, array) — Provider configuration. Written by the executor when the task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. The SessionManager reads PROV files to resolve the provider config from the KeyManager.
+- `prov_files` (OPTIONAL, array) — Provider sidecar. Written by the executor when the task specifies `provider` / `model`. Contains endpoint URL, model, and API type — but **NEVER** credentials or API keys. The envelope carries the same information; PROV is kept on disk for replay tooling only.
 
 Each entry MAY be either:
 
@@ -1278,15 +1289,14 @@ Each entry MAY be either:
 ```
 
 If `content` is present, the runtime MUST write (or overwrite) the file at
-`path` before the SessionManager processes the folder.  This inline form is
-RECOMMENDED when a workflow should be self-contained and runnable without
-additional files.
+`path` before dispatching.  This inline form is RECOMMENDED when a workflow
+should be self-contained and runnable without additional files.
 
 ##### 3.3.6.5 Path Resolution for `queue_binding`
 
 - Relative paths in `queue_binding` entries MUST be resolved relative to the task `working_directory`.
 - When writing inline `content`, the runtime MUST create parent directories if they do not exist.
-- For `cntx_files` path-only entries referencing upstream task outputs (e.g., `"../01_taskA/PROB_foo.output.txt"`), the runtime MUST **materialize** a copy as `CNTX_<filename>` in the current task's working directory so that the SessionManager categorizes it as Context.
+- For `cntx_files` path-only entries referencing upstream task outputs (e.g., `"../01_taskA/PROB_foo.output.txt"`), the runtime MUST **materialize** a copy as `CNTX_<filename>` in the current task's working directory and include its content in the envelope's user message.
 - If a `cntx_files` path contains **glob characters** (`*` or `?`), the runtime MUST expand the pattern against the filesystem before materialization. See 3.3.6.7 for details.
 
 ##### 3.3.6.6 Per-Item Template Substitution *(v1.1)*
@@ -1318,9 +1328,9 @@ prefixed by the filter's `binding` name:
 ```
 
 For a portfolio with 60 positions, this produces 60 uniquely named PROB files
-(e.g., `PROB_NVDA.txt`, `PROB_AAPL.txt`, …).  The SessionManager dispatches
-each as an independent AI query and writes the corresponding output files
-(`PROB_NVDA.output.txt`, `PROB_AAPL.output.txt`, …).
+(e.g., `PROB_NVDA.txt`, `PROB_AAPL.txt`, …).  The runtime builds one envelope
+per PROB, dispatches them in parallel via `AiRequestPool::Submit`, and writes
+the corresponding output files (`PROB_NVDA.output.txt`, `PROB_AAPL.output.txt`, …).
 
 **Note:** `{{key}}` substitution applies to `queue_binding` inline `content`
 and `path` strings.  For `file_inputs` and `file_outputs` path templates, use
@@ -1390,10 +1400,133 @@ Tasks MAY also declare an `environment` object for shell or Python tasks:
 - `variables` (OPTIONAL, object): Key-value environment variables for shell or Python tasks.
 - `assistant_id` (OPTIONAL, string): For `ai_call` tasks with `mode: "assistant"`, references a preconfigured assistant that keeps its own long-lived context.
 
-##### 3.3.6.9 Complete AI Call Example
+##### 3.3.6.9 Structured Output (`output_schema` / `output_retries`)
 
-A two-task workflow where the first task makes 60 per-item AI calls and the
-second task summarizes all results:
+`ai_call` tasks MAY declare an `output_schema` — a JSON Schema (Draft 2020-12
+subset) that the AI reply is validated against.  When validation fails, the
+runtime re-dispatches the same envelope up to `output_retries` times, appending
+the validator's error summary to the conversation with an instruction to
+produce a schema-conforming response.
+
+**Fields on an `ai_call` task:**
+
+- `output_schema` (OPTIONAL, object) — Raw JSON Schema.  Supported keywords:
+  `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`,
+  `minimum`, `maximum`, `minLength`, `maxLength`, `pattern`, `oneOf`, `anyOf`,
+  `$ref`, `$defs`.  Unsupported keywords are rejected at JCWF load time (not at
+  reply time) so authors see errors before a run starts.
+- `output_retries` (OPTIONAL, integer, default 3) — Maximum schema-validation
+  attempts (including the first).  The envelope's HTTP retry budget is
+  independent.
+
+**Effect on disk layout:**
+
+- When `output_schema` is set, a schema-valid reply is written as
+  `<stem>.output.json` (the extracted, validated JSON payload).
+- Without `output_schema`, the raw text lands at `<stem>.output.txt`.
+- Never both.
+
+**Dispatch-mode selection per provider:**
+
+- OpenAI API1 / API2: `response_format: { type: "json_schema", ... }` (native).
+- Gemini API3: `responseSchema` (native).
+- Anthropic API4: forced-tool shim — the schema is wrapped as a tool
+  parameter, `tool_choice: {"type":"tool","name":"output"}`.  The reply's
+  tool-use content block carries the structured payload.
+
+**Chunking interaction:** chunking and `output_schema` are **mutually
+exclusive**.  A chunked response can't satisfy a whole-object schema, so if an
+over-budget prompt is declared with a schema, chunking is skipped and the
+provider may reject the request (explicit warning in the log).  For oversized
+structured output, restructure the workflow — e.g. summarise first, then
+produce structured output on the summary.
+
+**Workflow-validator rule:** a dataflow reference of the form
+`{{tasks.X.output.field}}` is only valid when task X declares an
+`output_schema` — the validator rejects the reference otherwise, so authors
+can't accidentally consume structured fields from free-text tasks.
+
+**Example — classify step emits one enum value, downstream task consumes it:**
+
+```jsonc
+{
+  "tasks": {
+    "classify": {
+      "id": "classify",
+      "type": "ai_call",
+      "output_schema": {
+        "type": "object",
+        "required": ["category"],
+        "properties": {
+          "category": { "type": "string", "enum": ["invoice", "receipt", "other"] }
+        },
+        "additionalProperties": false
+      },
+      "output_retries": 3,
+      "outputs": { "category": { "type": "string" } },
+      "working_directory": "../../queue/classifier/01_classify",
+      "queue_binding": {
+        "stng_files": [{ "path": "STNG.txt", "content": "Respond with JSON only." }],
+        "task_files": [{ "path": "TASK.txt", "content": "Classify the document." }],
+        "cntx_files": ["../../../input/doc.pdf"],
+        "prob_files":  [{ "path": "PROB.txt", "content": "Emit the classification." }]
+      }
+    },
+    "route": {
+      "id": "route",
+      "type": "python",
+      "depends_on": ["classify"],
+      "params": { "module": "workflows.router", "function": "route_by_category" },
+      "inputs": {
+        "category": { "type": "string", "required": true }
+      }
+    }
+  },
+  "dataflow": [
+    { "from_task": "classify", "from_output": "category",
+      "to_task": "route",    "to_input":  "category" }
+  ]
+}
+```
+
+`classify` writes `PROB.output.json` containing `{"category":"invoice"}` (or
+fails after 3 retries with `AiError{kind=SchemaValidation}`).  The `route`
+task receives the validated value through the dataflow slot.
+
+##### 3.3.6.10 Chunking and Reduce Pass
+
+When the combined user message (STNG + CNTX + TASK + PROB) exceeds the target
+interface's `max_context_tokens` budget, the runtime splits the **CNTX portion
+only** into N chunks at markdown section boundaries (preferring whole `#` /
+`##` / `###` sections, subdividing a section only when it alone overruns
+budget).
+
+- Each chunk envelope carries `[STNG + TASK] + <slice i of CNTX> + [PROB]` —
+  i.e. the full instructions and original question, with just the context
+  portion sliced down.  Chunks dispatch in parallel via the shared HTTP/2
+  connection.
+- Per-chunk intermediates land as `<stem>.output.chunk<i>-of-<N>.txt` for
+  replay.
+- Once all N replies arrive, a **reduce envelope** is submitted that carries
+  the N partial answers plus the original PROB, asking the model to produce a
+  single unified reply.  The reduced reply becomes `<stem>.output.txt`.
+- If the reduce envelope can't be submitted (interface error, missing key),
+  the fallback is plain concatenation of the N partial answers with HTML
+  comment separators.
+
+**Per-interface budget** comes from `max_context_tokens` in `config.json` for
+each `ApiInterface`.  When unset, a curated model-name fallback table resolves
+a default (GPT-4-family 128K, Claude 200K, Gemini 1.5/2 1M, Llama/Qwen/DeepSeek/Phi
+128K, Mistral/Mixtral 32K, unknown model 50K).
+
+**What chunking does NOT do:** it does not summarize, filter, or reshape the
+content — it's a context-window workaround, not a content transformation.  If
+a JCWF requires precise aggregation (e.g. "rank all records by X"), a single
+envelope on a large-window model (Opus, Gemini 1.5) will produce a better
+result than chunking on a small-window model.  The `max_context_tokens`
+fallback table picks the right behaviour automatically.
+
+##### 3.3.6.11 Complete AI Call Example
 
 ```jsonc
 {
@@ -2000,7 +2133,7 @@ Recommended data structures (implemented in `workflowTypes.h`; shown here in sim
   - `std::unordered_map<std::string, TaskInstanceState> taskStates;`  
   - `JsonLikeState context;`
 
-The core orchestrator SHOULD be deterministic and thread-safe. It MAY use a task queue and worker threads. Document conversion is delegated to external Python processes (e.g. markitdown), while AI calls are issued by the C++ `SessionManager` on a thread pool.
+The core orchestrator SHOULD be deterministic and thread-safe. It MAY use a task queue and worker threads. Document conversion is delegated to external Python processes (e.g. markitdown), while AI calls are issued by the C++ `AiRequestPool` through the shared `CurlMultiDispatcher` (HTTP/2 multiplex).
 
 For tasks that integrate with the existing queue system, the orchestrator MAY map task execution to creation or consumption of STNG_, TASK_, CNTX_, PROB_, and PROV_ files in the queue directories according to `queue_binding`.
 
@@ -2214,310 +2347,11 @@ These values are available to all tasks via the context lookup (step 2 of §8.1)
 
 ## 9. JSON Schema (Draft)
 
-Below is a simplified JSON Schema for JCWF v1.1. It is not exhaustive but is suitable for validation and editor tooling.
+The JCWF JSON Schema lives at **[`doc/jcwf.schema.json`](jcwf.schema.json)** (Draft 2020-12).
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "JC Workflow File (JCWF) v1.1",
-  "type": "object",
-  "required": ["version", "id", "tasks"],
-  "properties": {
-    "version": {
-      "type": "string",
-      "pattern": "^1\.[01]$"
-    },
-    "id": { "type": "string" },
-    "label": { "type": "string" },
-    "doc": {
-      "anyOf": [
-        { "type": "string" },
-        { "type": "array", "items": { "type": "string" } }
-      ]
-    },
-    "base_directory": { "type": "string" },
-    "triggers": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/trigger" }
-    },
-    "tasks": {
-      "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/task" }
-    },
-    "dataflow": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/dataflow" }
-    },
-    "filters": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/filter" }
-    },
-    "control_nodes": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/control_node" }
-    },
-    "controlflow": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/controlflow_edge" }
-    },
-    "defaults": {
-      "type": "object",
-      "properties": {
-        "timeout_ms": { "type": "integer" },
-        "retries": {
-          "type": "object",
-          "properties": {
-            "max_attempts": { "type": "integer" },
-            "backoff_ms": { "type": "integer" }
-          }
-        },
-        "ai": {
-          "type": "object",
-          "properties": {
-            "provider": { "type": "string" },
-            "model": { "type": "string" },
-            "request_params": { "type": "object" }
-          }
-        }
-      },
-      "additionalProperties": true
-    }
-  },
+It is intentionally a pragmatic subset — sufficient for the editor's generate/validate flow and for schema-enforced output (`output_schema` on `ai_call`, §3.3.6). The runtime `WorkflowValidator` handles semantic checks that go beyond JSON Schema's reach (cycle detection, dataflow slot matching, path resolution).
 
-  "$defs": {
-    "trigger": {
-      "type": "object",
-      "required": ["type", "id"],
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "cron",
-            "file_watch",
-            "structure",
-            "manual"
-          ]
-        },
-        "id": { "type": "string" },
-        "enabled": { "type": "boolean" },
-        "params": { "type": "object" }
-      }
-    },
-
-    "task": {
-      "type": "object",
-      "required": ["id", "type"],
-      "properties": {
-        "id": { "type": "string" },
-        "type": {
-          "type": "string",
-          "enum": ["python", "shell", "ai_call", "internal"]
-        },
-        "label": { "type": "string" },
-        "doc": { "type": "string" },
-        "mode": {
-          "type": "string",
-          "enum": ["single", "per_item"],
-          "default": "single"
-        },
-        "filter": { "type": "string" },
-        "working_directory": { "type": "string" },
-        "depends_on": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "file_inputs": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "file_outputs": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "materialize": {
-          "type": "object",
-          "description": "Map from source path template (e.g. '{{input[0]}}') to target filename. The runtime copies each resolved source into the task working_directory under the target name before execution. Applies to all task types.",
-          "additionalProperties": { "type": "string" }
-        },
-        "environment": {
-          "type": "object",
-          "properties": {
-            "name": { "type": "string" },
-            "assistant_id": { "type": "string" },
-            "variables": {
-              "type": "object",
-              "additionalProperties": { "type": ["string", "number", "boolean"] }
-            }
-          }
-        },
-        "queue_binding": {
-          "type": "object",
-          "properties": {
-            "stng_files": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/queue_file_ref" }
-            },
-            "task_files": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/queue_file_ref" }
-            },
-            "cntx_files": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/queue_file_ref" }
-            },
-            "prob_files": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/queue_file_ref" }
-            },
-            "prov_files": {
-              "type": "array",
-              "items": { "$ref": "#/$defs/queue_file_ref" }
-            }
-          }
-        },
-        "params": {
-          "type": "object",
-          "properties": {
-            "command": { "type": "string" },
-            "args": {
-              "type": "array",
-              "items": { "type": "string" }
-            },
-            "provider": { "type": "string" },
-            "model": { "type": "string" },
-            "request_params": { "type": "object" },
-            "mode": {
-              "type": "string",
-              "enum": ["one_shot", "assistant"]
-            },
-            "prompt_template": { "type": "string" }
-          },
-          "additionalProperties": true
-        },
-        "inputs": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "type": { "type": "string" },
-              "required": { "type": "boolean" }
-            }
-          }
-        },
-        "outputs": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "type": { "type": "string" }
-            }
-          }
-        },
-        "expose_error_signal": { "type": "boolean", "default": false },
-        "timeout_ms": { "type": "integer" },
-        "retries": {
-          "type": "object",
-          "properties": {
-            "max_attempts": { "type": "integer" },
-            "backoff_ms": { "type": "integer" }
-          }
-        }
-      }
-    },
-
-    "queue_file_ref": {
-      "anyOf": [
-        { "type": "string" },
-        {
-          "type": "object",
-          "required": ["path", "content"],
-          "properties": {
-            "path": { "type": "string" },
-            "content": { "type": "string" }
-          }
-        }
-      ]
-    },
-
-    "dataflow": {
-      "type": "object",
-      "required": ["from_task", "to_task"],
-      "properties": {
-        "from_task": { "type": "string" },
-        "from_output": { "type": "string" },
-        "to_task": { "type": "string" },
-        "to_input": { "type": "string" },
-        "mapping": { "type": "object" }
-      }
-    },
-
-    "control_node": {
-      "type": "object",
-      "required": ["id", "type"],
-      "properties": {
-        "id": { "type": "string" },
-        "type": {
-          "type": "string",
-          "enum": ["branch"]
-        },
-        "label": { "type": "string" }
-      }
-    },
-
-    "controlflow_edge": {
-      "type": "object",
-      "required": ["from", "to", "kind"],
-      "properties": {
-        "from": { "type": "string" },
-        "to": { "type": "string" },
-        "kind": {
-          "type": "string",
-          "enum": ["normal", "error_signal", "on_error"]
-        },
-        "from_port": { "type": "string" },
-        "to_port": { "type": "string" }
-      }
-    },
-
-    "filter": {
-      "type": "object",
-      "required": ["id", "source", "binding"],
-      "properties": {
-        "id": { "type": "string" },
-        "source": {
-          "type": "object",
-          "required": ["kind"],
-          "properties": {
-            "kind": {
-              "type": "string",
-              "enum": ["csv", "text_lines", "query", "polarion_query"]
-            },
-            "path": { "type": "string" },
-            "delimiter": { "type": "string", "default": "," },
-            "has_header": { "type": "boolean", "default": true },
-            "range": { "type": "string" },
-            "skip_empty": { "type": "boolean", "default": true },
-            "index_path": { "type": "string" },
-            "query": { "type": "string" },
-            "fields": {
-              "type": "array",
-              "items": { "type": "string" }
-            },
-            "base_url": { "type": "string" },
-            "project_id": { "type": "string" },
-            "key_name": { "type": "string" },
-            "page_size": { "type": "integer", "default": 100 }
-          }
-        },
-        "binding": { "type": "string" },
-        "max_items": { "type": "integer", "default": 10000 }
-      }
-    }
-  }
-}
-
-```
+The schema is compiled into the binary at build time via the Premake prebuild step (`tools/generateEmbeddedHeaders.py` → `application/json/jcwfSchema.generated.h`), so runtime consumers never read it from disk.
 
 ---
 
