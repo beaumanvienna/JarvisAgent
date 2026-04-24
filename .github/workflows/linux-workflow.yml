@@ -105,12 +105,11 @@ jobs:
             workflow-editor/ui/dist/
 
   package-deb:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     runs-on: ubuntu-latest
     # Only build packages on main; feature/refactor branches just need the
     # upstream build-linux smoke test to stay green.
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout repository
@@ -133,11 +132,10 @@ jobs:
           if-no-files-found: warn
 
   package-appimage:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     runs-on: ubuntu-latest
     # Packages only on main (same policy as package-deb).
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout repository
@@ -297,7 +295,6 @@ jobs:
           if-no-files-found: warn
 
   package-flatpak:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build-linux
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
