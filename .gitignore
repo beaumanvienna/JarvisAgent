@@ -1,5 +1,6 @@
 /bin/
 /bin-int/
+/.build-edition
 Makefile
 Makefile.in
 Makefile.*

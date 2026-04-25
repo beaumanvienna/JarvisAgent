@@ -85,18 +85,13 @@ project "jarvisAgent"
     ------------------------------------
     if _OPTIONS["engine"] then
         targetname "jarvisAgent-engine"
-        -- Engine edition: remove Studio-only modules so they don't compile.
-        removefiles {
-            "application/assistant/**",
-            "application/web/aiJcwfService.h",
-            "application/web/aiJcwfService.cpp",
-            "application/web/webServerStudio.cpp",
-        }
         print(">>> Edition: Engine  ->  jarvisAgent-engine")
+        io.writefile(".build-edition", "engine\n")
     else
         targetname "jarvisAgent-studio"
         defines { "J9T_STUDIO" }
         print(">>> Edition: Studio  ->  jarvisAgent-studio")
+        io.writefile(".build-edition", "studio\n")
     end
 
     files
@@ -109,6 +104,19 @@ project "jarvisAgent"
         "vendor/simdjson/simdjson.h",
         "vendor/date/src/tz.cpp",
     }
+
+    -- Engine edition: drop Studio-only modules from the compile list.
+    -- removefiles MUST come after files() — applying it earlier removes from an
+    -- empty set and silently does nothing, which would link Studio code into
+    -- the engine binary (cybersecurity gap).
+    if _OPTIONS["engine"] then
+        removefiles {
+            "application/assistant/**",
+            "application/web/aiJcwfService.h",
+            "application/web/aiJcwfService.cpp",
+            "application/web/webServer_studio.cpp",
+        }
+    end
 
     -- Embed doc/jcwf.schema.json + doc/jcwf_generation_guide.md as C++ constants.
     -- Runs at premake-generation time so the generated headers exist before the
@@ -554,6 +562,7 @@ print(sysconfig.get_config_var('PYTHONFRAMEWORKPREFIX') or '')"]])
         os.rmdir("bin-int")
         os.rmdir("bin-int/engine")
         os.rmdir("bin-int/studio")
+        os.remove(".build-edition")
 
         ----------------------------------------------------
         -- Remove all generated Makefiles (.make)

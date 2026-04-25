@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Live Azure OpenAI API1Azure round-trip test.
+Live Azure OpenAI API6 round-trip test.
 
 Submits an adhoc ai_call targeting an Azure OpenAI interface (configured in config.json).
 Use against either Microsoft's aoai-api-simulator (free, local, fake responses) or a real
 Azure deployment.
 
 Prerequisites in j9t:
-- An interface is configured in config.json with API="API1Azure". Its `url` is the full
+- An interface is configured in config.json with API="API6". Its `url` is the full
   deployment URL: e.g. http://localhost:8000/openai/deployments/gpt-4/chat/completions?api-version=2024-08-01
 - A provider entry in keys.json.enc whose api_key matches the deployment's api-key value.
 
@@ -23,15 +23,15 @@ Setting up the local Microsoft aoai-api-simulator (one-time, no published image 
         aoai-api-simulator
 
 Then point j9t at it: api_key="test-azure-openai-key" on the Azure provider, url with
-http://localhost:8000/... on the API1Azure interface.
+http://localhost:8000/... on the API6 interface.
 
 Note: the simulator's `generate` mode emits large lorem-ipsum responses with mean ~19 s
 latency — set --timeout-seconds accordingly for stable runs.
 
 Usage:
-    python3 test/dispatch/test_api1azure_live.py
-    python3 test/dispatch/test_api1azure_live.py --token mcp_...
-    python3 test/dispatch/test_api1azure_live.py --interface aoai-simulator/gpt-4/API1Azure
+    python3 test/dispatch/test_api6_live.py
+    python3 test/dispatch/test_api6_live.py --token mcp_...
+    python3 test/dispatch/test_api6_live.py --interface aoai-simulator/gpt-4/API6
 """
 
 import argparse
@@ -48,14 +48,14 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DEFAULT_INTERFACE = "aoai-simulator/gpt-4/API1Azure"
+DEFAULT_INTERFACE = "aoai-simulator/gpt-4/API6"
 
 
 def build_jcwf(interface_name: str) -> dict:
     return {
         "version": "1.0",
-        "id": "adhoc_api1azure_smoke",
-        "label": "Contract: API1Azure (Azure OpenAI) round-trip",
+        "id": "adhoc_api6_smoke",
+        "label": "Contract: API6 (Azure OpenAI) round-trip",
         "triggers": [{"type": "manual", "id": "manual", "enabled": True, "params": {}}],
         "tasks": {
             "ask_azure": {
@@ -63,7 +63,7 @@ def build_jcwf(interface_name: str) -> dict:
                 "type": "ai_call",
                 "label": "Ask Azure-deployed model something small",
                 "mode": "single",
-                "working_directory": "../../queue/adhoc_api1azure_smoke/01_ask_azure",
+                "working_directory": "../../queue/adhoc_api6_smoke/01_ask_azure",
                 "params": {"provider": interface_name},
                 "queue_binding": {
                     "stng_files": [{
@@ -158,7 +158,7 @@ def main() -> int:
         return 1
 
     text = rc.text
-    print(f"OK: API1Azure round-trip succeeded.")
+    print(f"OK: API6 round-trip succeeded.")
     print(f"Reply (first 200 chars): {text[:200]!r}")
     return 0
 

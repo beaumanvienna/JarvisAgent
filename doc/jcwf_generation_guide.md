@@ -546,7 +546,7 @@ A workflow run fails **only** if it has at least one Failed task whose failure i
 
 - If `triggers` is omitted: implicit auto-trigger (starts on registration).
 - `manual_start: true` (default) allows manual start regardless of triggers.
-- **Webhook triggers** expose the workflow at `POST /api/webhook/<workflowId>`. The request body may include `runId`, `callbackUrl`, and a `context` object (key-value pairs injected into run context). If `params.secret` is set, the caller must send `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the body). Empty/missing secret = open webhook. If `callbackUrl` is provided, JarvisAgent POSTs a completion payload (`workflowId`, `runId`, `state`, `ok`, `completedAt`, per-task `tasks`) to that URL when the run finishes (fire-and-forget, 15 s timeout).
+- **Webhook triggers** expose the workflow at `POST /api/webhook/<workflowId>`. `params.secret` is **required** — the validator rejects webhook triggers with an empty or missing secret, and the runtime rejects any incoming request whose `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the raw body) does not verify against the configured secret. The request body may include `runId`, `callbackUrl`, and a `context` object (key-value pairs injected into run context). If `callbackUrl` is provided, JarvisAgent POSTs a completion payload (`workflowId`, `runId`, `state`, `ok`, `completedAt`, per-task `tasks`) to that URL when the run finishes (fire-and-forget, 15 s timeout).
 
 ---
 

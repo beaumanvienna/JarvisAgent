@@ -34,8 +34,8 @@ Workflows fire on cron schedules, file-watch events, HMAC-signed webhooks, or on
 
 A dual-edition architecture lets organizations move from prototyping to secure, controlled deployment. Both editions are included in every package:
 
-- **j9t Studio** — visual workflow editor with AI generation, explain, and auto-fix; AI assistant with 31 tools; workflow versioning and live debugging.
-- **j9t Engine** — lean production runtime with bearer-token auth, RBAC (admin/operator/viewer), TLS, HMAC webhooks, rate limiting, and a security audit log. Ready for private cloud or behind an API gateway.
+- **j9t Studio** — visual workflow editor with AI generation, explain, and auto-fix; AI assistant with 31 tools; workflow versioning and live debugging. Same auth posture as Engine: every browser session and MCP client requires an MCP API key.
+- **j9t Engine** — lean production runtime. Workflow CRUD / AI assistant / AI JCWF generation are removed at compile time; everything else (run control, settings admin, log analysis, monitoring) is reachable via MCP key and role-gated (admin/operator/viewer). TLS, HMAC webhooks, rate limiting, audit log, optional gateway-header cross-check. Ready for private cloud or behind an API gateway.
 
 **Current version: 0.8.5** — working towards **beta 0.95**, the first major baseline subject to regression testing across all packaging targets.
 
@@ -51,7 +51,7 @@ A dual-edition architecture lets organizations move from prototyping to secure, 
 
 ## Supported AI Backends
 
-JarvisAgent talks to AI providers through six interface adapters, covering every major hosted provider, every common self-hosted runtime, and the two enterprise-cloud platforms. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`/`API1Azure`/`API5`.
+JarvisAgent talks to AI providers through six interface adapters, covering every major hosted provider, every common self-hosted runtime, and the two enterprise-cloud platforms. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`/`API5`/`API6`.
 
 | Adapter | Endpoint | Providers that work today |
 |---|---|---|
@@ -59,8 +59,8 @@ JarvisAgent talks to AI providers through six interface adapters, covering every
 | **API2** — OpenAI Responses | `POST /v1/responses` | OpenAI (Responses API — newer endpoint, used for sequential chunk throughput) |
 | **API3** — Gemini native | `POST /v1beta/models/{model}:generateContent` | Google Gemini (native endpoint with `x-goog-api-key` auth) |
 | **API4** — Anthropic Messages | `POST /v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus, all generations with 200 K context) |
-| **API1Azure** — Azure OpenAI | `POST /openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (resource-scoped URLs, `api-key:` header) |
 | **API5** — AWS Bedrock | `POST /model/{modelId}/invoke` (SigV4-signed) | Bedrock-hosted **anthropic.claude-***, **meta.llama***, **amazon.titan-***, **amazon.nova-*** model families |
+| **API6** — Azure OpenAI | `POST /openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (resource-scoped URLs, `api-key:` header) |
 
 Self-hosted runtimes (Ollama, LM Studio, llama.cpp, vLLM) plug into API1 — see [User Manual](doc/jarvisagent.md) for the config shape. Context-window handling and chunking behavior are documented in [doc/architecture.md](doc/architecture.md).
 

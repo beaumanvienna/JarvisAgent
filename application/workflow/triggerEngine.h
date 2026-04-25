@@ -117,7 +117,9 @@ namespace AIAssistant
         void AddManualTrigger(std::string const& workflowId, std::string const& triggerId, bool isEnabled);
 
         // Register a webhook trigger.
-        // secret: shared secret for HMAC-SHA256 verification (empty = open webhook, no signature check).
+        // secret: shared secret for HMAC-SHA256 verification. Mandatory — the validator
+        // rejects webhook triggers with an empty secret and the request handler rejects
+        // requests with missing or invalid signatures.
         void AddWebhookTrigger(std::string const& workflowId, std::string const& triggerId, std::string const& secret,
                                bool isEnabled);
 

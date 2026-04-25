@@ -98,7 +98,6 @@ namespace AIAssistant
     private:
         void RegisterRoutes();
         void RegisterCommonRoutes();
-        void RegisterEngineRoutes();
         void RegisterWebSocket();
 #ifdef J9T_STUDIO
         void RegisterStudioRoutes();
@@ -134,6 +133,13 @@ namespace AIAssistant
         // otherwise over-restrict themselves to admin via CheckAdminAuth.
         // Returns "" on success, error code on failure.
         std::string CheckAuth(crow::request const& req, std::string_view minRole) const;
+        // Same as above but populates `outAuth` on success — for handlers that
+        // need the user/role on the success path (e.g. for downstream audit
+        // logging or quota lookups).  Both overloads emit the
+        // `forbidden reason=insufficient_role …` security log line on a role
+        // denial; never roll your own role check inline.
+        std::string CheckAuth(crow::request const& req, std::string_view minRole,
+                              AuthResult& outAuth) const;
 
         // MCP key store lifecycle (shared with the existing KeyManager master password).
         // Returns true if the store is now initialised (loaded from disk, or empty-ready).
@@ -151,8 +157,13 @@ namespace AIAssistant
         static std::string ExtractBearerToken(crow::request const& req);
         // Record a failed auth attempt for lockout tracking.
         void RecordAuthFailure(std::string const& ip);
-        // Returns true if the request should be rate-limited (429).
-        bool IsRateLimited(crow::request const& req);
+
+        // Two-tier rate limiting.  Pre-auth tier (per-IP) is tight and protects
+        // unauthenticated traffic from credential-stuffing/floods; authenticated
+        // tier (per-user) is loose and trusts the validated credential.  See
+        // doc/cyber security.md §"Per-tier rate limiting" for the rationale.
+        enum class RateLimitTier { PreAuth, Authenticated };
+        bool IsRateLimited(RateLimitTier tier, std::string const& key);
 
         // ---- MCP keys + dashboard sessions ----
         mutable McpKeyManager m_McpKeyManager;
@@ -175,14 +186,17 @@ namespace AIAssistant
         // ---- Uptime for debug_signals ----
         std::chrono::steady_clock::time_point m_ProcessStart{std::chrono::steady_clock::now()};
 
-        // ---- Rate limiting (Engine edition only) ----
+        // ---- Rate limiting (both editions, two-tier) ----
+        // Buckets are seeded to full burst on first encounter.  Tokens
+        // refill at the tier's rate up to the burst ceiling.
         struct TokenBucket
         {
-            double m_Tokens{20.0};
-            std::chrono::steady_clock::time_point m_LastRefill{std::chrono::steady_clock::now()};
+            double m_Tokens{0.0};
+            std::chrono::steady_clock::time_point m_LastRefill{};
         };
         std::mutex m_RateLimitMutex;
-        std::unordered_map<std::string, TokenBucket> m_RateLimitBuckets;
+        std::unordered_map<std::string, TokenBucket> m_PreAuthBuckets;       // key: client IP
+        std::unordered_map<std::string, TokenBucket> m_AuthenticatedBuckets; // key: validated user
         std::chrono::steady_clock::time_point m_LastRateLimitCleanup{std::chrono::steady_clock::now()};
 
         // ---- Failed auth lockout (Engine edition only) ----
@@ -264,39 +278,22 @@ namespace AIAssistant
         crow::response HandleLogGet(crow::request const& req);
         crow::response HandleSecurityLogGet(crow::request const& req);
 
-#ifdef J9T_STUDIO
-        // ---- Studio handlers (Studio edition only) ----
+        // ---- Common admin handlers (both editions; route-level RBAC) ----
 
-        // Workflow Editor UI
-        crow::response ServeWorkflowEditorIndex() const;
-        crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
-
-        // Workflow CRUD
+        // Workflow registry management (admin)
         crow::response HandleWorkflowsReloadPost();
-        crow::response HandleWorkflowsCreatePost(crow::request const& req);
-        crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
-        crow::response HandleWorkflowDelete(std::string const& workflowId);
-
-        // Workflow versioning
         crow::response HandleWorkflowVersionsListGet(std::string const& workflowId);
         crow::response HandleWorkflowVersionGetGet(std::string const& workflowId, std::string const& timestamp);
         crow::response HandleWorkflowVersionRestorePost(std::string const& workflowId, std::string const& timestamp);
 
-        // Workflow validation + run trigger
-        crow::response HandleWorkflowValidatePost(crow::request const& req);
-        crow::response HandleWorkflowValidateGet(std::string const& workflowId);
+        // Run control (operator+)
         crow::response HandleWorkflowRunPost(crow::request const& req, std::string const& workflowId);
         crow::response HandleWorkflowCleanDelete(std::string const& workflowId);
 
-        // Script / file check
-        crow::response HandleScriptCheckGet(crow::request const& req);
-        crow::response HandleScriptRegistryGet();
-        crow::response HandleFileCheckGet(crow::request const& req);
-
-        // Log analysis (requires AI)
+        // Log analysis (operator+)
         crow::response HandleLogAnalyzeLastRunGet(crow::request const& req);
 
-        // AI interfaces API
+        // AI interfaces API (admin)
         crow::response HandleAiInterfacesListGet();
         crow::response HandleAiInterfaceCreatePost(crow::request const& req);
         crow::response HandleAiInterfaceUpdatePut(crow::request const& req, std::string const& name);
@@ -304,12 +301,12 @@ namespace AIAssistant
         crow::response HandleAiInterfacesSavePost();
         crow::response HandleAiInterfaceTestPost(crow::request const& req);
 
-        // Config settings API
+        // Config settings API (admin)
         crow::response HandleConfigReloadPost();
         crow::response HandleConfigSettingsGet();
         crow::response HandleConfigSettingsPut(crow::request const& req);
 
-        // Provider settings API
+        // Provider settings API (admin)
         crow::response HandleProvidersListGet();
         crow::response HandleProviderCreatePost(crow::request const& req);
         crow::response HandleProviderUpdatePut(crow::request const& req, std::string const& providerName);
@@ -317,7 +314,7 @@ namespace AIAssistant
         crow::response HandleProviderSetDefaultPost(std::string const& providerName);
         crow::response HandleProvidersSavePost(crow::request const& req);
 
-        // Cloud connections API
+        // Cloud connections API (admin)
         crow::response HandleConnectionsListGet();
         crow::response HandleConnectionCreatePost(crow::request const& req);
         crow::response HandleConnectionUpdatePut(crow::request const& req, std::string const& connectionName);
@@ -325,9 +322,30 @@ namespace AIAssistant
         crow::response HandleConnectionTestPost(std::string const& connectionName);
         crow::response HandleConnectionsSavePost();
 
-        // OAuth consent flow
+        // OAuth consent flow (admin)
         crow::response HandleOAuthAuthorizeGet(std::string const& connectionName);
         crow::response HandleOAuthCallbackGet(crow::request const& req, std::string const& connectionName);
+
+#ifdef J9T_STUDIO
+        // ---- Studio-only handlers (compile-time excluded from Engine) ----
+
+        // Workflow Editor UI
+        crow::response ServeWorkflowEditorIndex() const;
+        crow::response ServeWorkflowEditorStatic(std::string const& requestPath) const;
+
+        // Workflow CRUD (mutating, editor-only)
+        crow::response HandleWorkflowsCreatePost(crow::request const& req);
+        crow::response HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId);
+        crow::response HandleWorkflowDelete(std::string const& workflowId);
+
+        // Workflow validation (editor-only)
+        crow::response HandleWorkflowValidatePost(crow::request const& req);
+        crow::response HandleWorkflowValidateGet(std::string const& workflowId);
+
+        // Script / file check (editor support)
+        crow::response HandleScriptCheckGet(crow::request const& req);
+        crow::response HandleScriptRegistryGet();
+        crow::response HandleFileCheckGet(crow::request const& req);
 #endif // J9T_STUDIO
 
     private:
@@ -359,11 +377,12 @@ namespace AIAssistant
 #ifdef J9T_STUDIO
         AiJcwfService m_AiJcwfService;
         AssistantController m_AssistantController;
+#endif
 
-        // OAuth PKCE state: code_verifier per connection (short-lived, in-memory only)
+        // OAuth PKCE state: code_verifier per connection (short-lived, in-memory only).
+        // Both editions — connections + OAuth admin routes are common (admin role-gated).
         std::mutex m_OAuthStateMutex;
         std::unordered_map<std::string, std::string> m_OAuthCodeVerifiers;
         std::unordered_map<std::string, std::string> m_OAuthStateTokens; // CSRF state param per connection
-#endif
     };
 } // namespace AIAssistant

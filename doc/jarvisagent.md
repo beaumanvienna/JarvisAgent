@@ -212,8 +212,8 @@ The following fields are recognized:
     - `API2` — OpenAI Responses API (GPT-5 and later models).
     - `API3` — Google Gemini native API (uses `x-goog-api-key` header and `/models/{model}:generateContent` URL scheme).
     - `API4` — Anthropic Messages API (uses `x-api-key` + `anthropic-version: 2023-06-01` headers, `/v1/messages` endpoint; Claude Haiku / Sonnet / Opus).
-    - `API1Azure` — Azure OpenAI (uses `api-key:` header; body identical to API1; the deployment URL is the full per-deployment URL, e.g. `https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`).
     - `API5` — AWS Bedrock (SigV4-signed; URL composed as `{base}/model/{modelId}/invoke`; body shape dispatches on `modelId` prefix: `anthropic.claude-*` → Anthropic-style, `meta.llama*` → Llama-native, `amazon.titan-*` / `amazon.nova-*` → Titan/Nova; reply parser sniffs the response shape and delegates).
+    - `API6` — Azure OpenAI (uses `api-key:` header; body identical to API1; the deployment URL is the full per-deployment URL, e.g. `https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`).
     - `Test` — no-network fixture backend for integration tests (reads canned reply from the interface's `url` field).
   - **`"max_context_tokens"`** — (integer, optional) Advisory context-window size for this interface. When set, j9t warns if an `ai_call` prompt is estimated to exceed it. Typical values: OpenAI GPT-4-family = 128000; OpenAI GPT-5-family = 200000; Google Gemini 2.5 = 1000000; Anthropic Claude = 200000.
   - **`"name"`** — (string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.
@@ -378,7 +378,7 @@ To use AI-powered workflows, you need at least one API key configured.
 ### Setting up AI models
 
 1. In the workflow editor, navigate to the **AI Manager** page.
-2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), `API3` for Google Gemini native, `API4` for Anthropic Messages (Claude), `API1Azure` for Azure-hosted OpenAI deployments, or `API5` for AWS Bedrock.
+2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), `API3` for Google Gemini native, `API4` for Anthropic Messages (Claude), `API5` for AWS Bedrock, or `API6` for Azure-hosted OpenAI deployments.
 3. Set the default interface index or override per-task in workflow definitions.
 
 Supported providers include OpenAI (API1 or API2), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native endpoint),
@@ -505,7 +505,7 @@ Engine is designed for production deployments and includes comprehensive securit
   - **viewer** — read-only dashboard, workflow list, run status.
 
   The role travels on the MCP key itself, on the session cookie derived from it, or (in gateway deployments) in the `X-Forwarded-Role` header (default `viewer` when absent).
-- **Per-IP rate limiting.** Token bucket algorithm: 100 requests/minute per IP, burst of 20. Rate-limited requests receive HTTP 429 with `Retry-After`.
+- **Two-tier rate limiting.** Token-bucket policy split by authentication state. Pre-auth (per-IP) is tight — 100 req/min, burst 20 — and applies to unauthenticated or credential-rejected traffic. Authenticated (per-user) is generous — 1200 req/min, burst 200 — and applies once an MCP key or session validates. Both tiers return HTTP 429 with `Retry-After`; the security log distinguishes them via `rate_limited_preauth` vs `rate_limited_authenticated`.
 - **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. Callers must include `X-Webhook-Signature: sha256=<hex>` computed over the raw request body. In Engine mode, webhooks without a configured secret are rejected.
 - **WebSocket authentication.** Browser upgrades are validated at the handshake via the session cookie (`.onaccept` hook); no in-band auth message is used.
 - **Built-in TLS (HTTPS).** Set `"TlsCert"` and `"TlsKey"` in `config.json` to serve HTTPS (default port 8443). If only one field is set or the files don't exist, j9t refuses to start. When TLS is enabled, HSTS headers are added.

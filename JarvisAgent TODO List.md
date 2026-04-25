@@ -338,9 +338,9 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 Landed. Both adapters live on top of the envelope architecture without touching schema validation, chunking, reduce, transcripts, or events. The auth-style branching that lived in `CurlWrapper` was lifted into a new `IAuthSigner` interface (`engine/curlWrapper/authSigner.{h,cpp}`); SigV4 is a clean `IAuthSigner` implementation in `engine/curlWrapper/awsSigV4.{h,cpp}` rather than an enum branch.
 
 - **5h.1 AWS Bedrock (`API5`)** — SigV4 signer hand-rolled on OpenSSL HMAC/SHA256. `RequestBuilderAPI5` dispatches body shape on `modelId` prefix (anthropic / meta.llama / amazon.titan|nova). `ReplyParserAPI5` sniffs response shape and delegates: Anthropic-on-Bedrock reuses `ReplyParserAPI4`; Llama/Titan have small dedicated parsers.
-- **5h.2 Azure OpenAI (`API1Azure`)** — `RequestBuilderAPI1Azure` inherits from `RequestBuilderAPI1`, overrides only the auth style. Reply parser maps to `ReplyParserAPI1` unchanged.
+- **5h.2 Azure OpenAI (`API6`)** — `RequestBuilderAPI6` inherits from `RequestBuilderAPI1`, overrides only the auth style. Reply parser maps to `ReplyParserAPI1` unchanged.
 
-Test infra: `microsoft/aoai-api-simulator` and LocalStack Hobby tier as commented services in `docker-compose.example.yml`. Live tests at `test/dispatch/test_api1azure_live.py` and `test/dispatch/test_api5_bedrock_anthropic_live.py`. SigV4 self-test (`SigV4Signer::RunSelfTest`) runs at engine startup in debug builds — verifies SHA256 of empty + AWS-published key derivation vector + Sign() determinism.
+Test infra: `microsoft/aoai-api-simulator` and LocalStack Hobby tier as commented services in `docker-compose.example.yml`. Live tests at `test/dispatch/test_api6_live.py` and `test/dispatch/test_api5_bedrock_anthropic_live.py`. SigV4 self-test (`SigV4Signer::RunSelfTest`) runs at engine startup in debug builds — verifies SHA256 of empty + AWS-published key derivation vector + Sign() determinism.
 
 Dashboard: new `aws` credential type with two-input form (access_key_id / secret_access_key + optional session_token) and region; `m_Params` map round-trips through REST with sensitive keys (`secret_access_key`, `session_token`) stripped from GET responses and auto-registered with `SecretRedactor` on load.
 

@@ -115,7 +115,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 ---
 
-## Workflows — CRUD — read-only (Both), mutating (Studio only)
+## Workflows — CRUD — read-only (Both, viewer+); mutating CRUD (Studio only, admin); reload + tree + dependency-graph + versions (Both, admin/viewer)
 
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
@@ -361,7 +361,7 @@ Security: only relative paths are accepted. The resolved path must remain inside
 
 ---
 
-## Workflows — Run Control & Monitoring — monitoring (Both), run trigger + clean (Studio only)
+## Workflows — Run Control & Monitoring — Both editions (operator+ for run/cancel/pause/resume/stop/clean; viewer+ for monitoring)
 
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
@@ -602,7 +602,7 @@ Persists the request JSON to disk for traceability. Context fields are passed to
 
 ---
 
-## Settings — AI Interfaces — Studio only
+## Settings — AI Interfaces — Both editions (admin only)
 
 Manage the `"API interfaces"` array in `config.json` (in-memory + persist to disk).
 
@@ -642,16 +642,16 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 ```
 `url` is required. `name` is auto-generated if omitted. Returns 409 on duplicate name.
 
-`api_type` accepts `API1`, `API2`, `API3`, `API4`, `API1Azure`, `API5`, or `Test`. Examples:
+`api_type` accepts `API1`, `API2`, `API3`, `API4`, `API5`, `API6`, or `Test`. Examples:
 
 ```json
-// Azure OpenAI: full deployment URL in `url`; key_name points at a provider with credential_type "api_key".
-{ "url": "https://my-resource.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2024-08-01",
-  "model": "gpt-4", "api_type": "API1Azure", "key_name": "azure-prod" }
-
 // AWS Bedrock: regional base URL in `url`; model is the full Bedrock modelId; key_name points at a provider with credential_type "aws".
 { "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
   "model": "anthropic.claude-3-haiku-20240307-v1:0", "api_type": "API5", "key_name": "bedrock-prod" }
+
+// Azure OpenAI: full deployment URL in `url`; key_name points at a provider with credential_type "api_key".
+{ "url": "https://my-resource.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2024-08-01",
+  "model": "gpt-4", "api_type": "API6", "key_name": "azure-prod" }
 ```
 
 ### POST /api/settings/ai-interfaces/save
@@ -699,7 +699,7 @@ Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
 
 ---
 
-## Settings — Config — Studio only
+## Settings — Config — Both editions (admin only)
 
 Read and update the scalar runtime configuration fields stored in `config.json`.
 
@@ -858,7 +858,7 @@ Caller must authenticate with the still-valid MCP key. **Response (200):** `{ "o
 
 ---
 
-## Settings — Providers — Studio only
+## Settings — Providers — Both editions (admin only)
 
 Manage AI provider configurations (name, endpoint, API key, model, type).
 
@@ -926,7 +926,7 @@ See **JC Workflow Specification §3.3.3** for full semantics and code examples.
 
 ---
 
-## Log Viewer — `GET /api/log` (Both), `GET /api/log/security` (Both), `analyze-last-run` (Studio only)
+## Log Viewer — Both editions (`GET /api/log` operator+; `GET /api/log/security` admin only; `analyze-last-run` operator+)
 
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
@@ -1091,7 +1091,7 @@ A persistent WebSocket connection for real-time communication.
 
 ---
 
-## Cloud Connections — Studio only
+## Cloud Connections — Both editions (admin only)
 
 Manage named cloud connections for external service integrations. Connections reference a key from the Keys page and carry type-specific parameters.
 

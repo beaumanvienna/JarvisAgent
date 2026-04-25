@@ -105,7 +105,7 @@ Trigger types: "auto", "manual", "cron", "file_watch", "webhook".
 - If triggers array is omitted, implicit auto-trigger is assumed.
 - manual_start defaults to true (allows manual start from UI).
 - Cron: params.expression (5-field cron), optional params.timezone.
-- Webhook: exposes at POST /api/webhook/<workflowId>, optional params.secret for HMAC-SHA256.
+- Webhook: exposes at POST /api/webhook/<workflowId>, requires non-empty params.secret for HMAC-SHA256.
 
 Dependencies: "depends_on" is an array of task IDs forming a DAG. Tasks with no depends_on run immediately.
 

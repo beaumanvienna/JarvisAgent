@@ -10,25 +10,31 @@ Starts a JarvisAgent workflow run. Returns the response under `item.json.jarvisA
 
 | Mode | URL | Description |
 |------|-----|-------------|
-| **Webhook** (default) | `POST /api/webhook/<workflowId>` | Recommended. Supports HMAC signing. |
-| **Legacy n8n/start** | `POST /api/integrations/n8n/start` | Backward-compatible. Includes `taskName` field. |
+| **Webhook** (default) | `POST /api/webhook/<workflowId>` | Recommended. HMAC signing required. |
+| **Legacy n8n/start** | `POST /api/integrations/n8n/start` | Admin-token authenticated. Includes `taskName` field. |
 
 ### Fields
 
 | Field | Modes | Description |
 |-------|-------|-------------|
-| Base URL | both | JarvisAgent server (default `http://localhost:8080`) |
+| Base URL | both | JarvisAgent server (e.g. `https://localhost:8443`) |
 | Endpoint | both | Webhook (recommended) or Legacy n8n/start |
 | Workflow ID | both | JCWF workflow to run |
 | Run ID | both | Custom run ID (optional, auto-generated if empty) |
 | Task Name | legacy | On-disk traceability folder name (default `n8n`) |
-| HMAC Secret | webhook | Shared secret for `X-Webhook-Signature` HMAC-SHA256 signing (optional) |
+| HMAC Secret | webhook | **Required.** Shared secret for `X-Webhook-Signature` HMAC-SHA256 signing. Must match the workflow trigger's `params.secret`. |
+| MCP Token | legacy | Required `Authorization: Bearer mcp_...` for the legacy endpoint. |
 | Callback URL | both | URL to receive completion POST when the run finishes |
 | Context (JSON) | both | JSON object injected into the workflow run context |
 
 ### HMAC signing
 
-When using the **Webhook** endpoint with an HMAC Secret, the node automatically computes `HMAC-SHA256(secret, requestBody)` and sends it in the `X-Webhook-Signature: sha256=<hex>` header.
+The webhook endpoint requires HMAC signing. Configure the **HMAC Secret** field
+with the shared secret declared in the workflow's webhook trigger (`params.secret`);
+the node computes `HMAC-SHA256(secret, requestBody)` and sends it in the
+`X-Webhook-Signature: sha256=<hex>` header on every request. Requests without a
+valid signature are rejected (HTTP 401); workflows whose JCWF trigger has no
+secret are refused at validator load time.
 
 ### Completion callback
 

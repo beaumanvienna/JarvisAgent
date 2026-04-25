@@ -44,7 +44,7 @@ namespace AIAssistant
             return combined;
         }
 
-        // Note: not `final` — RequestBuilderAPI1Azure inherits to share the body
+        // Note: not `final` — RequestBuilderAPI6 inherits to share the body
         // and URL behaviour, overriding only the auth style.
         class RequestBuilderAPI1 : public IRequestBuilder
         {
@@ -79,7 +79,7 @@ namespace AIAssistant
 
         // Azure OpenAI: same request body as API1, same URL pattern (the user supplies the full
         // deployment URL with api-version in iface.m_Url), but auth is `api-key:` instead of Bearer.
-        class RequestBuilderAPI1Azure final : public RequestBuilderAPI1
+        class RequestBuilderAPI6 final : public RequestBuilderAPI1
         {
         public:
             CurlWrapper::AuthStyle GetAuthStyle() const override { return CurlWrapper::AuthStyle::AzureApiKey; }
@@ -262,10 +262,10 @@ namespace AIAssistant
                 return std::make_unique<RequestBuilderAPI3>();
             case ConfigParser::EngineConfig::InterfaceType::API4:
                 return std::make_unique<RequestBuilderAPI4>();
-            case ConfigParser::EngineConfig::InterfaceType::API1Azure:
-                return std::make_unique<RequestBuilderAPI1Azure>();
             case ConfigParser::EngineConfig::InterfaceType::API5:
                 return std::make_unique<RequestBuilderAPI5>();
+            case ConfigParser::EngineConfig::InterfaceType::API6:
+                return std::make_unique<RequestBuilderAPI6>();
             default:
                 LOG_APP_ERROR("IRequestBuilder::Create: unsupported interface type");
                 return nullptr;

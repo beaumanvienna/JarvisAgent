@@ -183,8 +183,8 @@ namespace
             bool hasSecret = TryGetParamsString(trigger.m_ParamsJson, "secret", secret) && !secret.empty();
             if (!hasSecret)
             {
-                AddIssue(issues, WorkflowValidationSeverity::Warning, "webhook_no_secret",
-                         "Webhook trigger has no secret — incoming requests will not be verified (open webhook)",
+                AddIssue(issues, WorkflowValidationSeverity::Error, "webhook_secret_required",
+                         "Webhook trigger requires a non-empty 'secret' field for HMAC-SHA256 verification",
                          basePath + ".params.secret");
             }
         }

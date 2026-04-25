@@ -4,6 +4,16 @@ JarvisAgent ships as two editions with different security profiles. This documen
 
 ---
 
+## Executive Summary
+
+- **One auth funnel, both editions.** Per-IP lockout → credential validation → tier-appropriate rate limit → RBAC role gate. Studio and Engine differ only in *which routes* exist; *how* they authenticate is identical.
+- **Three credential types.** MCP API key (`Authorization: Bearer mcp_…`), session cookie (browser, set by `POST /api/auth/login` after a valid MCP key), HMAC-SHA256 signature (webhooks). Anonymous access is restricted to a tightly enumerated bootstrap allowlist.
+- **Two-tier rate limit.** Tight per-IP for unauthenticated/invalid traffic (100 req/min, burst 20); generous per-user once a credential validates (1200 req/min, burst 200). Defends against credential-stuffing without throttling legitimate clients.
+- **Defense in depth.** AES-256-GCM-encrypted MCP key store, 90-day key expiry with self-renew, mandatory webhook secrets, full audit log to `log/security.txt`, edition-isolated attack surface (Engine compile-time excludes the workflow editor, AI assistant, AI JCWF generation, and workflow CRUD).
+- **Identity from the credential, not the gateway.** When deployed behind an API gateway, j9t treats `X-Forwarded-User` / `X-Forwarded-Role` as a cross-check on top of the credential — they may downgrade the role but never authenticate alone.
+
+---
+
 ## Abbreviations
 
 | Term | Meaning |
@@ -44,22 +54,20 @@ JarvisAgent ships as two editions with different security profiles. This documen
 |-|-----------|-----------|
 | **Purpose** | Developer workstation | Production server |
 | **Network exposure** | Localhost only | LAN / internet |
-| **Browser UI auth** | None (localhost) | Session cookie from `POST /api/auth/login` (HttpOnly + SameSite=Strict) |
-| **MCP / programmatic auth** | MCP API key required (same store as Engine) | MCP API key required |
-| **Webhook auth** | HMAC-SHA256 (optional secret) | HMAC-SHA256 (mandatory secret) |
-| **Rate limiting** | None | Per-IP token bucket (100 req/min, burst 20) |
-| **Failed auth lockout** | None | 10 failures / 5 min → 15-min IP lockout |
+| **Browser UI auth** | Session cookie from `POST /api/auth/login` (HttpOnly + SameSite=Strict) | Same |
+| **MCP / programmatic auth** | MCP API key required | Same |
+| **Webhook auth** | HMAC-SHA256 (mandatory secret) | Same |
+| **Rate limiting** | Two-tier: pre-auth per-IP (100 req/min, burst 20) + authenticated per-user (1200 req/min, burst 200) | Same |
+| **Failed auth lockout** | 10 failures / 5 min → 15-min IP lockout | Same |
 | **Key expiry / renewal** | 90-day MCP key lifetime; self-renew before expiry | Same |
-| **RBAC** | 3 roles (admin, operator, viewer) on MCP keys | Same; also on session cookies and gateway headers |
-| **Gateway identity** | N/A | Trusts `X-Forwarded-User` / `X-Forwarded-Role` from API gateway |
-| **Audit logging** | `log/security.txt` — MCP auth events | `log/security.txt` (rotating, 10 MB x 5), includes user identity |
+| **RBAC** | 3 roles (admin, operator, viewer) on MCP keys, session cookies, and gateway headers | Same |
+| **Gateway identity** | Optional cross-check on `X-Forwarded-User` / `X-Forwarded-Role`; never replaces the primary credential | Same |
+| **Audit logging** | `log/security.txt` (rotating, 10 MB x 5), includes user identity | Same |
 | **Security headers** | CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy | Same + HSTS when TLS enabled |
-| **Request body limit** | None | Configurable `MaxRequestBodyMB` (default 10 MB) |
-| **Built-in TLS** | Optional | Optional (`TlsCert`/`TlsKey` in config.json) |
-| **Webhook secrets** | Optional | Mandatory |
-| **Workflow CRUD** | Open | Not available (compile-time removed) |
-| **AI assistant** | Open | Not available (compile-time removed) |
-| **Attack surface** | Full feature set | Minimal — runtime + monitoring only |
+| **Request body limit** | Configurable `MaxRequestBodyMB` (default 10 MB) | Same |
+| **Built-in TLS** | Optional (`TlsCert`/`TlsKey` in config.json) | Same |
+| **Workflow CRUD + AI assistant + AI JCWF generation** | Available | Compile-time removed (`removefiles` + `#ifdef J9T_STUDIO`) |
+| **Attack surface** | Full feature set | Minimal — runtime + monitoring + admin (config / providers / connections) |
 
 ---
 
@@ -74,20 +82,19 @@ JarvisAgent ships as two editions with different security profiles. This documen
 
 ### Remaining threats
 
-- **No browser-UI authentication.** Studio has no login page for the dashboard or workflow editor — anyone who can reach port 8080 on the developer's machine can read workflows, trigger runs, modify config, and shut down the server. This matches the standard developer-workstation model; MCP / programmatic access still requires a valid MCP API key.
 - **AI-generated scripts.** The Generate and Fix Script features produce shell and Python scripts from AI output. A malicious or buggy prompt can produce scripts that delete files, exfiltrate data, or consume disk space. The script review panel lets the developer inspect before accepting, but there is no sandbox.
 - **AI assistant tool access.** The assistant can read files, write files, edit files, and run shell commands (with user approval). A compromised or manipulated conversation could lead to unintended file modifications.
-- **No TLS.** Studio serves HTTP on localhost. If exposed beyond localhost (e.g. via SSH tunnel or Docker port mapping), traffic is unencrypted.
+- **No TLS by default.** Studio serves HTTP on the configured port unless `TlsCert`/`TlsKey` are set in `config.json`. If reachable beyond localhost, configure TLS to encrypt session cookies and the master-password unlock.
 
 ### Operator responsibility
 
-Studio is designed for **single-developer use on a local machine**. The operator is responsible for:
+Studio is designed for **single-developer or small-team use on workstations**. Authentication is identical to Engine — every browser session and MCP client must hold a valid MCP API key. The operator is responsible for:
 
-- Not exposing port 8080 beyond localhost.
 - Reviewing AI-generated scripts before accepting them.
 - Approving or rejecting assistant tool calls (mutating tools require explicit approval).
 - Keeping API keys secure (stored encrypted in `keys.json.enc` with a master password; the same password also unlocks `mcp_keys.json.enc`).
-- Activating the first-run MCP admin enrollment token j9t prints to stderr on initial startup — required before any MCP client can connect.
+- Activating the first-run MCP admin enrollment token j9t prints to stderr on initial startup — required before any browser session or MCP client can connect.
+- Configuring TLS (`TlsCert` + `TlsKey`) when the port is reachable beyond localhost.
 
 ---
 
@@ -95,29 +102,44 @@ Studio is designed for **single-developer use on a local machine**. The operator
 
 ### Safety measures
 
-- **Three auth paths, nothing else.** j9t authenticates each request via one of exactly three mechanisms: (1) `Authorization: Bearer mcp_...` validated against the encrypted MCP key store; (2) a session cookie set by `POST /api/auth/login` after the user submitted a valid MCP key; or (3) gateway-injected `X-Forwarded-User` / `X-Forwarded-Role` headers in reverse-proxy deployments. There is no legacy bearer-token fallback and no anonymous-admin path.
+- **One auth funnel — same in both editions.** j9t authenticates each non-bootstrap request via either (1) `Authorization: Bearer mcp_...` validated against the encrypted MCP key store, or (2) a session cookie set by `POST /api/auth/login` after the user submitted a valid MCP key. Webhook routes (`POST /api/webhook/<id>`, `POST /api/integrations/n8n/start`) authenticate via mandatory HMAC-SHA256 over the raw body. Gateway-injected `X-Forwarded-User` / `X-Forwarded-Role` headers are an optional cross-check on top of one of the above primary credentials — they verify the gateway-asserted user matches and may cap the role downward, but never authenticate by themselves. Bootstrap routes (the eight enumerated below) are public; everything else requires a credential. There is no legacy bearer-token fallback and no anonymous-admin path. See `doc/engine-studio-capability-review.md` for the full funnel diagram and route surface.
 - **MCP API keys.** Each key is a per-user credential (`mcp_` + 64 hex chars, 32 bytes of `RAND_bytes`) with its own identity, role (admin / operator / viewer), adhoc-submission flag, disk quota, and retention-policy ceiling. The raw key is shown to the user exactly once at activation; only its SHA-256 hash is persisted. The store (`mcp_keys.json.enc`) is encrypted at rest with AES-256-GCM + PBKDF2 — same format as `keys.json.enc`, unlocked with the same master password. Key comparison uses `CRYPTO_memcmp` for constant-time equality.
 - **Enrollment-token provisioning.** The admin never sees a user's final MCP key. Admin calls `POST /api/auth/mcp-keys/enroll` to create a single-use enrollment token (30-min default TTL), shares it with the user over a secure channel, and the user exchanges it at `POST /api/auth/mcp-keys/activate` — receiving their real key once, never again. This follows the HashiCorp Vault / Auth0 / AWS IAM pattern.
 - **Key expiry and self-renewal.** MCP keys expire after 90 days by default (admin-configurable). Within 30 days of expiry, the user can self-renew at `POST /api/auth/mcp-keys/self-renew` using their still-valid key — no admin involvement. The old key enters a 24-hour grace period, then is disabled. If the window is missed, the admin issues a fresh enrollment token.
 - **Dashboard sessions.** Engine browser login flow: user pastes their MCP key into the login page → `POST /api/auth/login` validates it and returns an HttpOnly + SameSite=Strict cookie (plus `Secure` when TLS is enabled). Session IDs are 256-bit random, server-side only, 8-hour sliding timeout (configurable via `session_timeout_hours`). `POST /api/auth/logout` destroys both cookie and server state. Sessions do not persist across j9t restarts.
 - **Master password in protected memory.** The master password is held in a `SecureString` RAII buffer that calls `mlock()` / `VirtualLock()` (preventing swap-to-disk) and `explicit_bzero()` / `SecureZeroMemory()` on destruction. It is never logged, never written to env vars, never persisted. Unlock happens once per j9t start via `POST /api/settings/keys/unlock`; until unlocked, MCP-authenticated requests and AI calls are unavailable. **Honest limitation:** a process with `ptrace` access (root on Linux, or a debugger attached to j9t) can still read the locked page — no userspace application can fully prevent that. `SecureString` raises the bar against every lesser class of attacker (swap files, crash dumps, casual memory scraping, freed-memory residue). The authoritative defence against privileged-process attackers is OS-level isolation: run j9t in Docker (Docker's default capability set already excludes `CAP_SYS_PTRACE`, so in-container ptrace is blocked out of the box — the provided `docker-compose.example.yml` also adds `security_opt: no-new-privileges:true` for defence in depth) or a dedicated VM with ptrace-restricted namespaces, and never grant `CAP_SYS_PTRACE` or run with `--privileged`.
-- **Failed auth lockout.** After 10 failed authentication attempts from the same IP within 5 minutes, that IP is blocked for 15 minutes. Locked-out requests receive HTTP 403 with a `Retry-After: 900` header. The lockout is checked before rate limiting (locked IPs don't consume rate-limit tokens). Successful authentication clears the failure count. Lockout entries are cleaned up automatically.
+- **Failed auth lockout.** After 10 failed authentication attempts from the same IP within 5 minutes, that IP is blocked for 15 minutes. Locked-out requests receive HTTP 403 with a `Retry-After: 900` header. The lockout is checked before any rate-limit work (locked IPs don't consume tokens in either tier). Successful authentication clears the failure count. Lockout entries are cleaned up automatically.
 - **HMAC-SHA256 webhook authentication.** Webhook triggers require a per-workflow secret. The caller must include an `X-Webhook-Signature: sha256=<hex>` header computed over the raw request body. Signature verification uses constant-time comparison. In Engine mode, a webhook secret is mandatory — webhooks without a configured secret are rejected with HTTP 403.
 - **WebSocket authentication.** Browser WebSocket upgrades carry the session cookie automatically; Crow's `.onaccept` hook calls `Authenticate()` at handshake time and rejects upgrades that do not produce a valid auth result. No in-band `type:"auth"` message is used — there is no post-upgrade auth window to exploit.
-- **Per-IP rate limiting.** Token bucket algorithm (100 requests/minute per IP, burst of 20) protects against brute-force token guessing and request flooding. Rate-limited requests receive HTTP 429 with a `Retry-After` header.
+- **Two-tier rate limiting.** A token-bucket policy split by authentication state, so legitimate clients are not throttled together with unauthenticated probers:
+  - **Pre-auth bucket (per-IP):** 100 req/min, burst 20. Applies when the request has no valid credential (missing/unrecognised header, or `mcp_`-prefixed token that fails validation). Defends against credential-stuffing and anonymous flooding. Combined with the failed-auth lockout (above), repeat offenders graduate from 429 → 15-minute ban. Logged as `rate_limited_preauth ip=…`.
+  - **Authenticated bucket (per-user):** 1200 req/min, burst 200. Applies once an MCP key or session has validated, keyed by the credential's user. Sized to comfortably absorb dashboard polling, MCP heartbeats, and bursty automation; runaway authenticated traffic surfaces in the audit log (with the user's identity attached) for investigation rather than being blanket-blocked at the auth layer. Logged as `rate_limited_authenticated user=…`.
+
+  Both tiers respond with HTTP 429 and a `Retry-After` header. Buckets idle for 10 minutes are evicted; the cleanup runs in the same lock as the bucket consume, so housekeeping never blocks the request path independently.
 - **Security audit logging.** All auth-related events are logged to a dedicated rotating log file (`log/security.txt`, 10 MB x 5 files) as well as the application log (TUI/console). Logged events include: auth success/failure with IP and endpoint, rate limit triggers, lockout triggers, webhook accept/reject with workflow ID, shutdown requests, and run control actions (cancel/pause/resume/stop) with run ID. The security log is accessible via `GET /api/log/security` (admin-auth required) and visible in the dashboard Log Viewer's "Security" tab with 3-second polling. Log macros: `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN`.
 - **Built-in TLS (HTTPS).** Optional native TLS via Crow's SSL support. Set `"TlsCert"` and `"TlsKey"` in `config.json` to point to PEM certificate and key files. When configured, j9t serves HTTPS on port 8443 instead of HTTP on 8080. If only one field is set or the files don't exist, j9t refuses to start (no silent fallback). `GET /api/status` includes `"tls": true/false`. This eliminates the cleartext last-mile between a reverse proxy and j9t, and can replace the reverse proxy entirely for simpler deployments.
-- **Gateway-trusted identity headers.** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), j9t trusts identity headers injected by the gateway. Configure `"TrustedProxyHeader": "X-Forwarded-User"` and `"TrustedRoleHeader": "X-Forwarded-Role"` in `config.json`. The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the authenticated user and role from the headers. This allows per-user identity in audit logs without j9t implementing its own identity provider integration.
+- **Gateway-trusted identity headers.** When deployed behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), j9t trusts identity headers injected by the gateway. Configure `"TrustedProxyHeader": "X-Forwarded-User"` and `"TrustedRoleHeader": "X-Forwarded-Role"` in `config.json`. The gateway handles authentication (OIDC, MFA, SSO) and j9t reads the authenticated user and role from the headers. This allows per-user identity in audit logs without j9t implementing its own identity provider integration. **Important:** the headers are a *cross-check* on top of the credential — they may downgrade the credential's role to a lower one but never authenticate alone, and never escalate. If `TrustedRoleHeader` is configured but the header is absent on a request, the credential's role passes through unchanged (no implicit default-deny). The credential remains the source of truth.
 - **Role-Based Access Control (RBAC).** Three roles with descending privilege: **admin** (full access including shutdown, security logs, and MCP key CRUD), **operator** (run control, workflow monitoring, adhoc submission when enabled, application logs), **viewer** (read-only dashboard, workflow list, run status). The role is carried by the MCP key itself (set at enrollment), by the session cookie derived from it, or by the `X-Forwarded-Role` header injected by an API gateway (default `viewer` if absent). Routes enforce minimum required role — a viewer attempting to stop a run, access security logs, or create an MCP enrollment receives HTTP 403 `insufficient_role`.
 - **Request body size limit.** Configurable maximum HTTP body size (`"MaxRequestBodyMB": 10` in `config.json`, default 10 MB). Oversized requests are rejected with HTTP 413 `payload_too_large` before parsing. Protects against memory exhaustion attacks via large webhook payloads.
 - **Security response headers.** All HTTP responses include: `Content-Security-Policy` (restricts script/style/connection sources to `'self'`), `X-Frame-Options: DENY` (prevents clickjacking), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`. When TLS is enabled, `Strict-Transport-Security` (HSTS) is also set.
-- **Reduced attack surface.** Studio-only modules (workflow editor, AI assistant, AI JCWF generation, settings API, script management) are excluded at compile time. The Engine binary is physically smaller and exposes fewer endpoints.
-- **Public endpoints are read-only and non-sensitive.** Only `GET /api/status` (health check), the dashboard HTML shell (`GET /`, `/dash-assets/*`), and the two auth-bootstrap endpoints — `POST /api/auth/mcp-keys/activate` (the enrollment token *is* the auth) and `POST /api/auth/login` (the MCP key *is* the auth) — are served without an existing session or bearer credential.
+- **Reduced attack surface.** Studio-only modules (workflow editor, AI assistant, AI JCWF generation, workflow CRUD, validation) are excluded at compile time. The Engine binary is physically smaller and exposes fewer endpoints. The `removefiles {...}` directive in `premake5.lua` (gated on `_OPTIONS["engine"]`) drops the Studio-only source files from the engine's compile graph entirely — they are never compiled, never linked, never present as symbols in the engine binary. Verified clean separation (2026-04-25): on a `premake5 clean` slate, `nm bin/Debug/jarvisAgent-engine | grep -c "AssistantController\|AiJcwfService"` returns **0** while the studio counterpart returns **>600**; the engine `bin-int/engine/Debug/` objdir contains no `aiJcwfService.o`, `assistant*.o`, or `webServerStudio.o`. Re-run that two-line check whenever the edition gating in `premake5.lua` is touched, and after any change to which sources are studio-only.
+- **Public bootstrap allowlist.** The following routes are reachable without a credential because they are the doors used to obtain one:
+  | Endpoint | Method | Reason |
+  |----------|--------|--------|
+  | `/` | GET | Dashboard HTML shell |
+  | `/dash-assets/<path>` | GET | Dashboard static assets |
+  | `/api/status` | GET | Health probe |
+  | `/api/auth/login` | POST | The MCP key in the body *is* the auth |
+  | `/api/auth/mcp-keys/activate` | POST | The enrollment token in the body *is* the auth |
+  | `/api/settings/keys/status` | GET | Pre-unlock probe |
+  | `/api/settings/keys/unlock` | POST | The master password in the body *is* the auth |
+  | `/api/auth/logout` | POST | Requires session cookie but no token |
+  Every other route requires a credential. The list is enforced as code in `WebServer::RegisterCommonRoutes()`; adding a route to it must accompany an explicit risk note.
 
 ### Remaining threats
 
-- **Gateway header spoofing.** When `TrustedProxyHeader` is configured, j9t trusts the identity header unconditionally. If j9t is accidentally exposed without a gateway in front, any client can inject a fake `X-Forwarded-User` header and impersonate any user. **Mitigation:** always deploy behind the gateway on a private subnet; never expose j9t directly to the internet when gateway trust is enabled.
-- **No encryption at rest.** Workflow data, AI outputs, and logs are stored as plaintext files on disk. If the server's storage is compromised (stolen disk, leaked snapshot, improper decommissioning), all data is exposed. **The operator must deploy j9t on encrypted storage** — see "Admin responsibility" below.
+- **Gateway as the only line of identity.** When `TrustedProxyHeader` is configured, j9t still requires a primary credential (MCP token or session cookie) and uses the gateway header only as a cross-check. The historical "trust the header alone" path was removed by §5i so that an accidentally-exposed Engine cannot be impersonated by injecting a fake `X-Forwarded-User`. The remaining residual risk is on the gateway itself: if the gateway is misconfigured to forward unauthenticated requests, j9t still requires the token, but a stolen token plus a forged header chain would replay successfully. **Mitigation:** keep the gateway authenticated against a real IdP; treat MCP tokens as the source of truth for identity; rotate compromised keys via the admin enrollment flow.
+- **No encryption at rest.** Workflow data, AI outputs, and logs are stored as plaintext files on disk. If the server's storage is compromised (stolen disk, leaked snapshot, improper decommissioning), all data is exposed. **The operator must deploy j9t on encrypted storage** — see "Admin responsibility" below. Worth calling out specifically: webhook trigger secrets live in plaintext inside the JCWF (`workflows/<id>/global.json` → `triggers[].params.secret`). The runtime never returns trigger params to any API client (`GET /api/workflows/<id>` strips them), so dashboard or MCP users — at any role — cannot read the secret over the wire; but anyone with read access to the install directory can.
 - **Log data sensitivity.** `GET /api/log` returns application logs that may contain prompt content, AI responses, file paths, and error traces. `GET /api/log/security` exposes IP addresses, user identities, and auth event history. Both are role-protected (operator+ for app log, admin for security log) but log content is not redacted.
 - **Unauthenticated shutdown via process signal.** The bearer token protects the `POST /api/shutdown` endpoint, but an attacker with OS-level access can still kill the process via signals (SIGTERM, SIGKILL). This is outside j9t's control.
 - **Denial of service.** Rate limiting, auth lockout, and request body size limits mitigate application-level attacks, but do not protect against network-level attacks (SYN floods, bandwidth exhaustion). Use a WAF or cloud-level DDoS protection for internet-facing deployments.
@@ -157,7 +179,7 @@ The MCP programmatic interface and adhoc submission add a small, well-scoped thr
 |--------|----------|------------|
 | **Adhoc JCWF abuse** — submitted JCWF references scripts to exfiltrate data or abuse resources | High | No script submission through the API (caller-supplied scripts rejected); scripts must pre-exist under `scripts/`; `adhoc_enabled` opt-in off by default; per-user disk quota; per-run AI call cap; every submission audit-logged with user + key_id |
 | **MCP key theft** — a leaked MCP key grants that user's role in full | High | 90-day key expiry, auto-disable on configured inactivity window, immediate revocation via the Settings > MCP Keys tab, per-key audit trail, encrypted key store (SHA-256 hashes only on disk) |
-| **MCP key brute force** — attacker tries random values | Medium | MCP keys are 256-bit random — computationally infeasible to guess. Failed-auth lockout (10 failures / 5 min / IP → 15-minute lockout) backs up the rate-limiter |
+| **MCP key brute force** — attacker tries random values | Medium | MCP keys are 256-bit random — computationally infeasible to guess. The pre-auth rate limit (per-IP) caps probe rate; the failed-auth lockout (10 failures / 5 min / IP → 15-minute ban) handles persistent attackers |
 | **Adhoc disk exhaustion** — malicious submissions fill disk | Medium | Per-user disk quota (default 1 GB, admin-configurable per key), TTL-based cleanup policies, `retain` requires explicit admin intent, `MaxRequestBodyMB` caps individual HTTP requests at 10 MB |
 | **Privilege escalation via MCP** — viewer key used to run workflows | Low | RBAC enforced at the route level in `Authenticate()`; the role is carried on the key record itself and cross-checked on every request |
 | **MCP sidecar compromise** — attacker gains control of the Node process | Medium | Sidecar holds exactly one bearer token — its own MCP key. Blast radius is limited to that key's role, quota, and adhoc_enabled flag. Revoke the key to cut off immediately |
@@ -396,8 +418,8 @@ j9t does not have built-in tenant isolation at the data level (all workflows sha
 | MCP / programmatic auth | MCP API key (same store) | MCP API key (same store) |
 | Webhook auth | HMAC-SHA256 (optional secret) | HMAC-SHA256 (mandatory secret) |
 | RBAC | 3 roles on MCP keys | 3 roles on MCP keys, sessions, and gateway headers |
-| Rate limiting | None | Per-IP token bucket (100 req/min, burst 20) |
-| Auth lockout | None | 10 failures / 5 min → 15-min IP lockout |
+| Rate limiting | Two-tier: pre-auth per-IP (100/min, burst 20) + authenticated per-user (1200/min, burst 200) | Same |
+| Auth lockout | 10 failures / 5 min → 15-min IP lockout | Same |
 | Key lifecycle | 90-day MCP key expiry, self-renew before expiry | Same |
 | Adhoc submission | MCP key + adhoc_enabled | MCP key + adhoc_enabled (quota + AI cap enforced) |
 | Audit logging | `log/security.txt` — MCP auth events | Full audit to `log/security.txt`, rotating, dashboard viewer |

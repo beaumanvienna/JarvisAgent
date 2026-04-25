@@ -540,13 +540,13 @@ namespace AIAssistant
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::Test;
                     }
-                    else if (api == "API1Azure")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API1Azure;
-                    }
                     else if (api == "API5")
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API5;
+                    }
+                    else if (api == "API6")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API6;
                     }
                     else
                     {
@@ -577,11 +577,11 @@ namespace AIAssistant
                     case EngineConfig::InterfaceType::Test:
                         apiTypeStr = "Test";
                         break;
-                    case EngineConfig::InterfaceType::API1Azure:
-                        apiTypeStr = "API1Azure";
-                        break;
                     case EngineConfig::InterfaceType::API5:
                         apiTypeStr = "API5";
+                        break;
+                    case EngineConfig::InterfaceType::API6:
+                        apiTypeStr = "API6";
                         break;
                     default:
                         break;

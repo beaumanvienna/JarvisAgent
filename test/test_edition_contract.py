@@ -4,11 +4,14 @@ Edition Contract Tests — verifies the Engine/Studio route split and security f
 
 Tests cover:
   - Edition detection and capability flags
-  - Route availability per edition (Engine vs Studio)
-  - MCP API key authentication (Engine)
+  - Route availability per edition (Engine vs Studio) post-§5i:
+      * Routes in RegisterCommonRoutes() respond in both editions, role-gated.
+      * Routes in RegisterStudioRoutes() return 404 on Engine.
+  - MCP API key authentication (both editions — Studio's anonymous-localhost
+    bypass was removed by §5i).
   - Security response headers (CSP, X-Frame-Options, Referrer-Policy, etc.)
   - Security audit log endpoint (GET /api/log/security)
-  - Auth lockout response format, RBAC, TLS status field (Engine)
+  - Auth lockout response format, RBAC, TLS status field
 
 Usage:
     python3 test/test_edition_contract.py                  # auto-detect edition
@@ -17,8 +20,8 @@ Usage:
     python3 test/test_edition_contract.py --base-url http://host:port
     python3 test/test_edition_contract.py --token mcp_...   # MCP admin key
 
-The script assumes JarvisAgent is already running. For Engine edition, an admin
-MCP API key is required (--token or J9T_TOKEN env var).
+The script assumes JarvisAgent is already running. An admin MCP API key is
+required for both editions (--token or J9T_TOKEN env var).
 """
 
 import argparse
@@ -158,8 +161,13 @@ class TestRunner:
             fail(f"{tag}: {json.dumps(actual)} (expected {json.dumps(expected)})")
             self.failed += 1
 
-    def assert_ws_connectable(self, path, expect_connectable, label=None):
-        """Assert that a WebSocket endpoint is/isn't connectable."""
+    def assert_ws_connectable(self, path, expect_connectable, label=None, with_auth=False):
+        """Assert that a WebSocket endpoint is/isn't connectable.
+
+        with_auth=True passes the admin MCP token as an Authorization header on
+        the WS upgrade so the .onaccept() handshake gate sees a valid credential
+        — used for routes that should accept *authenticated* clients (the only
+        legitimate use of /ws and /ws/assistant after the §5i refactor)."""
         tag = label or f"WS {path}"
         if not HAS_WEBSOCKET:
             warn(f"{tag} -> skipped (websocket-client not installed)")
@@ -172,6 +180,8 @@ class TestRunner:
             if not self.verify_ssl:
                 import ssl
                 ws_opts["sslopt"] = {"cert_reqs": ssl.CERT_NONE}
+            if with_auth and self.token:
+                ws_opts["header"] = [f"Authorization: Bearer {self.token}"]
             sock = ws_client.create_connection(url, timeout=5, **ws_opts)
             sock.close()
             if expect_connectable:
@@ -218,7 +228,8 @@ def test_common(t, status_data):
         ok(f"status.capabilities present ({len(caps)} keys)")
         t.passed += 1
         for key in ("workflow_crud", "workflow_run_endpoint", "ai_assistant",
-                     "ai_jcwf", "settings_api"):
+                     "ai_jcwf", "settings_api", "log_analyze",
+                     "workflow_versions", "workflow_reload"):
             if key in caps and isinstance(caps[key], bool):
                 ok(f"  capabilities.{key}: {caps[key]}")
                 t.passed += 1
@@ -229,83 +240,97 @@ def test_common(t, status_data):
         fail("status.capabilities missing or not an object")
         t.failed += 1
 
-    # Common routes should return 200 (with auth token if Engine)
+    # Common routes should return 200 (admin token required in both editions post-§5i).
     t.assert_status("get", "/api/workflows", 200)
     t.assert_status("get", "/api/workflow-runs/active", 200)
     t.assert_status("get", "/api/workflow-runs/last", 200)
     t.assert_status("get", "/api/log", 200)
     t.assert_status("get", "/", 200, label="GET / (dashboard, public)")
 
-    # /ws upgrade in Engine requires a session cookie or bearer token on the upgrade
-    # request (per the MCP auth plan — no more in-band "type:auth" first message).
-    # The test helper doesn't set auth headers on the upgrade, so Engine refuses.
-    # Studio has no auth on /ws, so it stays connectable.
-    is_engine = t.edition == "engine"
-    t.assert_ws_connectable("/ws", not is_engine, "WS /ws (main)")
+    # /ws upgrade requires a session cookie or bearer token on the handshake in
+    # both editions post-§5i.  Anonymous handshake must reject; authenticated
+    # handshake must connect.
+    t.assert_ws_connectable("/ws", False, "WS /ws (anonymous, must reject)")
+    t.assert_ws_connectable("/ws", True,  "WS /ws (authenticated)", with_auth=True)
 
 
 # ---------------------------------------------------------------------------
 # Engine-specific tests
 # ---------------------------------------------------------------------------
 def test_engine(t, status_data):
-    header("Engine — Studio routes must be absent (404)")
+    header("Engine — Studio-only routes absent (404), shared routes role-gated")
 
-    # Edition & capabilities
+    # Edition & capabilities post-§5i: workflow_run_endpoint, settings_api,
+    # log_analyze, workflow_versions, workflow_reload all True in Engine because
+    # the underlying routes moved to RegisterCommonRoutes(). Only
+    # workflow_crud / ai_assistant / ai_jcwf remain Studio-only.
     t.assert_json_field(status_data, "edition", "engine")
     t.assert_json_field(status_data, "capabilities.workflow_crud", False)
-    t.assert_json_field(status_data, "capabilities.workflow_run_endpoint", False)
     t.assert_json_field(status_data, "capabilities.ai_assistant", False)
     t.assert_json_field(status_data, "capabilities.ai_jcwf", False)
-    t.assert_json_field(status_data, "capabilities.settings_api", False)
+    t.assert_json_field(status_data, "capabilities.workflow_run_endpoint", True)
+    t.assert_json_field(status_data, "capabilities.settings_api", True)
+    t.assert_json_field(status_data, "capabilities.log_analyze", True)
+    t.assert_json_field(status_data, "capabilities.workflow_versions", True)
+    t.assert_json_field(status_data, "capabilities.workflow_reload", True)
 
-    # Studio CRUD routes → 404 or 405 (405 when path matches a common GET route)
+    # ---- Studio-only routes still absent in Engine ----
     ABSENT = {404, 405}
     t.assert_status("post", "/api/workflows", ABSENT,
                     json={"id": "__test__", "tasks": []})
     t.assert_status("put", "/api/workflows/__test__", ABSENT,
                     json={"id": "__test__", "tasks": []})
     t.assert_status("delete", "/api/workflows/__test__", ABSENT)
-    t.assert_status("post", "/api/workflows/reload", ABSENT)
-
-    # Studio run endpoint → 404
-    t.assert_status("post", "/api/workflows/__test__/run", 404)
-
-    # Studio clean endpoint → 404
-    t.assert_status("delete", "/api/workflows/__test__/clean", ABSENT)
-
-    # Validation endpoints → 404/405
     t.assert_status("post", "/api/workflows/validate", ABSENT,
                     json={"id": "__test__", "tasks": []})
     t.assert_status("get", "/api/workflows/__test__/validate", 404)
-
-    # Versioning → 404
-    t.assert_status("get", "/api/workflows/__test__/versions", 404)
-
-    # Settings API → 404 in Engine (capabilities.settings_api: false). Exception:
-    # /api/settings/keys/{status,unlock} are shared across editions because both
-    # editions need to unlock the encrypted key stores (keys + mcp_keys) after a
-    # restart. Those routes live in RegisterCommonRoutes().
-    t.assert_status("get", "/api/settings/config", 404)
-    t.assert_status("get", "/api/settings/ai-interfaces", 404)
-    t.assert_status("get", "/api/settings/keys/status", 200,
-                    label="/api/settings/keys/status (shared, public)")
-    t.assert_status("get", "/api/settings/providers", 404)
-
-    # Script/file check → 404
     t.assert_status("get", "/api/scripts/check", 404)
     t.assert_status("get", "/api/files/check", 404)
-
-    # Chat → 404
     t.assert_status("post", "/api/chat", 404, json={"message": "test"})
-
-    # Log analysis → 404
-    t.assert_status("get", "/api/log/analyze-last-run", 404)
-
-    # Editor UI → 404
     t.assert_status("get", "/editor", 404)
+    t.assert_ws_connectable("/ws/assistant", False, "WS /ws/assistant (absent)")
 
-    # Assistant WebSocket → refused
-    t.assert_ws_connectable("/ws/assistant", False, "WS /ws/assistant (should be absent)")
+    # ---- Routes moved from Studio to Common (registered, role-gated) ----
+    # Without auth → 401 (route exists, auth required). Distinguishes from 404
+    # which would mean the route is absent.
+    NEEDS_AUTH = {401, 403}
+    r = t.get_no_auth("/api/workflows/reload" if False else "/api/log/analyze-last-run")
+    if r.status_code in NEEDS_AUTH:
+        ok(f"GET /api/log/analyze-last-run (no auth) -> {r.status_code} (route exists)")
+        t.passed += 1
+    else:
+        fail(f"GET /api/log/analyze-last-run (no auth) -> {r.status_code} (expected 401/403)")
+        t.failed += 1
+
+    for path in ["/api/settings/config", "/api/settings/ai-interfaces",
+                 "/api/settings/providers", "/api/connections",
+                 "/api/workflows/__test__/versions"]:
+        r = t.get_no_auth(path)
+        if r.status_code in NEEDS_AUTH:
+            ok(f"GET {path} (no auth) -> {r.status_code} (route exists)")
+            t.passed += 1
+        else:
+            fail(f"GET {path} (no auth) -> {r.status_code} (expected 401/403)")
+            t.failed += 1
+
+    # With admin token: 200 for the routes that don't need a workflow id.
+    t.assert_status("get", "/api/settings/config", 200,
+                    label="/api/settings/config (admin)")
+    t.assert_status("get", "/api/settings/ai-interfaces", 200,
+                    label="/api/settings/ai-interfaces (admin)")
+    t.assert_status("get", "/api/settings/providers", 200,
+                    label="/api/settings/providers (admin)")
+    t.assert_status("get", "/api/connections", 200,
+                    label="/api/connections (admin)")
+
+    # POST /api/workflows/__test__/run: route registered (Common), workflow
+    # doesn't exist → expect 404 from the handler (not 401).
+    t.assert_status("post", "/api/workflows/__test__/run", {404, 400},
+                    label="run nonexistent workflow (admin)")
+
+    # Shared bootstrap.
+    t.assert_status("get", "/api/settings/keys/status", 200,
+                    label="/api/settings/keys/status (bootstrap)")
 
 
 # ---------------------------------------------------------------------------
@@ -532,13 +557,16 @@ def test_engine_security(t):
 def test_studio(t, status_data):
     header("Studio — all routes must be present")
 
-    # Edition & capabilities
+    # Edition & capabilities — every flag True in Studio.
     t.assert_json_field(status_data, "edition", "studio")
     t.assert_json_field(status_data, "capabilities.workflow_crud", True)
     t.assert_json_field(status_data, "capabilities.workflow_run_endpoint", True)
     t.assert_json_field(status_data, "capabilities.ai_assistant", True)
     t.assert_json_field(status_data, "capabilities.ai_jcwf", True)
     t.assert_json_field(status_data, "capabilities.settings_api", True)
+    t.assert_json_field(status_data, "capabilities.log_analyze", True)
+    t.assert_json_field(status_data, "capabilities.workflow_versions", True)
+    t.assert_json_field(status_data, "capabilities.workflow_reload", True)
 
     # CRUD routes present (we use safe methods / non-existent IDs to avoid side effects)
     t.assert_status("post", "/api/workflows/reload", 200)
@@ -570,14 +598,10 @@ def test_studio(t, status_data):
     # Editor UI present
     t.assert_status("get", "/editor", 200)
 
-    # Chat endpoint present (will fail without AI provider but shouldn't be 404)
-    r = t.post("/api/chat", json={"message": "test"})
-    if r.status_code != 404:
-        ok(f"POST /api/chat -> {r.status_code} (not 404)")
-        t.passed += 1
-    else:
-        fail(f"POST /api/chat -> 404 (should be registered)")
-        t.failed += 1
+    # No /api/chat REST route — assistant chat is delivered over the
+    # /ws/assistant WebSocket channel via {"type":"chat"} messages.  The
+    # capability flag (ai_assistant=true) and the WS handshake test below
+    # are the authoritative checks that the assistant feature is present.
 
     # Log analysis present (may return error without recent run, but not 404)
     r = t.get("/api/log/analyze-last-run")
@@ -588,8 +612,10 @@ def test_studio(t, status_data):
         fail(f"GET /api/log/analyze-last-run -> 404 (should be registered)")
         t.failed += 1
 
-    # Assistant WebSocket
-    t.assert_ws_connectable("/ws/assistant", True, "WS /ws/assistant")
+    # Assistant WebSocket — anonymous handshake must reject (auth funnel
+    # at .onaccept), authenticated upgrade must succeed.
+    t.assert_ws_connectable("/ws/assistant", False, "WS /ws/assistant (anonymous, must reject)")
+    t.assert_ws_connectable("/ws/assistant", True,  "WS /ws/assistant (authenticated)", with_auth=True)
 
 
 # ---------------------------------------------------------------------------

@@ -80,15 +80,15 @@ namespace AIAssistant
                 replyParser = std::make_unique<ReplyParserAPI4>(jsonString);
                 break;
             }
-            case ConfigParser::EngineConfig::InterfaceType::API1Azure:
-            {
-                // Azure OpenAI returns OpenAI-compatible bodies — reuse the API1 parser.
-                replyParser = std::make_unique<ReplyParserAPI1>(jsonString);
-                break;
-            }
             case ConfigParser::EngineConfig::InterfaceType::API5:
             {
                 replyParser = std::make_unique<ReplyParserAPI5>(jsonString);
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API6:
+            {
+                // Azure OpenAI returns OpenAI-compatible bodies — reuse the API1 parser.
+                replyParser = std::make_unique<ReplyParserAPI1>(jsonString);
                 break;
             }
             default:

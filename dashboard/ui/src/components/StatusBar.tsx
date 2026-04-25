@@ -83,12 +83,9 @@ export default function StatusBar({
     ? `Cloud: ${confirmedCount} healthy`
     : "Cloud: no connections";
 
-  // The Studio backend returns a synthetic identity `user="studio", role="admin"`
-  // for the unauthenticated browser flow (Studio has no UI auth, see cyber security
-  // spec). Don't render that identity as if it were a real user — it's an artifact
-  // of the open-flow auth shim. The edition badge below covers the "what edition
-  // am I on" question explicitly so we don't need the synthetic-user proxy.
-  const showAuthIdentity = authUser && authUser !== "studio";
+  // Show the authenticated identity in both editions — post-§5i, Studio also
+  // requires a real MCP login, so the identity always corresponds to a real user.
+  const showAuthIdentity = !!authUser;
 
   return (
     <header className="status-bar">

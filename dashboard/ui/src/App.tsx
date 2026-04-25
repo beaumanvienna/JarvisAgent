@@ -30,9 +30,10 @@ export default function App() {
   const isStudio = status?.edition === "studio";
   const canRunWorkflows = status?.capabilities?.workflow_run_endpoint !== false;
 
-  // Auth state: Engine edition requires a session cookie set by
-  // POST /api/auth/login with an MCP API key.
-  const isEngine = status?.edition === "engine";
+  // Auth state: both editions require a session cookie set by
+  // POST /api/auth/login with an MCP API key (post-§5i — see
+  // doc/engine-studio-capability-review.md). Studio's prior anonymous-localhost
+  // path was removed; the funnel is identical to Engine.
   const [needsAuth, setNeedsAuth] = useState(false);
   const [authUser, setAuthUser] = useState<string | null>(null);
   const [authRole, setAuthRole] = useState<string | null>(null);
@@ -53,7 +54,8 @@ export default function App() {
     keysStatus === "wrong_password" ||
     keysStatus === "no_keys_file";
 
-  // Probe current auth state via whoami (Engine only; Studio is open).
+  // Probe current auth state via whoami. Both editions enforce auth post-§5i —
+  // anonymous whoami returns 401 → user must sign in.
   useEffect(() => {
     let cancelled = false;
     whoami().then((result) => {
@@ -62,27 +64,22 @@ export default function App() {
         setAuthUser(result.user);
         setAuthRole(result.role ?? null);
         setNeedsAuth(false);
-      } else if (isEngine) {
+      } else {
         setNeedsAuth(true);
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [isEngine]);
+  }, []);
 
   // Listen for auth-required events from authFetch (401/403 responses).
-  // Only relevant in Engine — Studio is "open" per the cyber-security spec
-  // (doc/cyber security.md §"j9t Studio — Developer Workstation") and has no
-  // browser-UI authentication, so a transient 401 (e.g. during key-store
-  // unlock or a brief backend restart) must not flip the sign-in dialog on.
+  // Both editions go through the same login flow.
   useEffect(() => {
-    const handler = () => {
-      if (isEngine) setNeedsAuth(true);
-    };
+    const handler = () => setNeedsAuth(true);
     window.addEventListener("j9t-auth-required", handler);
     return () => window.removeEventListener("j9t-auth-required", handler);
-  }, [isEngine]);
+  }, []);
 
   const handleAuthenticated = useCallback(async () => {
     setNeedsAuth(false);
@@ -209,7 +206,7 @@ export default function App() {
           onUnlocked={handleKeysUnlocked}
         />
       )}
-      {keysStatus === "ok" && needsAuth && isEngine && (
+      {keysStatus === "ok" && needsAuth && (
         <AdminLoginDialog
           onAuthenticated={handleAuthenticated}
           onOpenActivation={(prefillToken) => {
@@ -247,7 +244,7 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         isStudio={isStudio}
-        onLogout={isEngine && authUser ? handleLogout : undefined}
+        onLogout={authUser ? handleLogout : undefined}
         authUser={authUser}
         // Studio's synthetic "studio"/"admin" identity is suppressed in StatusBar
         // (see `showAuthIdentity`); the edition badge there covers the

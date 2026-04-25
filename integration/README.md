@@ -6,24 +6,34 @@ How to trigger JarvisAgent workflows from **n8n**, **curl**, **CI pipelines**, o
 
 ## Quick Start (curl)
 
+Every webhook request must carry an HMAC-SHA256 signature of the raw body, computed
+with the per-workflow shared secret. (See the example JCWF
+`example/workflows/hamburg-tourist-day-planner.jcwf` — its placeholder secret is
+`demo-shared-secret-change-before-production`; rotate it before any real deployment.)
+
 ```bash
 # Start a workflow run via webhook
-curl -s -X POST http://localhost:8080/api/webhook/hamburg-tourist-day-planner \
+SECRET='demo-shared-secret-change-before-production'
+BODY='{
+  "context": {
+    "date": "2026-03-21",
+    "timezone": "Europe/Berlin",
+    "rainCategory": "some_rain",
+    "weatherJson": "{\"temp_max\": 8, \"precipitation_sum\": 2.1}"
+  }
+}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+curl -s -X POST https://localhost:8443/api/webhook/hamburg-tourist-day-planner \
   -H 'Content-Type: application/json' \
-  -d '{
-    "context": {
-      "date": "2026-03-21",
-      "timezone": "Europe/Berlin",
-      "rainCategory": "some_rain",
-      "weatherJson": "{\"temp_max\": 8, \"precipitation_sum\": 2.1}"
-    }
-  }'
+  -H "X-Webhook-Signature: sha256=$SIG" \
+  --data-raw "$BODY"
 
-# Check active runs
-curl -s http://localhost:8080/api/workflow-runs/active | jq .
+# Read endpoints below require an MCP token (see "Authentication" section).
+curl -fsSk https://localhost:8443/api/workflow-runs/active \
+  -H "Authorization: Bearer $J9T_TOKEN" | jq .
 
-# Check a specific run
-curl -s http://localhost:8080/api/workflow-runs/<runId> | jq .
+curl -fsSk https://localhost:8443/api/workflow-runs/<runId> \
+  -H "Authorization: Bearer $J9T_TOKEN" | jq .
 ```
 
 ---
@@ -68,24 +78,33 @@ Start a workflow run via the **webhook trigger**. The workflow JCWF must have a 
 
 #### HMAC Signature Verification
 
-If the webhook trigger's JCWF has `"params": { "secret": "my-shared-secret" }`, every request **must** include:
+Every webhook request **must** include:
 
 ```
 X-Webhook-Signature: sha256=<hex-encoded HMAC-SHA256 of the raw request body>
 ```
 
-Requests with a missing or invalid signature are rejected with HTTP 401. In **Engine mode**, a webhook secret is **mandatory** — webhooks without a configured secret are rejected with HTTP 403. In **Studio mode**, if no secret is configured the webhook is open (no signature check).
+The webhook trigger's JCWF must declare `"params": { "secret": "<shared-secret>" }`
+with a non-empty string. Both editions enforce this:
+
+- **Validator (load-time):** a webhook trigger missing a `secret` field, or with an
+  empty string, is a Tier B error. Affected workflows refuse to load.
+- **Runtime:** requests with a missing or invalid `X-Webhook-Signature` header
+  are rejected with HTTP 401; an unconfigured secret on the server side is HTTP 403.
 
 **Example with HMAC (bash):**
 
 ```bash
 BODY='{"context":{"date":"2026-03-21"}}'
-SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac 'my-shared-secret' | awk '{print $2}')
-curl -s -X POST http://localhost:8080/api/webhook/hamburg-tourist-day-planner \
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'my-shared-secret' | awk '{print $2}')
+curl -s -X POST https://localhost:8443/api/webhook/hamburg-tourist-day-planner \
   -H 'Content-Type: application/json' \
   -H "X-Webhook-Signature: sha256=$SIG" \
-  -d "$BODY"
+  --data-raw "$BODY"
 ```
+
+> Use `printf '%s'` (or `echo -n`) — a trailing newline from plain `echo` will produce
+> a different HMAC than what j9t computes over the raw body.
 
 ### POST /api/integrations/n8n/start (legacy)
 

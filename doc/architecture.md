@@ -226,8 +226,8 @@ Office documents in `cntx_files` (PDF / DOCX / XLSX / PPTX / ODT) are converted 
 | **API2** — OpenAI Responses | `/v1/responses` | OpenAI (Responses API) |
 | **API3** — Gemini native | `/v1beta/models/{model}:generateContent` | Google Gemini (native) |
 | **API4** — Anthropic Messages | `/v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus) |
-| **API1Azure** — Azure OpenAI | `/openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (`api-key:` header; body identical to API1) |
 | **API5** — AWS Bedrock | `/model/{modelId}/invoke` (SigV4-signed) | Bedrock Anthropic / Llama / Titan / Nova families. `RequestBuilderAPI5` dispatches body shape on `modelId` prefix; `ReplyParserAPI5` sniffs the response shape and delegates (Anthropic-on-Bedrock reuses `ReplyParserAPI4`). |
+| **API6** — Azure OpenAI | `/openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (`api-key:` header; body identical to API1) |
 | **Test** — fixture-driven | in-process | no-network integration tests; `m_Url` points at a fixture file |
 
 API keys are stored in an AES-256-GCM encrypted key store with a master password. Interfaces reference keys by `key_name`, resolved at runtime — no plaintext keys in workflow files or `config.json`. The `aws` credential type stores `access_key_id` in `m_ApiKey` and `secret_access_key` / `session_token` in `m_Params`; both secret values are auto-registered with `SecretRedactor` on load and stripped from REST GET responses.
@@ -307,7 +307,7 @@ Studio has no browser-UI auth (developer workstation — localhost only); MCP / 
 
 **Defense layers:**
 
-- Per-IP rate limiting (token bucket, 100 req/min, burst 20). Returns 429 with `Retry-After`.
+- Two-tier rate limiting (token bucket): pre-auth per-IP (100 req/min, burst 20) for unauthenticated/invalid traffic; authenticated per-user (1200 req/min, burst 200) once a credential validates. Returns 429 with `Retry-After`.
 - Failed auth lockout (10 failures → 15-min IP ban).
 - Request body size limit (configurable, default 10 MB).
 - Security response headers — CSP, X-Frame-Options, HSTS, Referrer-Policy.

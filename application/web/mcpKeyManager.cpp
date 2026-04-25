@@ -411,7 +411,7 @@ namespace AIAssistant
         Record rec;
         rec.m_KeyId = keyId;
         rec.m_KeyHash = Sha256Hex(rawKey);
-        rec.m_User = "admin";
+        rec.m_User = "boss";
         rec.m_Role = "admin";
         rec.m_AdhocEnabled = true;
         rec.m_DiskQuotaMb = 1024;

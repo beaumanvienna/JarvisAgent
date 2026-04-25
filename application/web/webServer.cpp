@@ -51,6 +51,7 @@
 #include "jarvisAgent.h"
 #include "python/pythonEnginePool.h"
 #include "web/webServer.h"
+#include "web/webServer_helpers.h"
 #include "file/scriptRegistry.h"
 #include "workflow/taskPathResolver.h"
 
@@ -85,478 +86,7 @@ namespace fs = std::filesystem;
 namespace AIAssistant
 
 {
-    namespace
-    {
-        std::string GenerateIntegrationRunId(std::string const& workflowId)
-        {
-            auto const now = std::chrono::system_clock::now().time_since_epoch();
-            auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-            return workflowId + "_" + std::to_string(millis);
-        }
-
-        std::string ComputeHmacSha256Hex(std::string const& secret, std::string const& data)
-        {
-            unsigned char digest[EVP_MAX_MD_SIZE];
-            unsigned int digestLength = 0;
-
-            HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
-                 reinterpret_cast<unsigned char const*>(data.data()), data.size(), digest, &digestLength);
-
-            std::string hex;
-            hex.reserve(digestLength * 2);
-            static constexpr char hexDigits[] = "0123456789abcdef";
-            for (unsigned int i = 0; i < digestLength; ++i)
-            {
-                hex.push_back(hexDigits[(digest[i] >> 4) & 0x0F]);
-                hex.push_back(hexDigits[digest[i] & 0x0F]);
-            }
-            return hex;
-        }
-
-        bool VerifyHmacSignature(std::string const& secret, std::string const& body, std::string const& headerValue)
-        {
-            // Expected header format: "sha256=<hex>"
-            static constexpr std::string_view kPrefix = "sha256=";
-            if (headerValue.size() <= kPrefix.size() || headerValue.compare(0, kPrefix.size(), kPrefix) != 0)
-            {
-                return false;
-            }
-
-            std::string const providedHex = headerValue.substr(kPrefix.size());
-            std::string const expectedHex = ComputeHmacSha256Hex(secret, body);
-
-            // Constant-time comparison to prevent timing attacks.
-            if (providedHex.size() != expectedHex.size())
-            {
-                return false;
-            }
-            unsigned char result = 0;
-            for (size_t i = 0; i < providedHex.size(); ++i)
-            {
-                result |= static_cast<unsigned char>(providedHex[i]) ^ static_cast<unsigned char>(expectedHex[i]);
-            }
-            return result == 0;
-        }
-
-        void SetSecurityHeaders(crow::response& response)
-        {
-            response.set_header("X-Frame-Options", "DENY");
-            response.set_header("X-Content-Type-Options", "nosniff");
-            response.set_header("Referrer-Policy", "strict-origin-when-cross-origin");
-            response.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-            response.set_header("Content-Security-Policy",
-                                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-                                "connect-src 'self' ws: wss:; img-src 'self' data:");
-        }
-
-        void SetJsonHeaders(crow::response& response)
-        {
-            response.add_header("Content-Type", "application/json");
-            response.add_header("Cache-Control", "no-store");
-            SetSecurityHeaders(response);
-        }
-
-        bool IsBodyTooLarge(crow::request const& req, size_t maxMB)
-        {
-            return maxMB > 0 && req.body.size() > maxMB * 1024 * 1024;
-        }
-
-        crow::response MakePayloadTooLargeResponse(size_t maxMB)
-        {
-            crow::json::wvalue body;
-            body["ok"] = false;
-            body["error"] = "payload_too_large";
-            body["message"] = "Request body exceeds " + std::to_string(maxMB) + " MB limit";
-            crow::response resp(413, body.dump());
-            SetJsonHeaders(resp);
-            return resp;
-        }
-
-        crow::response MakeJsonResponse(int const httpStatus, crow::json::wvalue const& json)
-        {
-            crow::response response(httpStatus, json.dump());
-            SetJsonHeaders(response);
-            return response;
-        }
-
-        crow::response MakeAuthErrorResponse(std::string const& error)
-        {
-            crow::json::wvalue body;
-            body["ok"] = false;
-            if (error == "locked_out")
-            {
-                body["error"] = "locked_out";
-                body["message"] = "Too many failed authentication attempts. Try again in 15 minutes.";
-                crow::response resp(403, body.dump());
-                SetJsonHeaders(resp);
-                resp.add_header("Retry-After", "900");
-                return resp;
-            }
-            else if (error == "rate_limited")
-            {
-                body["error"] = "rate_limited";
-                body["message"] = "Too many requests. Try again later.";
-                crow::response resp(429, body.dump());
-                SetJsonHeaders(resp);
-                resp.add_header("Retry-After", "5");
-                return resp;
-            }
-            else if (error == "missing" || error == "malformed")
-            {
-                body["error"] = "unauthorized";
-                body["message"] = "Authorization header required. Use: Authorization: Bearer <token>";
-                crow::response resp(401, body.dump());
-                SetJsonHeaders(resp);
-                resp.add_header("WWW-Authenticate", "Bearer");
-                return resp;
-            }
-            else if (error == "token_expired")
-            {
-                body["error"] = "token_expired";
-                body["message"] = "API token has expired. A new token has been generated — check server logs.";
-                crow::response resp(403, body.dump());
-                SetJsonHeaders(resp);
-                return resp;
-            }
-            else if (error == "insufficient_role")
-            {
-                body["error"] = "insufficient_role";
-                body["message"] = "Your role does not have permission for this endpoint.";
-                crow::response resp(403, body.dump());
-                SetJsonHeaders(resp);
-                return resp;
-            }
-            else
-            {
-                body["error"] = "forbidden";
-                body["message"] = "Invalid API token.";
-                crow::response resp(403, body.dump());
-                SetJsonHeaders(resp);
-                return resp;
-            }
-        }
-
-        crow::response MakeJsonTextResponse(int const httpStatus, std::string const& jsonText)
-        {
-            crow::response response(httpStatus, jsonText);
-            SetJsonHeaders(response);
-            return response;
-        }
-
-        crow::response MakeWorkflowJsonError(int const httpStatus, std::string const& errorCode, std::string const& message,
-                                             std::string const& endpoint,
-                                             std::optional<std::string> const& workflowId = std::nullopt)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = errorCode;
-            responseJson["message"] = message;
-            responseJson["endpoint"] = endpoint;
-            if (workflowId.has_value())
-            {
-                responseJson["workflowId"] = workflowId.value();
-            }
-
-            return MakeJsonResponse(httpStatus, responseJson);
-        }
-
-#ifdef J9T_STUDIO
-        struct WorkflowValidationFinding
-        {
-            std::string m_Code;
-            std::string m_Message;
-
-            std::string m_Path;
-            std::string m_TaskId;
-
-            std::string m_Tier;
-        };
-
-        std::string ToTierString(WorkflowValidationTier const tier)
-        {
-            switch (tier)
-            {
-                case WorkflowValidationTier::A:
-                    return "A";
-                case WorkflowValidationTier::B:
-                    return "B";
-                case WorkflowValidationTier::C:
-                    return "C";
-                case WorkflowValidationTier::D:
-                    return "D";
-                default:
-                    return "B";
-            }
-        }
-
-        void AddFindingToList(crow::json::wvalue::list& list, WorkflowValidationFinding const& finding)
-        {
-            crow::json::wvalue item;
-            item["code"] = finding.m_Code;
-            item["message"] = finding.m_Message;
-            if (!finding.m_Tier.empty())
-            {
-                item["tier"] = finding.m_Tier;
-            }
-            if (!finding.m_Path.empty())
-            {
-                item["path"] = finding.m_Path;
-            }
-            if (!finding.m_TaskId.empty())
-            {
-                item["taskId"] = finding.m_TaskId;
-            }
-            list.push_back(std::move(item));
-        }
-
-        crow::json::wvalue MakeWorkflowValidationResponse(bool const ok, std::string const& workflowId,
-                                                          std::vector<WorkflowValidationFinding> const& errors,
-                                                          std::vector<WorkflowValidationFinding> const& warnings,
-                                                          std::vector<WorkflowValidationFinding> const& infos)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = ok;
-            responseJson["id"] = workflowId;
-
-            crow::json::wvalue::list errorsList;
-            for (auto const& error : errors)
-            {
-                AddFindingToList(errorsList, error);
-            }
-            responseJson["errors"] = std::move(errorsList);
-
-            crow::json::wvalue::list warningsList;
-            for (auto const& warning : warnings)
-            {
-                AddFindingToList(warningsList, warning);
-            }
-            responseJson["warnings"] = std::move(warningsList);
-
-            crow::json::wvalue::list infosList;
-            for (auto const& info : infos)
-            {
-                AddFindingToList(infosList, info);
-            }
-            responseJson["infos"] = std::move(infosList);
-
-            return responseJson;
-        }
-
-        void ValidateJcwfParsedWorkflow(WorkflowDefinition const& workflow, std::vector<WorkflowValidationFinding>& errors,
-                                        std::vector<WorkflowValidationFinding>& warnings,
-                                        std::vector<WorkflowValidationFinding>& infos)
-        {
-            std::vector<WorkflowValidationIssue> issues;
-            WorkflowValidator::Validate(workflow, issues);
-
-            for (WorkflowValidationIssue const& issue : issues)
-            {
-                WorkflowValidationFinding finding;
-                finding.m_Code = issue.m_Code;
-                finding.m_Message = issue.m_Message;
-                finding.m_Path = issue.m_Path;
-                finding.m_TaskId = issue.m_TaskId;
-                finding.m_Tier = ToTierString(issue.m_Tier);
-
-                if (issue.m_Severity == WorkflowValidationSeverity::Error)
-                {
-                    errors.push_back(std::move(finding));
-                }
-                else if (issue.m_Severity == WorkflowValidationSeverity::Info)
-                {
-                    infos.push_back(std::move(finding));
-                }
-                else
-                {
-                    warnings.push_back(std::move(finding));
-                }
-            }
-        }
-
-        void ValidateJcwfJsonText(std::string const& workflowJsonText, std::vector<WorkflowValidationFinding>& errors,
-                                  std::vector<WorkflowValidationFinding>& warnings,
-                                  std::vector<WorkflowValidationFinding>& infos, std::string& workflowIdOut,
-                                  std::string& parseErrorMessageOut)
-        {
-            errors.clear();
-            warnings.clear();
-            infos.clear();
-            workflowIdOut.clear();
-            parseErrorMessageOut.clear();
-
-            WorkflowJsonParser workflowJsonParser;
-            WorkflowDefinition parsedWorkflow;
-            if (!workflowJsonParser.ParseWorkflowJson(workflowJsonText, parsedWorkflow, parseErrorMessageOut))
-            {
-                return;
-            }
-
-            workflowIdOut = parsedWorkflow.m_Id;
-            ValidateJcwfParsedWorkflow(parsedWorkflow, errors, warnings, infos);
-        }
-#endif // J9T_STUDIO
-
-        bool IsValidWorkflowId(std::string const& workflowId)
-        {
-            if (workflowId.empty())
-            {
-                return false;
-            }
-
-            for (char const character : workflowId)
-            {
-                bool const isAlphaNumeric =
-                    ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-                     (character >= '0' && character <= '9'));
-                bool const isAllowedSymbol = (character == '_' || character == '-');
-                if (!isAlphaNumeric && !isAllowedSymbol)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        bool IsValidTaskName(std::string const& taskName)
-        {
-            // Same restrictions as workflow ids: simple path-segment with no slashes.
-            return IsValidWorkflowId(taskName);
-        }
-
-        std::filesystem::path GetWorkflowsDirectoryAbsolute(std::string& errorMessage)
-        {
-            errorMessage.clear();
-
-            if (Core::g_Core == nullptr)
-            {
-                errorMessage = "Core::g_Core is null";
-                return {};
-            }
-
-            auto const& config = Core::g_Core->GetConfig();
-
-            std::filesystem::path workflowsPathFromConfig = std::filesystem::path(config.m_WorkflowsFolderFilepath);
-            if (workflowsPathFromConfig.empty())
-            {
-                errorMessage = "Config m_WorkflowsFolderFilepath is empty";
-                return {};
-            }
-
-            std::filesystem::path const& launchCwdAbsolute = Core::g_Core->GetLaunchCWDAbsolute();
-            std::filesystem::path workflowsDirectoryAbsolute = workflowsPathFromConfig.is_absolute()
-                                                                   ? workflowsPathFromConfig
-                                                                   : (launchCwdAbsolute / workflowsPathFromConfig);
-
-            return std::filesystem::absolute(workflowsDirectoryAbsolute).lexically_normal();
-        }
-
-        bool ReadTextFile(std::filesystem::path const& filePath, std::string& outContent)
-        {
-            std::ifstream fileStream(filePath, std::ios::in | std::ios::binary);
-            if (!fileStream)
-            {
-                return false;
-            }
-
-            std::ostringstream stringStream;
-            stringStream << fileStream.rdbuf();
-            outContent = stringStream.str();
-            return true;
-        }
-
-        bool WriteTextFileAtomic(std::filesystem::path const& filePath, std::string const& content,
-                                 std::string& errorMessage)
-        {
-            errorMessage.clear();
-            std::filesystem::path const parentDirectory = filePath.parent_path();
-            std::error_code errorCode;
-            std::filesystem::create_directories(parentDirectory, errorCode);
-            if (errorCode)
-            {
-                errorMessage = "Failed to create directories: " + parentDirectory.string() + " error=" + errorCode.message();
-                return false;
-            }
-
-            std::filesystem::path const tempPath = filePath.string() + ".tmp";
-            {
-                std::ofstream fileStream(tempPath, std::ios::out | std::ios::binary | std::ios::trunc);
-                if (!fileStream)
-                {
-                    errorMessage = "Failed to open temp file for writing: " + tempPath.string();
-                    return false;
-                }
-
-                fileStream.write(content.data(), static_cast<std::streamsize>(content.size()));
-                if (!fileStream.good())
-                {
-                    errorMessage = "Failed while writing temp file: " + tempPath.string();
-                    return false;
-                }
-            }
-
-            std::filesystem::rename(tempPath, filePath, errorCode);
-            if (errorCode)
-            {
-                // Try to cleanup temp file best-effort.
-                std::filesystem::remove(tempPath, errorCode);
-                errorMessage =
-                    "Failed to rename temp file to target: " + filePath.string() + " error=" + errorCode.message();
-                return false;
-            }
-
-            return true;
-        }
-
-        char const* ToStringWorkflowRunState(WorkflowRunState const state)
-        {
-            switch (state)
-            {
-                case WorkflowRunState::Pending:
-                    return "pending";
-                case WorkflowRunState::Running:
-                    return "running";
-                case WorkflowRunState::Paused:
-                    return "paused";
-                case WorkflowRunState::Stopping:
-                    return "stopping";
-                case WorkflowRunState::Succeeded:
-                    return "succeeded";
-                case WorkflowRunState::Failed:
-                    return "failed";
-                case WorkflowRunState::Cancelled:
-                    return "cancelled";
-                case WorkflowRunState::Stopped:
-                    return "stopped";
-                default:
-                    return "unknown";
-            }
-        }
-
-        char const* ToStringTaskInstanceStateKind(TaskInstanceStateKind const state)
-        {
-            switch (state)
-            {
-                case TaskInstanceStateKind::Pending:
-                    return "pending";
-                case TaskInstanceStateKind::Ready:
-                    return "ready";
-                case TaskInstanceStateKind::Running:
-                    return "running";
-                case TaskInstanceStateKind::Skipped:
-                    return "skipped";
-                case TaskInstanceStateKind::Succeeded:
-                    return "succeeded";
-                case TaskInstanceStateKind::Failed:
-                    return "failed";
-                case TaskInstanceStateKind::WaitingExternal:
-                    return "waiting_external";
-                default:
-                    return "unknown";
-            }
-        }
-
-    } // namespace
+    using namespace WebServerHelpers;
 
     namespace
     {
@@ -1017,52 +547,6 @@ namespace AIAssistant
         return ServeDashboardIndex();
     }
 
-#ifdef J9T_STUDIO
-    crow::response WebServer::ServeWorkflowEditorIndex() const
-    {
-        std::filesystem::path const distIndex = std::filesystem::path("workflow-editor") / "ui" / "dist" / "index.html";
-        if (!std::filesystem::exists(distIndex))
-        {
-            return crow::response(
-                500,
-                "Workflow Editor UI build not found. Please run: cd workflow-editor/ui && npm install && npm run build");
-        }
-
-        return ServeStaticFile(distIndex);
-    }
-
-    crow::response WebServer::ServeWorkflowEditorStatic(std::string const& requestPath) const
-    {
-        std::filesystem::path const distRoot = std::filesystem::path("workflow-editor") / "ui" / "dist";
-
-        if (requestPath == "/editor" || requestPath == "/editor/")
-        {
-            return ServeWorkflowEditorIndex();
-        }
-
-        // Serve assets from dist under two possible URL layouts:
-        //  - "/assets/..." (Vite default when base is "/")
-        //  - "/editor/assets/..." (if base is later set to "/editor/")
-        if (requestPath.rfind("/assets/", 0) == 0)
-        {
-            std::string const relative = requestPath.substr(std::string("/assets/").size());
-            return ServeStaticFile(distRoot / "assets" / relative);
-        }
-        if (requestPath.rfind("/editor/assets/", 0) == 0)
-        {
-            std::string const relative = requestPath.substr(std::string("/editor/assets/").size());
-            return ServeStaticFile(distRoot / "assets" / relative);
-        }
-
-        // SPA fallback: any /editor/* route should serve index.html
-        if (requestPath.rfind("/editor/", 0) == 0)
-        {
-            return ServeWorkflowEditorIndex();
-        }
-
-        return crow::response(404, "Not found");
-    }
-#endif // J9T_STUDIO
 
     // =========================================================================
     // Admin authentication (Engine edition only)
@@ -1072,6 +556,19 @@ namespace AIAssistant
     static constexpr size_t kMaxAuthFailures = 10;
     static constexpr auto kAuthFailureWindow = std::chrono::minutes(5);
     [[maybe_unused]] static constexpr auto kLockoutDuration = std::chrono::minutes(15);
+
+    // Two-tier rate-limit constants.
+    //   * Pre-auth (per-IP): tight quota for unauthenticated/invalid traffic.
+    //     Defends against credential-stuffing and anonymous flooding.
+    //     Backed by the failed-auth lockout above.
+    //   * Authenticated (per-user): generous quota once a credential validates.
+    //     Sized to absorb dashboard polling, MCP heartbeats, and contract test
+    //     bursts.  Audit logging makes runaway authenticated traffic
+    //     investigable rather than blanket-blocked at the auth layer.
+    static constexpr double kPreAuthBurst      = 20.0;
+    static constexpr double kPreAuthRefillRate = 100.0 / 60.0;       // 100 req/min
+    static constexpr double kAuthBurst         = 200.0;
+    static constexpr double kAuthRefillRate    = 1200.0 / 60.0;      // 1200 req/min
 
     // Role hierarchy: admin > operator > viewer.
     static int RoleLevel(std::string_view role)
@@ -1183,29 +680,30 @@ namespace AIAssistant
 
     WebServer::AuthResult WebServer::Authenticate(crow::request const& req) const
     {
-        // ---- MCP key (both editions) — takes precedence over everything else ----
-        if (auto mcp = TryMcpAuth(req); mcp.has_value())
-        {
-            return *mcp;
-        }
+        // Unified auth funnel — identical across Studio and Engine.  Edition
+        // controls *which routes are registered*, never *how requests are
+        // authenticated*.  See doc/engine-studio-capability-review.md.
+        //
+        // Order:
+        //   1. Lockout check                        (cheap, IP-level)
+        //   2. Credential extraction + validation   (MCP token | session cookie)
+        //      2a. Pre-auth rate limit (per-IP) on the failure paths
+        //   3. Authenticated rate limit (per-user)
+        //   4. Gateway cross-check                  (when TrustedProxyHeader is configured AND header present)
+        //   5. Return AuthResult
+        //
+        // Splitting the rate limit either side of step 2 keeps legitimate
+        // users on a generous per-user quota while still capping unauthenticated
+        // probing on a tight per-IP quota.  Token validation itself is cheap
+        // (HMAC compare on a 256-bit key) so doing it before throttling is
+        // affordable; the lockout (step 1) handles persistent attackers.
 
-        // ---- Dashboard session cookie (both editions; Engine issues, Studio ignores) ----
-        if (auto session = TrySessionAuth(req); session.has_value())
-        {
-            return *session;
-        }
-
-#ifdef J9T_STUDIO
-        // Studio edition: no auth required for non-MCP, non-session requests (browser UI, localhost).
-        (void)req;
-        return {"", "studio", "admin"};
-#else
+        auto* self = const_cast<WebServer*>(this);
         std::string const& ip = req.remote_ip_address;
         std::string const& endpoint = req.url;
 
-        // ---- Lockout check (before rate limiting — locked IPs should not consume tokens) ----
+        // ---- 1. Lockout check (locked IPs short-circuit before any rate-limit work) ----
         {
-            auto* self = const_cast<WebServer*>(this);
             std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
             auto it = self->m_AuthFailures.find(ip);
             if (it != self->m_AuthFailures.end())
@@ -1219,50 +717,96 @@ namespace AIAssistant
             }
         }
 
-        // Rate limit check (cast away const — rate limit state is mutable).
-        if (const_cast<WebServer*>(this)->IsRateLimited(req))
+        // ---- 2. Credential extraction + validation ----
+        // Exactly one of MCP token / session cookie must be present and valid.
+        // No anonymous path.  No "gateway header alone" path — gateway is a
+        // cross-check on top of a primary credential (step 4 below).
+        AuthResult auth;
+        if (auto mcp = TryMcpAuth(req); mcp.has_value())
         {
-            LOG_SECURITY_WARN("[security] rate_limited ip={} endpoint={}", ip, endpoint);
+            // TryMcpAuth populates an error code (invalid_token / key_disabled /
+            // token_expired) when the bearer header started with "mcp_" but did
+            // not validate.  Surface that immediately, but rate-limit the
+            // pre-auth path so a flood of invalid keys is cheap to reject.
+            if (!mcp->m_Error.empty())
+            {
+                if (self->IsRateLimited(RateLimitTier::PreAuth, ip))
+                {
+                    LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint={}", ip, endpoint);
+                    return {"rate_limited", "", ""};
+                }
+                return *mcp;
+            }
+            auth = *mcp;
+        }
+        else if (auto session = TrySessionAuth(req); session.has_value())
+        {
+            auth = *session;
+        }
+        else
+        {
+            // No valid credential — pre-auth rate limit applies before logging
+            // the rejection so a flood of empty/garbage requests is throttled.
+            if (self->IsRateLimited(RateLimitTier::PreAuth, ip))
+            {
+                LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint={}", ip, endpoint);
+                return {"rate_limited", "", ""};
+            }
+            std::string const& authHeader = req.get_header_value("Authorization");
+            if (authHeader.empty())
+            {
+                LOG_SECURITY_WARN("[security] auth_failure reason=missing_credential ip={} endpoint={}",
+                                  ip, endpoint);
+                return {"missing", "", ""};
+            }
+            LOG_SECURITY_WARN("[security] auth_failure reason=unrecognised_credential ip={} endpoint={}",
+                              ip, endpoint);
+            return {"forbidden", "", ""};
+        }
+
+        // ---- 3. Authenticated rate limit (per-user) ----
+        if (self->IsRateLimited(RateLimitTier::Authenticated, auth.m_User))
+        {
+            LOG_SECURITY_WARN("[security] rate_limited_authenticated user={} ip={} endpoint={}",
+                              auth.m_User, ip, endpoint);
             return {"rate_limited", "", ""};
         }
 
-        // ---- Gateway-trusted identity headers (opt-in via TrustedProxyHeader config) ----
+        // ---- 4. Gateway cross-check (opt-in via TrustedProxyHeader) ----
+        // When configured AND the gateway has injected its identity header,
+        // verify the gateway-asserted user matches the credential's user, and
+        // cap the role downward if the gateway asserts a lower role.
+        // Gateway can downgrade, never escalate.
         auto const& config = Core::g_Core->GetConfig();
         if (!config.m_TrustedProxyHeader.empty())
         {
-            std::string const& userHeader = req.get_header_value(config.m_TrustedProxyHeader);
-            if (!userHeader.empty())
+            std::string const& gatewayUser = req.get_header_value(config.m_TrustedProxyHeader);
+            if (!gatewayUser.empty())
             {
-                // Gateway authenticated this request. Extract role from role header.
-                std::string role = "viewer"; // default: least privilege
+                if (gatewayUser != auth.m_User)
+                {
+                    LOG_SECURITY_WARN("[security] forbidden reason=identity_mismatch ip={} "
+                                      "credential_user={} gateway_user={} endpoint={}",
+                                      ip, auth.m_User, gatewayUser, endpoint);
+                    return {"identity_mismatch", "", ""};
+                }
                 if (!config.m_TrustedRoleHeader.empty())
                 {
-                    std::string const& roleHeader = req.get_header_value(config.m_TrustedRoleHeader);
-                    if (roleHeader == "admin" || roleHeader == "operator" || roleHeader == "viewer")
+                    std::string const& gatewayRole = req.get_header_value(config.m_TrustedRoleHeader);
+                    if (gatewayRole == "admin" || gatewayRole == "operator" || gatewayRole == "viewer")
                     {
-                        role = roleHeader;
+                        if (RoleLevel(gatewayRole) < RoleLevel(auth.m_Role))
+                        {
+                            LOG_SECURITY_INFO("[security] role_downgrade user={} from={} to={} endpoint={}",
+                                              auth.m_User, auth.m_Role, gatewayRole, endpoint);
+                            auth.m_Role = gatewayRole;
+                        }
                     }
                 }
-
-                LOG_SECURITY_INFO("[security] auth_success ip={} user={} role={} method=gateway endpoint={}", ip,
-                                  userHeader, role, endpoint);
-                return {"", userHeader, role};
             }
-            // Gateway header not present — fall through to bearer token check.
         }
 
-        // No auth mechanism matched. MCP key, session cookie, and gateway header
-        // are the only supported paths — anything else (including an Authorization
-        // header that did not begin with "mcp_") is rejected.
-        std::string const& authHeader = req.get_header_value("Authorization");
-        if (authHeader.empty())
-        {
-            LOG_SECURITY_WARN("[security] auth_failure reason=missing_token ip={} endpoint={}", ip, endpoint);
-            return {"missing", "", ""};
-        }
-        LOG_SECURITY_WARN("[security] auth_failure reason=unrecognised_token ip={} endpoint={}", ip, endpoint);
-        return {"forbidden", "", ""};
-#endif
+        return auth;
     }
 
     // Legacy wrapper — used by existing route lambdas that require admin.
@@ -1275,14 +819,21 @@ namespace AIAssistant
 
     std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole) const
     {
-        auto auth = Authenticate(req);
-        if (!auth.m_Error.empty()) return auth.m_Error;
-        if (!HasRole(auth, minRole))
+        AuthResult unused;
+        return CheckAuth(req, minRole, unused);
+    }
+
+    std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole,
+                                     AuthResult& outAuth) const
+    {
+        outAuth = Authenticate(req);
+        if (!outAuth.m_Error.empty()) return outAuth.m_Error;
+        if (!HasRole(outAuth, minRole))
         {
             // Authenticated but lacks the required role.
             LOG_SECURITY_WARN("[security] forbidden reason=insufficient_role ip={} user={} role={} "
                               "required={} endpoint={}",
-                              req.remote_ip_address, auth.m_User, auth.m_Role, minRole, req.url);
+                              req.remote_ip_address, outAuth.m_User, outAuth.m_Role, minRole, req.url);
             return "forbidden";
         }
         return "";
@@ -1311,58 +862,55 @@ namespace AIAssistant
         }
     }
 
-    bool WebServer::IsRateLimited(crow::request const& req)
+    bool WebServer::IsRateLimited(RateLimitTier tier, std::string const& key)
     {
-#ifdef J9T_STUDIO
-        (void)req;
-        return false;
-#else
-
-        std::string const ip = req.remote_ip_address;
         auto const now = std::chrono::steady_clock::now();
 
-        static constexpr double kMaxTokens = 20.0;       // burst capacity
-        static constexpr double kRefillRate = 100.0 / 60.0; // tokens per second (100/min)
+        double const burst       = (tier == RateLimitTier::PreAuth) ? kPreAuthBurst       : kAuthBurst;
+        double const refillRate  = (tier == RateLimitTier::PreAuth) ? kPreAuthRefillRate  : kAuthRefillRate;
+        auto& buckets            = (tier == RateLimitTier::PreAuth) ? m_PreAuthBuckets    : m_AuthenticatedBuckets;
 
         std::lock_guard<std::mutex> lock(m_RateLimitMutex);
 
-        // Periodic cleanup: evict buckets older than 10 minutes.
+        // Periodic cleanup: evict idle buckets in both tiers, plus expired
+        // lockout records.  Cheap to do here since we already hold the mutex.
         auto const sinceCleanup = std::chrono::duration_cast<std::chrono::minutes>(now - m_LastRateLimitCleanup);
         if (sinceCleanup.count() >= 5)
         {
-            for (auto it = m_RateLimitBuckets.begin(); it != m_RateLimitBuckets.end();)
+            auto evictStale = [&now](auto& m)
             {
-                auto const age = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.m_LastRefill);
-                if (age.count() >= 10)
+                for (auto it = m.begin(); it != m.end();)
                 {
-                    it = m_RateLimitBuckets.erase(it);
+                    auto const age = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.m_LastRefill);
+                    if (age.count() >= 10) it = m.erase(it);
+                    else ++it;
                 }
-                else
-                {
-                    ++it;
-                }
-            }
-            // Also evict expired lockout entries (older than 15 minutes).
+            };
+            evictStale(m_PreAuthBuckets);
+            evictStale(m_AuthenticatedBuckets);
             for (auto it = m_AuthFailures.begin(); it != m_AuthFailures.end();)
             {
                 auto const age = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.m_FirstFailure);
-                if (age > kLockoutDuration)
-                {
-                    it = m_AuthFailures.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
+                if (age > kLockoutDuration) it = m_AuthFailures.erase(it);
+                else ++it;
             }
-
             m_LastRateLimitCleanup = now;
         }
 
-        auto& bucket = m_RateLimitBuckets[ip];
-        double const elapsed = std::chrono::duration<double>(now - bucket.m_LastRefill).count();
-        bucket.m_Tokens = std::min(kMaxTokens, bucket.m_Tokens + elapsed * kRefillRate);
-        bucket.m_LastRefill = now;
+        auto& bucket = buckets[key];
+        // First-touch buckets are seeded at full burst — clients pay no
+        // warm-up tax for arriving on a steady-clock zero default.
+        if (bucket.m_LastRefill.time_since_epoch().count() == 0)
+        {
+            bucket.m_Tokens = burst;
+            bucket.m_LastRefill = now;
+        }
+        else
+        {
+            double const elapsed = std::chrono::duration<double>(now - bucket.m_LastRefill).count();
+            bucket.m_Tokens = std::min(burst, bucket.m_Tokens + elapsed * refillRate);
+            bucket.m_LastRefill = now;
+        }
 
         if (bucket.m_Tokens >= 1.0)
         {
@@ -1371,13 +919,11 @@ namespace AIAssistant
         }
 
         return true;
-#endif
     }
 
     void WebServer::RegisterRoutes()
     {
         RegisterCommonRoutes();
-        RegisterEngineRoutes();
 #ifdef J9T_STUDIO
         RegisterStudioRoutes();
 #endif
@@ -1565,11 +1111,9 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "operator"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    AuthResult auth;
+                    if (auto err = CheckAuth(req, "operator", auth); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     LOG_SECURITY_INFO("[security] run_cancel ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
                                       runId);
                     return HandleWorkflowRunCancelPost(runId);
@@ -1579,11 +1123,9 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "operator"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    AuthResult auth;
+                    if (auto err = CheckAuth(req, "operator", auth); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     LOG_SECURITY_INFO("[security] run_pause ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
                                       runId);
                     return HandleWorkflowRunPausePost(runId);
@@ -1593,11 +1135,9 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "operator"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    AuthResult auth;
+                    if (auto err = CheckAuth(req, "operator", auth); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     LOG_SECURITY_INFO("[security] run_resume ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
                                       runId);
                     return HandleWorkflowRunResumePost(runId);
@@ -1607,11 +1147,9 @@ namespace AIAssistant
             .methods("POST"_method)(
                 [this](crow::request const& req, std::string const& runId)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "operator"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    AuthResult auth;
+                    if (auto err = CheckAuth(req, "operator", auth); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     LOG_SECURITY_INFO("[security] run_stop ip={} user={} runId={}", req.remote_ip_address, auth.m_User,
                                       runId);
                     return HandleWorkflowRunStopPost(runId);
@@ -1622,11 +1160,8 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "operator"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    if (auto err = CheckAuth(req, "operator"); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     return HandleLogGet(req);
                 });
 
@@ -1635,11 +1170,8 @@ namespace AIAssistant
             .methods("GET"_method)(
                 [this](crow::request const& req)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "admin"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    if (auto err = CheckAuth(req, "admin"); !err.empty())
+                        return MakeAuthErrorResponse(err);
                     return HandleSecurityLogGet(req);
                 });
 
@@ -1675,16 +1207,395 @@ namespace AIAssistant
                     }
                 });
 
+        // ---- Webhook (HMAC auth handled inside the handler — both editions) ----
+        CROW_ROUTE(m_Server, "/api/webhook/<string>")
+            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
+                                    { return HandleWebhookPost(req, workflowId); });
+
+        // ---- Admin: n8n integration ----
+        CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleN8nStartPost(req);
+                });
+
+        // ---- Viewer+: sub-workflow tree + dependency graph (read-only registry queries) ----
+        CROW_ROUTE(m_Server, "/api/workflows/dependency-graph")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAuth(req, "viewer");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+
+                    WorkflowRegistry const* registry = nullptr;
+                    {
+                        std::scoped_lock<std::mutex> const lock(m_Mutex);
+                        registry = m_WorkflowRegistry;
+                    }
+                    if (registry == nullptr)
+                    {
+                        return crow::response(503, "application/json",
+                                              R"({"ok":false,"error":"registry_unavailable"})");
+                    }
+
+                    auto const graph = registry->GetSubWorkflowDependencyGraph();
+                    crow::json::wvalue edgesArray(crow::json::wvalue::list{});
+                    size_t idx = 0;
+                    for (auto const& [parentId, children] : graph)
+                    {
+                        for (auto const& childId : children)
+                        {
+                            crow::json::wvalue edge;
+                            edge["parent"] = parentId;
+                            edge["child"] = childId;
+                            edgesArray[idx++] = std::move(edge);
+                        }
+                    }
+                    crow::json::wvalue body;
+                    body["ok"] = true;
+                    body["edges"] = std::move(edgesArray);
+                    return crow::response(200, "application/json", body.dump());
+                });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/tree")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& workflowId)
+                {
+                    auto err = CheckAuth(req, "viewer");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+
+                    WorkflowRegistry const* registry = nullptr;
+                    {
+                        std::scoped_lock<std::mutex> const lock(m_Mutex);
+                        registry = m_WorkflowRegistry;
+                    }
+                    if (registry == nullptr)
+                    {
+                        return crow::response(503, "application/json",
+                                              R"({"ok":false,"error":"registry_unavailable"})");
+                    }
+
+                    auto const workflowOpt = registry->GetWorkflow(workflowId);
+                    if (!workflowOpt.has_value())
+                    {
+                        return crow::response(404, "application/json", R"({"ok":false,"error":"not_found"})");
+                    }
+
+                    auto const allIds = registry->GetWorkflowIds();
+                    std::string const prefix = workflowId + "__";
+                    crow::json::wvalue childrenArray(crow::json::wvalue::list{});
+                    size_t idx = 0;
+                    for (auto const& id : allIds)
+                    {
+                        auto const childOpt = registry->GetWorkflow(id);
+                        if (!childOpt.has_value() || !childOpt->m_IsSubWorkflow) continue;
+                        if (childOpt->m_ParentWorkflowId != workflowId && id.rfind(prefix, 0) != 0) continue;
+
+                        crow::json::wvalue child;
+                        child["id"] = id;
+                        child["label"] = childOpt->m_Label;
+                        child["folderPath"] = childOpt->m_ContainerFolderPath;
+                        child["parentId"] = childOpt->m_ParentWorkflowId;
+                        childrenArray[idx++] = std::move(child);
+                    }
+
+                    crow::json::wvalue body;
+                    body["ok"] = true;
+                    body["workflowId"] = workflowId;
+                    body["label"] = workflowOpt->m_Label;
+                    body["isContainer"] = !workflowOpt->m_ContainerPath.empty();
+                    body["children"] = std::move(childrenArray);
+                    return crow::response(200, "application/json", body.dump());
+                });
+
+        // ---- Operator+: pre-registered workflow run + clean ----
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& workflowId)
+                {
+                    auto err = CheckAuth(req, "operator");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowRunPost(req, workflowId);
+                });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
+            .methods("DELETE"_method)(
+                [this](crow::request const& req, std::string const& workflowId)
+                {
+                    auto err = CheckAuth(req, "operator");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowCleanDelete(workflowId);
+                });
+
+        // ---- Operator+: log analyze-last-run ----
+        CROW_ROUTE(m_Server, "/api/log/analyze-last-run")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAuth(req, "operator");
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleLogAnalyzeLastRunGet(req);
+                });
+
+        // ---- Admin: workflow registry refresh + versioning ----
+        CROW_ROUTE(m_Server, "/api/workflows/reload")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowsReloadPost();
+                });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& workflowId)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowVersionsListGet(workflowId);
+                });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& workflowId, std::string const& timestamp)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowVersionGetGet(workflowId, timestamp);
+                });
+
+        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>/restore")
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& workflowId, std::string const& timestamp)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleWorkflowVersionRestorePost(workflowId, timestamp);
+                });
+
+        // ---- Admin: AI interface CRUD ----
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfacesListGet();
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfaceCreatePost(req);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("PUT"_method)(
+                [this](crow::request const& req, std::string const& name)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfaceUpdatePut(req, name);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
+            .methods("DELETE"_method)(
+                [this](crow::request const& req, std::string const& name)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfaceDeleteDelete(name);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfacesSavePost();
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/test")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleAiInterfaceTestPost(req);
+                });
+
+        // ---- Admin: config edit ----
+        CROW_ROUTE(m_Server, "/api/settings/config")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConfigSettingsGet();
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/config")
+            .methods("PUT"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConfigSettingsPut(req);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/config/reload")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConfigReloadPost();
+                });
+
+        // ---- Admin: AI provider CRUD ----
+        CROW_ROUTE(m_Server, "/api/settings/providers")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProvidersListGet();
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProviderCreatePost(req);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("PUT"_method)(
+                [this](crow::request const& req, std::string const& providerName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProviderUpdatePut(req, providerName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
+            .methods("DELETE"_method)(
+                [this](crow::request const& req, std::string const& providerName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProviderDelete(providerName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& providerName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProviderSetDefaultPost(providerName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/settings/providers/save")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProvidersSavePost(req);
+                });
+
+        // ---- Admin: cloud connections ----
+        CROW_ROUTE(m_Server, "/api/connections")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionsListGet();
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionCreatePost(req);
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>")
+            .methods("PUT"_method)(
+                [this](crow::request const& req, std::string const& connectionName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionUpdatePut(req, connectionName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>")
+            .methods("DELETE"_method)(
+                [this](crow::request const& req, std::string const& connectionName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionDelete(connectionName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>/test")
+            .methods("POST"_method)(
+                [this](crow::request const& req, std::string const& connectionName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionTestPost(connectionName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/save")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleConnectionsSavePost();
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/authorize")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& connectionName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleOAuthAuthorizeGet(connectionName);
+                });
+
+        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/callback")
+            .methods("GET"_method)(
+                [this](crow::request const& req, std::string const& connectionName)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleOAuthCallbackGet(req, connectionName);
+                });
+
         // ---- Admin: POST /api/shutdown (admin only) ----
         CROW_ROUTE(m_Server, "/api/shutdown")
             .methods("POST"_method)(
                 [this](crow::request const& req)
                 {
-                    auto auth = Authenticate(req);
-                    if (!auth.Ok())
-                        return MakeAuthErrorResponse(auth.m_Error);
-                    if (!HasRole(auth, "admin"))
-                        return MakeAuthErrorResponse("insufficient_role");
+                    AuthResult auth;
+                    if (auto err = CheckAuth(req, "admin", auth); !err.empty())
+                        return MakeAuthErrorResponse(err);
 
                     LOG_SECURITY_INFO("[security] shutdown_requested ip={} user={}", req.remote_ip_address, auth.m_User);
                     Core::g_Core->RequestQuit();
@@ -1697,272 +1608,6 @@ namespace AIAssistant
                 });
     }
 
-    void WebServer::RegisterEngineRoutes()
-    {
-        // ---- Webhook: has its own HMAC auth ----
-        CROW_ROUTE(m_Server, "/api/webhook/<string>")
-            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
-                                    { return HandleWebhookPost(req, workflowId); });
-
-        // ---- Admin: n8n integration ----
-        CROW_ROUTE(m_Server, "/api/integrations/n8n/start")
-            .methods("POST"_method)(
-                [this](crow::request const& req)
-                {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty())
-                        return MakeAuthErrorResponse(err);
-                    return HandleN8nStartPost(req);
-                });
-    }
-
-#ifdef J9T_STUDIO
-    void WebServer::RegisterStudioRoutes()
-    {
-        // ---- Workflow Editor UI (React SPA) ----
-        CROW_ROUTE(m_Server, "/editor")([this]() { return ServeWorkflowEditorIndex(); });
-        CROW_ROUTE(m_Server, "/assets/<path>")
-        ([this](std::string const& path) { return ServeWorkflowEditorStatic("/assets/" + path); });
-        CROW_ROUTE(m_Server, "/editor/<path>")
-        ([this](std::string const& path) { return ServeWorkflowEditorStatic("/editor/" + path); });
-
-        // ---- Workflow CRUD ----
-        CROW_ROUTE(m_Server, "/api/workflows")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowsCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/reload")
-            .methods("POST"_method)([this]() { return HandleWorkflowsReloadPost(); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& workflowId)
-                                   { return HandleWorkflowUpdatePut(req, workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>")
-            .methods("DELETE"_method)(
-                [this](std::string const& workflowId) { return HandleWorkflowDelete(workflowId); });
-
-        // ---- Workflow versioning ----
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions")
-            .methods("GET"_method)(
-                [this](std::string const& workflowId) { return HandleWorkflowVersionsListGet(workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>")
-            .methods("GET"_method)([this](std::string const& workflowId, std::string const& timestamp)
-                                   { return HandleWorkflowVersionGetGet(workflowId, timestamp); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/versions/<string>/restore")
-            .methods("POST"_method)([this](std::string const& workflowId, std::string const& timestamp)
-                                    { return HandleWorkflowVersionRestorePost(workflowId, timestamp); });
-
-        // ---- Sub-workflow dependency graph ----
-        CROW_ROUTE(m_Server, "/api/workflows/dependency-graph")
-            .methods("GET"_method)([this]()
-            {
-                WorkflowRegistry const* registry = nullptr;
-                {
-                    std::scoped_lock<std::mutex> const lock(m_Mutex);
-                    registry = m_WorkflowRegistry;
-                }
-
-                if (registry == nullptr)
-                {
-                    return crow::response(503, "application/json", R"({"ok":false,"error":"registry_unavailable"})");
-                }
-
-                auto const graph = registry->GetSubWorkflowDependencyGraph();
-
-                crow::json::wvalue edgesArray(crow::json::wvalue::list{});
-                size_t idx = 0;
-                for (auto const& [parentId, children] : graph)
-                {
-                    for (auto const& childId : children)
-                    {
-                        crow::json::wvalue edge;
-                        edge["parent"] = parentId;
-                        edge["child"] = childId;
-                        edgesArray[idx++] = std::move(edge);
-                    }
-                }
-
-                crow::json::wvalue body;
-                body["ok"] = true;
-                body["edges"] = std::move(edgesArray);
-                return crow::response(200, "application/json", body.dump());
-            });
-
-        // ---- Sub-workflow tree structure ----
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/tree")
-            .methods("GET"_method)([this](std::string const& workflowId)
-            {
-                WorkflowRegistry const* registry = nullptr;
-                {
-                    std::scoped_lock<std::mutex> const lock(m_Mutex);
-                    registry = m_WorkflowRegistry;
-                }
-
-                if (registry == nullptr)
-                {
-                    return crow::response(503, "application/json", R"({"ok":false,"error":"registry_unavailable"})");
-                }
-
-                auto const workflowOpt = registry->GetWorkflow(workflowId);
-                if (!workflowOpt.has_value())
-                {
-                    return crow::response(404, "application/json", R"({"ok":false,"error":"not_found"})");
-                }
-
-                // Build a tree of sub-workflows by scanning the registry for children.
-                auto const allIds = registry->GetWorkflowIds();
-                std::string const prefix = workflowId + "__";
-
-                crow::json::wvalue childrenArray(crow::json::wvalue::list{});
-                size_t idx = 0;
-
-                for (auto const& id : allIds)
-                {
-                    auto const childOpt = registry->GetWorkflow(id);
-                    if (!childOpt.has_value() || !childOpt->m_IsSubWorkflow)
-                    {
-                        continue;
-                    }
-                    if (childOpt->m_ParentWorkflowId != workflowId &&
-                        id.rfind(prefix, 0) != 0)
-                    {
-                        continue;
-                    }
-
-                    crow::json::wvalue child;
-                    child["id"] = id;
-                    child["label"] = childOpt->m_Label;
-                    child["folderPath"] = childOpt->m_ContainerFolderPath;
-                    child["parentId"] = childOpt->m_ParentWorkflowId;
-                    childrenArray[idx++] = std::move(child);
-                }
-
-                crow::json::wvalue body;
-                body["ok"] = true;
-                body["workflowId"] = workflowId;
-                body["label"] = workflowOpt->m_Label;
-                body["isContainer"] = !workflowOpt->m_ContainerPath.empty();
-                body["children"] = std::move(childrenArray);
-                return crow::response(200, "application/json", body.dump());
-            });
-
-        // ---- Workflow validation + run trigger ----
-        CROW_ROUTE(m_Server, "/api/workflows/validate")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleWorkflowValidatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/validate")
-            .methods("GET"_method)(
-                [this](std::string const& workflowId) { return HandleWorkflowValidateGet(workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/run")
-            .methods("POST"_method)([this](crow::request const& req, std::string const& workflowId)
-                                    { return HandleWorkflowRunPost(req, workflowId); });
-
-        CROW_ROUTE(m_Server, "/api/workflows/<string>/clean")
-            .methods("DELETE"_method)(
-                [this](std::string const& workflowId) { return HandleWorkflowCleanDelete(workflowId); });
-
-        // ---- Script / file check ----
-        CROW_ROUTE(m_Server, "/api/scripts/check")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleScriptCheckGet(req); });
-
-        CROW_ROUTE(m_Server, "/api/scripts/registry")
-            .methods("GET"_method)([this]() { return HandleScriptRegistryGet(); });
-
-        CROW_ROUTE(m_Server, "/api/files/check")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleFileCheckGet(req); });
-
-        // ---- Log analysis (requires AI) ----
-        CROW_ROUTE(m_Server, "/api/log/analyze-last-run")
-            .methods("GET"_method)([this](crow::request const& req) { return HandleLogAnalyzeLastRunGet(req); });
-
-        // ---- AI interfaces API ----
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
-            .methods("GET"_method)([this]() { return HandleAiInterfacesListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
-            .methods("PUT"_method)(
-                [this](crow::request const& req, std::string const& name) { return HandleAiInterfaceUpdatePut(req, name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/<string>")
-            .methods("DELETE"_method)(
-                [this](std::string const& name) { return HandleAiInterfaceDeleteDelete(name); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/save")
-            .methods("POST"_method)([this]() { return HandleAiInterfacesSavePost(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/ai-interfaces/test")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleAiInterfaceTestPost(req); });
-
-        // ---- Config settings API ----
-        CROW_ROUTE(m_Server, "/api/settings/config")
-            .methods("GET"_method)([this]() { return HandleConfigSettingsGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/config")
-            .methods("PUT"_method)([this](crow::request const& req) { return HandleConfigSettingsPut(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/config/reload")
-            .methods("POST"_method)([this]() { return HandleConfigReloadPost(); });
-
-        // ---- Provider settings API ----
-        CROW_ROUTE(m_Server, "/api/settings/providers")
-            .methods("GET"_method)([this]() { return HandleProvidersListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleProviderCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& providerName)
-                                   { return HandleProviderUpdatePut(req, providerName); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>")
-            .methods("DELETE"_method)(
-                [this](std::string const& providerName) { return HandleProviderDelete(providerName); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/<string>/default")
-            .methods("POST"_method)(
-                [this](std::string const& providerName) { return HandleProviderSetDefaultPost(providerName); });
-
-        CROW_ROUTE(m_Server, "/api/settings/providers/save")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleProvidersSavePost(req); });
-
-        // ---- Cloud connections API ----
-        CROW_ROUTE(m_Server, "/api/connections")
-            .methods("GET"_method)([this]() { return HandleConnectionsListGet(); });
-
-        CROW_ROUTE(m_Server, "/api/connections")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleConnectionCreatePost(req); });
-
-        CROW_ROUTE(m_Server, "/api/connections/<string>")
-            .methods("PUT"_method)([this](crow::request const& req, std::string const& connectionName)
-                                   { return HandleConnectionUpdatePut(req, connectionName); });
-
-        CROW_ROUTE(m_Server, "/api/connections/<string>")
-            .methods("DELETE"_method)(
-                [this](std::string const& connectionName) { return HandleConnectionDelete(connectionName); });
-
-        CROW_ROUTE(m_Server, "/api/connections/<string>/test")
-            .methods("POST"_method)(
-                [this](std::string const& connectionName) { return HandleConnectionTestPost(connectionName); });
-
-        CROW_ROUTE(m_Server, "/api/connections/save")
-            .methods("POST"_method)([this]() { return HandleConnectionsSavePost(); });
-
-        // OAuth consent flow
-        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/authorize")
-            .methods("GET"_method)(
-                [this](std::string const& connectionName) { return HandleOAuthAuthorizeGet(connectionName); });
-
-        CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/callback")
-            .methods("GET"_method)([this](crow::request const& req, std::string const& connectionName)
-                                   { return HandleOAuthCallbackGet(req, connectionName); });
-    }
-#endif // J9T_STUDIO
 
     crow::response WebServer::HandleMcpHeartbeatPost()
     {
@@ -1981,22 +1626,28 @@ namespace AIAssistant
         crow::json::wvalue status;
         status["ok"] = true;
 
-        // Edition + capabilities
+        // Edition + capabilities. Capabilities reflect actual route registration —
+        // routes that are role-gated but exist in both editions are reported `true`
+        // here regardless of edition; the dashboard does its own role check via
+        // /api/auth/whoami before exposing admin/operator UI.
 #ifdef J9T_STUDIO
         status["edition"] = "studio";
-        status["capabilities"]["workflow_crud"] = true;
-        status["capabilities"]["workflow_run_endpoint"] = true;
-        status["capabilities"]["ai_assistant"] = true;
-        status["capabilities"]["ai_jcwf"] = true;
-        status["capabilities"]["settings_api"] = true;
+        status["capabilities"]["workflow_crud"] = true;       // Studio-only: POST/PUT/DELETE /api/workflows
+        status["capabilities"]["ai_assistant"] = true;        // Studio-only: /ws/assistant
+        status["capabilities"]["ai_jcwf"] = true;             // Studio-only: AI JCWF generation
 #else
         status["edition"] = "engine";
         status["capabilities"]["workflow_crud"] = false;
-        status["capabilities"]["workflow_run_endpoint"] = false;
         status["capabilities"]["ai_assistant"] = false;
         status["capabilities"]["ai_jcwf"] = false;
-        status["capabilities"]["settings_api"] = false;
 #endif
+        // Routes that landed in Common after §5i — registered in both editions,
+        // role-gated at the handler.
+        status["capabilities"]["workflow_run_endpoint"] = true;  // POST /api/workflows/<id>/run (operator+)
+        status["capabilities"]["settings_api"] = true;           // /api/settings/* + /api/connections/* (admin)
+        status["capabilities"]["log_analyze"] = true;            // GET /api/log/analyze-last-run (operator+)
+        status["capabilities"]["workflow_versions"] = true;      // GET /api/workflows/<id>/versions* (admin)
+        status["capabilities"]["workflow_reload"] = true;        // POST /api/workflows/reload (admin)
 
         status["tls"] = m_TlsEnabled;
 
@@ -2222,7 +1873,6 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
-#ifdef J9T_STUDIO
     crow::response WebServer::HandleWorkflowsReloadPost()
     {
         WorkflowRegistry* workflowRegistryPtr = nullptr;
@@ -2278,7 +1928,6 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, responseJson);
     }
-#endif // J9T_STUDIO
 
     crow::response WebServer::HandleWorkflowGet(std::string const& workflowId)
     {
@@ -2329,227 +1978,6 @@ namespace AIAssistant
         return MakeJsonTextResponse(200, workflowJsonContent);
     }
 
-#ifdef J9T_STUDIO
-    crow::response WebServer::HandleWorkflowsCreatePost(crow::request const& req)
-    {
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
-        {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "POST /api/workflows");
-        }
-
-        WorkflowJsonParser workflowJsonParser;
-        WorkflowDefinition parsedWorkflow;
-        std::string parseErrorMessage;
-        if (!workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow, parseErrorMessage))
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "POST /api/workflows");
-        }
-
-        if (!IsValidWorkflowId(parsedWorkflow.m_Id))
-        {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Parsed JCWF id contains invalid characters",
-                                         "POST /api/workflows");
-        }
-
-        fs::path const targetPath = (workflowsDirectoryAbsolute / (parsedWorkflow.m_Id + ".jcwf")).lexically_normal();
-        if (fs::exists(targetPath))
-        {
-            return MakeWorkflowJsonError(409, "workflow_already_exists",
-                                         "Workflow file already exists: " + targetPath.string(), "POST /api/workflows",
-                                         parsedWorkflow.m_Id);
-        }
-
-        // Create the .jcwf zip container via the registry (handles extracted dir + pack).
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            if (m_WorkflowRegistry != nullptr)
-            {
-                std::string upsertErrorMessage;
-                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage))
-                {
-                    return MakeWorkflowJsonError(500, "workflow_write_failed", upsertErrorMessage, "POST /api/workflows",
-                                                 parsedWorkflow.m_Id);
-                }
-            }
-        }
-
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["id"] = parsedWorkflow.m_Id;
-        responseJson["savedPath"] = targetPath.string();
-        return MakeJsonResponse(201, responseJson);
-    }
-
-    crow::response WebServer::HandleWorkflowUpdatePut(crow::request const& req, std::string const& workflowId)
-    {
-        if (!IsValidWorkflowId(workflowId))
-        {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
-                                         "PUT /api/workflows/{id}", workflowId);
-        }
-
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
-        {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "PUT /api/workflows/{id}", workflowId);
-        }
-
-        WorkflowJsonParser workflowJsonParser;
-        WorkflowDefinition parsedWorkflow;
-        std::string parseErrorMessage;
-        if (!workflowJsonParser.ParseWorkflowJson(req.body, parsedWorkflow, parseErrorMessage))
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "PUT /api/workflows/{id}", workflowId);
-        }
-
-        if (parsedWorkflow.m_Id != workflowId)
-        {
-            return MakeWorkflowJsonError(400, "workflow_id_mismatch", "URL workflow id does not match parsed JCWF id",
-                                         "PUT /api/workflows/{id}", workflowId);
-        }
-
-        fs::path const targetPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
-        if (!fs::exists(targetPath))
-        {
-            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow file does not exist: " + targetPath.string(),
-                                         "PUT /api/workflows/{id}", workflowId);
-        }
-
-        // Version history: backup the existing file before overwriting
-        {
-            fs::path const historyDir = workflowsDirectoryAbsolute / ".history" / workflowId;
-            std::error_code ec;
-            fs::create_directories(historyDir, ec);
-            if (!ec)
-            {
-                auto const now = std::chrono::system_clock::now();
-                auto const timeT = std::chrono::system_clock::to_time_t(now);
-                std::tm gmTime{};
-#ifdef _WIN32
-                gmtime_s(&gmTime, &timeT);
-#else
-                gmtime_r(&timeT, &gmTime);
-#endif
-                char timestampBuf[32];
-                std::strftime(timestampBuf, sizeof(timestampBuf), "%Y%m%dT%H%M%S", &gmTime);
-
-                fs::path const backupPath = historyDir / (std::string(timestampBuf) + ".jcwf");
-                fs::copy_file(targetPath, backupPath, fs::copy_options::overwrite_existing, ec);
-            }
-        }
-
-        // Update the .jcwf zip container via the registry (handles extracted dir + repack).
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            if (m_WorkflowRegistry != nullptr)
-            {
-                std::string upsertErrorMessage;
-                if (!m_WorkflowRegistry->SaveOrUpdateWorkflowFromJson(req.body, targetPath, upsertErrorMessage))
-                {
-                    return MakeWorkflowJsonError(500, "workflow_write_failed", upsertErrorMessage,
-                                                 "PUT /api/workflows/{id}", workflowId);
-                }
-            }
-        }
-
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["id"] = workflowId;
-        responseJson["savedPath"] = targetPath.string();
-        return MakeJsonResponse(200, responseJson);
-    }
-
-    crow::response WebServer::HandleWorkflowDelete(std::string const& workflowId)
-    {
-        if (!IsValidWorkflowId(workflowId))
-        {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
-                                         "DELETE /api/workflows/{id}", workflowId);
-        }
-
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
-        {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "DELETE /api/workflows/{id}", workflowId);
-        }
-
-        WorkflowRegistry workflowRegistry;
-        if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
-        {
-            return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
-                                         "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
-                                         "DELETE /api/workflows/{id}", workflowId);
-        }
-
-        std::optional<WorkflowDefinition> workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
-        if (!workflowDefinition.has_value())
-        {
-            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found", "DELETE /api/workflows/{id}",
-                                         workflowId);
-        }
-
-        fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
-        if (workflowFilePath.is_relative())
-        {
-            workflowFilePath = (workflowsDirectoryAbsolute / workflowFilePath).lexically_normal();
-        }
-
-        std::error_code errorCode;
-
-        // Delete the .jcwf zip container.
-        fs::path const containerPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
-        bool removed = false;
-        if (fs::exists(containerPath, errorCode))
-        {
-            removed = fs::remove(containerPath, errorCode);
-            if (errorCode)
-            {
-                return MakeWorkflowJsonError(500, "workflow_delete_failed",
-                                             "Failed to delete container: " + containerPath.string() +
-                                                 " error=" + errorCode.message(),
-                                             "DELETE /api/workflows/{id}", workflowId);
-            }
-        }
-
-        // Delete the extracted directory.
-        fs::path const extractedDir = (workflowsDirectoryAbsolute / workflowId).lexically_normal();
-        if (fs::is_directory(extractedDir, errorCode))
-        {
-            fs::remove_all(extractedDir, errorCode);
-        }
-
-        // Also try the old plain-file path (for any leftover files).
-        if (!removed && fs::exists(workflowFilePath, errorCode))
-        {
-            removed = fs::remove(workflowFilePath, errorCode);
-        }
-
-        if (!removed)
-        {
-            return MakeWorkflowJsonError(404, "workflow_not_found",
-                                         "Workflow files did not exist for: " + workflowId,
-                                         "DELETE /api/workflows/{id}", workflowId);
-        }
-
-        // Remove from the main registry.
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            if (m_WorkflowRegistry != nullptr)
-            {
-                std::string removeError;
-                m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError);
-            }
-        }
-
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["id"] = workflowId;
-        return MakeJsonResponse(200, responseJson);
-    }
 
     // ---- Workflow versioning ----
 
@@ -2746,114 +2174,6 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
-    crow::response WebServer::HandleWorkflowValidatePost(crow::request const& req)
-    {
-        std::vector<WorkflowValidationFinding> errors;
-        std::vector<WorkflowValidationFinding> warnings;
-        std::vector<WorkflowValidationFinding> infos;
-        std::string workflowId;
-        std::string parseErrorMessage;
-
-        ValidateJcwfJsonText(req.body, errors, warnings, infos, workflowId, parseErrorMessage);
-        if (!parseErrorMessage.empty())
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "POST /api/workflows/validate");
-        }
-
-        bool const ok = errors.empty();
-        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(ok, workflowId, errors, warnings, infos);
-        return MakeJsonResponse(200, responseJson);
-    }
-
-    crow::response WebServer::HandleWorkflowValidateGet(std::string const& workflowId)
-    {
-        if (!IsValidWorkflowId(workflowId))
-        {
-            return MakeWorkflowJsonError(400, "invalid_workflow_id", "Workflow id contains invalid characters",
-                                         "GET /api/workflows/{id}/validate", workflowId);
-        }
-
-        std::string errorMessage;
-        fs::path const workflowsDirectoryAbsolute = GetWorkflowsDirectoryAbsolute(errorMessage);
-        if (workflowsDirectoryAbsolute.empty())
-        {
-            return MakeWorkflowJsonError(500, "config_error", errorMessage, "GET /api/workflows/{id}/validate", workflowId);
-        }
-
-        WorkflowRegistry const* workflowRegistryPtr = nullptr;
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            workflowRegistryPtr = m_WorkflowRegistry;
-        }
-
-        std::optional<WorkflowDefinition> workflowDefinition;
-
-        if (workflowRegistryPtr != nullptr)
-        {
-            workflowDefinition = workflowRegistryPtr->GetWorkflow(workflowId);
-        }
-        else
-        {
-            WorkflowRegistry workflowRegistry;
-            if (!workflowRegistry.LoadDirectory(workflowsDirectoryAbsolute))
-            {
-                return MakeWorkflowJsonError(500, "workflow_registry_load_failed",
-                                             "Failed to load workflows directory: " + workflowsDirectoryAbsolute.string(),
-                                             "GET /api/workflows/{id}/validate", workflowId);
-            }
-
-            workflowDefinition = workflowRegistry.GetWorkflow(workflowId);
-        }
-        if (!workflowDefinition.has_value())
-        {
-            return MakeWorkflowJsonError(404, "workflow_not_found", "Workflow not found: " + workflowId,
-                                         "GET /api/workflows/{id}/validate", workflowId);
-        }
-
-        fs::path workflowFilePath = fs::path(workflowDefinition->m_WorkflowFilePath);
-        if (workflowFilePath.is_relative())
-        {
-            workflowFilePath = (workflowsDirectoryAbsolute / workflowFilePath).lexically_normal();
-        }
-
-        std::string workflowJsonContent;
-        if (!ReadTextFile(workflowFilePath, workflowJsonContent))
-        {
-            return MakeWorkflowJsonError(500, "workflow_read_failed",
-                                         "Failed to read workflow file: " + workflowFilePath.string(),
-                                         "GET /api/workflows/{id}/validate", workflowId);
-        }
-
-        std::vector<WorkflowValidationFinding> errors;
-        std::vector<WorkflowValidationFinding> warnings;
-        std::vector<WorkflowValidationFinding> infos;
-        std::string parsedWorkflowId;
-        std::string parseErrorMessage;
-
-        ValidateJcwfJsonText(workflowJsonContent, errors, warnings, infos, parsedWorkflowId, parseErrorMessage);
-        if (!parseErrorMessage.empty())
-        {
-            return MakeWorkflowJsonError(400, "invalid_jcwf", parseErrorMessage, "GET /api/workflows/{id}/validate",
-                                         workflowId);
-        }
-
-        if (!parsedWorkflowId.empty() && parsedWorkflowId != workflowId)
-        {
-            WorkflowValidationFinding mismatch;
-            mismatch.m_Code = "workflow_id_mismatch";
-            mismatch.m_Message =
-                "Workflow id in file ('" + parsedWorkflowId + "') does not match requested id ('" + workflowId + "')";
-            mismatch.m_Path = "$.id";
-            mismatch.m_TaskId = std::string();
-            mismatch.m_Tier = "C";
-            warnings.push_back(std::move(mismatch));
-        }
-
-        bool const ok = errors.empty();
-        crow::json::wvalue responseJson = MakeWorkflowValidationResponse(
-            ok, parsedWorkflowId.empty() ? workflowId : parsedWorkflowId, errors, warnings, infos);
-        return MakeJsonResponse(200, responseJson);
-    }
 
     crow::response WebServer::HandleWorkflowRunPost(crow::request const& req, std::string const& workflowId)
     {
@@ -2992,7 +2312,6 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, responseJson);
     }
-#endif // J9T_STUDIO
 
     crow::response WebServer::HandleWorkflowRunsActiveGet()
     {
@@ -3504,22 +2823,21 @@ namespace AIAssistant
         }
 
         // ---- HMAC-SHA256 signature verification ----
-#ifndef J9T_STUDIO
-        // Engine mode: webhook secret is mandatory.
+        // Webhook secret is mandatory in both editions; the validator rejects JCWFs
+        // missing one, so reaching this point with an empty secret means the trigger
+        // was registered before the validator change or via direct file edit.
         if (webhookTrigger->m_Secret.empty())
         {
             LOG_SECURITY_WARN("[security] webhook_rejected reason=secret_not_configured ip={} workflowId={}",
                               req.remote_ip_address, workflowId);
-            LOG_APP_WARN("WebServer::HandleWebhookPost: webhook secret not configured for workflow '{}' "
-                         "(required in Engine mode)",
-                         workflowId);
+            LOG_APP_ERROR("WebServer::HandleWebhookPost: webhook secret not configured for workflow '{}' "
+                          "(secrets are mandatory)",
+                          workflowId);
             return MakeWorkflowJsonError(403, "secret_required",
-                                         "Webhook secret is required in Engine mode. "
-                                         "Configure a secret in the workflow trigger.",
+                                         "Webhook secret is required. "
+                                         "Configure a secret in the workflow's webhook trigger.",
                                          kEndpoint, workflowId);
         }
-#endif
-        if (!webhookTrigger->m_Secret.empty())
         {
             std::string signatureHeader;
             auto const it = req.headers.find("X-Webhook-Signature");
@@ -3687,244 +3005,6 @@ namespace AIAssistant
         return MakeJsonResponse(202, responseJson);
     }
 
-#ifdef J9T_STUDIO
-    crow::response WebServer::HandleScriptCheckGet(crow::request const& req)
-    {
-        // GET /api/scripts/check?path=scripts/runMake.sh
-        // Returns: { ok, path, exists, executable, error? }
-
-        std::string scriptPath;
-        auto pathParam = req.url_params.get("path");
-        if (pathParam != nullptr)
-        {
-            scriptPath = std::string(pathParam);
-        }
-
-        if (scriptPath.empty())
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "missing_path";
-            responseJson["message"] = "Query parameter 'path' is required.";
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        // Security: enforce "scripts/" prefix (same rule as ShellTaskExecutor::ValidateScriptPath)
-        if (scriptPath.rfind("scripts/", 0) != 0)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "invalid_path";
-            responseJson["message"] = "Script path must be inside the 'scripts/' directory.";
-            responseJson["path"] = scriptPath;
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        // Allow ".." in raw path (e.g. scripts/helpers/../run.sh) but the
-        // lexically-normalized result must still start with "scripts/" (JCWF spec §3.1.2).
-        std::string const normalizedScriptPath = fs::path(scriptPath).lexically_normal().string();
-        if (normalizedScriptPath.rfind("scripts/", 0) != 0)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "invalid_path";
-            responseJson["message"] = "Resolved script path escapes the 'scripts/' directory.";
-            responseJson["path"] = scriptPath;
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        // Resolve relative to JarvisAgent launch CWD (same as ShellTaskExecutor)
-        fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
-        if (launchCWD.empty())
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "server_error";
-            responseJson["message"] = "Cannot determine JarvisAgent working directory.";
-            return MakeJsonResponse(500, responseJson);
-        }
-
-        fs::path const absolutePath = (launchCWD / fs::path(scriptPath)).lexically_normal();
-
-        bool const exists = fs::exists(absolutePath);
-        bool executable = false;
-
-        if (exists)
-        {
-            // Check if regular file and has execute permission
-            std::error_code ec;
-            auto const status = fs::status(absolutePath, ec);
-            if (!ec && fs::is_regular_file(status))
-            {
-                auto const perms = status.permissions();
-                executable =
-                    (perms & (fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec)) != fs::perms::none;
-            }
-        }
-
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["path"] = scriptPath;
-        responseJson["exists"] = exists;
-        responseJson["executable"] = executable;
-        return MakeJsonResponse(200, responseJson);
-    }
-
-    crow::response WebServer::HandleFileCheckGet(crow::request const& req)
-    {
-        // GET /api/files/check?path=<fileInput>&workflowId=<id>&wd=<working_directory>
-        // Uses TaskPathResolver (same as runtime) to resolve the file path.
-        // Returns: { ok, path, exists, resolved }
-
-        std::string filePath;
-        std::string workflowId;
-        std::string workingDirectory;
-
-        auto pathParam = req.url_params.get("path");
-        if (pathParam != nullptr)
-        {
-            filePath = std::string(pathParam);
-        }
-        auto wfParam = req.url_params.get("workflowId");
-        if (wfParam != nullptr)
-        {
-            workflowId = std::string(wfParam);
-        }
-        auto wdParam = req.url_params.get("wd");
-        if (wdParam != nullptr)
-        {
-            workingDirectory = std::string(wdParam);
-        }
-
-        if (filePath.empty())
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "missing_path";
-            responseJson["message"] = "Query parameter 'path' is required.";
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        // Security: reject absolute paths
-        if (fs::path(filePath).is_absolute())
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "invalid_path";
-            responseJson["message"] = "Absolute paths are not allowed.";
-            responseJson["path"] = filePath;
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
-        if (launchCWD.empty())
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "server_error";
-            responseJson["message"] = "Cannot determine JarvisAgent working directory.";
-            return MakeJsonResponse(500, responseJson);
-        }
-
-        // Resolve using TaskPathResolver — same code path as the runtime.
-        fs::path absolutePath;
-
-        if (!workflowId.empty())
-        {
-            WorkflowRegistry const* registry = nullptr;
-            {
-                std::scoped_lock<std::mutex> const lock(m_Mutex);
-                registry = m_WorkflowRegistry;
-            }
-
-            if (registry != nullptr)
-            {
-                auto const workflowOpt = registry->GetWorkflow(workflowId);
-                if (workflowOpt.has_value())
-                {
-                    fs::path const baseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowOpt.value());
-                    fs::path const taskDir = TaskPathResolver::ResolveTaskWorkingDirectoryPath(baseDir, workingDirectory);
-                    absolutePath = TaskPathResolver::ResolvePath(taskDir, fs::path(filePath));
-                }
-            }
-        }
-
-        // Fallback: resolve relative to launchCWD (backward compatibility).
-        if (absolutePath.empty())
-        {
-            absolutePath = (launchCWD / fs::path(filePath)).lexically_normal();
-        }
-
-        // Security: verify resolved path stays within CWD
-        std::string const absStr = absolutePath.string();
-        std::string const cwdStr = launchCWD.string();
-        if (absStr.rfind(cwdStr, 0) != 0)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["ok"] = false;
-            responseJson["error"] = "invalid_path";
-            responseJson["message"] = "Resolved path escapes the working directory.";
-            responseJson["path"] = filePath;
-            return MakeJsonResponse(400, responseJson);
-        }
-
-        bool const exists = fs::exists(absolutePath);
-
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["path"] = filePath;
-        responseJson["exists"] = exists;
-        responseJson["resolved"] = absolutePath.string();
-        return MakeJsonResponse(200, responseJson);
-    }
-
-    crow::response WebServer::HandleScriptRegistryGet()
-    {
-        // GET /api/scripts/registry
-        // Returns: { "scripts": [ { "path", "short", "params", "description", "outputs" }, ... ] }
-
-        auto* registry = App::g_App ? App::g_App->GetScriptRegistry() : nullptr;
-        if (registry == nullptr)
-        {
-            crow::json::wvalue responseJson;
-            responseJson["scripts"] = crow::json::wvalue::list();
-            return MakeJsonResponse(200, responseJson);
-        }
-
-        auto entries = registry->GetEntries();
-
-        crow::json::wvalue responseJson;
-        std::vector<crow::json::wvalue> scriptsArray;
-        scriptsArray.reserve(entries.size());
-
-        for (auto const& entry : entries)
-        {
-            crow::json::wvalue scriptJson;
-            scriptJson["path"] = entry.m_FilePath;
-            scriptJson["short"] = entry.m_Short;
-            scriptJson["description"] = entry.m_Description;
-
-            std::vector<crow::json::wvalue> paramsArray;
-            for (auto const& p : entry.m_Params)
-            {
-                paramsArray.push_back(crow::json::wvalue(p));
-            }
-            scriptJson["params"] = std::move(paramsArray);
-
-            std::vector<crow::json::wvalue> outputsArray;
-            for (auto const& o : entry.m_Outputs)
-            {
-                outputsArray.push_back(crow::json::wvalue(o));
-            }
-            scriptJson["outputs"] = std::move(outputsArray);
-
-            scriptsArray.push_back(std::move(scriptJson));
-        }
-
-        responseJson["scripts"] = std::move(scriptsArray);
-        return MakeJsonResponse(200, responseJson);
-    }
-#endif // J9T_STUDIO
 
     crow::response WebServer::ReadLogFile(crow::request const& req, std::string const& logPath)
     {
@@ -4099,7 +3179,6 @@ namespace AIAssistant
         return ReadLogFile(req, "log/security.txt");
     }
 
-#ifdef J9T_STUDIO
     crow::response WebServer::HandleLogAnalyzeLastRunGet(crow::request const& req)
     {
         // GET /api/log/analyze-last-run?index=N
@@ -4327,14 +3406,14 @@ namespace AIAssistant
 
         return MakeJsonResponse(200, resp);
     }
-#endif // J9T_STUDIO
 
     void WebServer::RegisterWebSocket()
     {
         CROW_WEBSOCKET_ROUTE(m_Server, "/ws")
-#ifndef J9T_STUDIO
-            // Engine: validate the dashboard session cookie at upgrade time.
-            // Studio has no auth; Crow's .onaccept is omitted there to allow all local upgrades.
+            // Validate the credential at upgrade time in both editions.
+            // §5i made the auth funnel identical across Studio and Engine —
+            // anonymous WS clients otherwise receive workflow-run snapshots
+            // and log lines on connect, which is a real data leak.
             .onaccept(
                 [this](crow::request const& req, void**)
                 {
@@ -4347,7 +3426,6 @@ namespace AIAssistant
                     }
                     return true;
                 })
-#endif
             .onopen(
                 [this](crow::websocket::connection& conn)
                 {
@@ -4642,19 +3720,6 @@ namespace AIAssistant
                 });
     }
 
-#ifdef J9T_STUDIO
-    void WebServer::ShutdownAssistantController() { m_AssistantController.Shutdown(); }
-
-    void WebServer::RegisterAssistantWebSocket()
-    {
-        CROW_WEBSOCKET_ROUTE(m_Server, "/ws/assistant")
-            .onopen([this](crow::websocket::connection& conn) { m_AssistantController.OnOpen(conn); })
-            .onclose([this](crow::websocket::connection& conn, const std::string& /*reason*/, uint16_t /*code*/)
-                     { m_AssistantController.OnClose(conn); })
-            .onmessage([this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
-                       { m_AssistantController.OnMessage(conn, data); });
-    }
-#endif // J9T_STUDIO
 
     bool WebServer::Start()
     {
@@ -5088,7 +4153,6 @@ namespace AIAssistant
         BroadcastJSON(msg.dump());
     }
 
-#ifdef J9T_STUDIO
     // =========================================================================
     // AI interfaces API handlers (config.json "API interfaces")
     // =========================================================================
@@ -5154,8 +4218,8 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API3: item["api_type"] = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: item["api_type"] = "API4"; break;
                 case ConfigParser::EngineConfig::InterfaceType::Test: item["api_type"] = "Test"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API1Azure: item["api_type"] = "API1Azure"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API5: item["api_type"] = "API5"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API6: item["api_type"] = "API6"; break;
                 default: item["api_type"] = "API1"; break;
             }
             item["key_name"] = iface.m_KeyName;
@@ -5257,10 +4321,10 @@ namespace AIAssistant
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
         else if (apiTypeStr == "Test")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
-        else if (apiTypeStr == "API1Azure")
-            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1Azure;
         else if (apiTypeStr == "API5")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
+        else if (apiTypeStr == "API6")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API6;
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
 
@@ -5351,10 +4415,10 @@ namespace AIAssistant
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
                         else if (apiTypeStr == "Test")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
-                        else if (apiTypeStr == "API1Azure")
-                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1Azure;
                         else if (apiTypeStr == "API5")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
+                        else if (apiTypeStr == "API6")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API6;
                         else
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
                     }
@@ -5457,8 +4521,8 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
                 case ConfigParser::EngineConfig::InterfaceType::Test: apiStr = "Test"; break;
-                case ConfigParser::EngineConfig::InterfaceType::API1Azure: apiStr = "API1Azure"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API5: apiStr = "API5"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API6: apiStr = "API6"; break;
                 default: apiStr = "API1"; break;
             }
 
@@ -5605,7 +4669,16 @@ namespace AIAssistant
         std::string error;
         int64_t latencyMs = 0;
 
+#ifdef J9T_STUDIO
         bool const ok = m_AiJcwfService.TestAiInterface(static_cast<size_t>(index), responsePreview, error, latencyMs);
+#else
+        // Engine has no AiJcwfService (the AI test path is part of the Studio
+        // generation pipeline and requires the full assistant module surface).
+        // The settings UI in Engine still surfaces the interface list for admins
+        // to inspect; live-test must be done from a Studio install.
+        bool const ok = false;
+        error = "ai_test_not_available_in_engine";
+#endif
 
         auto const& config = Core::g_Core->GetConfig();
         std::string interfaceName;
@@ -5898,8 +4971,6 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
-#endif // J9T_STUDIO
-
     // =========================================================================
     // Key management API handlers (both editions — Engine also needs unlock)
     // =========================================================================
@@ -6067,7 +5138,6 @@ namespace AIAssistant
         return MakeJsonResponse(200, responseJson);
     }
 
-#ifdef J9T_STUDIO
     // =========================================================================
     // Provider settings API handlers
     // =========================================================================
@@ -7275,7 +6345,6 @@ namespace AIAssistant
         response.set_header("Content-Type", "text/html");
         return response;
     }
-#endif // J9T_STUDIO
 
     // ========================================================================
     // MCP key store lifecycle + auth endpoints (both editions)
@@ -8756,7 +7825,8 @@ namespace AIAssistant
         // ---- Rate-limit + auth-failure buckets ----
         {
             std::lock_guard<std::mutex> lock(m_RateLimitMutex);
-            signals["rate_limit_buckets_tracked"] = static_cast<int64_t>(m_RateLimitBuckets.size());
+            signals["rate_limit_buckets_preauth"] = static_cast<int64_t>(m_PreAuthBuckets.size());
+            signals["rate_limit_buckets_authenticated"] = static_cast<int64_t>(m_AuthenticatedBuckets.size());
             signals["auth_failure_records"] = static_cast<int64_t>(m_AuthFailures.size());
         }
 
