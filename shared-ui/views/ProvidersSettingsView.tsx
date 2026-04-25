@@ -17,12 +17,20 @@ type EditingKey = {
   private_key_pem: string;
   username: string;
   password: string;
+  // AWS dual-secret: api_key carries access_key_id, these two ride alongside.
+  secret_access_key: string;
+  session_token: string;
+  // Free-form params: region (Bedrock) or any future provider-specific keys.
+  params: Record<string, string>;
   isNew: boolean;
 };
 
 function emptyKey(): EditingKey
 {
-  return { name: "", api_key: "", credential_type: "api_key", scopes: "", private_key_pem: "", username: "", password: "", isNew: true };
+  return {
+    name: "", api_key: "", credential_type: "api_key", scopes: "", private_key_pem: "",
+    username: "", password: "", secret_access_key: "", session_token: "", params: {}, isNew: true,
+  };
 }
 
 type ProvidersSettingsViewProps = {
@@ -105,6 +113,23 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
       setErrorMessage("API key is required");
       return;
     }
+    if (editing.credential_type === "aws" && editing.isNew && (!editing.api_key.trim() || !editing.secret_access_key.trim()))
+    {
+      setErrorMessage("AWS access_key_id and secret_access_key are required");
+      return;
+    }
+
+    // Merge AWS dual-secret fields into params for transport. Server-side params
+    // accept these keys; the secret subset is never returned on subsequent reads.
+    const buildParams = (): Record<string, string> | undefined => {
+      const merged = { ...editing.params };
+      if (editing.credential_type === "aws")
+      {
+        if (editing.secret_access_key) merged.secret_access_key = editing.secret_access_key;
+        if (editing.session_token) merged.session_token = editing.session_token;
+      }
+      return Object.keys(merged).length > 0 ? merged : undefined;
+    };
 
     if (editing.isNew)
     {
@@ -116,6 +141,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
         private_key_pem: editing.private_key_pem || undefined,
         username: editing.username || undefined,
         password: editing.password || undefined,
+        params: buildParams(),
       });
       if (result.ok)
       {
@@ -131,15 +157,17 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
     }
     else
     {
-      const updates: Record<string, string> = {};
+      const updates: Record<string, unknown> = {};
       if (editing.api_key) updates.api_key = editing.api_key;
       updates.credential_type = editing.credential_type;
       if (editing.scopes) updates.scopes = editing.scopes;
       if (editing.private_key_pem) updates.private_key_pem = editing.private_key_pem;
       if (editing.username) updates.username = editing.username;
       if (editing.password) updates.password = editing.password;
+      const params = buildParams();
+      if (params) updates.params = params;
 
-      const result = await updateProvider(editing.name, updates);
+      const result = await updateProvider(editing.name, updates as Parameters<typeof updateProvider>[1]);
       if (result.ok)
       {
         setStatusMessage(`Updated key "${editing.name}"`);
@@ -270,7 +298,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
                 <button
                   className="btn"
                   type="button"
-                  onClick={() => { setShowPassword(false); setEditing({ name: p.name, api_key: "", credential_type: p.credential_type ?? "api_key", scopes: p.scopes ?? "", private_key_pem: "", username: p.username ?? "", password: "", isNew: false }); }}
+                  onClick={() => { setShowPassword(false); setEditing({ name: p.name, api_key: "", credential_type: p.credential_type ?? "api_key", scopes: p.scopes ?? "", private_key_pem: "", username: p.username ?? "", password: "", secret_access_key: "", session_token: "", params: { ...(p.params ?? {}) }, isNew: false }); }}
                 >
                   Edit
                 </button>
@@ -396,6 +424,7 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
               <option value="oauth">OAuth 2.0</option>
               <option value="key_pair">Key Pair (RSA)</option>
               <option value="credentials">Username / Password</option>
+              <option value="aws">AWS (access key + secret)</option>
             </select>
           </div>
 
@@ -509,6 +538,53 @@ export default function ProvidersSettingsView({ appMasterPassword, onDirtyStateC
                     {showPassword ? "\u{1F441}" : "\u{1F441}\u200D\u{1F5E8}"}
                   </button>
                 </div>
+              </div>
+            </>
+          )}
+
+          {editing.credential_type === "aws" && (
+            <>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>AWS Access Key ID</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder={editing.isNew ? "AKIA..." : "(leave blank to keep current)"}
+                  value={editing.api_key}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, api_key: e.target.value } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>AWS Secret Access Key</label>
+                <input
+                  className="input"
+                  type={showPassword ? "text" : "password"}
+                  placeholder={editing.isNew ? "40-char secret" : "(leave blank to keep current)"}
+                  value={editing.secret_access_key}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, secret_access_key: e.target.value } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>AWS Session Token (optional, for STS)</label>
+                <input
+                  className="input"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="(leave blank if using long-lived keys)"
+                  value={editing.session_token}
+                  onChange={(e) => setEditing((prev) => prev ? { ...prev, session_token: e.target.value } : prev)}
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 10 }}>
+                <label style={{ fontSize: 12, opacity: 0.8 }}>AWS Region</label>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="e.g. us-east-1"
+                  value={editing.params.region ?? ""}
+                  onChange={(e) => setEditing((prev) => prev
+                    ? { ...prev, params: { ...prev.params, region: e.target.value } }
+                    : prev)}
+                />
               </div>
             </>
           )}

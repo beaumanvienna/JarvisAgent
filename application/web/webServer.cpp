@@ -19,6 +19,7 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <array>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -4258,15 +4259,22 @@ namespace AIAssistant
         std::string const startedAt = extractTimestamp(lines[static_cast<size_t>(startLineIdx)]);
         std::string const completedAt = endLineIdx >= 0 ? extractTimestamp(lines[static_cast<size_t>(endLineIdx)]) : "";
 
-        // Collect issue lines between start and end.
-        // Match by log-level tags: [error], [critical], [warning], [warn]
+        // Collect issue lines between start and end (inclusive of the terminal
+        // [workflow] run 'X' failed/completed line at endLineIdx — that line is
+        // often the most informative ERROR for a failed run).
+        //
+        // Lines must mention this run's runId or workflowId; concurrent runs
+        // interleave in the log so unscoped errors would attribute to the wrong run.
+        // Every fail-path log in the backend MUST carry one of those identifiers,
+        // otherwise it is invisible to per-run analysis (see feedback_log_failures).
+        //
+        // Match by log-level tags: [error], [critical], [warning], [warn].
         // Also match [workflow] lines containing "failed" or "skipping" (task-level events).
-        // Only include lines that mention this run's runId or workflowId to avoid
-        // false positives from concurrent workflow runs.
         crow::json::wvalue::list issuesJson;
         int issueCount = 0;
 
-        for (int i = startLineIdx; i < searchEnd; ++i)
+        int const inclusiveEnd = endLineIdx >= 0 ? endLineIdx + 1 : searchEnd;
+        for (int i = startLineIdx; i < inclusiveEnd; ++i)
         {
             auto const& line = lines[static_cast<size_t>(i)];
 
@@ -5146,6 +5154,8 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API3: item["api_type"] = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: item["api_type"] = "API4"; break;
                 case ConfigParser::EngineConfig::InterfaceType::Test: item["api_type"] = "Test"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API1Azure: item["api_type"] = "API1Azure"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API5: item["api_type"] = "API5"; break;
                 default: item["api_type"] = "API1"; break;
             }
             item["key_name"] = iface.m_KeyName;
@@ -5247,6 +5257,10 @@ namespace AIAssistant
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
         else if (apiTypeStr == "Test")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
+        else if (apiTypeStr == "API1Azure")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1Azure;
+        else if (apiTypeStr == "API5")
+            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
         else
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
 
@@ -5337,6 +5351,10 @@ namespace AIAssistant
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
                         else if (apiTypeStr == "Test")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
+                        else if (apiTypeStr == "API1Azure")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1Azure;
+                        else if (apiTypeStr == "API5")
+                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
                         else
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
                     }
@@ -5439,6 +5457,8 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
                 case ConfigParser::EngineConfig::InterfaceType::Test: apiStr = "Test"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API1Azure: apiStr = "API1Azure"; break;
+                case ConfigParser::EngineConfig::InterfaceType::API5: apiStr = "API5"; break;
                 default: apiStr = "API1"; break;
             }
 
@@ -6094,6 +6114,35 @@ namespace AIAssistant
             {
                 entry["username"] = provider->m_Username;
             }
+
+            // Return non-secret params; strip known-sensitive keys. AWS secret_access_key /
+            // session_token must never leave the server. Extend the blocklist as new
+            // sensitive param keys are introduced.
+            if (!provider->m_Params.empty())
+            {
+                static std::array<char const*, 2> const kSensitiveParamKeys = {"secret_access_key", "session_token"};
+                crow::json::wvalue paramsJson;
+                for (auto const& [k, v] : provider->m_Params)
+                {
+                    bool sensitive = false;
+                    for (auto const* skey : kSensitiveParamKeys)
+                    {
+                        if (k == skey) { sensitive = true; break; }
+                    }
+                    if (sensitive)
+                    {
+                        // Surface a "set / not set" boolean so the UI can render an indicator
+                        // without the value crossing the network.
+                        entry[std::string("has_") + k] = !v.empty();
+                    }
+                    else
+                    {
+                        paramsJson[k] = v;
+                    }
+                }
+                entry["params"] = std::move(paramsJson);
+            }
+
             // API key and private_key_pem are intentionally NOT returned for security.
             providersList.push_back(std::move(entry));
         }
@@ -6162,6 +6211,23 @@ namespace AIAssistant
             if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
             {
                 config.m_Password = std::string(sv);
+            }
+
+            // Optional per-provider params (Azure resource/deployment/api_version, AWS region/secrets, ...).
+            {
+                simdjson::ondemand::object paramsObj;
+                if (doc["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
+                {
+                    for (auto paramField : paramsObj)
+                    {
+                        std::string_view paramKey = paramField.unescaped_key();
+                        std::string_view paramVal;
+                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
+                        {
+                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
+                        }
+                    }
+                }
             }
 
             auto& keyManager = Core::g_Core->GetKeyManager();
@@ -6252,6 +6318,25 @@ namespace AIAssistant
             if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
             {
                 config.m_Password = std::string(sv);
+            }
+
+            // Per-provider params: replace wholesale if the field is present (UI sends the
+            // full edited map); leave existing values untouched if absent.
+            {
+                simdjson::ondemand::object paramsObj;
+                if (doc["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
+                {
+                    config.m_Params.clear();
+                    for (auto paramField : paramsObj)
+                    {
+                        std::string_view paramKey = paramField.unescaped_key();
+                        std::string_view paramVal;
+                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
+                        {
+                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
+                        }
+                    }
+                }
             }
 
             keyManager.UpdateProvider(providerName, std::move(config));

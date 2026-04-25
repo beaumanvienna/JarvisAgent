@@ -317,10 +317,6 @@ namespace AIAssistant
 
         RAW_SHUTDOWN("[shutdown] Core::Shutdown() done\n");
 #undef RAW_SHUTDOWN
-
-#ifndef NDEBUG
-        std::cout << "shutdown complete" << std::endl;
-#endif
     }
 
     bool Core::Verbose() const { return m_EngineConfig.m_Verbose; }

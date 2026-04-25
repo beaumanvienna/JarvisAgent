@@ -101,10 +101,36 @@ export default function App() {
     setNeedsAuth(true);
   }, []);
 
-  // Re-query on mount AND every time the WebSocket reconnects — a reconnect
-  // means the backend came back up, and after a restart the key store is
-  // sealed again. Without this the dashboard holds the old "ok" status and
-  // neither the master-password modal nor the "locked" banner variant fires.
+  // Resolve key-store readiness from a public endpoint (`/api/settings/keys/status`,
+  // no auth) so the master-password dialog can show BEFORE the user has a session.
+  // In Engine this is the only way to break a deadlock: /ws requires auth, and
+  // gating the keys probe on `ws.connected` left the dialog suppressed forever
+  // when the user hadn't yet logged in. We poll on mount AND on every WebSocket
+  // (re)connect — the latter catches "backend restarted, store is sealed again".
+  useEffect(() => {
+    let cancelled = false;
+    const probe = () =>
+      fetchKeysStatus()
+        .then((data) => {
+          if (cancelled) return;
+          if (
+            data.status === "ok" ||
+            data.status === "no_password" ||
+            data.status === "wrong_password" ||
+            data.status === "no_keys_file"
+          ) {
+            setKeysStatus(data.status);
+          }
+        })
+        .catch(() => {
+          // Transient network hiccup — leave state as-is.
+        });
+    probe();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (!ws.connected) return;
     fetchKeysStatus()
@@ -118,10 +144,30 @@ export default function App() {
           setKeysStatus(data.status);
         }
       })
-      .catch(() => {
-        // Transient network hiccup — leave state as-is; next reconnect retries.
-      });
+      .catch(() => {});
   }, [ws.connected]);
+
+  // Cross-check against /api/status.keys_unlocked. Covers the studio→engine
+  // restart-while-tab-is-open scenario: the dashboard JS keeps running, ws may
+  // not reconnect (engine /ws requires auth), and our cached "ok" keysStatus
+  // would be stale. /api/status is public and polled every 5 s, so its
+  // keys_unlocked flag is the authoritative live signal. When it disagrees
+  // with our cached "ok", refetch the detailed reason.
+  useEffect(() => {
+    if (status?.keys_unlocked === false && keysStatus === "ok") {
+      fetchKeysStatus()
+        .then((data) => {
+          if (
+            data.status === "no_password" ||
+            data.status === "wrong_password" ||
+            data.status === "no_keys_file"
+          ) {
+            setKeysStatus(data.status);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [status?.keys_unlocked, keysStatus]);
 
   const handleKeysUnlocked = () => {
     setKeysStatus("ok");
@@ -203,14 +249,11 @@ export default function App() {
         isStudio={isStudio}
         onLogout={isEngine && authUser ? handleLogout : undefined}
         authUser={authUser}
-        // In Studio the backend returns a synthetic "studio"/"admin" identity for
-        // unauthenticated requests (see webServer.cpp Authenticate()). Keep the
-        // edition label visible but drop the "admin" role pill — per the cyber
-        // security spec (doc/cyber security.md §Studio) there is no browser-UI
-        // auth, so surfacing a role grant would be misleading.  Keyed off the
-        // user string alone (no `isStudio` guard) so the pill stays hidden even
-        // while the dashboard is disconnected and /api/status is unavailable.
-        authRole={authUser === "studio" ? null : authRole}
+        // Studio's synthetic "studio"/"admin" identity is suppressed in StatusBar
+        // (see `showAuthIdentity`); the edition badge there covers the
+        // "what edition am I on" question explicitly. Pass the role through
+        // unchanged — the StatusBar decides whether to render anything.
+        authRole={authRole}
         onOpenSettings={() => setShowSettings(true)}
       />
       <LastRunsBar lastRuns={ws.lastRuns} />

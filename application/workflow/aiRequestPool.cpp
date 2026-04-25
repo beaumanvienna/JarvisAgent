@@ -497,6 +497,46 @@ namespace AIAssistant
         return true;
     }
 
+    bool AiRequestPool::OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage)
+    {
+        if (expectedOutputPath.empty())
+        {
+            return false;
+        }
+        std::string const canonicalPath = fs::absolute(fs::path(expectedOutputPath)).lexically_normal().generic_string();
+
+        std::shared_ptr<PendingEntry> pendingEntry;
+        {
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+            auto const iterator = m_PendingByOutputPath.find(canonicalPath);
+            if (iterator == m_PendingByOutputPath.end())
+            {
+                return false;
+            }
+            pendingEntry = iterator->second;
+            m_PendingByOutputPath.erase(iterator);
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+            if (pendingEntry->m_IsCompleted)
+            {
+                return true;
+            }
+            pendingEntry->m_IsCompleted = true;
+            pendingEntry->m_IsFailed = true;
+            pendingEntry->m_ErrorMessage = errorMessage;
+            pendingEntry->conditionVariable.notify_all();
+        }
+
+        LOG_APP_ERROR("[AiRequestPool] OnRequestFailed run='{}' workflow='{}' task='{}' message='{}' path='{}'",
+                      pendingEntry->m_Context.m_RunId, pendingEntry->m_Context.m_WorkflowId,
+                      pendingEntry->m_Context.m_TaskId, errorMessage, canonicalPath);
+
+        QueueCompletionIfNeeded(pendingEntry);
+        return true;
+    }
+
     void AiRequestPool::QueueCompletionIfNeeded(std::shared_ptr<PendingEntry> const& pendingEntry)
     {
         if (pendingEntry == nullptr)
@@ -714,8 +754,8 @@ namespace AIAssistant
                     std::string const& taskId = entry->m_Context.m_TaskId;
                     if (!taskId.empty())
                     {
-                        LOG_APP_WARN("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
-                                     entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
+                        LOG_APP_ERROR("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
+                                      entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
                     }
 
                     entry->conditionVariable.notify_all();
@@ -825,6 +865,18 @@ namespace AIAssistant
             auto const* provider = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
                                                           : Core::g_Core->GetKeyManager().GetProvider(api.m_KeyName);
             return (provider != nullptr) ? provider->m_ApiKey : std::string{};
+        }
+
+        // SigV4 (AWS) needs region + secret_access_key beyond the api_key. They live in
+        // ProviderConfig::m_Params and need to be forwarded to QueryData::m_Params so the
+        // signer can reach them. Returns empty map when the provider has none.
+        std::unordered_map<std::string, std::string> ResolveProviderParams(
+            ConfigParser::EngineConfig::ApiInterface const& api)
+        {
+            if (Core::g_Core == nullptr) { return {}; }
+            auto const* provider = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
+                                                          : Core::g_Core->GetKeyManager().GetProvider(api.m_KeyName);
+            return (provider != nullptr) ? provider->m_Params : std::unordered_map<std::string, std::string>{};
         }
 
         std::string ConcatMessagesForCheck(std::vector<Message> const& messages)
@@ -988,6 +1040,29 @@ namespace AIAssistant
             }
         }
 
+        // Resolve the workflow binding (registered by RegisterPendingWorkflowTask before Submit)
+        // upfront so every fail-path log line in this function and the dispatch callback can
+        // carry runId/workflowId/taskId. The dashboard run analyzer's per-run filter requires
+        // these markers — see feedback_log_failures memory. Empty strings for non-workflow
+        // callers (assistant, jcwfService) — log lines render run='' there.
+        std::string runIdForLog;
+        std::string workflowIdForLog;
+        std::string taskIdForLog;
+        if (!envelope.m_QueueFolder.empty() && !envelope.m_ProbName.empty())
+        {
+            fs::path const outputPath =
+                envelope.m_QueueFolder / (fs::path(envelope.m_ProbName).stem().string() + ".output.txt");
+            std::string const lookupKey = fs::absolute(outputPath).lexically_normal().generic_string();
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+            auto const it = m_PendingByOutputPath.find(lookupKey);
+            if (it != m_PendingByOutputPath.end() && it->second != nullptr)
+            {
+                runIdForLog = it->second->m_Context.m_RunId;
+                workflowIdForLog = it->second->m_Context.m_WorkflowId;
+                taskIdForLog = it->second->m_Context.m_TaskId;
+            }
+        }
+
         // Count the first chunk of a chunked dispatch as one "chunked dispatch"
         // event — not every chunk envelope, so the signal reflects distinct PROBs
         // that required fan-out rather than the raw chunk count.
@@ -1000,8 +1075,9 @@ namespace AIAssistant
         auto const* api = ResolveInterface(envelope.m_InterfaceName);
         if (api == nullptr)
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: no resolvable AI interface (requested '{}', no default available)",
-                          envelope.m_InterfaceName);
+            LOG_APP_ERROR("AiRequestPool::Submit: no resolvable AI interface run='{}' workflow='{}' task='{}' "
+                          "requested='{}'",
+                          runIdForLog, workflowIdForLog, taskIdForLog, envelope.m_InterfaceName);
             return false;
         }
 
@@ -1017,8 +1093,8 @@ namespace AIAssistant
         }
         if (!hasNonWhitespace)
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: empty prompt body (task='{}' prob='{}') — rejecting",
-                          envelope.m_ProbName, envelope.m_QueueFolder.string());
+            LOG_APP_ERROR("AiRequestPool::Submit: empty prompt body run='{}' workflow='{}' task='{}' prob='{}' — rejecting",
+                          runIdForLog, workflowIdForLog, taskIdForLog, envelope.m_ProbName);
             return false;
         }
 
@@ -1104,7 +1180,8 @@ namespace AIAssistant
         auto requestBuilder = IRequestBuilder::Create(api->m_InterfaceType);
         if (!requestBuilder)
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: no request builder for interface type");
+            LOG_APP_ERROR("AiRequestPool::Submit: no request builder run='{}' workflow='{}' task='{}' interface='{}'",
+                          runIdForLog, workflowIdForLog, taskIdForLog, api->m_Name);
             return false;
         }
 
@@ -1115,19 +1192,22 @@ namespace AIAssistant
         std::string const apiKey = ResolveApiKey(*api);
         if (apiKey.empty())
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: no API key resolvable for interface '{}' (key_name='{}')", api->m_Name,
-                          api->m_KeyName);
+            LOG_APP_ERROR("AiRequestPool::Submit: no API key resolvable run='{}' workflow='{}' task='{}' "
+                          "interface='{}' key_name='{}'",
+                          runIdForLog, workflowIdForLog, taskIdForLog, api->m_Name, api->m_KeyName);
             return false;
         }
 
         CurlWrapper::QueryData queryData{.m_Url = queryUrl, .m_Data = requestBody, .m_ApiKey = apiKey,
-                                          .m_AuthStyle = authStyle};
+                                          .m_AuthStyle = authStyle, .m_TimeoutMs = 0,
+                                          .m_Params = ResolveProviderParams(*api)};
 
         JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
         if (dispatcher == nullptr)
         {
-            LOG_APP_ERROR("AiRequestPool::Submit: CurlMultiDispatcher unavailable (task prob='{}')", envelope.m_ProbName);
+            LOG_APP_ERROR("AiRequestPool::Submit: CurlMultiDispatcher unavailable run='{}' workflow='{}' task='{}' prob='{}'",
+                          runIdForLog, workflowIdForLog, taskIdForLog, envelope.m_ProbName);
             return false;
         }
 
@@ -1143,6 +1223,7 @@ namespace AIAssistant
             fs::path outputPath = queueFolder / (fs::path(probName).stem().string() + ".output.txt");
             expectedOutputPath = fs::absolute(outputPath).lexically_normal().generic_string();
         }
+
         ++m_DirectDispatchInflight;
 
         fs::path transcriptPath;
@@ -1161,8 +1242,9 @@ namespace AIAssistant
         AiInvocation envelopeForRetry = envelope;
 
         auto curlCallback = [this, interfaceType, queueFolder, probName, modelCapture, expectedOutputPath,
-                             transcriptPath, callbackCopy,
-                             envelopeForRetry](QueryResult curlResult, std::string responseBody) mutable
+                             transcriptPath, callbackCopy, envelopeForRetry,
+                             runIdForLog, workflowIdForLog,
+                             taskIdForLog](QueryResult curlResult, std::string responseBody) mutable
         {
             AiReply aiReply;
 
@@ -1173,8 +1255,9 @@ namespace AIAssistant
                     aiReply.m_Kind = AiReply::Kind::Error;
                     aiReply.m_Error.m_Kind = AiError::Kind::Http;
                     aiReply.m_Error.m_Message = curlResult.m_ErrorMessage;
-                    LOG_APP_ERROR("AiRequestPool::Submit callback: curl error ({}) for prob='{}': {}",
-                                  curlResult.m_ErrorCode, probName, curlResult.m_ErrorMessage);
+                    LOG_APP_ERROR("AiRequestPool::Submit callback: curl error ({}) run='{}' workflow='{}' task='{}' prob='{}': {}",
+                                  curlResult.m_ErrorCode, runIdForLog, workflowIdForLog, taskIdForLog, probName,
+                                  curlResult.m_ErrorMessage);
                 }
                 else
                 {
@@ -1333,6 +1416,13 @@ namespace AIAssistant
                         fs::absolute(writtenOutputPath).lexically_normal().generic_string();
                     OnOutputFileCreated(normalizedPath);
                 }
+                else if (aiReply.m_Kind == AiReply::Kind::Error && !isChunked && !expectedOutputPath.empty())
+                {
+                    // No .output.* file is written for error replies; without this signal the
+                    // workflow runtime would stay parked in waiting_external until the ai_call
+                    // deadline fires. Symmetric to the success path above.
+                    OnRequestFailed(expectedOutputPath, aiReply.m_Error.m_Message);
+                }
 
                 if (!transcriptPath.empty())
                 {
@@ -1361,11 +1451,16 @@ namespace AIAssistant
             }
             catch (std::exception const& e)
             {
-                LOG_APP_ERROR("AiRequestPool::Submit callback exception for prob='{}': {}", probName, e.what());
+                LOG_APP_ERROR("AiRequestPool::Submit callback exception run='{}' workflow='{}' task='{}' prob='{}': {}",
+                              runIdForLog, workflowIdForLog, taskIdForLog, probName, e.what());
                 AiReply errorReply;
                 errorReply.m_Kind = AiReply::Kind::Error;
                 errorReply.m_Error.m_Kind = AiError::Kind::Transport;
                 errorReply.m_Error.m_Message = e.what();
+                if (!expectedOutputPath.empty())
+                {
+                    OnRequestFailed(expectedOutputPath, errorReply.m_Error.m_Message);
+                }
                 if (callbackCopy)
                 {
                     callbackCopy(errorReply);

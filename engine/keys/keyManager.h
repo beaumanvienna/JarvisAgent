@@ -68,6 +68,10 @@ namespace AIAssistant
             // Basic auth fields (credential_type == "credentials")
             std::string m_Username;
             std::string m_Password;
+
+            // Per-provider extra params (e.g. Azure: resource/deployment/api_version;
+            // Bedrock: region/access_key_id/secret_access_key/session_token).
+            std::unordered_map<std::string, std::string> m_Params;
         };
 
         KeyManager() = default;

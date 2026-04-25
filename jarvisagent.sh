@@ -6,7 +6,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 
 # Detect edition: --engine or --studio flag, or script name containing "-engine".
 # Detect build config: --debug selects bin/Debug/ (with debug_signals endpoint enabled),
-# otherwise the default bin/Release/ binary is used.
+# --release selects bin/Release/ explicitly (also the default).
 EDITION="studio"
 BUILD_CONFIG="Release"
 PASSTHROUGH_ARGS=()
@@ -17,6 +17,8 @@ for arg in "$@"; do
         EDITION="studio"
     elif [[ "$arg" == "--debug" ]]; then
         BUILD_CONFIG="Debug"
+    elif [[ "$arg" == "--release" ]]; then
+        BUILD_CONFIG="Release"
     else
         PASSTHROUGH_ARGS+=("$arg")
     fi

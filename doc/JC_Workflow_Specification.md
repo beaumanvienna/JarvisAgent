@@ -1099,7 +1099,7 @@ The dashboard SHOULD indicate which workflows are blocked due to missing provide
 | `endpoint`      | Full URL to the chat completions endpoint.                     |
 | `api_key`       | API key (empty for local/keyless endpoints like Ollama).       |
 | `default_model` | Default model string sent in the request body.                 |
-| `api_type`      | `"API1"` (OpenAI Chat Completions) · `"API2"` (OpenAI Responses) · `"API3"` (Gemini native) · `"API4"` (Anthropic Messages) · `"Test"` (fixture-driven, integration tests). |
+| `api_type`      | `"API1"` (OpenAI Chat Completions) · `"API2"` (OpenAI Responses) · `"API3"` (Gemini native) · `"API4"` (Anthropic Messages) · `"API1Azure"` (Azure OpenAI: API1 body + `api-key:` header + per-deployment URL) · `"API5"` (AWS Bedrock: SigV4-signed; per-family body for anthropic.* / meta.llama* / amazon.titan-* / amazon.nova-*) · `"Test"` (fixture-driven, integration tests). |
 
 **Example: specialized AI tasks in a single workflow**
 
@@ -1428,11 +1428,14 @@ produce a schema-conforming response.
 
 **Dispatch-mode selection per provider:**
 
-- OpenAI API1 / API2: `response_format: { type: "json_schema", ... }` (native).
+- OpenAI API1 / API2 / Azure OpenAI API1Azure: `response_format: { type: "json_schema", ... }` (native).
 - Gemini API3: `responseSchema` (native).
 - Anthropic API4: forced-tool shim — the schema is wrapped as a tool
   parameter, `tool_choice: {"type":"tool","name":"output"}`.  The reply's
   tool-use content block carries the structured payload.
+- AWS Bedrock API5: per-family — `anthropic.*` follows API4's forced-tool shim,
+  `meta.llama*` and `amazon.titan-*`/`amazon.nova-*` use prompt-level instructions
+  (no native schema enforcement; relies on retry-on-validation-failure).
 
 **Chunking interaction:** chunking and `output_schema` are **mutually
 exclusive**.  A chunked response can't satisfy a whole-object schema, so if an

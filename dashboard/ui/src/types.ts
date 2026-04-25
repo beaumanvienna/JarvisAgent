@@ -17,6 +17,10 @@ export interface StatusResponse {
   mcp_connected?: boolean;
   mcp_last_heartbeat_secs_ago?: number;
   connection_health?: ConnectionHealthEntry[];
+  // True when the encrypted key store has been unlocked (master password
+  // accepted). Used by the dashboard to detect a backend restart that
+  // resealed the store while a tab is still open from a previous session.
+  keys_unlocked?: boolean;
 }
 
 export interface ConnectionHealthEntry {

@@ -1586,8 +1586,8 @@ namespace AIAssistant
 
                 if (!result.m_ExecuteOk)
                 {
-                    LOG_APP_WARN("[workflow] task '{}' failed in run '{}': {}", result.m_TaskId, workflowRun.m_RunId,
-                                 result.m_TaskState.m_LastErrorMessage);
+                    LOG_APP_ERROR("[workflow] task '{}' failed in run '{}': {}", result.m_TaskId, workflowRun.m_RunId,
+                                  result.m_TaskState.m_LastErrorMessage);
 
                     std::string const parentId = ParentTaskId(result.m_TaskId);
                     auto defIt = workflowDefinition.m_Tasks.find(parentId);
@@ -1657,7 +1657,7 @@ namespace AIAssistant
                 }
             }
 
-            LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
+            LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
             workflowRun.m_IsCompleted = true;
             return;
         }
@@ -1997,7 +1997,7 @@ namespace AIAssistant
 
             if (workflowRun.m_HasFailed)
             {
-                LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
+                LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", workflowRun.m_RunId, workflowRun.m_WorkflowId);
             }
             else
             {

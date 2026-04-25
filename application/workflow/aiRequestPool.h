@@ -109,6 +109,13 @@ namespace AIAssistant
         // Returns true if the path matched a registered expected output.
         bool OnOutputFileCreated(std::string const& fullFilePath);
 
+        // Symmetric failure path: called when the AI request errored before any
+        // .output.* file could be written (HTTP failure, parse error, transport
+        // exception). Marks the matching pending entry failed and queues a failed
+        // completion so the workflow runtime transitions out of waiting_external.
+        // Returns true if the path matched a registered expected output.
+        bool OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage);
+
         // Resets the file-activity watchdog for the given request.
         // Call after each queue-file write so the watchdog knows the executor is still making progress.
         // The watchdog fires if no file activity AND no curl dispatch happens within the watchdog window.

@@ -26,6 +26,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "curlWrapper/authSigner.h"
 #include "curlWrapper/curlWrapper.h"
 #include "json/replyParser.h"
 
@@ -282,24 +283,10 @@ namespace AIAssistant
         }
 
         CurlSlist headers;
-        switch (queryData.m_AuthStyle)
-        {
-            case AuthStyle::XGoogApiKey:
-                headers.Append("x-goog-api-key: " + queryData.m_ApiKey);
-                break;
-            case AuthStyle::AnthropicXApiKey:
-                headers.Append("x-api-key: " + queryData.m_ApiKey);
-                break;
-            case AuthStyle::Bearer:
-            default:
-                headers.Append("Authorization: Bearer " + queryData.m_ApiKey);
-                break;
-        }
+        std::vector<std::string> authHeaders;
+        IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, authHeaders);
+        for (auto const& h : authHeaders) { headers.Append(h); }
         headers.Append("Content-Type: application/json");
-        if (queryData.m_AuthStyle == AuthStyle::AnthropicXApiKey)
-        {
-            headers.Append("anthropic-version: 2023-06-01");
-        }
 
         auto& url = queryData.m_Url;
         auto& data = queryData.m_Data;

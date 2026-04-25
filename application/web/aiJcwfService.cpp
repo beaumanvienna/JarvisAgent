@@ -1175,7 +1175,9 @@ namespace AIAssistant
         outError.clear();
         outLatencyMs = 0;
 
-        static constexpr long kTestTimeoutMs = 10000; // 10 seconds
+        static constexpr long kTestTimeoutMs = 30000; // 30 seconds — generous enough to catch
+                                                     // real-cloud variance and LocalStack Bedrock's
+                                                     // first-call cold path while still snappy.
 
         auto const& config = Core::g_Core->GetConfig();
         if (interfaceIndex >= config.m_ApiInterfaces.size())
@@ -1187,14 +1189,18 @@ namespace AIAssistant
 
         auto const& iface = config.m_ApiInterfaces[interfaceIndex];
 
-        // Resolve API key from KeyManager.
+        // Resolve API key + provider params from KeyManager. Params carry SigV4
+        // material (region + secret_access_key + session_token) for AWS providers
+        // and any future per-provider extras.
         std::string apiKey;
+        std::unordered_map<std::string, std::string> providerParams;
         {
             auto const* provider = iface.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
                                                            : Core::g_Core->GetKeyManager().GetProvider(iface.m_KeyName);
-            if (provider && !provider->m_ApiKey.empty())
+            if (provider != nullptr)
             {
                 apiKey = provider->m_ApiKey;
+                providerParams = provider->m_Params;
             }
         }
 
@@ -1232,6 +1238,7 @@ namespace AIAssistant
             .m_ApiKey = apiKey,
             .m_AuthStyle = authStyle,
             .m_TimeoutMs = kTestTimeoutMs,
+            .m_Params = std::move(providerParams),
         };
 
         auto const startTime = std::chrono::steady_clock::now();
@@ -1491,9 +1498,9 @@ namespace AIAssistant
 
                 if (!stage1Ok)
                 {
-                    LOG_APP_WARN("[workflow] task 'explain_stage1' failed in run '{}': {}", runId, stage1Error);
+                    LOG_APP_ERROR("[workflow] task 'explain_stage1' failed in run '{}': {}", runId, stage1Error);
                     Broadcast(R"({"type":"ai-explain-result","ok":false,"error":")" + JsonEscape(stage1Error) + R"("})");
-                    LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
+                    LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
                     return;
                 }
                 LOG_APP_INFO("[workflow] task 'explain_stage1' completed in run '{}' (workflow '{}')", runId, workflowId);
@@ -1624,7 +1631,7 @@ namespace AIAssistant
                     {
                         Broadcast(R"({"type":"ai-generate-result","ok":false,"error":")" + JsonEscape(jcwfOrError) +
                                   R"("})");
-                        LOG_APP_WARN("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
+                        LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
                     }
                 };
 
@@ -1709,7 +1716,7 @@ namespace AIAssistant
                 if (!RunSingleAiCall("gen_" + seqStr + "_decompose", decomposeStng, decomposeTask, decomposeCntx,
                                      decomposeProb, decomposition, decomposeError))
                 {
-                    LOG_APP_WARN("[workflow] task 'decompose' failed in run '{}': {}", runId, decomposeError);
+                    LOG_APP_ERROR("[workflow] task 'decompose' failed in run '{}': {}", runId, decomposeError);
                     broadcastResult(false, "Decomposition failed: " + decomposeError, 0);
                     return;
                 }
@@ -1806,7 +1813,7 @@ namespace AIAssistant
                     if (!RunSingleAiCall("gen_" + seqStr + "_generate", generateStng, generateTask, generateCntx,
                                          generateProb, generatedJcwf, generateError, kJcwfSchemaJson))
                     {
-                        LOG_APP_WARN("[workflow] task 'generate' failed in run '{}': {}", runId, generateError);
+                        LOG_APP_ERROR("[workflow] task 'generate' failed in run '{}': {}", runId, generateError);
                         broadcastResult(false, "Generation failed: " + generateError, 0);
                         return;
                     }
@@ -2544,7 +2551,7 @@ namespace AIAssistant
                         if (!RunSingleAiCall("gen_" + seqStr + "_fix", fixStng, fixTask, fixCntx, fixProb, fixedJcwf,
                                              fixError))
                         {
-                            LOG_APP_WARN("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
+                            LOG_APP_ERROR("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
                             ensureMinDisplay(fixStart);
                             broadcastResult(!WorkflowValidator::HasErrors(vr.issues), generatedJcwf, 1);
                             return;
@@ -2570,7 +2577,7 @@ namespace AIAssistant
                         if (!RunSingleAiCall("gen_" + seqStr + "_fix", fixStng, fixTask, fixCntx, fixProb, fixedJcwf,
                                              fixError, kJcwfSchemaJson))
                         {
-                            LOG_APP_WARN("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
+                            LOG_APP_ERROR("[workflow] task 'fix' failed in run '{}': {}", runId, fixError);
                             ensureMinDisplay(fixStart);
                             broadcastResult(!WorkflowValidator::HasErrors(vr.issues), generatedJcwf, 1);
                             return;

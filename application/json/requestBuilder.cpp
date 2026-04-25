@@ -44,7 +44,9 @@ namespace AIAssistant
             return combined;
         }
 
-        class RequestBuilderAPI1 final : public IRequestBuilder
+        // Note: not `final` — RequestBuilderAPI1Azure inherits to share the body
+        // and URL behaviour, overriding only the auth style.
+        class RequestBuilderAPI1 : public IRequestBuilder
         {
         public:
             std::string BuildBody(AiInvocation const& envelope, std::string const& model) const override
@@ -73,6 +75,14 @@ namespace AIAssistant
 
             bool SupportsNativeJsonSchema() const override { return true; }
             bool SupportsForcedToolShim() const override { return true; }
+        };
+
+        // Azure OpenAI: same request body as API1, same URL pattern (the user supplies the full
+        // deployment URL with api-version in iface.m_Url), but auth is `api-key:` instead of Bearer.
+        class RequestBuilderAPI1Azure final : public RequestBuilderAPI1
+        {
+        public:
+            CurlWrapper::AuthStyle GetAuthStyle() const override { return CurlWrapper::AuthStyle::AzureApiKey; }
         };
 
         class RequestBuilderAPI2 final : public IRequestBuilder
@@ -159,6 +169,85 @@ namespace AIAssistant
             bool SupportsNativeJsonSchema() const override { return false; }
             bool SupportsForcedToolShim() const override { return true; }
         };
+
+        // Per-family Bedrock body builders. Bedrock wraps each model family's native body
+        // in its own envelope; the URL is shared but the body shape diverges by modelId prefix.
+        // Reply parser delegates symmetrically (replyParser.cpp).
+        std::string BuildBedrockAnthropicBody(AiInvocation const& envelope)
+        {
+            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(4096);
+            std::string json = R"({"anthropic_version": "bedrock-2023-05-31","max_tokens": )" + std::to_string(maxTokens) +
+                                R"(,"messages": [{"role": "user", "content": ")" + sanitized + R"("}])";
+            if (envelope.m_Settings.m_Temperature != 0.0)
+            {
+                json += R"(,"temperature": )" + std::to_string(envelope.m_Settings.m_Temperature);
+            }
+            json += "}";
+            return json;
+        }
+
+        std::string BuildBedrockLlamaBody(AiInvocation const& envelope)
+        {
+            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(2048);
+            std::string json = R"({"prompt": ")" + sanitized + R"(","max_gen_len": )" + std::to_string(maxTokens);
+            if (envelope.m_Settings.m_Temperature != 0.0)
+            {
+                json += R"(,"temperature": )" + std::to_string(envelope.m_Settings.m_Temperature);
+            }
+            json += "}";
+            return json;
+        }
+
+        std::string BuildBedrockTitanNovaBody(AiInvocation const& envelope)
+        {
+            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(2048);
+            std::string json = R"({"inputText": ")" + sanitized + R"(","textGenerationConfig": {"maxTokenCount": )" +
+                                std::to_string(maxTokens);
+            if (envelope.m_Settings.m_Temperature != 0.0)
+            {
+                json += R"(,"temperature": )" + std::to_string(envelope.m_Settings.m_Temperature);
+            }
+            json += "}}";
+            return json;
+        }
+
+        class RequestBuilderAPI5 final : public IRequestBuilder
+        {
+        public:
+            std::string BuildBody(AiInvocation const& envelope, std::string const& model) const override
+            {
+                if (model.rfind("anthropic.", 0) == 0)
+                {
+                    return BuildBedrockAnthropicBody(envelope);
+                }
+                if (model.rfind("meta.llama", 0) == 0)
+                {
+                    return BuildBedrockLlamaBody(envelope);
+                }
+                if (model.rfind("amazon.titan", 0) == 0 || model.rfind("amazon.nova", 0) == 0)
+                {
+                    return BuildBedrockTitanNovaBody(envelope);
+                }
+                LOG_APP_ERROR("RequestBuilderAPI5: unrecognized Bedrock modelId prefix '{}' — defaulting to Anthropic body shape", model);
+                return BuildBedrockAnthropicBody(envelope);
+            }
+
+            std::string ResolveUrl(std::string const& baseUrl, std::string const& model) const override
+            {
+                // Bedrock invoke endpoint: {baseUrl}/model/{modelId}/invoke
+                std::string url = baseUrl;
+                if (!url.empty() && url.back() == '/') url.pop_back();
+                return url + "/model/" + model + "/invoke";
+            }
+
+            CurlWrapper::AuthStyle GetAuthStyle() const override { return CurlWrapper::AuthStyle::AwsSigV4; }
+
+            bool SupportsNativeJsonSchema() const override { return false; }
+            bool SupportsForcedToolShim() const override { return true; }
+        };
     } // anonymous namespace
 
     std::unique_ptr<IRequestBuilder> IRequestBuilder::Create(ConfigParser::EngineConfig::InterfaceType interfaceType)
@@ -173,6 +262,10 @@ namespace AIAssistant
                 return std::make_unique<RequestBuilderAPI3>();
             case ConfigParser::EngineConfig::InterfaceType::API4:
                 return std::make_unique<RequestBuilderAPI4>();
+            case ConfigParser::EngineConfig::InterfaceType::API1Azure:
+                return std::make_unique<RequestBuilderAPI1Azure>();
+            case ConfigParser::EngineConfig::InterfaceType::API5:
+                return std::make_unique<RequestBuilderAPI5>();
             default:
                 LOG_APP_ERROR("IRequestBuilder::Create: unsupported interface type");
                 return nullptr;

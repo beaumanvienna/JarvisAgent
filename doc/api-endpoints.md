@@ -642,6 +642,18 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 ```
 `url` is required. `name` is auto-generated if omitted. Returns 409 on duplicate name.
 
+`api_type` accepts `API1`, `API2`, `API3`, `API4`, `API1Azure`, `API5`, or `Test`. Examples:
+
+```json
+// Azure OpenAI: full deployment URL in `url`; key_name points at a provider with credential_type "api_key".
+{ "url": "https://my-resource.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2024-08-01",
+  "model": "gpt-4", "api_type": "API1Azure", "key_name": "azure-prod" }
+
+// AWS Bedrock: regional base URL in `url`; model is the full Bedrock modelId; key_name points at a provider with credential_type "aws".
+{ "url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+  "model": "anthropic.claude-3-haiku-20240307-v1:0", "api_type": "API5", "key_name": "bedrock-prod" }
+```
+
 ### POST /api/settings/ai-interfaces/save
 Writes the in-memory interfaces back to the `config.json` file by replacing the `"API interfaces"` array.
 **Response (200):**

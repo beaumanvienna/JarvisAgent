@@ -139,7 +139,7 @@ JCWF ai_call task
        └─ construct 1 AiInvocation per PROB × chunk
             (m_InterfaceName mirrors PROV content; envelope is load-bearing, PROV stays for replay/debug)
   ↓  AiRequestPool::Submit(envelope)          [direct in-process call]
-  ↓  IRequestBuilder::BuildBody(envelope)     [per-provider: API1/2/3/4]
+  ↓  IRequestBuilder::BuildBody(envelope)     [per-provider: API1/2/3/4/1Azure/5]
   ↓  CurlMultiDispatcher                      [HTTP/2, shared I/O thread]
   ↑  ReplyParser                              [per-provider; returns AiReply]
   ↑  AiReply
@@ -161,13 +161,15 @@ Event bus (fire-and-forget, observability only):
 - **`AiInvocation`** (`application/workflow/aiInvocation.h`) is a pure data struct — no inheritance. Carries interface name, optional model override, `AiSettings` (temperature, seed, max_tokens), messages, optional `output_schema`, `StructuredMode`, timeout, retry policy, queue folder, prob name, optional chunk index/count. This envelope is the unambiguous source of truth at runtime.
 - **`AiReply`** carries `Kind` (`Text | Structured | Error`), the response payload, `AiUsage` (input/output/total tokens), finish reason, system fingerprint.
 - **`IRequestBuilder`** + **`ReplyParser`** are symmetric per-provider abstractions. Adding a provider means adding one builder and one parser, plus one enum variant — no other code changes.
+- **`IAuthSigner`** (`engine/curlWrapper/authSigner.h`) is the single authentication strategy. `Apply(QueryData, vector<string>& headers)` is called by both `CurlWrapper::Query` (sync) and `CurlMultiDispatcher` (async parallel) — no per-style branching in the curl layer. Concrete signers: `BearerSigner`, `XGoogApiKeySigner`, `AnthropicXApiKeySigner`, `AzureApiKeySigner`, `SigV4Signer`. SigV4 is hand-rolled on OpenSSL (`engine/curlWrapper/awsSigV4.{h,cpp}`) — no `aws-sdk-cpp` dependency. A startup self-test verifies SHA256 + the 4-stage signing-key derivation against AWS-published vectors in debug builds.
+- **`AiRequestPool::OnRequestFailed`** is the symmetric counterpart to `OnOutputFileCreated`. When a curl error or parse failure prevents writing `<prob>.output.*`, the pool calls `OnRequestFailed` to mark the pending entry failed and queue a failed completion — so workflow tasks transition out of `waiting_external` deterministically rather than waiting on the `ai_call` deadline.
 
 **Extension seams.** The envelope is deliberately designed to accept additive post-1.0 capabilities without structural change:
 
 - **Native tool-calling** — a future `m_Tools: vector<ToolDef>` field on `AiInvocation` plumbs directly into provider tool-call protocols (OpenAI `tools`, Gemini `functionDeclarations`, Anthropic `tools`). `ReplyParser` gains a `GetToolCalls()` virtual, `AiReply::Kind` gains `ToolCall`. Tracked in `JarvisAgent TODO List.md` §5e.
 - **Multi-turn conversation** — `m_Messages` already carries a full message list; a multi-turn executor keeps appending to it across tool-return rounds inside one `ai_call` task.
 - **Agent-of-agents / Claude Code orchestration** — the same envelope path drives outbound calls into sub-agents. Tracked in §5f.
-- **Additional providers** — Bedrock (SigV4), Azure OpenAI (deployment URLs + `api-key:` header) each need one new `InterfaceType` + builder + parser + auth style. Tracked in §5h.
+- **Additional providers beyond the current six** — each needs one new `InterfaceType` + builder + parser + (if novel auth) one new `IAuthSigner` implementation. Auth shape is the only meaningful axis of variation: SigV4 (Bedrock), api-key header (Azure), Bearer / x-api-key / x-goog-api-key (existing).
 
 All four build on the existing `AiInvocation → IRequestBuilder → CurlMultiDispatcher → ReplyParser → AiReply` pipeline; none require touching transport, schema validation, chunking, reduce pass, transcripts, or the event layer.
 
@@ -224,11 +226,11 @@ Office documents in `cntx_files` (PDF / DOCX / XLSX / PPTX / ODT) are converted 
 | **API2** — OpenAI Responses | `/v1/responses` | OpenAI (Responses API) |
 | **API3** — Gemini native | `/v1beta/models/{model}:generateContent` | Google Gemini (native) |
 | **API4** — Anthropic Messages | `/v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus) |
+| **API1Azure** — Azure OpenAI | `/openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (`api-key:` header; body identical to API1) |
+| **API5** — AWS Bedrock | `/model/{modelId}/invoke` (SigV4-signed) | Bedrock Anthropic / Llama / Titan / Nova families. `RequestBuilderAPI5` dispatches body shape on `modelId` prefix; `ReplyParserAPI5` sniffs the response shape and delegates (Anthropic-on-Bedrock reuses `ReplyParserAPI4`). |
 | **Test** — fixture-driven | in-process | no-network integration tests; `m_Url` points at a fixture file |
 
-API keys are stored in an AES-256-GCM encrypted key store with a master password. Interfaces reference keys by `key_name`, resolved at runtime — no plaintext keys in workflow files or `config.json`.
-
-Bedrock and Azure OpenAI are on the roadmap (tracked in `JarvisAgent TODO List.md` §5h).
+API keys are stored in an AES-256-GCM encrypted key store with a master password. Interfaces reference keys by `key_name`, resolved at runtime — no plaintext keys in workflow files or `config.json`. The `aws` credential type stores `access_key_id` in `m_ApiKey` and `secret_access_key` / `session_token` in `m_Params`; both secret values are auto-registered with `SecretRedactor` on load and stripped from REST GET responses.
 
 ---
 
@@ -360,6 +362,11 @@ Reference record for why things are the way they are. Reading current code is au
 | **Scripts cannot be submitted via API** | Adhoc submit rejects JCWFs whose `params.command` / `params.module` doesn't already exist under `scripts/` | Hard boundary against code injection. Scripts are the only arbitrary-code path in a workflow — gating them to admin-deployed content keeps adhoc submission a safe capability. |
 | **Envelope-direct AI dispatch** | `ai_call` tasks (registered and adhoc) build an `AiInvocation` and call `AiRequestPool::Submit` in-process | Removes the file-event round-trip that used to mediate AI completion. Disk-first is preserved: STNG/CNTX/TASK/PROB/PROV are still written for replay/debug, but the envelope is authoritative. `TriggerEngine` owns its own `FileWatcher` instance for `file_watch` triggers on arbitrary declared paths. |
 | **`file_outputs` on `ai_call` is allowed, with a portability note** | Validator emits Info for outside-tree destinations, Warning for destinations inside the task's own queue folder with requirement-firing filenames | Supports external-project agent workflows (Studio or Engine-without-Docker writing to `~/dev/<project>/...`) while still flagging the real bug (duplicate AI query when a file_output lands inside its own queue folder as e.g. `summary.txt`). |
+| **Failure-path log discipline** | Every C++ fail-path emits a `LOG_*_ERROR` line whose text includes the runId or workflowId as a literal substring | The dashboard's "Run Analysis" panel scopes issues to lines containing this run's identifiers — so concurrent runs don't cross-contaminate. A fail-path log without an id (or at WARN level) is invisible to the analyzer and silently drops out of debugging. Subsystems without run context (parsers, signers) return errors via their data types rather than logging, leaving the upstream caller with the runId in scope to do the ERROR log. |
+| **Per-tenant URL fields live on `ApiInterface`, not `ProviderConfig`** | Azure OpenAI's `resource`/`deployment`/`api_version` and Bedrock's `region` are encoded into `iface.m_Url` (Bedrock: extracted at signing time from the URL host); `ProviderConfig::m_Params` is reserved for per-tenant secret material (AWS `secret_access_key` / `session_token`) | One Azure subscription typically hosts multiple deployments (gpt-4 + gpt-35-turbo + ...) that share an api_key but differ in URL. Putting URL components on the provider would couple deployments. The provider is *who*, the interface is *where*. |
+| **`ProviderConfig::m_Params` is a flat string map, not a typed variant** | `std::unordered_map<std::string, std::string>` for per-provider extras (region, secret_access_key, session_token) | A `std::variant<AzureConfig, BedrockConfig, ...>` would couple `ProviderConfig` to every supported provider and require per-shape parse/serialize. The map is loose typing but flat — revisit if a sixth provider needs >5 extra keys, otherwise the simplicity wins. |
+| **SigV4 hand-rolled, no `aws-sdk-cpp`** | `engine/curlWrapper/awsSigV4.{h,cpp}` implements signing on OpenSSL primitives (HMAC-SHA256, SHA256). Self-test on debug startup checks against AWS-published key-derivation vectors. | `aws-sdk-cpp` is ~50 MB and pulls cmake into the build; our needs are request-signing-only. Hand-rolled is ~200 lines of well-documented crypto plumbing with no new vendor tree. |
+| **Bedrock per-family body/reply dispatch is private, not a public abstraction** | The `modelId`-prefix switch (anthropic.* / meta.llama* / amazon.titan-* / amazon.nova-*) is implemented as private free functions inside `requestBuilderAPI5.cpp` and `replyParserAPI5.cpp`, not as an exposed `IBedrockFamilyBuilder` interface | Only one provider (Bedrock) would ever use a family-builder abstraction, so exposing it publicly would be premature. Internal organization stays clean; the public surface stays minimal. |
 
 ---
 

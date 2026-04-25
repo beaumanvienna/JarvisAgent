@@ -25,6 +25,7 @@
 #include "json/replyParserAPI2.h"
 #include "json/replyParserAPI3.h"
 #include "json/replyParserAPI4.h"
+#include "json/replyParserAPI5.h"
 
 namespace AIAssistant
 {
@@ -77,6 +78,17 @@ namespace AIAssistant
             case ConfigParser::EngineConfig::InterfaceType::API4:
             {
                 replyParser = std::make_unique<ReplyParserAPI4>(jsonString);
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API1Azure:
+            {
+                // Azure OpenAI returns OpenAI-compatible bodies — reuse the API1 parser.
+                replyParser = std::make_unique<ReplyParserAPI1>(jsonString);
+                break;
+            }
+            case ConfigParser::EngineConfig::InterfaceType::API5:
+            {
+                replyParser = std::make_unique<ReplyParserAPI5>(jsonString);
                 break;
             }
             default:

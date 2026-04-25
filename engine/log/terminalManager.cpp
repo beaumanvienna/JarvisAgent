@@ -366,6 +366,14 @@ namespace AIAssistant
             }
 
             std::string const safe = SanitizeForCurses(message);
+            // Clear the row before writing, matching the status path. If a previous
+            // render placed a character pdcursesmod classified as wide (e.g. some
+            // emoji or punctuation depending on its wcwidth table), cell N+1 holds
+            // MAX_UNICODE as a continuation marker. A new shorter line that overwrites
+            // only cells 0..N would leave the orphan, and PDC_transform_line asserts
+            // on the next refresh. Under high log churn (stress tests) this surfaces.
+            wmove(m_LogWindow, m_LogPrintLine, 0);
+            wclrtoeol(m_LogWindow);
             wattron(m_LogWindow, COLOR_PAIR(1));
             mvwprintw(m_LogWindow, m_LogPrintLine, 0, "%s", safe.c_str());
             wattroff(m_LogWindow, COLOR_PAIR(1));

@@ -54,8 +54,8 @@ cd workflow-editor/ui && npm install && npm run build
 ./jarvisagent.sh              # Studio edition
 ./jarvisagent.sh --engine     # Engine edition
 
-# Dashboard: http://localhost:8080
-# Workflow Editor: http://localhost:8080/editor
+# Dashboard: https://localhost:8443
+# Workflow Editor: https://localhost:8443/editor
 
 # Or run the binary directly:
 ./bin/Release/jarvisAgent-studio
@@ -94,6 +94,14 @@ python3 test/assistant/test_assistant.py --with-ai --auto-approve # all 70 tests
 
 Format with clang-format using the `.clang-format` config at the root. No automated linting in CI — formatting is manual/IDE-driven.
 
+### Discipline rules (each one came from a real bug — don't relax them)
+
+- **No `default:` arms in `switch` over closed enums we own** (`InterfaceType`, `AuthStyle`, etc.). Either enumerate every case (the `-Wswitch` warning catches missing arms when a variant is added) or `static_assert(NumVariants == N, "extend this switch")`. A `default:` that silently absorbs unknown variants is anti-debugging armor — see the silent-Bearer-fallback bug in `CurlMultiDispatcher` for a real example.
+- **Don't duplicate complex-struct construction across files.** If two places build the same `QueryData` / envelope / similar struct from the same inputs, extract a `BuildXxx(...)` helper before a third site appears. Parallel construction sites are guaranteed to skew when fields are added.
+- **Failure-path logs are ERROR-level AND mention the runId or workflowId as a literal substring.** The dashboard's Run Analysis filters issues to lines containing this run's identifiers; a fail-path log without an id (or at WARN level) is invisible to it. Subsystems without run context (parsers, signers) return errors via their data types and let the upstream caller — which has the runId in scope — emit the ERROR log. Concrete: `LOG_APP_ERROR("AiRequestPool::Submit: ... run='{}' workflow='{}' task='{}': ...", ...)` not `LOG_APP_WARN("operation failed: %s", err)`.
+- **All C++ output goes through `LOG_*` macros**, never `std::cout` / `std::cerr`. The macros land in both the ncurses TUI and `log/log.txt`; raw stream writes only land in one (or are silently swallowed in TUI mode).
+- **simdjson is the only JSON library**. Don't add nlohmann or RapidJSON for new capabilities — extend on top of simdjson.
+
 ## Architecture
 
 ### Major Components
@@ -102,7 +110,7 @@ Format with clang-format using the `.clang-format` config at the root. No automa
 |-----------|---------------|-----------|
 | **Engine Core** | Thread pool, logging, event queue, JSON parsing | `engine/engine.h`, `engine/event/` |
 | **Workflow Runtime** | DAG-based task execution, JCWF parsing | `application/workflow/workflowJsonParser.h`, `triggerEngine.h` |
-| **AI Request Pool** | Parallel AI API dispatch (OpenAI, Gemini) | `application/workflow/aiRequestPool.h`, `aiCallTaskExecutor.h` |
+| **AI Request Pool** | Parallel AI dispatch over six adapters (OpenAI Chat / OpenAI Responses / Gemini native / Anthropic Messages / Azure OpenAI / AWS Bedrock); auth uniformly via `IAuthSigner` (Bearer / x-api-key / x-goog-api-key / api-key / SigV4) | `application/workflow/aiRequestPool.h`, `aiCallTaskExecutor.h`, `engine/curlWrapper/authSigner.h` |
 | **Session Manager** | Queue file monitoring, STNG/CNTX/TASK file assembly | `application/session/` |
 | **File Watcher** | Real-time queue folder change detection | `application/file/fileWatcher.h` |
 | **Web Server** | REST API + WebSocket, React UI serving (Crow framework) | `application/web/webServer.h` |
@@ -116,13 +124,13 @@ Format with clang-format using the `.clang-format` config at the root. No automa
 
 ### Data Flow
 
-1. **File Watcher** detects changes in the queue folder
-2. **File Categorizer** classifies files by type: STNG (settings), CNTX (context), TASK, REQ (requirements)
-3. **Session Manager** assembles the environment (STNG + CNTX + TASK files)
-4. **AI Request Pool** dispatches AI queries in parallel (one per requirement file)
-5. **Workflow Runtime** executes DAG tasks (shell/Python/AI/internal), managing dependencies
-6. **Web Server** exposes REST API + WebSocket for the React UI to monitor execution
-7. **Trigger Engine** fires workflows on schedule/webhook/file-watch events
+1. **Trigger Engine** fires workflows on cron / webhook / file-watch / manual events
+2. **Workflow Runtime** runs the task DAG, materializing each `ai_call` task's queue folder with **STNG** (settings), **CNTX** (context), **TASK** (instruction), **PROB** (one prompt per fan-out item) inputs
+3. **AI Request Pool** dispatches the assembled `AiInvocation` envelope in parallel — disk-first stays preserved (PROV sidecar + transcript still written), but the envelope is the authoritative source of truth, not a file-watcher round-trip
+4. The reply lands at `<prob>.output.{txt,json}`; the runtime advances the DAG to dependent tasks
+5. **Web Server** exposes REST + WebSocket for the React UI to monitor execution
+
+See `doc/architecture.md` "AI Dispatch Pipeline" for the full diagram.
 
 ### Workflow Format (JCWF)
 
@@ -139,8 +147,12 @@ See `doc/JC_Workflow_Specification.md` for the full format definition.
 
 - `doc/JC_Workflow_Specification.md` — Complete JCWF format and execution model
 - `doc/api-endpoints.md` — REST API reference
-- `doc/architecture.md` — Detailed architecture overview
+- `doc/architecture.md` — Detailed architecture overview, including the **Key Design Decisions** table (the "why" behind non-obvious choices)
+- `doc/jarvisagent.md` — User manual / `config.json` reference
+- `doc/cyber security.md` — Threat model, MCP key lifecycle, master-password handling
+- `mcp/README.md` — MCP tool surface (run, configure, artifact retrieval)
 - `integration/README.md` — Webhook triggers, n8n integration, HMAC signing
+- `docker-compose.example.yml` — Optional dev mocks (`aoai-api-simulator` for Azure OpenAI testing, LocalStack Hobby tier for Bedrock testing) — both kept commented; uncomment to run
 
 ### Vendored Dependencies
 

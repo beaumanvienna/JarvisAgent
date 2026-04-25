@@ -21,7 +21,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
+#include <unordered_map>
 
 typedef void CURL;
 struct curl_slist;
@@ -72,7 +74,9 @@ namespace AIAssistant
         {
             Bearer = 0,          // Authorization: Bearer <key> (OpenAI chat+Responses APIs)
             XGoogApiKey,         // x-goog-api-key: <key> (Google Gemini native)
-            AnthropicXApiKey     // x-api-key: <key> + anthropic-version: 2023-06-01 (Anthropic Messages)
+            AnthropicXApiKey,    // x-api-key: <key> + anthropic-version: 2023-06-01 (Anthropic Messages)
+            AzureApiKey,         // api-key: <key> (Azure OpenAI deployment URLs)
+            AwsSigV4             // AWS SigV4: signs the request body, emits Authorization+X-Amz-Date+X-Amz-Content-Sha256
         };
 
         struct QueryData
@@ -82,6 +86,9 @@ namespace AIAssistant
             std::string m_ApiKey;
             AuthStyle m_AuthStyle{AuthStyle::Bearer};
             long m_TimeoutMs{0}; // 0 = no timeout (default); >0 = max transfer time in ms
+            // Per-provider auxiliary fields read by signers (e.g. SigV4 needs region;
+            // Bedrock dual-secret puts secret_access_key + session_token here).
+            std::unordered_map<std::string, std::string> m_Params{};
             bool IsValid() const;
         };
 

@@ -333,27 +333,31 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - Dev-plan doc `AI dispatch refactor.md` has been mined into `doc/architecture.md` §"AI Dispatch Pipeline" and is safe to delete.
 - Loose follow-up: `tools/replayTranscript.py` — nominally-planned dispatch debugging tool that reads a `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; add when first real replay need comes up.
 
-### 5h. Additional AI backend adapters (Bedrock + Azure OpenAI)
+### 5h. Additional AI backend adapters (Bedrock + Azure OpenAI) — DONE
 
-Both are real gaps for customers who can't bring OpenAI/Anthropic API keys through procurement but already have cloud contracts.  Both fit cleanly on top of the envelope architecture — new `InterfaceType` variant + per-provider `RequestBuilder` / `ReplyParser` + new `AuthStyle` on `CurlWrapper`.  Reply parsing is mostly trivial because Bedrock and Azure OpenAI both return OpenAI-compatible response bodies for chat-completion-shaped routes.
+Landed. Both adapters live on top of the envelope architecture without touching schema validation, chunking, reduce, transcripts, or events. The auth-style branching that lived in `CurlWrapper` was lifted into a new `IAuthSigner` interface (`engine/curlWrapper/authSigner.{h,cpp}`); SigV4 is a clean `IAuthSigner` implementation in `engine/curlWrapper/awsSigV4.{h,cpp}` rather than an enum branch.
 
-**5h.1 — AWS Bedrock adapter (new `InterfaceType::API5`).**  Post-1.0, pre-1.0 if an enterprise customer pulls.
-- Endpoint: `POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke`.  Routes to Claude / Llama / Titan / Nova depending on `modelId`.
-- Auth: **SigV4 signed requests** (AWS access key + secret + region).  New `CurlWrapper::AuthStyle::AwsSigV4` that computes the signature from the request body + headers + timestamp.  Not a small piece — canonical request, string-to-sign, HMAC-SHA256 chain — but bounded (~300 lines, well-documented).
-- Request body shape varies per underlying model family (Anthropic-inside-Bedrock ≠ Llama-inside-Bedrock).  `RequestBuilderAPI5` needs a per-family selector — cleanest done by sniffing `modelId` prefix (`anthropic.claude-*` vs `meta.llama*` vs `amazon.titan*`).
-- Reply parser: Bedrock wraps each family's native response in its own envelope; unwrap and delegate to the matching existing family parser (e.g. for anthropic-inside-bedrock, reuse `ReplyParserAPI4` logic).
-- Chunking / max_context_tokens: pick up automatically from the model-name fallback table (`claude*` → 200 K, `llama*` → 128 K, etc.).
-- Target: post-1.0, bump to pre-1.0 when first enterprise customer asks.
+- **5h.1 AWS Bedrock (`API5`)** — SigV4 signer hand-rolled on OpenSSL HMAC/SHA256. `RequestBuilderAPI5` dispatches body shape on `modelId` prefix (anthropic / meta.llama / amazon.titan|nova). `ReplyParserAPI5` sniffs response shape and delegates: Anthropic-on-Bedrock reuses `ReplyParserAPI4`; Llama/Titan have small dedicated parsers.
+- **5h.2 Azure OpenAI (`API1Azure`)** — `RequestBuilderAPI1Azure` inherits from `RequestBuilderAPI1`, overrides only the auth style. Reply parser maps to `ReplyParserAPI1` unchanged.
 
-**5h.2 — Azure OpenAI adapter.**  Post-1.0.
-- Endpoint: `POST https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`.
-- Auth: **`api-key:` header** (not `Authorization: Bearer`).  New `CurlWrapper::AuthStyle::AzureApiKey`.
-- Request body: identical to OpenAI Chat Completions — reuse `RequestBuilderAPI1`'s body, just override URL composition and auth style.  Either a new `InterfaceType` (say `API1Azure`) that shares the builder/parser with API1 but picks a different URL template and auth style, or a flag on the existing API1 config.
-- Reply parser: reuse `ReplyParserAPI1` as-is.
-- The `?api-version=` query parameter is deployment-specific; carry it in the interface config (`"api_version": "2024-08-01-preview"`).
-- Smaller lift than Bedrock — ~100 lines.
+Test infra: `microsoft/aoai-api-simulator` and LocalStack Hobby tier as commented services in `docker-compose.example.yml`. Live tests at `test/dispatch/test_api1azure_live.py` and `test/dispatch/test_api5_bedrock_anthropic_live.py`. SigV4 self-test (`SigV4Signer::RunSelfTest`) runs at engine startup in debug builds — verifies SHA256 of empty + AWS-published key derivation vector + Sign() determinism.
 
-Both land without touching the envelope, schema validator, chunking, reduce pass, transcripts, or event layer.  The envelope architecture was designed for exactly this kind of additive backend expansion.
+Dashboard: new `aws` credential type with two-input form (access_key_id / secret_access_key + optional session_token) and region; `m_Params` map round-trips through REST with sensitive keys (`secret_access_key`, `session_token`) stripped from GET responses and auto-registered with `SecretRedactor` on load.
+
+### 5i. Engine vs Studio access — role-gate the shared surface, don't edition-gate
+
+**Problem.** Several capabilities (manual workflow run, AI assistant, JCWF generation, settings CRUD) are gated at the *edition* level: their routes live in `RegisterStudioRoutes()` (webServer.cpp), so the Engine binary never registers them at all. Result: an Engine deployment with a valid **admin** MCP token still can't start a registered workflow via `POST /api/workflows/<id>/run` — the route returns 404 because Crow has no record of it. The role check inside `HandleWorkflowRunPost` is unreachable. JC's mental model (and the natural one): capability is granted by **role** (operator/admin can start runs, viewer can't), not by edition. Edition decides which *subsystems* exist (Studio ships the AI assistant + JCWF generator; Engine doesn't), but for **shared** subsystems the boundary should be the per-handler `CheckAuth(req, requiredRole)` call, not the route registration.
+
+**Scope.**
+- Audit every route currently in `RegisterStudioRoutes()`. For each one, decide: edition-only (subsystem absent from Engine — assistant routes, AI JCWF generation routes belong here) or shared-with-role-gate (workflow CRUD reads / manual run / settings reads / providers / ai-interfaces).
+- Move shared routes to `RegisterCommonRoutes()`. The handlers already gate on role via `CheckAuth(req, "admin"|"operator"|"viewer")` — those checks become the actual policy in Engine instead of being unreachable.
+- Update `status.capabilities.workflow_run_endpoint` (and similar) to reflect the actual route registration, not a hardcoded `false` for Engine. The dashboard then naturally shows / hides the Run button based on whether the binary supports it.
+- Match MCP sidecar's tool surface: `run_workflow` should succeed in Engine for a sufficiently-privileged token; reject for viewer. Today it returns 404 for any token because of the route gap.
+
+**Out of scope.**
+- Studio's open auth (no UI auth) per `doc/cyber security.md` §"j9t Studio — Developer Workstation". Studio stays single-user-developer-workstation.
+
+**Discovered while testing the Bedrock + Azure refactor (§5h)** — JC tried to stress-test JCWFs in Engine after Studio passed and found `run_workflow` returns 404 for every workflow, even with an admin MCP token. Documenting now; revisit when ready.
 
 ### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
 

@@ -83,12 +83,35 @@ export default function StatusBar({
     ? `Cloud: ${confirmedCount} healthy`
     : "Cloud: no connections";
 
+  // The Studio backend returns a synthetic identity `user="studio", role="admin"`
+  // for the unauthenticated browser flow (Studio has no UI auth, see cyber security
+  // spec). Don't render that identity as if it were a real user — it's an artifact
+  // of the open-flow auth shim. The edition badge below covers the "what edition
+  // am I on" question explicitly so we don't need the synthetic-user proxy.
+  const showAuthIdentity = authUser && authUser !== "studio";
+
   return (
     <header className="status-bar">
       <div className="status-bar-left">
         <span className="title">
           JarvisAgent Dashboard
-          {authUser && (
+          <span
+            style={{
+              marginLeft: 8,
+              padding: "1px 6px",
+              borderRadius: 2,
+              background: "#475569",
+              color: "#fff",
+              fontSize: 10,
+              fontWeight: 600,
+              letterSpacing: 0.3,
+              textTransform: "uppercase",
+            }}
+            title="j9t edition"
+          >
+            {isStudio ? "studio" : "engine"}
+          </span>
+          {showAuthIdentity && (
             <span
               style={{
                 marginLeft: 10,

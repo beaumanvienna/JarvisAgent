@@ -540,6 +540,14 @@ namespace AIAssistant
                     {
                         apiInterface.m_InterfaceType = EngineConfig::InterfaceType::Test;
                     }
+                    else if (api == "API1Azure")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API1Azure;
+                    }
+                    else if (api == "API5")
+                    {
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API5;
+                    }
                     else
                     {
                         CORE_HARD_STOP("invalid API in config.json");
@@ -568,6 +576,12 @@ namespace AIAssistant
                         break;
                     case EngineConfig::InterfaceType::Test:
                         apiTypeStr = "Test";
+                        break;
+                    case EngineConfig::InterfaceType::API1Azure:
+                        apiTypeStr = "API1Azure";
+                        break;
+                    case EngineConfig::InterfaceType::API5:
+                        apiTypeStr = "API5";
                         break;
                     default:
                         break;

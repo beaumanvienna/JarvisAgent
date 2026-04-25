@@ -1,4 +1,4 @@
-export type CredentialType = "api_key" | "oauth" | "key_pair" | "credentials";
+export type CredentialType = "api_key" | "oauth" | "key_pair" | "credentials" | "aws";
 
 export type ProviderEntry = {
   name: string;
@@ -14,6 +14,9 @@ export type ProviderEntry = {
   scopes?: string;
   // Basic auth fields
   username?: string;
+  // Per-provider auxiliary fields. Non-secret values are returned verbatim;
+  // sensitive keys (e.g. AWS secret_access_key/session_token) are stripped server-side.
+  params?: Record<string, string>;
 };
 
 export type ProvidersListResponse = {
@@ -67,6 +70,10 @@ export type ProviderCreateInput = {
   // Basic auth fields
   username?: string;
   password?: string;
+  // Per-provider extras. AWS dual-secret puts secret_access_key + session_token here;
+  // Bedrock additionally needs region. Non-secret values can be edited freely; the
+  // server stores them but never returns the secret subset.
+  params?: Record<string, string>;
 };
 
 export async function createProvider(input: ProviderCreateInput): Promise<ProviderMutationResponse>
@@ -90,6 +97,7 @@ export type ProviderUpdateInput = {
   private_key_pem?: string;
   username?: string;
   password?: string;
+  params?: Record<string, string>;
 };
 
 export async function updateProvider(name: string, input: ProviderUpdateInput): Promise<ProviderMutationResponse>

@@ -25,6 +25,7 @@
 #include <curl/multi.h>
 
 #include "core.h"
+#include "curlWrapper/authSigner.h"
 #include "engine.h"
 
 namespace AIAssistant
@@ -130,27 +131,15 @@ namespace AIAssistant
             return nullptr;
         }
 
-        // Build authentication header based on provider style.
-        std::string authHeader;
-        switch (req.m_QueryData.m_AuthStyle)
+        // Auth headers are produced by IAuthSigner so AwsSigV4 / AzureApiKey are
+        // covered identically to CurlWrapper::Query — no per-style branching here.
+        std::vector<std::string> authHeaders;
+        IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, authHeaders);
+        for (auto const& h : authHeaders)
         {
-            case CurlWrapper::AuthStyle::XGoogApiKey:
-                authHeader = "x-goog-api-key: " + req.m_QueryData.m_ApiKey;
-                break;
-            case CurlWrapper::AuthStyle::AnthropicXApiKey:
-                authHeader = "x-api-key: " + req.m_QueryData.m_ApiKey;
-                break;
-            case CurlWrapper::AuthStyle::Bearer:
-            default:
-                authHeader = "Authorization: Bearer " + req.m_QueryData.m_ApiKey;
-                break;
+            req.m_Headers = curl_slist_append(req.m_Headers, h.c_str());
         }
-        req.m_Headers = curl_slist_append(req.m_Headers, authHeader.c_str());
         req.m_Headers = curl_slist_append(req.m_Headers, "Content-Type: application/json");
-        if (req.m_QueryData.m_AuthStyle == CurlWrapper::AuthStyle::AnthropicXApiKey)
-        {
-            req.m_Headers = curl_slist_append(req.m_Headers, "anthropic-version: 2023-06-01");
-        }
 
         // HTTP/2 for HTTPS (ALPN negotiation); falls back to HTTP/1.1 if unsupported.
         curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,     CURL_HTTP_VERSION_2TLS);

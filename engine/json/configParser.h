@@ -45,6 +45,8 @@ namespace AIAssistant
                 API3,
                 API4,
                 Test, // No-network fixture-driven backend for integration tests (§8 Phase 7)
+                API1Azure, // Azure OpenAI: API1 body shape, deployment URL template, api-key header
+                API5, // AWS Bedrock: per-model-family body, SigV4 signing
                 NumAPIs,
                 InvalidAPI
             };

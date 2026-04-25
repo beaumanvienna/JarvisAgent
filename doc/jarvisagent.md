@@ -212,6 +212,8 @@ The following fields are recognized:
     - `API2` — OpenAI Responses API (GPT-5 and later models).
     - `API3` — Google Gemini native API (uses `x-goog-api-key` header and `/models/{model}:generateContent` URL scheme).
     - `API4` — Anthropic Messages API (uses `x-api-key` + `anthropic-version: 2023-06-01` headers, `/v1/messages` endpoint; Claude Haiku / Sonnet / Opus).
+    - `API1Azure` — Azure OpenAI (uses `api-key:` header; body identical to API1; the deployment URL is the full per-deployment URL, e.g. `https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`).
+    - `API5` — AWS Bedrock (SigV4-signed; URL composed as `{base}/model/{modelId}/invoke`; body shape dispatches on `modelId` prefix: `anthropic.claude-*` → Anthropic-style, `meta.llama*` → Llama-native, `amazon.titan-*` / `amazon.nova-*` → Titan/Nova; reply parser sniffs the response shape and delegates).
     - `Test` — no-network fixture backend for integration tests (reads canned reply from the interface's `url` field).
   - **`"max_context_tokens"`** — (integer, optional) Advisory context-window size for this interface. When set, j9t warns if an `ai_call` prompt is estimated to exceed it. Typical values: OpenAI GPT-4-family = 128000; OpenAI GPT-5-family = 200000; Google Gemini 2.5 = 1000000; Anthropic Claude = 200000.
   - **`"name"`** — (string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.
@@ -376,7 +378,7 @@ To use AI-powered workflows, you need at least one API key configured.
 ### Setting up AI models
 
 1. In the workflow editor, navigate to the **AI Manager** page.
-2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), `API3` for Google Gemini native, or `API4` for Anthropic Messages (Claude).
+2. Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key provider to use. Use `API1` for OpenAI and compatible providers, `API2` for OpenAI Responses API (GPT-5+), `API3` for Google Gemini native, `API4` for Anthropic Messages (Claude), `API1Azure` for Azure-hosted OpenAI deployments, or `API5` for AWS Bedrock.
 3. Set the default interface index or override per-task in workflow definitions.
 
 Supported providers include OpenAI (API1 or API2), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native endpoint),

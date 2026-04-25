@@ -27,6 +27,7 @@
 #include "engine.h"
 #include "keys/keyEncryption.h"
 #include "keys/keyManager.h"
+#include "log/secretRedactor.h"
 
 namespace AIAssistant
 {
@@ -467,6 +468,40 @@ namespace AIAssistant
                 config.m_Password = std::string(sv);
             }
 
+            // Per-provider params object (optional)
+            {
+                simdjson::ondemand::object paramsObj;
+                if (providerObj["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
+                {
+                    for (auto paramField : paramsObj)
+                    {
+                        std::string_view paramKey = paramField.unescaped_key();
+                        std::string_view paramVal;
+                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
+                        {
+                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
+                        }
+                    }
+                }
+            }
+
+            // For AWS (credential_type="aws"), the dual-secret material lives in m_Params and
+            // must be redacted from logs. The access_key_id (m_ApiKey) is treated as public per
+            // AWS conventions (CloudTrail logs it), but the secret + session_token never leak.
+            if (config.m_CredentialType == "aws")
+            {
+                auto registerIfPresent = [&](char const* key)
+                {
+                    auto it = config.m_Params.find(key);
+                    if (it != config.m_Params.end() && !it->second.empty())
+                    {
+                        SecretRedactor::Get().AddSecret(it->second);
+                    }
+                };
+                registerIfPresent("secret_access_key");
+                registerIfPresent("session_token");
+            }
+
             m_Providers[std::string(providerName)] = std::move(config);
         }
 
@@ -531,6 +566,36 @@ namespace AIAssistant
                 oss << ",\n";
                 oss << "            \"username\": \"" << config.m_Username << "\",\n";
                 oss << "            \"password\": \"" << config.m_Password << "\"";
+            }
+
+            if (!config.m_Params.empty())
+            {
+                auto escape = [](std::string const& s)
+                {
+                    std::string out;
+                    out.reserve(s.size());
+                    for (char c : s)
+                    {
+                        if (c == '"') out += "\\\"";
+                        else if (c == '\\') out += "\\\\";
+                        else if (c == '\n') out += "\\n";
+                        else if (c == '\r') out += "\\r";
+                        else if (c == '\t') out += "\\t";
+                        else out += c;
+                    }
+                    return out;
+                };
+
+                oss << ",\n";
+                oss << "            \"params\": {";
+                size_t pi = 0;
+                for (auto const& [pk, pv] : config.m_Params)
+                {
+                    oss << (pi == 0 ? "\n" : ",\n");
+                    oss << "                \"" << escape(pk) << "\": \"" << escape(pv) << "\"";
+                    ++pi;
+                }
+                oss << "\n            }";
             }
 
             oss << "\n";

@@ -249,24 +249,33 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
   const handleTest = useCallback(async (index: number) => {
     setTestStatus((prev) => ({ ...prev, [index]: "testing" }));
     setTestDetails((prev) => ({ ...prev, [index]: "" }));
+    // Minimum visible yellow time. Without this, fast failures (ECONNREFUSED in 0ms)
+    // collapse "testing" and "error" into a single render and the user sees red instantly.
+    const minVisibleMs = 250;
+    const startedAt = performance.now();
+    const settle = (status: "success" | "error", detail: string) => {
+      const elapsed = performance.now() - startedAt;
+      const wait = Math.max(0, minVisibleMs - elapsed);
+      setTimeout(() => {
+        setTestStatus((prev) => ({ ...prev, [index]: status }));
+        setTestDetails((prev) => ({ ...prev, [index]: detail }));
+      }, wait);
+    };
     try
     {
       const result = await testAiInterface(index);
       if (result.ok)
       {
-        setTestStatus((prev) => ({ ...prev, [index]: "success" }));
-        setTestDetails((prev) => ({ ...prev, [index]: `${result.latency_ms}ms` }));
+        settle("success", `${result.latency_ms}ms`);
       }
       else
       {
-        setTestStatus((prev) => ({ ...prev, [index]: "error" }));
-        setTestDetails((prev) => ({ ...prev, [index]: result.error ?? "Test failed" }));
+        settle("error", result.error ?? "Test failed");
       }
     }
     catch (err: unknown)
     {
-      setTestStatus((prev) => ({ ...prev, [index]: "error" }));
-      setTestDetails((prev) => ({ ...prev, [index]: err instanceof Error ? err.message : "Network error" }));
+      settle("error", err instanceof Error ? err.message : "Network error");
     }
   }, []);
 

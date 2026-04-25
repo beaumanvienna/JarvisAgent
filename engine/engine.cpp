@@ -21,6 +21,7 @@
 
 #include "engine.h"
 #include "core.h"
+#include "curlWrapper/awsSigV4.h"
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/configChecker.h"
@@ -246,6 +247,10 @@ int engine(int argc, char* argv[])
     }
 
     engine->Start(engineConfig);
+
+#ifndef NDEBUG
+    SigV4Signer::RunSelfTest();
+#endif
 
     // create application Jarvis
     std::unique_ptr<AIAssistant::Application> app = JarvisAgent::Create();

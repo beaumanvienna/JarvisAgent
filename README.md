@@ -51,7 +51,7 @@ A dual-edition architecture lets organizations move from prototyping to secure, 
 
 ## Supported AI Backends
 
-JarvisAgent talks to AI providers through four interface adapters, covering every major hosted provider and every common self-hosted runtime. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`.
+JarvisAgent talks to AI providers through six interface adapters, covering every major hosted provider, every common self-hosted runtime, and the two enterprise-cloud platforms. You pick an interface in `config.json` by setting `API` to one of `API1`/`API2`/`API3`/`API4`/`API1Azure`/`API5`.
 
 | Adapter | Endpoint | Providers that work today |
 |---|---|---|
@@ -59,10 +59,10 @@ JarvisAgent talks to AI providers through four interface adapters, covering ever
 | **API2** — OpenAI Responses | `POST /v1/responses` | OpenAI (Responses API — newer endpoint, used for sequential chunk throughput) |
 | **API3** — Gemini native | `POST /v1beta/models/{model}:generateContent` | Google Gemini (native endpoint with `x-goog-api-key` auth) |
 | **API4** — Anthropic Messages | `POST /v1/messages` | Anthropic Claude (Haiku / Sonnet / Opus, all generations with 200 K context) |
+| **API1Azure** — Azure OpenAI | `POST /openai/deployments/{deployment}/chat/completions?api-version={ver}` | Azure-hosted OpenAI deployments (resource-scoped URLs, `api-key:` header) |
+| **API5** — AWS Bedrock | `POST /model/{modelId}/invoke` (SigV4-signed) | Bedrock-hosted **anthropic.claude-***, **meta.llama***, **amazon.titan-***, **amazon.nova-*** model families |
 
 Self-hosted runtimes (Ollama, LM Studio, llama.cpp, vLLM) plug into API1 — see [User Manual](doc/jarvisagent.md) for the config shape. Context-window handling and chunking behavior are documented in [doc/architecture.md](doc/architecture.md).
-
-**On the roadmap** (tracked in `JarvisAgent TODO List.md`): AWS Bedrock (SigV4 signing), Azure OpenAI (deployment-based URLs + `api-key:` header). Both land when we need enterprise-cloud-native deployments.
 
 ---
 
