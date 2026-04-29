@@ -123,7 +123,16 @@ namespace AIAssistant
             tm.tm_hour = hour;
             tm.tm_min = min;
             tm.tm_sec = sec;
+            // POSIX `timegm` and MSVC `_mkgmtime` are the cross-platform pair
+            // for "treat this tm as UTC and convert to time_t".  No portable
+            // standard equivalent (mktime treats tm as local time, which would
+            // shift the parsed wall-clock by the operator's TZ offset and
+            // silently corrupt the rate-limit reset math).
+#ifdef _WIN32
+            std::time_t const resetWallT = _mkgmtime(&tm);
+#else
             std::time_t const resetWallT = timegm(&tm);
+#endif
             std::time_t const nowWallT = std::time(nullptr);
             long const deltaSec = static_cast<long>(resetWallT - nowWallT);
             if (deltaSec <= 0 || deltaSec >= 7200)
