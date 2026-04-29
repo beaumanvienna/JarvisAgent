@@ -287,6 +287,130 @@ Auto\-generated from URL domain + model if omitted.
 (e.g. "openai", "google", "anthropic").
 .RE
 .
+.SS Rate\-limit configuration
+.PP
+Every interface has an associated adaptive controller that decides how
+aggressively to dispatch requests, plus a size\-aware in\-flight budget
+that bounds each request's curl timeout.  Both are tuned by the optional
+\fBrate_limit\fR block on the interface:
+.PP
+.RS
+.nf
+.B {
+.B "    \(dqAPI\(dq: \(dqAPI4\(dq,"
+.B "    \(dqurl\(dq: \(dqhttps://api.anthropic.com/v1/messages\(dq,"
+.B "    \(dqmodel\(dq: \(dqclaude-sonnet-4-6\(dq,"
+.B "    \(dqkey_name\(dq: \(dqAnthropic\(dq,"
+.B "    \(dqrate_limit\(dq: {"
+.B "        \(dqinitial_concurrency_probe\(dq: 4,"
+.B "        \(dqmax_concurrency\(dq: 48,"
+.B "        \(dqmax_retries_429\(dq: 10,"
+.B "        \(dqmax_retries_transient\(dq: 2,"
+.B "        \(dqbase_retry_ms\(dq: 1000,"
+.B "        \(dqrequest_budget\(dq: {"
+.B "            \(dqper_1k_input_token_seconds\(dq: 0.5,"
+.B "            \(dqper_1k_output_token_seconds\(dq: 5.0,"
+.B "            \(dqfixed_overhead_seconds\(dq: 5.0,"
+.B "            \(dqsafety_margin_factor\(dq: 4.0,"
+.B "            \(dqmin_seconds\(dq: 60.0,"
+.B "            \(dqmax_seconds\(dq: 600.0"
+.B "        }"
+.B "    }"
+.B }
+.fi
+.RE
+.PP
+\fBConcurrency / retry knobs\fR:
+.RS
+.TP
+.B initial_concurrency_probe
+Starting AIMD cap before the controller has observed any response.
+Default per InterfaceType: Anthropic 4, OpenAI 8, Empty 4.
+Set to 1 for a Tier\-1 Anthropic account; raise to 16+ for Tier\-3+.
+.TP
+.B max_concurrency
+Hard ceiling AIMD growth never crosses, regardless of how many clean
+completions accumulate.
+Default 48 (the HTTP/2 stream cap).
+Set lower to pace burn rate on cost\-capped accounts \(em this is the only
+cost\-shaping knob in 1.0.
+.TP
+.B max_retries_429
+Number of attempts after a 429 before giving up.
+Default 10 (controller's predictive gating means real 429s are rare in
+practice).
+.TP
+.B max_retries_transient
+Attempts after a transient HTTP error (400/500/502/503).
+Default 2.
+.TP
+.B base_retry_ms
+First retry delay; subsequent retries use exponential backoff
+\fBbase * 2^n\fR.
+Default 1000.
+.RE
+.PP
+\fBSize\-aware request budget\fR \(em every request gets a curl timeout
+(\fBCURLOPT_TIMEOUT_MS\fR) computed from:
+.PP
+.RS
+.nf
+seconds = (input_tokens / 1000 \(mu per_1k_input_token_seconds)
+        + (max_output_tokens / 1000 \(mu per_1k_output_token_seconds)
+        + fixed_overhead_seconds
+seconds *= safety_margin_factor
+seconds  = clamp(seconds, min_seconds, max_seconds)
+.fi
+.RE
+.PP
+Curl's timeout only counts time \fIon the wire\fR \(em inbox waits,
+controller throttling, and retry\-queue backoffs don't burn the budget.
+Each retry creates a fresh easy handle with a fresh budget.
+.PP
+\fBTuning examples:\fR
+.PP
+\fITier\-1 Anthropic (free / starter, ~5 RPM Sonnet):\fR
+.RS
+.nf
+\(dqrate_limit\(dq: { \(dqinitial_concurrency_probe\(dq: 1, \(dqmax_concurrency\(dq: 4 }
+.fi
+.RE
+.PP
+\fITier\-3 Anthropic (production, ~50 RPM Sonnet):\fR
+.RS
+.nf
+\(dqrate_limit\(dq: { \(dqinitial_concurrency_probe\(dq: 8, \(dqmax_concurrency\(dq: 32 }
+.fi
+.RE
+.PP
+\fICost\-capped account \(em pace burn at ~10 in\-flight max regardless of provider tier:\fR
+.RS
+.nf
+\(dqrate_limit\(dq: { \(dqmax_concurrency\(dq: 10 }
+.fi
+.RE
+.PP
+\fIWorkflow expects very long Opus responses (8K\-12K tokens):\fR
+.RS
+.nf
+\(dqrate_limit\(dq: {
+    \(dqrequest_budget\(dq: {
+        \(dqper_1k_output_token_seconds\(dq: 15.0,
+        \(dqmin_seconds\(dq: 120.0,
+        \(dqmax_seconds\(dq: 1200.0
+    }
+}
+.fi
+.RE
+.PP
+\fBVerifying tuning\fR \(em \fBGET /api/debug/signals\fR (debug builds only)
+exposes per\-(host, modelFamily) controller state at
+\fBdispatcher_controllers[]\fR: current AIMD cap, streak since last 429,
+last observation (remaining requests / tokens, reset times), last
+consumed input/output tokens.
+Use this to confirm the controller is doing what you expect before
+scaling up.
+.
 .SH ENVIRONMENT
 .TP
 .B OPENAI_API_KEY

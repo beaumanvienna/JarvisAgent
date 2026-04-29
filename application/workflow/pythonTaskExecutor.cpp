@@ -257,8 +257,8 @@ namespace AIAssistant
 
         // Store first 1024 characters for the frontend tooltip.
         static constexpr size_t kMaxCaptureChars = 1024;
-        taskState.m_CapturedStdout = capturedStdout.substr(0, std::min(capturedStdout.size(), kMaxCaptureChars));
-        taskState.m_CapturedStderr = capturedStderr.substr(0, std::min(capturedStderr.size(), kMaxCaptureChars));
+        taskState.m_CapturedStdout = TruncateUtf8Safe(capturedStdout, kMaxCaptureChars);
+        taskState.m_CapturedStderr = TruncateUtf8Safe(capturedStderr, kMaxCaptureChars);
 
         // Write stdout.txt and stderr.txt to the task working directory (full size).
         {

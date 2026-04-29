@@ -8,6 +8,54 @@ See also:
 
 ---
 
+## Session handoff — 2026-04-28 → next session
+
+Read this first.  Self-contained brief on where today's work left things.  Working tree is full of uncommitted changes that need a thoughtful commit boundary decision (JC handles all git operations himself — never run `git commit`).
+
+### What landed today (uncommitted)
+
+Today was three large pieces of work plus assorted fixes:
+
+1. **§5g-rl-tierb AI dispatch hermetic tests (Tier B)** — 8 Python tests + the C++ infra to support them.  See §5g-rl-tierb below for the full list.  All 8 verified passing across 3 sweeps in one j9t process (state-isolation + retry-sentinel fixes hold).
+2. **Two new dev plans authored** — `doc/misc/cybersec-hardening-dev-plan.md` (§18) and `doc/misc/cpp-safety-hardening-dev-plan.md` (§19).  Charter, 4-domain split, 4-session schedule combined per domain, importance rubric, per-change documentation template, per-domain triage, memo / lessons-learned.  Plans are review-ready; sessions to execute them not yet scheduled.
+3. **Two TUI ncurses stress tests** — `test_stress_tui_utf8_heavy.py` (3-way concurrent jarvisCpp at 420 ai_call tasks with diverse multi-byte UTF-8) and `test_stress_tui_utf8_invalid.py` (140 ai_call tasks with hand-crafted malformed bytes).  Surfaced + fixed a real bug: invalid bytes from the TestInterface fixture leaked raw into log/log.txt.  New `SanitizeUtf8` helper in `application/workflow/workflowTypes.h` (companion to `TruncateUtf8Safe`); applied at the TestInterface boundary.
+
+### Bug fixes that surfaced and got fixed today
+
+These came up while building the Tier B / TUI tests; documented inline in `§5g-rl-tierb` but worth flagging here because they affect real config:
+
+- **`ApplyAiInterfaceRateLimitFromJson` padded_string bug** — `simdjson::ondemand::parser::iterate(req.body)` silently no-opped on non-padded strings, so every `rate_limit` override sent via `POST /api/settings/ai-interfaces` was dropped on the floor.  Every interface in `config.json` ended up with C++ struct defaults regardless of what the operator submitted.  Fixed by wrapping in `simdjson::padded_string`.
+- **`m_MaxRetries429 == 0` treated as "use default 10"** — `> 0` check at `curlMultiDispatcher.cpp:776` meant operators couldn't actually configure 0 retries via `rate_limit.max_retries_429`.  Switched to `>= 0`; `-1` (struct default) is now the sole "unset" sentinel.  Same fix for `m_MaxRetriesTransient`.
+- **Localhost SSL bypass in DEBUG builds** — added in `CurlMultiDispatcher::SetupEasyHandle` so the dispatcher can hit the j9t server's own self-signed cert during hermetic tests.  Production paths still verify; bypass is gated on `#ifdef DEBUG && (host == localhost|127.0.0.1|::1)`.
+- **`SanitizeUtf8` UTF-8 sanitizer** — bytes from external sources (TestInterface fixture for now; real reply parsers + captured stdout/stderr deferred to §19) are sanitized at construction so downstream `LOG_*`, dashboard WS, and ncurses TUI all see well-formed UTF-8.
+
+### What's verified
+
+| Sweep | Result |
+|---|---|
+| Tier A (existing) — `test_rate_limit_observation_parse.py` | green |
+| Tier B (new today) — 8 tests × 3 sweeps within one j9t process | 24/24 pass |
+| TUI heavy UTF-8 — 3 jarvisCpp JCWFs concurrent, 420 ai_call | pass, j9t alive, 18.4 MB log clean |
+| TUI invalid UTF-8 — 140 ai_call with malformed fixture | pass after the `SanitizeUtf8` fix, 6.1 MB log clean |
+| Existing dispatch tests (`test_testinterface_hermetic.py`, schema-roundtrip, etc.) | not re-run today; should still pass — no breaking changes to those code paths |
+
+### Open items / next-session candidates
+
+1. **§19 cpp-safety hardening pass** — 4 sessions to execute the plan.  Among the entries: `SanitizeUtf8` at real AI reply parsers (`replyParserAPI{1..5}.cpp`) and at captured stdout/stderr (`shellTaskExecutor`, `pythonTaskExecutor`) — explicitly flagged in the plan's §6.1 D1 row "UTF-8 sanitization at external-byte boundaries" as the deferred companion work.
+2. **§18 cyber-sec hardening pass** — 4 sessions, runs combined with §19 per the dual-plan schedule (S1=D2 web+cloud+assistant, S2=D3 core engine, S3=D1 workflow orchestration, S4=D4 app infrastructure).
+
+### Gotchas next-session-Claude should know
+
+These survive past today and are still load-bearing:
+
+- **Don't restart j9t lightly.**  Dispatcher state (controller AIMD caps, observation history) lives in-memory; restart loses it.  For repeated test runs in one j9t, call `POST /api/debug/reset-dispatcher-state` between tests (each Phase B test does this at startup).
+- **`rate_limit.max_retries_429 = 0` now means 0** — previously meant "use default".  In practice nobody sets it explicitly, so unlikely to bite anyone, but worth flagging in changelog if shipping.
+- **TestInterface fixture content gets sanitized via `SanitizeUtf8` now** — the OUTPUT FILE on disk is also sanitized (downstream Python combiners read it as UTF-8 text; raw-byte preservation isn't worth breaking the combiner).  If a future test needs raw bytes on disk, that's a flag on the interface, not a default.
+- **Localhost SSL bypass is DEBUG-only.**  Don't write tests that depend on it under Release builds; they'll fail with `CURLE_SSL_PEER_CERTIFICATE`.
+- **`SanitizeUtf8` is the project-wide pattern for external-byte boundaries** (alongside `TruncateUtf8Safe` for size bounds).  See `feedback_established_safety_patterns.md` memory.
+
+---
+
 ## ~~1. GitHub CI and cross-platform testing~~ ✅
 - ~~Linux, macOS, and Windows workflows are green~~ ✅
 - ~~Fix smoke test segfault (TTY / ncurses / config path)~~ ✅ graceful exit when config.json missing; Core destructor restores cout/cerr rdbuf
@@ -318,20 +366,53 @@ Absorbed into the AI dispatch refactor (§5g below). Original scope kept here fo
 - [x] Docs sweep: architecture.md, api-endpoints.md, JC_Workflow_Specification.md §3.3.6, jcwf_generation_guide.md (embedded into the binary at build time), application/README.md, webServer.md, session/README.md + renamed fileWriter.md, file/README.md, logging.md, assistant/README.md — all scrubbed of SessionManager / ChatMessagePool / OnProbFileEvent references and "refactor" callouts.  `combinedDocumentation.md` is auto-generated by jarvisCppDocu — not hand-edited; regenerate on next run.
 
 **Independent remaining features (carry into post-1.0 or follow-ups):**
-- [ ] Chunking fan-out (emit N envelopes per oversized PROB, concat replies into one output). Planner + advisory already in.
+- [x] ~~Chunking fan-out~~ — landed; `test_chunking_fanout.py` validates emit-N-envelopes-per-oversized-PROB + reduce-pass concat.
 - [ ] JCWF schema gap-close: close gaps in `doc/jcwf.schema.json` vs. `workflowJsonParser` + parser↔schema contract test. `tools/generateEmbeddedHeaders.py` prebuild + `kJcwfSchemaJson` already compiled into the binary.
 - [ ] Wire `AiJcwfService::GenerateAsync` to set `AiInvocation.m_OutputSchemaJson = kJcwfSchemaJson` for schema-enforced JCWF generation with validator-error retry.
 - [ ] TUI / dashboard consumers subscribing to `EventCategoryAi` (events are posted; consumed only by the aggregated "in flight" LED today).
 - [ ] Contract tests under `test/dispatch/` — many landed in 5g (hermetic, relaxed env, output-schema roundtrip, chunking, markitdown, cross-workflow concurrency 2026-04-23); remaining slices tracked as follow-ups.
 
 **Known live-observed issues:**
-- [x] ~~60-second `WaitingExternal` timeout kills slow Claude calls~~ — resolved in refactor. `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` now uses 300 s default with a 120 s floor for `ai_call` tasks (matching `AiInvocation.m_Timeout`).
+- [x] ~~60-second `WaitingExternal` timeout kills slow Claude calls~~ — resolved in §5g-rl (rate-limit refactor 2026-04-26). The `WorkflowRuntimeManager::TimeoutWaitingExternalTasks` 5-min wall-clock kill no longer applies to `ai_call` tasks at all — curl owns the per-attempt timeout via `CURLOPT_TIMEOUT_MS`, set from a size-aware budget computed in `AiRequestPool::Submit`. The `kAiCallMinWaitingExternalTimeoutMs` 120s floor is gone. See §5g-rl below.
 - [x] Claude Haiku 4.5 occasionally ignores STNG "no markdown fences" rules and wraps output in ` ```cpp … ``` `. Model-behaviour quirk. Mitigation in place: `StripWholeReplyFence` in `aiRequestPool.cpp` removes the outer fence, with a keep-list for diagram formats (mermaid / dot / plantuml / graphviz / latex / markdown) so fence-wrapped Mermaid diagrams survive. Fence-strip counter exposed on `/api/debug/signals` as `ai_fence_strips`.
 
 - HTTP/2 multiplexing + libcurl multi transport + disk-first philosophy + async completion model — all preserved.
 - Out of scope: native LLM tool-calling (§5e — post-1.0), Claude Code PoC (§5f — post-1.0), additional cloud-native AI adapters (§5h — post-1.0 / pre-1.0 for enterprise).
 - Dev-plan doc `AI dispatch refactor.md` has been mined into `doc/architecture.md` §"AI Dispatch Pipeline" and is safe to delete.
 - Loose follow-up: `tools/replayTranscript.py` — nominally-planned dispatch debugging tool that reads a `<prob>.transcript.json` and re-emits the exact request body against the same provider, for reproducing drift. Not built; add when first real replay need comes up.
+
+### 5g-rl. AI call performance optimization (rate-limit + size-aware budget) — DONE 2026-04-26
+
+Followup to §5g triggered by yesterday's 137-task `jarvisCppDocu` failure on Anthropic Sonnet (rate-limit storms + dual-timeout layer killing legitimately slow calls). Designed and shipped as a five-phase plan in `AI call performance optimization.md`; all phases verified live.
+
+- [x] **Per-provider rate-limit strategy (Phase 1)** — `IRateLimitStrategy` (`engine/curlWrapper/rateLimitStrategy.h`) parses provider-specific response headers into a normalized `RateLimitObservation`. Concretes: OpenAI (API1/API2/API6), Anthropic (API4 — split input/output token quotas, ISO 8601 resets, retry-after), Empty (API3 Gemini, API5 Bedrock, Test). Verified live across API1/API2/API3/API4.
+- [x] **Adaptive controller (Phase 2)** — `RateLimitController` per `(host, modelFamily)`. Token-bucket mirror (correctness) + AIMD concurrency cap (max throughput) + server-directed waits (etiquette). Validated end-to-end: cap converged 4→16 across 137-task `jarvisCppDocu` Sonnet run with zero 429s.
+- [x] **Size-aware in-flight budget + dual-timeout collapse (Phase 4)** — replaces `AiRequestPool::m_Deadline` + runtime `WaitingExternal` 5-min kill for `ai_call`. Per-attempt timeout = `CURLOPT_TIMEOUT_MS` computed from `(input_tokens × per_1k_input) + (output_tokens × per_1k_output) + overhead, × safety_margin, clamp[min,max]`. Curl counts only in-flight time and resets per attempt. ~130 lines of obsolete deadline machinery deleted.
+- [x] **Config exposure (Phase 4)** — `config.json api_interfaces[i].rate_limit` block: `initial_concurrency_probe`, `max_concurrency`, `max_retries_429`, `max_retries_transient`, `base_retry_ms`, nested `request_budget` with the 6 budget knobs. Defaults shipped sized for Sonnet (slowest active provider); fast providers finish well within bounds.
+- [x] **Cascade cancellation (Phase 5)** — `WorkflowRuntimeManager` calls `AiRequestPool::CancelRequestsForRun(runId)` once when a run terminates; the pool walks pending entries and forwards each match to `CurlMultiDispatcher::CancelByCancelKey`. Drained on the I/O thread (curl handle mutations require single-threading vs `curl_multi_perform`). Validated under load: 126 in-flight Anthropic requests aborted in <1ms when an upstream task failed, halting token burn that would otherwise have continued for orphaned generations. `dispatcher_total_cancelled` counter exposed.
+- [x] **Observability (Phase 5)** — `/api/debug/signals dispatcher_controllers[]` exposes per-`QuotaKey` cap, streak, last observation (remaining requests/tokens, reset times), last consumed input/output tokens. Surfaces in `mcp__j9t__debug_signals` for in-conversation diagnosis.
+- [x] **Path-mismatch bug fix** — pre-existing latent bug surfaced by Gemini's 6s latency: `AiRequestPool::Submit` always derived the workflow-binding lookup key as `<stem>.output.txt` while structured tasks register under `<stem>.output.json`. Now uses the right suffix based on `envelope.m_OutputSchemaJson`.
+- [x] **Watchdog-on-throttle bug fix** — pre-existing 5s file-activity watchdog used to fire on requests legitimately throttled in the controller's inbox. Disarm moved from "curl_multi_add_handle fires" to "Submit was called" (handoff time). Validated at 15-parallel against gpt-4.1-mini (cap=8 → 7 throttled): 15/15 pass.
+- [x] **End-to-end verification** — `jarvisCppDocu` (137 tasks) succeeded clean against Anthropic Sonnet 4.6, **138/138 in 5 min 43 s wall**, zero 429s, zero retries-exhausted, zero failures, zero cancellations. The exact workload that motivated the refactor.
+
+Out of scope (deliberate):
+- API5 (Bedrock) and API6 (Azure OpenAI) live verification — neither in active use; strategy mapping (Empty for API5, OpenAI for API6) stays as best-guess.
+- SSE streaming — post-1.0; design hook in place (`Observe()` idempotent by replacement) so the future split into `ParseHeaders()` + `ParseBody()` is mechanical. Tracked separately in `doc/roadmap.md`.
+
+### 5g-rl-tierb. AI dispatch §14 Tier B hermetic tests — DONE 2026-04-28
+
+Eight Python tests cover the dispatcher hermetically via real curl traffic to a localhost mock endpoint. Replaces the live-credit verification path for routine controller / AIMD / budget regressions.
+
+- [x] **C++ infra** — `CurlMultiDispatcher::RecentSubmission` ring (capacity 64) + `GetRecentSubmissions()` for size-aware-budget readback. `CURLOPT_TCP_KEEPALIVE = 1` finally landed in `SetupEasyHandle` (was specified in §6.4 of the perf plan but never shipped). Localhost-only `CURLOPT_SSL_VERIFYPEER = 0` in DEBUG builds so the dispatcher can hit the j9t server's own self-signed cert without a CA bundle entry. New `ResetTestState()` clears `m_Controllers` / `m_HostRateLimits` / `m_RecentSubmissions` for test isolation.
+- [x] **Debug endpoints** — `GET /api/debug/recent-submissions`, `POST /api/debug/test-observe-idempotent`, `POST /api/debug/mock-ai-response`, `POST /api/debug/reset-dispatcher-state`. `dispatcher_keepalive_enabled` flag added to `/api/debug/signals`.
+- [x] **Phase A tests (3)** — debug-endpoint-only: `test_tcp_keepalive_set.py`, `test_observe_idempotent.py`, `test_rate_limit_strategy_dispatch.py`.
+- [x] **Phase B tests (5)** — real curl traffic through the mock endpoint: `test_size_aware_budget.py`, `test_quota_key_isolation.py`, `test_aimd_concurrency_cap.py`, `test_token_bucket_mirror.py`, `test_curlopt_timeout_fires.py`. Each calls `reset-dispatcher-state` at startup so repeat runs stay isolated.
+- [x] **Body fixtures** — `test/dispatch/fixtures/responses/{openai,anthropic}_{success,429_error}.json` + new header fixture `anthropic_zero_quota.txt`.
+- [x] **Bug fixes surfaced during the work:**
+  - `ApplyAiInterfaceRateLimitFromJson` was iterating `req.body` without `simdjson::padded_string` — silently no-opped, leaving every interface POST/PUT'd via REST with C++ struct defaults instead of the operator's overrides. Fixed.
+  - `m_MaxRetries429 == 0` and `m_MaxRetriesTransient == 0` were silently treated as "use dispatcher default" because of `> 0` checks — operators couldn't actually disable retries via config. Switched to `>= 0`; `-1` remains the "unset" sentinel, `0` now means "no retries". Updated `QueryData` field-doc comment.
+
+**Verification:** 8 tests × 3 sweeps within one j9t process — 24/24 pass. Sweeps surface state-leak bugs that single-run wouldn't catch.
 
 ### 5h. Additional AI backend adapters (Bedrock + Azure OpenAI) — DONE
 
@@ -672,4 +753,28 @@ Historical: the former `engine_api_token.txt` admin bearer token had a 90-day ex
 **RBAC:** Three roles (admin > operator > viewer). Admin-only: shutdown, security log. Operator+: run control, app log. Viewer+: workflow list, run monitoring. Bearer token grants admin (backward compatible). Gateway mode defaults to viewer (least privilege). `insufficient_role` → 403.
 
 **Documentation:** `doc/cyber security.md` updated with 11 new abbreviations (RBAC, MFA, WAF, OIDC, JWT, etc.), recommended deployment architecture (Internet → WAF → API Gateway → j9t), explicit "Direct Public Internet Exposure — Not Supported" section, multi-tenant guidance.
+
+---
+
+### ~~17. Dashboard live updates over WebSocket~~ ✅ DONE 2026-04-27
+
+Root cause was upstream of the WebSocket plumbing: `WorkflowRuntimeManager::Update()` sampled the per-run fingerprint **after** `DrainAiRequestCompletions()` had already mutated task states for AI completions. Every `WaitingExternal → Succeeded` transition for an `ai_call` was therefore invisible to the change detector — the dashboard saw only what `TickActiveRun()` itself mutated (run start, sub-workflow propagation, the final aggregator task), so a heavy AI workflow looked frozen at low N until the final non-AI task moved the needle.
+
+**Fix:** capture the fingerprint **before** the drain (workflowRuntimeManager.cpp around line 1310). Keyed by `runId` so the loop tolerates `m_ActiveRuns` mutating mid-iteration. New runs added by `StartPendingRuns` earlier in `Update()` aren't in the pre-drain map; that's treated as "fingerprint changed" so they still produce a broadcast.
+
+**Verified live 2026-04-27** with 3-workflow concurrent jarvisCppDocu run on Sonnet: `total_runs_snapshots_enqueued` grew 1:1 with `dispatcher_total_completed` (was stuck at 7 forever before the fix). Peak drain stats remained healthy (peak ~540 KB / ~37 ms duration even at triple snapshot density).
+
+Diagnostic side-effect: `/api/debug/signals` gained ~12 new WebSocket counters during the investigation (`websocket_total_broadcasts_enqueued`, `websocket_total_runs_snapshots_enqueued`, `websocket_total_drains`, `websocket_last_drain_bytes`, `websocket_peak_drain_bytes`, `websocket_peak_drain_duration_us`, etc.) — these stay in as a permanent post-mortem layer for any future WS pacing question.
+
+### 18. Cyber-security hardening pass
+
+Source: `doc/combinedCyberSecAudit.md` (729 findings: 54 CRITICAL, 239 HIGH, 279 MEDIUM, 157 LOW) — fresh baseline produced 2026-04-27 by the `jarvisCppCyberSecAudit` JCWF on Sonnet 4.6. Re-runnable end-to-end with `mcp__j9t__run_workflow workflowId="jarvisCppCyberSecAudit"`.
+
+**Plan:** `doc/misc/cybersec-hardening-dev-plan.md` (drafted 2026-04-28). 4-domain split, 4-session schedule combined with the C++ safety hardening pass (each session covers both plans for one domain). Importance-driven triage: address what holds up; skip with reason. No find-and-replace; per-change documentation template mandatory.
+
+### 19. C++ safety hardening pass
+
+Source: `doc/combinedSafetyAudit.md` (1243 findings: 13 CRITICAL, 277 HIGH, 483 MEDIUM, 470 LOW) — fresh baseline produced 2026-04-27 by the `jarvisCppSafetyAudit` JCWF on Sonnet 4.6.
+
+**Plan:** `doc/misc/cpp-safety-hardening-dev-plan.md` (drafted 2026-04-28). Same 4-domain split + 4-session schedule as §18 (combined sessions). Memo organized as Rust-emulating C++ defaults (capture-by-value into async, `std::optional` over nullable ptr, `[[nodiscard]]` on error returns, `static_assert(NumVariants == N)` on every closed-enum switch, mutex-wrapped shared state, etc.); distilled into `MEMORY.md` 2026-04-28 for long-term discipline.
 

@@ -113,6 +113,73 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 { "ok": true }
 ```
 
+### Debug Signals — Debug builds only
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime. Returns 404 on Release builds. |
+| POST | `/api/debug/parse-rate-limit-headers` | Hermetic-test entry point. Body: `{interface_type, model, header_buffer, body, http_status}`. Calls `IRateLimitStrategy::Parse(...)` and returns the parsed `RateLimitObservation` plus `quota_key` + `initial_concurrency_probe`. Lets `test/dispatch/test_rate_limit_observation_parse.py` exercise every provider strategy without a live HTTP round-trip. Returns 404 on Release builds. |
+
+**Selected fields (rate-limit refactor):**
+
+| Field | Description |
+|-------|-------------|
+| `dispatcher_total_dispatched` | Lifetime count of HTTP requests handed to `curl_multi_add_handle`. |
+| `dispatcher_total_completed` | Lifetime count of requests that returned a non-error result. |
+| `dispatcher_total_throttled` | Cumulative count of throttle decisions (push-backs to inbox while waiting for cap availability). Counts cycles, not unique requests. |
+| `dispatcher_total_429s` | Lifetime count of 429 responses received. |
+| `dispatcher_total_retries_exhausted` | Count of requests that failed after `max_retries_429` retries. |
+| `dispatcher_total_cancelled` | Count of requests aborted via cascade cancellation when their workflow run terminated. |
+| `dispatcher_active_count` | Requests currently on the wire (curl in-flight). |
+| `dispatcher_inbox_size` | Requests waiting in the dispatcher inbox for controller admission. |
+| `dispatcher_retry_queue_size` | Requests waiting on a retry backoff. |
+| `dispatcher_hosts[]` | Per-host roll-up: `host`, `remaining_requests`, `remaining_tokens`, `req_reset_in_sec`, `tok_reset_in_sec`, `active_count`. |
+| `dispatcher_controllers[]` | Per-(host, modelFamily) adaptive controller state — see below. |
+
+**`dispatcher_controllers[]` entry** — primary diagnostic for the rate-limit / AIMD layer:
+
+```json
+{
+  "quota_key": "api.anthropic.com|claude-sonnet",
+  "current_concurrency_cap": 16,
+  "streak_since_last_429": 4,
+  "remaining_requests": 999,
+  "remaining_tokens": 90000,
+  "req_reset_in_sec": -1,
+  "tok_reset_in_sec": -6,
+  "last_consumed_input_tokens": -1,
+  "last_consumed_output_tokens": -1
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `quota_key` | `<host>\|<modelFamily>` — opaque identifier, distinct per (account quota bucket). |
+| `current_concurrency_cap` | AIMD cap on simultaneous in-flight requests for this key. Halves on 429, additively grows on streak of 5 clean completions. |
+| `streak_since_last_429` | Clean completions accumulated toward the next AIMD cap increase. |
+| `remaining_requests` / `remaining_tokens` | Last-observed RPM/TPM remaining (from provider headers). `-1` = unknown / provider ships no proactive feedback (e.g. Gemini Native, Bedrock). |
+| `req_reset_in_sec` / `tok_reset_in_sec` | Seconds until the bucket refills. Negative = already past, refilled. |
+| `last_consumed_input_tokens` / `last_consumed_output_tokens` | Last response's `usage` totals. `-1` until first observation lands. |
+
+This is the canonical place to verify per-interface `rate_limit` config tuning is doing what you expect. See the user manual `doc/jarvisagent.md` "Rate-limit configuration" for the corresponding config schema.
+
+**WebSocket broadcast counters** — added 2026-04-27 while investigating the dashboard live-update bug; kept in as a permanent post-mortem layer. All counters reset on process start.
+
+| Field | Description |
+|-------|-------------|
+| `websocket_total_broadcasts_enqueued` | Lifetime count of every push into `m_PendingBroadcasts`. |
+| `websocket_total_runs_snapshots_enqueued` | Subset: `BroadcastWorkflowRunsSnapshot()` calls. Should track 1:1 with task state transitions during a heavy run. |
+| `websocket_total_last_runs_snapshots_enqueued` | Subset: `BroadcastWorkflowRunsLastSnapshot()` calls. |
+| `websocket_total_ai_call_events_enqueued` | Subset: `BroadcastAiCallStarted/Completed/Failed` events. |
+| `websocket_total_python_status_enqueued` | Subset: `BroadcastPythonStatus()` events. |
+| `websocket_total_log_batches_enqueued` | Subset: log-line batches enqueued at drain time. |
+| `websocket_total_drains` | Lifetime count of `DrainPendingBroadcasts()` invocations (one per client `ping` frame). |
+| `websocket_last_drain_bytes` / `websocket_peak_drain_bytes` | Size of the most recent / largest single batched `send_text` frame. |
+| `websocket_last_drain_messages` | Number of messages folded into the most recent batch. |
+| `websocket_last_drain_duration_us` / `websocket_peak_drain_duration_us` | Wall time spent inside the most recent / longest drain (build batch + send to all clients). |
+
+Healthy values during an active workflow: drains keep up with pings (one drain per ping interval), peak batch size in the hundreds of KB, peak duration in the tens of ms. A snapshot counter that flatlines while completions are still arriving means a producer-side bug — see TODO List §17 for the historical example.
+
 ---
 
 ## Workflows — CRUD — read-only (Both, viewer+); mutating CRUD (Studio only, admin); reload + tree + dependency-graph + versions (Both, admin/viewer)

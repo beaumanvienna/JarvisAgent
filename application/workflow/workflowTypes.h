@@ -36,6 +36,129 @@
 
 namespace AIAssistant
 {
+    // Truncate `s` to at most `maxBytes`, walking back to the last valid UTF-8
+    // boundary so we never leave a half-multibyte tail. Matters for downstream
+    // consumers that strictly validate UTF-8 — notably PyUnicode_FromString,
+    // which fails (and sets a Python exception) when given a string that ends
+    // mid-sequence; that exception leaks across the next PyObject_Call and
+    // detonates as the cryptic "<method 'get' of 'dict' objects> returned a
+    // result with an exception set" inside whichever Python user code happens
+    // to call dict.get first.
+    inline std::string TruncateUtf8Safe(std::string const& s, std::size_t maxBytes)
+    {
+        if (s.size() <= maxBytes)
+            return s;
+        std::size_t cut = maxBytes;
+        // The byte at index `cut` is the first byte EXCLUDED by substr(0, cut).
+        // If it's a UTF-8 continuation byte (10xxxxxx), the included slice ends
+        // mid-sequence — back off until we land at a non-continuation byte.
+        while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80)
+            --cut;
+        return s.substr(0, cut);
+    }
+
+    // SanitizeUtf8 — replace every malformed byte / sequence with the U+FFFD
+    // replacement character (\xEF\xBF\xBD).  Output is guaranteed well-formed
+    // UTF-8.  Apply at every boundary where externally-sourced bytes (AI
+    // provider replies, fixture file reads, captured stdout/stderr) enter
+    // the codebase — downstream consumers (LOG_* macros into log/log.txt,
+    // dashboard WS broadcasts as JSON, ncurses TUI rendering) all assume
+    // well-formed UTF-8 and choke or corrupt on bad bytes.  Found by the
+    // §14 TUI invalid-UTF-8 stress test (test/dispatch/test_stress_tui_utf8_invalid.py),
+    // which fed orphan continuations / truncated sequences / illegal lead
+    // bytes / overlong encodings / surrogate halves through the dispatcher
+    // and watched them propagate into log/log.txt as raw garbage.
+    //
+    // Rejected categories (each becomes a single U+FFFD):
+    //   - illegal lead byte (0xFE, 0xFF, 0x80-0xBF as start)
+    //   - truncated 2/3/4-byte sequence (lead+missing tails)
+    //   - missing/wrong continuation bytes (no 10xxxxxx after a multi-byte lead)
+    //   - overlong encodings (NUL as 0xC0 0x80, slash as 0xC0 0xAF, etc.)
+    //   - surrogate-half codepoints (U+D800-U+DFFF in UTF-8)
+    //   - codepoints > U+10FFFF
+    //
+    // Valid sequences pass through byte-for-byte.  O(n) time, ~same
+    // throughput as TruncateUtf8Safe.  Use both helpers in series when you
+    // need to bound size AND sanitize: SanitizeUtf8 first, TruncateUtf8Safe
+    // second (the helper returns clean UTF-8 so the truncation can't land
+    // mid-codepoint).
+    inline std::string SanitizeUtf8(std::string const& s)
+    {
+        std::string out;
+        out.reserve(s.size());
+
+        std::size_t i = 0;
+        while (i < s.size())
+        {
+            unsigned char const b = static_cast<unsigned char>(s[i]);
+
+            // ASCII fast path.
+            if (b < 0x80)
+            {
+                out.push_back(s[i]);
+                ++i;
+                continue;
+            }
+
+            // Determine sequence length from the lead byte.
+            std::size_t needed = 0;
+            std::uint32_t cp = 0;
+            if      ((b & 0xE0) == 0xC0) { needed = 1; cp = b & 0x1Fu; }
+            else if ((b & 0xF0) == 0xE0) { needed = 2; cp = b & 0x0Fu; }
+            else if ((b & 0xF8) == 0xF0) { needed = 3; cp = b & 0x07u; }
+            else
+            {
+                // Illegal lead byte (0x80-0xBF lone continuation, or 0xF8+).
+                out.append("\xEF\xBF\xBD");
+                ++i;
+                continue;
+            }
+
+            // Truncated at end of buffer.
+            if (i + needed >= s.size())
+            {
+                out.append("\xEF\xBF\xBD");
+                ++i;
+                continue;
+            }
+
+            // Validate continuations and build codepoint.
+            bool valid = true;
+            for (std::size_t k = 1; k <= needed; ++k)
+            {
+                unsigned char const c = static_cast<unsigned char>(s[i + k]);
+                if ((c & 0xC0) != 0x80) { valid = false; break; }
+                cp = (cp << 6) | (c & 0x3Fu);
+            }
+            if (!valid)
+            {
+                out.append("\xEF\xBF\xBD");
+                ++i;
+                continue;
+            }
+
+            // Reject overlongs, surrogates, out-of-range.
+            bool legal = true;
+            if (needed == 1 && cp < 0x80u)        legal = false;  // overlong 2-byte
+            if (needed == 2 && cp < 0x800u)       legal = false;  // overlong 3-byte
+            if (needed == 3 && cp < 0x10000u)     legal = false;  // overlong 4-byte
+            if (cp >= 0xD800u && cp <= 0xDFFFu)   legal = false;  // surrogate half
+            if (cp > 0x10FFFFu)                   legal = false;  // out of Unicode range
+            if (!legal)
+            {
+                out.append("\xEF\xBF\xBD");
+                ++i;
+                continue;
+            }
+
+            // Valid sequence — copy through.
+            out.append(s, i, needed + 1);
+            i += needed + 1;
+        }
+
+        return out;
+    }
+
     // ---------------------------------------------------------------------
     // TaskWatchdog — inactivity-based timeout for running tasks
     // ---------------------------------------------------------------------

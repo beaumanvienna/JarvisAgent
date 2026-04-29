@@ -49,10 +49,18 @@ export default function App() {
   const [keysStatus, setKeysStatus] = useState<
     "loading" | "ok" | "no_password" | "wrong_password" | "no_keys_file"
   >("loading");
+  // Include the live `keys_unlocked` flag from /api/status polling. Closes the
+  // post-restart race: when j9t restarts, the cached `keysStatus` stays at "ok"
+  // for a few seconds before the cross-check effect reacts, during which the
+  // sign-in dialog would render and submitting an MCP key would hit a
+  // misleading "invalid key" rejection because the store is actually sealed.
+  // /api/status is public and polled every 3 s, so the master-password dialog
+  // appears on the next tick instead of waiting for the second-hop fetchKeysStatus.
   const keysSealed =
     keysStatus === "no_password" ||
     keysStatus === "wrong_password" ||
-    keysStatus === "no_keys_file";
+    keysStatus === "no_keys_file" ||
+    status?.keys_unlocked === false;
 
   // Probe current auth state via whoami. Both editions enforce auth post-§5i —
   // anonymous whoami returns 401 → user must sign in.
@@ -206,7 +214,7 @@ export default function App() {
           onUnlocked={handleKeysUnlocked}
         />
       )}
-      {keysStatus === "ok" && needsAuth && (
+      {keysStatus === "ok" && !keysSealed && needsAuth && (
         <AdminLoginDialog
           onAuthenticated={handleAuthenticated}
           onOpenActivation={(prefillToken) => {

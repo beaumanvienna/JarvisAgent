@@ -1,0 +1,45 @@
+UTF-8 INVALID-BYTE STRESS REPLY (TUI sanitization regression armor).
+
+=== Section 1: Orphan continuation bytes ===
+ASCII text [€‚ƒ„] more ASCII [¿ ¾] end
+
+=== Section 2: Truncated 2-byte sequences ===
+Cafe Ã stops abruptly
+Naive Ã©Ã boundary case
+
+=== Section 3: Truncated 3-byte sequences ===
+CJK ä¸ cut mid-codepoint
+Em-dash â€ boundary 1024-style truncation
+
+=== Section 4: Truncated 4-byte sequences ===
+Emoji ğŸ˜ truncated emoji
+Rocket ğŸ half-emoji
+
+=== Section 5: Illegal start bytes 0xFE / 0xFF ===
+Forbidden şÿşÿ never legal
+
+=== Section 6: Overlong encodings ===
+Overlong NUL À€ should be sanitized
+Overlong slash À¯ path-traversal vector if not rejected
+
+=== Section 7: Surrogate halves (U+D800-U+DFFF in UTF-8) ===
+High surrogate í € never valid in UTF-8
+Low surrogate í°€ same
+
+=== Section 8: Mid-character truncation (the 2026-04-27 bug) ===
+Long line of many bytes followed by truncated em-dash at end â€
+
+=== Section 9: Mixed valid + invalid ===
+Valid: ä¸­æ–‡ Î±Î²Î³ ğŸš€  Invalid: €ÿÀ€  Valid: Ù…Ø±Ø­Ø¨Ø§  Invalid: â€ş  ASCII tail.
+
+=== Section 10: Heavy interleaving (~256 boundary cases) ===
+row00: valid_text € mid â€ tail
+row01: valid_text ‡ mid â€ tail
+row02: valid_text  mid â€ tail
+row03: valid_text • mid â€ tail
+row04: valid_text œ mid â€ tail
+row05: valid_text £ mid â€ tail
+row06: valid_text ª mid â€ tail
+row07: valid_text ± mid â€ tail
+
+End of invalid-byte fixture.

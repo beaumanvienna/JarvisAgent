@@ -1,150 +1,133 @@
-# jarvisCppDocu Workflow – C++ Class Documentation Generation
+# jarvisCppDocu Workflow — C++ Class Documentation
 
 **Label:** JarvisAgent C++ Docu Generator
 
-**Workflow doc:** ['Generates Markdown documentation for each C++ header (and matching .cpp when present) in application/ and engine/.', 'Each task is an ai_call and writes its artifacts into a per-task folder under ../queue/<workflowId>/.']
+**Workflow doc:** Generates Markdown documentation for each C++ header (and matching .cpp when present) in `application/` and `engine/`. Each task is an `ai_call` and writes its artifacts into a per-task folder under `../queue/<workflowId>/`.
 
-This workflow generates one documentation artifact per C++ header in the `application/` and `engine/` trees (optionally including the matching `.cpp` file when present). Each class doc is produced by an `ai_call` task that writes STNG/TASK/PROB queue artifacts inline and references source files via CNTX.
+This workflow runs a senior-C++-engineer documentation pass over every C++ source file in the j9t tree, one `ai_call` per file. Each task produces a Markdown class doc with role / public API / collaborators / threading / notes. A final `combineDocumentation` Python reducer aggregates every per-file doc into a single navigable `combinedDocumentation.md` with a folder-structured table of contents.
+
+The same per-file fan-out shape is shared with `jarvisCppCyberSecAudit` (cyber-security review) and `jarvisCppSafetyAudit` (non-security safety review). All three are generated from the same source-file table (`doc/misc/jarvisCppDoc.md`) by `scripts/buildJarvisCppDocu.py` — just pick a `--mode`.
+
+## What it generates
+
+Per-file docs are structured Markdown:
+
+- **Role** — one paragraph on what the file/class is responsible for in the system.
+- **Public API** — each method's purpose, expected inputs, side effects.
+- **Collaborators** — classes/modules the file works with and how.
+- **Threading / lifetime** — ownership rules, locking, who-owns-who, async constraints.
+- **Notes** — non-obvious behaviour, invariants, gotchas, constraints worth knowing.
+
+Trivial getters/setters and code-style commentary are skipped.
 
 ## Triggers
 
-- `auto` (`auto-run`) – enabled=true
-- `manual` (`manual-run`) – enabled=true
+- `manual` (`manual-run`) — enabled, exposed in the dashboard Run button.
 
 ## Directory layout
 
-- Workflow file lives under `../workflows/`.
-- Each AI task uses a working directory under `../queue/jarvisCppDocu/<NN>_<taskId>/`.
-- Relative file paths in tasks are resolved relative to the **task working directory** (per JCWF spec).
+- Workflow file lives under `workflows/jarvisCppDocu/`.
+- Each AI task uses a working directory under `queue/jarvisCppDocu/<NN>_<taskId>/`.
+- The combiner writes its output to `workflows/jarvisCppDocu/<NN>_combineDocumentation/combinedDocumentation.md`.
 
 ## Queue artifacts produced per AI task
 
 Each `ai_call` task declares a `queue_binding` with four parts:
 
-- **STNG**: written inline to `STNG_docu.txt`
-- **TASK**: written inline to `TASK_docu.txt`
-- **CNTX**: points at the header and (optionally) cpp file paths
-- **PROB**: written inline to `PROB_docu.txt`
+- **STNG** — `STNG_docu.txt` — senior-C++-engineer persona; output rules (no triple-backtick fences, plain Markdown only).
+- **TASK** — `TASK_docu.txt` — instruction listing the five doc dimensions above.
+- **CNTX** — the source header path and the matching `.cpp` when one exists.
+- **PROB** — `PROB_docu.txt` — the structured Markdown skeleton the model fills in.
 
-### STNG_docu.txt (inline content)
+## How to run
 
-```text
-write consise, succinct, no guessing, no embelishments
+```bash
+# From the dashboard:
+# Run button on jarvisCppDocu, or
+mcp__j9t__run_workflow workflowId="jarvisCppDocu"
 ```
 
-### TASK_docu.txt (inline content)
+The default API interface follows whatever is set as `engine.api_interfaces.default` in `config.json`.
+
+## Expected runtime and cost
+
+Empirically measured (140 ai_call tasks):
+
+| Model | Wall time | Approximate cost (per run) |
+|---|---|---|
+| `claude-sonnet-4-6` (default) | ~10–15 min | a few US$ |
+| `claude-opus-4-7` | ~45–60 min | ~5–10× higher |
+| `gpt-4.1` | ~5–8 min | lowest |
+
+Numbers vary with how chatty the model is on a given file. The dispatcher's adaptive rate-limit controller (`engine/curlWrapper/rateLimitController`) keeps concurrency at the provider's safe ceiling, so the run won't melt under tier-1 quotas.
+
+## Reading the output
+
+`combinedDocumentation.md` opens with a folder-structured table of contents, then one section per source file. The 2026-04-27 baseline run produced docs for 140 files; total length was ~1 MB.
+
+### Example excerpt
 
 ```text
-Write a docu about this C++ class that helps humans and AIs to quickly and efficiently learn about what the function does.
+## Application
+
+**Role:** `Application` is the abstract base class that every j9t host application
+must implement. It defines the mandatory lifecycle contract — startup, per-frame
+update, event dispatch, and shutdown — that the engine's run-loop calls in
+sequence. Concrete subclasses supply the actual logic for each phase…
+
+**Public API:**
+
+- `OnStart() → void` — Called once by the engine immediately after the
+  application object is installed and before the first update tick. Subclasses
+  perform one-time initialisation here. If initialisation cannot succeed, the
+  subclass must populate `m_FatalStartupMessage` before returning so callers
+  can surface the failure cleanly.
+- `OnUpdate() → void` — Called repeatedly by the engine's main loop while
+  `IsFinished()` returns `false`. …
+- `OnEvent(std::shared_ptr<Event>&) → void` — Delivers a single engine event to
+  the application. …
+
+**Collaborators:** …
+
+**Threading / lifetime:** No internal synchronisation; all four lifecycle
+methods are assumed to be called from the engine's main thread. Subclasses
+that spawn background threads must handle their own synchronisation before
+these methods return.
+
+**Notes:** `m_FatalStartupMessage` is the only formal error-reporting channel
+between `OnStart` and the engine. There is no return code or exception
+contract on `OnStart`…
 ```
-
-### PROB_docu.txt (inline content)
-
-```text
-Generate documentation for the provided C++ class. Output Markdown.
-```
-
-## Task pattern
-
-All tasks follow the same pattern:
-
-- `type`: `ai_call`
-- `mode`: `single`
-- `file_inputs`: the source header, plus the matching `.cpp` if it exists
-- `file_outputs`: `docu.md`
-- `queue_binding.cntx_files`: the same source file paths (header + optional `.cpp`)
-
-## Tasks generated from the source tree
-
-Total AI tasks: **73**
-
-### application/
-
-| Source | Includes .cpp? | Task ID | Working directory |
-|---|---:|---|---|
-
-| `application/application.h` | no | `doc_application_application_h` | `../queue/jarvisCppDocu/01_doc_application_application_h` |
-| `application/file/fileWatcher.h` | yes | `doc_application_file_fileWatcher_h` | `../queue/jarvisCppDocu/04_doc_application_file_fileWatcher_h` |
-| `application/jarvisAgent.h` | yes | `doc_application_jarvisAgent_h` | `../queue/jarvisCppDocu/07_doc_application_jarvisAgent_h` |
-| `application/json/jsonObjectParser.h` | yes | `doc_application_json_jsonObjectParser_h` | `../queue/jarvisCppDocu/08_doc_application_json_jsonObjectParser_h` |
-| `application/json/replyParser.h` | yes | `doc_application_json_replyParser_h` | `../queue/jarvisCppDocu/11_doc_application_json_replyParser_h` |
-| `application/json/replyParserAPI1.h` | yes | `doc_application_json_replyParserAPI1_h` | `../queue/jarvisCppDocu/09_doc_application_json_replyParserAPI1_h` |
-| `application/json/replyParserAPI2.h` | yes | `doc_application_json_replyParserAPI2_h` | `../queue/jarvisCppDocu/10_doc_application_json_replyParserAPI2_h` |
-| `application/log/statusRenderer.h` | yes | `doc_application_log_statusRenderer_h` | `../queue/jarvisCppDocu/12_doc_application_log_statusRenderer_h` |
-| `application/python/pythonEngine.h` | yes | `doc_application_python_pythonEngine_h` | `../queue/jarvisCppDocu/13_doc_application_python_pythonEngine_h` |
-| `application/session/fileWriter.h` | yes | `doc_application_session_fileWriter_h` | `../queue/jarvisCppDocu/14_doc_application_session_fileWriter_h` |
-| `application/session/sessionManager.h` | yes | `doc_application_session_sessionManager_h` | `../queue/jarvisCppDocu/15_doc_application_session_sessionManager_h` |
-| `application/task/carMaintenanceTask.h` | yes | `doc_application_task_carMaintenanceTask_h` | `../queue/jarvisCppDocu/16_doc_application_task_carMaintenanceTask_h` |
-| `application/task/internalTaskRegistry.h` | no | `doc_application_task_internalTaskRegistry_h` | `../queue/jarvisCppDocu/17_doc_application_task_internalTaskRegistry_h` |
-| `application/task/taskBase.h` | no | `doc_application_task_taskBase_h` | `../queue/jarvisCppDocu/18_doc_application_task_taskBase_h` |
-| `application/web/chatMessages.h` | yes | `doc_application_web_chatMessages_h` | `../queue/jarvisCppDocu/19_doc_application_web_chatMessages_h` |
-| `application/web/webServer.h` | yes | `doc_application_web_webServer_h` | `../queue/jarvisCppDocu/20_doc_application_web_webServer_h` |
-| `application/workflow/aiCallTaskExecutor.h` | yes | `doc_application_workflow_aiCallTaskExecutor_h` | `../queue/jarvisCppDocu/21_doc_application_workflow_aiCallTaskExecutor_h` |
-| `application/workflow/aiRequestPool.h` | yes | `doc_application_workflow_aiRequestPool_h` | `../queue/jarvisCppDocu/22_doc_application_workflow_aiRequestPool_h` |
-| `application/workflow/dataflowResolver.h` | yes | `doc_application_workflow_dataflowResolver_h` | `../queue/jarvisCppDocu/23_doc_application_workflow_dataflowResolver_h` |
-| `application/workflow/internalTaskExecutor.h` | yes | `doc_application_workflow_internalTaskExecutor_h` | `../queue/jarvisCppDocu/24_doc_application_workflow_internalTaskExecutor_h` |
-| `application/workflow/pythonTaskExecutor.h` | yes | `doc_application_workflow_pythonTaskExecutor_h` | `../queue/jarvisCppDocu/25_doc_application_workflow_pythonTaskExecutor_h` |
-| `application/workflow/shellTaskExecutor.h` | yes | `doc_application_workflow_shellTaskExecutor_h` | `../queue/jarvisCppDocu/26_doc_application_workflow_shellTaskExecutor_h` |
-| `application/workflow/taskExecutor.h` | yes | `doc_application_workflow_taskExecutor_h` | `../queue/jarvisCppDocu/27_doc_application_workflow_taskExecutor_h` |
-| `application/workflow/taskExecutorRegistry.h` | yes | `doc_application_workflow_taskExecutorRegistry_h` | `../queue/jarvisCppDocu/28_doc_application_workflow_taskExecutorRegistry_h` |
-| `application/workflow/taskFreshnessChecker.h` | yes | `doc_application_workflow_taskFreshnessChecker_h` | `../queue/jarvisCppDocu/29_doc_application_workflow_taskFreshnessChecker_h` |
-| `application/workflow/triggerEngine.h` | yes | `doc_application_workflow_triggerEngine_h` | `../queue/jarvisCppDocu/30_doc_application_workflow_triggerEngine_h` |
-| `application/workflow/workflowDataflow.h` | no | `doc_application_workflow_workflowDataflow_h` | `../queue/jarvisCppDocu/31_doc_application_workflow_workflowDataflow_h` |
-| `application/workflow/workflowJsonParser.h` | yes | `doc_application_workflow_workflowJsonParser_h` | `../queue/jarvisCppDocu/33_doc_application_workflow_workflowJsonParser_h` |
-| `application/workflow/workflowJsonParserDetails.h` | yes | `doc_application_workflow_workflowJsonParserDetails_h` | `../queue/jarvisCppDocu/32_doc_application_workflow_workflowJsonParserDetails_h` |
-| `application/workflow/workflowOrchestrator.h` | yes | `doc_application_workflow_workflowOrchestrator_h` | `../queue/jarvisCppDocu/34_doc_application_workflow_workflowOrchestrator_h` |
-| `application/workflow/workflowRegistry.h` | yes | `doc_application_workflow_workflowRegistry_h` | `../queue/jarvisCppDocu/35_doc_application_workflow_workflowRegistry_h` |
-| `application/workflow/workflowRuntimeManager.h` | yes | `doc_application_workflow_workflowRuntimeManager_h` | `../queue/jarvisCppDocu/36_doc_application_workflow_workflowRuntimeManager_h` |
-| `application/workflow/workflowTriggerBinder.h` | yes | `doc_application_workflow_workflowTriggerBinder_h` | `../queue/jarvisCppDocu/37_doc_application_workflow_workflowTriggerBinder_h` |
-| `application/workflow/workflowTypes.h` | no | `doc_application_workflow_workflowTypes_h` | `../queue/jarvisCppDocu/38_doc_application_workflow_workflowTypes_h` |
-
-### application/assistant/
-
-| Source | Includes .cpp? | Task ID | Working directory |
-|---|---:|---|---|
-
-| `application/assistant/assistantController.h` | yes | `doc_application_assistant_assistantController_h` | `../queue/jarvisCppDocu/44_doc_application_assistant_assistantController_h` |
-| `application/assistant/assistantMemory.h` | yes | `doc_application_assistant_assistantMemory_h` | `../queue/jarvisCppDocu/45_doc_application_assistant_assistantMemory_h` |
-| `application/assistant/assistantSession.h` | yes | `doc_application_assistant_assistantSession_h` | `../queue/jarvisCppDocu/46_doc_application_assistant_assistantSession_h` |
-| `application/assistant/assistantTools.h` | yes | `doc_application_assistant_assistantTools_h` | `../queue/jarvisCppDocu/47_doc_application_assistant_assistantTools_h` |
-| `application/assistant/contextAssembler.h` | yes | `doc_application_assistant_contextAssembler_h` | `../queue/jarvisCppDocu/48_doc_application_assistant_contextAssembler_h` |
-| `application/assistant/workspaceIndexer.h` | yes | `doc_application_assistant_workspaceIndexer_h` | `../queue/jarvisCppDocu/49_doc_application_assistant_workspaceIndexer_h` |
-
-### engine/
-
-| Source | Includes .cpp? | Task ID | Working directory |
-|---|---:|---|---|
-
-| `engine/auxiliary/file.h` | yes | `doc_engine_auxiliary_file_h` | `../queue/jarvisCppDocu/50_doc_engine_auxiliary_file_h` |
-| `engine/auxiliary/threadPool.h` | yes | `doc_engine_auxiliary_threadPool_h` | `../queue/jarvisCppDocu/51_doc_engine_auxiliary_threadPool_h` |
-| `engine/core.h` | yes | `doc_engine_core_h` | `../queue/jarvisCppDocu/52_doc_engine_core_h` |
-| `engine/curlWrapper/curlManager.h` | no | `doc_engine_curlWrapper_curlManager_h` | `../queue/jarvisCppDocu/53_doc_engine_curlWrapper_curlManager_h` |
-| `engine/curlWrapper/curlWrapper.h` | yes | `doc_engine_curlWrapper_curlWrapper_h` | `../queue/jarvisCppDocu/54_doc_engine_curlWrapper_curlWrapper_h` |
-| `engine/engine.h` | yes | `doc_engine_engine_h` | `../queue/jarvisCppDocu/55_doc_engine_engine_h` |
-| `engine/event/applicationEvent.h` | no | `doc_engine_event_applicationEvent_h` | `../queue/jarvisCppDocu/56_doc_engine_event_applicationEvent_h` |
-| `engine/event/engineEvent.h` | no | `doc_engine_event_engineEvent_h` | `../queue/jarvisCppDocu/57_doc_engine_event_engineEvent_h` |
-| `engine/event/event.h` | no | `doc_engine_event_event_h` | `../queue/jarvisCppDocu/58_doc_engine_event_event_h` |
-| `engine/event/eventQueue.h` | yes | `doc_engine_event_eventQueue_h` | `../queue/jarvisCppDocu/59_doc_engine_event_eventQueue_h` |
-| `engine/event/events.h` | no | `doc_engine_event_events_h` | `../queue/jarvisCppDocu/60_doc_engine_event_events_h` |
-| `engine/event/filesystemEvent.h` | no | `doc_engine_event_filesystemEvent_h` | `../queue/jarvisCppDocu/61_doc_engine_event_filesystemEvent_h` |
-| `engine/event/keyboardEvent.h` | no | `doc_engine_event_keyboardEvent_h` | `../queue/jarvisCppDocu/62_doc_engine_event_keyboardEvent_h` |
-| `engine/event/pythonErrorEvent.h` | no | `doc_engine_event_pythonErrorEvent_h` | `../queue/jarvisCppDocu/63_doc_engine_event_pythonErrorEvent_h` |
-| `engine/event/timerEvent.h` | no | `doc_engine_event_timerEvent_h` | `../queue/jarvisCppDocu/64_doc_engine_event_timerEvent_h` |
-| `engine/input/keyboardInput.h` | yes | `doc_engine_input_keyboardInput_h` | `../queue/jarvisCppDocu/65_doc_engine_input_keyboardInput_h` |
-| `engine/json/configChecker.h` | yes | `doc_engine_json_configChecker_h` | `../queue/jarvisCppDocu/66_doc_engine_json_configChecker_h` |
-| `engine/json/configParser.h` | yes | `doc_engine_json_configParser_h` | `../queue/jarvisCppDocu/67_doc_engine_json_configParser_h` |
-| `engine/json/jsonHelper.h` | yes | `doc_engine_json_jsonHelper_h` | `../queue/jarvisCppDocu/68_doc_engine_json_jsonHelper_h` |
-| `engine/log/log.h` | yes | `doc_engine_log_log_h` | `../queue/jarvisCppDocu/69_doc_engine_log_log_h` |
-| `engine/log/terminalLogStreamBuf.h` | no | `doc_engine_log_terminalLogStreamBuf_h` | `../queue/jarvisCppDocu/70_doc_engine_log_terminalLogStreamBuf_h` |
-| `engine/log/terminalManager.h` | yes | `doc_engine_log_terminalManager_h` | `../queue/jarvisCppDocu/71_doc_engine_log_terminalManager_h` |
 
 ## Up-to-date behavior
 
-The JCWF freshness model is Makefile-like: a task can be skipped as up-to-date only when its declared `file_outputs` exist and are newer than all declared `file_inputs`, and the task’s dependencies are also satisfied (see JC Workflow Spec §3.4).
+The JCWF freshness model is Makefile-like: an `ai_call` task is skipped when its declared `file_outputs` exist and are newer than all declared `file_inputs`, with the task's dependencies satisfied. Editing a single source file re-runs only that file's docu task plus the combiner — the other 139 stay cached.
 
-In this workflow, each AI task declares `file_outputs: ["docu.md"]`, so the runtime will use that output filename (within the task working directory) for up-to-date checks.
+Editing the docu prompts (STNG/TASK/PROB) in `scripts/buildJarvisCppDocu.py` and re-packing with `--mode docu --pack` invalidates every per-task hash and forces a full re-run.
+
+## Re-running just the combiner
+
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from combineDocumentation import BuildCombinedDocumentation
+BuildCombinedDocumentation(
+    docsDirectory='queue/jarvisCppDocu',
+    outputFileName='combinedDocumentation.md',
+    documentTitle='JarvisAgent C++ Documentation',
+    workflowId='jarvisCppDocu',
+    context={
+        '_task_working_directory': 'workflows/jarvisCppDocu/141_combineDocumentation',
+        '_workflow_base_directory': 'workflows/jarvisCppDocu',
+    },
+)
+"
+```
+
+(The combiner short-circuits when `combinedDocumentation.md` is newer than every per-task input — delete the existing combined file first if you want a forced rebuild.)
 
 ## Notes
 
-- This workflow is intentionally **AI-only**: it produces one markdown doc per header (plus optional `.cpp`) under the queue directories.
-- If you later want to *combine* the generated per-class docs into a single `combinedDocumentation.md`, add a final `python` task that depends on all AI tasks and consumes their outputs.
+- This workflow is intentionally **AI-only** for the per-file work; the only Python step is the final reducer.
+- The companion audits `jarvisCppCyberSecAudit` and `jarvisCppSafetyAudit` share the same source-file table and pattern. Pick a mode in `scripts/buildJarvisCppDocu.py` to switch.
+- If you add new C++ files to `application/` or `engine/`, add them to `doc/misc/jarvisCppDoc.md` and re-pack the workflow with `python3 scripts/buildJarvisCppDocu.py --mode docu --pack` — otherwise the docu silently skips them.

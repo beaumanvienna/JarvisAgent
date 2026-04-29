@@ -1,0 +1,56 @@
+UTF-8 STRESS REPLY — heavy multi-byte content for TUI renderer regression armor.
+
+Latin-1 with diacritics: àéîõü æœß ñ ç ÿ ä ö ü ß
+French quotes: «élégance» — naïveté résumé crème brûlée façade soufflé
+Polish: Zażółć gęślą jaźń, łódź, świerszcz
+Turkish: İstanbul, Türkçe, ğüışİöç
+Vietnamese: Tiếng Việt rất đẹp với các dấu thanh phong phú
+
+Greek: αβγδεζηθικλμνξοπρστυφχψω ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ
+Cyrillic: Привет мир — Здравствуйте, как дела? Россия Україна Беларусь Қазақстан
+Hebrew: שלום עולם — הקווים האחוריים יוצרים מחזה מרהיב
+Arabic: مرحبا بالعالم — كيف حالك؟ السلام عليكم ورحمة الله وبركاته
+Persian: درود بر شما — خوش آمدید به جمع برنامه‌نویسان
+
+CJK ideographs: 中文测试日本語한국어 — 你好世界 こんにちは世界 안녕하세요 세계
+Traditional/Simplified: 繁體中文 简体中文 漢字仮名交じり文
+Hiragana: あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ
+Katakana: アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ
+Hangul Jamo: 가나다라마바사아자차카타파하
+
+Mathematical: ∑∫∂∇√∞≈≠≤≥∈∉⊂⊃∪∩∅∀∃ℕℤℚℝℂℵ
+Logic: ¬∧∨⇒⇔⊥⊤
+Greek math: π τ φ ψ Δ Σ Π λ μ σ
+Currency: $€¥£₹₽₩₪₺₫₴₿
+Arrows: ←→↑↓↔↕⇐⇒⇑⇓⇔⇕↖↗↘↙
+Boxes: ▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏
+Borders: ─│┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬
+
+Emoji (4-byte sequences): 🚀🔥💥🎉⚡🌟💫✨🎊🎁🏆🥇🥈🥉🎖️🏅
+🐙🦀🐢🦂🦋🐝🐞🐌🦗🦟🐜🪲🪰🪱
+😀😁😂🤣😃😄😅😆😉😊😋😎😍😘🥰😗😙😚🙂🤗🤩🤔🤨😐😑
+🌍🌎🌏🌐🗺️🧭🏔️⛰️🌋🗻🏕️🏖️🏜️🏝️🏞️
+🍎🍐🍊🍋🍌🍉🍇🍓🍈🍒🍑🥭🍍🥥🥝🍅🍆🥑🥦🥬🥒🌶️🫑🌽🥕
+
+Combining diacritics: a̧b̆c̃d̊e̩f̌g̾h̘i̥j̛k̔l̜m̏n̅o̲p̗q̇r̟s̃t̥u̪v̈w̆x̅y̌z̾
+Stacked combining: a⃝b⃘c⃪d⃫e⃬
+
+CJK in flow: 在 j9t 这样的工作流引擎中处理大量并发 AI 请求时，需要对 UTF-8 编码的可靠性进行充分测试。
+日本語の文字エンコーディングが破損しないことを確認するためのテストです。
+한국어로 다국어 지원을 점검합니다 — 한자도 같이 사용해서 시험합니다 漢字 같이.
+
+Long sequences mixed: αβγ中文αβγ🚀العαβγ한국αβγ中文αβγ🔥🌟αβγβγδ
+こんにちは世界 — Hello, World! — Bonjour le monde — Hola mundo — Olá mundo — مرحبا بالعالم
+
+Math expressions inline: ∀x∈ℝ, ∃y∈ℝ : x²+y² ≥ 0 ∧ ∂f/∂x = lim(h→0) [f(x+h)-f(x)]/h
+Greek letters in equations: αλγέβρα · γεωμετρία · ανάλυση · τοπολογία
+Cyrillic numerals: а́, бы́, в́, гʼ, дʹ — accented Cyrillic forms
+
+Repeated heavy block (×4):
+中文测试 日本語 한국어 العربية русский ελληνικά עברית 🚀💥🔥
+中文测试 日本語 한국어 العربية русский ελληνικά עברית 🚀💥🔥
+中文测试 日本語 한국어 العربية русский ελληνικά עברית 🚀💥🔥
+中文测试 日本語 한국어 العربية русский ελληνικά עברית 🚀💥🔥
+
+Mixed script paragraph: When Гражданская оборона met 武士道, the 🥷 ninja's blade ─── ⚔️ ─── struck with αβγ-precision, and παν τα ρεϊ — все течет, всё движется. アロハ!
+End of stress reply ─── 終わり ─── סוף ─── النهاية ─── ✨🌟✨

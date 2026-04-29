@@ -34,6 +34,7 @@
 #include "core.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "curlWrapper/curlWrapper.h"
+#include "curlWrapper/rateLimitStrategy.h"
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/jsonHelper.h"
@@ -44,6 +45,7 @@
 #include "session/fileWriter.h"
 #include "workflow/aiCallEvents.h"
 #include "workflow/aiTranscript.h"
+#include "workflow/workflowTypes.h"
 
 namespace fs = std::filesystem;
 
@@ -51,7 +53,6 @@ namespace AIAssistant
 {
     namespace
     {
-        uint64_t const kDefaultTimeoutMs = 300000;     // 5 minutes
         uint64_t const kFileActivityWatchdogMs = 5000; // 5 seconds — max gap between file writes or curl dispatch
 
         bool WriteTextFile(std::string const& filePath, std::string const& fileContent, std::string& outErrorMessage)
@@ -271,11 +272,6 @@ namespace AIAssistant
 
     AiRequestHandle AiRequestPool::RegisterPending(AiRequestHandle const& requestHandle)
     {
-        return RegisterPending(requestHandle, kDefaultTimeoutMs);
-    }
-
-    AiRequestHandle AiRequestPool::RegisterPending(AiRequestHandle const& requestHandle, uint64_t const timeoutMs)
-    {
         if (!requestHandle.IsValid())
         {
             return {};
@@ -283,14 +279,9 @@ namespace AIAssistant
 
         std::shared_ptr<PendingEntry> pendingEntry = std::make_shared<PendingEntry>();
 
-        uint64_t const effectiveTimeoutMs = (timeoutMs > 0) ? timeoutMs : kDefaultTimeoutMs;
-
         auto const now = std::chrono::steady_clock::now();
 
         pendingEntry->m_Handle = requestHandle;
-        pendingEntry->m_HasDeadline = false; // deadline deferred until curl dispatch
-        pendingEntry->m_TimeoutMs = effectiveTimeoutMs;
-
         pendingEntry->m_FileActivityWatchdogActive = true;
         pendingEntry->m_FileActivityDeadline = now + std::chrono::milliseconds(kFileActivityWatchdogMs);
 
@@ -305,14 +296,14 @@ namespace AIAssistant
     AiRequestHandle AiRequestPool::RegisterPendingWorkflowTask(
         AiRequestHandle const& requestHandle, std::string const& workflowId, std::string const& runId,
         std::string const& taskId, std::vector<std::string> const& outputFilePaths,
-        std::vector<std::string> const& outputSlotNames, uint64_t const timeoutMs, std::string const& expectedOutputPath)
+        std::vector<std::string> const& outputSlotNames, std::string const& expectedOutputPath)
     {
         if (!requestHandle.IsValid())
         {
             return {};
         }
 
-        AiRequestHandle const registered = RegisterPending(requestHandle, timeoutMs);
+        AiRequestHandle const registered = RegisterPending(requestHandle);
         if (!registered.IsValid())
         {
             return {};
@@ -365,7 +356,7 @@ namespace AIAssistant
         return registered;
     }
 
-    void AiRequestPool::ActivateDeadlineForOutputPath(std::string const& outputAbsolutePath)
+    void AiRequestPool::OnSubmitHandoff(std::string const& outputAbsolutePath)
     {
         if (outputAbsolutePath.empty())
         {
@@ -384,12 +375,6 @@ namespace AIAssistant
         std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
         pendingEntry->m_CurlDispatched = true;
         pendingEntry->m_FileActivityWatchdogActive = false;
-        if (!pendingEntry->m_HasDeadline && pendingEntry->m_TimeoutMs > 0)
-        {
-            pendingEntry->m_HasDeadline = true;
-            pendingEntry->m_Deadline =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(pendingEntry->m_TimeoutMs);
-        }
     }
 
     void AiRequestPool::KickFileActivityWatchdog(AiRequestHandle const& requestHandle)
@@ -703,15 +688,13 @@ namespace AIAssistant
                     continue;
                 }
 
-                if (!entry->m_HasDeadline)
-                {
-                    continue;
-                }
-
-                // --- File-activity watchdog ---
-                // Fires quickly (5 s) if the executor placed queue files but
-                // Submit was never called (e.g. envelope rejected before dispatch).
-                if (entry->m_FileActivityWatchdogActive && !entry->m_CurlDispatched && now >= entry->m_FileActivityDeadline)
+                // File-activity watchdog: fires quickly (5 s) if the executor
+                // placed queue files but Submit was never called (e.g. envelope
+                // rejected before dispatch).  The per-attempt timeout is owned
+                // by curl (CURLOPT_TIMEOUT_MS), so this is the only watchdog
+                // AiRequestPool still runs in Update().
+                if (entry->m_FileActivityWatchdogActive && !entry->m_CurlDispatched &&
+                    now >= entry->m_FileActivityDeadline)
                 {
                     entry->m_IsCompleted = true;
                     entry->m_IsFailed = true;
@@ -722,44 +705,12 @@ namespace AIAssistant
                     std::string const& taskId = entry->m_Context.m_TaskId;
                     if (!taskId.empty())
                     {
-                        LOG_APP_WARN("[AiRequestPool] file-activity watchdog for task '{}' (workflow '{}', run '{}'): {}",
-                                     taskId, entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
+                        LOG_APP_ERROR("[AiRequestPool] file-activity watchdog run='{}' workflow='{}' task='{}': {}",
+                                      entry->m_Context.m_RunId, entry->m_Context.m_WorkflowId, taskId,
+                                      entry->m_ErrorMessage);
                     }
 
                     entry->conditionVariable.notify_all();
-                    becameCompleted = true;
-                }
-
-                if (becameCompleted)
-                {
-                    // Skip the main deadline check — already failed.
-                }
-                // --- Main deadline (t2 phase) ---
-                else if (now >= entry->m_Deadline)
-                {
-                    entry->m_IsCompleted = true;
-                    entry->m_IsFailed = true;
-
-                    if (!entry->m_CurlDispatched)
-                    {
-                        entry->m_ErrorMessage = "ai_call timed out: curl was never dispatched "
-                                                "(envelope rejected before reaching the dispatcher)";
-                    }
-                    else
-                    {
-                        entry->m_ErrorMessage = "ai_call timed out waiting for output artifact "
-                                                "(curl was dispatched but no response received)";
-                    }
-
-                    std::string const& taskId = entry->m_Context.m_TaskId;
-                    if (!taskId.empty())
-                    {
-                        LOG_APP_ERROR("[AiRequestPool] timeout for task '{}' (workflow '{}', run '{}'): {}", taskId,
-                                      entry->m_Context.m_WorkflowId, entry->m_Context.m_RunId, entry->m_ErrorMessage);
-                    }
-
-                    entry->conditionVariable.notify_all();
-
                     becameCompleted = true;
                 }
             }
@@ -828,6 +779,57 @@ namespace AIAssistant
 
         std::scoped_lock<std::mutex> const lock(m_MapMutex);
         m_PendingRequests.erase(MakeKey(requestHandle));
+    }
+
+    void AiRequestPool::CancelRequestsForRun(std::string const& runId)
+    {
+        if (runId.empty())
+        {
+            return;
+        }
+
+        // Collect cancel keys (= expectedOutputPaths) for the matching entries.
+        // Snapshot under the lock so the dispatcher call doesn't happen while
+        // m_OutputPathMutex is held (the dispatcher's I/O thread takes its own
+        // mutexes and we don't want to introduce a lock-ordering trap).
+        std::vector<std::string> cancelKeys;
+        {
+            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+            cancelKeys.reserve(m_PendingByOutputPath.size());
+            for (auto const& [path, entry] : m_PendingByOutputPath)
+            {
+                if (entry == nullptr)
+                {
+                    continue;
+                }
+                std::scoped_lock<std::mutex> entryLock(entry->mutex);
+                if (entry->m_Context.m_RunId == runId)
+                {
+                    cancelKeys.push_back(path);
+                }
+            }
+        }
+
+        if (cancelKeys.empty())
+        {
+            return;
+        }
+
+        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+        CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
+        if (dispatcher == nullptr)
+        {
+            LOG_APP_ERROR("AiRequestPool::CancelRequestsForRun: dispatcher unavailable run='{}' pending={}", runId,
+                          cancelKeys.size());
+            return;
+        }
+
+        LOG_APP_INFO("AiRequestPool::CancelRequestsForRun: aborting {} in-flight ai_calls for run='{}'", cancelKeys.size(),
+                     runId);
+        for (std::string const& cancelKey : cancelKeys)
+        {
+            dispatcher->CancelByCancelKey(cancelKey);
+        }
     }
 
     namespace
@@ -1045,13 +1047,24 @@ namespace AIAssistant
         // carry runId/workflowId/taskId. The dashboard run analyzer's per-run filter requires
         // these markers — see feedback_log_failures memory. Empty strings for non-workflow
         // callers (assistant, jcwfService) — log lines render run='' there.
+        // Suffix matches what RegisterPendingWorkflowTask was given: structured
+        // tasks register under .output.json (writes via FileWriter when reply
+        // is Kind::Structured); plain text tasks register under .output.txt.
+        // Without this match the binding lookup misses and:
+        //   (a) runId/workflowId/taskId stay empty in fail-path logs (the
+        //       dashboard run analyzer can't surface them);
+        //   (b) the onDispatched callback can't find the entry to disarm the
+        //       file-activity watchdog → false-positive 5 s timeout if the
+        //       provider takes more than 5 s to respond (e.g., Gemini Native).
+        std::string const outputSuffix = envelope.m_OutputSchemaJson.has_value() ? ".output.json" : ".output.txt";
+
         std::string runIdForLog;
         std::string workflowIdForLog;
         std::string taskIdForLog;
         if (!envelope.m_QueueFolder.empty() && !envelope.m_ProbName.empty())
         {
             fs::path const outputPath =
-                envelope.m_QueueFolder / (fs::path(envelope.m_ProbName).stem().string() + ".output.txt");
+                envelope.m_QueueFolder / (fs::path(envelope.m_ProbName).stem().string() + outputSuffix);
             std::string const lookupKey = fs::absolute(outputPath).lexically_normal().generic_string();
             std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
             auto const it = m_PendingByOutputPath.find(lookupKey);
@@ -1118,6 +1131,11 @@ namespace AIAssistant
                     replyText = buffer.str();
                 }
             }
+            // §14 TUI invalid-UTF-8 stress fixture: malformed bytes from a
+            // Test-interface fixture must be sanitized before they enter the
+            // log/dashboard pipeline.  Output file (binary write below)
+            // legitimately preserves the original bytes for inspection.
+            std::string const replyTextSanitized = SanitizeUtf8(replyText);
 
             fs::path const queueFolderCopy = envelope.m_QueueFolder;
             std::string const probNameCopy = envelope.m_ProbName;
@@ -1140,12 +1158,16 @@ namespace AIAssistant
             if (!queueFolderCopy.empty() && !probNameCopy.empty())
             {
                 writtenOutputPath = queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".output.txt");
-                FileWriter::Get().WriteWithHeader(writtenOutputPath, replyText, modelLocal);
+                // Output file gets the SANITIZED bytes — downstream tasks
+                // (combineDocumentation et al.) read this file as UTF-8 text;
+                // the inspection-on-disk benefit of preserving raw bytes is
+                // outweighed by every downstream consumer assuming valid UTF-8.
+                FileWriter::Get().WriteWithHeader(writtenOutputPath, replyTextSanitized, modelLocal);
             }
 
             AiReply testReply;
             testReply.m_Kind = AiReply::Kind::Text;
-            testReply.m_Text = replyText;
+            testReply.m_Text = replyTextSanitized;
             testReply.m_FinishReason = "test";
 
             if (!transcriptPathLocal.empty())
@@ -1198,9 +1220,71 @@ namespace AIAssistant
             return false;
         }
 
+        // QuotaKey = "<host>|<modelFamily>" — controllers in the dispatcher are
+        // keyed by this so per-(host, modelFamily) AIMD signals stay independent
+        // (Anthropic Sonnet vs Opus on same host).  Strategy derives the family;
+        // we extract host from the resolved URL.
+        std::string quotaKey;
+        {
+            std::string host;
+            size_t const schemeEnd = queryUrl.find("://");
+            if (schemeEnd != std::string::npos)
+            {
+                size_t const hostStart = schemeEnd + 3;
+                size_t hostEnd = queryUrl.find('/', hostStart);
+                if (hostEnd == std::string::npos)
+                    hostEnd = queryUrl.size();
+                size_t const colon = queryUrl.find(':', hostStart);
+                if (colon != std::string::npos && colon < hostEnd)
+                    hostEnd = colon;
+                host = queryUrl.substr(hostStart, hostEnd - hostStart);
+            }
+            std::string const family = IRateLimitStrategy::Get(api->m_InterfaceType).DeriveQuotaKey(model);
+            quotaKey = host + "|" + family;
+        }
+
+        int64_t const estimatedInputTokens =
+            IRateLimitStrategy::Get(api->m_InterfaceType).EstimateInputTokens(combinedPrompt);
+
+        // Size-aware in-flight budget (§6).  Computed here, enforced by curl's
+        // CURLOPT_TIMEOUT_MS — only counts time on the wire, resets per attempt
+        // because each retry creates a fresh easy handle.  Replaces the old
+        // AiRequestPool::m_Deadline machinery (deferred-arm + retry-extend).
+        // JCWF-level explicit timeout (envelope.m_Timeout) wins when set.
+        long timeoutMs = 0;
+        if (envelope.m_Timeout.has_value())
+        {
+            timeoutMs = static_cast<long>(envelope.m_Timeout->count());
+            LOG_APP_INFO("AiRequestPool::Submit: budget run='{}' workflow='{}' task='{}' explicit timeoutMs={}",
+                         runIdForLog, workflowIdForLog, taskIdForLog, timeoutMs);
+        }
+        else
+        {
+            auto const& budget = api->m_RateLimit.m_RequestBudget;
+            int32_t const maxOutTokens =
+                envelope.m_Settings.m_MaxTokens.value_or(api->m_DefaultOutputTokens);
+            double seconds = (static_cast<double>(estimatedInputTokens) / 1000.0) * budget.m_Per1kInputTokenSeconds
+                           + (static_cast<double>(maxOutTokens)        / 1000.0) * budget.m_Per1kOutputTokenSeconds
+                           + budget.m_FixedOverheadSeconds;
+            seconds *= budget.m_SafetyMarginFactor;
+            seconds = std::clamp(seconds, budget.m_MinSeconds, budget.m_MaxSeconds);
+            timeoutMs = static_cast<long>(seconds * 1000.0);
+            LOG_APP_INFO("AiRequestPool::Submit: budget run='{}' workflow='{}' task='{}' inTok={} outTok={} "
+                         "timeoutMs={}",
+                         runIdForLog, workflowIdForLog, taskIdForLog, estimatedInputTokens, maxOutTokens, timeoutMs);
+        }
+
         CurlWrapper::QueryData queryData{.m_Url = queryUrl, .m_Data = requestBody, .m_ApiKey = apiKey,
-                                          .m_AuthStyle = authStyle, .m_TimeoutMs = 0,
-                                          .m_Params = ResolveProviderParams(*api)};
+                                          .m_AuthStyle = authStyle, .m_TimeoutMs = timeoutMs,
+                                          .m_Params = ResolveProviderParams(*api),
+                                          .m_InterfaceType = static_cast<int>(api->m_InterfaceType),
+                                          .m_QuotaKey = quotaKey,
+                                          .m_EstimatedInputTokens = estimatedInputTokens,
+                                          .m_CancelKey = {}, // populated below once expectedOutputPath is computed
+                                          .m_MaxConcurrency = api->m_RateLimit.m_MaxConcurrency,
+                                          .m_MaxRetries429 = api->m_RateLimit.m_MaxRetries429,
+                                          .m_MaxRetriesTransient = api->m_RateLimit.m_MaxRetriesTransient,
+                                          .m_BaseRetryMs = api->m_RateLimit.m_BaseRetryMs};
 
         JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
@@ -1220,9 +1304,15 @@ namespace AIAssistant
         std::string expectedOutputPath;
         if (!queueFolder.empty() && !probName.empty())
         {
-            fs::path outputPath = queueFolder / (fs::path(probName).stem().string() + ".output.txt");
+            // Same suffix logic as the binding-lookup above so onDispatched and
+            // OnRequestFailed find the registered entry.
+            fs::path outputPath = queueFolder / (fs::path(probName).stem().string() + outputSuffix);
             expectedOutputPath = fs::absolute(outputPath).lexically_normal().generic_string();
         }
+        // Cancel key = expectedOutputPath (unique per workflow task per run).
+        // Used by AiRequestPool::CancelRequestsForRun → dispatcher CancelByCancelKey
+        // to abort in-flight HTTP requests when the calling workflow terminates.
+        queryData.m_CancelKey = expectedOutputPath;
 
         ++m_DirectDispatchInflight;
 
@@ -1473,12 +1563,17 @@ namespace AIAssistant
             }
         };
 
-        dispatcher->Submit(queryData, std::move(curlCallback));
+        // Disarm the file-activity watchdog at handoff time, NOT at
+        // curl_multi_add_handle time.  The watchdog catches "executor wrote
+        // queue files but Submit was never called" — once Submit is reached,
+        // its purpose is fulfilled regardless of whether the dispatcher's
+        // controller throttles the request in its inbox.  Pre-Phase-4b code
+        // armed deadlines from the dispatcher's onDispatched callback; with
+        // curl now owning the per-attempt timeout via CURLOPT_TIMEOUT_MS, the
+        // dispatcher needs no callback at all and we disarm here.
+        OnSubmitHandoff(expectedOutputPath);
 
-        // Disarm the file-activity watchdog and activate the main deadline for
-        // workflow-bound entries (no-op for AiJcwfService / assistant calls that
-        // don't register a workflow binding).
-        ActivateDeadlineForOutputPath(expectedOutputPath);
+        dispatcher->Submit(queryData, std::move(curlCallback));
 
         return true;
     }

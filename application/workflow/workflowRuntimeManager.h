@@ -174,6 +174,14 @@ namespace AIAssistant
             bool m_PauseRequested{false};
             bool m_StopRequested{false};
 
+            // Cascade-cancellation flag: AiRequestPool::CancelRequestsForRun is
+            // called once when the run transitions to a failed/cancelled state
+            // so any in-flight HTTP requests bound to this run are aborted
+            // (without this we'd keep burning AI provider tokens after the
+            // workflow has given up).  Set inside Update() after each tick;
+            // idempotent — second pass sees the flag and skips.
+            bool m_CancelCascadeFired{false};
+
             // Count of ai_call tasks this run has dispatched so far. Enforced against
             // EngineConfig::m_MaxAiCallsPerJcwf (0 = no cap) in the dispatch path.
             // Single-threaded access from the tick loop — no atomic needed.

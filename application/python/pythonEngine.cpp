@@ -782,6 +782,19 @@ namespace AIAssistant
             PyObject* valueString = PyUnicode_FromString(inputPair.second.c_str());
             if (valueString == nullptr)
             {
+                // PyUnicode_FromString sets a Python exception on failure (e.g.
+                // input string contains a half-multibyte UTF-8 tail or an
+                // embedded NUL). Skipping silently leaks that exception into
+                // the next PyObject_Call where it surfaces as the cryptic
+                // "<method 'get' of 'dict' objects> returned a result with an
+                // exception set" — blaming whichever dict.get the user code
+                // hits first. Clear it here so the rest of the call stays sane.
+                LOG_APP_ERROR("PythonEngine::ExecuteWorkflowTask: PyUnicode_FromString failed for input '{}' "
+                              "task='{}' (value size {} bytes); skipping this input and clearing the leaked "
+                              "Python exception. Upstream UTF-8 truncation should have made this impossible "
+                              "— investigate if this fires.",
+                              inputPair.first, taskDefinition.m_Id, inputPair.second.size());
+                PyErr_Clear();
                 continue;
             }
 

@@ -22,6 +22,7 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -32,6 +33,7 @@
 #include <vector>
 
 #include "curlWrapper.h"
+#include "rateLimitController.h"
 
 // Opaque libcurl types — avoid pulling in curl headers in this header.
 typedef void CURLM;
@@ -61,16 +63,96 @@ namespace AIAssistant
         // Enqueue a request. Thread-safe. Callback fires on the I/O thread.
         void Submit(CurlWrapper::QueryData const& data, Callback callback);
 
+        // Cascade cancellation: abort every request whose QueryData::m_CancelKey
+        // matches `cancelKey` — across the inbox, retry queue, AND active set.
+        // Used by AiRequestPool::CancelRequestsForRun to abort in-flight HTTP
+        // requests whose calling workflow has terminated, so we don't keep
+        // burning tokens against the AI provider for a run that already failed.
+        // Thread-safe; the actual aborts run on the I/O thread (curl handle
+        // mutations must be single-threaded relative to curl_multi_perform).
+        // Each cancelled request fires its callback with QueryResult::Fail.
+        void CancelByCancelKey(std::string const& cancelKey);
+
         // Phase-1 shutdown: signal the I/O thread to stop accepting new requests.
         void SignalStop();
         // Phase-2 shutdown: block until the I/O thread has exited.
         void WaitStop();
+
+        // Debug introspection. Cheap, lock-acquired-briefly. Surfaced via /api/debug/signals.
+        struct DebugSnapshot
+        {
+            uint64_t m_TotalDispatched{0};
+            uint64_t m_TotalThrottled{0};
+            uint64_t m_Total429s{0};
+            uint64_t m_TotalRetriesExhausted{0};
+            uint64_t m_TotalCompleted{0};
+            uint64_t m_TotalCancelled{0};
+            size_t m_InboxSize{0};
+            size_t m_ActiveCount{0};
+            size_t m_RetryQueueSize{0};
+
+            struct HostEntry
+            {
+                std::string m_Host;
+                int m_RemainingRequests{-1};
+                int m_RemainingTokens{-1};
+                long m_ReqResetInSec{-1};
+                long m_TokResetInSec{-1};
+                size_t m_ActiveCount{0};
+            };
+            std::vector<HostEntry> m_Hosts;
+
+            // Per-(host, modelFamily) RateLimitController state.  Keyed by the
+            // QuotaKey set by AiRequestPool::Submit.  Reflects AIMD cap +
+            // streak counter + last observation merged into the controller.
+            struct ControllerEntry
+            {
+                std::string m_QuotaKey;
+                int m_CurrentConcurrencyCap{0};
+                int m_StreakSinceLast429{0};
+                int64_t m_RemainingRequests{-1};
+                int64_t m_RemainingTokens{-1};
+                long m_ReqResetInSec{-1};
+                long m_TokResetInSec{-1};
+                int64_t m_LastConsumedInputTokens{-1};
+                int64_t m_LastConsumedOutputTokens{-1};
+            };
+            std::vector<ControllerEntry> m_Controllers;
+        };
+        DebugSnapshot GetDebugSnapshot() const;
+
+        // Per-Submit() snapshot used by §14 Tier B size-aware-budget tests to
+        // verify the timeout formula in `AI call performance optimization.md`
+        // §6.2 without scraping logs.  Captured at the dispatcher boundary so
+        // tests see exactly the QueryData the dispatcher received.  Bounded
+        // ring; the oldest entries roll off once kRecentSubmissionsCapacity is
+        // exceeded.
+        struct RecentSubmission
+        {
+            std::string m_QuotaKey;
+            std::string m_Url;
+            long m_TimeoutMs{0};
+            int64_t m_EstimatedInputTokens{-1};
+            int m_InterfaceType{-1};
+            std::chrono::steady_clock::time_point m_SubmittedAt{};
+        };
+        // Returns up to `maxCount` most recent submissions, newest first.
+        // Caller-supplied bound clamps to kRecentSubmissionsCapacity.
+        std::vector<RecentSubmission> GetRecentSubmissions(size_t maxCount = 64) const;
+
+        // §14 Tier B test isolation: clears controllers + host rate-limit state
+        // + recent-submissions ring.  Lets repeated test runs start from a
+        // clean slate without restarting j9t.  Does NOT touch m_Active /
+        // m_Inbox / m_RetryQueue — those carry live in-flight work.  Debug-
+        // only entry point; production builds must not call this.
+        void ResetTestState();
 
     private:
         struct PendingRequest
         {
             CurlWrapper::QueryData m_QueryData;
             Callback m_Callback;
+            int m_RetryCount{0};  // Preserved across retry → inbox round-trips so retries re-enter the throttle gate.
         };
 
         // All data kept alive for the duration of one in-flight easy handle.
@@ -85,6 +167,7 @@ namespace AIAssistant
             std::string m_PostData;     // stable storage — CURLOPT_POSTFIELDS pointer target
             struct curl_slist* m_Headers{nullptr};
             int m_RetryCount{0};        // number of 429 retries already attempted
+            int m_InterfaceType{-1};    // forwarded from QueryData; selects rate-limit strategy
         };
 
         // A request waiting for its retry delay to expire (I/O thread only).
@@ -96,44 +179,97 @@ namespace AIAssistant
         };
 
         // Per-host adaptive rate limit state (I/O thread only).
+        // Requests and tokens have independent quotas + reset windows on Anthropic.
+        // Tracking them separately lets the throttle gate hold on the exhausted
+        // dimension while still using the right reset time.
         struct HostRateLimitState
         {
-            int m_RemainingRequests{-1};  // -1 = unknown
-            int m_RemainingTokens{-1};    // -1 = unknown
-            std::chrono::steady_clock::time_point m_ResetAt;
+            int m_RemainingRequests{-1};
+            int m_RemainingTokens{-1};
+            std::chrono::steady_clock::time_point m_RequestsResetAt;
+            std::chrono::steady_clock::time_point m_TokensResetAt;
             std::chrono::steady_clock::time_point m_LastUpdated;
+            std::chrono::steady_clock::time_point m_LastThrottleLog;
         };
 
         void IoThreadFunc();
         void DrainInbox();
         void DrainCompleted();
         void DrainRetryQueue();
+        // Process pending cancellation requests pushed via CancelByCancelKey.
+        // I/O thread only — mutates curl handles.
+        void DrainPendingCancellations();
         CURL* SetupEasyHandle(ActiveRequest& req);
 
-        // Parse rate limit headers from the accumulated header buffer.
-        void ParseRateLimitHeaders(ActiveRequest const& req, std::string& host);
+        // Parse rate limit headers from the accumulated header buffer, merge
+        // them into the legacy HostRateLimitState (for /api/debug/signals)
+        // AND feed the per-(host, modelFamily) controller's Observe().
+        // httpCode drives the controller's AIMD signal: 429 halves the cap,
+        // any other clean completion advances the streak counter.
+        void ParseRateLimitHeaders(ActiveRequest const& req, std::string& host, long httpCode);
         // Extract host from URL (e.g. "api.openai.com" from "https://api.openai.com/v1/...").
         static std::string ExtractHost(std::string const& url);
 
-        static constexpr int kMaxRetries = 5;            // max retries for 429 rate limit
-        static constexpr int kMaxRetriesTransient = 2;  // max retries for transient HTTP errors (400, 500, 502, 503)
-        static constexpr int kBaseRetryMs = 1000;       // 1 second base for exponential backoff
-        static constexpr size_t kMaxActivePerHost = 48; // max concurrent HTTP/2 streams per host
+        // Fallback constants used only when QueryData doesn't pre-resolve a
+        // per-interface override (rare — only legacy callers like assistant /
+        // jcwfService Test-connection that bypass AiRequestPool::Submit).
+        // The values come from config.api_interfaces[i].rate_limit; see §7
+        // of "AI call performance optimization.md".
+        static constexpr int kDefaultMaxRetries429 = 10;
+        static constexpr int kDefaultMaxRetriesTransient = 2;
+        static constexpr int kDefaultBaseRetryMs = 1000;
+        static constexpr size_t kMaxActivePerHost = 48; // hard ceiling on HTTP/2 streams per host (independent of provider quota)
 
         CURLM* m_MultiHandle{nullptr};
         std::thread m_IoThread;
         std::atomic<bool> m_Stopping{false};
 
         std::queue<PendingRequest> m_Inbox;
-        std::mutex m_InboxMutex;
+        mutable std::mutex m_InboxMutex;
 
-        // Keyed by CURL* easy handle. Accessed only from the I/O thread.
+        // Keyed by CURL* easy handle. Mutated only from the I/O thread; protected by
+        // m_DebugMutex for cross-thread debug snapshot reads.
         std::unordered_map<CURL*, std::unique_ptr<ActiveRequest>> m_Active;
 
-        // Retry queue — sorted by ready-at time (I/O thread only).
+        // Retry queue — sorted by ready-at time. Same threading rules as m_Active.
         std::vector<RetryEntry> m_RetryQueue;
 
-        // Per-host rate limit tracking (I/O thread only).
+        // Per-host rate limit tracking. Same threading rules as m_Active.
+        // Phase 2: kept for /api/debug/signals snapshot only — gating moved to
+        // m_Controllers below.  Phase 5 will retire this entirely.
         std::unordered_map<std::string, HostRateLimitState> m_HostRateLimits;
+
+        // Per-(host, modelFamily) adaptive controllers (Phase 2).  Key is
+        // QuotaKey, "<host>|<family>", computed by AiRequestPool::Submit and
+        // carried in QueryData::m_QuotaKey.  Anthropic Sonnet and Opus get
+        // independent AIMD signals despite sharing api.anthropic.com.
+        // Same threading rules as m_Active.
+        std::unordered_map<std::string, RateLimitController> m_Controllers;
+
+        // Recursive so the same I/O-thread call chain can lock at multiple nested levels
+        // (e.g. DrainCompleted holds the lock and calls ParseRateLimitHeaders, which also
+        // wants it). API-thread snapshot reads contend rarely.
+        mutable std::recursive_mutex m_DebugMutex;
+
+        // Lifetime counters — atomic so debug reads are wait-free.
+        std::atomic<uint64_t> m_TotalDispatched{0};
+        std::atomic<uint64_t> m_TotalThrottled{0};
+        std::atomic<uint64_t> m_Total429s{0};
+        std::atomic<uint64_t> m_TotalRetriesExhausted{0};
+        std::atomic<uint64_t> m_TotalCompleted{0};
+        std::atomic<uint64_t> m_TotalCancelled{0};
+
+        // Cascade-cancellation queue — populated by CancelByCancelKey on any
+        // thread, drained by the I/O thread in DrainPendingCancellations
+        // (where curl handle mutations are safe).
+        std::vector<std::string> m_PendingCancellations;
+        mutable std::mutex m_PendingCancellationsMutex;
+
+        // Bounded ring of recent submissions for §14 Tier B size-aware-budget
+        // hermetic tests.  Captured at Submit() boundary so tests see the
+        // QueryData::m_TimeoutMs the dispatcher actually received.
+        static constexpr size_t kRecentSubmissionsCapacity = 64;
+        std::deque<RecentSubmission> m_RecentSubmissions;
+        mutable std::mutex m_RecentSubmissionsMutex;
     };
 } // namespace AIAssistant

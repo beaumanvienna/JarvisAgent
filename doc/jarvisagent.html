@@ -1,665 +1,1335 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>jarvisagent(1) — JarvisAgent User Manual</title>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>jarvisagent</title>
   <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      max-width: 50em;
-      margin: 2em auto;
-      padding: 0 1em;
-      line-height: 1.6;
-      color: #222;
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
     }
-
-    h1 {
-      border-bottom: 2px solid #333;
-      padding-bottom: 0.3em;
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
     }
-
-    h2 {
-      border-bottom: 1px solid #ccc;
-      padding-bottom: 0.2em;
-      margin-top: 2em;
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
     }
-
-    h3 {
-      margin-top: 1.5em;
+    p {
+      margin: 1em 0;
     }
-
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
     code {
-      background: #f4f4f4;
-      padding: 0.15em 0.4em;
-      border-radius: 3px;
-      font-size: 0.95em;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
     }
-
     pre {
-      background: #f4f4f4;
-      padding: 1em;
-      border-radius: 5px;
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
       overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
     }
-
-    dt {
-      font-weight: bold;
-      margin-top: 0.8em;
+    table caption {
+      margin-bottom: 0.75em;
     }
-
-    dd {
-      margin-left: 2em;
-      margin-bottom: 0.5em;
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
     }
-
-    .section-nav {
-      background: #f9f9f9;
-      border: 1px solid #ddd;
-      border-radius: 5px;
-      padding: 1em;
-      margin-bottom: 2em;
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
     }
-
-    .section-nav a {
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
       text-decoration: none;
-      color: #0366d6;
     }
-
-    .section-nav a:hover {
-      text-decoration: underline;
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
     }
-
-    .footer {
-      margin-top: 3em;
-      border-top: 1px solid #ccc;
-      padding-top: 1em;
-      font-size: 0.9em;
-      color: #666;
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
     }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
   </style>
 </head>
-
 <body>
-
-  <h1>jarvisagent(1) &mdash; JarvisAgent User Manual</h1>
-  <p><strong>Version 0.8</strong> &mdash; March 2026</p>
-
-  <div class="section-nav">
-    <strong>Contents:</strong>
-    <a href="#name">Name</a> &middot;
-    <a href="#synopsis">Synopsis</a> &middot;
-    <a href="#description">Description</a> &middot;
-    <a href="#options">Options</a> &middot;
-    <a href="#installation">Installation</a> &middot;
-    <a href="#configuration">Configuration</a> &middot;
-    <a href="#environment">Environment</a> &middot;
-    <a href="#ai-setup">AI Setup</a> &middot;
-    <a href="#workflows">Workflows</a> &middot;
-    <a href="#workflow-editor">Workflow Editor</a> &middot;
-    <a href="#dashboard">Dashboard</a> &middot;
-    <a href="#files">Files</a> &middot;
-    <a href="#see-also">See Also</a>
-  </div>
-
-  <h2 id="name">NAME</h2>
-  <p><strong>jarvisAgent</strong> &mdash; parallel AI-driven automation engine with visual workflow editor</p>
-
-  <h2 id="synopsis">SYNOPSIS</h2>
-  <pre>jarvisAgent [--help] [--version]</pre>
-
-  <h2 id="description">DESCRIPTION</h2>
-  <p>JarvisAgent is a C++ backend / React frontend application for parallel AI-driven automation.
-    Its engine core dispatches many concurrent AI requests in parallel &mdash; think requirements analysis
-    across hundreds of items, stock-portfolio deep-research across every position, or chapter-by-chapter
-    processing of entire PDF books.</p>
-
-  <p>Office documents (Word, Excel, PowerPoint, PDF) are automatically converted to Markdown via
-    Microsoft MarkItDown &mdash; and chunked when too large &mdash; before being sent to the AI. JarvisAgent
-    is file-oriented by design: all inputs, outputs, and intermediate results live on disk, making it
-    a natural fit for engineering environments with large file landscapes.</p>
-
-  <p>Workflows let you chain serial and parallel tasks &mdash; AI calls, Python scripts, shell commands,
-    or native C++ &mdash; in a visual graph editor with various trigger types (manual, cron, file_watch).</p>
-
-  <p>The application ships with an ncurses terminal UI for local or SSH sessions, a browser-based
-    React dashboard for remote monitoring, and a visual workflow editor. It compiles and runs on
-    Linux, macOS, and Windows.</p>
-
-  <h2 id="editions">EDITIONS</h2>
-  <p>JarvisAgent builds as two distinct binaries selected at build time
-    (see <a href="#installation">Installation</a>):</p>
-  <table style="border-collapse: collapse; width: 100%;">
-    <thead>
-      <tr>
-        <th style="border: 1px solid #ccc; padding: 6px; text-align: left;"></th>
-        <th style="border: 1px solid #ccc; padding: 6px; text-align: left;">j9t Studio (default)</th>
-        <th style="border: 1px solid #ccc; padding: 6px; text-align: left;">j9t Engine</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Binary</strong></td><td style="border: 1px solid #ccc; padding: 6px;"><code>jarvisAgent-studio</code></td><td style="border: 1px solid #ccc; padding: 6px;"><code>jarvisAgent-engine</code></td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Purpose</strong></td><td style="border: 1px solid #ccc; padding: 6px;">Developer workstation</td><td style="border: 1px solid #ccc; padding: 6px;">Production server</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Network exposure</strong></td><td style="border: 1px solid #ccc; padding: 6px;">Localhost only</td><td style="border: 1px solid #ccc; padding: 6px;">LAN / internet</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Authentication</strong></td><td style="border: 1px solid #ccc; padding: 6px;">MCP key for MCP access; no auth for localhost browser UI</td><td style="border: 1px solid #ccc; padding: 6px;">MCP key, session cookie, or gateway header</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>RBAC</strong></td><td style="border: 1px solid #ccc; padding: 6px;">3 roles on MCP keys</td><td style="border: 1px solid #ccc; padding: 6px;">3 roles on MCP keys / sessions / gateway</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Rate limiting</strong></td><td style="border: 1px solid #ccc; padding: 6px;">None</td><td style="border: 1px solid #ccc; padding: 6px;">Per-IP token bucket (100 req/min, burst 20)</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Audit logging</strong></td><td style="border: 1px solid #ccc; padding: 6px;"><code>log/security.txt</code> (auth events)</td><td style="border: 1px solid #ccc; padding: 6px;"><code>log/security.txt</code> (rotating, 10 MB x 5)</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Workflow CRUD</strong></td><td style="border: 1px solid #ccc; padding: 6px;">Full</td><td style="border: 1px solid #ccc; padding: 6px;">Not available (compile-time removed)</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>AI assistant / JCWF generation</strong></td><td style="border: 1px solid #ccc; padding: 6px;">Full</td><td style="border: 1px solid #ccc; padding: 6px;">Not available (compile-time removed)</td></tr>
-      <tr><td style="border: 1px solid #ccc; padding: 6px;"><strong>Attack surface</strong></td><td style="border: 1px solid #ccc; padding: 6px;">Full feature set</td><td style="border: 1px solid #ccc; padding: 6px;">Minimal &mdash; runtime + monitoring only</td></tr>
-    </tbody>
-  </table>
-  <p>Studio is designed for single-developer use on a local machine. Engine is designed for
-    production deployments behind an API gateway. See <a href="#security">Security</a> for details.</p>
-
-  <h2 id="options">OPTIONS</h2>
-  <dl>
-    <dt><code>--help</code>, <code>-h</code></dt>
-    <dd>Show a help message and exit.</dd>
-
-    <dt><code>--version</code>, <code>-v</code></dt>
-    <dd>Print the version number and exit.</dd>
-  </dl>
-  <p>Unknown options cause an error message and a non-zero exit code.</p>
-
-  <h2 id="installation">INSTALLATION</h2>
-  <p>JarvisAgent is available as pre-built packages for all major platforms:</p>
-  <table>
-    <tr>
-      <td><strong>Linux</strong></td>
-      <td>DEB, RPM, Arch (PKGBUILD), Flatpak, AppImage</td>
-    </tr>
-    <tr>
-      <td><strong>macOS</strong></td>
-      <td>DMG, Homebrew formula</td>
-    </tr>
-    <tr>
-      <td><strong>Windows</strong></td>
-      <td>MSI installer, portable ZIP</td>
-    </tr>
-    <tr>
-      <td><strong>Docker</strong></td>
-      <td><code>ghcr.io/beaumanvienna/jarvisagent</code></td>
-    </tr>
-  </table>
-  <p>For building from source and detailed install/uninstall instructions for each package format,
-    see the project <strong>README.md</strong> and <strong>packaging/packaging.md</strong>.</p>
-  <p>GitHub repository: <a
-      href="https://github.com/beaumanvienna/JarvisAgent">https://github.com/beaumanvienna/JarvisAgent</a></p>
-
-  <h2 id="configuration">CONFIGURATION</h2>
-  <p>JarvisAgent reads <code>config.json</code> from the current working directory at startup.
-    If the file is missing, the application prints an error and exits.</p>
-
-  <p>The following fields are recognized:</p>
-  <dl>
-    <dt><code>"file format identifier"</code></dt>
-    <dd>(number) Internal format version for the config file.</dd>
-
-    <dt><code>"description"</code></dt>
-    <dd>(string) A human-readable description of this configuration.</dd>
-
-    <dt><code>"author"</code></dt>
-    <dd>(string) Author or owner of this configuration.</dd>
-
-    <dt><code>"queue folder"</code></dt>
-    <dd>(string, <strong>required</strong>) Relative or absolute path to the queue directory.
-      JarvisAgent monitors this folder for incoming files that trigger AI requests.</dd>
-
-    <dt><code>"workflows folder"</code></dt>
-    <dd>(string) Relative or absolute path to the directory containing <code>.jcwf</code>
-      workflow definition files. Defaults to <code>workflows/</code>.</dd>
-
-    <dt><code>"max threads"</code></dt>
-    <dd>(number) Maximum number of concurrent AI request threads.</dd>
-
-    <dt><code>"engine sleep time in run loop in ms"</code></dt>
-    <dd>(number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness.</dd>
-
-    <dt><code>"max file size in kB"</code></dt>
-    <dd>(number) Maximum input file size in kilobytes. Files larger than this are chunked before
-      being sent to the AI. Default: 20.</dd>
-
-    <dt><code>"jcwf batch size"</code></dt>
-    <dd>(number) Number of tasks per batch when the AI JCWF generator fans out to multiple parallel
-      calls for large workflows. Workflows with fewer tasks than this threshold are generated in a
-      single call. Default: 10.</dd>
-
-    <dt><code>"verbose"</code></dt>
-    <dd>(boolean) Enable verbose logging output.</dd>
-
-    <dt><code>"keys_file"</code></dt>
-    <dd>(string) Path to the encrypted API keys file. Default: <code>keys.json.enc</code>.</dd>
-
-    <dt><code>"API index"</code></dt>
-    <dd>(number) Zero-based index of the default AI interface to use from the
-      <code>"API interfaces"</code> array.
-    </dd>
-
-    <dt><code>"API interfaces"</code></dt>
-    <dd>(array) List of AI provider configurations. Each entry is an object with the following fields:
-      <dl>
-        <dt><code>"url"</code></dt>
-        <dd>(string, <strong>required</strong>) The API endpoint URL
-          (e.g. <code>https://api.openai.com/v1/chat/completions</code>).</dd>
-
-        <dt><code>"model"</code></dt>
-        <dd>(string) The model name (e.g. <code>gpt-4o</code>, <code>gemini-2.5-flash</code>).</dd>
-
-        <dt><code>"API"</code></dt>
-        <dd>(string) The reply parser type:<br>
-          <code>API1</code> &mdash; OpenAI-compatible chat completions (OpenAI, Google Gemini via OpenAI-compat
-          endpoint, Ollama, any <code>/v1/chat/completions</code> provider).<br>
-          <code>API2</code> &mdash; OpenAI Responses API (GPT-5 and later models).<br>
-          <code>API3</code> &mdash; Google Gemini native API (uses <code>x-goog-api-key</code> header and
-          <code>/models/{model}:generateContent</code> URL scheme).
-        </dd>
-
-        <dt><code>"name"</code></dt>
-        <dd>(string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.</dd>
-
-        <dt><code>"description"</code></dt>
-        <dd>(string) Optional description of this interface.</dd>
-
-        <dt><code>"key_name"</code></dt>
-        <dd>(string) Name of the API key provider to use from the encrypted keys file
-          (e.g. "openai", "google", "anthropic").</dd>
-      </dl>
-    </dd>
-  </dl>
-
-  <h2 id="environment">ENVIRONMENT</h2>
-  <dl>
-    <dt><code>OPENAI_API_KEY</code></dt>
-    <dd>Bootstrapping fallback. If no encrypted keys file is found and this variable is set,
-      JarvisAgent creates a single <code>openai</code> provider entry using the key value.
-      Intended for simple single-provider setups &mdash; encrypt keys as soon as practical.</dd>
-  </dl>
-
-  <p>The master password for <code>keys.json.enc</code> and <code>mcp_keys.json.enc</code> is
-    supplied <strong>only</strong> at runtime via the dashboard login flow or
-    <code>POST /api/settings/keys/unlock</code>. There is no environment-variable shortcut
-    &mdash; the password is held exclusively in <code>mlock()</code>-protected memory
-    (<code>SecureString</code>) and never lands in process listings, <code>docker inspect</code>,
-    or crash dumps.</p>
-
-  <p><strong>API key priority order:</strong></p>
-  <ol>
-    <li>Encrypted keys file (<code>keys.json.enc</code>) &mdash; unlocked at runtime via dashboard login or <code>POST /api/settings/keys/unlock</code>.</li>
-    <li>Plaintext keys file (<code>keys.json</code>) &mdash; development fallback only.</li>
-    <li><code>OPENAI_API_KEY</code> environment variable.</li>
-  </ol>
-
-  <h2 id="first-steps">FIRST STEPS AFTER RESTART</h2>
-  <p>Every time JarvisAgent starts (cold boot, <code>systemctl restart</code>, container
-    restart), the encrypted key stores (<code>keys.json.enc</code> and
-    <code>mcp_keys.json.enc</code>) are sealed &mdash; the master password is held only
-    in <code>mlock()</code>-protected memory and is never persisted. An admin must
-    unlock them before any credential-dependent work can proceed.</p>
-  <p><strong>What does not work until you unlock:</strong></p>
-  <ul>
-    <li>MCP API key authentication &mdash; all <code>Authorization: Bearer mcp_...</code>
-        requests return 401 / 403 because the key hashes can't be compared.</li>
-    <li>AI provider API calls &mdash; workflows with <code>ai_call</code> tasks fail at
-        dispatch time with a "no providers configured" error.</li>
-    <li>OAuth token refresh (OneDrive, Google Sheets, etc.) &mdash; access tokens won't
-        be re-issued when they expire.</li>
-    <li>Cloud connections that depend on encrypted credentials.</li>
-  </ul>
-  <p><strong>What does work:</strong></p>
-  <ul>
-    <li><code>GET /api/status</code> &mdash; reports <code>"keys_unlocked": false</code>
-        so monitors can alert.</li>
-    <li><code>POST /api/auth/mcp-keys/activate</code> &mdash; new users can exchange an
-        enrollment token without the store being unlocked (the token itself is the auth).</li>
-    <li><code>POST /api/settings/keys/unlock</code> &mdash; the endpoint that unseals
-        everything.</li>
-    <li>Studio browser UI on localhost (no auth required).</li>
-  </ul>
-  <p><strong>How to unlock:</strong></p>
-  <ol>
-    <li><strong>Dashboard</strong>: load the Engine dashboard, enter your MCP key on the
-        login page. If the key store is sealed, the Settings modal prompts for the
-        master password; provide it once.</li>
-    <li><strong>REST</strong>:
-        <code>curl -sS -X POST https://host:8443/api/settings/keys/unlock -H 'Content-Type: application/json' -d '{"master_password":"..."}'</code>
-        &mdash; returns 200 with <code>"mcp_keys_loaded": true</code> on success, 401 on
-        wrong password.</li>
-    <li><strong>CI / Docker / automation</strong>: call the unlock endpoint from a
-        startup script using a secret from Docker secrets, AWS Secrets Manager, or
-        HashiCorp Vault. The old <code>JARVIS_MASTER_PASSWORD</code> env var was
-        removed deliberately &mdash; the password never appears in process listings or
-        <code>docker inspect</code>.</li>
-  </ol>
-  <p><strong>First-run only:</strong> on the very first start with an empty MCP key
-    store, JarvisAgent prints a bootstrap admin enrollment token to the application log
-    (<code>log/log.txt</code> plus the TUI). Activate it via
-    <code>POST /api/auth/mcp-keys/activate</code> to obtain the initial admin MCP key,
-    then unlock as above on subsequent restarts.</p>
-
-  <h2 id="mcp-keys">MCP API KEYS &mdash; ENROLLMENT AND USE</h2>
-  <p>Every credential in JarvisAgent is an <strong>MCP API key</strong> &mdash; a per-user,
-    individually-revocable bearer token. Keys are prefixed <code>mcp_</code> because
-    the same credential is used by the <strong>M</strong>odel <strong>C</strong>ontext
-    <strong>P</strong>rotocol sidecar (the machine path: Claude Code, CI bots, custom
-    agents) <em>and</em> by humans signing into the dashboard in a browser (the user
-    path). Each key carries an identity, role, adhoc flag, disk quota, and retention
-    ceiling on the server side.</p>
-  <p><strong>Why one credential type for both paths.</strong> An agent holding Alice's
-    key is authorised <em>exactly</em> as Alice is. If Alice can submit adhoc workflows,
-    so can her Claude Code instance; if Alice cannot shut down the server, neither can
-    her agent. Every action &mdash; whether it originated from a browser click or an LLM
-    tool call &mdash; traces back to a single human user in the audit log. Agents
-    genuinely act <strong>on behalf of</strong> their user, without a separate
-    service-account pattern. One issuance, one revocation, one audit trail.</p>
-  <p>New users never pick their own keys; they activate an <strong>enrollment token</strong>
-    (<code>enroll_&hellip;</code>) their admin shared with them.</p>
-  <p><strong>User onboarding flow:</strong></p>
-  <ol>
-    <li>Open the dashboard at <code>https://&lt;host&gt;:8443/</code>. At the sign-in dialog,
-        paste the <code>enroll_&hellip;</code> token &mdash; the UI auto-switches to the
-        Activate dialog with your token pre-filled.</li>
-    <li>Click <strong>Activate</strong>. Your real MCP API key is shown exactly once;
-        save it to a password manager or your Claude Code config.</li>
-    <li>Tick the <em>"I have saved this key"</em> checkbox &mdash; the sign-in button
-        turns green &mdash; then sign in.</li>
-  </ol>
-  <p><strong>Using your key with Claude Code:</strong> the MCP sidecar reads the key
-    from <code>J9T_TOKEN</code> or a file pointed to by <code>J9T_TOKEN_FILE</code>
-    (recommended; chmod 600 and gitignored). After editing <code>.mcp.json</code>,
-    restart Claude Code and verify with the <code>whoami</code> MCP tool.</p>
-  <p><strong>Self-renewal:</strong> MCP keys expire after 90 days by default.
-    Within 30 days of expiry you can renew yourself via
-    <code>POST /api/auth/mcp-keys/self-renew</code>; the old key enters a
-    24-hour grace period. Admins need not be involved unless the key has
-    already expired.</p>
-  <p><strong>Admin tasks</strong> (Settings &rarr; MCP Keys tab):</p>
-  <ul>
-    <li><strong>+ Create enrollment</strong> &mdash; issues a single-use token
-        (30-min TTL) to share with a new user. The admin never sees the user's
-        real key.</li>
-    <li><strong>Revoke</strong> &mdash; immediate; subsequent requests 401.</li>
-    <li>Re-enroll to rotate a key or change role / quota / adhoc flag.</li>
-  </ul>
-  <p><strong>Deploying scripts:</strong> drop shell or Python files into
-    <code>scripts/</code>, add an <code>@jarvis-script</code> metadata header
-    (<code>@short</code>, <code>@params</code>, <code>@description</code>,
-    <code>@outputs</code>), then open Settings &rarr; Scripts and click
-    <strong>Refresh</strong>. The catalog refreshes without a j9t restart and
-    the new script becomes visible to MCP agents via <code>list_scripts</code>.</p>
-  <p><strong>Adhoc workflow loop</strong> (agent-driven): <code>list_scripts</code>
-    &rarr; compose JCWF &rarr; <code>run_adhoc_workflow</code> &rarr;
-    <code>get_run_status</code> (poll) &rarr; <code>list_run_files</code> (discover
-    outputs) &rarr; <code>get_run_file</code> (retrieve bytes, Range-supported for
-    files above the 10 MB single-response cap). Every step is audit-logged;
-    operators see only their own runs and admins can read any with a durable
-    <code>admin_cross_user_read</code> trail.</p>
-
-  <h2 id="ai-setup">AI SETUP</h2>
-  <p>To use AI-powered workflows, you need at least one API key configured.</p>
-
-  <h3>Setting up API keys</h3>
-  <ol>
-    <li>Open the workflow editor at <code>http://localhost:8080/editor</code>.</li>
-    <li>Navigate to the <strong>Settings</strong> page (gear icon) and select <strong>AI Keys</strong>.</li>
-    <li>Add a provider name (e.g. "openai", "google", "anthropic") and paste the corresponding API key.</li>
-    <li>Click <strong>Save Encrypted</strong>. You will be prompted for a master password.
-      This encrypts all keys into <code>keys.json.enc</code> in the working directory.</li>
-  </ol>
-
-  <h3>Setting up AI models</h3>
-  <ol>
-    <li>In the workflow editor, navigate to the <strong>AI Manager</strong> page.</li>
-    <li>Configure one or more AI interfaces: set the API endpoint URL, model name, parser type, and select which key
-      provider to use.
-      Use <code>API1</code> for OpenAI and compatible providers,
-      <code>API2</code> for OpenAI Responses API (GPT-5+),
-      or <code>API3</code> for Google Gemini native.
-    </li>
-    <li>Set the default interface index or override per-task in workflow definitions.</li>
-  </ol>
-
-  <p>Supported providers include OpenAI (API1), Google Gemini (API1 via OpenAI-compat endpoint, or API3 for the native
-    endpoint),
-    Anthropic (API1), Ollama and any provider offering an OpenAI-compatible chat completions API (API1).
-    The OpenAI Responses API (GPT-5+) uses API2.</p>
-
-  <h2 id="workflows">WORKFLOWS</h2>
-  <p>JarvisAgent uses <strong>JC Workflow</strong> definition files (<code>.jcwf</code>) to describe
-    automation pipelines as directed acyclic graphs (DAGs).</p>
-
-  <p>A workflow consists of:</p>
-  <ul>
-    <li><strong>Tasks</strong> &mdash; individual units of work: AI calls, shell commands, Python scripts,
-      or internal actions. Tasks can run in parallel when their dependencies allow it.</li>
-    <li><strong>Edges</strong> &mdash; dependency and dataflow connections between tasks. A task only runs
-      after all its upstream dependencies have completed.</li>
-    <li><strong>Triggers</strong> &mdash; how a workflow is started: manually, on a cron schedule, or when
-      a file appears in a watched directory.</li>
-    <li><strong>Filters</strong> &mdash; per-item expansion from CSV files, text line lists, or queries.
-      A single task definition can fan out into many parallel instances.</li>
-  </ul>
-
-  <h3>Task types</h3>
-  <dl>
-    <dt><code>ai_call</code></dt>
-    <dd>Send a prompt (with optional file attachments) to an AI provider and capture the response.</dd>
-
-    <dt><code>shell</code></dt>
-    <dd>Run a shell command or script. Stdout and stderr are captured.</dd>
-
-    <dt><code>python</code></dt>
-    <dd>Call a Python function with structured inputs/outputs.</dd>
-
-    <dt><code>internal</code></dt>
-    <dd>Built-in actions (e.g. file operations).</dd>
-  </dl>
-
-  <p>For the full specification including JSON schema, dataflow mapping, template syntax, filter
-    types, and per-item expansion, see: <strong>doc/JC_Workflow_Specification.md</strong></p>
-
-  <h2 id="workflow-editor">WORKFLOW EDITOR</h2>
-  <p>The visual workflow editor is a React application served by JarvisAgent at:</p>
-  <pre>http://localhost:8080/editor</pre>
-
-  <p>Key features:</p>
-  <ul>
-    <li><strong>Visual DAG editor</strong> &mdash; drag-and-drop nodes, draw dependency and dataflow edges between
-      tasks.</li>
-    <li><strong>Task inspector</strong> &mdash; configure task type, parameters, file inputs/outputs, working directory,
-      timeout, and per-task AI interface override.</li>
-    <li><strong>Workflow CRUD</strong> &mdash; open, save, validate, run, and clean workflows.</li>
-    <li><strong>Live run monitoring</strong> &mdash; task state badges update in real time via WebSocket (running,
-      succeeded, failed, skipped).</li>
-    <li><strong>Run controls</strong> &mdash; start, stop, pause, and resume workflow runs.</li>
-    <li><strong>Template browser</strong> &mdash; start from pre-built workflow templates.</li>
-    <li><strong>Validation</strong> &mdash; the backend validates the workflow structure and reports issues with
-      severity tiers directly on the canvas.</li>
-    <li><strong>Filter builder</strong> &mdash; configure CSV, text_lines, or query filters for per-item fan-out.</li>
-    <li><strong>Log viewer</strong> &mdash; virtual-scrolling log display with search and run analysis (see <a
-        href="#dashboard">Dashboard</a> below for details).</li>
-  </ul>
-
-  <h2 id="dashboard">DASHBOARD</h2>
-  <p>The React dashboard is served at:</p>
-  <pre>http://localhost:8080</pre>
-  <p>It has two tabs: a <strong>Dashboard</strong> overview and a <strong>Log Viewer</strong>.</p>
-
-  <h3>Dashboard tab</h3>
-  <ul>
-    <li><strong>Status bar</strong> &mdash; live WebSocket connection indicator, active workflow runs, AI session count,
-      completed/failed counters, and a quit button.</li>
-    <li><strong>Workflows panel</strong> &mdash; lists all registered workflows with controls to run or clean each
-      workflow.</li>
-    <li><strong>Session managers panel</strong> &mdash; shows active AI request sessions with real-time status updates.
-    </li>
-  </ul>
-
-  <h3>Log Viewer tab</h3>
-  <p>A full-screen, virtual-scrolling log display (up to 100,000 lines).</p>
-  <ul>
-    <li><strong>Live streaming</strong> &mdash; new log lines arrive in real time via WebSocket.</li>
-    <li><strong>Auto-scroll</strong> &mdash; follows the latest output; toggles between <strong>Follow</strong> and
-      <strong>Paused</strong> mode. Click the button or scroll up to pause, click again to resume.
-    </li>
-    <li><strong>Search</strong> &mdash; press <kbd>/</kbd> or <kbd>Ctrl+F</kbd> to search. Navigate matches with
-      <kbd>Enter</kbd> (next) / <kbd>Shift+Enter</kbd> (previous). Match count and position are shown in the toolbar.
-    </li>
-    <li><strong>Color-coded log levels</strong> &mdash; lines containing <code>[error]</code> are displayed in <strong
-        style="color:#ef4444">red</strong>; lines containing <code>[warning]</code> or <code>[warn]</code> are displayed
-      in <strong style="color:#eab308">yellow</strong>.</li>
-    <li><strong>Run Analyzer</strong> &mdash; press <kbd>1</kbd> or click the <strong>Analyze</strong> button. An
-      overlay panel appears showing:
-      <ul>
-        <li>Workflow ID, run ID, state, start/end timestamps.</li>
-        <li>Clickable log-region links (start line &mdash; end line) to jump directly to the run's output.</li>
-        <li><strong>&laquo; / &raquo;</strong> arrows to cycle through previous runs (newest first).</li>
-        <li><strong>Issues list</strong> &mdash; all warnings and errors within the run, color-coded by severity (red
-          for errors, yellow for warnings).</li>
-        <li><strong>&uarr; / &darr;</strong> arrows to step through issues one by one; clicking an issue jumps to its
-          log line.</li>
-      </ul>
-    </li>
-  </ul>
-
-  <h2 id="security">SECURITY</h2>
-  <h3>Studio edition</h3>
-  <p>Studio has <strong>no browser-UI authentication</strong> &mdash; it's designed for
-    single-developer use on localhost. MCP / programmatic access still requires an MCP key
-    (the same key store as Engine). The operator is responsible for not exposing the port
-    beyond localhost, reviewing AI-generated scripts before accepting them, and keeping
-    API keys secure.</p>
-
-  <h3>Engine edition</h3>
-  <p>Engine is designed for production deployments and includes comprehensive security:</p>
-  <ul>
-    <li><strong>MCP API key authentication.</strong> All programmatic endpoints require
-        <code>Authorization: Bearer mcp_...</code>. Keys are per-user (identity, role,
-        adhoc flag, disk quota, retention policy) and stored only as SHA-256 hashes in
-        the encrypted <code>mcp_keys.json.enc</code>. Provisioning uses a single-use
-        enrollment token: admin calls <code>POST /api/auth/mcp-keys/enroll</code>; the
-        user exchanges it at <code>POST /api/auth/mcp-keys/activate</code> and receives
-        their real key <strong>once</strong>. Key comparison uses
-        <code>CRYPTO_memcmp</code> for constant-time equality.</li>
-    <li><strong>Dashboard sessions.</strong> Browser users sign in at the login page
-        by pasting their MCP key &rarr; <code>POST /api/auth/login</code> returns a
-        server-side session with an <code>HttpOnly + SameSite=Strict</code> cookie
-        (plus <code>Secure</code> when TLS is enabled), 8-hour sliding timeout.</li>
-    <li><strong>Key expiry and self-renewal.</strong> Keys expire 90 days after
-        activation by default. Users renew themselves at
-        <code>POST /api/auth/mcp-keys/self-renew</code> without admin help; old keys
-        enter a 24-hour grace period then disable.</li>
-    <li><strong>Adhoc artefact retrieval.</strong> Files produced by adhoc runs are
-        discoverable via <code>GET /api/workflow-runs/&lt;runId&gt;/files</code> and
-        downloadable via <code>GET /api/workflow-runs/&lt;runId&gt;/files/&lt;path&gt;</code>.
-        Runs live under <code>_adhoc/&lt;user_slug&gt;/&lt;ts&gt;_&lt;counter&gt;_del-&lt;ts&gt;/</code>
-        so ownership is enforced by the filesystem layout as well as the handler &mdash;
-        operators see only their own runs; admins can read any run and every cross-user
-        read is audit-logged. The download endpoint rejects path traversal, symlinks,
-        directories, and non-regular files; full-file responses carry
-        <code>X-Content-SHA256</code> and are capped at 10 MB (use <code>Range:</code> for larger files).</li>
-    <li><strong>Script catalog.</strong> <code>GET /api/scripts</code> returns the inventory
-        of scripts under <code>scripts/</code> that adhoc JCWFs can reference, parsed from each
-        script's <code>@jarvis-script</code> metadata header. The dashboard's
-        <strong>Settings &rarr; Scripts</strong> tab displays the same catalog with a
-        manual <strong>Refresh</strong> button &mdash; admins picking up a freshly
-        deployed script without a j9t restart.</li>
-    <li><strong>Failed auth lockout.</strong> 10 failed attempts from the same IP within
-        5 minutes triggers a 15-minute lockout (HTTP 403 with
-        <code>Retry-After: 900</code>).</li>
-    <li><strong>RBAC.</strong> Three roles: <strong>admin</strong> (full access incl.
-        shutdown, security logs, MCP key CRUD), <strong>operator</strong> (run control,
-        app logs, adhoc submission when <code>adhoc_enabled</code> is granted),
-        <strong>viewer</strong> (read-only monitoring). Role travels on the MCP key, the
-        session cookie derived from it, or the <code>X-Forwarded-Role</code> header.</li>
-    <li><strong>Per-IP rate limiting.</strong> Token bucket: 100 requests/minute per IP,
-        burst 20. Rate-limited requests get HTTP 429 with <code>Retry-After</code>.</li>
-    <li><strong>HMAC-SHA256 webhook authentication.</strong> Per-workflow secret;
-        callers include <code>X-Webhook-Signature: sha256=&lt;hex&gt;</code>. Engine
-        rejects webhooks without a configured secret.</li>
-    <li><strong>WebSocket authentication.</strong> Browser upgrades are validated at the
-        handshake via the session cookie (Crow's <code>.onaccept</code> hook); no
-        in-band auth message is used.</li>
-    <li><strong>Built-in TLS (HTTPS).</strong> Set <code>TlsCert</code> and
-        <code>TlsKey</code> in <code>config.json</code> to serve HTTPS (default port
-        8443). If only one is set or the files don't exist, j9t refuses to start. HSTS
-        headers are added when TLS is enabled.</li>
-    <li><strong>Gateway-trusted identity headers.</strong> When deployed behind an API
-        gateway, configure <code>TrustedProxyHeader</code> and
-        <code>TrustedRoleHeader</code> &mdash; the gateway handles authentication
-        (OIDC, MFA, SSO) and j9t reads the authenticated user and role from injected
-        headers.</li>
-    <li><strong>Security audit logging.</strong> All auth events land in
-        <code>log/security.txt</code> (rotating, 10 MB x 5 files). Accessible via
-        <code>GET /api/log/security</code> (admin role) and the dashboard's Security
-        tab.</li>
-    <li><strong>Security response headers.</strong> All responses include
-        <code>Content-Security-Policy</code>, <code>X-Frame-Options: DENY</code>,
-        <code>X-Content-Type-Options: nosniff</code>, <code>Referrer-Policy</code>, and
-        <code>Permissions-Policy</code>.</li>
-    <li><strong>Request body size limit.</strong> Configurable via
-        <code>MaxRequestBodyMB</code> (default 10 MB). Oversized requests are rejected
-        with HTTP 413 before parsing.</li>
-  </ul>
-  <p>For the complete security model, threat analysis, and operator responsibilities,
-    see <a href="cyber%20security.md">cyber security.md</a>.</p>
-
-  <h2 id="files">FILES</h2>
-  <dl>
-    <dt><code>config.json</code></dt>
-    <dd>Main configuration file (must exist in the working directory).</dd>
-
-    <dt><code>keys.json.enc</code></dt>
-    <dd>Encrypted API keys (AES-256, master-password protected).</dd>
-
-    <dt><code>keys.json</code></dt>
-    <dd>Plaintext API keys (development fallback, gitignored).</dd>
-
-    <dt><code>workflows/</code></dt>
-    <dd>Directory containing <code>.jcwf</code> workflow definition files.</dd>
-
-    <dt><code>queue/</code></dt>
-    <dd>Monitored directory for incoming files.</dd>
-
-    <dt><code>log/log.txt</code></dt>
-    <dd>Application log file.</dd>
-
-    <dt><code>.venv/</code></dt>
-    <dd>Python virtual environment (auto-created by launcher scripts). Contains markitdown, md2pdf-mermaid, and
-      playwright.</dd>
-  </dl>
-
-  <h2 id="see-also">SEE ALSO</h2>
-  <dl>
-    <dt>Project README</dt>
-    <dd><a href="https://github.com/beaumanvienna/JarvisAgent/blob/main/README.md">README.md</a></dd>
-
-    <dt>Packaging and installation</dt>
-    <dd><a
-        href="https://github.com/beaumanvienna/JarvisAgent/blob/main/packaging/packaging.md">packaging/packaging.md</a>
-    </dd>
-
-    <dt>JC Workflow Specification</dt>
-    <dd><a
-        href="https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md">doc/JC_Workflow_Specification.md</a>
-    </dd>
-
-    <dt>REST API reference</dt>
-    <dd><a href="https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md">doc/api-endpoints.md</a>
-    </dd>
-
-    <dt>Key management internals</dt>
-    <dd><a href="https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md">engine/keys.md</a></dd>
-  </dl>
-
-  <div class="footer">
-    <p>JarvisAgent is developed by JC Technolabs &mdash;
-      <a href="https://github.com/beaumanvienna/JarvisAgent">GitHub</a>
-    </p>
-  </div>
-
+<h1 id="jarvisagent1-jarvisagent-user-manual">jarvisagent(1) —
+JarvisAgent User Manual</h1>
+<p><strong>Version 0.9</strong> — April 2026</p>
+<p><strong>Contents:</strong> <a href="#name">Name</a> · <a
+href="#synopsis">Synopsis</a> · <a href="#description">Description</a> ·
+<a href="#editions">Editions</a> · <a href="#options">Options</a> · <a
+href="#installation">Installation</a> · <a
+href="#configuration">Configuration</a> · <a
+href="#environment">Environment</a> · <a href="#ai-setup">AI Setup</a> ·
+<a href="#workflows">Workflows</a> · <a href="#workflow-editor">Workflow
+Editor</a> · <a href="#dashboard">Dashboard</a> · <a
+href="#security">Security</a> · <a href="#files">Files</a> · <a
+href="#see-also">See Also</a></p>
+<hr />
+<h2 id="name">NAME</h2>
+<p><strong>jarvisAgent</strong> — parallel AI-driven automation engine
+with visual workflow editor</p>
+<h2 id="synopsis">SYNOPSIS</h2>
+<pre><code>jarvisagent.sh [--studio | --engine] [--help]
+jarvisAgent-studio [--help] [--version]
+jarvisAgent-engine [--help] [--version]</code></pre>
+<h2 id="description">DESCRIPTION</h2>
+<p>JarvisAgent is a C++ backend / React frontend application for
+parallel AI-driven automation. Its engine core dispatches many
+concurrent AI requests in parallel — think requirements analysis across
+hundreds of items, stock-portfolio deep-research across every position,
+or chapter-by-chapter processing of entire PDF books.</p>
+<p>Office documents (Word, Excel, PowerPoint, PDF) are automatically
+converted to Markdown via Microsoft MarkItDown — and chunked when too
+large — before being sent to the AI. JarvisAgent is file-oriented by
+design: all inputs, outputs, and intermediate results live on disk,
+making it a natural fit for engineering environments with large file
+landscapes.</p>
+<p>Workflows let you chain serial and parallel tasks — AI calls, Python
+scripts, shell commands, or native C++ — in a visual graph editor with
+various trigger types (manual, cron, file_watch).</p>
+<p>The application ships in two editions — <strong>Studio</strong> (full
+developer IDE) and <strong>Engine</strong> (lean production server) —
+each with its own binary and security profile. See <a
+href="#editions">Editions</a> below.</p>
+<p>The application ships with an ncurses terminal UI for local or SSH
+sessions, a browser-based React dashboard for remote monitoring, and a
+visual workflow editor. It compiles and runs on Linux, macOS, and
+Windows.</p>
+<h2 id="editions">EDITIONS</h2>
+<p>JarvisAgent builds as two distinct binaries selected at build time
+(see <a href="#installation">Installation</a>):</p>
+<table>
+<colgroup>
+<col style="width: 2%" />
+<col style="width: 62%" />
+<col style="width: 34%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>j9t Studio (default)</th>
+<th>j9t Engine</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Binary</strong></td>
+<td><code>jarvisAgent-studio</code></td>
+<td><code>jarvisAgent-engine</code></td>
+</tr>
+<tr class="even">
+<td><strong>Purpose</strong></td>
+<td>Developer workstation</td>
+<td>Production server</td>
+</tr>
+<tr class="odd">
+<td><strong>Network exposure</strong></td>
+<td>Localhost only</td>
+<td>LAN / internet</td>
+</tr>
+<tr class="even">
+<td><strong>Authentication</strong></td>
+<td>None</td>
+<td>Bearer token (admin), HMAC-SHA256 (webhooks)</td>
+</tr>
+<tr class="odd">
+<td><strong>RBAC</strong></td>
+<td>N/A</td>
+<td>3 roles: admin, operator, viewer</td>
+</tr>
+<tr class="even">
+<td><strong>Rate limiting</strong></td>
+<td>None</td>
+<td>Per-IP token bucket (100 req/min, burst 20)</td>
+</tr>
+<tr class="odd">
+<td><strong>Audit logging</strong></td>
+<td>None</td>
+<td><code>log/security.txt</code> (rotating, 10 MB x 5)</td>
+</tr>
+<tr class="even">
+<td><strong>Request body limit</strong></td>
+<td>None</td>
+<td>Configurable (default 10 MB)</td>
+</tr>
+<tr class="odd">
+<td><strong>Workflow CRUD</strong></td>
+<td>Full</td>
+<td>Not available (compile-time removed)</td>
+</tr>
+<tr class="even">
+<td><strong>AI assistant</strong></td>
+<td>Full</td>
+<td>Not available (compile-time removed)</td>
+</tr>
+<tr class="odd">
+<td><strong>AI JCWF generation</strong></td>
+<td>Full</td>
+<td>Not available (compile-time removed)</td>
+</tr>
+<tr class="even">
+<td><strong>Attack surface</strong></td>
+<td>Full feature set</td>
+<td>Minimal — runtime + monitoring only</td>
+</tr>
+</tbody>
+</table>
+<p>Studio is designed for single-developer use on a local machine.
+Engine is designed for production deployments behind an API gateway. See
+<a href="#security">Security</a> for details.</p>
+<h2 id="options">OPTIONS</h2>
+<p><strong>Launcher flags</strong> (for
+<code>jarvisagent.sh</code>):</p>
+<ul>
+<li><strong><code>--studio</code></strong> — Launch the Studio edition
+(default).</li>
+<li><strong><code>--engine</code></strong> — Launch the Engine
+edition.</li>
+<li><strong><code>--help</code></strong> — Show usage information.</li>
+</ul>
+<p><strong>Binary flags</strong> (for <code>jarvisAgent-studio</code> /
+<code>jarvisAgent-engine</code>):</p>
+<ul>
+<li><strong><code>--help</code></strong>,
+<strong><code>-h</code></strong> — Show a help message and exit.</li>
+<li><strong><code>--version</code></strong>,
+<strong><code>-v</code></strong> — Print the version number and
+exit.</li>
+</ul>
+<p>Unknown options cause an error message and a non-zero exit code.</p>
+<h2 id="installation">INSTALLATION</h2>
+<p>JarvisAgent is available as pre-built packages for all major
+platforms:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Platform</th>
+<th>Formats</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><strong>Linux</strong></td>
+<td>DEB, RPM, Arch (PKGBUILD), Flatpak, AppImage</td>
+</tr>
+<tr class="even">
+<td><strong>macOS</strong></td>
+<td>DMG, Homebrew formula</td>
+</tr>
+<tr class="odd">
+<td><strong>Windows</strong></td>
+<td>MSI installer, portable ZIP</td>
+</tr>
+<tr class="even">
+<td><strong>Docker</strong></td>
+<td><code>ghcr.io/beaumanvienna/jarvisagent</code></td>
+</tr>
+</tbody>
+</table>
+<p>For building from source and detailed install/uninstall instructions
+for each package format, see the project <strong>README.md</strong> and
+<strong>packaging/packaging.md</strong>.</p>
+<h3 id="shell-completions">Shell completions</h3>
+<p>Shell completion scripts for the launcher are included in
+<code>integration/completions/</code>:</p>
+<ul>
+<li><p><strong>Bash:</strong>
+<code>source /path/to/jarvisAgent/integration/completions/jarvisagent.bash</code>
+(or add to <code>~/.bashrc</code>)</p></li>
+<li><p><strong>Zsh:</strong> Add the completions directory to
+<code>fpath</code> and run <code>compinit</code>:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">fpath</span><span class="op">=</span><span class="va">(</span>/path/to/jarvisAgent/integration/completions <span class="va">$fpath)</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="ex">compinit</span></span></code></pre></div></li>
+</ul>
+<p>GitHub repository: https://github.com/beaumanvienna/JarvisAgent</p>
+<h3 id="docker">Docker</h3>
+<p>The published image
+<code>ghcr.io/beaumanvienna/jarvisagent:latest</code> ships both
+editions (Studio is launched by default). The
+<code>scripts/run-docker.sh</code> wrapper handles docker group
+membership, data-directory persistence, and the HTTP/TLS mode
+switch.</p>
+<p><strong>Default: plain HTTP on port 8080.</strong> Out of the box the
+container serves the dashboard and editor over plain HTTP:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span>              <span class="co"># interactive with TUI</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--headless</span>   <span class="co"># headless (web only)</span></span></code></pre></div>
+<p>Open <code>http://localhost:8080</code> (dashboard) and
+<code>http://localhost:8080/editor</code> (workflow editor). Workflows,
+logs, keys, and <code>config.json</code> persist in
+<code>~/JarvisAgent</code> — pass a trailing path to use a different
+directory.</p>
+<p>On Windows, use <code>scripts\run-docker.ps1</code> with the same
+semantics.</p>
+<p><strong>TLS mode: HTTPS on port 8443.</strong> For HTTPS, generate a
+certificate (or supply one from your PKI) and place the files under
+<code>&lt;data_dir&gt;/certs/</code>:</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">mkdir</span> <span class="at">-p</span> ~/JarvisAgent/certs</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ex">openssl</span> req <span class="at">-x509</span> <span class="at">-newkey</span> rsa:2048 <span class="at">-nodes</span> <span class="dt">\</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">-keyout</span> ~/JarvisAgent/certs/j9t-key.pem <span class="dt">\</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">-out</span>    ~/JarvisAgent/certs/j9t-cert.pem <span class="dt">\</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">-days</span> 365 <span class="dt">\</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">-subj</span> <span class="st">&quot;/CN=localhost&quot;</span> <span class="dt">\</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>  <span class="at">-addext</span> <span class="st">&quot;subjectAltName=DNS:localhost,IP:127.0.0.1&quot;</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="fu">chmod</span> 600 ~/JarvisAgent/certs/j9t-key.pem</span></code></pre></div>
+<p>Then launch the container in TLS mode:</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span>              <span class="co"># interactive + TUI, HTTPS on 8443</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="ex">./scripts/run-docker.sh</span> <span class="at">--tls</span> <span class="at">--headless</span>   <span class="co"># headless, HTTPS on 8443</span></span></code></pre></div>
+<p>Open <code>https://localhost:8443</code>. Self-signed certificates
+produce a browser warning — accept it to proceed. On Windows, use
+<code>scripts\run-docker.ps1 -Tls</code>.</p>
+<p><strong>Switching modes after first run.</strong> On the very first
+start, the container seeds <code>/app/config.json</code> from the image
+defaults. Subsequent starts reuse the existing file. If you later want
+to switch between HTTP and TLS, do one of the following:</p>
+<ul>
+<li>Edit <code>~/JarvisAgent/config.json</code> directly: for TLS, set
+<code>"port": 8443</code> and add
+<code>"TlsCert": "certs/j9t-cert.pem"</code> +
+<code>"TlsKey": "certs/j9t-key.pem"</code>; for HTTP, remove those three
+fields.</li>
+<li>Delete <code>~/JarvisAgent/config.json</code> so the entrypoint
+re-seeds it on next start.</li>
+</ul>
+<p>The entrypoint refuses to launch when the <code>--tls</code> flag
+disagrees with the config file on disk and prints instructions matching
+your case.</p>
+<h2 id="configuration">CONFIGURATION</h2>
+<p>JarvisAgent reads <code>config.json</code> from the current working
+directory at startup. If the file is missing, the application prints an
+error and exits.</p>
+<p>The following fields are recognized:</p>
+<ul>
+<li><strong><code>"file format identifier"</code></strong> — (number)
+Internal format version for the config file.</li>
+<li><strong><code>"description"</code></strong> — (string) A
+human-readable description of this configuration.</li>
+<li><strong><code>"author"</code></strong> — (string) Author or owner of
+this configuration.</li>
+<li><strong><code>"queue folder"</code></strong> — (string,
+<strong>required</strong>) Relative or absolute path to the queue
+directory. JarvisAgent monitors this folder for incoming files that
+trigger AI requests.</li>
+<li><strong><code>"workflows folder"</code></strong> — (string) Relative
+or absolute path to the directory containing <code>.jcwf</code> workflow
+definition files. Defaults to <code>workflows/</code>.</li>
+<li><strong><code>"port"</code></strong> — (number) Web server listen
+port. <code>0</code> = auto-select (8080 for HTTP, 8443 for HTTPS).
+Valid range: 1–65535. Default: <code>0</code>.</li>
+<li><strong><code>"max threads"</code></strong> — (number) Worker-thread
+pool size. Default: 16. Valid range: 1–256.</li>
+<li><strong><code>"max inflight ai calls"</code></strong> — (number)
+Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from
+thread pool size since requests are multiplexed on a single I/O thread.
+Default: 100. Valid range: 1–1000.</li>
+<li><strong><code>"python engines"</code></strong> — (number) Number of
+Python sub-interpreters (each with its own GIL) for parallel Python task
+execution. Requires Python 3.12+. Default: 4. Valid range: 1–16.</li>
+<li><strong><code>"engine sleep time in run loop in ms"</code></strong>
+— (number) Main loop sleep duration in milliseconds. Controls CPU usage
+vs. responsiveness. Default: 10. Valid range: 1–256.</li>
+<li><strong><code>"max file size in kB"</code></strong> — (number)
+Maximum input file size in kilobytes. Files larger than this are chunked
+before being sent to the AI. Default: 20. Valid range: 1–256.</li>
+<li><strong><code>"jcwf batch size"</code></strong> — (number) Number of
+tasks per batch when the AI JCWF generator fans out to multiple parallel
+calls for large workflows. Workflows with fewer tasks than this
+threshold are generated in a single call. Default: 10.</li>
+<li><strong><code>"verbose"</code></strong> — (boolean) Enable verbose
+logging output.</li>
+<li><strong><code>"keys_file"</code></strong> — (string) Path to the
+encrypted API keys file. Default: <code>keys.json.enc</code>.</li>
+<li><strong><code>"use_bash"</code></strong> — (boolean) Windows only:
+prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. Default:
+<code>false</code>. Ignored on Linux/macOS.</li>
+<li><strong><code>"TlsCert"</code></strong> — (string) Path to a
+PEM-format TLS certificate file. Both <code>TlsCert</code> and
+<code>TlsKey</code> must be set to enable HTTPS. See <a
+href="#security">Security</a>.</li>
+<li><strong><code>"TlsKey"</code></strong> — (string) Path to a
+PEM-format TLS private key file.</li>
+<li><strong><code>"TrustedProxyHeader"</code></strong> — (string) HTTP
+header name for gateway-injected user identity
+(e.g. <code>X-Forwarded-User</code>). Engine edition only. See <a
+href="#security">Security</a>.</li>
+<li><strong><code>"TrustedRoleHeader"</code></strong> — (string) HTTP
+header name for gateway-injected user role
+(e.g. <code>X-Forwarded-Role</code>). Engine edition only.</li>
+<li><strong><code>"MaxRequestBodyMB"</code></strong> — (number) Maximum
+HTTP request body size in megabytes. Oversized requests are rejected
+with HTTP 413 before parsing. Engine edition only. Default: 10.</li>
+<li><strong><code>"API index"</code></strong> — (number) Zero-based
+index of the default AI interface to use from the
+<code>"API interfaces"</code> array.</li>
+<li><strong><code>"API interfaces"</code></strong> — (array) List of AI
+provider configurations. Each entry is an object with:
+<ul>
+<li><strong><code>"url"</code></strong> — (string,
+<strong>required</strong>) The API endpoint URL
+(e.g. <code>https://api.openai.com/v1/chat/completions</code>).</li>
+<li><strong><code>"model"</code></strong> — (string) The model name
+(e.g. <code>gpt-4o</code>, <code>gemini-2.5-flash</code>).</li>
+<li><strong><code>"API"</code></strong> — (string) The reply parser
+type:
+<ul>
+<li><code>API1</code> — OpenAI-compatible chat completions (OpenAI,
+Google Gemini via OpenAI-compat endpoint, Ollama, any
+<code>/v1/chat/completions</code> provider).</li>
+<li><code>API2</code> — OpenAI Responses API (GPT-5 and later
+models).</li>
+<li><code>API3</code> — Google Gemini native API (uses
+<code>x-goog-api-key</code> header and
+<code>/models/{model}:generateContent</code> URL scheme).</li>
+<li><code>API4</code> — Anthropic Messages API (uses
+<code>x-api-key</code> + <code>anthropic-version: 2023-06-01</code>
+headers, <code>/v1/messages</code> endpoint; Claude Haiku / Sonnet /
+Opus).</li>
+<li><code>API5</code> — AWS Bedrock (SigV4-signed; URL composed as
+<code>{base}/model/{modelId}/invoke</code>; body shape dispatches on
+<code>modelId</code> prefix: <code>anthropic.claude-*</code> →
+Anthropic-style, <code>meta.llama*</code> → Llama-native,
+<code>amazon.titan-*</code> / <code>amazon.nova-*</code> → Titan/Nova;
+reply parser sniffs the response shape and delegates).</li>
+<li><code>API6</code> — Azure OpenAI (uses <code>api-key:</code> header;
+body identical to API1; the deployment URL is the full per-deployment
+URL,
+e.g. <code>https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}</code>).</li>
+<li><code>Test</code> — no-network fixture backend for integration tests
+(reads canned reply from the interface’s <code>url</code> field).</li>
+</ul></li>
+<li><strong><code>"max_context_tokens"</code></strong> — (integer,
+optional) Advisory context-window size for this interface. When set, j9t
+warns if an <code>ai_call</code> prompt is estimated to exceed it.
+Typical values: OpenAI GPT-4-family = 128000; OpenAI GPT-5-family =
+200000; Google Gemini 2.5 = 1000000; Anthropic Claude = 200000.</li>
+<li><strong><code>"default_output_tokens"</code></strong> — (integer,
+optional) Default max output tokens used by the size-aware request
+budget when an envelope’s <code>m_MaxTokens</code> isn’t set. Default:
+4096.</li>
+<li><strong><code>"name"</code></strong> — (string) Human-readable name
+for this interface. Auto-generated from URL domain + model if
+omitted.</li>
+<li><strong><code>"description"</code></strong> — (string) Optional
+description of this interface.</li>
+<li><strong><code>"key_name"</code></strong> — (string) Name of the API
+key provider to use from the encrypted keys file (e.g. “openai”,
+“google”, “anthropic”).</li>
+<li><strong><code>"rate_limit"</code></strong> — (object, optional)
+Per-interface adaptive rate-limit + size-aware in-flight budget knobs.
+All sub-fields optional; missing fields fall back to
+per-<code>InterfaceType</code> defaults shipped in the binary. See
+<strong>Rate-limit configuration</strong> below for the schema and
+tuning examples.</li>
+</ul></li>
+</ul>
+<h3 id="rate-limit-configuration">Rate-limit configuration</h3>
+<p>Every interface has an associated adaptive controller that decides
+how aggressively to dispatch requests, plus a size-aware in-flight
+budget that bounds each request’s curl timeout. Both are tuned by the
+optional <code>rate_limit</code> block on the interface:</p>
+<pre class="jsonc"><code>{
+    &quot;API&quot;: &quot;API4&quot;,
+    &quot;url&quot;: &quot;https://api.anthropic.com/v1/messages&quot;,
+    &quot;model&quot;: &quot;claude-sonnet-4-6&quot;,
+    &quot;key_name&quot;: &quot;Anthropic&quot;,
+    &quot;rate_limit&quot;: {
+        &quot;initial_concurrency_probe&quot;: 4,
+        &quot;max_concurrency&quot;: 48,
+        &quot;max_retries_429&quot;: 10,
+        &quot;max_retries_transient&quot;: 2,
+        &quot;base_retry_ms&quot;: 1000,
+        &quot;request_budget&quot;: {
+            &quot;per_1k_input_token_seconds&quot;: 0.5,
+            &quot;per_1k_output_token_seconds&quot;: 5.0,
+            &quot;fixed_overhead_seconds&quot;: 5.0,
+            &quot;safety_margin_factor&quot;: 4.0,
+            &quot;min_seconds&quot;: 60.0,
+            &quot;max_seconds&quot;: 600.0
+        }
+    }
+}</code></pre>
+<p><strong>Concurrency / retry knobs:</strong></p>
+<ul>
+<li><code>initial_concurrency_probe</code> — starting AIMD cap before
+the controller has observed any response. Default per
+<code>InterfaceType</code>: Anthropic 4, OpenAI 8, Empty 4. Set to 1 for
+a Tier-1 Anthropic account; raise to 16+ for Tier-3+.</li>
+<li><code>max_concurrency</code> — hard ceiling AIMD growth never
+crosses, regardless of how many clean completions accumulate. Default 48
+(the HTTP/2 stream cap). Set lower to pace burn rate on cost-capped
+accounts (this is the only cost-shaping knob in 1.0).</li>
+<li><code>max_retries_429</code> — number of attempts after a 429 before
+giving up. Default 10 (controller’s predictive gating means real 429s
+are rare in practice).</li>
+<li><code>max_retries_transient</code> — attempts after a transient HTTP
+error (400/500/502/503). Default 2.</li>
+<li><code>base_retry_ms</code> — first retry delay; subsequent retries
+use exponential backoff <code>base * 2^n</code>. Default 1000.</li>
+</ul>
+<p><strong>Size-aware request budget</strong> — every request gets a
+curl timeout (<code>CURLOPT_TIMEOUT_MS</code>) computed from the
+formula:</p>
+<pre><code>seconds = (input_tokens / 1000 × per_1k_input_token_seconds)
+        + (max_output_tokens / 1000 × per_1k_output_token_seconds)
+        + fixed_overhead_seconds
+seconds *= safety_margin_factor
+seconds  = clamp(seconds, min_seconds, max_seconds)</code></pre>
+<p>Curl’s timeout only counts time <em>on the wire</em> — inbox waits,
+controller throttling, and retry-queue backoffs don’t burn the budget.
+Each retry creates a fresh easy handle with a fresh budget.</p>
+<p><strong>Default rate at which providers generate output</strong> (the
+dominant term for typical AI workloads):</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Provider tier</th>
+<th>Approx. output rate</th>
+<th>Recommended <code>per_1k_output_token_seconds</code></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Anthropic Claude Haiku 4.5</td>
+<td>~150 tok/s</td>
+<td>1.0</td>
+</tr>
+<tr class="even">
+<td>OpenAI gpt-4o-mini, gpt-5-nano</td>
+<td>~120 tok/s</td>
+<td>1.5</td>
+</tr>
+<tr class="odd">
+<td>OpenAI gpt-4o, gpt-4.1</td>
+<td>~80 tok/s</td>
+<td>2.5</td>
+</tr>
+<tr class="even">
+<td>Google Gemini 2.5 Flash</td>
+<td>~70 tok/s</td>
+<td>3.0</td>
+</tr>
+<tr class="odd">
+<td>Anthropic Claude Sonnet 4.6</td>
+<td>~70 tok/s</td>
+<td>5.0</td>
+</tr>
+<tr class="even">
+<td>Anthropic Claude Opus 4.7</td>
+<td>~30 tok/s</td>
+<td>12.0</td>
+</tr>
+</tbody>
+</table>
+<p>Shipped defaults (<code>per_1k_output=5.0</code>,
+<code>safety_margin=4.0</code>, <code>min=60s</code>) are calibrated for
+Sonnet, the slowest provider in active use. Fast providers finish well
+within the floor with no harm done.</p>
+<p><strong>Tuning examples:</strong></p>
+<p><em>Tier-1 Anthropic (free / starter, ~5 RPM Sonnet):</em></p>
+<pre class="jsonc"><code>&quot;rate_limit&quot;: { &quot;initial_concurrency_probe&quot;: 1, &quot;max_concurrency&quot;: 4 }</code></pre>
+<p><em>Tier-3 Anthropic (production, ~50 RPM Sonnet):</em></p>
+<pre class="jsonc"><code>&quot;rate_limit&quot;: { &quot;initial_concurrency_probe&quot;: 8, &quot;max_concurrency&quot;: 32 }</code></pre>
+<p><em>Cost-capped account — pace burn at ~10 in-flight max regardless
+of provider tier:</em></p>
+<pre class="jsonc"><code>&quot;rate_limit&quot;: { &quot;max_concurrency&quot;: 10 }</code></pre>
+<p><em>Workflow expects very long Opus responses (8K-12K
+tokens):</em></p>
+<pre class="jsonc"><code>&quot;rate_limit&quot;: {
+    &quot;request_budget&quot;: {
+        &quot;per_1k_output_token_seconds&quot;: 15.0,
+        &quot;min_seconds&quot;: 120.0,
+        &quot;max_seconds&quot;: 1200.0
+    }
+}</code></pre>
+<p><strong>Verifying tuning</strong> —
+<code>GET /api/debug/signals</code> (debug builds only) exposes
+per-<code>(host, modelFamily)</code> controller state at
+<code>dispatcher_controllers[]</code>: current AIMD cap, streak since
+last 429, last observation (remaining requests / tokens, reset times),
+last consumed input/output tokens. Use this to confirm the controller is
+doing what you expect before scaling up.</p>
+<h2 id="environment">ENVIRONMENT</h2>
+<ul>
+<li><strong><code>OPENAI_API_KEY</code></strong> — Bootstrapping
+fallback. If no encrypted keys file is found and this variable is set,
+JarvisAgent creates a single <code>openai</code> provider entry using
+the key value. This is a convenience for simple single-provider setups;
+encrypt keys as soon as practical.</li>
+</ul>
+<p>The master password for <code>keys.json.enc</code> and
+<code>mcp_keys.json.enc</code> is supplied <strong>only</strong> at
+runtime via the dashboard login flow or
+<code>POST /api/settings/keys/unlock</code>. There is no
+environment-variable shortcut — the password is held exclusively in
+<code>mlock()</code>-protected memory (<code>SecureString</code>) and
+never lands in process listings, <code>docker inspect</code>, or crash
+dumps.</p>
+<p><strong>API key priority order:</strong></p>
+<ol type="1">
+<li>Encrypted keys file (<code>keys.json.enc</code>) — unlocked at
+runtime via dashboard login or
+<code>POST /api/settings/keys/unlock</code>.</li>
+<li>Plaintext keys file (<code>keys.json</code>) — development fallback
+only.</li>
+<li><code>OPENAI_API_KEY</code> environment variable.</li>
+</ol>
+<h2 id="first-steps-after-restart">FIRST STEPS AFTER RESTART</h2>
+<p>Every time JarvisAgent starts (cold boot,
+<code>systemctl restart</code>, container restart), the encrypted key
+stores (<code>keys.json.enc</code> and <code>mcp_keys.json.enc</code>)
+are sealed — the master password is held only in
+<code>mlock()</code>-protected memory and is never persisted. An admin
+must unlock them before any credential-dependent work can proceed.</p>
+<p><strong>What does not work until you unlock:</strong></p>
+<ul>
+<li>MCP API key authentication — all
+<code>Authorization: Bearer mcp_...</code> requests return 401 / 403
+because the key hashes can’t be compared.</li>
+<li>AI provider API calls — workflows with <code>ai_call</code> tasks
+fail at dispatch time with a clear “no providers configured” error.</li>
+<li>OAuth token refresh (OneDrive, Google Sheets, etc.) — access tokens
+won’t be re-issued when they expire.</li>
+<li>Cloud connections that depend on encrypted credentials (Snowflake
+key-pair, Postgres/SMTP BasicAuth, Slack bot token, etc.).</li>
+</ul>
+<p><strong>What does work:</strong></p>
+<ul>
+<li><code>GET /api/status</code> — reports
+<code>"keys_unlocked": false</code> so monitors can alert.</li>
+<li><code>POST /api/auth/mcp-keys/activate</code> — new users can
+exchange an enrollment token without the store being unlocked (the token
+itself is the auth).</li>
+<li><code>POST /api/settings/keys/unlock</code> — the endpoint that
+unseals everything.</li>
+<li>Studio browser UI on localhost (no auth required).</li>
+</ul>
+<p><strong>How to unlock:</strong></p>
+<ol type="1">
+<li><strong>Dashboard:</strong> load the Engine dashboard in a browser,
+enter your MCP key on the login page. If the key store is sealed, the
+Settings modal will prompt for the master password; provide it once and
+the session proceeds normally afterwards.</li>
+<li><strong>REST:</strong>
+<code>curl -sS -X POST https://host:8443/api/settings/keys/unlock -H 'Content-Type: application/json' -d '{"master_password":"..."}'</code>
+— returns 200 with <code>"mcp_keys_loaded": true</code> on success, 401
+on wrong password.</li>
+<li><strong>CI / Docker / automation:</strong> call the unlock endpoint
+from a startup script using a secret you mount in (e.g. from Docker
+secrets, AWS Secrets Manager, HashiCorp Vault). <strong>Do not</strong>
+try to use the old <code>JARVIS_MASTER_PASSWORD</code> environment
+variable — it was removed on purpose so the password never shows up in
+process listings or <code>docker inspect</code>.</li>
+</ol>
+<p><strong>First-run only:</strong> on the very first start with an
+empty MCP key store, JarvisAgent prints a bootstrap admin enrollment
+token to the application log (<code>log/log.txt</code> plus the TUI).
+Activate it via <code>POST /api/auth/mcp-keys/activate</code> to obtain
+the initial admin MCP key, then unlock as above on subsequent
+restarts.</p>
+<h2 id="mcp-api-keys-enrollment-activation-use">MCP API KEYS —
+ENROLLMENT, ACTIVATION, USE</h2>
+<p>Every credential in JarvisAgent is an <strong>MCP API key</strong> —
+a per-user, individually-revocable bearer token. Keys are prefixed
+<code>mcp_</code> because the same credential is used by the
+<strong>M</strong>odel <strong>C</strong>ontext
+<strong>P</strong>rotocol sidecar (the machine path: Claude Code, CI
+bots, custom agents) <em>and</em> by humans signing into the dashboard
+in a browser (the user path). Each key carries an identity, role, adhoc
+flag, disk quota, and retention ceiling on the server side.</p>
+<p><strong>Why one credential type for both paths.</strong> An agent
+holding Alice’s key is authorised <em>exactly</em> as Alice is. If Alice
+can submit adhoc workflows, so can her Claude Code instance; if Alice
+cannot shut down the server, neither can her agent. This design means
+every action — whether it originated from a browser click or an LLM tool
+call — traces back to a single human user in the audit log. Agents
+genuinely act <strong>on behalf of</strong> their user, without a
+separate service-account pattern.</p>
+<p>Practical implications: - <strong>One issuance flow.</strong> The
+admin issues <em>one</em> MCP key per user; the user uses it in the
+dashboard, the CLI, Claude Code, or any other MCP client. No parallel
+service credentials. - <strong>One revocation flow.</strong> Revoking a
+key cuts off that human’s browser sessions, MCP agent sessions, and any
+script using the key — all at once. - <strong>One audit trail.</strong>
+<code>alice@company.com</code> appears in the security log for dashboard
+logins, adhoc submissions, artifact downloads, and every other
+authenticated action. Role-based accountability, not just
+credential-based.</p>
+<p>There are three distinct actors in the flows below: the
+<strong>admin</strong> who issues credentials, the <strong>user</strong>
+who activates and uses them, and the <strong>agent</strong> process
+(Claude Code, a CI bot, a custom script) that holds the final key on
+behalf of that user.</p>
+<h3 id="im-a-new-user-how-do-i-get-a-key">I’m a new user — how do I get
+a key?</h3>
+<p>Your admin hands you an <strong>enrollment token</strong>
+(<code>enroll_…</code>) out-of-band — Slack DM, email, in person. The
+token is single-use and expires within 30 minutes of creation (60
+minutes for the first-run bootstrap token).</p>
+<ol type="1">
+<li>Open the JarvisAgent dashboard in your browser
+(<code>https://&lt;host&gt;:8443/</code>).</li>
+<li>At the Sign-in dialog, paste the <code>enroll_…</code> token into
+the input field. The dialog auto-switches to <strong>Activate enrollment
+token</strong> with your token pre-filled — no extra click
+required.</li>
+<li>Click <strong>Activate</strong>. Your real MCP API key appears on
+screen. <strong>It is shown exactly once.</strong></li>
+<li>Tick the <em>“I have saved this MCP API key to a password manager or
+my Claude Code config”</em> checkbox. The <strong>Sign in with this key
+→</strong> button flips from red to green.</li>
+<li>Copy the key into your password manager (or Claude Code config — see
+next section). Then click <strong>Sign in with this key →</strong> to
+enter the dashboard.</li>
+</ol>
+<p>If you lose the key, there is no way to recover it — ask the admin
+for a fresh enrollment token. Don’t share your key; treat it like a
+password.</p>
+<h3 id="im-a-user-how-do-i-use-my-key-with-claude-code">I’m a user — how
+do I use my key with Claude Code?</h3>
+<p>The MCP sidecar (<code>mcp/dist/index.js</code>) reads the key from
+two sources, in order:</p>
+<ul>
+<li><code>J9T_TOKEN</code> environment variable, <em>or</em></li>
+<li><code>J9T_TOKEN_FILE</code> environment variable pointing to a file
+whose contents are the raw key (with <code>chmod 600</code>,
+gitignored).</li>
+</ul>
+<p>Minimal <code>.mcp.json</code> snippet:</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;mcpServers&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;j9t&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;command&quot;</span><span class="fu">:</span> <span class="st">&quot;node&quot;</span><span class="fu">,</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;args&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;/abs/path/to/jarvisAgent/mcp/dist/index.js&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;env&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;J9T_URL&quot;</span><span class="fu">:</span> <span class="st">&quot;https://localhost:8443&quot;</span><span class="fu">,</span></span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;J9T_TOKEN_FILE&quot;</span><span class="fu">:</span> <span class="st">&quot;/abs/path/to/.mcp_admin_token&quot;</span></span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span></span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">}</span></span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>Restart Claude Code after editing <code>.mcp.json</code>. Verify with
+the <code>whoami</code> MCP tool — it should return your user and
+role.</p>
+<h3 id="im-a-user-my-key-is-about-to-expire">I’m a user — my key is
+about to expire</h3>
+<p>MCP keys expire 90 days after activation by default. Within 30 days
+of expiry, responses to your requests carry an
+<code>X-Key-Expires-In: &lt;N&gt;d</code> header. You can renew
+<strong>without admin involvement</strong> by calling
+<code>POST /api/auth/mcp-keys/self-renew</code> with your current
+(still-valid) key — a fresh key is issued, the old one enters a 24-hour
+grace period, then disables. The same ceiling (role, adhoc flag, quota)
+carries over; self-renewal cannot escalate privilege.</p>
+<p>If your key has already expired, the admin must issue a new
+enrollment token.</p>
+<h3 id="im-an-admin-how-do-i-onboard-a-new-user">I’m an admin — how do I
+onboard a new user?</h3>
+<ol type="1">
+<li>Sign into the dashboard with your admin MCP key.</li>
+<li>Open <strong>Settings</strong> (gear icon) → <strong>MCP
+Keys</strong> tab.</li>
+<li>Click <strong>+ Create enrollment</strong>.</li>
+<li>Fill in the user’s email/username, role (<code>admin</code> /
+<code>operator</code> / <code>viewer</code>), adhoc flag, disk quota,
+default retention, and expiry. Click <strong>Create</strong>.</li>
+<li>Copy the <code>enroll_…</code> token shown in the confirmation
+dialog and share it with the user over a secure channel (Slack DM,
+email, password manager). You will never see the user’s real MCP key —
+that’s by design.</li>
+<li>Audit log records
+<code>Enrollment token created for alice@company.com (operator, adhoc=off) by admin@company.com</code>.</li>
+</ol>
+<p>To <strong>revoke</strong> a key: Settings → MCP Keys → click
+<strong>Revoke</strong> on the row. Revocation is immediate; subsequent
+requests with that key receive 401. The revocation is audit-logged.</p>
+<p>To <strong>re-enroll</strong> a user (rotate their key or change
+role/quota): issue a fresh enrollment token. The user activates it, and
+their previous key enters the 24-hour grace period.</p>
+<h3 id="im-an-admin-how-do-i-deploy-scripts">I’m an admin — how do I
+deploy scripts?</h3>
+<p>Scripts under <code>scripts/</code> are the only way for adhoc
+workflows to execute shell / Python code — agents can reference them but
+cannot upload code. To make a script agent-discoverable:</p>
+<ol type="1">
+<li><p>Drop the file into <code>scripts/</code> on the j9t host. Shell
+scripts are <code>.sh</code>/<code>.ps1</code>; Python modules are
+<code>.py</code> importable as
+<code>scripts.&lt;name&gt;</code>.</p></li>
+<li><p>Add a metadata header so it surfaces in the catalog with a
+description:</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co">#!/usr/bin/env bash</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="co"># @jarvis-script</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co"># @short: One-line description of what the script does</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># @params: ARG1 ARG2 ARG3</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="co"># @description: Longer explanation, possibly wrapping onto</span></span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a><span class="co">#   indented continuation lines.</span></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># @outputs: Free-text description of what the script produces</span></span></code></pre></div></li>
+<li><p>Make it executable: <code>chmod +x scripts/my-script.sh</code>
+(shell only).</p></li>
+<li><p>In the dashboard, open <strong>Settings → Scripts</strong> and
+click <strong>Refresh</strong> to trigger an on-demand rescan. No j9t
+restart required. The MCP <code>list_scripts</code> tool and
+<code>GET /api/scripts</code> endpoint will now surface the new script
+with its metadata; agents submitting adhoc JCWFs can reference
+it.</p></li>
+</ol>
+<p>Scripts without the <code>@jarvis-script</code> marker still appear
+in the catalog but are flagged — useful for flagging internal helper
+modules (e.g. <code>scripts/helpers/*.py</code>) that agents shouldn’t
+reference directly as task entries.</p>
+<h3 id="im-an-admin-how-do-agents-use-adhoc-workflows">I’m an admin —
+how do agents use adhoc workflows?</h3>
+<p>An authorised agent (MCP key with <code>adhoc_enabled</code>, role
+<code>operator</code>+) composes a JCWF referencing pre-deployed scripts
+and submits it via <code>run_adhoc_workflow</code>. The full loop:</p>
+<ol type="1">
+<li><strong>Discover</strong> — <code>list_scripts</code> returns the
+catalog; the agent’s LLM picks the scripts it needs.</li>
+<li><strong>Compose</strong> — the agent assembles a JCWF canvas (task
+graph, inputs, outputs) referencing those scripts.</li>
+<li><strong>Submit</strong> — <code>run_adhoc_workflow</code> stages the
+JCWF under
+<code>_adhoc/&lt;user_slug&gt;/&lt;timestamp&gt;_&lt;counter&gt;_del-&lt;delete-at&gt;/</code>
+and kicks off execution. Missing script references are rejected with
+<code>400 missing_scripts</code>.</li>
+<li><strong>Monitor</strong> — <code>get_run_status</code> polls until
+the state is terminal.</li>
+<li><strong>Enumerate</strong> — <code>list_run_files</code> returns the
+run’s outputs with size, content-type, SHA-256, a local filesystem
+<code>path</code> (for agents on the same host), and a
+<code>download_url</code> (for remote agents).</li>
+<li><strong>Retrieve</strong> — <code>get_run_file</code> streams an
+artefact by path. Text is returned inline; binary is base64-encoded.
+Range requests are supported for files over the 10 MB single-response
+cap.</li>
+<li><strong>Cleanup</strong> — based on the submission’s cleanup policy:
+<code>on_completion</code> wipes the folder inline; TTL policies
+(<code>ttl_1h</code> / <code>ttl_24h</code> / <code>ttl_48h</code> /
+<code>ttl_72h</code>) are swept by the reaper thread;
+<code>retain</code> needs admin action.</li>
+</ol>
+<p>Every step is audit-logged with the agent’s identity, role, and (for
+file reads) bytes served. Admins can read any user’s run folders
+(<code>admin_cross_user_read</code> audit entry); operators see only
+their own.</p>
+<h2 id="ai-setup">AI SETUP</h2>
+<p>To use AI-powered workflows, you need at least one API key
+configured.</p>
+<h3 id="setting-up-api-keys">Setting up API keys</h3>
+<ol type="1">
+<li>Open the workflow editor at
+<code>http://localhost:8080/editor</code>.</li>
+<li>Navigate to the <strong>Settings</strong> page (gear icon) and
+select <strong>AI Keys</strong>.</li>
+<li>Add a provider name (e.g. “openai”, “google”, “anthropic”) and paste
+the corresponding API key.</li>
+<li>Click <strong>Save Encrypted</strong>. You will be prompted for a
+master password. This encrypts all keys into <code>keys.json.enc</code>
+in the working directory.</li>
+</ol>
+<h3 id="setting-up-ai-models">Setting up AI models</h3>
+<ol type="1">
+<li>In the workflow editor, navigate to the <strong>AI Manager</strong>
+page.</li>
+<li>Configure one or more AI interfaces: set the API endpoint URL, model
+name, parser type, and select which key provider to use. Use
+<code>API1</code> for OpenAI and compatible providers, <code>API2</code>
+for OpenAI Responses API (GPT-5+), <code>API3</code> for Google Gemini
+native, <code>API4</code> for Anthropic Messages (Claude),
+<code>API5</code> for AWS Bedrock, or <code>API6</code> for Azure-hosted
+OpenAI deployments.</li>
+<li>Set the default interface index or override per-task in workflow
+definitions.</li>
+</ol>
+<p>Supported providers include OpenAI (API1 or API2), Google Gemini
+(API1 via OpenAI-compat endpoint, or API3 for the native endpoint),
+Anthropic (API4 native), Ollama and any provider offering an
+OpenAI-compatible chat completions API (API1). The OpenAI Responses API
+(GPT-5+) uses API2.</p>
+<p><strong>Self-hosted example — Ollama on localhost</strong> (same
+pattern works for LM Studio, llama.cpp server, vLLM,
+text-generation-webui):</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;ollama/llama3.1/API1&quot;</span><span class="fu">,</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;url&quot;</span><span class="fu">:</span> <span class="st">&quot;http://localhost:11434/v1/chat/completions&quot;</span><span class="fu">,</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;model&quot;</span><span class="fu">:</span> <span class="st">&quot;llama3.1&quot;</span><span class="fu">,</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;API&quot;</span><span class="fu">:</span> <span class="st">&quot;API1&quot;</span><span class="fu">,</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;key_name&quot;</span><span class="fu">:</span> <span class="st">&quot;ollama&quot;</span></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>Register an <code>ollama</code> provider in the KeyManager with any
+non-empty string as the API key — Ollama itself ignores the bearer, but
+the j9t dispatcher requires one.</p>
+<h2 id="workflows">WORKFLOWS</h2>
+<p>JarvisAgent uses <strong>JC Workflow</strong> files
+(<code>.jcwf</code>) to describe automation pipelines as directed
+acyclic graphs (DAGs). A <code>.jcwf</code> file is a <strong>zip
+container</strong> that bundles JSON workflow definitions and any input
+data files into a single portable package.</p>
+<p>A workflow consists of:</p>
+<ul>
+<li><strong>Tasks</strong> — individual units of work: AI calls, shell
+commands, Python scripts, internal actions, or sub-workflow invocations.
+Tasks can run in parallel when their dependencies allow it.</li>
+<li><strong>Edges</strong> — dependency and dataflow connections between
+tasks. A task only runs after all its upstream dependencies have
+completed.</li>
+<li><strong>Triggers</strong> — how a workflow is started: manually, on
+a cron schedule, or when a file appears in a watched directory.</li>
+<li><strong>Filters</strong> — per-item expansion from CSV files, text
+line lists, or queries. A single task definition can fan out into many
+parallel instances.</li>
+<li><strong>Sub-workflows</strong> — nested workflow canvases that group
+tasks into reusable units. Each sub-workflow is a folder inside the
+<code>.jcwf</code> container with its own JSON task DAG.</li>
+</ul>
+<h3 id="container-format">Container format</h3>
+<p>A <code>.jcwf</code> file is a zip archive containing:</p>
+<ul>
+<li><code>global.json</code> — workflow-wide metadata (version, id,
+label, triggers, defaults).</li>
+<li><code>&lt;workflow-name&gt;.json</code> — the root canvas task
+DAG.</li>
+<li>Sub-workflow folders — each folder represents a sub-workflow (folder
+name = display name), containing its own <code>.json</code> task
+DAG.</li>
+</ul>
+<p>When loaded, the container is extracted to
+<code>workflows/&lt;workflow-name&gt;/</code>. All task
+<code>working_directory</code> paths are relative to this extracted
+folder.</p>
+<h3 id="task-types">Task types</h3>
+<ul>
+<li><strong><code>ai_call</code></strong> — Send a prompt (with optional
+file attachments) to an AI provider and capture the response.</li>
+<li><strong><code>shell</code></strong> — Run a shell command or script.
+Stdout and stderr are captured.</li>
+<li><strong><code>python</code></strong> — Call a Python function with
+structured inputs/outputs.</li>
+<li><strong><code>internal</code></strong> — Built-in actions (e.g. file
+operations).</li>
+<li><strong><code>sub_workflow</code></strong> — Execute a child
+workflow from a sub-folder within the container. The parent task waits
+for the child to complete.</li>
+</ul>
+<p>For the full specification including JSON schema, dataflow mapping,
+template syntax, filter types, per-item expansion, and container format,
+see: <strong>doc/JC_Workflow_Specification.md</strong></p>
+<h2 id="workflow-editor">WORKFLOW EDITOR</h2>
+<p>The visual workflow editor is a React application served by
+JarvisAgent at:</p>
+<pre><code>http://localhost:8080/editor</code></pre>
+<p>Key features:</p>
+<ul>
+<li><strong>Visual DAG editor</strong> — drag-and-drop nodes, draw
+dependency and dataflow edges between tasks.</li>
+<li><strong>Task inspector</strong> — configure task type, parameters,
+file inputs/outputs, working directory, timeout, and per-task AI
+interface override.</li>
+<li><strong>Sub-workflow support</strong> — add sub-workflow nodes that
+reference nested canvases. Double-click a sub-workflow node to navigate
+into it.</li>
+<li><strong>Workflow tree</strong> — the left sidebar shows the
+sub-workflow hierarchy as a collapsible tree. Click any node in the tree
+to navigate directly to that canvas.</li>
+<li><strong>Breadcrumb navigation</strong> — when inside a sub-workflow,
+a breadcrumb bar above the canvas shows the navigation path. Click any
+parent in the chain to jump back.</li>
+<li><strong>Workflow CRUD</strong> — open, save, validate, run, and
+clean workflows. Workflows are saved as <code>.jcwf</code> zip
+containers.</li>
+<li><strong>Live run monitoring</strong> — task state badges update in
+real time via WebSocket (running, succeeded, failed, skipped).</li>
+<li><strong>Run controls</strong> — start, stop, pause, and resume
+workflow runs.</li>
+<li><strong>Template browser</strong> — start from pre-built workflow
+templates.</li>
+<li><strong>Validation</strong> — the backend validates the workflow
+structure and reports issues with severity tiers directly on the
+canvas.</li>
+<li><strong>Filter builder</strong> — configure CSV, text_lines, or
+query filters for per-item fan-out.</li>
+<li><strong>Log viewer</strong> — virtual-scrolling log display with
+search and run analysis (see <a href="#dashboard">Dashboard</a> below
+for details).</li>
+</ul>
+<h2 id="dashboard">DASHBOARD</h2>
+<p>The React dashboard is served at:</p>
+<pre><code>http://localhost:8080</code></pre>
+<p>It has two tabs: a <strong>Dashboard</strong> overview and a
+<strong>Log Viewer</strong>.</p>
+<h3 id="dashboard-tab">Dashboard tab</h3>
+<ul>
+<li><strong>Status bar</strong> — live WebSocket connection indicator,
+active workflow runs, AI session count, completed/failed counters, and a
+quit button.</li>
+<li><strong>Workflows panel</strong> — lists all registered workflows
+with controls to run or clean each workflow.</li>
+<li><strong>Session managers panel</strong> — shows active AI request
+sessions with real-time status updates.</li>
+</ul>
+<h3 id="log-viewer-tab">Log Viewer tab</h3>
+<p>A full-screen, virtual-scrolling log display (up to 100,000
+lines).</p>
+<ul>
+<li><strong>Live streaming</strong> — new log lines arrive in real time
+via WebSocket.</li>
+<li><strong>Auto-scroll</strong> — follows the latest output; toggles
+between <strong>Follow</strong> and <strong>Paused</strong> mode. Click
+the button or scroll up to pause, click again to resume.</li>
+<li><strong>Search</strong> — press <code>/</code> or
+<code>Ctrl+F</code> to search. Navigate matches with <code>Enter</code>
+(next) / <code>Shift+Enter</code> (previous). Match count and position
+are shown in the toolbar.</li>
+<li><strong>Color-coded log levels</strong> — lines containing
+<code>[error]</code> are displayed in <strong>red</strong>; lines
+containing <code>[warning]</code> or <code>[warn]</code> are displayed
+in <strong>yellow</strong>.</li>
+<li><strong>Run Analyzer</strong> — press <code>1</code> or click the
+<strong>Analyze</strong> button. An overlay panel appears showing:
+<ul>
+<li>Workflow ID, run ID, state, start/end timestamps.</li>
+<li>Clickable log-region links (start line — end line) to jump directly
+to the run’s output.</li>
+<li><strong>◀ / ▶</strong> arrows to cycle through previous runs (newest
+first).</li>
+<li><strong>Issues list</strong> — all warnings and errors within the
+run, color-coded by severity (red for errors, yellow for warnings).</li>
+<li><strong>▲ / ▼</strong> arrows to step through issues one by one;
+clicking an issue jumps to its log line.</li>
+</ul></li>
+</ul>
+<h2 id="security">SECURITY</h2>
+<h3 id="studio-edition">Studio edition</h3>
+<p>Studio has <strong>no authentication</strong>. It is designed for
+single-developer use on localhost. The operator is responsible for not
+exposing the port beyond localhost, reviewing AI-generated scripts
+before accepting them, and keeping API keys secure.</p>
+<h3 id="engine-edition">Engine edition</h3>
+<p>Engine is designed for production deployments and includes
+comprehensive security:</p>
+<ul>
+<li><strong>MCP API key authentication.</strong> All programmatic
+endpoints require <code>Authorization: Bearer mcp_...</code>. Keys are
+per-user (identity, role, adhoc flag, disk quota, retention policy) and
+stored only as SHA-256 hashes in the encrypted
+<code>mcp_keys.json.enc</code>. Provisioning: admin creates an
+enrollment token (<code>POST /api/auth/mcp-keys/enroll</code>); the user
+exchanges it at <code>POST /api/auth/mcp-keys/activate</code> and
+receives their real key <strong>once</strong>. On j9t’s first run with
+an empty key store, a bootstrap admin enrollment token is logged to
+stderr. Key comparison uses <code>CRYPTO_memcmp</code> for constant-time
+equality.</li>
+<li><strong>Dashboard sessions.</strong> Browser users sign in at the
+login page by pasting their MCP key → <code>POST /api/auth/login</code>
+creates a server-side session with an
+<code>HttpOnly + SameSite=Strict</code> cookie (plus <code>Secure</code>
+when TLS is enabled), 8-hour sliding timeout.
+<code>POST /api/auth/logout</code> destroys the session.</li>
+<li><strong>Key expiry and self-renewal.</strong> MCP keys expire 90
+days after activation by default. Within 30 days of expiry, users can
+renew themselves at <code>POST /api/auth/mcp-keys/self-renew</code>
+without admin involvement; old keys enter a 24-hour grace period then
+disable. After expiry, the admin must issue a fresh enrollment
+token.</li>
+<li><strong>Failed auth lockout.</strong> 10 failed attempts from the
+same IP within 5 minutes triggers a 15-minute lockout (HTTP 403 with
+<code>Retry-After: 900</code>).</li>
+<li><strong>RBAC (Role-Based Access Control).</strong> Three roles with
+descending privilege:
+<ul>
+<li><strong>admin</strong> — full access including shutdown, security
+logs, MCP key CRUD, and all configuration endpoints.</li>
+<li><strong>operator</strong> — run control, workflow monitoring,
+application logs, adhoc workflow submission (when
+<code>adhoc_enabled</code> is granted).</li>
+<li><strong>viewer</strong> — read-only dashboard, workflow list, run
+status.</li>
+</ul>
+The role travels on the MCP key itself, on the session cookie derived
+from it, or (in gateway deployments) in the
+<code>X-Forwarded-Role</code> header (default <code>viewer</code> when
+absent).</li>
+<li><strong>Two-tier rate limiting.</strong> Token-bucket policy split
+by authentication state. Pre-auth (per-IP) is tight — 100 req/min, burst
+20 — and applies to unauthenticated or credential-rejected traffic.
+Authenticated (per-user) is generous — 1200 req/min, burst 200 — and
+applies once an MCP key or session validates. Both tiers return HTTP 429
+with <code>Retry-After</code>; the security log distinguishes them via
+<code>rate_limited_preauth</code> vs
+<code>rate_limited_authenticated</code>.</li>
+<li><strong>HMAC-SHA256 webhook authentication.</strong> Webhook
+triggers require a per-workflow secret. Callers must include
+<code>X-Webhook-Signature: sha256=&lt;hex&gt;</code> computed over the
+raw request body. In Engine mode, webhooks without a configured secret
+are rejected.</li>
+<li><strong>WebSocket authentication.</strong> Browser upgrades are
+validated at the handshake via the session cookie
+(<code>.onaccept</code> hook); no in-band auth message is used.</li>
+<li><strong>Built-in TLS (HTTPS).</strong> Set <code>"TlsCert"</code>
+and <code>"TlsKey"</code> in <code>config.json</code> to serve HTTPS
+(default port 8443). If only one field is set or the files don’t exist,
+j9t refuses to start. When TLS is enabled, HSTS headers are added.</li>
+<li><strong>Gateway-trusted identity headers.</strong> When deployed
+behind an API gateway (Kong, AWS API Gateway, Traefik, nginx), configure
+<code>"TrustedProxyHeader"</code> and <code>"TrustedRoleHeader"</code>
+in <code>config.json</code>. The gateway handles authentication (OIDC,
+MFA, SSO) and j9t reads the authenticated user and role from the
+injected headers.</li>
+<li><strong>Security audit logging.</strong> All auth events are logged
+to <code>log/security.txt</code> (rotating, 10 MB x 5 files). Logged
+events: auth success/failure, rate limit triggers, lockout triggers,
+webhook accept/reject, shutdown requests, and run control actions — all
+with IP, user identity, and timestamps. Accessible via
+<code>GET /api/log/security</code> (admin role required) and the
+dashboard’s Security tab.</li>
+<li><strong>Security response headers.</strong> All responses include
+<code>Content-Security-Policy</code>,
+<code>X-Frame-Options: DENY</code>,
+<code>X-Content-Type-Options: nosniff</code>,
+<code>Referrer-Policy</code>, and <code>Permissions-Policy</code>.</li>
+<li><strong>Request body size limit.</strong> Configurable via
+<code>"MaxRequestBodyMB"</code> (default 10 MB). Oversized requests are
+rejected with HTTP 413 before parsing.</li>
+</ul>
+<p>For the complete security model, threat analysis, and operator
+responsibilities, see <strong>doc/cyber security.md</strong>.</p>
+<h2 id="files">FILES</h2>
+<ul>
+<li><strong><code>config.json</code></strong> — Main configuration file
+(must exist in the working directory).</li>
+<li><strong><code>keys.json.enc</code></strong> — Encrypted AI provider
+credentials (AES-256-GCM, master-password protected).</li>
+<li><strong><code>keys.json</code></strong> — Plaintext API keys
+(development fallback, gitignored).</li>
+<li><strong><code>mcp_keys.json.enc</code></strong> — Encrypted MCP API
+key store (same master password as <code>keys.json.enc</code>; only
+SHA-256 hashes of keys are persisted).</li>
+<li><strong><code>workflows/</code></strong> — Directory containing
+<code>.jcwf</code> workflow definition files.</li>
+<li><strong><code>_adhoc/</code></strong> — Per-run folders for adhoc
+workflow submissions (auto-cleaned per the configured retention
+policy).</li>
+<li><strong><code>queue/</code></strong> — Monitored directory for
+incoming files.</li>
+<li><strong><code>log/log.txt</code></strong> — Application log
+file.</li>
+<li><strong><code>log/security.txt</code></strong> — Security audit log
+(Engine edition only, rotating 10 MB x 5 files).</li>
+<li><strong><code>integration/completions/</code></strong> — Shell
+completion scripts for bash and zsh.</li>
+<li><strong><code>.venv/</code></strong> — Python virtual environment
+(auto-created by launcher scripts). Contains markitdown. PDF workflows
+additionally require <code>pandoc</code> (system package) and
+<code>mmdc</code>
+(<code>npm install -g @mermaid-js/mermaid-cli@10.x</code>).</li>
+</ul>
+<h2 id="see-also">SEE ALSO</h2>
+<ul>
+<li><strong>Project README</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/README.md">README.md</a></li>
+<li><strong>Packaging and installation</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/packaging/packaging.md">packaging/packaging.md</a></li>
+<li><strong>JC Workflow Specification</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/JC_Workflow_Specification.md">doc/JC_Workflow_Specification.md</a></li>
+<li><strong>REST API reference</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/api-endpoints.md">doc/api-endpoints.md</a></li>
+<li><strong>Cyber security model</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/doc/cyber%20security.md">doc/cyber
+security.md</a></li>
+<li><strong>Key management internals</strong> — <a
+href="https://github.com/beaumanvienna/JarvisAgent/blob/main/engine/keys.md">engine/keys.md</a></li>
+</ul>
+<hr />
+<p><em>JarvisAgent is developed by JC Technolabs — <a
+href="https://github.com/beaumanvienna/JarvisAgent">GitHub</a></em></p>
 </body>
-
 </html>

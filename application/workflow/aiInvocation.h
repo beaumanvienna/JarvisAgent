@@ -75,7 +75,13 @@ namespace AIAssistant
         std::vector<Message> m_Messages;
         std::optional<std::string> m_OutputSchemaJson;
         StructuredMode m_StructuredMode = StructuredMode::None;
-        std::chrono::milliseconds m_Timeout{120000};
+        // Optional explicit timeout override.  When set, AiRequestPool::Submit
+        // uses this value as curl's CURLOPT_TIMEOUT_MS instead of the size-aware
+        // budget computed from the per-interface rate_limit.request_budget knobs.
+        // Set from JCWF taskDefinition.m_TimeoutMs by AiCallTaskExecutor when
+        // the workflow author declared a per-task timeout.  Unset = use the
+        // size-aware budget.
+        std::optional<std::chrono::milliseconds> m_Timeout;
         AiRetryPolicy m_Retry;
         std::filesystem::path m_QueueFolder;
         std::string m_ProbName;

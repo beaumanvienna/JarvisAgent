@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+content-type: application/json
+anthropic-ratelimit-requests-remaining: 0
+anthropic-ratelimit-tokens-remaining: 0
+anthropic-ratelimit-input-tokens-remaining: 0
+anthropic-ratelimit-output-tokens-remaining: 0
+anthropic-ratelimit-requests-reset: {{RESET_AT_ISO}}
+anthropic-ratelimit-tokens-reset: {{RESET_AT_ISO}}
+anthropic-ratelimit-input-tokens-reset: {{RESET_AT_ISO}}
+anthropic-ratelimit-output-tokens-reset: {{RESET_AT_ISO}}

@@ -8,6 +8,7 @@ import {
   reloadConfig,
   testAiInterface,
   type AiInterface,
+  type RateLimitConfig,
 } from "../api/aiInterfaces";
 import { listProviders, saveProviders, type ProviderEntry } from "../api/providers";
 
@@ -18,6 +19,20 @@ type EditingInterface = {
   model: string;
   api_type: string;
   key_name: string;
+  // Rate-limit knobs — empty string means "use server default"; numeric values
+  // override.  Stored as strings here so the form can distinguish "not set" from
+  // "explicit zero" cleanly; converted to numbers (or omitted entirely) at submit.
+  rl_initial_concurrency_probe: string;
+  rl_max_concurrency: string;
+  rl_max_retries_429: string;
+  rl_max_retries_transient: string;
+  rl_base_retry_ms: string;
+  rb_per_1k_input_token_seconds: string;
+  rb_per_1k_output_token_seconds: string;
+  rb_fixed_overhead_seconds: string;
+  rb_safety_margin_factor: string;
+  rb_min_seconds: string;
+  rb_max_seconds: string;
   isNew: boolean;
   originalName: string;
 };
@@ -31,6 +46,17 @@ function emptyInterface(): EditingInterface
     model: "",
     api_type: "API1",
     key_name: "",
+    rl_initial_concurrency_probe: "",
+    rl_max_concurrency: "",
+    rl_max_retries_429: "",
+    rl_max_retries_transient: "",
+    rl_base_retry_ms: "",
+    rb_per_1k_input_token_seconds: "",
+    rb_per_1k_output_token_seconds: "",
+    rb_fixed_overhead_seconds: "",
+    rb_safety_margin_factor: "",
+    rb_min_seconds: "",
+    rb_max_seconds: "",
     isNew: true,
     originalName: "",
   };
@@ -38,6 +64,9 @@ function emptyInterface(): EditingInterface
 
 function fromEntry(entry: AiInterface): EditingInterface
 {
+  const rl = entry.rate_limit ?? {};
+  const rb = rl.request_budget ?? {};
+  const numStr = (v: number | undefined): string => (v === undefined || v === null ? "" : String(v));
   return {
     name: entry.name,
     description: entry.description,
@@ -45,9 +74,78 @@ function fromEntry(entry: AiInterface): EditingInterface
     model: entry.model,
     api_type: entry.api_type,
     key_name: entry.key_name,
+    rl_initial_concurrency_probe: numStr(rl.initial_concurrency_probe),
+    rl_max_concurrency: numStr(rl.max_concurrency),
+    rl_max_retries_429: numStr(rl.max_retries_429),
+    rl_max_retries_transient: numStr(rl.max_retries_transient),
+    rl_base_retry_ms: numStr(rl.base_retry_ms),
+    rb_per_1k_input_token_seconds: numStr(rb.per_1k_input_token_seconds),
+    rb_per_1k_output_token_seconds: numStr(rb.per_1k_output_token_seconds),
+    rb_fixed_overhead_seconds: numStr(rb.fixed_overhead_seconds),
+    rb_safety_margin_factor: numStr(rb.safety_margin_factor),
+    rb_min_seconds: numStr(rb.min_seconds),
+    rb_max_seconds: numStr(rb.max_seconds),
     isNew: false,
     originalName: entry.name,
   };
+}
+
+// Build a RateLimitConfig from an EditingInterface.  Returns undefined when
+// every knob is left empty (server keeps its baked-in defaults).  Empty
+// individual fields are dropped from the payload so partial overrides work.
+function buildRateLimitPayload(e: EditingInterface): RateLimitConfig | undefined
+{
+  const parseInt_ = (s: string): number | undefined =>
+  {
+    const t = s.trim();
+    if (t === "") return undefined;
+    const n = parseInt(t, 10);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const parseFloat_ = (s: string): number | undefined =>
+  {
+    const t = s.trim();
+    if (t === "") return undefined;
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  const budget = {
+    per_1k_input_token_seconds: parseFloat_(e.rb_per_1k_input_token_seconds),
+    per_1k_output_token_seconds: parseFloat_(e.rb_per_1k_output_token_seconds),
+    fixed_overhead_seconds: parseFloat_(e.rb_fixed_overhead_seconds),
+    safety_margin_factor: parseFloat_(e.rb_safety_margin_factor),
+    min_seconds: parseFloat_(e.rb_min_seconds),
+    max_seconds: parseFloat_(e.rb_max_seconds),
+  };
+  const budgetSet = Object.values(budget).some((v) => v !== undefined);
+
+  const rl: RateLimitConfig = {
+    initial_concurrency_probe: parseInt_(e.rl_initial_concurrency_probe),
+    max_concurrency: parseInt_(e.rl_max_concurrency),
+    max_retries_429: parseInt_(e.rl_max_retries_429),
+    max_retries_transient: parseInt_(e.rl_max_retries_transient),
+    base_retry_ms: parseInt_(e.rl_base_retry_ms),
+  };
+  if (budgetSet)
+  {
+    // Only include defined entries — partial overrides leave other budget
+    // fields at their server defaults.
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(budget))
+    {
+      if (v !== undefined) cleaned[k] = v;
+    }
+    rl.request_budget = cleaned;
+  }
+
+  // Strip undefined top-level keys so the payload is clean.
+  const cleaned: RateLimitConfig = {};
+  for (const [k, v] of Object.entries(rl))
+  {
+    if (v !== undefined) (cleaned as Record<string, unknown>)[k] = v;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : undefined;
 }
 
 type AiManagerViewProps = {
@@ -133,6 +231,8 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
       return;
     }
 
+    const ratePayload = buildRateLimitPayload(editing);
+
     if (editing.isNew)
     {
       const result = await createAiInterface({
@@ -142,6 +242,7 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
         name: editing.name.trim() || undefined,
         description: editing.description.trim() || undefined,
         key_name: editing.key_name || undefined,
+        rate_limit: ratePayload,
       });
       if (result.ok)
       {
@@ -164,6 +265,7 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
         name: editing.name.trim(),
         description: editing.description.trim(),
         key_name: editing.key_name,
+        rate_limit: ratePayload,
       });
       if (result.ok)
       {
@@ -557,6 +659,8 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                 <option value="API2">API2 (OpenAI Responses)</option>
                 <option value="API3">API3 (Gemini native)</option>
                 <option value="API4">API4 (Anthropic Messages)</option>
+                <option value="API5">API5 (AWS Bedrock — SigV4)</option>
+                <option value="API6">API6 (Azure OpenAI — api-key)</option>
                 <option value="Test">Test (no-network fixture)</option>
               </select>
             </div>
@@ -580,6 +684,31 @@ export default function AiManagerView({ appMasterPassword, onDirtyStateChange }:
                 )}
               </select>
             </div>
+
+            <details style={{ marginTop: 12, marginBottom: 8 }}>
+              <summary style={{ fontSize: 12, opacity: 0.85, cursor: "pointer", userSelect: "none" }}>
+                Rate limit (optional — leave blank to use server defaults)
+              </summary>
+              <div style={{ paddingTop: 10, paddingLeft: 8, borderLeft: "2px solid rgba(255,255,255,0.1)", marginTop: 6 }}>
+                <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 8 }}>
+                  Concurrency / retry — gates how aggressively the dispatcher fans out to this interface.
+                </div>
+                {field("Initial concurrency probe (default: 4–8 by interface type)", "rl_initial_concurrency_probe", "e.g. 4")}
+                {field("Max concurrency (hard ceiling, default 48)", "rl_max_concurrency", "e.g. 16")}
+                {field("Max 429 retries (default 10)", "rl_max_retries_429", "e.g. 10")}
+                {field("Max transient retries (default 2)", "rl_max_retries_transient", "e.g. 2")}
+                {field("Base retry ms (default 1000)", "rl_base_retry_ms", "e.g. 1000")}
+                <div style={{ fontSize: 11, opacity: 0.65, marginBottom: 8, marginTop: 12 }}>
+                  Request budget — feeds the size-aware curl timeout. See doc/jarvisagent.md for the formula.
+                </div>
+                {field("per_1k_input_token_seconds (default 0.5)", "rb_per_1k_input_token_seconds", "e.g. 0.5")}
+                {field("per_1k_output_token_seconds (default 5.0; bump for slow models like Opus)", "rb_per_1k_output_token_seconds", "e.g. 5.0")}
+                {field("fixed_overhead_seconds (default 5)", "rb_fixed_overhead_seconds", "e.g. 5")}
+                {field("safety_margin_factor (default 4.0)", "rb_safety_margin_factor", "e.g. 4.0")}
+                {field("min_seconds (default 60)", "rb_min_seconds", "e.g. 60")}
+                {field("max_seconds (default 600)", "rb_max_seconds", "e.g. 600")}
+              </div>
+            </details>
 
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button className="btn btnPrimary" type="button" onClick={handleSave}>

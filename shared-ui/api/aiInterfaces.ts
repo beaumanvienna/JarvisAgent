@@ -1,3 +1,21 @@
+export type RequestBudgetConfig = {
+  per_1k_input_token_seconds?: number;
+  per_1k_output_token_seconds?: number;
+  fixed_overhead_seconds?: number;
+  safety_margin_factor?: number;
+  min_seconds?: number;
+  max_seconds?: number;
+};
+
+export type RateLimitConfig = {
+  initial_concurrency_probe?: number;
+  max_concurrency?: number;
+  max_retries_429?: number;
+  max_retries_transient?: number;
+  base_retry_ms?: number;
+  request_budget?: RequestBudgetConfig;
+};
+
 export type AiInterface = {
   name: string;
   description: string;
@@ -5,6 +23,9 @@ export type AiInterface = {
   model: string;
   api_type: string;
   key_name: string;
+  max_context_tokens?: number;
+  default_output_tokens?: number;
+  rate_limit?: RateLimitConfig;
 };
 
 export type AiInterfacesListResponse = {
@@ -57,6 +78,9 @@ export type AiInterfaceCreateInput = {
   name?: string;
   description?: string;
   key_name?: string;
+  max_context_tokens?: number;
+  default_output_tokens?: number;
+  rate_limit?: RateLimitConfig;
 };
 
 export async function createAiInterface(input: AiInterfaceCreateInput): Promise<AiInterfaceMutationResponse>
@@ -76,6 +100,9 @@ export type AiInterfaceUpdateInput = {
   name?: string;
   description?: string;
   key_name?: string;
+  max_context_tokens?: number;
+  default_output_tokens?: number;
+  rate_limit?: RateLimitConfig;
 };
 
 export async function updateAiInterface(name: string, input: AiInterfaceUpdateInput): Promise<AiInterfaceMutationResponse>

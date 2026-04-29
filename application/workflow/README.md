@@ -17,8 +17,10 @@ DAG-based workflow execution engine. Parses JCWF files, resolves dependencies, d
 | `workflowTriggerBinder.h/cpp` | Binds parsed trigger definitions to TriggerEngine |
 | `taskPathResolver.h/cpp` | Resolves working directories and file paths per task |
 | `taskExecutorRegistry.h/cpp` | Maps TaskType enum to ITaskExecutor implementations |
-| `aiRequestPool.h/cpp` | Parallel AI API dispatch pool |
+| `aiRequestPool.h/cpp` | Parallel AI API dispatch pool. Computes the size-aware curl `CURLOPT_TIMEOUT_MS` budget per request, plumbs `QuotaKey` to the dispatcher's adaptive controller, fires cascade-cancellation when a run terminates (`CancelRequestsForRun`). |
 | `aiCallTaskExecutor.h/cpp` | AI call task execution (queue file assembly, API dispatch) |
+
+The adaptive rate-limit controller (`RateLimitController`) and per-provider strategy (`IRateLimitStrategy`) live in `engine/curlWrapper/` — see `engine/curlWrapper/curlWrapper.md` §15 and `doc/architecture.md` "Rate-limit + concurrency control" for the design.
 
 ## Task Executors
 

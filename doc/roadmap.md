@@ -55,3 +55,14 @@ Investigate bounded iteration support for use cases like iterative AI refinement
 - Retry-until-success is already handled at the executor level
 
 Evaluate real demand before committing — the DAG model's simplicity is a feature, not a limitation.
+
+### AI Streaming (SSE)
+
+Today the dispatcher buffers each AI response fully and then parses. Switching to Server-Sent Events streaming buys two real wins:
+
+- **Idle-event watchdog** distinguishes "model thinking" from "TCP stuck" — replaces the size-aware `CURLOPT_TIMEOUT_MS` budget with "no event in N seconds = stuck" semantics. More accurate for slow generations.
+- **Live progress in dashboard** — token-by-token rendering of in-flight ai_call output instead of all-or-nothing on completion.
+
+Scoped post-1.0: per-provider SSE parser, per-event state machine in each `ReplyParser`, transcript-per-event vs transcript-per-reply decision, schema validator on assembled stream rather than partial chunks, retry semantics ("got `message_start` then stream broke — retry from scratch or accept partial?"). 2-3 day refactor.
+
+Design hook already in place: `RateLimitController::Observe()` is idempotent by replacement so a future split into `ParseHeaders()` + `ParseBody()` (streaming requires this) is mechanical without changing controller state semantics. See `AI call performance optimization.md` §10 decision 4.

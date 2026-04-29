@@ -1232,6 +1232,10 @@ namespace AIAssistant
         CurlWrapper::AuthStyle const authStyle = probeBuilder->GetAuthStyle();
 
         // Direct curl POST with a short timeout for the connectivity probe.
+        // Test-connection path: synchronous CurlManager::Query, not the
+        // dispatcher's adaptive controller — controller / retry-budget fields
+        // are unused here, set to defaults so the dispatcher's per-field
+        // fallbacks apply if this QueryData ever did flow through.
         CurlWrapper::QueryData queryData = {
             .m_Url = queryUrl,
             .m_Data = requestData,
@@ -1239,6 +1243,14 @@ namespace AIAssistant
             .m_AuthStyle = authStyle,
             .m_TimeoutMs = kTestTimeoutMs,
             .m_Params = std::move(providerParams),
+            .m_InterfaceType = -1,
+            .m_QuotaKey = {},
+            .m_EstimatedInputTokens = -1,
+            .m_CancelKey = {},
+            .m_MaxConcurrency = -1,
+            .m_MaxRetries429 = -1,
+            .m_MaxRetriesTransient = -1,
+            .m_BaseRetryMs = -1,
         };
 
         auto const startTime = std::chrono::steady_clock::now();

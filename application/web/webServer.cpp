@@ -23,6 +23,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <thread>
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -74,6 +75,10 @@
 #include "cloud/oneDriveConnector.h"
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
+#include "curlWrapper/curlMultiDispatcher.h"
+#include "curlWrapper/rateLimitController.h"
+#include "curlWrapper/rateLimitObservation.h"
+#include "curlWrapper/rateLimitStrategy.h"
 #include <curl/curl.h>
 #include "workflow/triggerEngine.h"
 #include "workflow/workflowTriggerBinder.h"
@@ -199,67 +204,11 @@ namespace AIAssistant
         m_TriggerEngine = triggerEngine;
     }
 
-    namespace
-    {
-        // Replace invalid UTF-8 bytes with the Unicode replacement character so
-        // WebSocket text frames stay valid (RFC 6455 requires valid UTF-8).
-        std::string SanitizeUtf8(std::string const& input)
-        {
-            std::string out;
-            out.reserve(input.size());
-            size_t i = 0;
-            while (i < input.size())
-            {
-                unsigned char c = static_cast<unsigned char>(input[i]);
-                size_t seqLen = 0;
-                if (c <= 0x7F)
-                {
-                    seqLen = 1;
-                }
-                else if ((c & 0xE0) == 0xC0)
-                {
-                    seqLen = 2;
-                }
-                else if ((c & 0xF0) == 0xE0)
-                {
-                    seqLen = 3;
-                }
-                else if ((c & 0xF8) == 0xF0)
-                {
-                    seqLen = 4;
-                }
-
-                if (seqLen == 0 || i + seqLen > input.size())
-                {
-                    out += "\xEF\xBF\xBD"; // U+FFFD
-                    ++i;
-                    continue;
-                }
-
-                bool valid = true;
-                for (size_t j = 1; j < seqLen; ++j)
-                {
-                    if ((static_cast<unsigned char>(input[i + j]) & 0xC0) != 0x80)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid)
-                {
-                    out.append(input, i, seqLen);
-                    i += seqLen;
-                }
-                else
-                {
-                    out += "\xEF\xBF\xBD"; // U+FFFD
-                    ++i;
-                }
-            }
-            return out;
-        }
-    } // anonymous namespace
+    // SanitizeUtf8 lives in workflow/workflowTypes.h (AIAssistant namespace).
+    // Previously this file had its own anonymous-namespace copy; consolidated
+    // 2026-04-28 when the §14 TUI invalid-UTF-8 stress test surfaced bytes
+    // leaking into log/log.txt — sanitization now applies project-wide at
+    // the boundaries where external bytes enter, not just at the WS layer.
 
     void WebServer::BroadcastWorkflowRunsSnapshot()
     {
@@ -377,7 +326,12 @@ namespace AIAssistant
 
         json["runs"] = std::move(runs);
 
-        BroadcastJSON(json.dump());
+        std::string const payload = json.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalRunsSnapshotsEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     void WebServer::BroadcastWorkflowRunsLastSnapshot()
@@ -418,7 +372,12 @@ namespace AIAssistant
         }
         json["runs"] = std::move(runsJson);
 
-        BroadcastJSON(json.dump());
+        std::string const payload = json.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalLastRunsSnapshotsEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     namespace
@@ -1018,6 +977,69 @@ namespace AIAssistant
                     auto err = CheckAdminAuth(req);
                     if (!err.empty()) return MakeAuthErrorResponse(err);
                     return HandleDebugSignalsGet();
+                });
+
+        // Hermetic-test entry point for the rate-limit strategy parsers.  Lets
+        // a Python test feed canned header buffers per provider through
+        // IRateLimitStrategy::Parse() without a live HTTP round-trip.  See
+        // test/dispatch/test_rate_limit_observation_parse.py for the canonical
+        // caller.
+        CROW_ROUTE(m_Server, "/api/debug/parse-rate-limit-headers")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleParseRateLimitHeadersPost(req);
+                });
+
+        // §14 Tier B size-aware-budget readback — surfaces the dispatcher's
+        // bounded ring of recent submissions (QueryData::m_TimeoutMs etc.)
+        // so test_size_aware_budget.py can assert the §6.2 formula without
+        // scraping logs.
+        CROW_ROUTE(m_Server, "/api/debug/recent-submissions")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleDebugRecentSubmissionsGet();
+                });
+
+        // §14 Tier B Observe-idempotent contract test entry.  Test feeds a
+        // sequence of observations through an ephemeral RateLimitController
+        // and reads back the merged state, asserting that headers-only +
+        // body-only observations produce the same state as a single combined
+        // observation (idempotence-by-replacement).
+        CROW_ROUTE(m_Server, "/api/debug/test-observe-idempotent")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleDebugTestObserveIdempotentPost(req);
+                });
+
+        // §14 Tier B mock-AI-response endpoint.  Auth-free on purpose — the
+        // dispatcher hits this with provider auth (Bearer/x-api-key/etc.),
+        // not an MCP key.  Compiled out of release builds with the rest of
+        // the #ifdef DEBUG block.
+        CROW_ROUTE(m_Server, "/api/debug/mock-ai-response")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    return HandleDebugMockAiResponsePost(req);
+                });
+
+        // §14 Tier B test-isolation reset.  Phase B tests call this at
+        // setup so each run starts from a clean dispatcher state.
+        CROW_ROUTE(m_Server, "/api/debug/reset-dispatcher-state")
+            .methods("POST"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleDebugResetDispatcherStatePost();
                 });
 #endif
 
@@ -3911,6 +3933,7 @@ namespace AIAssistant
 
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonMessage);
+        ++m_WsTotalBroadcastsEnqueued;
         if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
         {
             m_WsPeakPendingBroadcasts = m_PendingBroadcasts.size();
@@ -3924,6 +3947,7 @@ namespace AIAssistant
 
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_PendingBroadcasts.push_back(jsonString);
+        ++m_WsTotalBroadcastsEnqueued;
         if (m_PendingBroadcasts.size() > m_WsPeakPendingBroadcasts)
         {
             m_WsPeakPendingBroadcasts = m_PendingBroadcasts.size();
@@ -3945,6 +3969,7 @@ namespace AIAssistant
 
     void WebServer::DrainPendingBroadcasts()
     {
+        auto const drainStart = std::chrono::steady_clock::now();
         std::vector<std::string> pending;
         std::vector<std::string> logLines;
         std::unordered_set<crow::websocket::connection*> clients;
@@ -4008,6 +4033,8 @@ namespace AIAssistant
                 }
                 logMsg += "]}";
                 m_PendingBroadcasts.push_back(std::move(logMsg));
+                ++m_WsTotalBroadcastsEnqueued;
+                ++m_WsTotalLogBatchesEnqueued;
             }
 
             if (m_PendingBroadcasts.empty())
@@ -4099,6 +4126,27 @@ namespace AIAssistant
             {
             }
         }
+
+        // Update drain diagnostics. Duration captures the *whole* drain including
+        // build + send_text on every client; on TLS sockets the send is the
+        // dominant cost when batches grow large, which is exactly what we are
+        // trying to measure here.
+        auto const drainEnd = std::chrono::steady_clock::now();
+        uint64_t const durationUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(drainEnd - drainStart).count());
+        size_t const batchBytes = safeBatch.size();
+        size_t const messageCount = pending.size();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalDrains;
+            m_WsLastDrainBytes = batchBytes;
+            m_WsLastDrainMessages = messageCount;
+            m_WsLastDrainDurationUs = durationUs;
+            if (batchBytes > m_WsPeakDrainBytes)
+                m_WsPeakDrainBytes = batchBytes;
+            if (durationUs > m_WsPeakDrainDurationUs)
+                m_WsPeakDrainDurationUs = durationUs;
+        }
     }
 
     void WebServer::BroadcastPythonStatus(bool pythonRunning)
@@ -4107,7 +4155,12 @@ namespace AIAssistant
         msg["type"] = "python-status";
         msg["running"] = pythonRunning;
 
-        BroadcastJSON(msg.dump());
+        std::string const payload = msg.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalPythonStatusEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     bool WebServer::IsMcpConnected()
@@ -4124,7 +4177,12 @@ namespace AIAssistant
         msg["type"] = "ai-call-started";
         msg["prob"] = probName;
         msg["interface"] = interfaceName;
-        BroadcastJSON(msg.dump());
+        std::string const payload = msg.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalAiCallEventsEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     void WebServer::BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
@@ -4138,7 +4196,12 @@ namespace AIAssistant
         msg["output_tokens"] = static_cast<int64_t>(outputTokens);
         msg["total_tokens"] = static_cast<int64_t>(totalTokens);
         msg["finish_reason"] = finishReason;
-        BroadcastJSON(msg.dump());
+        std::string const payload = msg.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalAiCallEventsEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     void WebServer::BroadcastAiCallFailed(std::string const& probName, int errorKind,
@@ -4150,7 +4213,12 @@ namespace AIAssistant
         msg["error_kind"] = static_cast<int64_t>(errorKind);
         msg["http_status"] = static_cast<int64_t>(httpStatus);
         msg["error_message"] = errorMessage;
-        BroadcastJSON(msg.dump());
+        std::string const payload = msg.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalAiCallEventsEnqueued;
+        }
+        BroadcastJSON(payload);
     }
 
     // =========================================================================
@@ -4195,6 +4263,119 @@ namespace AIAssistant
         return decoded;
     }
 
+    // ------------------------------------------------------------------
+    // Parse the optional `rate_limit` and `default_output_tokens` blocks
+    // from a REST POST/PUT body and apply them to the target structs.
+    // Missing fields preserve current values (so partial updates work for
+    // PUT, and the create path keeps its struct defaults when the client
+    // omits rate_limit).  Mirrors the on-disk parsing in
+    // ConfigParser::Load — same field names, same semantics.
+    // ------------------------------------------------------------------
+    static void ApplyAiInterfaceRateLimitFromJson(std::string const& json,
+                                                   ConfigParser::EngineConfig::RateLimit& rateLimit,
+                                                   int32_t& defaultOutputTokens)
+    {
+        // simdjson::ondemand requires SIMDJSON_PADDING bytes after the buffer;
+        // padded_string copies + adds the padding.  Iterating a raw std::string
+        // silently no-ops (no exception, no SUCCESS) — this exact bug used to
+        // make POST/PUT bodies' rate_limit and default_output_tokens overrides
+        // get dropped, leaving every new interface with C++ struct defaults.
+        // §14 Tier B test_size_aware_budget surfaced it.
+        simdjson::ondemand::parser parser;
+        try
+        {
+            simdjson::padded_string padded(json);
+            auto doc = parser.iterate(padded);
+            int64_t outVal = 0;
+            if (doc["default_output_tokens"].get_int64().get(outVal) == simdjson::SUCCESS && outVal > 0)
+            {
+                defaultOutputTokens = static_cast<int32_t>(outVal);
+            }
+        }
+        catch (...)
+        {
+        }
+
+        try
+        {
+            simdjson::padded_string padded(json);
+            auto doc = parser.iterate(padded);
+            simdjson::ondemand::object rateLimitObject;
+            if (doc["rate_limit"].get_object().get(rateLimitObject) != simdjson::SUCCESS)
+            {
+                return;
+            }
+            auto& budget = rateLimit.m_RequestBudget;
+            for (auto rlField : rateLimitObject)
+            {
+                std::string_view rlKey;
+                if (rlField.unescaped_key().get(rlKey) != simdjson::SUCCESS)
+                    continue;
+
+                if (rlKey == "initial_concurrency_probe")
+                {
+                    int64_t v = 0;
+                    if (rlField.value().get_int64().get(v) == simdjson::SUCCESS)
+                        rateLimit.m_InitialConcurrencyProbe = static_cast<int>(v);
+                }
+                else if (rlKey == "max_concurrency")
+                {
+                    int64_t v = 0;
+                    if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
+                        rateLimit.m_MaxConcurrency = static_cast<int>(v);
+                }
+                else if (rlKey == "max_retries_429")
+                {
+                    int64_t v = 0;
+                    if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
+                        rateLimit.m_MaxRetries429 = static_cast<int>(v);
+                }
+                else if (rlKey == "max_retries_transient")
+                {
+                    int64_t v = 0;
+                    if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
+                        rateLimit.m_MaxRetriesTransient = static_cast<int>(v);
+                }
+                else if (rlKey == "base_retry_ms")
+                {
+                    int64_t v = 0;
+                    if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
+                        rateLimit.m_BaseRetryMs = static_cast<int>(v);
+                }
+                else if (rlKey == "request_budget")
+                {
+                    simdjson::ondemand::object budgetObject;
+                    if (rlField.value().get_object().get(budgetObject) != simdjson::SUCCESS)
+                        continue;
+                    for (auto bField : budgetObject)
+                    {
+                        std::string_view bKey;
+                        if (bField.unescaped_key().get(bKey) != simdjson::SUCCESS)
+                            continue;
+                        double v = 0.0;
+                        if (bField.value().get_double().get(v) != simdjson::SUCCESS)
+                            continue;
+                        if (bKey == "per_1k_input_token_seconds")
+                            budget.m_Per1kInputTokenSeconds = v;
+                        else if (bKey == "per_1k_output_token_seconds")
+                            budget.m_Per1kOutputTokenSeconds = v;
+                        else if (bKey == "fixed_overhead_seconds")
+                            budget.m_FixedOverheadSeconds = v;
+                        else if (bKey == "safety_margin_factor")
+                            budget.m_SafetyMarginFactor = v;
+                        else if (bKey == "min_seconds")
+                            budget.m_MinSeconds = v;
+                        else if (bKey == "max_seconds")
+                            budget.m_MaxSeconds = v;
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
     crow::response WebServer::HandleAiInterfacesListGet()
     {
         auto const& config = Core::g_Core->GetConfig();
@@ -4223,6 +4404,28 @@ namespace AIAssistant
                 default: item["api_type"] = "API1"; break;
             }
             item["key_name"] = iface.m_KeyName;
+            item["max_context_tokens"] = static_cast<int64_t>(iface.m_MaxContextTokens);
+            item["default_output_tokens"] = static_cast<int64_t>(iface.m_DefaultOutputTokens);
+
+            // Rate-limit + size-aware request budget — always emit so the UI
+            // can render current effective values (defaults included) without
+            // needing a second source-of-truth.
+            crow::json::wvalue rl;
+            rl["initial_concurrency_probe"] = iface.m_RateLimit.m_InitialConcurrencyProbe;
+            rl["max_concurrency"]           = iface.m_RateLimit.m_MaxConcurrency;
+            rl["max_retries_429"]           = iface.m_RateLimit.m_MaxRetries429;
+            rl["max_retries_transient"]     = iface.m_RateLimit.m_MaxRetriesTransient;
+            rl["base_retry_ms"]             = iface.m_RateLimit.m_BaseRetryMs;
+            crow::json::wvalue budget;
+            budget["per_1k_input_token_seconds"]  = iface.m_RateLimit.m_RequestBudget.m_Per1kInputTokenSeconds;
+            budget["per_1k_output_token_seconds"] = iface.m_RateLimit.m_RequestBudget.m_Per1kOutputTokenSeconds;
+            budget["fixed_overhead_seconds"]      = iface.m_RateLimit.m_RequestBudget.m_FixedOverheadSeconds;
+            budget["safety_margin_factor"]        = iface.m_RateLimit.m_RequestBudget.m_SafetyMarginFactor;
+            budget["min_seconds"]                 = iface.m_RateLimit.m_RequestBudget.m_MinSeconds;
+            budget["max_seconds"]                 = iface.m_RateLimit.m_RequestBudget.m_MaxSeconds;
+            rl["request_budget"] = std::move(budget);
+            item["rate_limit"] = std::move(rl);
+
             items.push_back(std::move(item));
         }
         responseJson["interfaces"] = std::move(items);
@@ -4312,6 +4515,10 @@ namespace AIAssistant
             maxContextTokensOverride > 0
                 ? maxContextTokensOverride
                 : ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(model);
+
+        // rate_limit + default_output_tokens — if absent in body, struct
+        // defaults stay; partial overrides land cleanly via the helper.
+        ApplyAiInterfaceRateLimitFromJson(req.body, newIface.m_RateLimit, newIface.m_DefaultOutputTokens);
 
         if (apiTypeStr == "API4")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
@@ -4428,6 +4635,12 @@ namespace AIAssistant
                     if (d["key_name"].get_string().get(sv) == simdjson::SUCCESS)
                         target->m_KeyName = std::string(sv);
                 }
+                {
+                    auto d = parser.iterate(json);
+                    int64_t v = 0;
+                    if (d["max_context_tokens"].get_int64().get(v) == simdjson::SUCCESS && v > 0)
+                        target->m_MaxContextTokens = static_cast<uint64_t>(v);
+                }
             }
             catch (...)
             {
@@ -4437,6 +4650,12 @@ namespace AIAssistant
                 err["message"] = "Failed to parse request body.";
                 return MakeJsonResponse(400, err);
             }
+
+            // Apply rate_limit + default_output_tokens overrides if present.
+            // Outside the broad try/catch above so a malformed rate_limit
+            // block silently keeps existing values rather than 400'ing the
+            // whole update — partial updates were already accepted.
+            ApplyAiInterfaceRateLimitFromJson(req.body, target->m_RateLimit, target->m_DefaultOutputTokens);
         }
 
         config.m_InterfacesDirty = true;
@@ -4526,6 +4745,27 @@ namespace AIAssistant
                 default: apiStr = "API1"; break;
             }
 
+            // Detect whether the rate_limit struct deviates from the
+            // baked-in defaults (RateLimit{}, RequestBudget{}). Only emit
+            // the block when it does — keeps the saved config.json minimal
+            // and stable for users who never touched the knobs.
+            ConfigParser::EngineConfig::RateLimit const defaultRateLimit{};
+            ConfigParser::EngineConfig::RequestBudget const defaultBudget{};
+            auto const& rl = iface.m_RateLimit;
+            auto const& budget = rl.m_RequestBudget;
+            bool const rateLimitDeviates =
+                rl.m_InitialConcurrencyProbe != defaultRateLimit.m_InitialConcurrencyProbe ||
+                rl.m_MaxConcurrency           != defaultRateLimit.m_MaxConcurrency ||
+                rl.m_MaxRetries429            != defaultRateLimit.m_MaxRetries429 ||
+                rl.m_MaxRetriesTransient      != defaultRateLimit.m_MaxRetriesTransient ||
+                rl.m_BaseRetryMs              != defaultRateLimit.m_BaseRetryMs ||
+                budget.m_Per1kInputTokenSeconds  != defaultBudget.m_Per1kInputTokenSeconds ||
+                budget.m_Per1kOutputTokenSeconds != defaultBudget.m_Per1kOutputTokenSeconds ||
+                budget.m_FixedOverheadSeconds    != defaultBudget.m_FixedOverheadSeconds ||
+                budget.m_SafetyMarginFactor      != defaultBudget.m_SafetyMarginFactor ||
+                budget.m_MinSeconds              != defaultBudget.m_MinSeconds ||
+                budget.m_MaxSeconds              != defaultBudget.m_MaxSeconds;
+
             newArray += "        {\n";
             newArray += "            \"name\": \"" + iface.m_Name + "\",\n";
             if (!iface.m_Description.empty())
@@ -4539,6 +4779,35 @@ namespace AIAssistant
             {
                 newArray += ",\n";
                 newArray += "            \"key_name\": \"" + iface.m_KeyName + "\"";
+            }
+            if (iface.m_DefaultOutputTokens != 4096)
+            {
+                newArray += ",\n";
+                newArray += "            \"default_output_tokens\": " + std::to_string(iface.m_DefaultOutputTokens);
+            }
+            if (rateLimitDeviates)
+            {
+                auto const num = [](double v) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%g", v);
+                    return std::string(buf);
+                };
+                newArray += ",\n";
+                newArray += "            \"rate_limit\": {\n";
+                newArray += "                \"initial_concurrency_probe\": " + std::to_string(rl.m_InitialConcurrencyProbe) + ",\n";
+                newArray += "                \"max_concurrency\": "           + std::to_string(rl.m_MaxConcurrency) + ",\n";
+                newArray += "                \"max_retries_429\": "           + std::to_string(rl.m_MaxRetries429) + ",\n";
+                newArray += "                \"max_retries_transient\": "     + std::to_string(rl.m_MaxRetriesTransient) + ",\n";
+                newArray += "                \"base_retry_ms\": "             + std::to_string(rl.m_BaseRetryMs) + ",\n";
+                newArray += "                \"request_budget\": {\n";
+                newArray += "                    \"per_1k_input_token_seconds\": "  + num(budget.m_Per1kInputTokenSeconds) + ",\n";
+                newArray += "                    \"per_1k_output_token_seconds\": " + num(budget.m_Per1kOutputTokenSeconds) + ",\n";
+                newArray += "                    \"fixed_overhead_seconds\": "      + num(budget.m_FixedOverheadSeconds) + ",\n";
+                newArray += "                    \"safety_margin_factor\": "        + num(budget.m_SafetyMarginFactor) + ",\n";
+                newArray += "                    \"min_seconds\": "                 + num(budget.m_MinSeconds) + ",\n";
+                newArray += "                    \"max_seconds\": "                 + num(budget.m_MaxSeconds) + "\n";
+                newArray += "                }\n";
+                newArray += "            }";
             }
             newArray += "\n";
             newArray += "        }";
@@ -7812,6 +8081,28 @@ namespace AIAssistant
             signals["websocket_peak_pending_broadcasts"] =
                 static_cast<int64_t>(m_WsPeakPendingBroadcasts);
             signals["websocket_pending_broadcasts"] = static_cast<int64_t>(m_PendingBroadcasts.size());
+
+            // Diagnostic counters for TODO List §17 (dashboard live-update bug).
+            signals["websocket_total_broadcasts_enqueued"] =
+                static_cast<int64_t>(m_WsTotalBroadcastsEnqueued);
+            signals["websocket_total_runs_snapshots_enqueued"] =
+                static_cast<int64_t>(m_WsTotalRunsSnapshotsEnqueued);
+            signals["websocket_total_last_runs_snapshots_enqueued"] =
+                static_cast<int64_t>(m_WsTotalLastRunsSnapshotsEnqueued);
+            signals["websocket_total_ai_call_events_enqueued"] =
+                static_cast<int64_t>(m_WsTotalAiCallEventsEnqueued);
+            signals["websocket_total_python_status_enqueued"] =
+                static_cast<int64_t>(m_WsTotalPythonStatusEnqueued);
+            signals["websocket_total_log_batches_enqueued"] =
+                static_cast<int64_t>(m_WsTotalLogBatchesEnqueued);
+            signals["websocket_total_drains"] = static_cast<int64_t>(m_WsTotalDrains);
+            signals["websocket_last_drain_bytes"] = static_cast<int64_t>(m_WsLastDrainBytes);
+            signals["websocket_last_drain_messages"] = static_cast<int64_t>(m_WsLastDrainMessages);
+            signals["websocket_last_drain_duration_us"] =
+                static_cast<int64_t>(m_WsLastDrainDurationUs);
+            signals["websocket_peak_drain_bytes"] = static_cast<int64_t>(m_WsPeakDrainBytes);
+            signals["websocket_peak_drain_duration_us"] =
+                static_cast<int64_t>(m_WsPeakDrainDurationUs);
         }
 
         // ---- Key store state ----
@@ -7878,6 +8169,60 @@ namespace AIAssistant
             {
                 signals["ai_calls_inflight"] = 0;
             }
+
+            // ---- HTTP dispatcher (throttle gate + retry queue) ----
+            CurlMultiDispatcher* dispatcher = app->GetCurlMultiDispatcher();
+            if (dispatcher != nullptr)
+            {
+                auto snap = dispatcher->GetDebugSnapshot();
+                signals["dispatcher_total_dispatched"]        = static_cast<int64_t>(snap.m_TotalDispatched);
+                signals["dispatcher_total_throttled"]         = static_cast<int64_t>(snap.m_TotalThrottled);
+                signals["dispatcher_total_429s"]              = static_cast<int64_t>(snap.m_Total429s);
+                signals["dispatcher_total_retries_exhausted"] = static_cast<int64_t>(snap.m_TotalRetriesExhausted);
+                signals["dispatcher_total_completed"]         = static_cast<int64_t>(snap.m_TotalCompleted);
+                signals["dispatcher_total_cancelled"]         = static_cast<int64_t>(snap.m_TotalCancelled);
+                signals["dispatcher_inbox_size"]              = static_cast<int64_t>(snap.m_InboxSize);
+                signals["dispatcher_active_count"]            = static_cast<int64_t>(snap.m_ActiveCount);
+                signals["dispatcher_retry_queue_size"]        = static_cast<int64_t>(snap.m_RetryQueueSize);
+                // CURLOPT_TCP_KEEPALIVE is set unconditionally on every easy
+                // handle in CurlMultiDispatcher::SetupEasyHandle (§6.4).
+                // Surfaced as a flag so test_tcp_keepalive_set.py can assert
+                // the policy without poking at libcurl internals.
+                signals["dispatcher_keepalive_enabled"]       = true;
+
+                crow::json::wvalue::list hosts;
+                hosts.reserve(snap.m_Hosts.size());
+                for (auto const& h : snap.m_Hosts)
+                {
+                    crow::json::wvalue host;
+                    host["host"]               = h.m_Host;
+                    host["remaining_requests"] = static_cast<int64_t>(h.m_RemainingRequests);
+                    host["remaining_tokens"]   = static_cast<int64_t>(h.m_RemainingTokens);
+                    host["req_reset_in_sec"]   = static_cast<int64_t>(h.m_ReqResetInSec);
+                    host["tok_reset_in_sec"]   = static_cast<int64_t>(h.m_TokResetInSec);
+                    host["active_count"]       = static_cast<int64_t>(h.m_ActiveCount);
+                    hosts.push_back(std::move(host));
+                }
+                signals["dispatcher_hosts"] = std::move(hosts);
+
+                crow::json::wvalue::list controllers;
+                controllers.reserve(snap.m_Controllers.size());
+                for (auto const& c : snap.m_Controllers)
+                {
+                    crow::json::wvalue controller;
+                    controller["quota_key"]                     = c.m_QuotaKey;
+                    controller["current_concurrency_cap"]       = c.m_CurrentConcurrencyCap;
+                    controller["streak_since_last_429"]         = c.m_StreakSinceLast429;
+                    controller["remaining_requests"]            = static_cast<int64_t>(c.m_RemainingRequests);
+                    controller["remaining_tokens"]              = static_cast<int64_t>(c.m_RemainingTokens);
+                    controller["req_reset_in_sec"]              = static_cast<int64_t>(c.m_ReqResetInSec);
+                    controller["tok_reset_in_sec"]              = static_cast<int64_t>(c.m_TokResetInSec);
+                    controller["last_consumed_input_tokens"]    = static_cast<int64_t>(c.m_LastConsumedInputTokens);
+                    controller["last_consumed_output_tokens"]   = static_cast<int64_t>(c.m_LastConsumedOutputTokens);
+                    controllers.push_back(std::move(controller));
+                }
+                signals["dispatcher_controllers"] = std::move(controllers);
+            }
         }
 
         // ---- Python engine pool ----
@@ -7915,6 +8260,427 @@ namespace AIAssistant
         }
 
         body["signals"] = std::move(signals);
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleParseRateLimitHeadersPost(crow::request const& req)
+    {
+        // Parse JSON body. Mandatory: interface_type. Optional everything else.
+        std::string interfaceTypeStr;
+        std::string model;
+        std::string headerBuffer;
+        std::string responseBody;
+        int httpStatus = 200;
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+
+            std::string_view sv;
+            if (doc["interface_type"].get_string().get(sv) == simdjson::SUCCESS)
+                interfaceTypeStr = std::string(sv);
+            if (doc["model"].get_string().get(sv) == simdjson::SUCCESS)
+                model = std::string(sv);
+            if (doc["header_buffer"].get_string().get(sv) == simdjson::SUCCESS)
+                headerBuffer = std::string(sv);
+            if (doc["body"].get_string().get(sv) == simdjson::SUCCESS)
+                responseBody = std::string(sv);
+            int64_t status = 0;
+            if (doc["http_status"].get_int64().get(status) == simdjson::SUCCESS)
+                httpStatus = static_cast<int>(status);
+        }
+        catch (std::exception const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = std::string("invalid JSON body: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+
+        if (interfaceTypeStr.empty())
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "interface_type is required";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Map interface_type string → enum, mirroring the configParser branch.
+        ConfigParser::EngineConfig::InterfaceType interfaceType =
+            ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
+        if (interfaceTypeStr == "API1")       interfaceType = ConfigParser::EngineConfig::InterfaceType::API1;
+        else if (interfaceTypeStr == "API2")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
+        else if (interfaceTypeStr == "API3")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
+        else if (interfaceTypeStr == "API4")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
+        else if (interfaceTypeStr == "Test")  interfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
+        else if (interfaceTypeStr == "API5")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
+        else if (interfaceTypeStr == "API6")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API6;
+        else
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = std::string("unknown interface_type '") + interfaceTypeStr + "'";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Drive the strategy through its pure interface — no I/O, no controller
+        // state mutation. The same call path the dispatcher takes, just exposed
+        // for hermetic testing.
+        IRateLimitStrategy const& strategy = IRateLimitStrategy::Get(interfaceType);
+        RateLimitObservation observation = strategy.Parse(headerBuffer, responseBody, httpStatus);
+
+        // Convert steady_clock::time_point resets to "seconds-from-now" — same
+        // shape the dispatcher_controllers debug rollup uses. Negative or
+        // already-elapsed values stay observable; -1 means "not present".
+        auto const now = std::chrono::steady_clock::now();
+        auto resetSecsFromNow = [&now](std::optional<std::chrono::steady_clock::time_point> const& tp) -> int64_t
+        {
+            if (!tp.has_value()) return -1;
+            return std::chrono::duration_cast<std::chrono::seconds>(*tp - now).count();
+        };
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["quota_key"] = strategy.DeriveQuotaKey(model);
+        body["initial_concurrency_probe"] = static_cast<int64_t>(strategy.InitialConcurrencyProbe());
+
+        crow::json::wvalue obs;
+        obs["is_empty"] = observation.IsEmpty();
+        obs["remaining_requests"] = static_cast<int64_t>(observation.m_RemainingRequests);
+        obs["remaining_input_tokens"] = static_cast<int64_t>(observation.m_RemainingInputTokens);
+        obs["remaining_output_tokens"] = static_cast<int64_t>(observation.m_RemainingOutputTokens);
+        obs["remaining_combined_tokens"] = static_cast<int64_t>(observation.m_RemainingCombinedTokens);
+        obs["requests_reset_in_sec"] = resetSecsFromNow(observation.m_RequestsResetAt);
+        obs["tokens_reset_in_sec"] = resetSecsFromNow(observation.m_TokensResetAt);
+        obs["retry_after_ms"] = observation.m_RetryAfter.has_value()
+            ? static_cast<int64_t>(observation.m_RetryAfter->count())
+            : -1;
+        obs["consumed_input_tokens"] = static_cast<int64_t>(observation.m_ConsumedInputTokens);
+        obs["consumed_output_tokens"] = static_cast<int64_t>(observation.m_ConsumedOutputTokens);
+        body["observation"] = std::move(obs);
+
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleDebugRecentSubmissionsGet()
+    {
+        JarvisAgent* app = App::g_App;
+        CurlMultiDispatcher* dispatcher = (app != nullptr) ? app->GetCurlMultiDispatcher() : nullptr;
+        crow::json::wvalue body;
+        body["ok"] = true;
+        if (dispatcher == nullptr)
+        {
+            body["submissions"] = crow::json::wvalue::list{};
+            return MakeJsonResponse(200, body);
+        }
+
+        auto const recent = dispatcher->GetRecentSubmissions(64);
+        auto const now = std::chrono::steady_clock::now();
+        crow::json::wvalue::list out;
+        out.reserve(recent.size());
+        for (auto const& s : recent)
+        {
+            crow::json::wvalue entry;
+            entry["quota_key"]               = s.m_QuotaKey;
+            entry["url"]                     = s.m_Url;
+            entry["timeout_ms"]              = static_cast<int64_t>(s.m_TimeoutMs);
+            entry["estimated_input_tokens"]  = static_cast<int64_t>(s.m_EstimatedInputTokens);
+            entry["interface_type"]          = s.m_InterfaceType;
+            entry["age_seconds"] = static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(now - s.m_SubmittedAt).count());
+            out.push_back(std::move(entry));
+        }
+        body["submissions"] = std::move(out);
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleDebugTestObserveIdempotentPost(crow::request const& req)
+    {
+        // Body shape:
+        //   {
+        //     "initial_concurrency_probe": int,
+        //     "hard_cap": int,
+        //     "observations": [
+        //       {
+        //         "remaining_requests": int (-1 = unknown),
+        //         "remaining_input_tokens": int,
+        //         "remaining_output_tokens": int,
+        //         "remaining_combined_tokens": int,
+        //         "requests_reset_in_sec": int (-1 = unknown),
+        //         "tokens_reset_in_sec": int,
+        //         "retry_after_ms": int,
+        //         "consumed_input_tokens": int,
+        //         "consumed_output_tokens": int,
+        //         "was_429": bool
+        //       },
+        //       ...
+        //     ]
+        //   }
+        int initialConcurrencyProbe = 1;
+        int hardCap = 48;
+        std::vector<std::pair<RateLimitObservation, bool>> observations;
+        try
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(req.body);
+            auto doc = parser.iterate(padded);
+
+            int64_t i64 = 0;
+            if (doc["initial_concurrency_probe"].get_int64().get(i64) == simdjson::SUCCESS)
+                initialConcurrencyProbe = static_cast<int>(i64);
+            if (doc["hard_cap"].get_int64().get(i64) == simdjson::SUCCESS)
+                hardCap = static_cast<int>(i64);
+
+            auto const now = std::chrono::steady_clock::now();
+            auto obsArray = doc["observations"].get_array();
+            if (obsArray.error() == simdjson::SUCCESS)
+            {
+                for (auto element : obsArray.value())
+                {
+                    RateLimitObservation observation;
+                    bool was429 = false;
+                    auto reader = element.get_object();
+                    if (reader.error() != simdjson::SUCCESS) continue;
+                    auto obj = reader.value();
+
+                    auto readInt = [&](char const* key, int64_t& out) {
+                        int64_t v = 0;
+                        if (obj[key].get_int64().get(v) == simdjson::SUCCESS) { out = v; return true; }
+                        return false;
+                    };
+                    int64_t v = 0;
+                    if (readInt("remaining_requests", v))         observation.m_RemainingRequests = v;
+                    if (readInt("remaining_input_tokens", v))     observation.m_RemainingInputTokens = v;
+                    if (readInt("remaining_output_tokens", v))    observation.m_RemainingOutputTokens = v;
+                    if (readInt("remaining_combined_tokens", v))  observation.m_RemainingCombinedTokens = v;
+                    if (readInt("consumed_input_tokens", v))      observation.m_ConsumedInputTokens = v;
+                    if (readInt("consumed_output_tokens", v))     observation.m_ConsumedOutputTokens = v;
+                    if (readInt("requests_reset_in_sec", v) && v >= 0)
+                        observation.m_RequestsResetAt = now + std::chrono::seconds(v);
+                    if (readInt("tokens_reset_in_sec", v) && v >= 0)
+                        observation.m_TokensResetAt = now + std::chrono::seconds(v);
+                    if (readInt("retry_after_ms", v) && v >= 0)
+                        observation.m_RetryAfter = std::chrono::milliseconds(v);
+                    bool b = false;
+                    if (obj["was_429"].get_bool().get(b) == simdjson::SUCCESS) was429 = b;
+
+                    observations.emplace_back(std::move(observation), was429);
+                }
+            }
+        }
+        catch (std::exception const& e)
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = std::string("invalid JSON body: ") + e.what();
+            return MakeJsonResponse(400, err);
+        }
+
+        // Apply observations in order to an ephemeral controller.
+        RateLimitController controller(initialConcurrencyProbe, hardCap);
+        for (auto const& [obs, was429] : observations)
+        {
+            controller.Observe(obs, was429);
+        }
+
+        // Read back state.  The test compares the post-state across two
+        // different observation sequences that should be equivalent.
+        auto const& last = controller.LastObservation();
+        auto const now2 = std::chrono::steady_clock::now();
+        auto resetSecsFromNow = [&now2](std::optional<std::chrono::steady_clock::time_point> const& tp) -> int64_t
+        {
+            if (!tp.has_value()) return -1;
+            return std::chrono::duration_cast<std::chrono::seconds>(*tp - now2).count();
+        };
+
+        crow::json::wvalue body;
+        body["ok"] = true;
+        body["current_concurrency_cap"] = controller.CurrentConcurrencyCap();
+        body["streak_since_last_429"]   = controller.StreakSinceLast429();
+
+        crow::json::wvalue lastObs;
+        lastObs["is_empty"]                  = last.IsEmpty();
+        lastObs["remaining_requests"]        = static_cast<int64_t>(last.m_RemainingRequests);
+        lastObs["remaining_input_tokens"]    = static_cast<int64_t>(last.m_RemainingInputTokens);
+        lastObs["remaining_output_tokens"]   = static_cast<int64_t>(last.m_RemainingOutputTokens);
+        lastObs["remaining_combined_tokens"] = static_cast<int64_t>(last.m_RemainingCombinedTokens);
+        lastObs["requests_reset_in_sec"]     = resetSecsFromNow(last.m_RequestsResetAt);
+        lastObs["tokens_reset_in_sec"]       = resetSecsFromNow(last.m_TokensResetAt);
+        lastObs["retry_after_ms"]            = last.m_RetryAfter.has_value()
+            ? static_cast<int64_t>(last.m_RetryAfter->count()) : -1;
+        lastObs["consumed_input_tokens"]     = static_cast<int64_t>(last.m_ConsumedInputTokens);
+        lastObs["consumed_output_tokens"]    = static_cast<int64_t>(last.m_ConsumedOutputTokens);
+        body["last_observation"] = std::move(lastObs);
+        return MakeJsonResponse(200, body);
+    }
+
+    crow::response WebServer::HandleDebugMockAiResponsePost(crow::request const& req)
+    {
+        // Query params drive the response shape.  Defaults: 200 OK, no delay,
+        // 60s reset, no fixtures (returns "{}").
+        int status = 200;
+        int delay_ms = 0;
+        int reset_in_sec = 60;
+        std::string headerFixture;
+        std::string bodyFixture;
+
+        if (auto const* v = req.url_params.get("status")) status = std::atoi(v);
+        if (auto const* v = req.url_params.get("delay_ms")) delay_ms = std::atoi(v);
+        if (auto const* v = req.url_params.get("reset_in_sec")) reset_in_sec = std::atoi(v);
+        if (auto const* v = req.url_params.get("header_fixture")) headerFixture = v;
+        if (auto const* v = req.url_params.get("body_fixture")) bodyFixture = v;
+
+        // Path-confinement: fixture names are basenames, not paths.  No
+        // separators, no `..`, no leading dot.  Defends the file-load step
+        // against URL-injected traversal even though this endpoint is debug-only.
+        auto isSafeName = [](std::string const& n)
+        {
+            if (n.empty()) return false;
+            if (n.find("..") != std::string::npos) return false;
+            if (n.find('/')  != std::string::npos) return false;
+            if (n.find('\\') != std::string::npos) return false;
+            if (n.front() == '.') return false;
+            return true;
+        };
+
+        if (!headerFixture.empty() && !isSafeName(headerFixture))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid header_fixture name";
+            return MakeJsonResponse(400, err);
+        }
+        if (!bodyFixture.empty() && !isSafeName(bodyFixture))
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "invalid body_fixture name";
+            return MakeJsonResponse(400, err);
+        }
+
+        // Sleep first so timeout tests see the wire-time blow past
+        // CURLOPT_TIMEOUT_MS before the response is even built.
+        if (delay_ms > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
+
+        auto const fixturesRoot = Core::g_Core->GetLaunchCWDAbsolute() / "test" / "dispatch" / "fixtures";
+
+        std::string responseBody = "{}";
+        if (!bodyFixture.empty())
+        {
+            auto path = fixturesRoot / "responses" / (bodyFixture + ".json");
+            std::ifstream f(path);
+            if (f)
+            {
+                std::stringstream ss;
+                ss << f.rdbuf();
+                responseBody = ss.str();
+            }
+            else
+            {
+                LOG_APP_WARN("[mock-ai-response] body_fixture not found: {}", path.string());
+            }
+        }
+
+        crow::response resp(status, responseBody);
+
+        if (!headerFixture.empty())
+        {
+            auto path = fixturesRoot / "headers" / (headerFixture + ".txt");
+            std::ifstream f(path);
+            if (!f)
+            {
+                LOG_APP_WARN("[mock-ai-response] header_fixture not found: {}", path.string());
+                resp.add_header("Content-Type", "application/json");
+                return resp;
+            }
+            std::stringstream ss;
+            ss << f.rdbuf();
+            std::string headerText = ss.str();
+
+            // Substitute {{RESET_AT_ISO}} with an ISO 8601 timestamp
+            // reset_in_sec into the future.  Anthropic fixture uses this
+            // pattern; OpenAI fixtures use literal "Ns" duration syntax
+            // and don't need substitution.
+            {
+                std::time_t resetT = std::time(nullptr) + reset_in_sec;
+                std::tm gmt{};
+#ifdef _WIN32
+                gmtime_s(&gmt, &resetT);
+#else
+                gmtime_r(&resetT, &gmt);
+#endif
+                char iso[32]{};
+                std::strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &gmt);
+                std::string const placeholder = "{{RESET_AT_ISO}}";
+                std::string const isoStr(iso);
+                size_t pos = 0;
+                while ((pos = headerText.find(placeholder, pos)) != std::string::npos)
+                {
+                    headerText.replace(pos, placeholder.size(), isoStr);
+                    pos += isoStr.size();
+                }
+            }
+
+            // Parse line-by-line.  First line is the HTTP status line ("HTTP/1.1
+            // 200 OK"); skip it — Crow sets the status from `resp.code`.  Each
+            // subsequent "Key: Value" line becomes a response header.
+            std::istringstream lines(headerText);
+            std::string line;
+            bool firstLine = true;
+            bool contentTypeSet = false;
+            while (std::getline(lines, line))
+            {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) continue;
+                if (firstLine) { firstLine = false; continue; }
+                auto colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string key = line.substr(0, colon);
+                std::string val = line.substr(colon + 1);
+                if (!val.empty() && val.front() == ' ') val.erase(0, 1);
+                resp.add_header(key, val);
+                // Case-insensitive "content-type" check without locale tables.
+                if (key.size() == 12)
+                {
+                    bool match = true;
+                    static char const* const kCT = "content-type";
+                    for (size_t i = 0; i < 12; ++i)
+                    {
+                        char const a = static_cast<char>(std::tolower(static_cast<unsigned char>(key[i])));
+                        if (a != kCT[i]) { match = false; break; }
+                    }
+                    if (match) contentTypeSet = true;
+                }
+            }
+            if (!contentTypeSet)
+                resp.add_header("Content-Type", "application/json");
+        }
+        else
+        {
+            resp.add_header("Content-Type", "application/json");
+        }
+
+        return resp;
+    }
+
+    crow::response WebServer::HandleDebugResetDispatcherStatePost()
+    {
+        JarvisAgent* app = App::g_App;
+        CurlMultiDispatcher* dispatcher = (app != nullptr) ? app->GetCurlMultiDispatcher() : nullptr;
+        crow::json::wvalue body;
+        body["ok"] = true;
+        if (dispatcher == nullptr)
+        {
+            body["reset"] = false;
+            body["reason"] = "dispatcher unavailable";
+            return MakeJsonResponse(200, body);
+        }
+        dispatcher->ResetTestState();
+        body["reset"] = true;
         return MakeJsonResponse(200, body);
     }
 #endif  // DEBUG

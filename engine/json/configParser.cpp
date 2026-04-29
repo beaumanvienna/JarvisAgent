@@ -515,6 +515,91 @@ namespace AIAssistant
                         LOG_CORE_INFO("max_context_tokens: {}", value);
                     }
                 }
+                else if (jsonObjectKey == "default_output_tokens")
+                {
+                    int64_t value = 0;
+                    if (field.value().get_int64().get(value) == simdjson::SUCCESS && value > 0)
+                    {
+                        apiInterface.m_DefaultOutputTokens = static_cast<int32_t>(value);
+                        LOG_CORE_INFO("default_output_tokens: {}", value);
+                    }
+                }
+                else if (jsonObjectKey == "rate_limit")
+                {
+                    // Adaptive rate-limit + size-aware budget block.  All sub-fields
+                    // optional; missing fields keep RateLimit/RequestBudget defaults.
+                    ondemand::object rateLimitObject;
+                    if (field.value().get_object().get(rateLimitObject) == simdjson::SUCCESS)
+                    {
+                        auto& rateLimit = apiInterface.m_RateLimit;
+                        auto& budget = rateLimit.m_RequestBudget;
+                        for (auto rlField : rateLimitObject)
+                        {
+                            std::string_view rlKey = rlField.unescaped_key();
+                            if (rlKey == "initial_concurrency_probe")
+                            {
+                                int64_t v = 0;
+                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS)
+                                    rateLimit.m_InitialConcurrencyProbe = static_cast<int>(v);
+                            }
+                            else if (rlKey == "max_concurrency")
+                            {
+                                int64_t v = 0;
+                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
+                                    rateLimit.m_MaxConcurrency = static_cast<int>(v);
+                            }
+                            else if (rlKey == "max_retries_429")
+                            {
+                                int64_t v = 0;
+                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
+                                    rateLimit.m_MaxRetries429 = static_cast<int>(v);
+                            }
+                            else if (rlKey == "max_retries_transient")
+                            {
+                                int64_t v = 0;
+                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v >= 0)
+                                    rateLimit.m_MaxRetriesTransient = static_cast<int>(v);
+                            }
+                            else if (rlKey == "base_retry_ms")
+                            {
+                                int64_t v = 0;
+                                if (rlField.value().get_int64().get(v) == simdjson::SUCCESS && v > 0)
+                                    rateLimit.m_BaseRetryMs = static_cast<int>(v);
+                            }
+                            else if (rlKey == "request_budget")
+                            {
+                                ondemand::object budgetObject;
+                                if (rlField.value().get_object().get(budgetObject) == simdjson::SUCCESS)
+                                {
+                                    for (auto bField : budgetObject)
+                                    {
+                                        std::string_view bKey = bField.unescaped_key();
+                                        double v = 0.0;
+                                        if (bField.value().get_double().get(v) != simdjson::SUCCESS)
+                                            continue;
+                                        if (bKey == "per_1k_input_token_seconds")
+                                            budget.m_Per1kInputTokenSeconds = v;
+                                        else if (bKey == "per_1k_output_token_seconds")
+                                            budget.m_Per1kOutputTokenSeconds = v;
+                                        else if (bKey == "fixed_overhead_seconds")
+                                            budget.m_FixedOverheadSeconds = v;
+                                        else if (bKey == "safety_margin_factor")
+                                            budget.m_SafetyMarginFactor = v;
+                                        else if (bKey == "min_seconds")
+                                            budget.m_MinSeconds = v;
+                                        else if (bKey == "max_seconds")
+                                            budget.m_MaxSeconds = v;
+                                    }
+                                }
+                            }
+                        }
+                        LOG_CORE_INFO("rate_limit: maxConcurrency={} budget=[in={}s/1k out={}s/1k overhead={}s margin=x{} "
+                                      "min={}s max={}s]",
+                                      rateLimit.m_MaxConcurrency, budget.m_Per1kInputTokenSeconds,
+                                      budget.m_Per1kOutputTokenSeconds, budget.m_FixedOverheadSeconds,
+                                      budget.m_SafetyMarginFactor, budget.m_MinSeconds, budget.m_MaxSeconds);
+                    }
+                }
                 else if (jsonObjectKey == "API")
                 {
                     CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");

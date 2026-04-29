@@ -24,8 +24,12 @@
 #include <curl/curl.h>
 #include <curl/multi.h>
 
+#include <cstdio>
+#include <ctime>
+
 #include "core.h"
 #include "curlWrapper/authSigner.h"
+#include "curlWrapper/rateLimitStrategy.h"
 #include "engine.h"
 
 namespace AIAssistant
@@ -96,9 +100,83 @@ namespace AIAssistant
     {
         {
             std::lock_guard<std::mutex> lock(m_InboxMutex);
-            m_Inbox.push({data, std::move(callback)});
+            PendingRequest pending;
+            pending.m_QueryData = data;
+            pending.m_Callback = std::move(callback);
+            m_Inbox.push(std::move(pending));
+        }
+        // §14 Tier B: capture submission for size-aware-budget hermetic tests.
+        // Separate mutex to avoid contending with the inbox lock.
+        {
+            std::lock_guard<std::mutex> lock(m_RecentSubmissionsMutex);
+            RecentSubmission entry;
+            entry.m_QuotaKey = data.m_QuotaKey;
+            entry.m_Url = data.m_Url;
+            entry.m_TimeoutMs = data.m_TimeoutMs;
+            entry.m_EstimatedInputTokens = data.m_EstimatedInputTokens;
+            entry.m_InterfaceType = data.m_InterfaceType;
+            entry.m_SubmittedAt = std::chrono::steady_clock::now();
+            m_RecentSubmissions.push_back(std::move(entry));
+            while (m_RecentSubmissions.size() > kRecentSubmissionsCapacity)
+            {
+                m_RecentSubmissions.pop_front();
+            }
         }
         curl_multi_wakeup(m_MultiHandle);
+    }
+
+    std::vector<CurlMultiDispatcher::RecentSubmission>
+    CurlMultiDispatcher::GetRecentSubmissions(size_t maxCount) const
+    {
+        std::lock_guard<std::mutex> lock(m_RecentSubmissionsMutex);
+        size_t const wanted = std::min(maxCount, m_RecentSubmissions.size());
+        std::vector<RecentSubmission> out;
+        out.reserve(wanted);
+        // Newest first.  m_RecentSubmissions is push_back-ordered (oldest at
+        // front), so iterate the tail backwards.
+        auto it = m_RecentSubmissions.rbegin();
+        for (size_t i = 0; i < wanted; ++i, ++it)
+        {
+            out.push_back(*it);
+        }
+        return out;
+    }
+
+    void CurlMultiDispatcher::ResetTestState()
+    {
+        // §14 Tier B test isolation.  m_Controllers + m_HostRateLimits hold
+        // adaptive state (AIMD cap, last observation) accumulated across
+        // submissions; without resetting them, repeated Phase B test runs
+        // see residue from prior runs.  m_Active / m_Inbox / m_RetryQueue
+        // carry live work — those are NOT cleared here.
+        {
+            std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+            m_Controllers.clear();
+            m_HostRateLimits.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_RecentSubmissionsMutex);
+            m_RecentSubmissions.clear();
+        }
+    }
+
+    void CurlMultiDispatcher::CancelByCancelKey(std::string const& cancelKey)
+    {
+        if (cancelKey.empty())
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_PendingCancellationsMutex);
+            m_PendingCancellations.push_back(cancelKey);
+        }
+        // Wake the I/O thread so DrainPendingCancellations runs even if no
+        // socket activity is in flight.  curl handle mutations must be on
+        // the I/O thread (single-thread relative to curl_multi_perform).
+        if (m_MultiHandle != nullptr)
+        {
+            curl_multi_wakeup(m_MultiHandle);
+        }
     }
 
     void CurlMultiDispatcher::SignalStop()
@@ -116,6 +194,78 @@ namespace AIAssistant
         {
             m_IoThread.join();
         }
+    }
+
+    CurlMultiDispatcher::DebugSnapshot CurlMultiDispatcher::GetDebugSnapshot() const
+    {
+        DebugSnapshot snap;
+        snap.m_TotalDispatched        = m_TotalDispatched.load();
+        snap.m_TotalThrottled         = m_TotalThrottled.load();
+        snap.m_Total429s              = m_Total429s.load();
+        snap.m_TotalRetriesExhausted  = m_TotalRetriesExhausted.load();
+        snap.m_TotalCompleted         = m_TotalCompleted.load();
+        snap.m_TotalCancelled         = m_TotalCancelled.load();
+        {
+            std::lock_guard<std::mutex> lock(m_InboxMutex);
+            snap.m_InboxSize = m_Inbox.size();
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+            snap.m_ActiveCount     = m_Active.size();
+            snap.m_RetryQueueSize  = m_RetryQueue.size();
+
+            std::unordered_map<std::string, size_t> activePerHost;
+            for (auto const& [handle, req] : m_Active)
+            {
+                std::string host = ExtractHost(req->m_Url);
+                if (!host.empty())
+                    ++activePerHost[host];
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            auto secsUntil = [&now](std::chrono::steady_clock::time_point t) -> long
+            {
+                if (t == std::chrono::steady_clock::time_point{}) return -1;
+                return std::chrono::duration_cast<std::chrono::seconds>(t - now).count();
+            };
+            for (auto const& [host, state] : m_HostRateLimits)
+            {
+                DebugSnapshot::HostEntry e;
+                e.m_Host               = host;
+                e.m_RemainingRequests  = state.m_RemainingRequests;
+                e.m_RemainingTokens    = state.m_RemainingTokens;
+                e.m_ReqResetInSec      = secsUntil(state.m_RequestsResetAt);
+                e.m_TokResetInSec      = secsUntil(state.m_TokensResetAt);
+                auto it = activePerHost.find(host);
+                e.m_ActiveCount        = (it != activePerHost.end()) ? it->second : 0;
+                snap.m_Hosts.push_back(std::move(e));
+            }
+
+            for (auto const& [quotaKey, controller] : m_Controllers)
+            {
+                DebugSnapshot::ControllerEntry e;
+                e.m_QuotaKey               = quotaKey;
+                e.m_CurrentConcurrencyCap  = controller.CurrentConcurrencyCap();
+                e.m_StreakSinceLast429     = controller.StreakSinceLast429();
+                auto const& obs            = controller.LastObservation();
+                e.m_RemainingRequests      = obs.m_RemainingRequests;
+                int64_t mergedTok = -1;
+                auto const consider = [&](int64_t v) {
+                    if (v < 0) return;
+                    if (mergedTok < 0 || v < mergedTok) mergedTok = v;
+                };
+                consider(obs.m_RemainingCombinedTokens);
+                consider(obs.m_RemainingInputTokens);
+                consider(obs.m_RemainingOutputTokens);
+                e.m_RemainingTokens        = mergedTok;
+                e.m_ReqResetInSec          = obs.m_RequestsResetAt.has_value() ? secsUntil(*obs.m_RequestsResetAt) : -1;
+                e.m_TokResetInSec          = obs.m_TokensResetAt.has_value() ? secsUntil(*obs.m_TokensResetAt) : -1;
+                e.m_LastConsumedInputTokens  = obs.m_ConsumedInputTokens;
+                e.m_LastConsumedOutputTokens = obs.m_ConsumedOutputTokens;
+                snap.m_Controllers.push_back(std::move(e));
+            }
+        }
+        return snap;
     }
 
     // ---------------------------------------------------------------------------
@@ -154,6 +304,11 @@ namespace AIAssistant
         curl_easy_setopt(easy, CURLOPT_NOPROGRESS,       0L);
         curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION, MultiProgressCallback);
 
+        // §6.4 liveness: TCP keepalive helps long-idle in-flight connections
+        // notice they're dead.  Default CURLOPT_TCP_KEEPIDLE (60s) is fine for
+        // AI requests that may "think" silently before emitting tokens.
+        curl_easy_setopt(easy, CURLOPT_TCP_KEEPALIVE,    1L);
+
         if (req.m_QueryData.m_TimeoutMs > 0)
         {
             curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, req.m_QueryData.m_TimeoutMs);
@@ -164,6 +319,21 @@ namespace AIAssistant
         {
             curl_easy_setopt(easy, CURLOPT_CAINFO, caBundle.c_str());
         }
+
+#ifdef DEBUG
+        // §14 Tier B hermetic tests configure AI interfaces pointing at the
+        // j9t server's own debug mock endpoint (https://localhost:8443/...).
+        // The j9t HTTPS cert is self-signed; the system CA bundle doesn't
+        // trust it, so curl returns CURLE_SSL_PEER_CERTIFICATE.  Disable
+        // verification for localhost ONLY, in debug builds ONLY — production
+        // paths and non-localhost URLs still verify.
+        std::string const host = ExtractHost(req.m_Url);
+        if (host == "localhost" || host == "127.0.0.1" || host == "::1")
+        {
+            curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);
+        }
+#endif
 
         return easy;
     }
@@ -176,24 +346,95 @@ namespace AIAssistant
             local.swap(m_Inbox);
         }
 
-        // Count active requests per host so we can enforce kMaxActivePerHost.
+        // Hold m_DebugMutex through the whole drain so debug snapshot reads see a
+        // consistent view of m_Active + controllers.
+        std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+
+        // Count active requests per QuotaKey + per host.  QuotaKey-keyed counts
+        // feed the controller; host-keyed counts feed the existing
+        // /api/debug/signals snapshot until Phase 5 retires it.
+        std::unordered_map<std::string, size_t> activePerKey;
         std::unordered_map<std::string, size_t> activePerHost;
         for (auto const& [handle, req] : m_Active)
         {
-            std::string host = ExtractHost(req->m_Url);
+            std::string const host = ExtractHost(req->m_Url);
             if (!host.empty())
                 ++activePerHost[host];
+            std::string const key = req->m_QueryData.m_QuotaKey.empty()
+                                        ? host
+                                        : req->m_QueryData.m_QuotaKey;
+            if (!key.empty())
+                ++activePerKey[key];
         }
 
         while (!local.empty())
         {
             auto& pending = local.front();
-            std::string host = ExtractHost(pending.m_QueryData.m_Url);
+            std::string const host = ExtractHost(pending.m_QueryData.m_Url);
+            std::string const quotaKey = pending.m_QueryData.m_QuotaKey.empty()
+                                             ? host
+                                             : pending.m_QueryData.m_QuotaKey;
 
-            // If this host already has kMaxActivePerHost streams in flight,
-            // push remaining requests back into the inbox for the next cycle.
-            if (!host.empty() && activePerHost[host] >= kMaxActivePerHost)
+            // Resolve the controller, creating one on first contact with this
+            // QuotaKey.  Initial cap = strategy.InitialConcurrencyProbe();
+            // hard cap = kMaxActivePerHost (HTTP/2 stream ceiling) — Phase 4
+            // will plumb config.rate_limit.max_concurrency in here.
+            char const* throttleReason = nullptr;
+            std::chrono::steady_clock::time_point nextAttemptAt{};
+            int64_t const estTokens = pending.m_QueryData.m_EstimatedInputTokens >= 0
+                                          ? pending.m_QueryData.m_EstimatedInputTokens
+                                          : 0;
+            size_t const inflightForKey = activePerKey[quotaKey];
+
+            if (!quotaKey.empty())
             {
+                auto controllerIt = m_Controllers.find(quotaKey);
+                if (controllerIt == m_Controllers.end())
+                {
+                    int initialProbe = 4;
+                    if (pending.m_QueryData.m_InterfaceType >= 0 &&
+                        pending.m_QueryData.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
+                    {
+                        auto const interfaceType =
+                            static_cast<ConfigParser::EngineConfig::InterfaceType>(pending.m_QueryData.m_InterfaceType);
+                        initialProbe = IRateLimitStrategy::Get(interfaceType).InitialConcurrencyProbe();
+                    }
+                    int const hardCap = (pending.m_QueryData.m_MaxConcurrency > 0)
+                                            ? pending.m_QueryData.m_MaxConcurrency
+                                            : static_cast<int>(kMaxActivePerHost);
+                    auto inserted = m_Controllers.emplace(quotaKey, RateLimitController(initialProbe, hardCap));
+                    controllerIt = inserted.first;
+                }
+
+                RateLimitController::Decision const decision =
+                    controllerIt->second.ShouldAdmit(static_cast<int>(inflightForKey), estTokens);
+                if (!decision.m_Admit)
+                {
+                    throttleReason = decision.m_Reason;
+                    nextAttemptAt = decision.m_NextAttemptAt;
+                }
+            }
+
+            if (throttleReason != nullptr)
+            {
+                ++m_TotalThrottled;
+                auto& state = m_HostRateLimits[host];
+                auto const now = std::chrono::steady_clock::now();
+                if (now - state.m_LastThrottleLog >= std::chrono::seconds(5))
+                {
+                    auto const secsUntil = [&now](std::chrono::steady_clock::time_point t) -> long {
+                        if (t == std::chrono::steady_clock::time_point{})
+                            return -1;
+                        return std::chrono::duration_cast<std::chrono::seconds>(t - now).count();
+                    };
+                    auto const cit = m_Controllers.find(quotaKey);
+                    int const cap = (cit != m_Controllers.end()) ? cit->second.CurrentConcurrencyCap() : -1;
+                    LOG_CORE_INFO("CurlMultiDispatcher: throttling key='{}' reason='{}' inflight={} cap={} "
+                                  "nextAttemptIn={}s",
+                                  quotaKey, throttleReason, inflightForKey, cap, secsUntil(nextAttemptAt));
+                    state.m_LastThrottleLog = now;
+                }
+
                 std::lock_guard<std::mutex> lock(m_InboxMutex);
                 while (!local.empty())
                 {
@@ -204,10 +445,12 @@ namespace AIAssistant
             }
 
             auto req = std::make_unique<ActiveRequest>();
-            req->m_QueryData = pending.m_QueryData;
-            req->m_Callback  = std::move(pending.m_Callback);
-            req->m_Url       = pending.m_QueryData.m_Url;
-            req->m_PostData  = pending.m_QueryData.m_Data;
+            req->m_QueryData     = pending.m_QueryData;
+            req->m_Callback      = std::move(pending.m_Callback);
+            req->m_Url           = pending.m_QueryData.m_Url;
+            req->m_PostData      = pending.m_QueryData.m_Data;
+            req->m_RetryCount    = pending.m_RetryCount;
+            req->m_InterfaceType = pending.m_QueryData.m_InterfaceType;
 
             CURL* easy = SetupEasyHandle(*req);
             if (easy != nullptr)
@@ -216,6 +459,9 @@ namespace AIAssistant
                 m_Active[easy] = std::move(req);
                 if (!host.empty())
                     ++activePerHost[host];
+                if (!quotaKey.empty())
+                    ++activePerKey[quotaKey];
+                ++m_TotalDispatched;
             }
             else
             {
@@ -247,100 +493,93 @@ namespace AIAssistant
         return url.substr(start, end - start);
     }
 
-    void CurlMultiDispatcher::ParseRateLimitHeaders(ActiveRequest const& req, std::string& host)
+    void CurlMultiDispatcher::ParseRateLimitHeaders(ActiveRequest const& req, std::string& host, long httpCode)
     {
-        // Headers arrive as "Name: Value\r\n" lines concatenated in m_HeaderBuffer.
+        // Per-provider strategy delegation (Phase 1) + controller Observe (Phase 2).
+        // The strategy returns a normalized RateLimitObservation; we merge it into
+        // the legacy HostRateLimitState (kept for /api/debug/signals until Phase 5)
+        // AND into the per-(host, modelFamily) controller for AIMD/token-bucket
+        // gating.
+        ConfigParser::EngineConfig::InterfaceType const interfaceType =
+            (req.m_InterfaceType >= 0 && req.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
+                ? static_cast<ConfigParser::EngineConfig::InterfaceType>(req.m_InterfaceType)
+                : ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
+
+        IRateLimitStrategy const& strategy = IRateLimitStrategy::Get(interfaceType);
+        RateLimitObservation const observation =
+            strategy.Parse(req.m_HeaderBuffer, req.m_ReadBuffer, static_cast<int>(httpCode));
+
+        std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+
+        // ---- Controller Observe (Phase 2) ----
+        // Find or create the controller for this request's QuotaKey.  Note: we
+        // create on first observation (not just first dispatch) so the controller
+        // exists for snapshot reads even before any ShouldAdmit() runs through
+        // it for that key.  hardCap = kMaxActivePerHost; Phase 4 will swap in
+        // config.rate_limit.max_concurrency.
+        std::string const quotaKey = req.m_QueryData.m_QuotaKey.empty() ? host : req.m_QueryData.m_QuotaKey;
+        if (!quotaKey.empty())
+        {
+            auto controllerIt = m_Controllers.find(quotaKey);
+            if (controllerIt == m_Controllers.end())
+            {
+                int const initialProbe = strategy.InitialConcurrencyProbe();
+                int const hardCap = (req.m_QueryData.m_MaxConcurrency > 0) ? req.m_QueryData.m_MaxConcurrency
+                                                                           : static_cast<int>(kMaxActivePerHost);
+                auto inserted = m_Controllers.emplace(quotaKey, RateLimitController(initialProbe, hardCap));
+                controllerIt = inserted.first;
+            }
+            bool const was429 = (httpCode == 429);
+            controllerIt->second.Observe(observation, was429);
+        }
         auto& state = m_HostRateLimits[host];
         state.m_LastUpdated = std::chrono::steady_clock::now();
 
-        size_t pos = 0;
-        while (pos < req.m_HeaderBuffer.size())
+        if (observation.m_RemainingRequests >= 0)
         {
-            size_t eol = req.m_HeaderBuffer.find('\n', pos);
-            if (eol == std::string::npos)
-                eol = req.m_HeaderBuffer.size();
+            state.m_RemainingRequests = static_cast<int>(observation.m_RemainingRequests);
+        }
 
-            std::string line = req.m_HeaderBuffer.substr(pos, eol - pos);
-            // Strip trailing \r
-            if (!line.empty() && line.back() == '\r')
-                line.pop_back();
+        // Token quota: providers report variously combined / split (input+output).
+        // Track the TIGHTEST remaining so the throttle gate trips on the first
+        // exhausted bucket — matches existing behavior where Anthropic's
+        // input/output remaining headers each updated state.m_RemainingTokens
+        // only when smaller than the prior value.
+        int64_t mergedTokensRemaining = -1;
+        auto const consider = [&](int64_t value) {
+            if (value < 0)
+                return;
+            if (mergedTokensRemaining < 0 || value < mergedTokensRemaining)
+                mergedTokensRemaining = value;
+        };
+        consider(observation.m_RemainingCombinedTokens);
+        consider(observation.m_RemainingInputTokens);
+        consider(observation.m_RemainingOutputTokens);
+        if (mergedTokensRemaining >= 0)
+        {
+            state.m_RemainingTokens = static_cast<int>(mergedTokensRemaining);
+        }
 
-            // Case-insensitive prefix match
-            auto startsWith = [&](std::string const& prefix) -> bool
-            {
-                if (line.size() < prefix.size())
-                    return false;
-                for (size_t i = 0; i < prefix.size(); ++i)
-                {
-                    if (std::tolower(static_cast<unsigned char>(line[i])) !=
-                        std::tolower(static_cast<unsigned char>(prefix[i])))
-                        return false;
-                }
-                return true;
-            };
+        if (observation.m_RequestsResetAt.has_value())
+        {
+            state.m_RequestsResetAt = *observation.m_RequestsResetAt;
+        }
+        if (observation.m_TokensResetAt.has_value())
+        {
+            // For token resets the strategy already takes the LATEST internally
+            // (slowest-refilling bucket dominates).  Adopt directly.
+            state.m_TokensResetAt = *observation.m_TokensResetAt;
+        }
 
-            auto valueAfterColon = [&]() -> std::string
-            {
-                size_t c = line.find(':');
-                if (c == std::string::npos)
-                    return {};
-                size_t v = c + 1;
-                while (v < line.size() && line[v] == ' ')
-                    ++v;
-                return line.substr(v);
-            };
-
-            if (startsWith("x-ratelimit-remaining-requests:"))
-            {
-                try { state.m_RemainingRequests = std::stoi(valueAfterColon()); } catch (...) {}
-            }
-            else if (startsWith("x-ratelimit-remaining-tokens:"))
-            {
-                try { state.m_RemainingTokens = std::stoi(valueAfterColon()); } catch (...) {}
-            }
-            else if (startsWith("x-ratelimit-reset-requests:"))
-            {
-                // Value is like "200ms" or "6s" or "1m30s"
-                std::string val = valueAfterColon();
-                int ms = 0;
-                // Parse duration: combinations of Nm, Ns, Nms
-                size_t i = 0;
-                while (i < val.size())
-                {
-                    if (!std::isdigit(static_cast<unsigned char>(val[i])))
-                    {
-                        ++i;
-                        continue;
-                    }
-                    int num = 0;
-                    while (i < val.size() && std::isdigit(static_cast<unsigned char>(val[i])))
-                    {
-                        num = num * 10 + (val[i] - '0');
-                        ++i;
-                    }
-                    if (i + 1 < val.size() && val[i] == 'm' && val[i + 1] == 's')
-                    {
-                        ms += num;
-                        i += 2;
-                    }
-                    else if (i < val.size() && val[i] == 'm')
-                    {
-                        ms += num * 60000;
-                        ++i;
-                    }
-                    else if (i < val.size() && val[i] == 's')
-                    {
-                        ms += num * 1000;
-                        ++i;
-                    }
-                }
-                if (ms > 0)
-                {
-                    state.m_ResetAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-                }
-            }
-
-            pos = eol + 1;
+        if (observation.m_RetryAfter.has_value())
+        {
+            // retry-after is a floor on the next admission for both buckets —
+            // never re-dispatch sooner than the server explicitly told us to.
+            auto const candidate = std::chrono::steady_clock::now() + *observation.m_RetryAfter;
+            if (candidate > state.m_RequestsResetAt)
+                state.m_RequestsResetAt = candidate;
+            if (candidate > state.m_TokensResetAt)
+                state.m_TokensResetAt = candidate;
         }
     }
 
@@ -354,33 +593,131 @@ namespace AIAssistant
             return;
 
         auto now = std::chrono::steady_clock::now();
-        // Process entries whose delay has expired.
-        // Iterate backwards so we can erase without invalidating indices.
+        // Move ready entries back to the inbox so they re-enter DrainInbox's per-host
+        // throttle gate. Otherwise retries bypass the gate and re-trigger 429 storms.
         for (int i = static_cast<int>(m_RetryQueue.size()) - 1; i >= 0; --i)
         {
             if (m_RetryQueue[static_cast<size_t>(i)].m_ReadyAt <= now)
             {
-                RetryEntry entry = std::move(m_RetryQueue[static_cast<size_t>(i)]);
-                m_RetryQueue.erase(m_RetryQueue.begin() + i);
-
-                // Re-submit as a new active request.
-                auto req = std::make_unique<ActiveRequest>();
-                req->m_QueryData  = entry.m_Request.m_QueryData;
-                req->m_Callback   = std::move(entry.m_Request.m_Callback);
-                req->m_Url        = entry.m_Request.m_QueryData.m_Url;
-                req->m_PostData   = entry.m_Request.m_QueryData.m_Data;
-                req->m_RetryCount = entry.m_RetryCount;
-
-                CURL* easy = SetupEasyHandle(*req);
-                if (easy != nullptr)
+                RetryEntry entry;
                 {
-                    curl_multi_add_handle(m_MultiHandle, easy);
-                    m_Active[easy] = std::move(req);
+                    std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+                    entry = std::move(m_RetryQueue[static_cast<size_t>(i)]);
+                    m_RetryQueue.erase(m_RetryQueue.begin() + i);
+                }
+
+                PendingRequest pending = std::move(entry.m_Request);
+                pending.m_RetryCount = entry.m_RetryCount;
+
+                std::lock_guard<std::mutex> lock(m_InboxMutex);
+                m_Inbox.push(std::move(pending));
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Cascade cancellation (I/O thread only)
+    // ---------------------------------------------------------------------------
+
+    void CurlMultiDispatcher::DrainPendingCancellations()
+    {
+        std::vector<std::string> local;
+        {
+            std::lock_guard<std::mutex> lock(m_PendingCancellationsMutex);
+            if (m_PendingCancellations.empty())
+            {
+                return;
+            }
+            local.swap(m_PendingCancellations);
+        }
+
+        std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+
+        for (std::string const& cancelKey : local)
+        {
+            if (cancelKey.empty())
+            {
+                continue;
+            }
+
+            // 1. Inbox — drop matching, fire callback.
+            {
+                std::lock_guard<std::mutex> inboxLock(m_InboxMutex);
+                std::queue<PendingRequest> kept;
+                while (!m_Inbox.empty())
+                {
+                    PendingRequest pending = std::move(m_Inbox.front());
+                    m_Inbox.pop();
+                    if (pending.m_QueryData.m_CancelKey == cancelKey)
+                    {
+                        if (pending.m_Callback)
+                        {
+                            pending.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                                                  "request cancelled (run terminated)"),
+                                               {});
+                        }
+                        ++m_TotalCancelled;
+                    }
+                    else
+                    {
+                        kept.push(std::move(pending));
+                    }
+                }
+                m_Inbox = std::move(kept);
+            }
+
+            // 2. Retry queue — drop matching, fire callback.
+            for (auto it = m_RetryQueue.begin(); it != m_RetryQueue.end();)
+            {
+                if (it->m_Request.m_QueryData.m_CancelKey == cancelKey)
+                {
+                    if (it->m_Request.m_Callback)
+                    {
+                        it->m_Request.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                                                    "request cancelled (run terminated)"),
+                                                 {});
+                    }
+                    it = m_RetryQueue.erase(it);
+                    ++m_TotalCancelled;
                 }
                 else
                 {
-                    req->m_Callback(QueryResult::Fail(QueryErrorCode::CurlNotInitialized, "curl_easy_init() failed"), {});
+                    ++it;
                 }
+            }
+
+            // 3. Active set — abort in-flight curl handle, fire callback.
+            // Iterate by collecting matches first since erasing while iterating
+            // m_Active is awkward; the matches are O(<10) typically per cancel.
+            std::vector<CURL*> toAbort;
+            for (auto const& [easy, req] : m_Active)
+            {
+                if (req->m_QueryData.m_CancelKey == cancelKey)
+                {
+                    toAbort.push_back(easy);
+                }
+            }
+            for (CURL* easy : toAbort)
+            {
+                auto it = m_Active.find(easy);
+                if (it == m_Active.end())
+                {
+                    continue;
+                }
+                ActiveRequest& req = *it->second;
+                Callback callback = std::move(req.m_Callback);
+                struct curl_slist* hdrs = req.m_Headers;
+                curl_multi_remove_handle(m_MultiHandle, easy);
+                curl_slist_free_all(hdrs);
+                curl_easy_cleanup(easy);
+                m_Active.erase(it);
+                if (callback)
+                {
+                    callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                                 "request cancelled (run terminated)"),
+                             {});
+                }
+                ++m_TotalCancelled;
             }
         }
     }
@@ -405,6 +742,7 @@ namespace AIAssistant
             CURL* easy = msg->easy_handle;
             CURLcode res = msg->data.result;
 
+            std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
             auto it = m_Active.find(easy);
             if (it == m_Active.end())
             {
@@ -431,23 +769,39 @@ namespace AIAssistant
             std::string host = ExtractHost(req.m_Url);
             if (!host.empty())
             {
-                ParseRateLimitHeaders(req, host);
+                ParseRateLimitHeaders(req, host, httpCode);
             }
 
             // --- Handle 429 with auto-retry ---
-            if (res == CURLE_OK && httpCode == 429 && req.m_RetryCount < kMaxRetries && !m_Stopping.load())
+            // Sentinel discipline: -1 (or any negative) = "unset, use dispatcher
+            // default"; 0 = "no retries, fail on first 429"; >0 = explicit retry
+            // budget.  Conflating 0 with the unset case made hermetic tests
+            // (e.g. test_aimd_concurrency_cap.py) silently inherit the default
+            // 10 and fire 11× as many Observe(was_429=true) calls as expected.
+            int const maxRetries429 = (req.m_QueryData.m_MaxRetries429 >= 0) ? req.m_QueryData.m_MaxRetries429
+                                                                             : kDefaultMaxRetries429;
+            int const baseRetryMs = (req.m_QueryData.m_BaseRetryMs > 0) ? req.m_QueryData.m_BaseRetryMs
+                                                                        : kDefaultBaseRetryMs;
+            int const maxRetriesTransient = (req.m_QueryData.m_MaxRetriesTransient >= 0)
+                                                ? req.m_QueryData.m_MaxRetriesTransient
+                                                : kDefaultMaxRetriesTransient;
+
+            if (res == CURLE_OK && httpCode == 429 && req.m_RetryCount < maxRetries429 && !m_Stopping.load())
             {
                 int retryCount = req.m_RetryCount + 1;
 
                 // Determine delay: prefer Retry-After header, fall back to exponential backoff.
-                int delayMs = kBaseRetryMs * (1 << (retryCount - 1)); // exponential: 1s, 2s, 4s, 8s, 16s
+                int delayMs = baseRetryMs * (1 << (retryCount - 1)); // exponential: 1s, 2s, 4s, 8s, 16s
 
-                // Check if the host state has a reset-at time that's more informative.
+                // Check if the host state has a reset-at time that's more informative —
+                // wait for the LATER of req/token reset, since either could be what 429'd us.
                 auto hostIt = m_HostRateLimits.find(host);
                 if (hostIt != m_HostRateLimits.end())
                 {
+                    auto laterReset = std::max(hostIt->second.m_RequestsResetAt,
+                                               hostIt->second.m_TokensResetAt);
                     auto msUntilReset = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        hostIt->second.m_ResetAt - std::chrono::steady_clock::now()).count();
+                        laterReset - std::chrono::steady_clock::now()).count();
                     if (msUntilReset > 0 && msUntilReset < 120000) // cap at 2 minutes
                     {
                         delayMs = static_cast<int>(msUntilReset) + 100; // small buffer
@@ -455,53 +809,61 @@ namespace AIAssistant
                 }
 
                 LOG_CORE_WARN("HTTP 429 rate limit for query {} (host: {}) — auto-retrying in {}ms (attempt {}/{})",
-                              qnum, host, delayMs, retryCount, kMaxRetries);
+                              qnum, host, delayMs, retryCount, maxRetries429);
+                ++m_Total429s;
 
-                // Build retry entry.
+                // Build retry entry. Carry the dispatched hook forward so retries
+                // re-fire it (AiRequestPool re-disarms its watchdog on the next
+                // curl_multi_add_handle).  No deadline-extension hook needed —
+                // each retry creates a fresh easy handle with its own
+                // CURLOPT_TIMEOUT_MS budget.
                 PendingRequest pendingRetry;
-                pendingRetry.m_QueryData = std::move(req.m_QueryData);
-                pendingRetry.m_Callback  = std::move(req.m_Callback);
+                pendingRetry.m_QueryData     = std::move(req.m_QueryData);
+                pendingRetry.m_Callback      = std::move(req.m_Callback);
 
                 RetryEntry entry;
                 entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
                 entry.m_Request    = std::move(pendingRetry);
                 entry.m_RetryCount = retryCount;
 
-                m_RetryQueue.push_back(std::move(entry));
-
-                // Clean up the completed easy handle.
-                curl_multi_remove_handle(m_MultiHandle, easy);
-                curl_slist_free_all(req.m_Headers);
-                curl_easy_cleanup(easy);
-                m_Active.erase(it);
+                {
+                    std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+                    m_RetryQueue.push_back(std::move(entry));
+                    curl_multi_remove_handle(m_MultiHandle, easy);
+                    curl_slist_free_all(req.m_Headers);
+                    curl_easy_cleanup(easy);
+                    m_Active.erase(it);
+                }
                 continue; // do NOT invoke callback — retry is pending
             }
 
             // --- Handle transient HTTP errors (400, 500, 502, 503) with limited auto-retry ---
             bool const isTransientError = (httpCode == 400 || httpCode == 500 || httpCode == 502 || httpCode == 503);
-            if (res == CURLE_OK && isTransientError && req.m_RetryCount < kMaxRetriesTransient && !m_Stopping.load())
+            if (res == CURLE_OK && isTransientError && req.m_RetryCount < maxRetriesTransient && !m_Stopping.load())
             {
                 int retryCount = req.m_RetryCount + 1;
-                int delayMs = kBaseRetryMs * (1 << (retryCount - 1)); // 1s, 2s
+                int delayMs = baseRetryMs * (1 << (retryCount - 1)); // 1s, 2s
 
                 LOG_CORE_WARN("HTTP {} for query {} — transient error, auto-retrying in {}ms (attempt {}/{})",
-                              httpCode, qnum, delayMs, retryCount, kMaxRetriesTransient);
+                              httpCode, qnum, delayMs, retryCount, maxRetriesTransient);
 
                 PendingRequest pendingRetry;
-                pendingRetry.m_QueryData = std::move(req.m_QueryData);
-                pendingRetry.m_Callback  = std::move(req.m_Callback);
+                pendingRetry.m_QueryData     = std::move(req.m_QueryData);
+                pendingRetry.m_Callback      = std::move(req.m_Callback);
 
                 RetryEntry entry;
                 entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
                 entry.m_Request    = std::move(pendingRetry);
                 entry.m_RetryCount = retryCount;
 
-                m_RetryQueue.push_back(std::move(entry));
-
-                curl_multi_remove_handle(m_MultiHandle, easy);
-                curl_slist_free_all(req.m_Headers);
-                curl_easy_cleanup(easy);
-                m_Active.erase(it);
+                {
+                    std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+                    m_RetryQueue.push_back(std::move(entry));
+                    curl_multi_remove_handle(m_MultiHandle, easy);
+                    curl_slist_free_all(req.m_Headers);
+                    curl_easy_cleanup(easy);
+                    m_Active.erase(it);
+                }
                 continue; // do NOT invoke callback — retry is pending
             }
 
@@ -541,6 +903,7 @@ namespace AIAssistant
                 {
                     LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; retries exhausted ({}x)",
                                    qnum, req.m_RetryCount);
+                    ++m_TotalRetriesExhausted;
                 }
                 else
                 {
@@ -558,10 +921,14 @@ namespace AIAssistant
             Callback callback         = std::move(req.m_Callback);
             struct curl_slist* hdrs   = req.m_Headers;
 
-            curl_multi_remove_handle(m_MultiHandle, easy);
-            curl_slist_free_all(hdrs);
-            curl_easy_cleanup(easy);
-            m_Active.erase(it);
+            {
+                std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
+                curl_multi_remove_handle(m_MultiHandle, easy);
+                curl_slist_free_all(hdrs);
+                curl_easy_cleanup(easy);
+                m_Active.erase(it);
+            }
+            ++m_TotalCompleted;
 
             callback(result, std::move(responseBody));
         }
@@ -606,6 +973,10 @@ namespace AIAssistant
             }
             else
             {
+                // Cancellations first so cancelled requests don't churn through
+                // the throttle gate or get re-dispatched from the retry queue
+                // before being aborted.
+                DrainPendingCancellations();
                 DrainInbox();
                 DrainRetryQueue();
             }

@@ -282,7 +282,7 @@ query 42 HTTP error 429
 | Unified error reporting | `QueryResult` + `QueryErrorCode` |
 | Per-request API key | `QueryData::m_ApiKey` (set by caller per request) |
 | Multi-provider auth | `AuthStyle::Bearer` / `AuthStyle::XGoogApiKey` |
-| Per-request timeout | `QueryData::m_TimeoutMs` → `CURLOPT_TIMEOUT_MS` |
+| Per-request timeout | `QueryData::m_TimeoutMs` → `CURLOPT_TIMEOUT_MS` (size-aware budget when set by `AiRequestPool::Submit`) |
 | Graceful shutdown | Progress callback aborts in-flight requests |
 | Response buffering | Internal `std::string m_ReadBuffer` |
 
@@ -312,3 +312,72 @@ else
     LOG_CORE_ERROR("query failed ({}): {}", result.m_ErrorCode, result.m_ErrorMessage);
 }
 ```
+
+---
+
+## 15. `CurlMultiDispatcher` — async parallel I/O thread
+
+While `CurlWrapper::Query` is the synchronous one-shot path used by REST handlers and connection-test endpoints, `CurlMultiDispatcher` is the async parallel path used by every workflow `ai_call` task. One dedicated I/O thread drives `libcurl multi`; HTTP/2 stream multiplexing carries up to ~100 concurrent requests over a single TCP/TLS connection per host.
+
+### Dispatch pipeline
+
+```
+AiRequestPool::Submit(envelope)
+   ↓ build QueryData (URL, body, auth, m_QuotaKey, m_EstimatedInputTokens, m_TimeoutMs, m_CancelKey)
+   ↓ disarm AiRequestPool's pre-dispatch file-activity watchdog (handoff complete)
+   ↓
+CurlMultiDispatcher::Submit(queryData, callback)
+   ↓ push to inbox + curl_multi_wakeup
+   ↓ I/O thread:
+   ↓   DrainPendingCancellations()  (abort cancelled-run requests first)
+   ↓   DrainInbox()                  (controller.ShouldAdmit gate; curl_multi_add_handle)
+   ↓   DrainRetryQueue()             (re-enter inbox when retry-ready)
+   ↓   curl_multi_perform + DrainCompleted (parse rate-limit headers; route 429/transient → retry queue)
+```
+
+### Adaptive rate-limit + concurrency control
+
+The dispatcher composes three mechanisms keyed by `(host, modelFamily)` via `QueryData::m_QuotaKey`:
+
+- **`IRateLimitStrategy`** (`rateLimitStrategy.h`) — per-`InterfaceType` parser of provider-specific response headers into a normalized `RateLimitObservation`. Implementations: `RateLimitStrategyOpenAI` (API1/API2/API6), `RateLimitStrategyAnthropic` (API4 — split input/output token quotas, ISO 8601 resets, retry-after), `RateLimitStrategyEmpty` (API3 Gemini, API5 Bedrock, Test). Also provides `EstimateInputTokens(prompt)` (chars/4 default), `DeriveQuotaKey(model)` (model→family), and `InitialConcurrencyProbe()`.
+- **`RateLimitController`** (`rateLimitController.h`) — per-`QuotaKey` adaptive controller. `ShouldAdmit(currentInflight, estimatedInputTokens)` projects the token bucket forward (deny if overshooting) and compares against the AIMD cap. `Observe(observation, was429)` updates state idempotently — known fields replace, unknown fields preserve, multiple calls per request produce identical state. AIMD: cap halves on 429, +1 every 5 clean completions, lower bound 1, upper bound from `config.rate_limit.max_concurrency`.
+- **Server-directed waits** — `Retry-After` / `*-reset` headers are floors on the next admission time.
+
+State surfaces via `GetDebugSnapshot()` → `/api/debug/signals dispatcher_controllers[]`.
+
+### Cascade cancellation
+
+`CancelByCancelKey(cancelKey)` is thread-safe; it pushes the key into a pending-cancellations queue and wakes the I/O thread. `DrainPendingCancellations()` (I/O thread only — curl handle mutations must be single-threaded relative to `curl_multi_perform`) drops matching entries from the inbox + retry queue and aborts in-flight `m_Active` handles via `curl_multi_remove_handle` + `curl_easy_cleanup`. Each cancelled request fires its callback with `Fail(CURLE_ABORTED_BY_CALLBACK, "request cancelled (run terminated)")`.
+
+Callers: `AiRequestPool::CancelRequestsForRun(runId)` walks `m_PendingByOutputPath`, finds matching runId entries, fires `CancelByCancelKey` for each. Triggered by `WorkflowRuntimeManager` when `ActiveRun.m_Run.m_HasFailed || m_CancelRequested || m_StopRequested` flips true. Idempotent via `ActiveRun.m_CancelCascadeFired`.
+
+### Per-attempt timeout = `CURLOPT_TIMEOUT_MS`
+
+`AiRequestPool::Submit` computes the size-aware budget from `api->m_RateLimit.m_RequestBudget` and sets `QueryData::m_TimeoutMs`. The dispatcher passes it straight to curl. This replaces the pre-1.0 `AiRequestPool::m_Deadline` machinery (deferred-arm + retry-extension) — curl already counts only in-flight time and resets per attempt. Curl returns `CURLE_OPERATION_TIMEDOUT` when the budget elapses; the standard `Fail(...)` callback path takes over.
+
+### Per-host stream / connection caps
+
+- `CURLMOPT_MAX_HOST_CONNECTIONS = 1` — one TCP connection per host
+- `CURLMOPT_MAX_CONCURRENT_STREAMS = 100` — HTTP/2 stream cap over that connection
+- `kMaxActivePerHost = 48` — internal hard ceiling, used as the AIMD `hardCap` when no per-interface override is set
+- `CURLOPT_TCP_KEEPALIVE = 1` — long-idle in-flight connections notice they're dead
+
+### Lifetime counters (`/api/debug/signals`)
+
+`dispatcher_total_dispatched`, `_completed`, `_throttled`, `_429s`, `_retries_exhausted`, `_cancelled` — all `std::atomic<uint64_t>` so debug snapshot reads are wait-free.
+
+### Liveness detection — what curl catches and what it doesn't
+
+Operational reference for "why didn't j9t notice X?" investigations. The dispatcher relies on curl's standard error mapping plus the size-aware budget; no custom heartbeat layer.
+
+| Failure mode | Detected? | Mechanism |
+|---|---|---|
+| Internet off, new request | Immediate | `CURLE_COULDNT_CONNECT` |
+| Internet off mid-request | Eventually | TCP RST → curl error, or `CURLOPT_TIMEOUT_MS` |
+| DNS down | Immediate | `CURLE_COULDNT_RESOLVE_HOST` |
+| TLS handshake fail | Immediate | `CURLE_SSL_CONNECT_ERROR` |
+| Server returns 5xx | Yes | HTTP code → existing transient-retry path |
+| Server slow but generating | No (looks normal) | only `CURLOPT_TIMEOUT_MS` |
+| Server quietly stuck | No | only `CURLOPT_TIMEOUT_MS` |
+
+Network-level failures all surface as curl errors with no extra work. The only gap the size-aware budget can't tighten is "server accepted my POST and is silently doing nothing" — looks identical to "server is generating tokens." Streaming (SSE) is the only proactive signal that distinguishes them, and it's deferred to post-1.0 (`Observe()` is idempotent by replacement so the future split into `ParseHeaders()` + `ParseBody()` is mechanical — see `doc/roadmap.md`). `CURLOPT_LOW_SPEED_LIMIT` + `CURLOPT_LOW_SPEED_TIME` are deliberately **not** set — they would false-fire when a model "thinks" silently for 30s before emitting tokens.

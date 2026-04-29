@@ -81,12 +81,12 @@ namespace AIAssistant
 
         int64_t AllocateRequestId();
 
-        // Registers a pending request with a default timeout (currently 5 minutes).
+        // Registers a pending request.  Per-attempt timeout enforcement now
+        // lives at curl level (CURLOPT_TIMEOUT_MS, set from the size-aware
+        // budget in Submit) — AiRequestPool only retains the file-activity
+        // watchdog (catches "executor wrote queue files but Submit was never
+        // called") and the workflow-binding bookkeeping.
         AiRequestHandle RegisterPending(AiRequestHandle const& requestHandle);
-
-        // Registers a pending request with an explicit timeout.
-        // timeoutMs == 0 means "use default".
-        AiRequestHandle RegisterPending(AiRequestHandle const& requestHandle, uint64_t const timeoutMs);
 
         // Registers a pending request and associates it with a specific workflow task instance.
         // This is the preferred path for workflow ai_call tasks.
@@ -101,7 +101,7 @@ namespace AIAssistant
                                                     std::string const& runId, std::string const& taskId,
                                                     std::vector<std::string> const& outputFilePaths,
                                                     std::vector<std::string> const& outputSlotNames,
-                                                    uint64_t const timeoutMs, std::string const& expectedOutputPath = "");
+                                                    std::string const& expectedOutputPath = "");
 
         // Path-based completion: called by Submit's reply callback once the .output.*
         // artifact has been written.  Looks up the pending entry by canonical path
@@ -145,6 +145,15 @@ namespace AIAssistant
 
         // Removes any pending entry (safe to call even if the entry does not exist).
         void Forget(AiRequestHandle const& requestHandle);
+
+        // Cascade cancellation: when a workflow run terminates (failed,
+        // cancelled, completed-with-failures), abort any in-flight HTTP
+        // requests bound to that run.  Without this, dispatched curl requests
+        // continue against the AI provider after the calling workflow is gone
+        // — burning tokens with no consumer.  Iterates pending entries with
+        // m_Context.m_RunId == runId and forwards each to the dispatcher's
+        // CancelByCancelKey path.  Idempotent; safe to call from any thread.
+        void CancelRequestsForRun(std::string const& runId);
 
         // Direct envelope-driven dispatch.  Builds the HTTP body via the per-provider
         // IRequestBuilder, submits to the shared CurlMultiDispatcher, and invokes `onReply`
@@ -202,10 +211,10 @@ namespace AIAssistant
             // Path of the .output.{txt,json} file that triggered completion (set by OnOutputFileCreated).
             std::string m_SourceOutputFilePath;
 
-            bool m_HasDeadline = false;
-            std::chrono::steady_clock::time_point m_Deadline;
-            uint64_t m_TimeoutMs = 0; // stored so the deadline can be deferred until curl dispatch
-
+            // Set by OnCurlDispatchedForOutputPath when curl_multi_add_handle
+            // fires.  Used by the file-activity watchdog to know it can stop
+            // tracking inactivity (the per-attempt timeout is owned by curl
+            // via CURLOPT_TIMEOUT_MS once the request is on the wire).
             bool m_CurlDispatched = false;
 
             // File-activity watchdog.  Active from registration until Submit hands
@@ -243,10 +252,14 @@ namespace AIAssistant
 
         void QueueCompletionIfNeeded(std::shared_ptr<PendingEntry> const& pendingEntry);
 
-        // Disarm the file-activity watchdog and activate the main deadline for the
-        // workflow-bound entry registered at `outputAbsolutePath`.  No-op when no
-        // binding exists (e.g. non-workflow AiJcwfService / assistant calls).
-        void ActivateDeadlineForOutputPath(std::string const& outputAbsolutePath);
+        // Disarms the file-activity watchdog for the workflow-bound entry at
+        // `outputAbsolutePath`.  Called from Submit at the moment of handoff
+        // to the dispatcher: from this point the per-attempt timeout is owned
+        // by curl (CURLOPT_TIMEOUT_MS), and any further wait (controller
+        // throttle, retry-queue backoff) is legitimate and must not trigger
+        // the watchdog.  No-op when no binding exists (e.g. non-workflow
+        // AiJcwfService / assistant calls).
+        void OnSubmitHandoff(std::string const& outputAbsolutePath);
 
     private:
         std::mutex m_MapMutex;

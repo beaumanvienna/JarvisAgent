@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 #include <curl/curl.h>
 
@@ -1231,8 +1232,7 @@ namespace AIAssistant
                 if (!completion.m_ResponseText.empty())
                 {
                     static constexpr size_t kMaxCaptureChars = 1024;
-                    taskState.m_CapturedStdout = completion.m_ResponseText.substr(
-                        0, std::min(completion.m_ResponseText.size(), kMaxCaptureChars));
+                    taskState.m_CapturedStdout = TruncateUtf8Safe(completion.m_ResponseText, kMaxCaptureChars);
                 }
 
                 // Publish ai_call outputs into the run context.
@@ -1307,13 +1307,65 @@ namespace AIAssistant
             stateChanged = true;
         }
 
+        // Fingerprint of task states + the run completion flag. The "before"
+        // sample MUST happen before DrainAiRequestCompletions / PropagateSubWorkflowCompletions:
+        // those functions mutate task states (AI replies flipping WaitingExternal → Succeeded,
+        // sub-workflow completions propagating to parents). Sampling after the drain made
+        // every AI completion invisible to the change detector, so the dashboard saw only
+        // what TickActiveRun itself mutated and the task counter froze mid-run.
+        auto fingerprint = [](ActiveRun const& a) -> uint64_t
+        {
+            uint64_t h = a.m_Run.m_IsCompleted ? 1ull : 0ull;
+            for (auto const& [tid, ts] : a.m_Run.m_TaskStates)
+            {
+                h = h * 1315423911ull + static_cast<uint64_t>(ts.m_State);
+                h = h * 2654435761ull + static_cast<uint64_t>(ts.m_AttemptCount);
+            }
+            return h;
+        };
+
+        std::unordered_map<std::string, uint64_t> fingerprintsBefore;
+        fingerprintsBefore.reserve(m_ActiveRuns.size());
+        for (auto const& runPtr : m_ActiveRuns)
+        {
+            fingerprintsBefore.emplace(runPtr->m_Run.m_RunId, fingerprint(*runPtr));
+        }
+
         DrainAiRequestCompletions();
         PropagateSubWorkflowCompletions();
 
         for (size_t index = 0; index < m_ActiveRuns.size();)
         {
             ActiveRun& active = *m_ActiveRuns[index];
+
             TickActiveRun(active);
+
+            // Compare to the pre-drain fingerprint. New runs added by StartPendingRuns
+            // earlier in this Update() won't be in the map; treat that as a state change
+            // (it is one — the run just started).
+            auto const fpIt = fingerprintsBefore.find(active.m_Run.m_RunId);
+            if (fpIt == fingerprintsBefore.end() || fingerprint(active) != fpIt->second)
+                stateChanged = true;
+
+            // Cascade-cancel any in-flight HTTP requests bound to this run if
+            // the run just transitioned to a failed/cancelled/stopped state.
+            // Idempotent via m_CancelCascadeFired so retries / completion-hold
+            // ticks don't re-fire.  Without this, after the workflow runtime
+            // gives up on a run (watchdog, downstream failure, user cancel),
+            // dispatched curl requests keep running against the AI provider
+            // burning tokens for output that gets thrown away.
+            bool const runTerminated = active.m_Run.m_HasFailed || active.m_CancelRequested ||
+                                        active.m_StopRequested;
+            if (runTerminated && !active.m_CancelCascadeFired)
+            {
+                JarvisAgent* app = App::g_App;
+                AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+                if (requestPool != nullptr)
+                {
+                    requestPool->CancelRequestsForRun(active.m_Run.m_RunId);
+                }
+                active.m_CancelCascadeFired = true;
+            }
 
             if (active.m_Run.m_IsCompleted)
             {
@@ -2113,13 +2165,13 @@ namespace AIAssistant
 
     void WorkflowRuntimeManager::TimeoutWaitingExternalTasks(ActiveRun& activeRun)
     {
-        static constexpr uint64_t kDefaultWaitingExternalTimeoutMs = 300000; // 5 minutes (matches AiRequestPool)
-        // Floor for ai_call tasks — modern AI providers routinely take 60-120 s for
-        // long structured outputs.  User-authored workflow-wide `timeout_ms` values
-        // (often a generic 60 000 ms) would otherwise abort perfectly healthy calls
-        // while the HTTP response was still in flight.  The AiInvocation envelope's
-        // own default is 120 s, so we use that as the floor here for consistency.
-        static constexpr uint64_t kAiCallMinWaitingExternalTimeoutMs = 120000; // 2 minutes
+        // Default timeout for non-ai_call WaitingExternal tasks (sub_workflow, etc.).
+        // ai_call tasks are NOT subject to this safety net — their per-attempt timeout
+        // is owned by curl (CURLOPT_TIMEOUT_MS, set from the per-interface size-aware
+        // budget computed in AiRequestPool::Submit).  The runtime-level kill that used
+        // to fire here at 5 min wall-clock killed legitimately-slow Sonnet/Opus calls
+        // even when AiRequestPool's deadline was correctly extended past 5 min.
+        static constexpr uint64_t kDefaultWaitingExternalTimeoutMs = 300000; // 5 minutes
 
         WorkflowRun& workflowRun = activeRun.m_Run;
         WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
@@ -2140,20 +2192,19 @@ namespace AIAssistant
                 continue;
             }
 
-            // Look up task-level timeout; fall back to default.
+            // Skip ai_call tasks — curl owns their timeout via CURLOPT_TIMEOUT_MS.
             std::string const parentId = ParentTaskId(taskId);
             auto defIt = workflowDefinition.m_Tasks.find(parentId);
-            uint64_t timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
-                                     ? defIt->second.m_TimeoutMs
-                                     : kDefaultWaitingExternalTimeoutMs;
-
-            // Enforce a minimum timeout for ai_call tasks so short user-authored
-            // `timeout_ms` values don't abort legitimate slow AI responses.
-            if (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_Type == TaskType::AiCall &&
-                timeoutMs < kAiCallMinWaitingExternalTimeoutMs)
+            if (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_Type == TaskType::AiCall)
             {
-                timeoutMs = kAiCallMinWaitingExternalTimeoutMs;
+                continue;
             }
+
+            // Other task types (sub_workflow, etc.): use the per-task explicit
+            // timeout if set, else the 5-minute default.
+            uint64_t const timeoutMs = (defIt != workflowDefinition.m_Tasks.end() && defIt->second.m_TimeoutMs > 0)
+                                           ? defIt->second.m_TimeoutMs
+                                           : kDefaultWaitingExternalTimeoutMs;
 
             auto const elapsed =
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - taskState.m_WaitingExternalSince).count();

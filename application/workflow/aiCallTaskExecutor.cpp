@@ -1281,7 +1281,7 @@ namespace AIAssistant
         // between registration and Submit.
         AiRequestHandle const registered = requestPool->RegisterPendingWorkflowTask(
             requestHandle, workflowRun.m_WorkflowId, workflowRun.m_RunId, taskIdForBinding, resolvedFileOutputs,
-            outputSlotNames, taskDefinition.m_TimeoutMs, expectedOutputPath);
+            outputSlotNames, expectedOutputPath);
 
         if (!registered.IsValid())
         {
@@ -1402,6 +1402,14 @@ namespace AIAssistant
                 envelope.m_InterfaceName = envelopeInterfaceName;
                 envelope.m_QueueFolder = taskWorkingDirectoryPath;
                 envelope.m_ProbName = probRelativeName;
+                // Forward the JCWF-declared per-task timeout (if any) so it
+                // overrides the size-aware budget in AiRequestPool::Submit.
+                // Workflow authors who set timeout_ms in the task definition
+                // beat the auto-computed budget.
+                if (taskDefinition.m_TimeoutMs > 0)
+                {
+                    envelope.m_Timeout = std::chrono::milliseconds(taskDefinition.m_TimeoutMs);
+                }
                 if (!taskDefinition.m_OutputSchemaJson.empty())
                 {
                     envelope.m_OutputSchemaJson = taskDefinition.m_OutputSchemaJson;

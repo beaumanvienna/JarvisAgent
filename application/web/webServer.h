@@ -255,6 +255,46 @@ namespace AIAssistant
         // `reference_debug_signals.md` in the memory/ folder for the convention.
         // The release build has this entire path stripped at compile time.
         crow::response HandleDebugSignalsGet();
+
+        // Hermetic-test entry: feed (interface_type, header_buffer, body, status,
+        // model) → parsed RateLimitObservation + quota_key + initial_concurrency_probe.
+        // Lets test/dispatch/test_rate_limit_observation_parse.py exercise every
+        // provider strategy without a live HTTP round-trip.
+        crow::response HandleParseRateLimitHeadersPost(crow::request const& req);
+
+        // §14 Tier B readback: dispatcher's bounded ring of recent submissions.
+        // Used by test_size_aware_budget.py to assert QueryData::m_TimeoutMs
+        // matches the formula in `AI call performance optimization.md` §6.2
+        // without scraping logs.
+        crow::response HandleDebugRecentSubmissionsGet();
+
+        // §14 Tier B Observe-idempotent contract test.  Body:
+        //   { "initial_concurrency_probe": int, "hard_cap": int,
+        //     "observations": [ {observation+was_429}, ... ] }
+        // Constructs an ephemeral RateLimitController, applies the observations
+        // in order, and returns the resulting controller state (cap, streak,
+        // last observation) so the test can compare a single combined call
+        // against a sequence of partial calls.
+        crow::response HandleDebugTestObserveIdempotentPost(crow::request const& req);
+
+        // §14 Tier B mock-AI-response endpoint.  Lets Phase B Python tests
+        // configure a real AI interface (API1/API4/etc.) pointing at this URL
+        // and exercise the dispatcher with controlled responses without an
+        // upstream provider.  Query params:
+        //   status         (int, default 200)
+        //   delay_ms       (int, default 0)   — sleep before responding
+        //   reset_in_sec   (int, default 60)  — substituted into {{RESET_AT_ISO}}
+        //   header_fixture (string, optional) — basename in test/dispatch/fixtures/headers/<X>.txt
+        //   body_fixture   (string, optional) — basename in test/dispatch/fixtures/responses/<X>.json
+        // Auth-free on purpose: the dispatcher hits this with provider-style
+        // auth (Bearer/x-api-key/etc.), not an MCP key.  Debug builds only.
+        crow::response HandleDebugMockAiResponsePost(crow::request const& req);
+
+        // §14 Tier B test isolation: wipes dispatcher controllers, host rate-
+        // limit state, and the recent-submissions ring so repeated test runs
+        // start from a clean slate.  Does NOT touch in-flight work
+        // (m_Active / m_Inbox / m_RetryQueue).
+        crow::response HandleDebugResetDispatcherStatePost();
 #endif
 
         // Look up the MCP record backing the request, or nullopt if not MCP-auth.
@@ -363,6 +403,23 @@ namespace AIAssistant
         size_t m_WsTotalDisconnects{0};
         size_t m_WsPeakClients{0};
         size_t m_WsPeakPendingBroadcasts{0};
+
+        // Diagnostic counters added to investigate the dashboard live-update bug
+        // (TODO List §17). Per-type enqueue counters answer "is the queue mostly
+        // duplicate full-state snapshots?"; drain stats answer "how big are the
+        // batches the IO thread sends, and how long does each drain take?".
+        size_t m_WsTotalBroadcastsEnqueued{0};
+        size_t m_WsTotalRunsSnapshotsEnqueued{0};
+        size_t m_WsTotalLastRunsSnapshotsEnqueued{0};
+        size_t m_WsTotalAiCallEventsEnqueued{0};
+        size_t m_WsTotalPythonStatusEnqueued{0};
+        size_t m_WsTotalLogBatchesEnqueued{0};
+        size_t m_WsTotalDrains{0};
+        size_t m_WsLastDrainBytes{0};
+        size_t m_WsLastDrainMessages{0};
+        size_t m_WsPeakDrainBytes{0};
+        uint64_t m_WsLastDrainDurationUs{0};
+        uint64_t m_WsPeakDrainDurationUs{0};
 
         std::vector<std::string> m_PendingBroadcasts;
 

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Tier B mock 429 — synthetic rate-limit response.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded"
+  }
+}

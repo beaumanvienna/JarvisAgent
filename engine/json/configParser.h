@@ -51,6 +51,37 @@ namespace AIAssistant
                 InvalidAPI
             };
 
+            // Size-aware request budget — fed into curl's CURLOPT_TIMEOUT_MS by
+            // AiRequestPool::Submit.  Replaces the old AiRequestPool::m_Deadline
+            // machinery (which required deferred-arm + extend-on-retry hooks).
+            // Each per-attempt budget covers exactly the time the request spends
+            // on the wire: queue-waits and retry-queue backoffs don't count.
+            struct RequestBudget
+            {
+                // Defaults sized for Anthropic Sonnet's actual generation rate
+                // (~70 tok/s output → 4K output tokens ≈ 60 s pure generation).
+                // Fast providers (gpt-4o-mini, Haiku) finish well within these
+                // bounds; slow providers (Opus, Sonnet) get the headroom they
+                // need to avoid spurious CURLOPT_TIMEOUT_MS aborts.  Per-
+                // interface override via config.json rate_limit.request_budget.
+                double m_Per1kInputTokenSeconds{0.5};
+                double m_Per1kOutputTokenSeconds{5.0};
+                double m_FixedOverheadSeconds{5.0};
+                double m_SafetyMarginFactor{4.0};
+                double m_MinSeconds{60.0};
+                double m_MaxSeconds{600.0};
+            };
+
+            struct RateLimit
+            {
+                int m_InitialConcurrencyProbe{-1};   // -1 = strategy default
+                int m_MaxConcurrency{48};            // hard cap on AIMD growth
+                int m_MaxRetries429{10};
+                int m_MaxRetriesTransient{2};
+                int m_BaseRetryMs{1000};
+                RequestBudget m_RequestBudget;
+            };
+
             struct ApiInterface
             {
                 std::string m_Name;
@@ -63,6 +94,14 @@ namespace AIAssistant
                 // fall back to a conservative default". Chars ÷ 4 is the rough token
                 // estimator for English text.
                 uint64_t m_MaxContextTokens{0};
+                // Adaptive rate-limit + size-aware budget knobs (§7).  Fields are
+                // optional in config.json; missing fields fall back to the per-
+                // InterfaceType defaults baked in here.
+                RateLimit m_RateLimit;
+                // Default max output tokens used by the budget formula when the
+                // envelope's m_MaxTokens isn't set.  4096 is conservative for
+                // chat models; raise for long-form generation interfaces.
+                int32_t m_DefaultOutputTokens{4096};
             };
 
             // Generate a unique interface name from URL domain + model

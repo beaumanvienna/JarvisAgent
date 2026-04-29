@@ -17,7 +17,7 @@
 
 j9t is a platform for scaling AI-driven work. It transforms AI calls, Python, shell scripts, and native C++ into visual workflows that execute hundreds of tasks in parallel — enabling teams to automate complex processes and accelerate analysis, while integrating directly with their existing cloud systems and data sources.
 
-A modern backend with multithreading and HTTP/2 multiplexing ensures fast execution whether running locally or in the cloud. On top of this engine, j9t provides a React-based workflow editor with AI-assisted generation, structured outputs and automatic retry on failure for predictable automation, 14 cloud connectors across 5 categories, and MCP integration with external AI systems.
+A modern backend with multithreading, HTTP/2 multiplexing, and an adaptive rate limiter that pushes AI to the max ensures fast execution whether running locally or in the cloud. On top of this engine, j9t provides a React-based workflow editor with AI-assisted generation, structured outputs and automatic retry on failure for predictable automation, 14 cloud connectors across 5 categories, and MCP integration with external AI systems.
 
 Workflows fire on cron schedules, file-watch events, HMAC-signed webhooks, or on demand — the same pipeline can run once from a button, every hour, or whenever a file lands in a folder.
 

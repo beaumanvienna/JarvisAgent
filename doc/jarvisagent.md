@@ -216,9 +216,102 @@ The following fields are recognized:
     - `API6` — Azure OpenAI (uses `api-key:` header; body identical to API1; the deployment URL is the full per-deployment URL, e.g. `https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={ver}`).
     - `Test` — no-network fixture backend for integration tests (reads canned reply from the interface's `url` field).
   - **`"max_context_tokens"`** — (integer, optional) Advisory context-window size for this interface. When set, j9t warns if an `ai_call` prompt is estimated to exceed it. Typical values: OpenAI GPT-4-family = 128000; OpenAI GPT-5-family = 200000; Google Gemini 2.5 = 1000000; Anthropic Claude = 200000.
+  - **`"default_output_tokens"`** — (integer, optional) Default max output tokens used by the size-aware request budget when an envelope's `m_MaxTokens` isn't set. Default: 4096.
   - **`"name"`** — (string) Human-readable name for this interface. Auto-generated from URL domain + model if omitted.
   - **`"description"`** — (string) Optional description of this interface.
   - **`"key_name"`** — (string) Name of the API key provider to use from the encrypted keys file (e.g. "openai", "google", "anthropic").
+  - **`"rate_limit"`** — (object, optional) Per-interface adaptive rate-limit + size-aware in-flight budget knobs. All sub-fields optional; missing fields fall back to per-`InterfaceType` defaults shipped in the binary. See **Rate-limit configuration** below for the schema and tuning examples.
+
+### Rate-limit configuration
+
+Every interface has an associated adaptive controller that decides how aggressively to dispatch requests, plus a size-aware in-flight budget that bounds each request's curl timeout. Both are tuned by the optional `rate_limit` block on the interface:
+
+```jsonc
+{
+    "API": "API4",
+    "url": "https://api.anthropic.com/v1/messages",
+    "model": "claude-sonnet-4-6",
+    "key_name": "Anthropic",
+    "rate_limit": {
+        "initial_concurrency_probe": 4,
+        "max_concurrency": 48,
+        "max_retries_429": 10,
+        "max_retries_transient": 2,
+        "base_retry_ms": 1000,
+        "request_budget": {
+            "per_1k_input_token_seconds": 0.5,
+            "per_1k_output_token_seconds": 5.0,
+            "fixed_overhead_seconds": 5.0,
+            "safety_margin_factor": 4.0,
+            "min_seconds": 60.0,
+            "max_seconds": 600.0
+        }
+    }
+}
+```
+
+**Concurrency / retry knobs:**
+
+- `initial_concurrency_probe` — starting AIMD cap before the controller has observed any response. Default per `InterfaceType`: Anthropic 4, OpenAI 8, Empty 4. Set to 1 for a Tier-1 Anthropic account; raise to 16+ for Tier-3+.
+- `max_concurrency` — hard ceiling AIMD growth never crosses, regardless of how many clean completions accumulate. Default 48 (the HTTP/2 stream cap). Set lower to pace burn rate on cost-capped accounts (this is the only cost-shaping knob in 1.0).
+- `max_retries_429` — number of attempts after a 429 before giving up. Default 10 (controller's predictive gating means real 429s are rare in practice).
+- `max_retries_transient` — attempts after a transient HTTP error (400/500/502/503). Default 2.
+- `base_retry_ms` — first retry delay; subsequent retries use exponential backoff `base * 2^n`. Default 1000.
+
+**Size-aware request budget** — every request gets a curl timeout (`CURLOPT_TIMEOUT_MS`) computed from the formula:
+
+```
+seconds = (input_tokens / 1000 × per_1k_input_token_seconds)
+        + (max_output_tokens / 1000 × per_1k_output_token_seconds)
+        + fixed_overhead_seconds
+seconds *= safety_margin_factor
+seconds  = clamp(seconds, min_seconds, max_seconds)
+```
+
+Curl's timeout only counts time *on the wire* — inbox waits, controller throttling, and retry-queue backoffs don't burn the budget. Each retry creates a fresh easy handle with a fresh budget.
+
+**Default rate at which providers generate output** (the dominant term for typical AI workloads):
+
+| Provider tier | Approx. output rate | Recommended `per_1k_output_token_seconds` |
+|---|---|---|
+| Anthropic Claude Haiku 4.5 | ~150 tok/s | 1.0 |
+| OpenAI gpt-4o-mini, gpt-5-nano | ~120 tok/s | 1.5 |
+| OpenAI gpt-4o, gpt-4.1 | ~80 tok/s | 2.5 |
+| Google Gemini 2.5 Flash | ~70 tok/s | 3.0 |
+| Anthropic Claude Sonnet 4.6 | ~70 tok/s | 5.0 |
+| Anthropic Claude Opus 4.7 | ~30 tok/s | 12.0 |
+
+Shipped defaults (`per_1k_output=5.0`, `safety_margin=4.0`, `min=60s`) are calibrated for Sonnet, the slowest provider in active use. Fast providers finish well within the floor with no harm done.
+
+**Tuning examples:**
+
+*Tier-1 Anthropic (free / starter, ~5 RPM Sonnet):*
+```jsonc
+"rate_limit": { "initial_concurrency_probe": 1, "max_concurrency": 4 }
+```
+
+*Tier-3 Anthropic (production, ~50 RPM Sonnet):*
+```jsonc
+"rate_limit": { "initial_concurrency_probe": 8, "max_concurrency": 32 }
+```
+
+*Cost-capped account — pace burn at ~10 in-flight max regardless of provider tier:*
+```jsonc
+"rate_limit": { "max_concurrency": 10 }
+```
+
+*Workflow expects very long Opus responses (8K-12K tokens):*
+```jsonc
+"rate_limit": {
+    "request_budget": {
+        "per_1k_output_token_seconds": 15.0,
+        "min_seconds": 120.0,
+        "max_seconds": 1200.0
+    }
+}
+```
+
+**Verifying tuning** — `GET /api/debug/signals` (debug builds only) exposes per-`(host, modelFamily)` controller state at `dispatcher_controllers[]`: current AIMD cap, streak since last 429, last observation (remaining requests / tokens, reset times), last consumed input/output tokens. Use this to confirm the controller is doing what you expect before scaling up.
 
 ## ENVIRONMENT
 

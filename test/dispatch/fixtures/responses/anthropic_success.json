@@ -1,0 +1,10 @@
+{
+  "id": "msg_tierb_mock",
+  "type": "message",
+  "role": "assistant",
+  "content": [{"type": "text", "text": "Tier B mock reply (Anthropic shape)."}],
+  "model": "claude-sonnet-4-6",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {"input_tokens": 10, "output_tokens": 8}
+}

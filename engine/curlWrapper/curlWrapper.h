@@ -89,6 +89,40 @@ namespace AIAssistant
             // Per-provider auxiliary fields read by signers (e.g. SigV4 needs region;
             // Bedrock dual-secret puts secret_access_key + session_token here).
             std::unordered_map<std::string, std::string> m_Params{};
+            // ConfigParser::EngineConfig::InterfaceType encoded as int to keep this
+            // header free of a configParser.h dependency.  -1 = unknown / not set;
+            // matches ConfigParser::EngineConfig::InterfaceType::InvalidAPI semantics.
+            // CurlMultiDispatcher uses this to dispatch to the right
+            // IRateLimitStrategy when parsing response headers.
+            int m_InterfaceType{-1};
+            // Opaque "<host>|<modelFamily>" composed by AiRequestPool::Submit.
+            // Used as the dispatcher's controller-map key so per-(host, modelFamily)
+            // AIMD signals stay independent (Anthropic Sonnet vs Opus on same host).
+            // Empty string = "one bucket per host" (controller derives from URL).
+            std::string m_QuotaKey;
+            // strategy.EstimateInputTokens(prompt) computed once at submit time.
+            // Used by the controller's token-bucket projection.  -1 = unknown.
+            int64_t m_EstimatedInputTokens{-1};
+            // Stable per-request identifier used by CancelByCancelKey to abort
+            // matching requests across the dispatcher's inbox / retry queue /
+            // active set.  AiRequestPool::Submit fills this with the request's
+            // expectedOutputPath (unique per workflow task).  Empty = request
+            // is not cancellable through the cascade path (legacy callers).
+            std::string m_CancelKey;
+            // Per-interface rate-limit knobs resolved at submit time from
+            // config.rate_limit.  Forwarded to the dispatcher to drive the
+            // controller's hardCap, the 429 retry budget, transient retry
+            // budget, and base backoff delay.  Sentinel discipline:
+            //   -1  (or any negative) = "unset, dispatcher uses its default"
+            //   0                     = "explicit zero" (no retries, no concurrency)
+            //   >0                    = explicit value
+            // Keeps QueryData usable for legacy callers (assistant, jcwfService)
+            // that don't pre-resolve config — they leave the field at -1.
+            int m_MaxConcurrency{-1};
+            int m_MaxRetries429{-1};
+            int m_MaxRetriesTransient{-1};
+            int m_BaseRetryMs{-1};
+
             bool IsValid() const;
         };
 
