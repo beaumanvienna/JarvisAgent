@@ -140,12 +140,14 @@ namespace AIAssistant
         // Caller-supplied bound clamps to kRecentSubmissionsCapacity.
         std::vector<RecentSubmission> GetRecentSubmissions(size_t maxCount = 64) const;
 
+#ifdef DEBUG
         // §14 Tier B test isolation: clears controllers + host rate-limit state
         // + recent-submissions ring.  Lets repeated test runs start from a
         // clean slate without restarting j9t.  Does NOT touch m_Active /
-        // m_Inbox / m_RetryQueue — those carry live in-flight work.  Debug-
-        // only entry point; production builds must not call this.
+        // m_Inbox / m_RetryQueue — those carry live in-flight work.  Debug
+        // builds only — Release strips the symbol entirely.
         void ResetTestState();
+#endif
 
     private:
         struct PendingRequest

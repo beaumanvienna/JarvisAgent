@@ -5,54 +5,7 @@ This list tracks **general project TODOs and high-level features** for JarvisAge
 See also:
 - `application/workflow/doc/todo.md` — C++ backend TODOs (workflow engine, runtime manager, task executors)
 - `workflow-editor/todo.md` — Frontend TODOs (React workflow editor UI)
-
----
-
-## Session handoff — 2026-04-28 → next session
-
-Read this first.  Self-contained brief on where today's work left things.  Working tree is full of uncommitted changes that need a thoughtful commit boundary decision (JC handles all git operations himself — never run `git commit`).
-
-### What landed today (uncommitted)
-
-Today was three large pieces of work plus assorted fixes:
-
-1. **§5g-rl-tierb AI dispatch hermetic tests (Tier B)** — 8 Python tests + the C++ infra to support them.  See §5g-rl-tierb below for the full list.  All 8 verified passing across 3 sweeps in one j9t process (state-isolation + retry-sentinel fixes hold).
-2. **Two new dev plans authored** — `doc/misc/cybersec-hardening-dev-plan.md` (§18) and `doc/misc/cpp-safety-hardening-dev-plan.md` (§19).  Charter, 4-domain split, 4-session schedule combined per domain, importance rubric, per-change documentation template, per-domain triage, memo / lessons-learned.  Plans are review-ready; sessions to execute them not yet scheduled.
-3. **Two TUI ncurses stress tests** — `test_stress_tui_utf8_heavy.py` (3-way concurrent jarvisCpp at 420 ai_call tasks with diverse multi-byte UTF-8) and `test_stress_tui_utf8_invalid.py` (140 ai_call tasks with hand-crafted malformed bytes).  Surfaced + fixed a real bug: invalid bytes from the TestInterface fixture leaked raw into log/log.txt.  New `SanitizeUtf8` helper in `application/workflow/workflowTypes.h` (companion to `TruncateUtf8Safe`); applied at the TestInterface boundary.
-
-### Bug fixes that surfaced and got fixed today
-
-These came up while building the Tier B / TUI tests; documented inline in `§5g-rl-tierb` but worth flagging here because they affect real config:
-
-- **`ApplyAiInterfaceRateLimitFromJson` padded_string bug** — `simdjson::ondemand::parser::iterate(req.body)` silently no-opped on non-padded strings, so every `rate_limit` override sent via `POST /api/settings/ai-interfaces` was dropped on the floor.  Every interface in `config.json` ended up with C++ struct defaults regardless of what the operator submitted.  Fixed by wrapping in `simdjson::padded_string`.
-- **`m_MaxRetries429 == 0` treated as "use default 10"** — `> 0` check at `curlMultiDispatcher.cpp:776` meant operators couldn't actually configure 0 retries via `rate_limit.max_retries_429`.  Switched to `>= 0`; `-1` (struct default) is now the sole "unset" sentinel.  Same fix for `m_MaxRetriesTransient`.
-- **Localhost SSL bypass in DEBUG builds** — added in `CurlMultiDispatcher::SetupEasyHandle` so the dispatcher can hit the j9t server's own self-signed cert during hermetic tests.  Production paths still verify; bypass is gated on `#ifdef DEBUG && (host == localhost|127.0.0.1|::1)`.
-- **`SanitizeUtf8` UTF-8 sanitizer** — bytes from external sources (TestInterface fixture for now; real reply parsers + captured stdout/stderr deferred to §19) are sanitized at construction so downstream `LOG_*`, dashboard WS, and ncurses TUI all see well-formed UTF-8.
-
-### What's verified
-
-| Sweep | Result |
-|---|---|
-| Tier A (existing) — `test_rate_limit_observation_parse.py` | green |
-| Tier B (new today) — 8 tests × 3 sweeps within one j9t process | 24/24 pass |
-| TUI heavy UTF-8 — 3 jarvisCpp JCWFs concurrent, 420 ai_call | pass, j9t alive, 18.4 MB log clean |
-| TUI invalid UTF-8 — 140 ai_call with malformed fixture | pass after the `SanitizeUtf8` fix, 6.1 MB log clean |
-| Existing dispatch tests (`test_testinterface_hermetic.py`, schema-roundtrip, etc.) | not re-run today; should still pass — no breaking changes to those code paths |
-
-### Open items / next-session candidates
-
-1. **§19 cpp-safety hardening pass** — 4 sessions to execute the plan.  Among the entries: `SanitizeUtf8` at real AI reply parsers (`replyParserAPI{1..5}.cpp`) and at captured stdout/stderr (`shellTaskExecutor`, `pythonTaskExecutor`) — explicitly flagged in the plan's §6.1 D1 row "UTF-8 sanitization at external-byte boundaries" as the deferred companion work.
-2. **§18 cyber-sec hardening pass** — 4 sessions, runs combined with §19 per the dual-plan schedule (S1=D2 web+cloud+assistant, S2=D3 core engine, S3=D1 workflow orchestration, S4=D4 app infrastructure).
-
-### Gotchas next-session-Claude should know
-
-These survive past today and are still load-bearing:
-
-- **Don't restart j9t lightly.**  Dispatcher state (controller AIMD caps, observation history) lives in-memory; restart loses it.  For repeated test runs in one j9t, call `POST /api/debug/reset-dispatcher-state` between tests (each Phase B test does this at startup).
-- **`rate_limit.max_retries_429 = 0` now means 0** — previously meant "use default".  In practice nobody sets it explicitly, so unlikely to bite anyone, but worth flagging in changelog if shipping.
-- **TestInterface fixture content gets sanitized via `SanitizeUtf8` now** — the OUTPUT FILE on disk is also sanitized (downstream Python combiners read it as UTF-8 text; raw-byte preservation isn't worth breaking the combiner).  If a future test needs raw bytes on disk, that's a flag on the interface, not a default.
-- **Localhost SSL bypass is DEBUG-only.**  Don't write tests that depend on it under Release builds; they'll fail with `CURLE_SSL_PEER_CERTIFICATE`.
-- **`SanitizeUtf8` is the project-wide pattern for external-byte boundaries** (alongside `TruncateUtf8Safe` for size bounds).  See `feedback_established_safety_patterns.md` memory.
+- `doc/misc/hand-off.md` — End-of-session hand-off log; newest entry on top.  Read this first when picking up across sessions.
 
 ---
 
@@ -425,20 +378,11 @@ Test infra: `microsoft/aoai-api-simulator` and LocalStack Hobby tier as commente
 
 Dashboard: new `aws` credential type with two-input form (access_key_id / secret_access_key + optional session_token) and region; `m_Params` map round-trips through REST with sensitive keys (`secret_access_key`, `session_token`) stripped from GET responses and auto-registered with `SecretRedactor` on load.
 
-### 5i. Engine vs Studio access — role-gate the shared surface, don't edition-gate
+### ~~5i. Engine vs Studio access — role-gate the shared surface, don't edition-gate~~ ✅ DONE 2026-04-25
 
-**Problem.** Several capabilities (manual workflow run, AI assistant, JCWF generation, settings CRUD) are gated at the *edition* level: their routes live in `RegisterStudioRoutes()` (webServer.cpp), so the Engine binary never registers them at all. Result: an Engine deployment with a valid **admin** MCP token still can't start a registered workflow via `POST /api/workflows/<id>/run` — the route returns 404 because Crow has no record of it. The role check inside `HandleWorkflowRunPost` is unreachable. JC's mental model (and the natural one): capability is granted by **role** (operator/admin can start runs, viewer can't), not by edition. Edition decides which *subsystems* exist (Studio ships the AI assistant + JCWF generator; Engine doesn't), but for **shared** subsystems the boundary should be the per-handler `CheckAuth(req, requiredRole)` call, not the route registration.
+Implemented in the 2026-04-25 session — see `doc/misc/engine-studio-capability-review.md` for the full design + implementation log.  Scope expanded well beyond the original ticket: full auth funnel rewrite (one path, no anonymous-localhost branch, gateway header is cross-check not credential); 10 routes moved Studio→Common with `CheckAuth(req, role)` gates (manual run, reload, versions, log-analyze, the full settings + connections + providers + ai-interfaces surface); `RegisterEngineRoutes()` deleted; `webServer.cpp` decomposed into 3 files (common / studio / shared helpers); webhook secrets mandatory in BOTH editions; Studio dashboard now requires login (anonymous bypass removed); two-tier rate limiting (pre-auth tight per-IP, post-auth loose per-user); audit-log markers split (`rate_limited_preauth` vs `rate_limited_authenticated`); contract test updated for both editions; doc sweep across `cyber security.md` / `api-endpoints.md` / `README.md` / integration READMEs.  All 4 binaries clean, symbol isolation verified (Engine has 0 Studio symbols).  Original bug closed: Engine + admin MCP token now succeeds on `POST /api/workflows/<id>/run` with operator-role gate; viewer rejects 403; missing/invalid token rejects 401.
 
-**Scope.**
-- Audit every route currently in `RegisterStudioRoutes()`. For each one, decide: edition-only (subsystem absent from Engine — assistant routes, AI JCWF generation routes belong here) or shared-with-role-gate (workflow CRUD reads / manual run / settings reads / providers / ai-interfaces).
-- Move shared routes to `RegisterCommonRoutes()`. The handlers already gate on role via `CheckAuth(req, "admin"|"operator"|"viewer")` — those checks become the actual policy in Engine instead of being unreachable.
-- Update `status.capabilities.workflow_run_endpoint` (and similar) to reflect the actual route registration, not a hardcoded `false` for Engine. The dashboard then naturally shows / hides the Run button based on whether the binary supports it.
-- Match MCP sidecar's tool surface: `run_workflow` should succeed in Engine for a sufficiently-privileged token; reject for viewer. Today it returns 404 for any token because of the route gap.
-
-**Out of scope.**
-- Studio's open auth (no UI auth) per `doc/cyber security.md` §"j9t Studio — Developer Workstation". Studio stays single-user-developer-workstation.
-
-**Discovered while testing the Bedrock + Azure refactor (§5h)** — JC tried to stress-test JCWFs in Engine after Studio passed and found `run_workflow` returns 404 for every workflow, even with an admin MCP token. Documenting now; revisit when ready.
+A handful of small tail items live in the review doc's "Open items / follow-ups" section (lines 333-339) — most consequential is the `POST /api/shutdown` audit-log gap (denials emit `mcp_auth_success` instead of `forbidden reason=insufficient_role`).
 
 ### 5e. Native LLM tool-calling (post-1.0) — Assistant + JCWF `ai_call`
 

@@ -1,0 +1,111 @@
+# Session Hand-off Log
+
+End-of-session brief for next-session-Claude.  Newest entry on top.
+
+**Convention** — when wrapping up a session, prepend a new entry under a date header (`## YYYY-MM-DD → next session`) covering:
+
+- **What landed** — the major themes shipped this session (committed or working-tree).
+- **What's verified** — tests run, results, what was deliberately not re-tested.
+- **Open items / next-session candidates** — the natural follow-ups that didn't make today's cut.
+- **Gotchas** — load-bearing knowledge that survives past today (config-schema breaks, debug-only paths, helpers to reuse).
+
+Keep entries self-contained — a fresh-context Claude should be able to read just the latest entry and pick up cleanly.  Cross-reference into `JarvisAgent TODO List.md` / `doc/misc/*-dev-plan.md` rather than duplicating their content.
+
+---
+
+## 2026-04-28 (post-commit maintenance) → next session
+
+Pure documentation + file-structure cleanup pass after the morning's big commit.  One small post-commit C++ change (`ResetTestState()` `#ifdef DEBUG`-gated for hygiene), no functional code work.  JC committing as `"maintenance"`.
+
+### What landed
+
+1. **`ResetTestState()` gated `#ifdef DEBUG`** in `engine/curlWrapper/curlMultiDispatcher.{h,cpp}` — completes the symmetry with the route gating.  All 4 binaries rebuilt (Studio Debug/Release, Engine Debug/Release); Engine symbol-isolation invariant intact (Engine Release ~1 MB smaller than Studio Release).
+2. **Hand-off log convention established** — `doc/misc/hand-off.md` (this file).  Newest entry on top, self-contained per entry, cross-references rather than duplicates other docs.  New auto-memory entry `feedback_session_handoff_log.md` so future-Claude reads the latest entry at session start and prepends a new one at session end.
+3. **TODO restructure** — three archives moved into `doc/misc/`:
+   - `JarvisAgent TODO List.md` → `doc/misc/JarvisAgent TODO List.md` (global archive)
+   - `application/workflow/doc/todo.md` → `doc/misc/application-workflow-todo.md` (backend archive)
+   - `workflow-editor/todo.md` → `doc/misc/workflow-editor-todo.md` (frontend archive)
+   New consolidated `todo.md` at project root holds the live open items only.  The two scope-specific files were re-created empty with header-only stubs at the original locations (so the directory shape stays valid; new scope-specific TODOs land there if they ever arise).  Memory `reference_todo_files.md` updated to reflect the new shape.
+4. **§5i verified done + tail items extracted** — read `doc/misc/engine-studio-capability-review.md` carefully; the §5i refactor landed in the **2026-04-25** session (way before today).  Today's commit pulled that work in as part of the big bundle but didn't add to it.  Struck the §5i entry from the archived global TODO with a verification summary.  Four real tail items from the review doc's "Open items / follow-ups" section that hadn't been captured anywhere live-tracked got added to `todo.md` under a new "§5i follow-ups (post-implementation)" subsection: shutdown audit-log gap, `HandleAiInterfaceTestPost` Engine fallback decision, AI-WS dispatch extraction (drops `#ifdef` count 10→7), bootstrap `admin/admin` badge collision.
+5. **Audited the 4 recent refactor docs** for forgotten TODOs:
+   - `doc/misc/API refactor.md` (5h Bedrock + Azure) — fully done.
+   - `doc/misc/AI dispatch refactor.md` (5g) — main follow-ups already in `todo.md`; **one missing**: live-backed E2E tests for schema-validation retry, chunking, and markitdown (today's tests are hermetic-only).  Added to `todo.md` §5g remaining follow-ups.
+   - `doc/misc/AI call performance optimization.md` (rev 7) — fully done after today's Tier B.
+   - `doc/misc/cloud-integration-dev-plan.md` — surfaced **two genuinely open items** (`email_watch` doesn't actually IMAP-poll for new mail; Mailpit JCWF coverage gap that explains the 14-vs-13 dashboard mismatch JC noticed).  Added to `todo.md` under a new "Cloud integration tail" subsection.  Two **stale checkboxes** in the plan flipped to `[x]` with verification notes: Redmine frontend (in `ConnectionsView.tsx` + `WorkflowEditorView.tsx`) and Snowflake round-trip (verified end-to-end per `snowflakeQueryDemo.md`).
+6. **Self-hosted Docker registry** removed from the consolidated TODO — misunderstanding from old session notes; GitHub Container Registry is fine, no migration needed.
+
+### Where things live now
+
+- `todo.md` (project root) — live open items only; consolidated 2026-04-28
+- `application/workflow/doc/todo.md` — header-only stub, scope clarified
+- `workflow-editor/todo.md` — header-only stub, scope clarified
+- `doc/misc/JarvisAgent TODO List.md` — global archive (read-only)
+- `doc/misc/application-workflow-todo.md` — backend archive (read-only)
+- `doc/misc/workflow-editor-todo.md` — frontend archive (read-only)
+- `doc/misc/hand-off.md` — this file
+- `doc/misc/cybersec-hardening-dev-plan.md` — §18 plan
+- `doc/misc/cpp-safety-hardening-dev-plan.md` — §19 plan
+- `doc/misc/engine-studio-capability-review.md` — §5i design + impl log
+- `doc/misc/AI call performance optimization.md` — §5g-rl design ref (refactor done)
+- `doc/misc/AI dispatch refactor.md` — §5g design ref (refactor done)
+- `doc/misc/cloud-integration-dev-plan.md` — Phase 0-12 tracker (mostly done; two tail items in `todo.md`)
+- `doc/misc/API refactor.md` — §5h design ref (refactor done)
+
+### Open items / next-session candidates
+
+Unchanged from the morning entry below (Tier B + TUI sanitization + 2 hardening plans landed; §18/§19 sessions are next).  See `todo.md` for the full live list — all items now consolidated there with cross-refs to the relevant dev plans.
+
+### Gotchas next-session-Claude should know
+
+All of the morning's gotchas still apply.  One new one from this pass:
+
+- **Always read `doc/misc/hand-off.md`'s latest entry first when picking up an active project** — even if the user opens with "let's keep going on X", the hand-off has the load-bearing context (config-schema breaks, debug-only paths, helpers worth reusing) that recently landed.  Memory `feedback_session_handoff_log.md` makes this explicit.
+
+---
+
+## 2026-04-28 → next session
+
+### What landed
+
+Three large pieces of work plus assorted fixes, all committed + pushed.
+
+1. **AI dispatch performance refactor (Phases 1–5) committed** — uncommitted since 2026-04-26.  Rate-limit controller (`engine/curlWrapper/rateLimitController.{h,cpp}`), per-provider strategies (`rateLimitStrategy.{h,cpp}`), normalized observation (`rateLimitObservation.h`), AIMD + token-bucket + server-directed waits, size-aware budget via `CURLOPT_TIMEOUT_MS`, dual-timeout collapse, cascade cancellation.  Verified live 2026-04-26 against Anthropic Sonnet (137 tasks, AIMD converged 4→16, zero 429s).
+2. **§14 Tier B hermetic dispatcher tests** — 8 Python tests + C++ infra (4 new debug endpoints: `recent-submissions`, `mock-ai-response`, `test-observe-idempotent`, `reset-dispatcher-state`).  All 8 verified across 3 sweeps in one j9t process.
+3. **TUI ncurses stress tests** — `test_stress_tui_utf8_heavy.py` (3-way concurrent jarvisCpp at 420 ai_call tasks with multi-byte UTF-8) and `test_stress_tui_utf8_invalid.py` (140 tasks with malformed bytes).  Surfaced + fixed a real bug (raw invalid bytes leaking into `log/log.txt`).  New `SanitizeUtf8` helper in `application/workflow/workflowTypes.h` (companion to `TruncateUtf8Safe`).
+4. **Two new dev plans** — `doc/misc/cybersec-hardening-dev-plan.md` (§18) and `doc/misc/cpp-safety-hardening-dev-plan.md` (§19).  4-domain split, 4 combined sessions, importance rubric, per-change template, memo with Rust-emulating defaults.  Plans are review-ready; sessions to execute them not yet scheduled.
+5. **10 new auto-memory entries** distilled from the §10 memos of both hardening plans (argv-only shell, allowlist-not-blocklist, path-confinement-edition, secrets-only-via-redactor, auth-funnel, constant-time-compare, capture-by-value-async, no-jthread-use-threadpool, rust-emulating-defaults, established-safety-patterns).
+
+### Bug fixes surfaced via testing today
+
+These came up while building the Tier B / TUI tests; all fixed in the same commit:
+
+- **`ApplyAiInterfaceRateLimitFromJson` padded_string bug** — `simdjson::ondemand::parser::iterate(req.body)` silently no-opped on non-padded `std::string`, so every `rate_limit` override sent via `POST /api/settings/ai-interfaces` was dropped.  Every interface ended up with C++ struct defaults regardless of operator config.
+- **`m_MaxRetries429 == 0` treated as "use default 10"** — `> 0` check at `curlMultiDispatcher.cpp:776` meant operators couldn't actually disable retries via config.  Switched to `>= 0`; `-1` is now the sole "unset" sentinel.  Same fix for `m_MaxRetriesTransient`.
+- **Malformed UTF-8 from AI replies leaking raw into `log/log.txt` + dashboard WS** — fixed at the TestInterface boundary; real-AI parser + captured-stdout coverage deferred to §19 (D1, S3).
+- **Localhost SSL bypass added in DEBUG builds** — so the dispatcher can hit the j9t server's own self-signed cert during hermetic tests.  Production paths still verify; bypass is `#ifdef DEBUG && (host == localhost|127.0.0.1|::1)`.
+
+### What's verified
+
+| Sweep | Result |
+|---|---|
+| Tier A (existing) — `test_rate_limit_observation_parse.py` | green |
+| Tier B (new today) — 8 tests × 3 sweeps in one j9t process | 24/24 pass |
+| TUI heavy UTF-8 — 3 jarvisCpp JCWFs concurrent, 420 ai_call | pass, j9t alive, 18.4 MB log clean |
+| TUI invalid UTF-8 — 140 ai_call with malformed fixture | pass after `SanitizeUtf8` fix, 6.1 MB log clean |
+| All 4 binaries built post-commit (Studio Debug/Release, Engine Debug/Release) | clean, edition isolation intact (Engine Release ~1 MB smaller than Studio Release) |
+| Existing dispatch tests (`test_testinterface_hermetic.py`, schema-roundtrip, etc.) | not re-run today; should still pass — no breaking changes to those code paths |
+
+### Open items / next-session candidates
+
+1. **§19 cpp-safety hardening pass** — 4 sessions to execute the plan.  Among the entries: `SanitizeUtf8` at real AI reply parsers (`replyParserAPI{1..5}.cpp`) and at captured stdout/stderr (`shellTaskExecutor`, `pythonTaskExecutor`) — flagged in the plan's §6.1 D1 row "UTF-8 sanitization at external-byte boundaries" as the deferred companion work to today's TUI fix.
+2. **§18 cyber-sec hardening pass** — 4 sessions, runs combined with §19 per the dual-plan schedule (S1=D2 web+cloud+assistant, S2=D3 core engine, S3=D1 workflow orchestration, S4=D4 app infrastructure).
+
+### Gotchas next-session-Claude should know
+
+Load-bearing past today:
+
+- **Don't restart j9t lightly.**  Dispatcher state (controller AIMD caps, observation history) lives in-memory; restart loses it.  For repeated test runs in one j9t, call `POST /api/debug/reset-dispatcher-state` between tests (each Phase B test does this at startup).
+- **`rate_limit.max_retries_429 = 0` now means 0** — previously meant "use default 10".  In practice nobody sets it explicitly, so unlikely to bite anyone, but worth flagging in changelog if shipping.
+- **TestInterface fixture content gets sanitized via `SanitizeUtf8` now** — the on-disk output file is also sanitized (downstream Python combiners read it as UTF-8 text; raw-byte preservation isn't worth breaking the combiner).  If a future test needs raw bytes on disk, that's a flag on the interface, not a default.
+- **Localhost SSL bypass + `ResetTestState()` are DEBUG-only** — both `#ifdef DEBUG`-gated.  Release builds verify TLS normally and don't expose the reset endpoint.  Don't write tests that depend on these under Release builds.
+- **`SanitizeUtf8` is the project-wide pattern for external-byte boundaries** (alongside `TruncateUtf8Safe` for size bounds).  See `feedback_established_safety_patterns.md` memory.

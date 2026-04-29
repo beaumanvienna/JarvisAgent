@@ -142,6 +142,7 @@ namespace AIAssistant
         return out;
     }
 
+#ifdef DEBUG
     void CurlMultiDispatcher::ResetTestState()
     {
         // §14 Tier B test isolation.  m_Controllers + m_HostRateLimits hold
@@ -159,6 +160,7 @@ namespace AIAssistant
             m_RecentSubmissions.clear();
         }
     }
+#endif
 
     void CurlMultiDispatcher::CancelByCancelKey(std::string const& cancelKey)
     {

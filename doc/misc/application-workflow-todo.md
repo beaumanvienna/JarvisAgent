@@ -1,0 +1,478 @@
+# JarvisAgent TODO List
+
+Last reviewed: 2026-03-23
+
+**Build command:** `make config=release && make config=debug`
+
+---
+
+## Go-live blockers (highest priority)
+
+### Platform
+- [x] ~~Fix **Windows build**~~ — guarded `<unistd.h>` behind `#ifndef _WIN32` in `terminalManager.cpp`; added `<io.h>`/`_write()`/`_fileno()` for MSVC via `RAW_STDERR` macro.
+- [x] ~~Fix **macOS build**~~ — Apple Clang's libc++ lacks C++20 chrono timezone. Integrated Howard Hinnant's `date` library (`vendor/date`) which provides the same API cross-platform. `triggerEngine.cpp` now uses `date::` for timezone resolution on all platforms.
+
+### ai_call architecture compliance
+- [x] ~~Implement **per-request overrides** for `ai_call`~~ — per-task AI interface selection via `api_interface` field in editor inspector. Each interface specifies model, URL, API type, and `key_name`. Dropdown shows all configured interfaces plus "default (global API index)".
+- [x] ~~Implement `queue_binding.prob_files` behavior~~ — already implemented in `BuildProbTextFromQueueBinding` + `WriteInlineQueueBindingFiles` in `aiCallTaskExecutor.cpp`. `prob_files` (inline or file ref) are consumed, concatenated, and written into the executor's `PROB_<id>_<ts>.txt`. No conflict — same pipeline.
+- [x] ~~Finalize **ai_call output semantics**~~ — file-path-only mode. Output slots always contain file paths, never raw text in memory. When no explicit `file_outputs` are declared, the source `.output.txt` created by the core engine is used as the default. Implemented in `BuildCompletionOutputs` / `AiRequestPool`.
+
+### Workflow graph validation (load-time)
+- [x] ~~Enforce **version handling**~~ — parser now splits `"major.minor"`, rejects unknown major (only `1` accepted), warns on minor > known (`1.0`). Malformed or non-numeric versions are rejected. Validator retains defense-in-depth empty check.
+- [x] ~~Add **cycle detection at load time**~~ — implemented in `workflowValidator.cpp`.
+- [x] ~~Apply **root-level defaults** to tasks~~ — `defaults` parsed into `WorkflowDefaults` struct (`timeout_ms`, `retries`). Post-parse merge loop applies them to every task whose field is still zero. AI defaults deferred to dispatch time. Raw JSON kept for serialization.
+
+### Required input correctness (fail-fast)
+- [x] ~~Implement **required input validation**~~ — was already implemented in `DataflowResolver` + `workflowValidator`. Added `m_ErrorMessage` to `TaskResolvedInputs` so the specific missing input name propagates to `TaskInstanceState.m_LastErrorMessage` (previously only logged, not surfaced).
+
+---
+
+## Runtime execution gaps (core functionality)
+
+### Modes, filters, and per_item expansion
+- [x] ~~Implement `mode: "per_item"` task expansion with **filter nodes**~~ — full pipeline: `DispatchFilterEvaluation`, `FanOutPerItemChildren`, `AggregatePerItemResults` in `workflowRuntimeManager.cpp`. Filter engine supports CSV, text_lines, Lucene/Polarion. Includes manifest freshness and skip-if-fresh logic.
+- [x] ~~**Create `text_lines` example workflow + documentation**~~ — `example/workflows/bookSummaryPipeline.jcwf`: shell→python→text_lines filter→per_item ai_call→python combine. Demonstrates the full per_item pipeline.
+- [x] ~~Update **JC Workflow Specification** for filters + per_item~~ — bumped spec to v1.1: added §3.7 (Filters), `"filters"` root-level array, `"filter"` field on tasks, filter JSON Schema `$def`, query language reference, filter manifest freshness scheme, fan-out node description, security note for unbounded expansion.
+
+### Dataflow and context resolution
+- [x] ~~Implement `dataflow.mapping` evaluation~~ — mapping values are injected into `resolvedInputs.m_StringValues` in `DataflowResolver`. Fixed parser to strip surrounding JSON quotes from string values so they are stored clean.
+- [x] ~~Implement **context-based input resolution**~~ — full 3-step resolution chain in `DataflowResolver`: (1) dataflow edges, (2) `workflowRun.m_Context` lookup, (3) input-level `"default"` fallback. Task outputs auto-publish to context as `taskId.outputName` keys. `POST /api/workflows/<id>/run` accepts optional `{"context": {...}}` body to seed initial values. `TaskIOField.m_Default` parsed from JCWF `"default"` field.
+
+### Workflow housekeeping — "Clean" command
+- [x] ~~Implement a **"Clean" command**~~ — `DELETE /api/workflows/<id>/clean` endpoint + `WorkflowRuntimeManager::CleanWorkflow()` + "Clean" button in editor toolbar with confirmation dialog. Deletes queue task folders, declared `file_outputs`, and empty working directories.
+
+### Reliability features
+- [x] ~~Implement **retries/backoff** from `RetryPolicy`~~ — `TryScheduleRetry` in `workflowRuntimeManager.cpp`: linear backoff (`m_BackoffMs * attempt`), `m_RetryAfterTime` respected by dispatch loop, deadlock detector accounts for retry-pending tasks.
+- [x] ~~Enforce `timeout_ms` for **non-ai_call** tasks (`python` / `shell` / `internal`) at runtime~~ — inactivity watchdog: `TaskWatchdog` atomic struct, shell executor uses `fork()/exec()/poll()` with stdout as implicit heartbeat + process group kill on timeout; REST `POST /api/task/<id>/heartbeat` for explicit heartbeats; python/internal get post-execution inactivity check. Spec §3.3.3 updated, bookSummaryPipeline demo added.
+
+### Sub-workflows and JCWF container format
+- [x] ~~Implement **sub-workflow task type** (`sub_workflow`)~~ — `SubWorkflowTaskExecutor` enqueues child `WorkflowRun`, returns `WaitingExternal`. `PropagateSubWorkflowCompletions()` + `CancelChildSubWorkflowRuns()` in runtime manager. DFS cycle detection + depth limit (max 10) in validator. `workflow_file` field on `TaskDef`, parsed in `workflowJsonParser.cpp`.
+- [x] ~~Implement **JCWF zip container format**~~ — `.jcwf` is now a zip archive: `global.json` (metadata) + canvas `.json` files + sub-workflow folders. `JcwfContainer` utility wraps miniz (vendored static lib). `ParseGlobalJson()` / `ParseCanvasJson()` split in parser. Registry `LoadContainer()` extracts, discovers sub-workflow tree recursively, registers all levels. Extract-before-execution with staleness check. CRUD endpoints updated to create/update/delete zip containers. Assistant tools (`jcwf_read/validate/generate/fix_task`) updated for zip format.
+
+### Error branching / controlflow
+- [x] ~~Implement **error branching** with Branch nodes and `expose_error_signal`~~ — `control_nodes` array + `controlflow` edges parsed in `workflowJsonParser.cpp`, validated in `workflowValidator.cpp` (DAG constraint includes controlflow edges). Runtime: `FireBranchIfReady` in `workflowRuntimeManager.cpp` activates selected path and skips unselected path. Re-activation of previously-skipped tasks handled (Skipped→Pending reset). Rule A: handled failures don't fail the run. Verified with `exampleMakefile5`: ai_call generates code with deliberate error → shell fails → branch_1 error path → ai_call_fix → shell_retry succeeds → branch_2 → shell_2 runs hello.
+
+---
+
+## Executor completeness
+
+- [x] ~~Implement JCWF I/O semantics for `PythonTaskExecutor`~~ — already implemented: resolved inputs passed as Python **kwargs** via `PythonEngine::ExecuteWorkflowTask`; return `dict` collected into `TaskInstanceState.m_OutputValues`; `file_inputs`/`file_outputs` injected as positional keys (`input[0]`, etc.); `BuildOutputSlotMap` fills missing output slots. Verified with `bookSummaryPipeline` (`extractChapters.py`, `combineSummaries.py`).
+- [x] ~~Implement `InternalTaskExecutor`~~ — has working implementation in `internalTaskExecutor.cpp`.
+
+---
+
+## Multi-tasking / concurrency
+
+- [x] ~~**Decouple AI inflight throttle from thread pool size**~~ — new `"max inflight ai calls"` config field (default 100, range [1,1000]). SessionManager throttles against this value instead of `MaxThreads * 1.5`. Aligns with `CURLMOPT_MAX_CONCURRENT_STREAMS = 100` in `CurlMultiDispatcher`.
+- [x] ~~**Python Engine parallelization**~~ — `PythonEnginePool` manages N sub-interpreters via `Py_NewInterpreterFromConfig()` with shared GIL. Load-balanced dispatch to engine with smallest queue depth. Hooks route to engine[0] only. Configurable via `"python engines"` in config.json (default 4). Verified end-to-end with 60 parallel Python tasks.
+- [x] ~~**Per-item aggregation race fix**~~ — `AggregatePerItemResults()` now runs both before AND after the worker task harvest phase. Fixes false deadlock detection when per_item children complete within the same tick they were dispatched (common with fast Python tasks).
+- [x] ~~**Adaptive rate limit throttling**~~ — `CURLOPT_HEADERFUNCTION` captures `x-ratelimit-remaining-requests`, `x-ratelimit-remaining-tokens`, `x-ratelimit-reset-requests` headers per host. On HTTP 429: auto-retry with exponential backoff (1s, 2s, 4s, 8s, 16s) up to 5 attempts, preferring `x-ratelimit-reset-requests` delay when available. Per-host `HostRateLimitState` tracked in `CurlMultiDispatcher`. Retry queue with delayed re-submission on I/O thread.
+- [x] ~~**Configurable web server port**~~ — `"port"` field in config.json (default 0 = auto: 8080 HTTP, 8443 HTTPS). Already implemented in config parser + webServer.cpp.
+
+---
+
+## Refactor cleanup / safety
+
+- [x] ~~**Unify template substitution syntax: `${...}` → `{{...}}`**~~ — created shared `templateEngine.h/.cpp` with `ExpandTemplate()` supporting strict (shell) and lenient (ai_call) modes. Migrated `ShellTaskExecutor`, `AiCallTaskExecutor`, and `DataflowResolver` to use the shared engine. Updated all 5 example JCWF files and 3 documentation files. No `${...}` template references remain in the codebase.
+
+- [x] ~~**Port `web/index.html` to React**~~ — replaced legacy `web/index.html` with React 18 + Vite + TypeScript dashboard (`dashboard/ui/`). Live WebSocket monitoring, workflow run controls, session manager table, status LEDs. Old `web/` folder deleted.
+- [x] ~~Remove old synchronous orchestrator fallback~~ — removed `WorkflowOrchestrator` usage from `jarvisAgent.cpp` and `webServer.cpp`. Trigger callback and API now require `WorkflowRuntimeManager`; null case logs error / returns 500.
+
+---
+
+## AI Keys & multi-provider support
+
+- [x] ~~**Google AI integration**~~ — Google Gemini works via OpenAI-compatible endpoint (`/v1beta/openai/chat/completions`) with API1 parser, Bearer auth, model `gemini-2.5-flash`. No new parser needed.
+- [x] ~~**Free-text key names**~~ — AI Keys "Name" field changed from interface-constrained dropdown to free-text input (e.g. "openai", "google", "anthropic").
+- [x] ~~**Eye icon on API Key input**~~ — password visibility toggle added to AI Keys page, matching `MasterPasswordDialog`.
+- [x] ~~**Master password prompt on Save Encrypted**~~ — `ProvidersSettingsView` shows password modal when no cached password; stores in page-level state (cleared on navigate away). App-level password passed from startup unlock dialog.
+- [x] ~~**Password validation before save**~~ — backend decrypts existing `keys.json.enc` with provided password before overwriting; wrong password returns HTTP 403 `"wrong_password"`. Frontend shows error in modal, stays open for retry.
+- [x] ~~**`key_name` persistence in config.json**~~ — each AI interface can reference a named key; saved to config.json, omitted when empty.
+- [x] ~~**Key dropdown default fix**~~ — AI Manager dropdown shows "— not set —" instead of falsely defaulting to first key alphabetically.
+
+---
+
+## Bugs
+
+- [x] ~~**`POST /api/workflows/{id}/run` accepts non-existent workflow IDs**~~ — fixed: handler now validates workflow ID against registry and returns HTTP 404 immediately.
+
+---
+
+## Bug: JA hangs on shutdown when cleaning auto-triggered workflows
+
+**Repro:** Start JA with all 9 test JCWF files in `workflows/`. Before the auto-triggered
+workflows finish, request clean via the Python test runner (`run_tests.py`). JA times out
+on all JCWFs and hangs on shutdown (never exits cleanly).
+
+**Suspected cause:** The clean endpoint returns 409 when a workflow is running, but the
+combination of multiple concurrent auto-triggered runs timing out may deadlock the
+shutdown sequence (two-phase parallel subsystem shutdown + 6s watchdog safety net).
+
+**Root causes found (3) and fixed:**
+
+1. **WaitingExternal tasks never timed out in the runtime manager** — the `AiRequestPool` had its
+   own timeout, but the deadlock detector gave a free pass to any run with `WaitingExternal` tasks,
+   masking the real deadlock.
+   - **Fix:** `TimeoutWaitingExternalTasks()` runs every tick before the deadlock detector.
+     Uses per-task `timeout_ms` (or 5 min default). Stamps `m_WaitingExternalSince` on transition.
+
+2. **Failed tasks didn't propagate to downstream dependents** — `IsTaskReady()` only passes on
+   `Succeeded`/`Skipped`, so when an upstream task failed, all downstream tasks stayed `Pending`
+   forever. If another branch still had a `WaitingExternal` task, the deadlock detector wouldn't fire.
+   - **Fix:** `SkipDownstreamOfFailed()` does a BFS from the failed task and immediately marks all
+     transitive dependents as `Skipped`. Called at all three failure points (task future threw,
+     task execution failed, AI completion failed) plus from `TimeoutWaitingExternalTasks()`.
+
+3. **Shutdown didn't clean up WaitingExternal tasks** — `OnUpdate()` stops running after
+   `m_IsFinished = true`, so `m_CancelRequested` (set by `SignalStop()`) was never processed by
+   `TickActiveRun()`. Orphaned `WaitingExternal` tasks could block `AiRequestPool::Shutdown()`.
+   - **Fix:** `WaitStop()` now iterates all active runs, fails any remaining `WaitingExternal` tasks,
+     and calls `requestPool->Forget()` on their AI request handles before clearing.
+
+**Remaining investigation:**
+- [x] ~~Check if `CleanWorkflow` or the 409 rejection path leaves the runtime manager in a bad state~~
+  — Verified 2026-03-12: the 409 path is read-only (mutex-guarded scan of `m_ActiveRuns`), no state mutation.
+- [x] ~~Reproduce with logging and confirm the hang is fixed~~
+  — Verified 2026-03-12: started JA with 9 JCWFs, pressed `q` ~1s after start while all workflows
+  were running. Shutdown completed in ~1.56s total (68ms after phase-1 signal). WaitStop() failed
+  76 WaitingExternal tasks across 5 runs, curl abort callback killed all in-flight requests.
+  No watchdog timer needed, no deadlock, clean exit.
+
+---
+
+## Run control — pause / resume / stop
+
+Backend support for fine-grained run control. UI buttons and `doc/api-endpoints.md`
+documentation are already in place (buttons disabled until backend is ready).
+
+- [x] ~~Add `RunControlState` enum (`Running`, `Paused`, `Stopping`) to `WorkflowRun` in `workflowTypes.h`~~ — added `Paused` and `Stopping` to `WorkflowRunState` enum
+- [x] ~~Implement `PauseRun(runId)` in `workflowRuntimeManager.cpp`~~ — `RequestPauseRun` sets `m_PauseRequested`, dispatch loop returns early
+- [x] ~~Implement `ResumeRun(runId)`~~ — `RequestResumeRun` clears `m_PauseRequested`, sets state back to `Running`
+- [x] ~~Implement `StopRun(runId)`~~ — `RequestStopRun` sets `m_StopRequested`, in-flight tasks finish, remaining skipped
+- [x] ~~Add three route handlers in `webServer.cpp`~~ — `HandleWorkflowRunPausePost`, `HandleWorkflowRunResumePost`, `HandleWorkflowRunStopPost`
+- [x] ~~Add `pauseRun()`, `resumeRun()`, `stopRun()` API calls in `workflow-editor/ui/src/api/workflows.ts`~~
+- [x] ~~Remove `disabled` from Pause/Resume buttons in `WorkflowEditorView.tsx`~~ — added Stop/Pause/Resume/Cancel button row
+
+---
+
+## E2E testing — padded indices
+
+~~Staged but uncommitted changes to `FilterEngine::AddPaddedIndices()`. Needs live
+verification before committing.~~
+
+- [x] ~~Build project (`make config=release verbose=1 && make config=debug verbose=1`)~~
+- [x] ~~Run `aiCarMaintenancePipeline` workflow — verify per_item CSV filter + padded index filenames~~
+- [x] ~~Run `portfolioDividendAnalysis` workflow — verify per_item CSV filter + padded index filenames~~
+- [x] ~~Commit staged changes after successful E2E~~
+
+Verified 2026-03-11: `portfolioDividendAnalysis` output files use 3-digit zero-padded
+row numbers (e.g. `PROB_BNDX_002.txt`, `PROB_BAC_007.txt`, `PROB_BA_053.txt`).
+
+---
+
+## Workflow editor — recent features (Feb 2026)
+
+- [x] ~~**Script path validation**~~ — `GET /api/scripts/check?path=...` endpoint validates that shell task command scripts exist and are executable. Frontend caches results and shows inline warnings on shell task nodes. Lexical path normalization rejects `..` traversal.
+- [x] ~~**Shell task stdout/stderr capture**~~ — `ExecuteCommandWithWatchdog` uses 2 separate pipes; `ExecuteCommandWithCapturedOutput` redirects stderr to temp file. Full output written to `stdout.txt`/`stderr.txt` in task working directory. First 1024 chars stored in `TaskInstanceState` and exposed via REST API + WebSocket snapshot. Frontend shows hover tooltip (stderr in red, stdout below) and side panel display.
+
+---
+
+## Workflow editor testing (open)
+
+The manual test plan in `workflow-editor/workflow-editor-test.md` covers 3 test workflows:
+1. **exampleMakefile** — ai_call → shell (make)
+2. **stockAnalyzerTop6** — filter + per_item fan-out → summary
+3. **techTermGlossary** — 3-task ai_call chain
+
+These should be re-run periodically after editor changes to catch regressions.
+Additional test scenarios to cover:
+- [x] ~~Shell task with stderr output (verify red text in tooltip + side panel)~~ — Verified 2026-03-12: `exampleMakefile4` with deliberate syntax error. Failed shell task shows red node glow, red "F" badge, hover tooltip with compiler errors in red. Downstream "run hello" correctly skipped.
+- [x] ~~Shell task with >1024 chars output (verify truncation)~~ — Verified 2026-03-12: `truncationTest` workflow with 50-line stdout/stderr. Stdout cuts at exactly byte 1024 (line 12 "jumps ov"). Also fixed tooltip UX: `pointer-events: auto` + padding bridge so popup is scrollable and stays visible on mouse-over.
+- [x] ~~Watchdog timeout path (task with low `timeout_ms` that hangs)~~ — Verified 2026-03-12: `watchdogTimeoutTest` workflow with `sleep 3600` script and `timeout_ms: 5000`. Task killed after exactly 5s, run analyzer shows "Task timed out (inactivity > 5000ms)". Stdout captured: "Starting... will hang now."
+- [x] ~~Pause / Resume / Stop controls during a multi-task run~~ — Verified 2026-03-12: `pauseResumeStopTest` workflow (3×10s chained shell tasks). Pause shows ❚❚ badges + PAUSED banner + ▶ Resume button. Stop during step 1 → "■ Run stopped", steps 2&3 skipped. Also fixed: stale "R" badge (fetch final state on run exit), `WorkflowRunState::Stopped` terminal state, normal completion path preserving Stopping state, auto-trigger prevention via explicit triggers array.
+- [x] ~~Clean command after a run (verify queue folders are deleted)~~ — Verified 2026-03-12: `DELETE /api/workflows/exampleMakefile4/clean` returned `{"ok": true}`, `queue/exampleMakefile4/` and all task subdirectories fully removed.
+
+---
+
+## Bug: exampleMakefile4 dependency code uses stale inputs
+
+**Repro:** Run `exampleMakefile4` with queue outputs still present from a previous run.
+The shell task (`run command make`) materializes the old `PROB_hello.output.txt` before
+the AI task for the current run has finished writing its new output. As a result, `make`
+compiles the stale `hello.cpp` instead of the freshly generated one.
+
+**Timeline observed (2026-02-28):**
+- 10:56:43 — workflow run started, `ai_call` + `ai_call_2` dispatched
+- 10:56:45 — shell task copied stale `PROB_hello.output.txt` → `hello.cpp` (old content)
+- 10:56:45 — `make` compiled successfully (stale code, no syntax error)
+- 10:56:46 — AI wrote new `PROB_hello.output.txt` with deliberate syntax error (too late)
+
+**Root cause found:** The path-based AI completion routing in `jarvisAgent.cpp` `OnEvent()`
+(line ~456) had **no stale file guard**. When an ai_call task registered its expected output
+path in `m_PendingByOutputPath`, the existing stale `PROB_hello.output.txt` from a prior
+run could trigger a file event that `OnOutputFileCreated` matched — reading the **old
+content** and marking the ai_call as `Succeeded` before the real AI response arrived.
+The PROB-based completion path (for `PROB_<id>_<ts>` naming) already had a stale guard
+(`fileTimestamp < startupTimestamp`), but the path-based path did not.
+
+**Fix (applied):** Added `last_write_time` < `m_StartupTime` check to the path-based
+completion block in `jarvisAgent.cpp`, matching the pattern already used by
+`suppressTriggerEvent`. Stale `.output` files are now logged and ignored.
+
+---
+
+## Bug: PROV file regression after API3 integration ✅
+
+**Repro:** `vehicleTroubleshootingGuide` workflow configured for OpenAI generates `PROV_provider.json`
+with Google's API URL after the Gemini API3 integration. All AI tasks fail with HTTP 404.
+
+**Root causes found (3) and fixed (2026-03-12):**
+
+1. **PROV URL/api_type resolved from stale ProviderConfig** — `aiCallTaskExecutor.cpp` used
+   `KeyManager::GetProvider()` which stores a single endpoint per provider name, ambiguous when
+   multiple interfaces share the same key. Fixed: look up config.json interface by **name** (the
+   unique identifier). JCWF `provider` field now uses interface names (e.g.
+   `"api.openai.com/gpt-4.1-mini/API1"`). PROV file stores `key_name` as `"provider"` for
+   SessionManager API key resolution.
+
+2. **ReplyParser type mismatch** — `sessionManager.cpp` used `Core::g_Core->GetInterfaceType()`
+   (global default API2) instead of the per-session `m_ApiType` (API1 from PROV file). Fixed: use
+   `m_ApiType` to select the correct parser.
+
+3. **Prerequisite check blocked auto-triggers** — `CheckAiProviderPrerequisites` in
+   `workflowRuntimeManager.cpp` called `keyManager.GetProvider("api.openai.com/gpt-4.1-mini/API1")`
+   which doesn't exist as a key name. Fixed: resolve interface name → `key_name` before KeyManager
+   lookup. Falls back to treating `providerName` as a key name for legacy JCWFs.
+
+**Files changed:** `aiCallTaskExecutor.cpp`, `sessionManager.cpp`, `workflowRuntimeManager.cpp`,
+5 JCWFs in `example/workflows/`.
+
+**Verified:** All 7 workflows succeeded (dashboard: 7 succeeded, 0 failed), including full
+PDF generation pipeline for `vehicleTroubleshootingGuide`.
+
+---
+
+## Shutdown hang — RESOLVED (2026-03-12)
+
+**Root cause:** `DrainPendingBroadcasts()` was only called from the WebSocket `onmessage` handler
+(triggered by browser pings), never from `JarvisAgent::OnUpdate()`. The broadcast queue grew
+unbounded — **33,152 peak messages in 4 minutes** of normal operation. At shutdown, Crow's I/O loop
+had to process/discard thousands of pending async writes, causing the ~5s delay that triggered the
+watchdog.
+
+**Fix:** Added `m_WebServer->DrainPendingBroadcasts()` to `JarvisAgent::OnUpdate()` (`jarvisAgent.cpp`).
+Queue now stays at 0, peak limited to ~162 (startup burst only). Confirmed with 2.5-hour soak test —
+zero queue growth, shutdown is instant.
+
+**Diagnostics retained:**
+- [x] Raw `stderr` diagnostic before/after `app->OnShutdown()` in `engine.cpp`
+- [x] Raw `stderr` diagnostic at every step inside `JarvisAgent::OnShutdown()` in `jarvisAgent.cpp`
+- [x] WebSocket accumulation stats (`totalConnects`, `totalDisconnects`, `peakClients`,
+  `peakPendingBroadcasts`) in `webServer.h`, logged at shutdown + connect/disconnect
+- [x] WebSocket stats exposed via `GET /api/status` for live monitoring
+- [x] WebSocket forced close + `m_Server.stop()` + thread join logging in `webServer.cpp`
+
+---
+
+## ~~Bug: WebSocket log line buffer grows unbounded when no client is connected~~ ✅
+
+~~`EnqueueLogLine()` in `webServer.cpp` pushes every log line into `m_PendingLogLines`
+with no size cap. When no WebSocket client is connected, log lines accumulate in memory
+indefinitely.~~
+
+**Fix (applied):** Two-layer defense in `EnqueueLogLine()`:
+1. `m_ClientCount` atomic (lock-free mirror of `m_Clients.size()`, updated in `onopen`/`onclose`) — skip buffering entirely when no WebSocket client is connected.
+2. `kMaxPendingLogLines = 500` cap — if a client is connected but the drain lags, oldest lines are evicted.
+
+Related: the prior shutdown hang (see "Shutdown hang — RESOLVED" above) was caused by
+`m_PendingBroadcasts` growing unbounded — same pattern, different buffer.
+
+---
+
+## JCWF generation pipeline (AI → workflow)
+
+- [x] ~~**`AiJcwfService` multi-stage pipeline**~~ — decompose → generate JCWF (batched fan-out) → generate scripts → review → validate → fix. Supports both Python and **shell (bash)** script generation. Implemented in `aiJcwfService.cpp`. Each stage uses queue folder artifacts (STNG/TASK/CNTX/PROB files).
+- [x] ~~**Shell script generation**~~ — AI generates bash scripts with POSIX awk rules (prohibition list: no 3-arg `match()`, `nextfile`, `asort()`, `gensub()`, multidimensional arrays). Prompts include positional arg mapping from JCWF `file_inputs`/`file_outputs`, host OS detection (`GetHostOsDescription()`), and `set -euo pipefail` requirement. Separate review stage checks shell-specific correctness.
+- [x] ~~**Fix Script button**~~ — `FixFailedScriptAsync()`: reads failed script + stderr from disk, sends to AI for fix, broadcasts result via WebSocket (`ai-fix-script-progress`/`ai-fix-script-result`). Frontend shows fix in `ScriptReviewPanel` for accept/reject. WebSocket handler: `ai-fix-failed-script` in `webServer.cpp`.
+- [x] ~~**Fan-out batched generation**~~ — with `"jcwf batch size": N` in `config.json`, tasks are split into N-sized batches. Batch 0 gets full workflow skeleton; subsequent batches produce task-only fragments. `MergeJcwfFragments()` combines them. Early validate+fix runs before script generation.
+- [x] ~~**Host OS detection in all AI prompts**~~ — `GetHostOsDescription()` reads `/etc/os-release` on Linux, `sw_vers` on macOS, static string on Windows. Injected into decompose, generate, script generation, and fix prompts.
+- [x] ~~**`ExtractTaskIdsFromDecomposition` fallback**~~ — AI sometimes returns `{ "task_id": {...} }` without a `"tasks"` wrapper. Added root-level key iteration fallback (skipping known workflow fields) so `PatchTasksIntoJcwf()` no longer silently drops fixes.
+- [x] ~~**Shell executor individual arg injection**~~ — `EnsureDefaultInputOutputArgs` now injects `{{input[0]}}`, `{{input[1]}}`, …, `{{output[0]}}`, … instead of `{{inputs}}`/`{{outputs}}` (which joined all files into one quoted arg). Validator warns on duplicated literal paths in `args` that match `file_inputs`/`file_outputs`.
+- [x] ~~**Validator script content checks**~~ — `ValidateScriptContentOnDisk()` reads first 50 lines of scripts on disk; checks shebang, `@jarvis-script` marker, `@short` metadata, and (shell only) `set -euo pipefail`. Runs for both shell and Python scripts.
+- [x] ~~**Validator file_input path hint**~~ — `lexically_relative()` computes correct relative depth from `working_directory` (was hardcoded single `..`).
+- [x] ~~**`WorkflowFileIndex`**~~ — scans `workflows/` at startup and before generation, indexes files by basename. Provides file inventory to the decompose prompt so the AI knows which input files exist on disk. Used by the validator to suggest path corrections for unreachable `file_inputs`.
+- [x] ~~**Python hot-reload**~~ — `PythonEngine` evicts `sys.modules` entries for `scripts.*` before each import, ensuring AI-generated scripts are picked up immediately without restart.
+- [x] ~~**`context` dict always passed**~~ — `PythonEngine::ExecuteWorkflowTask` always attaches the `context` dict (with `_file_input_0`, `_task_working_directory`, etc.) to kwargs. Previously only attached when the task explicitly declared a `context` input.
+- [x] ~~**Generation prompts use `context` not `_context`**~~ — fixed hardcoded prompt strings in `aiJcwfService.cpp` and `jcwf_generation_guide.md` to match the actual kwarg name passed by the C++ executor.
+- [x] ~~**Validator file_inputs path resolution**~~ — `ValidateFileInputReachability` resolves paths relative to `workflows/` base directory (via `TaskPathResolver::ResolveWorkflowBaseDirectory`), not bare `launchCwd`. Provides `WorkflowFileIndex` basename suggestions in fix hints.
+- [x] ~~**`TaskPathResolver` extraction**~~ — `ResolveWorkflowBaseDirectory()` extracted from `workflowRuntimeManager.cpp` into shared `taskPathResolver.h/.cpp` for use by both the runtime and the validator.
+- [x] ~~**E2E verified**~~ — `cyber2` workflow: OpenSSH log → Python parse → AI threat assessment. `cyber3` workflow: OpenSSH log → **shell** parse → AI threat assessment (includes Fix Script iteration). See `example/workflows/cyber2_e2e.md` and `example/workflows/cyber3_e2e.md`.
+
+---
+
+## Notes / follow-ups (when the above is done)
+- [x] ~~Update docs to match final behavior (JCWF spec + `aiCallArchitecture.md` alignment)~~:
+  - [x] ~~Clarify `doc` field accepted types~~ — verified: root-level uses `ExtractRawJson` (handles string and array), task-level uses `ElementToString` (string only). Both match the spec.
+  - [x] ~~Cron trigger timezone support~~ — implemented C++20 `std::chrono::zoned_time` in `ComputeNextFireTime`, parsed `params.timezone` in `WorkflowTriggerBinder`, added trigger config UI in editor.
+  - [x] ~~README.md rewrite~~ — updated project description, added workflow editor screenshot, planned features (Docker, n8n).
+
+---
+
+## AI Assistant (browser-based chat terminal)
+
+- [x] ~~**Phase 1 — Chat terminal skeleton**~~ — `/ws/assistant` WebSocket route, `AssistantController`, `AssistantSession` (JSONL persistence), `ContextAssembler`, xterm.js frontend (`AssistantView.tsx`), slash commands (`/help`, `/status`, `/runs`, `/sessions`, `/new`, `/clear`). Streamed AI responses via `AiRequestPool` queue-file pipeline.
+- [x] ~~**Phase 2 — Tools (L1→L2 bridge)**~~ — `ToolRegistry` with 10 tools: `get_system_status`, `list_workflows`, `run_workflow`, `get_run_status`, `get_task_output`, `list_recent_runs`, `read_file`, `search_files`, `list_files`, `get_log_tail`. `<tool_call>` parsing, tool-use loop (max 5 iterations), tool status/result events to frontend. Security: deny-list for `read_file`, 4 KB output cap, prompt injection fences.
+- [x] ~~**Phase 3 — Memory (L2)**~~ — `MemoryStore` with JSON persistence (`assistant/memory.json`). 4 memory tools: `save_memory`, `recall_memory`, `list_memories`, `delete_memory`. Keyword-based relevance search, auto-injection of relevant memories into context. `/memory` and `/memory clear` slash commands.
+- [x] ~~**Phase 4 — Indexing and summaries (L2)**~~ — `WorkspaceIndexer` scans workspace at startup, persists to `assistant/index/file_index.jsonl`. `get_file_summary` tool generates and caches AI summaries on demand (via `MakeToolAiCall` callback). `get_folder_summary` returns all cached summaries in a directory. Keyword-based summary injection into context. `/index` and `/index rescan` slash commands.
+- [x] ~~**Phase 5 — Multi-step tool loop + approval flow (L3)**~~ — tool-use loop extended to max 10 iterations. Approval flow: tools requiring user consent send `approval_request` to frontend, block background thread on `std::condition_variable` (`PendingApproval` struct, 60s timeout auto-deny). Loop detection: same tool+args called >3× forces final answer. On final iteration, tool descriptions stripped to prevent further calls.
+- [x] ~~**Phase 6 — Mutating tools (L3)**~~ — `run_shell` (execute shell commands via `/bin/sh -c`, 30s timeout, process group kill), `write_file` (atomic write + `.bak` backup, path deny-list for sensitive files), `edit_file` (find-and-replace, must match exactly once, atomic write). All require user approval. Compile/test/fix workflow guidelines in system prompt.
+- [x] ~~**Phase 7 — Response validation (L3)**~~ — `ValidateResponse()` heuristic: keyword overlap check (≥30% of user message keywords must appear in response), file path existence check (paths with `/` and known extensions verified via `fs::exists()`). Suppressed when tool calls were used. Detection of "false action" phrases (e.g. "proceeding to execute") with no tool call — appends warning note.
+- [x] ~~**Phase 8 — JCWF development tools (L3)**~~ — 8 tools: `jcwf_read`, `jcwf_explain`, `jcwf_validate`, `jcwf_read_plan`, `jcwf_write_plan`, `jcwf_generate` (AI-generates JCWF from plan, validates, atomic write with backup), `jcwf_fix_task` (AI-fixes specific failed task), `jcwf_write_script` (validates shebang + `set -euo pipefail` for shell, sets executable). Plan-first development model in system prompt. Total tools: 31.
+- [x] ~~**Phase 9 — Runtime control tools (L3)**~~ — `workflow_pause`, `workflow_resume`, `workflow_stop` (all require approval), `get_dashboard_status` (comprehensive system overview, no approval). System prompt guidelines for checking status before pausing/stopping, confirming intent before stop (irreversible). `/log`, `/runs` slash command enhancements.
+- [x] ~~**Phase 10 — UX polish (L3)**~~ — ghost-text auto-completion (slash commands, workflow IDs, command history), Ctrl+R reverse history search across all sessions. Assistant button greyed out when no AI provider configured.
+- [x] ~~**Testing**~~ — 70-test suite in `test/assistant/test_assistant.py` (28 non-AI, 42 with `--with-ai`). Covers all tools, approval flow (approve/deny paths), loop detection, max iterations, access control, path traversal, hallucinated path warning. See `test/assistant/TEST_PLAN.md`.
+
+**Documentation:** `application/assistant/ai-assistant.md`
+
+---
+
+## Recent fixes (2026-03-23)
+
+- [x] ~~**JCWF assistant provider override**~~ — "JCWF AI Interface" dropdown in Settings modal. Stored as `jcwf_ai_interface` in `config.json`. `AiJcwfService` resolves selected interface → `PROV_provider.json` sidecar. E2E verified with `api.openai.com/gpt-4.1-mini/API2`.
+- [x] ~~**Python task stdout/stderr capture**~~ — inline `_JarvisTee` class in `PythonEngine` tees output to both real-time terminal and `StringIO` buffer. `PythonTaskExecutor` writes `stdout.txt`/`stderr.txt` + stores in `TaskInstanceState`. Verified with "Print Hello World" tooltip.
+- [x] ~~**AI Manager modal styling**~~ — replaced inline transparent/blur styles with `modalOverlay`/`modalContent` CSS classes matching `SettingsModal.tsx`.
+- [x] ~~**Workflow reload auto-trigger bug**~~ — `HandleWorkflowsReloadPost` re-registered auto triggers and fired them on every page navigation. Added `bool fireImmediately` to `AddAutoTrigger`; reload path passes `false`.
+- [x] ~~**PDCurses MAX_UNICODE crash**~~ — `assert(ch < MAX_UNICODE)` in `vt/pdcdisp.c:363` crashed on emoji in AI responses. Replaced with `break` guard so outer loop handles combining chars correctly.
+
+---
+
+## Recent fixes (2026-03-28)
+
+- [x] ~~**`working_directory` omit/empty spec compliance**~~ — `TaskPathResolver::ResolveTaskWorkingDirectoryPath` now falls back to `workflowBaseDirectoryPath` when the resolved path is empty, implementing spec §3.3: "If `working_directory` is omitted, it MUST default to the Workflow Base Directory." Previously caused `ShellTaskExecutor: Missing working directory` for tasks without the field.
+- [x] ~~**Python scripts missing `**kwargs`**~~ — `scripts/printFileInfo.py::get_file_info()` and `scripts/combineEngineTroubleshootingGuide.py::buildEngineTroubleshootingGuide()` crashed with `got an unexpected keyword argument 'context'` after the "context always passed" fix. Added `**kwargs` to both function signatures.
+- [x] ~~**Example JCWF auto-triggers disabled for fresh install**~~ — `aiCarMaintenancePipeline`, `aiZipDemo`, `vehicleTroubleshootingGuide` auto triggers set to `enabled: false`; `make-example` kept enabled (scripts fall back to mock files when g++ absent). `vehicleTroubleshootingGuide` removed from all packaging scripts (DEB, RPM, DMG, Homebrew, Windows ZIP, Flatpak) — fragile chrome dependency not worth shipping.
+- [x] ~~**`jarvisCppDocu` JCWF updated for AI assistant classes**~~ — 6 new tasks added for `application/assistant/` headers (`assistantController`, `assistantMemory`, `assistantSession`, `assistantTools`, `contextAssembler`, `workspaceIndexer`); engine tasks renumbered 44→50 through 67→73; `combineDocumentation` at 74. All 6 new tasks in `depends_on`. Total AI tasks: 73.
+- [x] ~~**Dashboard log analyzer panel background**~~ — `.log-analyze-panel` was nearly transparent (`rgba(255,255,255,0.03)`); changed to solid `#1e1e1e` matching editor modals.
+
+---
+
+## ~~Security audit logging~~ ✅
+
+- [x] ~~Add `security` spdlog logger writing to `log/security.txt` (separate from application log)~~ ✅ `Security` logger in `log.cpp` with rotating file sink (10 MB x 5) + ostream sink (TUI/console)
+- [x] ~~Add `LOG_SECURITY_INFO` / `LOG_SECURITY_WARN` macros (same pattern as `LOG_APP_*` / `LOG_CORE_*`)~~ ✅ in `engine.h`, no-op in `DISTRIBUTION_BUILD`
+- [x] ~~Log at each `CheckAdminAuth` call site: IP, endpoint, outcome (success / missing token / wrong token)~~ ✅
+- [x] ~~Log at rate limit trigger: IP, endpoint, request count~~ ✅
+- [x] ~~Log at webhook handler: IP, workflow ID, outcome (accepted / rejected with reason)~~ ✅
+- [x] ~~Log at shutdown endpoint: IP~~ ✅
+- [x] ~~Log at run control endpoints (cancel/pause/resume/stop): IP, run ID~~ ✅
+- [x] ~~Ensure security log is rotated (spdlog rotating file sink, e.g. 10 MB x 5 files)~~ ✅
+
+## ~~Built-in TLS (HTTPS)~~ ✅
+
+- [x] ~~Add `TlsCert` and `TlsKey` string fields to `EngineConfig` + `configParser.cpp`~~ ✅
+- [x] ~~In `WebServer::Start()`: if both paths are set and files exist, call `m_Server.ssl_file(cert, key)` and bind to port 8443~~ ✅ `CROW_ENABLE_SSL` defined globally in `premake5.lua`
+- [x] ~~If only one is set or files don't exist, log error and refuse to start (don't silently fall back to HTTP)~~ ✅
+- [x] ~~Update `HandleStatusGet` to include `"tls": true/false` so dashboard and tests can detect it~~ ✅
+
+## ~~Token expiration and rotation~~ ✅
+
+- [x] ~~Extend `engine_api_token.txt` format: first line = token, second line = `issued_at=<ISO-8601>`~~ ✅ backward-compatible: legacy files get stamped on load
+- [x] ~~On `GenerateAndPersistApiToken`: write both lines~~ ✅
+- [x] ~~On token load in `RegisterRoutes`: parse `issued_at`, compute age~~ ✅
+- [x] ~~In `CheckAdminAuth`: if token age > max (default 90 days), reject with 403 + `"token_expired"` message~~ ✅ auto-rotates on expiry
+- [x] ~~Log warning at startup if token expires within 7 days~~ ✅
+- [x] ~~On expiry, auto-generate new token and log to stdout~~ ✅
+
+## ~~Failed auth lockout~~ ✅
+
+- [x] ~~Add `m_AuthFailures` map: IP → {count, first_failure_time} (guarded by `m_RateLimitMutex`)~~ ✅ `AuthFailureRecord` struct
+- [x] ~~In `CheckAdminAuth`: on failure, increment count for IP; if count >= 10 within 5 minutes, return `"locked_out"`~~ ✅ lockout checked before rate limiting
+- [x] ~~`MakeAuthErrorResponse`: handle `"locked_out"` → 403 with lockout message and `Retry-After: 900`~~ ✅
+- [x] ~~Auto-clear lockout entries after 15 minutes~~ ✅ piggybacks on rate limit cleanup cycle
+- [x] ~~Log lockout events to security log~~ ✅
+
+## ~~Security headers~~ ✅
+
+- [x] ~~`SetSecurityHeaders` function: CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy~~ ✅
+- [x] ~~Wired into `SetJsonHeaders` (all JSON responses) and `ServeStaticFile` (all static assets)~~ ✅
+- [x] ~~HSTS (`Strict-Transport-Security`) set only when TLS is enabled~~ ✅
+
+## ~~Request body size limit~~ ✅
+
+- [x] ~~`MaxRequestBodyMB` config field (default 10)~~ ✅ in `EngineConfig` + `configParser.cpp`
+- [x] ~~`IsBodyTooLarge` check in webhook and n8n handlers~~ ✅ returns 413 `payload_too_large`
+- [x] ~~Logged to security log~~ ✅
+
+## ~~Gateway-trusted identity headers~~ ✅
+
+- [x] ~~`TrustedProxyHeader` / `TrustedRoleHeader` config fields~~ ✅
+- [x] ~~`Authenticate()` method returns `AuthResult{error, user, role}`~~ ✅ replaces `CheckAdminAuth` internally
+- [x] ~~Gateway mode: trust header identity, extract role, default to `viewer`~~ ✅
+- [x] ~~Bearer token mode: always grants `admin` (backward compatible)~~ ✅
+- [x] ~~Security log includes user identity and auth method (gateway/bearer)~~ ✅
+
+## ~~Role-Based Access Control (RBAC)~~ ✅
+
+- [x] ~~Three roles: admin > operator > viewer~~ ✅ `HasRole()` with `RoleLevel()` hierarchy
+- [x] ~~`admin` only: shutdown, security log~~ ✅
+- [x] ~~`operator`+: run cancel/pause/resume/stop, application log~~ ✅
+- [x] ~~`viewer`+: workflow list, workflow detail, run monitoring~~ ✅
+- [x] ~~`insufficient_role` → 403 error response~~ ✅
+
+## ~~MCP API keys + dashboard sessions + legacy admin-token rip-out~~ ✅
+
+Per the "Adhoc Workflow Submission and MCP plan.md" Phase 1. Auth now has exactly three paths (MCP key / session cookie / gateway header); no legacy fallback.
+
+- [x] ~~`SecureString` RAII buffer (`mlock()` / `explicit_bzero()`) replaces `std::string m_CachedMasterPassword` in `KeyManager`~~ ✅ `engine/keys/secureString.{h,cpp}`
+- [x] ~~`McpKeyManager` encrypted store (`mcp_keys.json.enc`, AES-256-GCM + PBKDF2, same KeyEncryption format as keys.json.enc)~~ ✅ `application/web/mcpKeyManager.{h,cpp}`
+- [x] ~~Enrollment-token provisioning: `POST /api/auth/mcp-keys/enroll` (admin) + `POST /api/auth/mcp-keys/activate` (user, no auth required — enrollment token *is* the auth)~~ ✅
+- [x] ~~Self-renewal: `POST /api/auth/mcp-keys/self-renew` — user-driven, old key enters 24h grace period~~ ✅
+- [x] ~~Key CRUD: `GET /api/auth/mcp-keys`, `PUT`, `DELETE` (admin-only)~~ ✅
+- [x] ~~`WebSessionManager` server-side sessions — 256-bit random id, HttpOnly + SameSite=Strict cookie, 8h sliding timeout~~ ✅ `application/web/webSessionManager.{h,cpp}`
+- [x] ~~`POST /api/auth/login` + `POST /api/auth/logout` routes; also supports gateway-header login~~ ✅
+- [x] ~~`Authenticate()` path ordering: MCP key → session cookie → gateway header → reject (no anonymous admin)~~ ✅
+- [x] ~~WebSocket upgrade auth moved to Crow's `.onaccept` handshake; no in-band `type:"auth"` message~~ ✅
+- [x] ~~Removed `m_AdminToken`, `m_TokenIssuedAt`, `GenerateAndPersistApiToken`, `engine_api_token.txt` handling, `FormatIssuedAt`/`ParseIssuedAt`, `m_AuthenticatedClients`~~ ✅
+- [x] ~~Config: `mcp_keys_file`, `session_timeout_hours` fields~~ ✅
+- [x] ~~Status endpoint: `keys_unlocked`, `mcp_keys_loaded`~~ ✅
+- [x] ~~First-run admin enrollment auto-created and logged to stderr when `mcp_keys.json.enc` is empty~~ ✅
+- [x] ~~Frontend: LoginDialog (MCP-key only), session-aware routing via `whoami`, logout via `/api/auth/logout`, StatusBar shows user + role pill, MCP Keys admin tab with enrollment dialog~~ ✅
+
+## ~~MCP configure-plane tools~~ ✅
+
+- [x] ~~`mcp/src/j9tClient.ts`: `put()`, `delete()`, `getText()`~~ ✅
+- [x] ~~`mcp/src/tools.ts`: `whoami`, `get_run_logs`, `validate_workflow`, `upload_workflow`, `manage_connections`, `manage_keys`, `run_adhoc_workflow`~~ ✅
+
+## ~~Adhoc workflow submission~~ ✅
+
+Per the "Adhoc Workflow Submission and MCP plan.md" Phase 3.
+
+- [x] ~~Config: `max_ai_calls_per_jcwf` (0 = no cap); bumped `max inflight ai calls` default 100→1000, clamp widened to [1, 10000]~~ ✅ `engine/json/configParser.{h,cpp}`, `configChecker.cpp`
+- [x] ~~`AdhocWorkflowManager` — staging, per-user disk quota via `McpKeyManager::RecordDiskUsage`, 60s reaper thread, `meta.json` attribution, restart-safe folder naming `<ts>_<counter>_del-<ts>`~~ ✅ `application/workflow/adhocWorkflowManager.{h,cpp}`
+- [x] ~~Per-run AI call cap enforced in `WorkflowRuntimeManager` dispatch loop (`ActiveRun::m_AiCallsDispatched`)~~ ✅
+- [x] ~~`WorkflowRuntimeManager::SetRunTerminalObserver` hook fires inline `on_completion` cleanup~~ ✅
+- [x] ~~`POST /api/workflows/run-adhoc` REST endpoint — MCP key + adhoc_enabled + role≥operator + quota check + cleanup policy validation~~ ✅
+- [x] ~~Dashboard `LastRunsBar` with rolling last-3 runs + adhoc pill + relative time~~ ✅
+
+## ~~Adhoc — known follow-ups~~ ✅
+
+- [x] ~~Enforce "user's `default_cleanup_policy` is the maximum TTL" ceiling~~ — `HandleAdhocRunPost` compares the submitted policy's rank against the MCP key's `default_cleanup_policy`; longer TTLs rejected with 403 `policy_exceeds_ceiling`.
+- [x] ~~Server-side 2-second minimum visibility for sub-second adhoc runs (plan §6)~~ — `WorkflowRuntimeManager::OnUpdate` holds completed runs in `m_ActiveRuns` until 2 s elapsed since `m_StartedAtSteady`, so fast runs always reach at least one snapshot broadcast.
+- [x] ~~Explicit pre-stage script-existence check (plan §2)~~ — `HandleAdhocRunPost` walks `tasks`, extracts `params.command` (shell) and `params.module` (python), and rejects with 400 `missing_scripts` if any referenced file is absent under `scripts/`.
+
+## UX — sign-in onboarding ✅
+
+- [x] ~~Auto-switch to activation dialog when user pastes an `enroll_` token into sign-in~~ — `AdminLoginDialog` detects the prefix on change, opens `ActivationDialog` with the token prefilled. Zero extra clicks, no "invalid key" error flash.
+
+## ~~Adhoc `ai_call` dispatch — FileWatcher dynamic watch set~~ ✅ (Option A)
+
+Fixed the regression where adhoc `ai_call` tasks hung indefinitely in `waiting_external`. Root cause: the `FileWatcher` only observed the single top-level `queue/` folder from `config.json`, so queue-binding files in `_adhoc/<user>/<run>/queue/<task>/` were invisible — no `SessionManager` was ever created, no HTTP dispatch.
+
+- [x] ~~`FileWatcher::AddPath` / `RemovePath`~~ — thread-safe dynamic watch set. Single watch thread, snapshot roots per tick, prune tracked-file entries under a removed root without firing spurious `FileRemovedEvent`s.
+- [x] ~~`AdhocWorkflowManager` integration~~ — `Stage()` adds the run's `queue/` path; `OnRunCompleted()` (on_completion) and `Reap()` remove the path before `remove_all`; `Init()` rehydrates pre-existing run queues at startup.
+- [x] ~~`JarvisAgent::GetQueueFileWatcher()` getter~~ — `WebServer::SetWorkflowRegistry` threads the pointer into the `AdhocWorkflowManager` constructor.
+- [x] ~~Integration test~~ — `test_auth_mcp.py::test_adhoc_aicall_roundtrip` submits an adhoc ai_call, polls to `succeeded`, asserts `session_managers_total >= 1` and that a `*.output.txt` appears in the run folder. Gated on `--with-ai` so clean installs without a provider still pass. 104/104 tests with the flag.
+- [x] ~~Spec clarification~~ — `file_outputs` on `ai_call` is allowed. Pattern A (`outputs` slot for zero-copy downstream refs) and Pattern B (`file_outputs` → external destination, e.g. for adhoc agents writing to external projects) are both valid. The narrow forbidden case (destination inside own queue folder with a requirement-firing filename) stays warned. `doc/JC_Workflow_Specification.md` §3.3.6.3 + `doc/jcwf_generation_guide.md` updated.
+- [x] ~~Validator warnings~~ — `file_output_outside_working_tree` (Info; portability note, external-project agent use is supported) and `file_output_triggers_extra_ai_query` (Warning; real bug — destination inside own queue folder).
+
+Post-1.0: Option E (`JarvisAgent TODO List.md` §5c) — remove the file-watcher round-trip for runtime-initiated `ai_call` tasks entirely by having `AiCallTaskExecutor` call `AiRequestPool::Submit` directly.
