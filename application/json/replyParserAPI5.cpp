@@ -26,6 +26,7 @@
 #include "engine.h"
 #include "json/replyParserAPI4.h"
 #include "simdjson/simdjson.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -67,7 +68,7 @@ namespace AIAssistant
                 std::string_view sv;
                 if (doc["generation"].get_string().get(sv) == simdjson::SUCCESS)
                 {
-                    m_Generation.assign(sv.data(), sv.size());
+                    m_Generation = SanitizeUtf8(std::string(sv));
                 }
                 if (doc["stop_reason"].get_string().get(sv) == simdjson::SUCCESS)
                 {
@@ -136,7 +137,7 @@ namespace AIAssistant
                         std::string_view sv;
                         if (obj["outputText"].get_string().get(sv) == simdjson::SUCCESS)
                         {
-                            m_OutputText.assign(sv.data(), sv.size());
+                            m_OutputText = SanitizeUtf8(std::string(sv));
                         }
                         if (obj["completionReason"].get_string().get(sv) == simdjson::SUCCESS)
                         {

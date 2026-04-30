@@ -35,7 +35,7 @@ Boundary clarifications (same as cyber-sec plan): `engine/curlWrapper/` whole in
 
 ## 3. Session schedule
 
-Identical to the cyber-sec plan. Each session covers **both** plans for one domain.
+Identical to the cyber-sec plan. Each session covers **both** plans for one domain.  Each **session** = one domain; each **sitting** = one bounded working session that closes at a documented boundary in the cumulative session note (`doc/misc/S<N>-D<N>-session-note.md`).  A session typically spans multiple sittings — see the cyber-sec plan §3 sitting-cadence table for current calibration.
 
 | Session | Domain | Cyber-sec focus | Safety focus |
 |---|---|---|---|
@@ -103,6 +103,8 @@ rejected, a one-paragraph "why".
 ```
 
 If a change can't fit this template, it's too big. Split it.
+
+**Code-comment discipline.** Per-change template entries live in the session note (`doc/misc/S<N>-D<N>-session-note.md`).  Source-code comments must NOT cite the audit, the finding ID, the severity tag, the session number, or any session-tracking artifact.  Audits are change-trace; six months later `// safety §02 [HIGH] Background thread captures...` is dead weight pointing at a doc that's moved or rotted.  Write the *invariant* in plain English where it's non-obvious; otherwise no comment.  Memory: `feedback_no_audit_traces_in_code`.
 
 ---
 
@@ -319,4 +321,4 @@ These are the C++ idioms we use to recover most of Rust's compile-time guarantee
 - **Not 1243 fixes.** Many findings will be skipped, with reasons.
 - **Not a C++ unit-test framework.** j9t's testing pattern is Python-via-REST plus debug endpoints. We add debug endpoints when we need to test pure C++ logic in isolation; we don't pull in gtest.
 - **Not a re-architecture for memory safety.** Where a finding implies a redesign (e.g., move all shared state to message-passing), we either scope to "fix-and-document here" or file a separate plan in `doc/misc/`.
-- **Not a re-audit.** We trust the audit as inventory; we don't re-run it during the hardening pass. After the four sessions, we re-run `jarvisCppSafetyAudit.jcwf` once to verify the next baseline.
+- **Not a re-audit.** We trust the audit as inventory; we don't re-run it during the hardening pass. After all four sessions close (across however many sittings each takes), we re-run `jarvisCppSafetyAudit.jcwf` once to verify the next baseline.

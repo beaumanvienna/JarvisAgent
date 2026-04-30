@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "assistant/assistantController.h"
+#include "assistant/assistantHelpers.h"
 #include "assistant/contextAssembler.h"
 #include "engine.h"
 #include "jarvisAgent.h"
@@ -41,24 +42,8 @@
 // simdjson for incoming message parsing
 #include "simdjson/simdjson.h"
 
-#if defined(_WIN32)
-#define popen _popen
-#define pclose _pclose
-#endif
-
 namespace
 {
-    // On Windows, _popen routes through cmd.exe which cannot run POSIX commands.
-    // Wrap the command in bash (MSYS2 / Git Bash) to match the workflow engine.
-    std::string WrapForBash([[maybe_unused]] std::string const& cmd)
-    {
-#if defined(_WIN32)
-        return "bash -c \"" + cmd + "\"";
-#else
-        return cmd;
-#endif
-    }
-
     namespace fs = std::filesystem;
 
     std::string JsonEscape(std::string const& input)
@@ -145,26 +130,46 @@ namespace AIAssistant
 
     void AssistantController::OnOpen(crow::websocket::connection& conn)
     {
+        size_t total = 0;
         {
             std::lock_guard<std::mutex> lock(m_ClientsMutex);
             m_Clients.insert(&conn);
             m_ClientStates[&conn] = ClientState{};
+            total = m_Clients.size();
         }
-        LOG_APP_INFO("[assistant] Client connected (total: {})", m_Clients.size());
+        LOG_APP_INFO("[assistant] Client connected (total: {})", total);
     }
 
     void AssistantController::OnClose(crow::websocket::connection& conn)
     {
+        size_t remaining = 0;
         {
             std::lock_guard<std::mutex> lock(m_ClientsMutex);
             m_Clients.erase(&conn);
             m_ClientStates.erase(&conn);
+            remaining = m_Clients.size();
         }
-        LOG_APP_INFO("[assistant] Client disconnected (remaining: {})", m_Clients.size());
+        // Fail-close any approvals owned by this connection; otherwise their
+        // background AI loop sits on the 60s timeout, and a future connection
+        // that reuses the same pointer address could match by identity.
+        CancelApprovalsForConnection(&conn);
+        LOG_APP_INFO("[assistant] Client disconnected (remaining: {})", remaining);
     }
 
     void AssistantController::OnMessage(crow::websocket::connection& conn, std::string const& data)
     {
+        // Cap incoming WS frames before allocating a padded simdjson buffer.
+        // 64 KB covers every legitimate user_message + slash-command shape;
+        // anything larger is a DoS attempt or a misbehaving client.
+        constexpr size_t kMaxIncomingFrameBytes = 64 * 1024;
+        if (data.size() > kMaxIncomingFrameBytes)
+        {
+            LOG_SECURITY_WARN("[security] assistant_ws_frame_too_large bytes={}", data.size());
+            QueueMessage(R"({"type":"error","message":"Message too large (max 64 KB)."})");
+            DrainPendingMessages();
+            return;
+        }
+
         try
         {
             simdjson::ondemand::parser parser;
@@ -227,17 +232,19 @@ namespace AIAssistant
                     if (doc["approved"].get_bool().get(val) == simdjson::SUCCESS)
                         approved = val;
                 }
-                HandleApprovalResponse(requestId, approved);
+                HandleApprovalResponse(conn, requestId, approved);
             }
             else if (type == "get_history")
             {
-                int maxEntries = 500;
+                // Clamp before the cast so a negative or oversized value can't
+                // turn into a billion-iteration scan or wrap-around.
+                int64_t maxEntries = 500;
                 {
                     int64_t val;
                     if (doc["maxEntries"].get_int64().get(val) == simdjson::SUCCESS)
-                        maxEntries = static_cast<int>(val);
+                        maxEntries = std::clamp<int64_t>(val, 1, 500);
                 }
-                HandleGetHistory(conn, maxEntries);
+                HandleGetHistory(conn, static_cast<int>(maxEntries));
             }
             else if (type == "completion_request")
             {
@@ -275,7 +282,7 @@ namespace AIAssistant
             return;
 
         // Resolve session — create if empty/missing.
-        AssistantSession* session = nullptr;
+        std::shared_ptr<AssistantSession> session;
         std::string resolvedSessionId = sessionId;
 
         if (sessionId.empty())
@@ -310,21 +317,25 @@ namespace AIAssistant
             std::string cmd = text.substr(1, spacePos == std::string::npos ? std::string::npos : spacePos - 1);
             std::string cmdArgs = spacePos != std::string::npos ? text.substr(spacePos + 1) : "";
 
-            // Record in session history.
-            session->AddUserMessage(text);
+            // Record in session history.  Persistence failure is logged at ERROR by the
+            // session itself; we proceed with the in-memory request regardless so the user
+            // gets a response even if disk is full.  Same pattern at every Add{User,Assistant}
+            // call site below.
+            (void)session->AddUserMessage(text);
 
             HandleCommand(conn, resolvedSessionId, cmd, cmdArgs);
             return;
         }
 
         // Record user message.
-        session->AddUserMessage(text);
+        (void)session->AddUserMessage(text);
 
         // Send "thinking" indicator.
         QueueMessage("{\"type\":\"assistant_thinking\",\"sessionId\":\"" + JsonEscape(resolvedSessionId) + "\"}");
 
-        // Dispatch AI call on background thread.
-        RunAiCallAsync(resolvedSessionId, text);
+        // Dispatch AI call on background thread.  Pin approvals to this
+        // specific client connection — only this conn can approve later.
+        RunAiCallAsync(resolvedSessionId, text, &conn);
     }
 
     void AssistantController::HandleCommand(crow::websocket::connection& /*conn*/, std::string const& sessionId,
@@ -351,7 +362,7 @@ namespace AIAssistant
         }
         else if (command == "new")
         {
-            auto* session = CreateSession();
+            auto session = CreateSession();
             QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonEscape(session->GetSessionId()) + "\"}");
             QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(session->GetSessionId()) +
                          "\",\"text\":\"New session started.\"}");
@@ -389,10 +400,10 @@ namespace AIAssistant
         // Record response in session if we have one.
         if (!sessionId.empty())
         {
-            auto* session = GetSession(sessionId);
+            auto session = GetSession(sessionId);
             if (session)
             {
-                session->AddAssistantMessage(response);
+                (void)session->AddAssistantMessage(response);
             }
         }
 
@@ -405,24 +416,29 @@ namespace AIAssistant
         // Start with sessions persisted to disk.
         auto ids = AssistantSession::ListSessions(GetSessionsDir());
 
-        // Also include in-memory sessions that have not yet written a file
-        // (e.g. newly created sessions with no messages).
+        // Snapshot in-memory session ids + their shared_ptrs in one lock
+        // scope so per-session GetTurnCount() can be called outside the
+        // mutex without re-acquiring it (no lock-order inversion if a future
+        // refactor adds a session-side mutex), and without TOCTOU between an
+        // id appearing in the list and the matching pointer becoming valid.
+        std::unordered_map<std::string, std::shared_ptr<AssistantSession>> snapshot;
         {
             std::lock_guard<std::mutex> lock(m_SessionsMutex);
-            for (auto const& [sid, _] : m_Sessions)
+            snapshot = m_Sessions;
+        }
+        for (auto const& [sid, _] : snapshot)
+        {
+            bool found = false;
+            for (auto const& id : ids)
             {
-                bool found = false;
-                for (auto const& id : ids)
+                if (id == sid)
                 {
-                    if (id == sid)
-                    {
-                        found = true;
-                        break;
-                    }
+                    found = true;
+                    break;
                 }
-                if (!found)
-                    ids.push_back(sid);
             }
+            if (!found)
+                ids.push_back(sid);
         }
 
         // Re-sort newest first (session IDs are timestamp-based).
@@ -433,7 +449,11 @@ namespace AIAssistant
         {
             if (i > 0)
                 json += ",";
-            auto* session = GetSession(ids[i]);
+            std::shared_ptr<AssistantSession> session;
+            if (auto it = snapshot.find(ids[i]); it != snapshot.end())
+                session = it->second;
+            else
+                session = GetSession(ids[i]); // disk-loaded, not in snapshot
             size_t turns = session ? session->GetTurnCount() : 0;
             json += "{\"id\":\"" + JsonEscape(ids[i]) + "\",\"turns\":" + std::to_string(turns) + "}";
         }
@@ -443,7 +463,7 @@ namespace AIAssistant
 
     void AssistantController::HandleResumeSession(crow::websocket::connection& conn, std::string const& sessionId)
     {
-        auto* session = GetSession(sessionId);
+        auto session = GetSession(sessionId);
         if (!session)
         {
             QueueMessage("{\"type\":\"error\",\"message\":\"Session not found: " + JsonEscape(sessionId) + "\"}");
@@ -473,7 +493,7 @@ namespace AIAssistant
 
     void AssistantController::HandleNewSession(crow::websocket::connection& conn)
     {
-        auto* session = CreateSession();
+        auto session = CreateSession();
         {
             std::lock_guard<std::mutex> lock(m_ClientsMutex);
             if (m_ClientStates.count(&conn))
@@ -501,7 +521,7 @@ namespace AIAssistant
             if (static_cast<int>(history.size()) >= maxEntries)
                 break;
 
-            auto* session = GetSession(sid);
+            auto session = GetSession(sid);
             if (!session)
                 continue;
 
@@ -586,9 +606,18 @@ namespace AIAssistant
 
         if ((kind.empty() || kind == "history") && static_cast<int>(candidates.size()) < kMaxCandidates)
         {
-            // Match against recent user messages in the active session.
-            std::lock_guard<std::mutex> lock(m_SessionsMutex);
-            for (auto const& [sid, session] : m_Sessions)
+            // Snapshot session shared_ptrs under m_SessionsMutex, then iterate
+            // outside it.  GetAllTurns() is called without the controller's
+            // mutex held, so any session-side mutex can be acquired without
+            // creating a lock-order inversion.
+            std::vector<std::shared_ptr<AssistantSession>> sessionsSnapshot;
+            {
+                std::lock_guard<std::mutex> lock(m_SessionsMutex);
+                sessionsSnapshot.reserve(m_Sessions.size());
+                for (auto const& [_, session] : m_Sessions)
+                    sessionsSnapshot.push_back(session);
+            }
+            for (auto const& session : sessionsSnapshot)
             {
                 auto turns = session->GetAllTurns();
                 for (auto it = turns.rbegin(); it != turns.rend(); ++it)
@@ -636,7 +665,8 @@ namespace AIAssistant
     // AI call
     // -----------------------------------------------------------------
 
-    void AssistantController::RunAiCallAsync(std::string const& sessionId, std::string const& userMessage)
+    void AssistantController::RunAiCallAsync(std::string const& sessionId, std::string const& userMessage,
+                                              crow::websocket::connection* originConn)
     {
         JoinFinishedThreads();
 
@@ -645,13 +675,15 @@ namespace AIAssistant
 
         std::lock_guard<std::mutex> lock(m_ThreadsMutex);
         m_BackgroundThreads.emplace_back(
-            [this, sid = std::move(sessionIdCopy), msg = std::move(messageCopy)]()
+            [this, sid = std::move(sessionIdCopy), msg = std::move(messageCopy), origin = originConn]()
             {
                 if (m_ShuttingDown.load())
                     return;
 
-                // Get session and recent turns for context.
-                AssistantSession* session = GetSession(sid);
+                // Get session and recent turns for context.  shared_ptr keeps
+                // the session alive for the lifetime of this lambda, even if
+                // the controller's m_Sessions evicts it.
+                std::shared_ptr<AssistantSession> session = GetSession(sid);
                 if (!session)
                 {
                     QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonEscape(sid) +
@@ -672,20 +704,20 @@ namespace AIAssistant
                 std::string const toolDescriptions = m_ToolRegistry.BuildToolDescriptions();
 
                 // Inject relevant memories into the conversation context.
+                // Logs report counts and shapes only — never user content or
+                // memory values, which can carry secrets.
                 std::string memoryContext;
                 {
                     auto relevantMemories = m_MemoryStore.GetRelevant(msg, 5);
-                    LOG_APP_INFO("[assistant] Memory recall for '{}': {} matches (total store: {})", msg.substr(0, 60),
-                                 relevantMemories.size(), m_MemoryStore.Size());
+                    LOG_APP_INFO("[assistant] Memory recall: {} matches (total store: {}, query_len={})",
+                                 relevantMemories.size(), m_MemoryStore.Size(), msg.size());
                     if (!relevantMemories.empty())
                     {
                         memoryContext = "\n\n=== Recalled Memories ===\n";
                         for (auto const& mem : relevantMemories)
-                        {
                             memoryContext += "- [" + mem.key + "]: " + mem.value + "\n";
-                            LOG_APP_INFO("[assistant]   injected memory: [{}] = {}", mem.key, mem.value.substr(0, 80));
-                        }
                         memoryContext += "=== End Memories ===\n";
+                        LOG_APP_INFO("[assistant] Injected {} memories into context", relevantMemories.size());
                     }
                 }
 
@@ -784,7 +816,7 @@ namespace AIAssistant
                     if (!ok)
                     {
                         std::string errorMsg = "AI call failed: " + error;
-                        session->AddAssistantMessage(errorMsg);
+                        (void)session->AddAssistantMessage(errorMsg);
                         QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"message\":\"" +
                                      JsonEscape(errorMsg) + "\"}");
                         return;
@@ -842,7 +874,7 @@ namespace AIAssistant
                                 finalText += validationWarnings;
                         }
 
-                        session->AddAssistantMessage(finalText);
+                        (void)session->AddAssistantMessage(finalText);
                         QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"text\":\"" +
                                      JsonEscape(finalText) + "\"}");
                         return;
@@ -924,7 +956,7 @@ namespace AIAssistant
                             }
                             approvalDesc += ")";
 
-                            bool approved = RequestToolApproval(sid, call, approvalDesc);
+                            bool approved = RequestToolApproval(sid, call, approvalDesc, origin);
                             if (approved)
                             {
                                 result = m_ToolRegistry.Execute(call);
@@ -945,9 +977,12 @@ namespace AIAssistant
                                      ",\"summary\":\"" + JsonEscape(result.output.substr(0, 200)) + "\"}");
 
                         // Build tool results text for next AI iteration.
+                        // Defang any literal tool-call/tool-result markers in
+                        // the captured output so a script that printed them
+                        // doesn't become a parsed tool call on the next turn.
                         toolResultsBlock += "<tool_result name=\"" + call.name + "\"";
                         toolResultsBlock += result.ok ? " status=\"ok\"" : " status=\"error\"";
-                        toolResultsBlock += ">\n" + result.output + "\n</tool_result>\n\n";
+                        toolResultsBlock += ">\n" + ToolRegistry::DefangToolMarkers(result.output) + "\n</tool_result>\n\n";
 
                         LOG_APP_INFO("[assistant] Tool {} → {} ({} bytes)", call.name, result.ok ? "ok" : "error",
                                      result.output.size());
@@ -978,8 +1013,9 @@ namespace AIAssistant
                 }
 
                 // Exhausted max iterations — send whatever we have.
-                session->AddAssistantMessage("Reached maximum tool call iterations (" + std::to_string(MAX_TOOL_ITERATIONS) +
-                                             "). Please try a simpler query.");
+                (void)session->AddAssistantMessage("Reached maximum tool call iterations (" +
+                                                   std::to_string(MAX_TOOL_ITERATIONS) +
+                                                   "). Please try a simpler query.");
                 QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) +
                              "\",\"text\":\"Reached maximum tool call iterations. Please try a simpler query.\"}");
             });
@@ -1398,9 +1434,6 @@ namespace AIAssistant
                 case WorkflowRunState::Stopped:
                     stateStr = "stopped";
                     break;
-                default:
-                    stateStr = "unknown";
-                    break;
             }
             oss << "  " << run.m_RunId << "  " << run.m_WorkflowId << "  [" << stateStr << "]\n";
         }
@@ -1426,31 +1459,78 @@ namespace AIAssistant
             }
         }
 
+        constexpr size_t kMaxResultBytes = 32768;
+        constexpr std::streamsize kReadChunk = 4096;
         namespace fs = std::filesystem;
-        fs::path logPath = "log/log.txt";
-        std::error_code ec;
-        if (!fs::exists(logPath, ec))
-            return "Log file not found: " + logPath.string();
+        fs::path const logPath = "log/log.txt";
 
-        std::string cmd = "tail -" + std::to_string(lines) + " '" + logPath.string() + "' 2>/dev/null";
-        std::string const shellCmd = WrapForBash(cmd);
-        std::array<char, 4096> buffer;
-        std::string result;
-
-        FILE* pipe = popen(shellCmd.c_str(), "r");
-        if (!pipe)
-            return "Failed to read log file.";
-
-        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        std::ifstream ifs(logPath, std::ios::in | std::ios::binary);
+        if (!ifs)
         {
-            result += buffer.data();
-            if (result.size() > 32768)
-                break;
+            LOG_APP_INFO("[assistant] /log open failed for path='{}'", logPath.string());
+            return "Log file not available.";
         }
-        pclose(pipe);
 
-        if (result.empty())
+        ifs.seekg(0, std::ios::end);
+        std::streamoff fileSize = ifs.tellg();
+        if (fileSize <= 0)
             return "Log file is empty.";
+
+        // Walk backwards in chunks counting newlines.  Stop once we have
+        // (lines + 1) newlines (the +1 anchors the start of the Nth line) or
+        // we hit byte 0 of the file.
+        std::streamoff readStart = fileSize;
+        int newlinesSeen = 0;
+        std::vector<char> tailBuf;
+        tailBuf.reserve(static_cast<size_t>(std::min<std::streamoff>(fileSize, kReadChunk * 8)));
+
+        while (readStart > 0 && newlinesSeen <= lines)
+        {
+            std::streamoff const chunkEnd = readStart;
+            std::streamoff const chunkStart = std::max<std::streamoff>(0, readStart - kReadChunk);
+            std::streamoff const chunkLen = chunkEnd - chunkStart;
+
+            ifs.seekg(chunkStart, std::ios::beg);
+            std::vector<char> chunk(static_cast<size_t>(chunkLen));
+            ifs.read(chunk.data(), chunkLen);
+            std::streamsize const got = ifs.gcount();
+            if (got <= 0)
+                break;
+
+            // Prepend chunk bytes to tailBuf (we walked backwards).
+            tailBuf.insert(tailBuf.begin(), chunk.begin(), chunk.begin() + got);
+
+            // Count newlines we just ingested.
+            for (std::streamsize i = got - 1; i >= 0; --i)
+            {
+                if (chunk[static_cast<size_t>(i)] == '\n')
+                {
+                    ++newlinesSeen;
+                    if (newlinesSeen > lines)
+                    {
+                        // Trim tailBuf so it begins right after this newline.
+                        size_t const keepFrom =
+                            tailBuf.size() - (static_cast<size_t>(got) - static_cast<size_t>(i) - 1);
+                        tailBuf.erase(tailBuf.begin(), tailBuf.begin() + keepFrom);
+                        break;
+                    }
+                }
+            }
+
+            readStart = chunkStart;
+            if (tailBuf.size() > kMaxResultBytes)
+            {
+                tailBuf.erase(tailBuf.begin(), tailBuf.begin() + (tailBuf.size() - kMaxResultBytes));
+                break;
+            }
+        }
+
+        if (tailBuf.empty())
+            return "Log file is empty.";
+
+        std::string result(tailBuf.begin(), tailBuf.end());
+        if (result.size() > kMaxResultBytes)
+            result.resize(kMaxResultBytes);
 
         return "Last " + std::to_string(lines) + " lines of log/log.txt:\n\n" + result;
     }
@@ -1560,13 +1640,20 @@ namespace AIAssistant
     // -----------------------------------------------------------------
 
     bool AssistantController::RequestToolApproval(std::string const& sessionId, ToolCall const& call,
-                                                  std::string const& description)
+                                                  std::string const& description,
+                                                  crow::websocket::connection* originConn)
     {
-        int const seq = m_NextApprovalSeq.fetch_add(1);
-        std::string const requestId = "apr_" + std::to_string(seq);
+        std::string const randomPart = RandomHex(16);
+        if (randomPart.empty())
+            return false; // RAND_bytes failure already logged; fail closed.
+        std::string const requestId = "apr_" + randomPart;
 
         auto approval = std::make_shared<PendingApproval>();
         approval->requestId = requestId;
+        approval->originSessionId = sessionId;
+        // originConn is stored as identity only — only ever compared by
+        // pointer equality, never dereferenced.
+        approval->originConn = originConn;
 
         {
             std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
@@ -1592,7 +1679,11 @@ namespace AIAssistant
                      JsonEscape(requestId) + "\",\"tool\":\"" + JsonEscape(call.name) + "\",\"args\":" + argsJson +
                      ",\"description\":\"" + JsonEscape(description) + "\"}");
 
-        LOG_APP_INFO("[assistant] Approval requested: {} — {}", requestId, description);
+        // Log shape only — `description` carries the rendered tool args,
+        // which may include secret values.  The full description still goes
+        // to the dashboard via QueueMessage above; the log line is for
+        // operator triage and stays redacted.
+        LOG_APP_INFO("[assistant] Approval requested: requestId_prefix={} tool={}", requestId.substr(0, 8), call.name);
 
         // Block until the user responds or timeout.
         bool approved = false;
@@ -1606,7 +1697,7 @@ namespace AIAssistant
             }
             else
             {
-                LOG_APP_WARN("[assistant] Approval timed out or shutdown: {}", requestId);
+                LOG_APP_WARN("[assistant] Approval timed out or shutdown: requestId_prefix={}", requestId.substr(0, 8));
                 QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"tool\":\"" +
                              JsonEscape(call.name) + "\",\"ok\":false,\"summary\":\"Approval timed out after " +
                              std::to_string(APPROVAL_TIMEOUT_S) + " seconds.\"}");
@@ -1619,11 +1710,12 @@ namespace AIAssistant
             m_PendingApprovals.erase(requestId);
         }
 
-        LOG_APP_INFO("[assistant] Approval result: {} — {}", requestId, approved ? "approved" : "denied");
+        LOG_APP_INFO("[assistant] Approval result: requestId_prefix={} approved={}", requestId.substr(0, 8), approved);
         return approved;
     }
 
-    void AssistantController::HandleApprovalResponse(std::string const& requestId, bool approved)
+    void AssistantController::HandleApprovalResponse(crow::websocket::connection& conn, std::string const& requestId,
+                                                     bool approved)
     {
         std::shared_ptr<PendingApproval> approval;
         {
@@ -1631,10 +1723,21 @@ namespace AIAssistant
             auto it = m_PendingApprovals.find(requestId);
             if (it == m_PendingApprovals.end())
             {
-                LOG_APP_WARN("[assistant] Approval response for unknown request: {}", requestId);
+                LOG_SECURITY_WARN("[security] assistant_approval_unknown_request");
                 return;
             }
             approval = it->second;
+        }
+
+        // Only the originating client may approve.  &conn is live (we are
+        // inside its WS handler); originConn was either alive at request time
+        // or has since been cancelled by OnClose, so this comparison cannot
+        // dereference a dangling pointer.
+        if (approval->originConn != &conn)
+        {
+            LOG_SECURITY_WARN("[security] assistant_approval_wrong_connection requestId_prefix={}",
+                              requestId.substr(0, 8));
+            return;
         }
 
         {
@@ -1643,7 +1746,35 @@ namespace AIAssistant
             approval->approved = approved;
         }
         approval->cv.notify_one();
-        LOG_APP_INFO("[assistant] Approval response received: {} — {}", requestId, approved ? "approved" : "denied");
+        LOG_APP_INFO("[assistant] Approval response received: requestId_prefix={} approved={}", requestId.substr(0, 8),
+                     approved);
+    }
+
+    void AssistantController::CancelApprovalsForConnection(crow::websocket::connection* conn)
+    {
+        // Snapshot owned approvals under the mutex, notify outside it.
+        // Background threads erase their own entry from m_PendingApprovals
+        // when RequestToolApproval returns; we only flip responded/approved.
+        std::vector<std::shared_ptr<PendingApproval>> owned;
+        {
+            std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
+            for (auto const& [_, approval] : m_PendingApprovals)
+            {
+                if (approval->originConn == conn)
+                    owned.push_back(approval);
+            }
+        }
+        for (auto& approval : owned)
+        {
+            {
+                std::lock_guard<std::mutex> lock(approval->mutex);
+                approval->responded = true;
+                approval->approved = false;
+            }
+            approval->cv.notify_all();
+        }
+        if (!owned.empty())
+            LOG_APP_INFO("[assistant] Cancelled {} pending approval(s) for closed connection", owned.size());
     }
 
     // -----------------------------------------------------------------
@@ -1652,7 +1783,16 @@ namespace AIAssistant
 
     void AssistantController::QueueMessage(std::string const& jsonMessage)
     {
+        // Hard cap: a long-running tool loop can produce many messages without
+        // an incoming WS message arriving to drain the queue.  10k is well
+        // above any real session and below "process OOM".
+        constexpr size_t kMaxPendingMessages = 10000;
         std::lock_guard<std::mutex> lock(m_PendingMutex);
+        if (m_PendingMessages.size() >= kMaxPendingMessages)
+        {
+            LOG_APP_ERROR("[assistant] Pending message queue full (>={}); dropping message", kMaxPendingMessages);
+            return;
+        }
         m_PendingMessages.push_back(jsonMessage);
     }
 
@@ -1685,6 +1825,14 @@ namespace AIAssistant
 
         for (auto* client : clients)
         {
+            // Re-check membership under m_ClientsMutex before each send.
+            // Between the snapshot and here, OnClose may have fired on another
+            // ASIO thread and torn down the connection.
+            {
+                std::lock_guard<std::mutex> lock(m_ClientsMutex);
+                if (m_Clients.find(client) == m_Clients.end())
+                    continue;
+            }
             try
             {
                 client->send_text(batch);
@@ -1700,36 +1848,61 @@ namespace AIAssistant
     // Session management
     // -----------------------------------------------------------------
 
-    AssistantSession* AssistantController::GetSession(std::string const& sessionId)
+    std::shared_ptr<AssistantSession> AssistantController::GetSession(std::string const& sessionId)
     {
+        // sessionId is concatenated into a filesystem path; the strict opaque-ID
+        // allowlist (alphanumerics + `_` + `-`, max 128 chars) is the first gate.
+        if (!IsValidOpaqueId(sessionId))
+        {
+            LOG_SECURITY_WARN("[security] assistant_session_invalid_id length={}", sessionId.size());
+            return nullptr;
+        }
+
         std::lock_guard<std::mutex> lock(m_SessionsMutex);
 
         auto it = m_Sessions.find(sessionId);
         if (it != m_Sessions.end())
-            return it->second.get();
+            return it->second;
 
-        // Try to load from disk.
+        // Verify the resolved path canonicalises under the sessions dir
+        // (defense in depth against symlinks placed inside the sessions
+        // directory itself).
         fs::path const sessionsDir = GetSessionsDir();
         fs::path const filePath = sessionsDir / (sessionId + ".jsonl");
-        if (fs::exists(filePath))
+        std::error_code ec;
+        fs::path const canonRoot = fs::weakly_canonical(sessionsDir, ec);
+        fs::path const canonFile = fs::weakly_canonical(filePath, ec);
+        if (ec)
         {
-            auto session = std::make_unique<AssistantSession>(sessionsDir, sessionId);
-            auto* ptr = session.get();
-            m_Sessions[sessionId] = std::move(session);
-            return ptr;
+            LOG_APP_INFO("[assistant] GetSession path resolution failed: {}", ec.message());
+            return nullptr;
+        }
+        fs::path const rel = canonFile.lexically_relative(canonRoot);
+        std::string const relGeneric = rel.generic_string();
+        bool const escapes = rel.empty() || relGeneric == ".." || relGeneric.rfind("../", 0) == 0;
+        if (escapes)
+        {
+            LOG_SECURITY_WARN("[security] assistant_session_path_escape sid_len={}", sessionId.size());
+            return nullptr;
+        }
+
+        if (fs::exists(filePath, ec))
+        {
+            auto session = std::make_shared<AssistantSession>(sessionsDir, sessionId);
+            m_Sessions[sessionId] = session;
+            return session;
         }
 
         return nullptr;
     }
 
-    AssistantSession* AssistantController::CreateSession()
+    std::shared_ptr<AssistantSession> AssistantController::CreateSession()
     {
         std::lock_guard<std::mutex> lock(m_SessionsMutex);
 
-        auto session = std::make_unique<AssistantSession>(GetSessionsDir());
-        auto* ptr = session.get();
-        m_Sessions[session->GetSessionId()] = std::move(session);
-        return ptr;
+        auto session = std::make_shared<AssistantSession>(GetSessionsDir());
+        m_Sessions[session->GetSessionId()] = session;
+        return session;
     }
 
     std::filesystem::path AssistantController::GetSessionsDir() const { return fs::absolute("assistant/sessions"); }
@@ -1739,13 +1912,16 @@ namespace AIAssistant
         std::ofstream ofs(path, std::ios::out | std::ios::binary);
         if (!ofs)
         {
-            outError = "Failed to open " + path.string();
+            LOG_APP_ERROR("[assistant] WriteFile open failed: path='{}'", path.string());
+            outError = "File write error";
             return false;
         }
         ofs << content;
+        ofs.flush();
         if (!ofs.good())
         {
-            outError = "Write failed for " + path.string();
+            LOG_APP_ERROR("[assistant] WriteFile flush failed: path='{}' bytes={}", path.string(), content.size());
+            outError = "File write error";
             return false;
         }
         return true;
@@ -1761,14 +1937,18 @@ namespace AIAssistant
         if (m_ShuttingDown.exchange(true))
             return;
 
-        // Wake all pending approvals so background threads can finish.
+        // Snapshot approvals under m_ApprovalsMutex, notify outside it.
+        // The wait predicate checks the m_ShuttingDown atomic, so the notify
+        // just unblocks wait_for to let the predicate re-check.
+        std::vector<std::shared_ptr<PendingApproval>> approvals;
         {
             std::lock_guard<std::mutex> lock(m_ApprovalsMutex);
-            for (auto& [id, approval] : m_PendingApprovals)
-            {
-                approval->cv.notify_all();
-            }
+            approvals.reserve(m_PendingApprovals.size());
+            for (auto& [_, approval] : m_PendingApprovals)
+                approvals.push_back(approval);
         }
+        for (auto& approval : approvals)
+            approval->cv.notify_all();
 
         // Force-close assistant WS connections.
         {

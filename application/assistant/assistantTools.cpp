@@ -54,7 +54,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-// MSVC equivalents for popen/pclose (still used by search_files / list_files / get_log_tail).
+// MSVC equivalent for popen/pclose, used only on the search_files
+// Windows-via-bash fallback.  list_files uses std::filesystem directly and
+// get_log_tail no longer exists.  The Windows search_files path single-quote
+// escapes its arguments (PosixSingleQuote); the argv exec port is pending.
 #define popen _popen
 #define pclose _pclose
 #endif
@@ -63,35 +66,243 @@ namespace fs = std::filesystem;
 
 namespace
 {
+#if defined(_WIN32)
     // On Windows, _popen routes through cmd.exe which cannot run POSIX commands.
     // Wrap the command in bash (MSYS2 / Git Bash) to match the workflow engine.
-    std::string WrapForBash([[maybe_unused]] std::string const& cmd)
+    std::string WrapForBash(std::string const& cmd)
     {
-#if defined(_WIN32)
         return "bash -c \"" + cmd + "\"";
-#else
-        return cmd;
-#endif
     }
 
-#if defined(_WIN32)
-    // Single-quote quoting for PowerShell: wrap in single quotes, double inner single quotes.
-    std::string QuoteForPowerShellArg(std::string const& value)
+    // POSIX single-quote escape: every "'" becomes "'\''", whole value wrapped in '...'.
+    // Renders an arbitrary string safe for inclusion in a single-quoted /bin/sh argument.
+    // Used on the Windows-via-bash path where we still build a shell command string;
+    // POSIX paths use argv exec (RunArgvCapture below) and never need this.
+    std::string PosixSingleQuote(std::string const& value)
     {
-        std::string quoted;
-        quoted.reserve(value.size() + 2);
-        quoted.push_back('\'');
+        std::string out;
+        out.reserve(value.size() + 2);
+        out.push_back('\'');
         for (char c : value)
         {
             if (c == '\'')
-                quoted.append("''");
+                out.append("'\\''");
             else
-                quoted.push_back(c);
+                out.push_back(c);
         }
-        quoted.push_back('\'');
-        return quoted;
+        out.push_back('\'');
+        return out;
     }
 #endif
+
+    // Resolve `cwd` against the process's current working directory and verify the
+    // result lies under the project root (the process CWD).  Defends against
+    //   - `..` segments
+    //   - absolute paths to outside-project locations
+    //   - symlinks pointing outside the project root
+    // Returns true on success and writes the resolved canonical path to canonicalOut;
+    // false on any rejection with a human-readable reason in reasonOut.
+    bool IsCwdInsideProjectRoot(fs::path const& cwd, fs::path& canonicalOut, std::string& reasonOut)
+    {
+        std::error_code ec;
+        fs::path const root = fs::weakly_canonical(fs::current_path(ec), ec);
+        if (ec)
+        {
+            reasonOut = "cannot resolve project root: " + ec.message();
+            return false;
+        }
+        fs::path const candidate = fs::weakly_canonical(cwd, ec);
+        if (ec)
+        {
+            reasonOut = "cannot resolve cwd: " + ec.message();
+            return false;
+        }
+        // lexically_relative returns "" when no common base exists (e.g. different drives on Windows),
+        // "." for equal paths, "<sub>" for child paths, and ".."/"../<x>" when candidate is outside root.
+        fs::path const rel = candidate.lexically_relative(root);
+        std::string const relStr = rel.string();
+        if (relStr.empty() || relStr.rfind("..", 0) == 0)
+        {
+            reasonOut = "cwd is outside project root: " + candidate.string();
+            return false;
+        }
+        canonicalOut = candidate;
+        return true;
+    }
+
+#if !defined(_WIN32)
+    // Argv-array exec result.  Captures combined stdout+stderr.
+    struct ArgvExecResult
+    {
+        int exitCode = -1;
+        bool execFailed = false; // exec syscall failed (no such file, perms)
+        bool timedOut = false;
+        std::string output;
+    };
+
+    // POSIX argv-array exec: child does setpgid + chdir + execvp.  No /bin/sh
+    // involvement, no shell metacharacter parsing — argv elements pass
+    // straight to execvp.  Replaces the popen-with-string-composed-command
+    // pattern; every tool that needs to spawn a process funnels through here
+    // for the same fork/exec/poll plumbing.
+    //
+    // Caller responsibilities:
+    //   - validate cwd policy (e.g. inside-project-root) before calling
+    //   - choose argv[0] so execvp's PATH search finds the right binary
+    //   - cap maxOutputBytes appropriately for the tool
+    ArgvExecResult RunArgvCapture(std::vector<std::string> const& argv, fs::path const& cwd,
+                                  int timeoutMs, size_t maxOutputBytes)
+    {
+        ArgvExecResult result;
+        if (argv.empty())
+        {
+            result.execFailed = true;
+            return result;
+        }
+
+        int pipeFds[2];
+        if (pipe(pipeFds) != 0)
+        {
+            result.execFailed = true;
+            return result;
+        }
+
+        pid_t const pid = fork();
+        if (pid < 0)
+        {
+            close(pipeFds[0]);
+            close(pipeFds[1]);
+            result.execFailed = true;
+            return result;
+        }
+
+        if (pid == 0)
+        {
+            // Child: new process group for clean kill, dup pipe ends, chdir, exec.
+            setpgid(0, 0);
+            close(pipeFds[0]);
+            dup2(pipeFds[1], STDOUT_FILENO);
+            dup2(pipeFds[1], STDERR_FILENO);
+            close(pipeFds[1]);
+
+            if (!cwd.empty())
+            {
+                if (chdir(cwd.c_str()) != 0)
+                    _exit(126); // chdir failed — distinct from exec failure (127)
+            }
+
+            std::vector<char*> cargv;
+            cargv.reserve(argv.size() + 1);
+            for (auto const& a : argv)
+                cargv.push_back(const_cast<char*>(a.c_str()));
+            cargv.push_back(nullptr);
+
+            execvp(cargv[0], cargv.data());
+            _exit(127); // exec failed
+        }
+
+        // Parent.
+        close(pipeFds[1]);
+        auto const start = std::chrono::steady_clock::now();
+        struct pollfd pfd
+        {
+            pipeFds[0], POLLIN, 0
+        };
+
+        for (;;)
+        {
+            auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
+            int const remaining = timeoutMs - static_cast<int>(elapsed);
+            if (remaining <= 0)
+            {
+                result.timedOut = true;
+                break;
+            }
+            int const r = poll(&pfd, 1, std::min(remaining, 200));
+            if (r > 0 && (pfd.revents & POLLIN))
+            {
+                char buf[4096];
+                ssize_t const n = read(pipeFds[0], buf, sizeof(buf));
+                if (n <= 0)
+                    break;
+                result.output.append(buf, static_cast<size_t>(n));
+                if (result.output.size() > maxOutputBytes)
+                {
+                    result.output += "\n... [output truncated]";
+                    break;
+                }
+            }
+            else if (r == 0)
+            {
+                int status = 0;
+                pid_t const w = waitpid(pid, &status, WNOHANG);
+                if (w > 0)
+                    break;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        close(pipeFds[0]);
+
+        if (result.timedOut)
+        {
+            kill(-pid, SIGTERM);
+            usleep(100000);
+            kill(-pid, SIGKILL);
+            waitpid(pid, nullptr, 0);
+            return result;
+        }
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        // exit code 127 from execvp = exec failed; 126 from chdir = chdir failed.
+        if (result.exitCode == 127 || result.exitCode == 126)
+            result.execFailed = true;
+        return result;
+    }
+#endif // !_WIN32
+
+    // Minimal RFC 8259 string-content escape — matches the existing JsonEscape pattern
+    // in assistantSession.cpp (and workspaceIndexer.cpp).  Three copies now in this code
+    // base; convergence to a single helper in `engine/json/jsonHelper.h` is tracked as
+    // a follow-up rather than landed inline (would balloon this sitting's diff).  Used
+    // for JSON values that must round-trip as strings — e.g. AI-supplied workflowId
+    // embedded in global.json by ExecJcwfGenerate.
+    std::string JsonEscape(std::string const& input)
+    {
+        std::string out;
+        out.reserve(input.size() + 16);
+        for (char c : input)
+        {
+            switch (c)
+            {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                        out += buf;
+                    }
+                    else
+                    {
+                        out += c;
+                    }
+                    break;
+            }
+        }
+        return out;
+    }
 } // namespace
 
 namespace AIAssistant
@@ -145,10 +356,6 @@ namespace AIAssistant
         m_ToolDefs.push_back({"list_files", "Lists files and directories at a given path.",
                               "Args: path (string, optional, default \".\"), depth (integer, optional, default 2)", false});
         m_ToolFns["list_files"] = [this](auto const& a) { return ExecListFiles(a); };
-
-        // get_log_tail removed from AI tools — use /log [N] slash command instead.
-        // The AI tool was self-defeating: the AI call itself generates log lines,
-        // so the user sees AI-internal noise instead of pre-existing log content.
 
         // --- Memory tools ---
         m_ToolDefs.push_back({"save_memory",
@@ -331,6 +538,37 @@ namespace AIAssistant
     namespace
     {
         bool ParseToolCallJson(std::string const& json, ToolCall& out);
+    }
+
+    std::string ToolRegistry::DefangToolMarkers(std::string const& text)
+    {
+        if (text.empty())
+            return text;
+        struct Replace
+        {
+            char const* from;
+            char const* to;
+        };
+        // U+27E8 = E2 9F A8, U+27E9 = E2 9F A9.
+        static Replace const subs[] = {
+            {"<tool_call>", "\xE2\x9F\xA8tool_call\xE2\x9F\xA9"},
+            {"</tool_call>", "\xE2\x9F\xA8/tool_call\xE2\x9F\xA9"},
+            {"<tool_result>", "\xE2\x9F\xA8tool_result\xE2\x9F\xA9"},
+            {"</tool_result>", "\xE2\x9F\xA8/tool_result\xE2\x9F\xA9"},
+        };
+        std::string out = text;
+        for (auto const& sub : subs)
+        {
+            size_t pos = 0;
+            std::string const fromStr = sub.from;
+            std::string const toStr = sub.to;
+            while ((pos = out.find(fromStr, pos)) != std::string::npos)
+            {
+                out.replace(pos, fromStr.size(), toStr);
+                pos += toStr.size();
+            }
+        }
+        return out;
     }
 
     std::vector<ToolCall> ToolRegistry::ParseToolCalls(std::string const& responseText, std::string& outCleanText)
@@ -586,29 +824,79 @@ namespace AIAssistant
     // Security: deny-list for read_file
     // -----------------------------------------------------------------
 
+    // Deny-list policy for tool-driven file access.  Resolves the input via
+    // fs::weakly_canonical (so symlinks in any existing prefix collapse to
+    // their target) and case-folds filename + extension before comparison.
+    // Anything that resolves outside the project root is denied; backup/temp
+    // extensions (.bak, .tmp) and per-base backup filenames (config.json.bak
+    // etc.) are denied even if the underlying base file is allowed.  Fail
+    // closed on any resolution error.
     bool ToolRegistry::IsPathDenied(std::string const& path)
     {
-        // Normalize the path.
-        fs::path p = fs::path(path).lexically_normal();
-        std::string normalized = p.string();
+        if (path.empty())
+            return true;
 
-        // Block sensitive files.
-        static std::vector<std::string> const denyList = {"config.json", "keys.json", "keys.json.enc", ".env"};
+        std::error_code ec;
+        fs::path const projectRoot = fs::weakly_canonical(fs::current_path(ec), ec);
+        if (ec)
+            return true; // fail closed if we cannot resolve our own cwd
 
-        for (auto const& denied : denyList)
-        {
-            if (normalized == denied || normalized.ends_with("/" + denied))
+        // Resolve `path` to absolute canonical form, following any existing symlink
+        // segments.  weakly_canonical canonicalizes the existing prefix and leaves
+        // a dangling tail intact, so non-existent files still get the symlink-resolved
+        // parent component for confinement checks.
+        fs::path const absInput = fs::path(path).is_absolute() ? fs::path(path) : (projectRoot / path);
+        fs::path const resolved = fs::weakly_canonical(absInput, ec);
+        if (ec)
+            return true; // fail closed
+
+        // 1. Reject anything outside the project root — defends against the symlink
+        //    "safe.txt → /etc/passwd" exfiltration and explicit absolute-path inputs.
+        fs::path const rel = resolved.lexically_relative(projectRoot);
+        std::string const relStr = rel.string();
+        if (relStr.empty() || relStr.rfind("..", 0) == 0)
+            return true;
+
+        // 2. Subtree deny: assistant/ holds the assistant's own memory + index +
+        //    summaries; the AI must not read its own prompt material.  Both POSIX
+        //    and Windows separator forms checked because lexically_relative returns
+        //    the native separator.
+        static char const* const subtreePrefixes[] = {"assistant/", "assistant\\"};
+        for (char const* p : subtreePrefixes)
+            if (relStr.rfind(p, 0) == 0)
                 return true;
-        }
 
-        // Block sensitive extensions.
-        std::string ext = p.extension().string();
-        if (ext == ".pem" || ext == ".key")
-            return true;
+        // Lowercase the filename + extension once for case-insensitive comparisons —
+        // case-insensitive filesystems (Windows, default macOS APFS) would otherwise
+        // let `Config.JSON` slip past a case-sensitive literal compare.
+        auto toLower = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return s;
+        };
+        std::string const fnameLower = toLower(resolved.filename().string());
+        std::string const extLower = toLower(resolved.extension().string());
 
-        // Block reading assistant's own memory (prevents AI from reading its own prompt).
-        if (normalized.starts_with("assistant/"))
-            return true;
+        // 3. Filename-base denies — sensitive files plus their auto-generated .bak / .tmp
+        //    siblings (ExecWriteFile / ExecEditFile create these on every overwrite, and
+        //    they retain prior contents of the named base).
+        static char const* const deniedFilenames[] = {
+            "config.json",   "config.json.bak",   "config.json.tmp",
+            "keys.json",     "keys.json.bak",     "keys.json.tmp",
+            "keys.json.enc", "keys.json.enc.bak", "keys.json.enc.tmp",
+            ".env",          ".env.bak",          ".env.tmp",
+        };
+        for (char const* d : deniedFilenames)
+            if (fnameLower == d)
+                return true;
+
+        // 4. Extension denies — `.bak` / `.tmp` are auto-generated by the write tools and
+        //    may contain prior contents of any file the AI wrote (including ones the
+        //    deny-list missed at write time).  `.pem` / `.key` cover crypto material.
+        static char const* const deniedExts[] = {".pem", ".key", ".bak", ".tmp"};
+        for (char const* e : deniedExts)
+            if (extLower == e)
+                return true;
 
         return false;
     }
@@ -826,7 +1114,7 @@ namespace AIAssistant
             {
                 oss << "    " << taskId << ": " << TaskStateToString(taskState.m_State);
                 if (!taskState.m_LastErrorMessage.empty())
-                    oss << " — " << taskState.m_LastErrorMessage;
+                    oss << " — " << DefangToolMarkers(taskState.m_LastErrorMessage);
                 oss << "\n";
             }
         }
@@ -905,19 +1193,21 @@ namespace AIAssistant
         auto const& ts = stateIt->second;
         oss << "Task: " << taskIt->second << "  State: " << TaskStateToString(ts.m_State) << "\n";
 
+        // Defang structural tokens before reflecting external bytes back into the AI's
+        // context — a script that printed `<tool_call>...</tool_call>` to stdout would
+        // otherwise become a parsed tool call on the next AI turn.  See DefangToolMarkers.
         if (!ts.m_LastErrorMessage.empty())
-            oss << "Error: " << ts.m_LastErrorMessage << "\n";
+            oss << "Error: " << DefangToolMarkers(ts.m_LastErrorMessage) << "\n";
 
-        // Show captured stdout/stderr from the task instance state.
         if (!ts.m_CapturedStdout.empty())
         {
             oss << "\n--- stdout ---\n";
-            oss << TruncateOutput(ts.m_CapturedStdout);
+            oss << DefangToolMarkers(TruncateOutput(ts.m_CapturedStdout));
         }
         if (!ts.m_CapturedStderr.empty())
         {
             oss << "\n--- stderr ---\n";
-            oss << TruncateOutput(ts.m_CapturedStderr);
+            oss << DefangToolMarkers(TruncateOutput(ts.m_CapturedStderr));
         }
 
         return {"get_task_output", true, oss.str()};
@@ -1050,31 +1340,60 @@ namespace AIAssistant
         if (queryIt == args.end() || queryIt->second.empty())
             return {"search_files", false, "Missing required argument: query"};
 
-        // Build rg command. Falls back to grep if rg not available.
-        std::string cmd = "rg --no-heading --line-number --max-count 30 --max-columns 200 --color never";
-
-        // Add glob filter if provided.
+        std::string const& query = queryIt->second;
+        std::string glob;
         if (auto globIt = args.find("glob"); globIt != args.end() && !globIt->second.empty())
+            glob = globIt->second;
+
+#if !defined(_WIN32)
+        // POSIX: argv exec, no shell.  query and glob are passed as discrete
+        // argv elements, never concatenated into a shell command.  Missing rg
+        // returns a clean error rather than falling back to grep with the
+        // same unescaped query.
+        std::vector<std::string> argv = {"rg", "--no-heading",  "--line-number", "--max-count",
+                                         "30", "--max-columns", "200",           "--color",
+                                         "never"};
+        if (!glob.empty())
         {
-            cmd += " --glob '" + globIt->second + "'";
+            argv.emplace_back("--glob");
+            argv.emplace_back(glob);
         }
-
-        // Exclude common noise directories.
-        cmd += " --glob '!node_modules' --glob '!bin' --glob '!bin-int' --glob '!vendor' --glob '!.git'";
-
-        // Add the query (escaped in single quotes).
-        std::string query = queryIt->second;
-        // Simple shell escaping: replace single quotes.
-        for (auto& c : query)
+        for (char const* exclude :
+             {"!node_modules", "!bin", "!bin-int", "!vendor", "!.git"})
         {
-            if (c == '\'')
-                c = '"';
+            argv.emplace_back("--glob");
+            argv.emplace_back(exclude);
         }
-        cmd += " -- '" + query + "' . 2>/dev/null || grep -rn --max-count=30 '" + query +
-               "' --include='*.cpp' --include='*.h' --include='*.ts' --include='*.tsx' --include='*.py' --include='*.md' "
-               "--include='*.json' . 2>/dev/null";
+        argv.emplace_back("--");
+        argv.emplace_back(query);
+        argv.emplace_back(".");
 
-        // Execute via popen (routed through bash on Windows).
+        ArgvExecResult const r = RunArgvCapture(argv, fs::current_path(), 30000, kMaxToolOutputSize);
+        if (r.execFailed)
+        {
+            return {"search_files", false,
+                    "ripgrep (rg) is not installed or not on PATH. Install ripgrep to use search_files."};
+        }
+        if (r.timedOut)
+            return {"search_files", false, "search_files timed out (30s)"};
+        if (r.output.empty())
+            return {"search_files", true, "No matches found for: " + query};
+        return {"search_files", true, TruncateOutput(r.output)};
+#else
+        // Windows: still routes through popen-via-bash (MSYS2/Git Bash).
+        // Pending the argv-exec port, apply full POSIX single-quote escaping
+        // so query and glob can't break out of their quoted positions.
+        std::string cmd = "rg --no-heading --line-number --max-count 30 --max-columns 200 --color never";
+        if (!glob.empty())
+            cmd += " --glob " + PosixSingleQuote(glob);
+        for (char const* exclude :
+             {"!node_modules", "!bin", "!bin-int", "!vendor", "!.git"})
+        {
+            cmd += " --glob ";
+            cmd += PosixSingleQuote(exclude);
+        }
+        cmd += " -- " + PosixSingleQuote(query) + " . 2>/dev/null";
+
         std::string const shellCmd = WrapForBash(cmd);
         std::array<char, 256> buffer;
         std::string result;
@@ -1095,9 +1414,10 @@ namespace AIAssistant
         pclose(pipe);
 
         if (result.empty())
-            return {"search_files", true, "No matches found for: " + queryIt->second};
+            return {"search_files", true, "No matches found for: " + query};
 
         return {"search_files", true, TruncateOutput(result)};
+#endif
     }
 
     // -----------------------------------------------------------------
@@ -1122,81 +1442,82 @@ namespace AIAssistant
             }
         }
 
-        fs::path dirPath = fs::path(path).lexically_normal();
+        // No exec is invoked — std::filesystem walks the tree with no shell
+        // parser anywhere on the path.
+        fs::path const dirPath = fs::path(path).lexically_normal();
         std::error_code ec;
         if (!fs::exists(dirPath, ec) || !fs::is_directory(dirPath, ec))
             return {"list_files", false, "Not a directory: " + path};
 
-        // Use fd or find for listing.
-        std::string cmd = "find '" + dirPath.string() + "' -maxdepth " + std::to_string(maxDepth) +
-                          " -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/bin-int/*'"
-                          " -not -path '*/vendor/*' -not -path '*/bin/*'"
-                          " -printf '%y %p\\n' 2>/dev/null | head -100";
+        // Excluded directory components: must match the leaf name to keep the walk fast (we
+        // disable_recursion_pending() at the boundary instead of filtering each entry's full
+        // path string).  Same set as the prior `find -not -path` flags.
+        static auto const isExcluded = [](std::string const& leaf) {
+            return leaf == "node_modules" || leaf == ".git" || leaf == "bin-int" ||
+                   leaf == "vendor" || leaf == "bin";
+        };
 
-        std::string const shellCmd = WrapForBash(cmd);
-        std::array<char, 256> buffer;
         std::string result;
+        result.reserve(2048);
+        size_t const kMaxLines = 100;
+        size_t lineCount = 0;
 
-        FILE* pipe = popen(shellCmd.c_str(), "r");
-        if (!pipe)
-            return {"list_files", false, "Failed to list directory"};
+        // Include the root entry itself first to match the prior `find` shape (it printed the
+        // start path as the first line).
+        result += "d ";
+        result += dirPath.string();
+        result += '\n';
+        ++lineCount;
 
-        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        try
         {
-            result += buffer.data();
-            if (result.size() > kMaxToolOutputSize)
-                break;
-        }
-        pclose(pipe);
+            fs::recursive_directory_iterator it(
+                dirPath, fs::directory_options::skip_permission_denied, ec);
+            fs::recursive_directory_iterator const end;
+            for (; it != end && !ec; it.increment(ec))
+            {
+                if (lineCount >= kMaxLines || result.size() > kMaxToolOutputSize)
+                    break;
 
-        if (result.empty())
+                fs::directory_entry const& entry = *it;
+                fs::path const& entryPath = entry.path();
+                std::string const leaf = entryPath.filename().string();
+
+                if (entry.is_directory(ec) && isExcluded(leaf))
+                {
+                    it.disable_recursion_pending();
+                    continue;
+                }
+
+                // Depth: 1 = direct children of dirPath; cap at maxDepth (1..5).
+                int const depth = it.depth() + 1;
+                if (depth > maxDepth)
+                {
+                    it.disable_recursion_pending();
+                    continue;
+                }
+
+                char const typeChar = entry.is_directory(ec) ? 'd' : (entry.is_regular_file(ec) ? 'f' : 'l');
+                result += typeChar;
+                result += ' ';
+                result += entryPath.string();
+                result += '\n';
+                ++lineCount;
+            }
+        }
+        catch (std::exception const& e)
+        {
+            // recursive_directory_iterator can throw on non-permission errors even with the
+            // skip_permission_denied flag.  Treat as partial success rather than total failure.
+            result += "[walk aborted: ";
+            result += e.what();
+            result += "]\n";
+        }
+
+        if (lineCount <= 1)
             return {"list_files", true, "Directory is empty: " + path};
 
         return {"list_files", true, TruncateOutput(result)};
-    }
-
-    // -----------------------------------------------------------------
-    // get_log_tail
-    // -----------------------------------------------------------------
-
-    ToolResult ToolRegistry::ExecGetLogTail(std::unordered_map<std::string, std::string> const& args)
-    {
-        int lines = 50;
-        if (auto linesIt = args.find("lines"); linesIt != args.end())
-        {
-            try
-            {
-                lines = std::clamp(std::stoi(linesIt->second), 1, 200);
-            }
-            catch (...)
-            {
-            }
-        }
-
-        fs::path logPath = "log/log.txt";
-        std::error_code ec;
-        if (!fs::exists(logPath, ec))
-            return {"get_log_tail", false, "Log file not found: " + logPath.string()};
-
-        std::string cmd = "tail -" + std::to_string(lines) + " '" + logPath.string() + "' 2>/dev/null";
-
-        std::string const shellCmd = WrapForBash(cmd);
-        std::array<char, 256> buffer;
-        std::string result;
-
-        FILE* pipe = popen(shellCmd.c_str(), "r");
-        if (!pipe)
-            return {"get_log_tail", false, "Failed to read log"};
-
-        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
-        {
-            result += buffer.data();
-            if (result.size() > kMaxToolOutputSize)
-                break;
-        }
-        pclose(pipe);
-
-        return {"get_log_tail", true, TruncateOutput(result)};
     }
 
     // -----------------------------------------------------------------
@@ -1331,6 +1652,14 @@ namespace AIAssistant
 
         std::string const& filePath = pathIt->second;
 
+        // Gate the path through IsPathDenied — file content is forwarded to
+        // the external AI provider for summarization, so the same deny rules
+        // that guard ExecReadFile apply here.  Run the deny check before the
+        // cached-summary lookup too, in case the cache was populated before
+        // the rule landed.
+        if (IsPathDenied(filePath))
+            return {"get_file_summary", false, "Access denied: " + filePath + " (sensitive file)"};
+
         // Check for cached summary first.
         std::string cached = m_WorkspaceIndexer->GetFileSummary(filePath);
         if (!cached.empty())
@@ -1342,8 +1671,8 @@ namespace AIAssistant
         if (!m_AiCallFn)
             return {"get_file_summary", false, "AI call function not configured. Cannot generate summary."};
 
-        // Read file content.
-        std::string content = WorkspaceIndexer::ReadFileContent(filePath, 32768);
+        // Read file content (workspace-confined).
+        std::string content = m_WorkspaceIndexer->ReadFileContent(filePath, 32768);
         if (content.empty())
             return {"get_file_summary", false, "Cannot read file: " + filePath};
 
@@ -1441,25 +1770,17 @@ namespace AIAssistant
     // -----------------------------------------------------------------
     // run_shell
     // -----------------------------------------------------------------
-
-    namespace
-    {
-        // Blocklist patterns — reject obviously dangerous commands.
-        bool IsCommandBlocked(std::string const& cmd)
-        {
-            static std::vector<std::string> const patterns = {
-                "rm -rf /",  "rm -rf /*",      "mkfs",      "dd if=", ":(){ :|:& };:", "> /dev/sd",
-                "> /dev/nv", "chmod -R 777 /", "chown -R ", "sudo ",  "su -",          "passwd",
-                "shutdown",  "reboot",         "init ",     "halt",   "poweroff",
-            };
-            for (auto const& p : patterns)
-            {
-                if (cmd.find(p) != std::string::npos)
-                    return true;
-            }
-            return false;
-        }
-    } // namespace
+    //
+    // The user-supplied command is passed to /bin/sh -c — that's the contract
+    // of run_shell.  No blocklist (blocklists fail open; see memory
+    // `feedback_allowlist_not_blocklist`).  The defense is the human-approval
+    // flow at the controller layer.
+    //
+    // The validated cwd is applied via chdir() in the child, never composed
+    // into the shell command string, so a hostile cwd value cannot inject
+    // `&&` chains.  IsCwdInsideProjectRoot is the canonical-path gate that
+    // rejects `..`, absolute escapes, and symlinks pointing outside the
+    // project root.
 
 #if !defined(_WIN32)
     ToolResult ToolRegistry::ExecRunShell(std::unordered_map<std::string, std::string> const& args)
@@ -1470,33 +1791,23 @@ namespace AIAssistant
 
         std::string const& command = cmdIt->second;
 
-        // Security: blocklist check.
-        if (IsCommandBlocked(command))
-            return {"run_shell", false, "Command blocked by security policy: " + command};
-
-        // Determine working directory.
-        std::string cwd = ".";
+        // Determine + validate working directory against project root.
+        std::string cwdArg = ".";
         if (auto cwdIt = args.find("cwd"); cwdIt != args.end() && !cwdIt->second.empty())
-        {
-            cwd = cwdIt->second;
-        }
+            cwdArg = cwdIt->second;
 
-        fs::path cwdPath = fs::path(cwd).lexically_normal();
+        fs::path canonicalCwd;
+        std::string reason;
+        if (!IsCwdInsideProjectRoot(cwdArg, canonicalCwd, reason))
+            return {"run_shell", false, "cwd rejected: " + reason};
+
         std::error_code ec;
-        if (!fs::exists(cwdPath, ec) || !fs::is_directory(cwdPath, ec))
-            return {"run_shell", false, "Working directory does not exist: " + cwd};
+        if (!fs::is_directory(canonicalCwd, ec))
+            return {"run_shell", false, "Working directory does not exist: " + cwdArg};
 
-        // Reject path traversal outside project.
-        std::string cwdNorm = cwdPath.string();
-        if (cwdNorm.find("..") != std::string::npos)
-            return {"run_shell", false, "Path traversal not allowed in cwd"};
-
-        // Build the full command: cd into cwd, then run the command.
-        // Use a subshell to capture both stdout and stderr, with a timeout.
-        std::string fullCmd = "cd '" + cwdPath.string() + "' && " + command;
-        fullCmd += " 2>&1";
-
-        // Create pipe for reading output.
+        // Run command in subshell with the validated cwd applied via chdir(), not via
+        // string composition.  Combined stdout+stderr captured; 30s timeout enforced by
+        // the parent poll loop (kill the whole process group on timeout).
         int pipeFds[2];
         if (pipe(pipeFds) != 0)
             return {"run_shell", false, "Failed to create pipe"};
@@ -1511,24 +1822,26 @@ namespace AIAssistant
 
         if (pid == 0)
         {
-            // Child process — new process group for clean kill.
+            // Child.
             setpgid(0, 0);
-            close(pipeFds[0]); // close read end
+            close(pipeFds[0]);
             dup2(pipeFds[1], STDOUT_FILENO);
             dup2(pipeFds[1], STDERR_FILENO);
             close(pipeFds[1]);
-            execl("/bin/sh", "sh", "-c", fullCmd.c_str(), nullptr);
+
+            if (chdir(canonicalCwd.c_str()) != 0)
+                _exit(126); // chdir failed
+
+            execl("/bin/sh", "sh", "-c", command.c_str(), nullptr);
             _exit(127); // exec failed
         }
 
-        // Parent process.
-        close(pipeFds[1]); // close write end
+        // Parent.
+        close(pipeFds[1]);
 
-        // Read output with a 30-second timeout using poll.
         static constexpr int kTimeoutMs = 30000;
         std::string output;
         output.reserve(1024);
-
         auto startTime = std::chrono::steady_clock::now();
         bool timedOut = false;
 
@@ -1553,10 +1866,8 @@ namespace AIAssistant
                 char buf[4096];
                 ssize_t n = read(pipeFds[0], buf, sizeof(buf));
                 if (n <= 0)
-                    break; // EOF or error
+                    break;
                 output.append(buf, static_cast<size_t>(n));
-
-                // Cap output at 16 KB.
                 if (output.size() > 16384)
                 {
                     output += "\n... [output truncated at 16 KB]";
@@ -1565,15 +1876,14 @@ namespace AIAssistant
             }
             else if (ret == 0)
             {
-                // Timeout on poll — check if child is still alive.
                 int status;
                 pid_t w = waitpid(pid, &status, WNOHANG);
                 if (w > 0)
-                    break; // Child exited
+                    break;
             }
             else
             {
-                break; // poll error
+                break;
             }
         }
 
@@ -1581,31 +1891,38 @@ namespace AIAssistant
 
         if (timedOut)
         {
-            // Kill the entire process group.
             kill(-pid, SIGTERM);
-            usleep(100000); // 100ms grace
+            usleep(100000);
             kill(-pid, SIGKILL);
             waitpid(pid, nullptr, 0);
             output += "\n[Process killed: exceeded 30-second timeout]";
             return {"run_shell", false, TruncateOutput(output, 16384)};
         }
 
-        // Wait for child to finish.
         int status = 0;
         waitpid(pid, &status, 0);
-
         int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
         std::string header = "Exit code: " + std::to_string(exitCode) + "\n";
-        if (!cwd.empty() && cwd != ".")
-            header += "Working directory: " + cwdPath.string() + "\n";
+        if (cwdArg != ".")
+            header += "Working directory: " + canonicalCwd.string() + "\n";
         header += "\n";
 
         return {"run_shell", exitCode == 0, TruncateOutput(header + output, 16384)};
     }
 #else
-    // Windows implementation: route through PowerShell or bash depending on config.
-    // Uses CreateProcess() + a reader thread + WaitForSingleObject() for a 30-second timeout.
+    // Windows implementation: route through PowerShell or bash depending on
+    // config.  CreateProcess() + reader thread + WaitForSingleObject() for a
+    // 30-second timeout.
+    //
+    // Security parity with POSIX:
+    //   - cwd validated via IsCwdInsideProjectRoot (canonical-path comparison)
+    //   - cwd applied via CreateProcessA's lpCurrentDirectory, never composed
+    //     into the shell command (no "Set-Location <cwd>;" / "cd <cwd> &&"
+    //     prefix that could become a CWD-injection vector).
+    //
+    // PowerShell mode still concatenates `command` into a `-Command "..."`
+    // argument; an -EncodedCommand / script-file pattern is the next step.
     ToolResult ToolRegistry::ExecRunShell(std::unordered_map<std::string, std::string> const& args)
     {
         auto cmdIt = args.find("command");
@@ -1614,41 +1931,33 @@ namespace AIAssistant
 
         std::string const& command = cmdIt->second;
 
-        // Security: blocklist check.
-        if (IsCommandBlocked(command))
-            return {"run_shell", false, "Command blocked by security policy: " + command};
-
-        // Determine working directory.
-        std::string cwd = ".";
+        // Determine + validate working directory against project root.
+        std::string cwdArg = ".";
         if (auto cwdIt = args.find("cwd"); cwdIt != args.end() && !cwdIt->second.empty())
-        {
-            cwd = cwdIt->second;
-        }
+            cwdArg = cwdIt->second;
 
-        fs::path cwdPath = fs::path(cwd).lexically_normal();
+        fs::path canonicalCwd;
+        std::string reason;
+        if (!IsCwdInsideProjectRoot(cwdArg, canonicalCwd, reason))
+            return {"run_shell", false, "cwd rejected: " + reason};
+
         std::error_code ec;
-        if (!fs::exists(cwdPath, ec) || !fs::is_directory(cwdPath, ec))
-            return {"run_shell", false, "Working directory does not exist: " + cwd};
-
-        // Reject path traversal outside project.
-        std::string cwdNorm = cwdPath.string();
-        if (cwdNorm.find("..") != std::string::npos)
-            return {"run_shell", false, "Path traversal not allowed in cwd"};
+        if (!fs::is_directory(canonicalCwd, ec))
+            return {"run_shell", false, "Working directory does not exist: " + cwdArg};
 
         std::string shellCmd;
         if (ShellTaskExecutor::GetWindowsShell() == WindowsShell::PowerShell)
         {
-            // PowerShell inline command: Set-Location then run the command, merge stderr.
-            std::string psCommand =
-                "Set-Location " + QuoteForPowerShellArg(cwdPath.string()) + "; " + command + " 2>&1";
+            // PowerShell inline command.  cwd is set via lpCurrentDirectory below; no
+            // Set-Location prefix.  stderr merged into stdout.
+            std::string const psCommand = command + " 2>&1";
             shellCmd = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
                        "-Command \"" + psCommand + "\"";
         }
         else
         {
-            // Bash mode: cd into cwd, then run the command.
-            std::string genericCwd = cwdPath.generic_string();
-            std::string fullCmd = "cd '" + genericCwd + "' && " + command + " 2>&1";
+            // Bash mode.  cwd inherited from CreateProcessA's lpCurrentDirectory; no cd prefix.
+            std::string const fullCmd = command + " 2>&1";
             shellCmd = WrapForBash(fullCmd);
         }
 
@@ -1681,7 +1990,7 @@ namespace AIAssistant
             TRUE,             // bInheritHandles — child inherits the pipe write end.
             CREATE_NO_WINDOW, // Don't flash a console window.
             nullptr,
-            cwdPath.string().c_str(),
+            canonicalCwd.string().c_str(),
             &si,
             &pi);
 
@@ -2616,12 +2925,15 @@ namespace AIAssistant
         // Create the extracted directory structure.
         fs::create_directories(extractedDir, ec);
 
-        // Write global.json (minimal metadata).
+        // Write global.json (minimal metadata).  workflowId is JSON-escaped
+        // before embedding; otherwise a value containing a quote, backslash,
+        // or control char would produce malformed JSON or flip surrounding
+        // metadata (e.g. manual_start) by injection.
         {
             std::ofstream ofs(extractedDir / "global.json", std::ios::out | std::ios::binary);
             if (ofs)
             {
-                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << workflowId
+                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << JsonEscape(workflowId)
                     << "\",\n  \"manual_start\": true\n}";
             }
         }
@@ -2779,17 +3091,36 @@ namespace AIAssistant
         if (type != "shell" && type != "python")
             return {"jcwf_write_script", false, "Invalid type: \"" + type + "\". Must be \"shell\" or \"python\"."};
 
-        // Path must start with "scripts/".
-        fs::path scriptPath = fs::path(path).lexically_normal();
-        std::string normalized = scriptPath.string();
-        if (!normalized.starts_with("scripts/") && !normalized.starts_with("scripts\\"))
-            return {"jcwf_write_script", false, "Script path must start with \"scripts/\". Got: " + path};
+        // Path validation:
+        //   1. Reject absolute paths (scripts are project-relative).
+        //   2. Canonicalise so symlinks and `.`/`..` segments collapse.
+        //   3. Assert the resolved path lies under canonical scripts/.
+        //   4. Run through IsPathDenied (catches `.bak` / `.tmp` and any
+        //      sensitive base that lands under scripts/ via a crafted path).
 
-        // Reject absolute paths and traversal.
-        if (scriptPath.is_absolute())
+        if (fs::path(path).is_absolute())
             return {"jcwf_write_script", false, "Absolute paths not allowed."};
-        if (normalized.find("..") != std::string::npos)
-            return {"jcwf_write_script", false, "Path traversal not allowed."};
+
+        std::error_code ecValidate;
+        fs::path const projectRoot = fs::weakly_canonical(fs::current_path(ecValidate), ecValidate);
+        if (ecValidate)
+            return {"jcwf_write_script", false, "Cannot resolve project root."};
+
+        fs::path const scriptPath = fs::weakly_canonical(projectRoot / fs::path(path), ecValidate);
+        if (ecValidate)
+            return {"jcwf_write_script", false, "Cannot resolve script path: " + ecValidate.message()};
+
+        fs::path const scriptsRoot = fs::weakly_canonical(projectRoot / "scripts", ecValidate);
+        if (ecValidate)
+            return {"jcwf_write_script", false, "Cannot resolve scripts/ root."};
+
+        fs::path const relUnderScripts = scriptPath.lexically_relative(scriptsRoot);
+        std::string const relUnderScriptsStr = relUnderScripts.string();
+        if (relUnderScriptsStr.empty() || relUnderScriptsStr.rfind("..", 0) == 0)
+            return {"jcwf_write_script", false, "Script path must resolve under scripts/. Got: " + path};
+
+        if (IsPathDenied(scriptPath.string()))
+            return {"jcwf_write_script", false, "Access denied: " + path + " (sensitive file or extension)"};
 
         // Validate content based on type.
         if (type == "shell")
@@ -2843,7 +3174,8 @@ namespace AIAssistant
 
         std::string action = existed ? "Overwritten" : "Created";
         return {"jcwf_write_script", true,
-                action + ": " + normalized + " (" + std::to_string(content.size()) + " bytes, " + type + ")"};
+                action + ": scripts/" + relUnderScriptsStr + " (" + std::to_string(content.size()) + " bytes, " + type +
+                    ")"};
     }
 
 } // namespace AIAssistant

@@ -30,7 +30,7 @@ namespace AIAssistant
 {
     struct MemoryEntry
     {
-        std::string id;              // Unique identifier (auto-generated).
+        std::string id;              // Unique identifier (auto-generated, "mem_" + 16 random hex bytes).
         std::string key;             // Short label / topic.
         std::string value;           // Content.
         std::vector<std::string> tags;
@@ -39,47 +39,69 @@ namespace AIAssistant
     };
 
     // Persistent memory store backed by a JSON file.
-    // Thread-safe — all public methods acquire m_Mutex.
+    // Thread-safe — all public methods acquire m_Mutex once and hold it for the whole operation.
+    //
+    // Construction-time thread-safety contract: the constructor does NOT acquire m_Mutex;
+    // it loads from disk before any other thread can observe `this`.  Callers must
+    // fully construct before sharing.
     class MemoryStore
     {
     public:
         explicit MemoryStore(std::filesystem::path storePath);
 
+        MemoryStore(MemoryStore const&) = delete;
+        MemoryStore& operator=(MemoryStore const&) = delete;
+        MemoryStore(MemoryStore&&) = delete;
+        MemoryStore& operator=(MemoryStore&&) = delete;
+
         // Save or update a memory.  If a memory with the same key exists, it is updated.
-        // Returns the entry id.
-        std::string Save(std::string const& key, std::string const& value,
-                         std::vector<std::string> const& tags = {},
-                         std::string const& sessionId = {});
+        // Returns the entry id, or an empty string on rejection (over caps, file degraded).
+        // Inputs are clamped: key to kMaxKeyBytes, value to kMaxValueBytes,
+        // tags to kMaxTagsPerEntry × kMaxTagBytes.
+        [[nodiscard]] std::string Save(std::string const& key, std::string const& value,
+                                       std::vector<std::string> const& tags = {},
+                                       std::string const& sessionId = {});
 
         // Delete a memory by key.  Returns true if found and deleted.
-        bool Delete(std::string const& key);
+        [[nodiscard]] bool Delete(std::string const& key);
 
         // Search memories by keyword (matches key, value, and tags).
-        std::vector<MemoryEntry> Recall(std::string const& query) const;
+        [[nodiscard]] std::vector<MemoryEntry> Recall(std::string const& query) const;
 
         // List all memories (key + createdAt only, for brief display).
-        std::vector<MemoryEntry> ListAll() const;
+        [[nodiscard]] std::vector<MemoryEntry> ListAll() const;
 
         // Get memories relevant to a user message (simple keyword overlap).
         // Returns at most maxResults entries, sorted by relevance score.
-        std::vector<MemoryEntry> GetRelevant(std::string const& userMessage, int maxResults = 5) const;
+        [[nodiscard]] std::vector<MemoryEntry> GetRelevant(std::string const& userMessage, int maxResults = 5) const;
 
         // Clear all memories.
         void ClearAll();
 
         // Number of stored memories.
-        size_t Size() const;
+        [[nodiscard]] size_t Size() const;
+
+        // Hard limits — enforced at every Save and during LoadFromDisk to bound memory.
+        static constexpr size_t kMaxEntries = 10000;
+        static constexpr size_t kMaxKeyBytes = 256;
+        static constexpr size_t kMaxValueBytes = 64 * 1024;
+        static constexpr size_t kMaxTagBytes = 256;
+        static constexpr size_t kMaxTagsPerEntry = 32;
 
     private:
-        void LoadFromDisk();
-        void SaveToDisk() const;
+        // Locked variants — caller must already hold m_Mutex.
+        void LoadFromDiskLocked();
+        bool SaveToDiskLocked(); // returns true iff serialized + flushed to disk.
+        std::vector<MemoryEntry> RecallLocked(std::string const& query) const;
 
         static std::string GenerateId();
         static std::string NowUtcIso8601();
+        static std::string LogSafeKey(std::string const& key);
         static int ScoreMatch(MemoryEntry const& entry, std::vector<std::string> const& queryWords);
 
         std::filesystem::path m_StorePath;
         mutable std::mutex m_Mutex;
         std::vector<MemoryEntry> m_Entries;
+        bool m_FileBroken{false};
     };
 } // namespace AIAssistant

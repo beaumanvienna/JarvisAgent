@@ -23,6 +23,7 @@
 #include "engine.h"
 #include "json/replyParserAPI2.h"
 #include "json/jsonObjectParser.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -237,7 +238,7 @@ namespace AIAssistant
                             else if (ck == "text")
                             {
                                 std::string_view text = contentField.value().get_string();
-                                content.m_Text = std::string(text);
+                                content.m_Text = SanitizeUtf8(std::string(text));
                             }
                         }
                         if (!content.m_Text.empty())
@@ -310,7 +311,7 @@ namespace AIAssistant
             if (key == "message")
             {
                 std::string_view message = field.value().get_string();
-                errorInfo.m_Message = std::string(message);
+                errorInfo.m_Message = SanitizeUtf8(std::string(message));
             }
             else if (key == "type")
             {

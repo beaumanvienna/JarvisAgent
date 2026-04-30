@@ -19,26 +19,44 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#pragma once
+#include "assistant/assistantHelpers.h"
 #include "engine.h"
+
+#include <openssl/rand.h>
+
+#include <vector>
 
 namespace AIAssistant
 {
-    class JsonHelper
+    std::string RandomHex(std::size_t numBytes)
     {
-    public:
-        JsonHelper() = default;
-        ~JsonHelper() = default;
+        std::vector<unsigned char> buf(numBytes);
+        if (RAND_bytes(buf.data(), static_cast<int>(numBytes)) != 1)
+        {
+            LOG_CORE_ERROR("AssistantHelpers: RAND_bytes failed ({} bytes)", numBytes);
+            return {};
+        }
+        static constexpr char const* hex = "0123456789abcdef";
+        std::string out(numBytes * 2, '0');
+        for (std::size_t i = 0; i < numBytes; ++i)
+        {
+            out[2 * i] = hex[(buf[i] >> 4) & 0xF];
+            out[2 * i + 1] = hex[buf[i] & 0xF];
+        }
+        return out;
+    }
 
-        // RFC 8259 §7-compliant escape of a string for embedding inside JSON string literals.
-        // Escapes the mandatory pair "\\" and the structural double quote, the three
-        // shorthand whitespace controls (\n, \r, \t), and emits \u00XX for every other
-        // byte in 0x00-0x1F.  Bytes >= 0x20 (including UTF-8 continuation bytes) are
-        // passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
-        static std::string EscapeJsonString(std::string_view input);
-
-        // Backwards-compatible instance alias.  Existing call sites use
-        // `JsonHelper jh; jh.SanitizeForJson(x);` or `JsonHelper().SanitizeForJson(x);`.
-        std::string SanitizeForJson(std::string const& input) const { return EscapeJsonString(input); }
-    };
+    bool IsValidOpaqueId(std::string const& id)
+    {
+        if (id.empty() || id.size() > 128)
+            return false;
+        for (char c : id)
+        {
+            bool const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                            c == '-';
+            if (!ok)
+                return false;
+        }
+        return true;
+    }
 } // namespace AIAssistant

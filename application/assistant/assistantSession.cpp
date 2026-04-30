@@ -20,104 +20,65 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "assistant/assistantSession.h"
+#include "assistant/assistantHelpers.h"
 #include "engine.h"
+#include "json/jsonHelper.h"
+#include "simdjson/simdjson.h"
 
 #include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
-#include <atomic>
 #include <sstream>
 
-// Minimal JSON helpers — avoid pulling in a full JSON writer for simple JSONL.
-namespace
-{
-    std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20)
-                    {
-                        char buf[8];
-                        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += c;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
-
-    // Tiny JSON value extractor — finds "key":"value" in a JSON line.
-    // Good enough for our simple JSONL format. Not a general JSON parser.
-    std::string ExtractJsonString(std::string const& json, std::string const& key)
-    {
-        std::string pattern = "\"" + key + "\":\"";
-        auto pos = json.find(pattern);
-        if (pos == std::string::npos)
-            return {};
-        pos += pattern.size();
-        std::string result;
-        while (pos < json.size() && json[pos] != '"')
-        {
-            if (json[pos] == '\\' && pos + 1 < json.size())
-            {
-                char next = json[pos + 1];
-                switch (next)
-                {
-                    case '"': result += '"'; break;
-                    case '\\': result += '\\'; break;
-                    case 'n': result += '\n'; break;
-                    case 'r': result += '\r'; break;
-                    case 't': result += '\t'; break;
-                    default: result += next; break;
-                }
-                pos += 2;
-            }
-            else
-            {
-                result += json[pos];
-                ++pos;
-            }
-        }
-        return result;
-    }
-} // namespace
+#ifndef _WIN32
+    #include <sys/stat.h>
+#endif
 
 namespace AIAssistant
 {
-    // Create a new session.
-    AssistantSession::AssistantSession(std::filesystem::path const& sessionsDir)
+    namespace fs = std::filesystem;
+
+    // -----------------------------------------------------------------
+    // Construction
+    // -----------------------------------------------------------------
+
+    AssistantSession::AssistantSession(fs::path const& sessionsDir)
         : m_SessionId(GenerateSessionId())
         , m_StartedAt(NowIso8601())
     {
         std::error_code ec;
-        std::filesystem::create_directories(sessionsDir, ec);
+        fs::create_directories(sessionsDir, ec);
+        if (ec)
+        {
+            LOG_APP_ERROR("[assistant] Sessions dir create failed: {} (path='{}')", ec.message(),
+                          sessionsDir.string());
+            m_FileBroken = true;
+        }
         m_FilePath = sessionsDir / (m_SessionId + ".jsonl");
-        LOG_APP_INFO("[assistant] New session created: {}", m_SessionId);
+        LOG_APP_INFO("[assistant] New session created: {}", LogSafeSessionId(m_SessionId));
     }
 
-    // Resume an existing session.
-    AssistantSession::AssistantSession(std::filesystem::path const& sessionsDir, std::string const& sessionId)
-        : m_SessionId(sessionId)
-        , m_FilePath(sessionsDir / (sessionId + ".jsonl"))
+    AssistantSession::AssistantSession(fs::path const& sessionsDir, std::string const& sessionId)
     {
-        LoadFromFile();
+        // Defense in depth: AssistantController::GetSession is the production caller and
+        // already gates on IsValidOpaqueId, but this constructor is part of the public
+        // surface — re-validating here means a future direct caller cannot smuggle a
+        // path-traversal sessionId into m_FilePath.
+        if (!IsValidOpaqueId(sessionId))
+        {
+            LOG_SECURITY_WARN("[security] assistant_session_resume_invalid_id length={}", sessionId.size());
+            m_SessionId.clear();
+            m_StartedAt = NowIso8601();
+            m_FileBroken = true;
+            return;
+        }
+
+        m_SessionId = sessionId;
+        m_FilePath = sessionsDir / (sessionId + ".jsonl");
+
+        LoadFromFileLocked();
         if (!m_Turns.empty())
         {
             m_StartedAt = m_Turns.front().timestamp;
@@ -126,8 +87,12 @@ namespace AIAssistant
         {
             m_StartedAt = NowIso8601();
         }
-        LOG_APP_INFO("[assistant] Resumed session: {} ({} turns)", m_SessionId, m_Turns.size());
+        LOG_APP_INFO("[assistant] Resumed session: {} ({} turns)", LogSafeSessionId(m_SessionId), m_Turns.size());
     }
+
+    // -----------------------------------------------------------------
+    // Public API
+    // -----------------------------------------------------------------
 
     size_t AssistantSession::GetTurnCount() const
     {
@@ -135,22 +100,24 @@ namespace AIAssistant
         return m_Turns.size();
     }
 
-    void AssistantSession::AddUserMessage(std::string const& text)
+    bool AssistantSession::AddUserMessage(std::string const& text)
     {
         AssistantTurn turn;
         turn.role = "user";
         turn.text = text;
         turn.timestamp = NowIso8601();
-        AppendTurn(turn);
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return AppendTurnLocked(turn);
     }
 
-    void AssistantSession::AddAssistantMessage(std::string const& text)
+    bool AssistantSession::AddAssistantMessage(std::string const& text)
     {
         AssistantTurn turn;
         turn.role = "assistant";
         turn.text = text;
         turn.timestamp = NowIso8601();
-        AppendTurn(turn);
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return AppendTurnLocked(turn);
     }
 
     std::vector<AssistantTurn> AssistantSession::GetRecentTurns(size_t maxTokens) const
@@ -158,19 +125,23 @@ namespace AIAssistant
         std::lock_guard<std::mutex> lock(m_Mutex);
 
         std::vector<AssistantTurn> result;
+        if (maxTokens == 0)
+            return result;
+
         size_t tokenCount = 0;
 
         // Walk backwards from newest turn, collecting until budget is exhausted.
+        // The audit calls out a stale `!result.empty()` guard that always returned at
+        // least one turn even if it alone exceeded maxTokens — removed.
         for (auto it = m_Turns.rbegin(); it != m_Turns.rend(); ++it)
         {
             size_t turnTokens = it->text.size() / 4; // rough estimate
-            if (tokenCount + turnTokens > maxTokens && !result.empty())
+            if (tokenCount + turnTokens > maxTokens)
                 break;
             result.push_back(*it);
             tokenCount += turnTokens;
         }
 
-        // Reverse so oldest is first.
         std::reverse(result.begin(), result.end());
         return result;
     }
@@ -181,58 +152,145 @@ namespace AIAssistant
         return m_Turns;
     }
 
-    void AssistantSession::AppendTurn(AssistantTurn const& turn)
-    {
-        std::lock_guard<std::mutex> lock(m_Mutex);
-        m_Turns.push_back(turn);
+    // -----------------------------------------------------------------
+    // Persistence
+    // -----------------------------------------------------------------
 
-        // Append to JSONL file.
-        std::ofstream ofs(m_FilePath, std::ios::app);
-        if (ofs)
+    bool AssistantSession::AppendTurnLocked(AssistantTurn const& turn)
+    {
+        if (m_FileBroken)
         {
-            ofs << "{\"role\":\"" << JsonEscape(turn.role)
-                << "\",\"text\":\"" << JsonEscape(turn.text)
-                << "\",\"ts\":\"" << JsonEscape(turn.timestamp) << "\"}\n";
+            LOG_APP_ERROR("[assistant] AppendTurn refused: session in degraded state, sid={}",
+                          LogSafeSessionId(m_SessionId));
+            return false;
         }
-        else
+        if (m_Turns.size() >= kMaxTurnsPerSession)
         {
-            LOG_APP_WARN("[assistant] Failed to write to session file: {}", m_FilePath.string());
+            LOG_APP_ERROR("[assistant] AppendTurn refused: session at turn cap ({}) sid={}", kMaxTurnsPerSession,
+                          LogSafeSessionId(m_SessionId));
+            return false;
         }
+
+        // Write to disk first; only commit to in-memory history on success.
+        std::ofstream ofs(m_FilePath, std::ios::app | std::ios::binary);
+        if (!ofs)
+        {
+            m_FileBroken = true;
+            LOG_APP_ERROR("[assistant] AppendTurn open failed: sid={} path='{}'", LogSafeSessionId(m_SessionId),
+                          m_FilePath.string());
+            return false;
+        }
+
+        // Restrict permissions on first write (best-effort, no error path).
+        RestrictFilePermissions(m_FilePath);
+
+        ofs << "{\"role\":\"" << JsonHelper::EscapeJsonString(turn.role) << "\",\"text\":\""
+            << JsonHelper::EscapeJsonString(turn.text) << "\",\"ts\":\""
+            << JsonHelper::EscapeJsonString(turn.timestamp) << "\"}\n";
+        ofs.flush();
+        if (!ofs.good())
+        {
+            m_FileBroken = true;
+            LOG_APP_ERROR("[assistant] AppendTurn write/flush failed: sid={} path='{}'",
+                          LogSafeSessionId(m_SessionId), m_FilePath.string());
+            return false;
+        }
+
+        m_Turns.push_back(turn);
+        return true;
     }
 
-    void AssistantSession::LoadFromFile()
+    void AssistantSession::LoadFromFileLocked()
     {
-        std::lock_guard<std::mutex> lock(m_Mutex);
         m_Turns.clear();
 
+        // Open without an `exists` pre-check — the open succeeds-or-fails atomically
+        // and we can distinguish "absent" (genuine new session) from "present but unreadable".
         std::ifstream ifs(m_FilePath);
         if (!ifs)
+        {
+            std::error_code ec;
+            if (fs::exists(m_FilePath, ec))
+            {
+                LOG_APP_ERROR("[assistant] LoadFromFile: file present but unreadable: sid={} path='{}'",
+                              LogSafeSessionId(m_SessionId), m_FilePath.string());
+            }
             return;
+        }
 
         std::string line;
+        line.reserve(1024);
+        size_t lineCount = 0;
         while (std::getline(ifs, line))
         {
+            ++lineCount;
             if (line.empty())
                 continue;
-            AssistantTurn turn;
-            turn.role = ExtractJsonString(line, "role");
-            turn.text = ExtractJsonString(line, "text");
-            turn.timestamp = ExtractJsonString(line, "ts");
-            if (!turn.role.empty())
+            if (line.size() > kMaxLineBytes)
             {
-                m_Turns.push_back(std::move(turn));
+                LOG_APP_ERROR("[assistant] LoadFromFile: line {} exceeds {} bytes — truncating session load: sid={}",
+                              lineCount, kMaxLineBytes, LogSafeSessionId(m_SessionId));
+                m_FileBroken = true;
+                break;
+            }
+
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(line);
+            simdjson::ondemand::document doc;
+            if (parser.iterate(padded).get(doc))
+                continue;
+            simdjson::ondemand::object obj;
+            if (doc.get_object().get(obj))
+                continue;
+
+            AssistantTurn turn;
+            std::string_view sv;
+            if (!obj["role"].get_string().get(sv))
+                turn.role = std::string(sv);
+            if (!obj["text"].get_string().get(sv))
+                turn.text = std::string(sv);
+            if (!obj["ts"].get_string().get(sv))
+                turn.timestamp = std::string(sv);
+
+            // Validate role against the closed set.  An adversarial JSONL with
+            // `"role":"badvalue"` is silently dropped rather than fed to downstream
+            // AI provider formatters that switch on role strings.
+            if (turn.role != "user" && turn.role != "assistant" && turn.role != "system")
+                continue;
+
+            if (turn.text.size() > kMaxTurnTextBytes)
+                turn.text.resize(kMaxTurnTextBytes);
+
+            m_Turns.push_back(std::move(turn));
+            if (m_Turns.size() >= kMaxTurnsPerSession)
+            {
+                LOG_APP_ERROR("[assistant] LoadFromFile: turn cap ({}) reached — truncating: sid={}",
+                              kMaxTurnsPerSession, LogSafeSessionId(m_SessionId));
+                m_FileBroken = true;
+                break;
             }
         }
     }
 
+    // -----------------------------------------------------------------
+    // ID / time helpers
+    // -----------------------------------------------------------------
+
     std::string AssistantSession::GenerateSessionId()
     {
-        static std::atomic<uint32_t> s_Counter{0};
-        auto now = std::chrono::system_clock::now();
-        auto epoch = now.time_since_epoch();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(epoch).count();
-        uint32_t n = s_Counter.fetch_add(1, std::memory_order_relaxed);
-        return "sess_" + std::to_string(ms) + "_" + std::to_string(n);
+        // 16 random bytes → 32 hex chars (128 bits of entropy).  No timestamp / counter:
+        // the prior scheme leaked process-start time and was guessable across resets.
+        std::string const r = RandomHex(16);
+        if (r.empty())
+        {
+            // RAND_bytes failure already logged at ERROR by RandomHex; fall through to a
+            // PID+time fallback so the session has SOME unique-ish ID rather than empty
+            // (which would collide).  This branch is degraded mode only.
+            auto now = std::chrono::system_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            return "sess_fallback_" + std::to_string(ms);
+        }
+        return "sess_" + r;
     }
 
     std::string AssistantSession::NowIso8601()
@@ -250,22 +308,68 @@ namespace AIAssistant
         return oss.str();
     }
 
-    std::vector<std::string> AssistantSession::ListSessions(std::filesystem::path const& sessionsDir)
+    std::string AssistantSession::LogSafeSessionId(std::string const& id)
+    {
+        // Session IDs are security-sensitive (they're file basenames and conversation handles).
+        // Logs are aggregated into log/log.txt and the dashboard; emit only an 8-char prefix.
+        if (id.size() <= 8)
+            return id;
+        return id.substr(0, 8) + "...";
+    }
+
+    void AssistantSession::RestrictFilePermissions(fs::path const& path)
+    {
+#ifndef _WIN32
+        std::error_code ec;
+        // 0600 — session contains conversation history including any secrets
+        // the user typed.  Best-effort: never throws, never fails the write path.
+        fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write,
+                        fs::perm_options::replace, ec);
+        // ec ignored intentionally — already-correct permissions are normal,
+        // and a permissions-set failure shouldn't tank the write that just succeeded.
+#else
+        (void)path; // Windows: rely on inherited NTFS DACLs from the parent dir.
+#endif
+    }
+
+    // -----------------------------------------------------------------
+    // Static utilities
+    // -----------------------------------------------------------------
+
+    std::vector<std::string> AssistantSession::ListSessions(fs::path const& sessionsDir)
     {
         std::vector<std::string> ids;
-        std::error_code ec;
-        if (!std::filesystem::exists(sessionsDir, ec))
-            return ids;
 
-        for (auto const& entry : std::filesystem::directory_iterator(sessionsDir, ec))
+        // Construct the iterator directly with an error_code — the prior `exists` pre-check
+        // was both racy (TOCTOU between exists and iterator construction) and noisy
+        // (couldn't distinguish "no sessions" from "directory removed mid-call").
+        std::error_code ec;
+        fs::directory_iterator it(sessionsDir, ec);
+        if (ec)
+        {
+            // Distinguish missing-on-first-run (silent) from permission/IO error (warn).
+            if (ec != std::errc::no_such_file_or_directory)
+            {
+                LOG_APP_WARN("[assistant] ListSessions iterator failed: {} (path='{}')", ec.message(),
+                             sessionsDir.string());
+            }
+            return ids;
+        }
+
+        for (auto const& entry : it)
         {
             if (entry.path().extension() == ".jsonl")
             {
-                ids.push_back(entry.path().stem().string());
+                std::string stem = entry.path().stem().string();
+                // Accept only IDs that match our allowlist.  A foreign .jsonl placed
+                // in the directory by another tool shouldn't surface as a session.
+                if (IsValidOpaqueId(stem))
+                    ids.push_back(std::move(stem));
             }
         }
 
-        // Sort newest first (session IDs contain timestamps).
+        // Sort newest first (random hex IDs aren't time-ordered, so sort by mtime
+        // would be more correct; keep the lexical sort for now to preserve behavior).
         std::sort(ids.begin(), ids.end(), std::greater<>());
         return ids;
     }

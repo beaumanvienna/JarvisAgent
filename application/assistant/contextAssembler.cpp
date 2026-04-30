@@ -20,18 +20,71 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "assistant/contextAssembler.h"
+#include "assistant/assistantTools.h"
 
 namespace AIAssistant
 {
-    AssembledPrompt ContextAssembler::Assemble(std::vector<AssistantTurn> const& recentTurns, std::string const& userMessage,
+    std::string ContextAssembler::DefangContextSentinels(std::string const& text)
+    {
+        if (text.empty())
+            return text;
+
+        // Step 1: tool-marker defang (shared with the runtime tool-result path).
+        std::string defanged = ToolRegistry::DefangToolMarkers(text);
+
+        // Step 2: collapse runs of `===` to U+2550 (BOX DRAWINGS DOUBLE HORIZONTAL).
+        // The 3-byte UTF-8 encoding of U+2550 is E2 95 90.  Visual content preserved;
+        // ASCII `=` byte sequences (which the AI keys on for `=== Section ===` boundaries
+        // in the system prompt) are replaced.
+        static constexpr char const* kBoxDouble = "\xE2\x95\x90";
+
+        std::string out;
+        out.reserve(defanged.size());
+        size_t i = 0;
+        while (i < defanged.size())
+        {
+            if (defanged[i] == '=')
+            {
+                size_t j = i;
+                while (j < defanged.size() && defanged[j] == '=')
+                    ++j;
+                size_t const runLen = j - i;
+                if (runLen >= 3)
+                {
+                    for (size_t k = 0; k < runLen; ++k)
+                        out.append(kBoxDouble, 3);
+                }
+                else
+                {
+                    out.append(defanged, i, runLen);
+                }
+                i = j;
+            }
+            else
+            {
+                out += defanged[i];
+                ++i;
+            }
+        }
+        return out;
+    }
+
+    AssembledPrompt ContextAssembler::Assemble(std::vector<AssistantTurn> const& recentTurns,
+                                               std::string const& userMessage,
                                                std::string const& toolDescriptions)
     {
         AssembledPrompt prompt;
         prompt.stng = BuildSystemPrompt();
 
-        // Inject tool descriptions into STNG if provided.
+        // Inject tool descriptions into STNG if provided.  toolDescriptions is generated
+        // by the trusted ToolRegistry, but we still cap it as defense in depth against
+        // a future regression that lets user-influenced text leak in via tool registration.
         if (!toolDescriptions.empty())
         {
+            std::string td = toolDescriptions;
+            if (td.size() > kMaxToolDescriptionsBytes)
+                td.resize(kMaxToolDescriptionsBytes);
+
             prompt.stng += "\n\n=== Tool System ===\n\n";
             prompt.stng += "When you need to look up live data (workflow list, run status, file contents, logs, etc.), "
                            "emit a tool call block:\n<tool_call>{\"name\": \"tool_name\", \"args\": {\"key\": "
@@ -58,13 +111,18 @@ namespace AIAssistant
                            "the system automatically shows a confirmation dialog to the user — you must NOT ask "
                            "for permission yourself. Just call the tool. If the user denies, you receive an error "
                            "result.\n\n";
-            prompt.stng += toolDescriptions;
+            prompt.stng += td;
             prompt.stng += "\n=== End Tool System ===";
         }
 
         prompt.task = "Respond to the user's message. Be concise, helpful, and direct.";
         prompt.cntx = BuildConversationContext(recentTurns);
-        prompt.prob = userMessage;
+
+        // Defang + cap the new user message before placing it in the PROB slot.
+        std::string defangedUser = DefangContextSentinels(userMessage);
+        if (defangedUser.size() > kMaxUserMessageBytes)
+            defangedUser.resize(kMaxUserMessageBytes);
+        prompt.prob = std::move(defangedUser);
         return prompt;
     }
 
@@ -250,14 +308,26 @@ Slash commands (non-AI, instant):
 
         for (auto const& turn : turns)
         {
+            // Per-turn truncation: a single attacker-supplied turn cannot blow past the cap.
+            std::string defanged = DefangContextSentinels(turn.text);
+            if (defanged.size() > kMaxTurnTextBytes)
+                defanged.resize(kMaxTurnTextBytes);
+
+            // Total-context truncation: stop adding turns once the running concat has
+            // reached the cap.  Drops oldest-pushed turns first because we iterate in
+            // session order; if a future caller wants newest-preserving truncation,
+            // the right place is GetRecentTurns's token budget.
+            std::string line;
             if (turn.role == "user")
-            {
-                context += "User: " + turn.text + "\n\n";
-            }
+                line = "User: " + defanged + "\n\n";
             else if (turn.role == "assistant")
-            {
-                context += "Assistant: " + turn.text + "\n\n";
-            }
+                line = "Assistant: " + defanged + "\n\n";
+            else
+                continue; // unknown role — drop silently (LoadFromFile already filters).
+
+            if (context.size() + line.size() > kMaxConversationContextBytes)
+                break;
+            context += line;
         }
 
         return context;

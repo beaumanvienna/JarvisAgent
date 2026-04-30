@@ -21,73 +21,53 @@
 
 #include "assistant/assistantMemory.h"
 
+#include "assistant/assistantHelpers.h"
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
-#include <random>
 #include <sstream>
 
 namespace fs = std::filesystem;
 
 namespace AIAssistant
 {
-    // -----------------------------------------------------------------
-    // JSON string escaping (for manual serialization)
-    // -----------------------------------------------------------------
-
-    static std::string JsonEscapeMem(std::string const& input)
+    namespace
     {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
+        std::string ClampLen(std::string const& s, size_t maxBytes)
         {
-            switch (c)
-            {
-                case '"':
-                    out += "\\\"";
-                    break;
-                case '\\':
-                    out += "\\\\";
-                    break;
-                case '\n':
-                    out += "\\n";
-                    break;
-                case '\r':
-                    out += "\\r";
-                    break;
-                case '\t':
-                    out += "\\t";
-                    break;
-                default:
-                    out += c;
-                    break;
-            }
+            if (s.size() <= maxBytes)
+                return s;
+            return s.substr(0, maxBytes);
         }
-        return out;
-    }
+    } // namespace
 
     // -----------------------------------------------------------------
     // Construction / persistence
     // -----------------------------------------------------------------
 
-    MemoryStore::MemoryStore(fs::path storePath) : m_StorePath(std::move(storePath)) { LoadFromDisk(); }
+    MemoryStore::MemoryStore(fs::path storePath) : m_StorePath(std::move(storePath)) { LoadFromDiskLocked(); }
 
-    void MemoryStore::LoadFromDisk()
+    void MemoryStore::LoadFromDiskLocked()
     {
-        std::error_code ec;
-        if (!fs::exists(m_StorePath, ec))
-            return;
-
-        // Read entire file into a padded string for simdjson.
+        // Open without an exists() pre-check — distinguishes "absent" (silent first-run)
+        // from "present but unreadable" (genuine I/O error → ERROR-level log).
         std::ifstream ifs(m_StorePath);
         if (!ifs)
         {
-            LOG_APP_WARN("[memory] Failed to open memory file: {}", m_StorePath.string());
+            std::error_code ec;
+            if (fs::exists(m_StorePath, ec))
+            {
+                LOG_APP_ERROR("[memory] Memory file present but unreadable: {}", m_StorePath.string());
+                m_FileBroken = true;
+            }
             return;
         }
+
         std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         if (content.empty())
             return;
@@ -98,14 +78,16 @@ namespace AIAssistant
         auto err = parser.iterate(padded).get(doc);
         if (err)
         {
-            LOG_APP_WARN("[memory] Failed to parse memory file: {}", simdjson::error_message(err));
+            LOG_APP_ERROR("[memory] Memory file parse failed: {}", simdjson::error_message(err));
+            m_FileBroken = true;
             return;
         }
 
         simdjson::ondemand::array arr;
         if (doc.get_array().get(arr))
         {
-            LOG_APP_WARN("[memory] Memory file is not a JSON array — ignoring");
+            LOG_APP_ERROR("[memory] Memory file root is not a JSON array — refusing to load");
+            m_FileBroken = true;
             return;
         }
 
@@ -118,12 +100,15 @@ namespace AIAssistant
             MemoryEntry entry;
             std::string_view sv;
 
+            // Each get_string().get(sv) populates a view into `padded`'s buffer; we
+            // copy into std::string immediately, so the view's borrowed lifetime ends
+            // at the call site.  Do not store sv beyond this scope.
             if (!obj["id"].get_string().get(sv))
                 entry.id = std::string(sv);
             if (!obj["key"].get_string().get(sv))
-                entry.key = std::string(sv);
+                entry.key = ClampLen(std::string(sv), kMaxKeyBytes);
             if (!obj["value"].get_string().get(sv))
-                entry.value = std::string(sv);
+                entry.value = ClampLen(std::string(sv), kMaxValueBytes);
             if (!obj["createdAt"].get_string().get(sv))
                 entry.createdAt = std::string(sv);
             if (!obj["sourceSessionId"].get_string().get(sv))
@@ -134,44 +119,59 @@ namespace AIAssistant
             {
                 for (auto tag : tagsArr)
                 {
+                    if (entry.tags.size() >= kMaxTagsPerEntry)
+                        break;
                     if (!tag.get_string().get(sv))
-                        entry.tags.emplace_back(sv);
+                        entry.tags.emplace_back(ClampLen(std::string(sv), kMaxTagBytes));
                 }
             }
 
-            if (!entry.key.empty())
-                m_Entries.push_back(std::move(entry));
+            if (entry.key.empty())
+                continue;
+
+            m_Entries.push_back(std::move(entry));
+            if (m_Entries.size() >= kMaxEntries)
+            {
+                LOG_APP_ERROR("[memory] LoadFromDisk: entry cap ({}) reached — truncating", kMaxEntries);
+                m_FileBroken = true;
+                break;
+            }
         }
 
         LOG_APP_INFO("[memory] Loaded {} memories from {}", m_Entries.size(), m_StorePath.string());
     }
 
-    void MemoryStore::SaveToDisk() const
+    bool MemoryStore::SaveToDiskLocked()
     {
-        // Ensure parent directory exists.
         std::error_code ec;
         fs::create_directories(m_StorePath.parent_path(), ec);
+        if (ec)
+        {
+            LOG_APP_ERROR("[memory] Memory dir create failed: {} (path='{}')", ec.message(),
+                          m_StorePath.parent_path().string());
+            m_FileBroken = true;
+            return false;
+        }
 
-        // Manual JSON serialization.
         std::ostringstream oss;
         oss << "[\n";
         for (size_t i = 0; i < m_Entries.size(); ++i)
         {
             auto const& e = m_Entries[i];
             oss << "  {\n"
-                << "    \"id\": \"" << JsonEscapeMem(e.id) << "\",\n"
-                << "    \"key\": \"" << JsonEscapeMem(e.key) << "\",\n"
-                << "    \"value\": \"" << JsonEscapeMem(e.value) << "\",\n"
+                << "    \"id\": \"" << JsonHelper::EscapeJsonString(e.id) << "\",\n"
+                << "    \"key\": \"" << JsonHelper::EscapeJsonString(e.key) << "\",\n"
+                << "    \"value\": \"" << JsonHelper::EscapeJsonString(e.value) << "\",\n"
                 << "    \"tags\": [";
             for (size_t t = 0; t < e.tags.size(); ++t)
             {
                 if (t > 0)
                     oss << ", ";
-                oss << "\"" << JsonEscapeMem(e.tags[t]) << "\"";
+                oss << "\"" << JsonHelper::EscapeJsonString(e.tags[t]) << "\"";
             }
             oss << "],\n"
-                << "    \"createdAt\": \"" << JsonEscapeMem(e.createdAt) << "\",\n"
-                << "    \"sourceSessionId\": \"" << JsonEscapeMem(e.sourceSessionId) << "\"\n"
+                << "    \"createdAt\": \"" << JsonHelper::EscapeJsonString(e.createdAt) << "\",\n"
+                << "    \"sourceSessionId\": \"" << JsonHelper::EscapeJsonString(e.sourceSessionId) << "\"\n"
                 << "  }";
             if (i + 1 < m_Entries.size())
                 oss << ",";
@@ -179,13 +179,24 @@ namespace AIAssistant
         }
         oss << "]\n";
 
-        std::ofstream ofs(m_StorePath, std::ios::out | std::ios::trunc);
+        std::ofstream ofs(m_StorePath, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!ofs)
         {
-            LOG_APP_WARN("[memory] Failed to write memory file: {}", m_StorePath.string());
-            return;
+            LOG_APP_ERROR("[memory] Memory file open-for-write failed: {}", m_StorePath.string());
+            m_FileBroken = true;
+            return false;
         }
-        ofs << oss.str();
+
+        std::string const buf = oss.str();
+        ofs.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+        ofs.flush();
+        if (!ofs.good())
+        {
+            LOG_APP_ERROR("[memory] Memory file write/flush failed: {}", m_StorePath.string());
+            m_FileBroken = true;
+            return false;
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------
@@ -197,36 +208,71 @@ namespace AIAssistant
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
 
-        // Check if a memory with the same key already exists — update it.
+        if (m_FileBroken)
+        {
+            LOG_APP_ERROR("[memory] Save refused: store in degraded state, key_len={}", key.size());
+            return {};
+        }
+
+        std::string const clampedKey = ClampLen(key, kMaxKeyBytes);
+        if (clampedKey.empty())
+        {
+            LOG_APP_ERROR("[memory] Save refused: empty key");
+            return {};
+        }
+
+        std::string const clampedValue = ClampLen(value, kMaxValueBytes);
+
+        std::vector<std::string> clampedTags;
+        clampedTags.reserve(std::min(tags.size(), kMaxTagsPerEntry));
+        for (auto const& t : tags)
+        {
+            if (clampedTags.size() >= kMaxTagsPerEntry)
+                break;
+            clampedTags.push_back(ClampLen(t, kMaxTagBytes));
+        }
+
+        // Update existing key if present.
         for (auto& entry : m_Entries)
         {
-            if (entry.key == key)
+            if (entry.key == clampedKey)
             {
-                entry.value = value;
-                entry.tags = tags;
+                entry.value = clampedValue;
+                entry.tags = std::move(clampedTags);
                 entry.createdAt = NowUtcIso8601();
                 if (!sessionId.empty())
                     entry.sourceSessionId = sessionId;
-                SaveToDisk();
-                LOG_APP_INFO("[memory] Updated memory: key='{}'", key);
+                if (!SaveToDiskLocked())
+                    return {};
+                LOG_APP_INFO("[memory] Updated memory: key={}", LogSafeKey(clampedKey));
                 return entry.id;
             }
         }
 
-        // Create new entry.
+        if (m_Entries.size() >= kMaxEntries)
+        {
+            LOG_APP_ERROR("[memory] Save refused: entry cap ({}) reached", kMaxEntries);
+            return {};
+        }
+
         MemoryEntry entry;
         entry.id = GenerateId();
-        entry.key = key;
-        entry.value = value;
-        entry.tags = tags;
+        entry.key = clampedKey;
+        entry.value = clampedValue;
+        entry.tags = std::move(clampedTags);
         entry.createdAt = NowUtcIso8601();
         entry.sourceSessionId = sessionId;
 
         std::string id = entry.id;
         m_Entries.push_back(std::move(entry));
-        SaveToDisk();
+        if (!SaveToDiskLocked())
+        {
+            // Roll back the in-memory mutation so the on-disk and in-memory state stay consistent.
+            m_Entries.pop_back();
+            return {};
+        }
 
-        LOG_APP_INFO("[memory] Saved new memory: key='{}' id='{}'", key, id);
+        LOG_APP_INFO("[memory] Saved new memory: key={} entries={}", LogSafeKey(clampedKey), m_Entries.size());
         return id;
     }
 
@@ -234,21 +280,33 @@ namespace AIAssistant
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
 
-        auto it = std::remove_if(m_Entries.begin(), m_Entries.end(), [&key](MemoryEntry const& e) { return e.key == key; });
+        if (m_FileBroken)
+        {
+            LOG_APP_ERROR("[memory] Delete refused: store in degraded state, key_len={}", key.size());
+            return false;
+        }
+
+        auto it = std::remove_if(m_Entries.begin(), m_Entries.end(),
+                                 [&key](MemoryEntry const& e) { return e.key == key; });
 
         if (it == m_Entries.end())
             return false;
 
         m_Entries.erase(it, m_Entries.end());
-        SaveToDisk();
-        LOG_APP_INFO("[memory] Deleted memory: key='{}'", key);
+        if (!SaveToDiskLocked())
+            return false; // m_Entries already mutated; sticky m_FileBroken prevents further writes.
+        LOG_APP_INFO("[memory] Deleted memory: key={}", LogSafeKey(key));
         return true;
     }
 
     std::vector<MemoryEntry> MemoryStore::Recall(std::string const& query) const
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
+        return RecallLocked(query);
+    }
 
+    std::vector<MemoryEntry> MemoryStore::RecallLocked(std::string const& query) const
+    {
         if (query.empty())
             return m_Entries;
 
@@ -259,7 +317,6 @@ namespace AIAssistant
             std::string raw;
             while (iss >> raw)
             {
-                // Strip leading/trailing punctuation.
                 std::string word;
                 word.reserve(raw.size());
                 for (char c : raw)
@@ -267,7 +324,7 @@ namespace AIAssistant
                     if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')
                         word += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 }
-                if (word.size() >= 2) // skip very short words
+                if (word.size() >= 2)
                     queryWords.push_back(word);
             }
         }
@@ -275,27 +332,29 @@ namespace AIAssistant
         if (queryWords.empty())
             return m_Entries;
 
-        // Score and filter.
+        // Score by index — never store raw pointers into m_Entries.  An audit-level
+        // lifetime hazard if any caller drops the lock between scoring and dereferencing.
         struct Scored
         {
             int score;
-            MemoryEntry const* entry;
+            size_t idx;
         };
         std::vector<Scored> scored;
 
-        for (auto const& entry : m_Entries)
+        for (size_t i = 0; i < m_Entries.size(); ++i)
         {
-            int s = ScoreMatch(entry, queryWords);
+            int s = ScoreMatch(m_Entries[i], queryWords);
             if (s > 0)
-                scored.push_back({s, &entry});
+                scored.push_back({s, i});
         }
 
-        std::sort(scored.begin(), scored.end(), [](auto const& a, auto const& b) { return a.score > b.score; });
+        std::sort(scored.begin(), scored.end(),
+                  [](Scored const& a, Scored const& b) { return a.score > b.score; });
 
         std::vector<MemoryEntry> results;
         results.reserve(scored.size());
         for (auto const& s : scored)
-            results.push_back(*s.entry);
+            results.push_back(m_Entries[s.idx]);
 
         return results;
     }
@@ -308,9 +367,16 @@ namespace AIAssistant
 
     std::vector<MemoryEntry> MemoryStore::GetRelevant(std::string const& userMessage, int maxResults) const
     {
-        auto results = Recall(userMessage);
+        // Acquire the lock once and call RecallLocked, fixing the prior atomicity gap
+        // where Recall released its lock before we trimmed the result.  Same lock is
+        // also non-recursive, so a future inline of Recall here would no longer
+        // deadlock — RecallLocked is the lock-free helper.
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        auto results = RecallLocked(userMessage);
+        if (maxResults < 0)
+            maxResults = 0;
         if (static_cast<int>(results.size()) > maxResults)
-            results.resize(maxResults);
+            results.resize(static_cast<size_t>(maxResults));
         return results;
     }
 
@@ -318,7 +384,8 @@ namespace AIAssistant
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         m_Entries.clear();
-        SaveToDisk();
+        if (!m_FileBroken)
+            (void)SaveToDiskLocked();
         LOG_APP_INFO("[memory] Cleared all memories");
     }
 
@@ -334,11 +401,19 @@ namespace AIAssistant
 
     std::string MemoryStore::GenerateId()
     {
-        static std::mt19937_64 rng(std::chrono::steady_clock::now().time_since_epoch().count());
-        std::uniform_int_distribution<uint64_t> dist;
-        std::ostringstream oss;
-        oss << "mem_" << std::hex << dist(rng);
-        return oss.str();
+        // 16 bytes → 32 hex chars.  Cryptographically secure (RAND_bytes), thread-safe,
+        // unpredictable.  Replaces the prior process-local mt19937 race.
+        std::string const r = RandomHex(16);
+        if (r.empty())
+        {
+            // RAND_bytes failure is logged at ERROR by RandomHex.  Degraded fallback:
+            // monotonic counter under the static mutex so collisions are bounded.
+            static std::mutex s_Mutex;
+            static uint64_t s_Counter = 0;
+            std::lock_guard<std::mutex> lk(s_Mutex);
+            return "mem_fallback_" + std::to_string(++s_Counter);
+        }
+        return "mem_" + r;
     }
 
     std::string MemoryStore::NowUtcIso8601()
@@ -356,9 +431,31 @@ namespace AIAssistant
         return buf;
     }
 
+    std::string MemoryStore::LogSafeKey(std::string const& key)
+    {
+        // Keys are user-supplied — they may carry secrets, PII, or log-injection chars.
+        // Strip newlines, cap length, and indicate truncation.  Never log raw values.
+        constexpr size_t kMaxLogChars = 64;
+        std::string out;
+        out.reserve(std::min(key.size(), kMaxLogChars) + 4);
+        for (char c : key)
+        {
+            unsigned char const u = static_cast<unsigned char>(c);
+            if (u < 0x20 || u == 0x7F)
+                out += '?';
+            else
+                out += c;
+            if (out.size() >= kMaxLogChars)
+            {
+                out += "...";
+                break;
+            }
+        }
+        return "'" + out + "'(" + std::to_string(key.size()) + ")";
+    }
+
     int MemoryStore::ScoreMatch(MemoryEntry const& entry, std::vector<std::string> const& queryWords)
     {
-        // Build a lowercase haystack from key + value + tags.
         std::string haystack;
         haystack.reserve(entry.key.size() + entry.value.size() + 128);
 
@@ -368,7 +465,8 @@ namespace AIAssistant
         for (auto const& tag : entry.tags)
             haystack += tag + " ";
 
-        std::transform(haystack.begin(), haystack.end(), haystack.begin(), ::tolower);
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
         int score = 0;
         for (auto const& word : queryWords)

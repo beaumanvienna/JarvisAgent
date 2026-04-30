@@ -36,9 +36,9 @@ namespace AIAssistant
         std::string relativePath; // relative to workspace root
         std::string extension;    // e.g. ".cpp", ".h", ".ts"
         uint64_t sizeBytes{0};
-        int64_t mtimeNs{0};          // filesystem modification time (ns since epoch)
-        std::string summary;          // AI-generated summary (empty if not yet generated)
-        int64_t summaryMtimeNs{0};    // mtime when summary was generated (0 = no summary)
+        int64_t mtimeNs{0};        // filesystem modification time (ns since epoch)
+        std::string summary;       // AI-generated summary (empty if not yet generated)
+        int64_t summaryMtimeNs{0}; // mtime when summary was generated (0 = no summary)
     };
 
     // Indexes source files in the workspace for fast lookup and summary caching.
@@ -47,48 +47,74 @@ namespace AIAssistant
     // Subsequent startups load the existing index and only re-scan changed files (by mtime).
     // AI-generated summaries are cached per-file and invalidated when the file changes.
     //
-    // Thread-safe: all public methods acquire m_Mutex.
+    // Thread-safe: all public methods acquire m_Mutex once and hold it for the whole operation.
     class WorkspaceIndexer
     {
     public:
+        // Captures the workspace root from `fs::current_path()` at construction time.
+        // Every path-bearing operation anchors against this root via weakly_canonical;
+        // changes to cwd after construction do NOT shift the security boundary.
         explicit WorkspaceIndexer(std::filesystem::path indexDir);
+
+        WorkspaceIndexer(WorkspaceIndexer const&) = delete;
+        WorkspaceIndexer& operator=(WorkspaceIndexer const&) = delete;
+        WorkspaceIndexer(WorkspaceIndexer&&) = delete;
+        WorkspaceIndexer& operator=(WorkspaceIndexer&&) = delete;
 
         // Full workspace scan.  Loads existing index first, then scans directories
         // and adds/updates/removes entries as needed.
         void ScanWorkspace();
 
         // Get the cached summary for a file (empty string if not cached or stale).
-        std::string GetFileSummary(std::string const& relativePath) const;
+        [[nodiscard]] std::string GetFileSummary(std::string const& relativePath) const;
 
-        // Store an AI-generated summary for a file.
+        // Store an AI-generated summary for a file.  The summary is clamped to
+        // kMaxSummaryBytes; oversized inputs are truncated rather than rejected.
         void SetFileSummary(std::string const& relativePath, std::string const& summary);
 
         // Read file content (for summarization by the AI tool).
-        // Returns empty string on error or if the path is outside the workspace.
-        static std::string ReadFileContent(std::string const& relativePath, size_t maxBytes = 32768);
+        // Returns empty string on error or if the path resolves outside the workspace
+        // root captured at construction (defends against `..` traversal, absolute paths,
+        // and symlinks pointing out of tree).  Note: this is NOT a security gate against
+        // sensitive files — callers (ExecGetFileSummary etc.) must additionally apply
+        // ToolRegistry::IsPathDenied for that.  This method only enforces workspace
+        // confinement.
+        [[nodiscard]] std::string ReadFileContent(std::string const& relativePath,
+                                                  size_t maxBytes = 32768) const;
 
         // Get relevant file entries whose summaries match query keywords.
         // Returns at most maxResults entries sorted by relevance score.
-        std::vector<FileIndexEntry> GetRelevantFiles(std::string const& query, int maxResults = 5) const;
+        [[nodiscard]] std::vector<FileIndexEntry> GetRelevantFiles(std::string const& query, int maxResults = 5) const;
 
         // Stats
-        size_t FileCount() const;
-        size_t SummaryCount() const;
-        std::chrono::steady_clock::time_point LastScanTime() const;
+        [[nodiscard]] size_t FileCount() const;
+        [[nodiscard]] size_t SummaryCount() const;
+        [[nodiscard]] std::chrono::steady_clock::time_point LastScanTime() const;
 
         // Get all entries (for /index command).
-        std::vector<FileIndexEntry> GetAllEntries() const;
+        [[nodiscard]] std::vector<FileIndexEntry> GetAllEntries() const;
+
+        // Hard limits — enforced during LoadIndex and SetFileSummary.
+        static constexpr size_t kMaxIndexEntries = 100000;
+        static constexpr size_t kMaxSummaryBytes = 8 * 1024;
 
     private:
         void LoadIndex();
         void SaveIndex() const;
         void ScanDirectory(std::filesystem::path const& dir, int maxDepth);
-        bool IsIndexableExtension(std::string const& ext) const;
 
-        static int ScoreMatch(FileIndexEntry const& entry, std::vector<std::string> const& queryWords);
+        // Validate a relative path against the captured workspace root.
+        // Returns the resolved absolute path on success; empty path on rejection
+        // (`..` escape, absolute path, or path outside workspace root).
+        [[nodiscard]] std::filesystem::path ResolveAndConfine(std::string const& relativePath) const;
 
-        std::filesystem::path m_IndexDir;   // e.g. assistant/index/
-        std::filesystem::path m_IndexPath;  // e.g. assistant/index/file_index.jsonl
+        static bool IsIndexableExtension(std::string const& ext);
+        [[nodiscard]] static int ScoreMatch(FileIndexEntry const& entry,
+                                            std::vector<std::string> const& queryWords);
+
+        std::filesystem::path m_IndexDir;       // e.g. assistant/index/
+        std::filesystem::path m_IndexPath;      // e.g. assistant/index/file_index.jsonl
+        std::filesystem::path m_WorkspaceRoot;  // canonical project-root path captured at ctor.
         mutable std::mutex m_Mutex;
         std::vector<FileIndexEntry> m_Entries;
         std::unordered_map<std::string, size_t> m_PathToIndex; // relativePath → index in m_Entries

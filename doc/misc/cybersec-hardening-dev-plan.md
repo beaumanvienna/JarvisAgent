@@ -38,7 +38,7 @@ Boundary clarifications:
 
 ---
 
-## 3. Session schedule — 4 sessions, both plans bundled
+## 3. Session schedule — 4 domains, multi-sitting per session
 
 Each session covers **both** plans for one domain. We do D2 first because it carries the highest attacker-reachable risk and the most CRITICALs; the rest follow the natural dependency direction (web depends on engine; deferring D3 too long means web fixes get reverted when engine primitives change).
 
@@ -49,7 +49,20 @@ Each session covers **both** plans for one domain. We do D2 first because it car
 | **S3** | D1 — Workflow orchestration | Shell/Python task injection, queue-folder path confinement, template-variable injection, JCWF zip-slip, AI reply parsing safety | Workflow runtime lifetimes, AI request pool synchronization, fail-path logging completeness, RAII over libcurl/Python handles |
 | **S4** | D4 — Application infrastructure | Lifecycle + signal-handler safety, TUI byte-handling against malicious replies | TUI ncurses byte safety, app-level cleanup ordering |
 
-Each session is **one** working session. If a session can't finish in one sitting, we **stop** at a documented boundary and resume; we don't accelerate by skipping the per-change template (§5).
+Each **session** = one domain.  Each **sitting** = one bounded working session that closes at a documented boundary in the cumulative session note (`doc/misc/S<N>-D<N>-session-note.md`).  A session typically spans multiple sittings; the §1 charter ("slow and thorough") is incompatible with single-sitting closure for any of the four domains.
+
+Sitting cadence (calibrated against S1=D2 sittings 1–3, 2026-04-29):
+
+| Domain | Estimated sittings | Why |
+|---|---:|---|
+| **S1** D2 | 5–6 | Densest CRITICAL surface: assistantTools (5 CRITICALs), assistantController (2 CRITICALs + dense HIGHs), assistantSession + assistantMemory + workspaceIndexer + contextAssembler, then webServer + webSessionManager + aiJcwfService + mcpKeyManager, then 37 cloud connectors |
+| **S2** D3 | 3–4 | Keystore + thread pool + event queue + curl multi dispatcher — concentrated but tightly coupled |
+| **S3** D1 | 3–4 | Broad surface; recent §5g refactor already cleaned chunks of the runtime |
+| **S4** D4 | 2–3 | Smallest: lifecycle + ncurses + python embedding |
+
+Total: **13–17 sittings** at the discipline level we've been honoring.  Wall-clock is whatever JC wants — this is calendar-flexible work.
+
+If a sitting can't finish its scoped boundary, we **stop** at a documented sub-boundary and resume; we don't accelerate by skipping the per-change template (§5).  The boundary-discipline is what keeps each sitting's diff reviewable and each finding's status auditable.
 
 ---
 
@@ -107,6 +120,8 @@ diff itself.
 ```
 
 If a change can't fit this template, the change is too big. Split it.
+
+**Code-comment discipline.** Per-change template entries live in the session note (`doc/misc/S<N>-D<N>-session-note.md`).  Source-code comments must NOT cite the audit, the finding ID, the severity tag, the session number, or any session-tracking artifact.  Audits are change-trace; six months later `// Cyber-sec audit (assistantTools.h §05) HIGH:` is dead weight pointing at a doc that's moved or rotted.  Write the *invariant* in plain English where it's non-obvious; otherwise no comment.  Memory: `feedback_no_audit_traces_in_code`.
 
 ---
 
@@ -309,5 +324,5 @@ This section accumulates the **rules** we adopt going forward to stop re-introdu
 
 - **Not 729 fixes.** We will skip many findings, with reasons.
 - **Not a full re-architecture.** Where a finding implies a redesign, we either scope it to "refactor + fix here" (if the redesign is small) or file it as a separate plan in `doc/misc/` (if it's its own project).
-- **Not a re-audit.** We trust the audit as inventory; we don't re-run it during the hardening pass. After the four sessions, we re-run `jarvisCppCyberSecAudit.jcwf` once to verify the next baseline.
+- **Not a re-audit.** We trust the audit as inventory; we don't re-run it during the hardening pass. After all four sessions close (across however many sittings each takes), we re-run `jarvisCppCyberSecAudit.jcwf` once to verify the next baseline.
 - **Not a code freeze.** Other work continues; hardening sessions are scheduled, not exclusive.

@@ -20,25 +20,20 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include "engine.h"
+
+#include <cstddef>
+#include <string>
 
 namespace AIAssistant
 {
-    class JsonHelper
-    {
-    public:
-        JsonHelper() = default;
-        ~JsonHelper() = default;
+    // Cryptographically secure hex token of `numBytes` random bytes (output is 2*numBytes hex chars).
+    // Backed by OpenSSL RAND_bytes; returns an empty string on RAND_bytes failure (logged at ERROR).
+    // Callers MUST treat empty return as fail-closed.
+    std::string RandomHex(std::size_t numBytes);
 
-        // RFC 8259 §7-compliant escape of a string for embedding inside JSON string literals.
-        // Escapes the mandatory pair "\\" and the structural double quote, the three
-        // shorthand whitespace controls (\n, \r, \t), and emits \u00XX for every other
-        // byte in 0x00-0x1F.  Bytes >= 0x20 (including UTF-8 continuation bytes) are
-        // passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
-        static std::string EscapeJsonString(std::string_view input);
-
-        // Backwards-compatible instance alias.  Existing call sites use
-        // `JsonHelper jh; jh.SanitizeForJson(x);` or `JsonHelper().SanitizeForJson(x);`.
-        std::string SanitizeForJson(std::string const& input) const { return EscapeJsonString(input); }
-    };
+    // Strict allowlist for assistant-side opaque identifiers (session IDs, approval requestIds,
+    // memory IDs).  Returns true iff the input matches `[A-Za-z0-9_-]{1,128}`.  Empty strings,
+    // path separators, NULs, and any other byte are rejected.  Used at every site where an
+    // attacker-influenced ID feeds into a filesystem path or audit-log substring.
+    bool IsValidOpaqueId(std::string const& id);
 } // namespace AIAssistant

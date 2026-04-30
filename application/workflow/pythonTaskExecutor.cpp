@@ -255,6 +255,12 @@ namespace AIAssistant
                                                   contextValues, pythonOutputs, errorMessage, capturedStdout,
                                                   capturedStderr);
 
+        // Sanitize at the external-byte boundary: Python's print() / sys.stderr.write() can emit
+        // non-UTF-8 bytes (binary data, mojibake from misconfigured locales).  Downstream
+        // consumers — log/log.txt, dashboard JSON, ncurses TUI — assume well-formed UTF-8.
+        capturedStdout = SanitizeUtf8(capturedStdout);
+        capturedStderr = SanitizeUtf8(capturedStderr);
+
         // Store first 1024 characters for the frontend tooltip.
         static constexpr size_t kMaxCaptureChars = 1024;
         taskState.m_CapturedStdout = TruncateUtf8Safe(capturedStdout, kMaxCaptureChars);

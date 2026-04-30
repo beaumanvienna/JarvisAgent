@@ -97,7 +97,10 @@ namespace AIAssistant
         void HandleCompletionRequest(crow::websocket::connection& conn, std::string const& prefix, std::string const& kind);
 
         // Run AI call on background thread, queue response.
-        void RunAiCallAsync(std::string const& sessionId, std::string const& userMessage);
+        // originConn is recorded with any approval requests so only the
+        // originating client can approve them.
+        void RunAiCallAsync(std::string const& sessionId, std::string const& userMessage,
+                            crow::websocket::connection* originConn);
 
         // Make a blocking AI call using the queue-file pipeline (same as AiJcwfService).
         bool RunSingleAiCall(std::string const& subfolderName, std::string const& stngContent,
@@ -117,19 +120,26 @@ namespace AIAssistant
         bool MakeToolAiCall(std::string const& systemPrompt, std::string const& userPrompt, std::string& outResponse,
                             std::string& outError);
 
-        // Tool approval flow — blocks the calling thread until the user responds or timeout.
-        // Returns true if approved, false if denied or timed out.
-        bool RequestToolApproval(std::string const& sessionId, ToolCall const& call, std::string const& description);
+        // Blocks the calling thread until the user responds or timeout.
+        // Only the connection in originConn can approve.  Returns true if
+        // approved, false if denied, timed out, or the originating client
+        // disconnected.  Pointer identity only — never dereferenced.
+        bool RequestToolApproval(std::string const& sessionId, ToolCall const& call, std::string const& description,
+                                 crow::websocket::connection* originConn);
 
         // Called from OnMessage when the frontend sends an approval_response.
-        void HandleApprovalResponse(std::string const& requestId, bool approved);
+        // conn must match the PendingApproval's originConn or the response is
+        // rejected.
+        void HandleApprovalResponse(crow::websocket::connection& conn, std::string const& requestId, bool approved);
 
         // Queue a JSON message for delivery to all assistant clients.
         void QueueMessage(std::string const& jsonMessage);
 
-        // Get or create a session.
-        AssistantSession* GetSession(std::string const& sessionId);
-        AssistantSession* CreateSession();
+        // Get or create a session.  shared_ptr so background AI threads can
+        // hold a session safely across blocking calls without racing with
+        // shutdown / session eviction.
+        std::shared_ptr<AssistantSession> GetSession(std::string const& sessionId);
+        std::shared_ptr<AssistantSession> CreateSession();
 
         void JoinFinishedThreads();
 
@@ -147,7 +157,7 @@ namespace AIAssistant
 
         // Active sessions (loaded on demand).
         std::mutex m_SessionsMutex;
-        std::unordered_map<std::string, std::unique_ptr<AssistantSession>> m_Sessions;
+        std::unordered_map<std::string, std::shared_ptr<AssistantSession>> m_Sessions;
 
         // Pending messages to send to clients.
         std::mutex m_PendingMutex;
@@ -172,10 +182,16 @@ namespace AIAssistant
         WorkflowRegistry* m_WorkflowRegistry = nullptr;
         WorkflowRuntimeManager* m_WorkflowRuntimeManager = nullptr;
 
-        // Pending tool approvals (keyed by requestId).
+        // Pending tool approvals (keyed by requestId).  originConn pins each
+        // approval to the connection that triggered it — only that connection
+        // may answer.  The pointer is never dereferenced; OnClose cancels any
+        // approvals owned by a closing connection so a future reuse of the
+        // same address can't match by identity.
         struct PendingApproval
         {
             std::string requestId;
+            std::string originSessionId;
+            crow::websocket::connection* originConn{nullptr};
             std::mutex mutex;
             std::condition_variable cv;
             bool responded{false};
@@ -183,7 +199,11 @@ namespace AIAssistant
         };
         std::mutex m_ApprovalsMutex;
         std::unordered_map<std::string, std::shared_ptr<PendingApproval>> m_PendingApprovals;
-        std::atomic<int> m_NextApprovalSeq{1};
+
+        // Fail-close every pending approval owned by `conn` (called from
+        // OnClose) so the background AI loop unblocks immediately rather
+        // than waiting for the 60-second timeout.
+        void CancelApprovalsForConnection(crow::websocket::connection* conn);
 
         static constexpr int AI_CALL_TIMEOUT_MS = 120000; // 2 minutes
         static constexpr int MAX_TOOL_ITERATIONS = 10;    // max tool-call re-sends per turn

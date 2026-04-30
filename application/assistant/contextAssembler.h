@@ -40,13 +40,34 @@ namespace AIAssistant
     //
     // Phase 1 (L1): system prompt + conversation history + user message.
     // Phase 3 (L2): adds workspace memory, rules, folder summaries.
+    //
+    // Every user-origin string (prior turns + the new userMessage) is run through
+    // DefangContextSentinels before being placed in the prompt.  This neutralises
+    // attacker-supplied tokens that the AI would otherwise interpret as structural
+    // boundaries (`<tool_call>`, `</tool_call>`, `<tool_result>`, `</tool_result>`,
+    // `=== ... ===` section headers).
     class ContextAssembler
     {
     public:
         // Assemble a prompt from the current session state and user message.
-        // conversationBudgetTokens controls how many recent turns are included.
-        static AssembledPrompt Assemble(std::vector<AssistantTurn> const& recentTurns, std::string const& userMessage,
+        static AssembledPrompt Assemble(std::vector<AssistantTurn> const& recentTurns,
+                                        std::string const& userMessage,
                                         std::string const& toolDescriptions = {});
+
+        // Defang structural sentinels in user-origin text:
+        // - delegates `<tool_call>` / `</tool_call>` / `<tool_result>` / `</tool_result>`
+        //   to ToolRegistry::DefangToolMarkers (mathematical-angle-bracket replacement);
+        // - replaces any run of 3+ `=` characters with the same number of U+2550
+        //   (BOX DRAWINGS DOUBLE HORIZONTAL).  The system prompt uses literal `===`
+        //   to delimit `=== Tool System ===`-style headers, so a user-supplied `===…===`
+        //   would otherwise spoof those boundaries.
+        [[nodiscard]] static std::string DefangContextSentinels(std::string const& text);
+
+        // Caps on user-origin text appearing in the prompt — prevents OOM via crafted turns.
+        static constexpr size_t kMaxUserMessageBytes = 64 * 1024;
+        static constexpr size_t kMaxTurnTextBytes = 32 * 1024;
+        static constexpr size_t kMaxConversationContextBytes = 128 * 1024;
+        static constexpr size_t kMaxToolDescriptionsBytes = 64 * 1024;
 
     private:
         static std::string BuildSystemPrompt();

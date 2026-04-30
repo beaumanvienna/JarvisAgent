@@ -25,6 +25,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -142,7 +143,7 @@ namespace AIAssistant
                 std::string_view errorMessageView;
                 if (!errorObject["message"].get_string().get(errorMessageView))
                 {
-                    m_ErrorInfo.m_Message = std::string(errorMessageView);
+                    m_ErrorInfo.m_Message = SanitizeUtf8(std::string(errorMessageView));
                 }
             }
             m_HasError = true;
@@ -201,7 +202,7 @@ namespace AIAssistant
                 std::string_view textView;
                 if (!blockObject["text"].get_string().get(textView))
                 {
-                    block.m_Text = std::string(textView);
+                    block.m_Text = SanitizeUtf8(std::string(textView));
                 }
                 m_Reply.m_Content.push_back(std::move(block));
             }

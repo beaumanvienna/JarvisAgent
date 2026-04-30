@@ -32,6 +32,7 @@ import socket
 import sys
 import threading
 import time
+import ssl
 import traceback
 from typing import Any, Callable, Dict, List, Optional
 
@@ -47,7 +48,10 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-WS_URL = "ws://localhost:8080/ws/assistant"
+# Default to TLS — j9t serves WSS-only on port 8443.  Override via --url for
+# legacy ws:// configs.  Self-signed cert acceptance is automatic when wss://
+# is used (this is a localhost dev harness, not a public client).
+WS_URL = "wss://localhost:8443/ws/assistant"
 DEFAULT_TIMEOUT = 15.0   # seconds to wait for a response
 AI_TIMEOUT = 60.0        # longer timeout for AI provider calls
 PING_INTERVAL = 0.5      # match frontend ping cadence
@@ -70,20 +74,40 @@ class C:
 # ---------------------------------------------------------------------------
 
 class AssistantClient:
-    def __init__(self, url: str = WS_URL, auto_approve: bool = False, verbose: bool = False):
+    def __init__(self, url: str = WS_URL, auto_approve: bool = False, verbose: bool = False,
+                 token: Optional[str] = None):
         self.url = url
         self.auto_approve = auto_approve
         self.verbose = verbose
+        self.token = token
         self.ws: Optional[websocket.WebSocket] = None
         self.session_id: str = ""
         self._queued: List[dict] = []
         self._lock = threading.Lock()
+        # _ws_io_lock serializes ws.send() and ws.recv() across the ping thread + main
+        # thread.  websocket-client 1.7.0's WebSocket isn't thread-safe under TLS +
+        # concurrent send/recv — concurrent access drops the connection within ~40 ms.
+        # Plain ws:// previously masked this; wss:// (now the default) exposes it.
+        self._ws_io_lock = threading.Lock()
         self._ping_thread: Optional[threading.Thread] = None
         self._ping_stop = threading.Event()
 
     def connect(self):
-        """Connect to the assistant WebSocket."""
-        self.ws = websocket.create_connection(self.url, timeout=5)
+        """Connect to the assistant WebSocket.
+
+        For wss:// against the localhost dev server (self-signed cert), disable
+        cert verification — this is a localhost dev harness, not a public client.
+        For ws:// (plain), no SSL options applied.
+
+        Auth: /ws and /ws/assistant gate at the upgrade handshake via Authorization:
+        Bearer; pass --token or set J9T_TOKEN to authenticate.
+        """
+        kwargs: Dict[str, Any] = {"timeout": 5}
+        if self.url.startswith("wss://"):
+            kwargs["sslopt"] = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+        if self.token:
+            kwargs["header"] = [f"Authorization: Bearer {self.token}"]
+        self.ws = websocket.create_connection(self.url, **kwargs)
         self._ping_stop.clear()
         self._ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
         self._ping_thread.start()
@@ -103,7 +127,8 @@ class AssistantClient:
         while not self._ping_stop.is_set():
             try:
                 if self.ws and self.ws.connected:
-                    self.ws.send(json.dumps({"type": "ping"}))
+                    with self._ws_io_lock:
+                        self.ws.send(json.dumps({"type": "ping"}))
             except Exception:
                 break
             self._ping_stop.wait(PING_INTERVAL)
@@ -113,7 +138,8 @@ class AssistantClient:
         raw = json.dumps(msg)
         if self.verbose:
             print(f"  {C.DIM}>>> {raw[:200]}{C.RESET}")
-        self.ws.send(raw)
+        with self._ws_io_lock:
+            self.ws.send(raw)
 
     def recv(self, timeout: float = DEFAULT_TIMEOUT) -> Optional[dict]:
         """Receive a single non-ping message, with timeout."""
@@ -125,8 +151,9 @@ class AssistantClient:
                     return self._queued.pop(0)
             try:
                 remaining = max(0.1, deadline - time.time())
-                self.ws.settimeout(remaining)
-                raw = self.ws.recv()
+                with self._ws_io_lock:
+                    self.ws.settimeout(remaining)
+                    raw = self.ws.recv()
                 if raw is None:
                     continue
                 msg = json.loads(raw)
@@ -1392,6 +1419,9 @@ def main():
                         help="Show raw WebSocket messages")
     parser.add_argument("--url", default=WS_URL,
                         help=f"WebSocket URL (default: {WS_URL})")
+    parser.add_argument("--token", default=os.environ.get("J9T_TOKEN", ""),
+                        help="Bearer token for WS handshake (default: $J9T_TOKEN); required when "
+                             "the server runs with auth enabled — which is the default.")
     args = parser.parse_args()
 
     if args.list:
@@ -1402,7 +1432,8 @@ def main():
         print(f"\n  Total: {len(suite.tests)} ({sum(1 for _, _, ai in suite.tests if ai)} require --with-ai)\n")
         return
 
-    client = AssistantClient(url=args.url, auto_approve=args.auto_approve, verbose=args.verbose)
+    client = AssistantClient(url=args.url, auto_approve=args.auto_approve, verbose=args.verbose,
+                             token=args.token or None)
 
     try:
         print(f"\n{C.CYAN}Connecting to {args.url} ...{C.RESET}")

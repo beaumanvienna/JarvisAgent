@@ -21,51 +21,49 @@
 
 #include "json/jsonHelper.h"
 
+#include <cstdio>
+
 namespace AIAssistant
 {
-    std::string JsonHelper::SanitizeForJson(std::string const& input)
+    std::string JsonHelper::EscapeJsonString(std::string_view input)
     {
         std::string output;
-        output.reserve(input.size());
+        output.reserve(input.size() + 16);
 
-        for (char c : input)
+        for (char rawC : input)
         {
+            unsigned char const c = static_cast<unsigned char>(rawC);
             switch (c)
             {
-                case '':
-                {
-                    break;
-                }
-                case '\"':
-                {
+                case '"':
                     output += "\\\"";
                     break;
-                }
                 case '\\':
-                {
                     output += "\\\\";
                     break;
-                }
                 case '\n':
-                {
                     output += "\\n";
                     break;
-                }
                 case '\r':
-                {
                     output += "\\r";
                     break;
-                }
                 case '\t':
-                {
                     output += "\\t";
                     break;
-                }
                 default:
-                {
-                    output += c;
+                    if (c < 0x20)
+                    {
+                        // RFC 8259: every codepoint U+0000..U+001F that is not one of
+                        // the shorthand cases above must be emitted as \u00XX.
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                        output += buf;
+                    }
+                    else
+                    {
+                        output += rawC;
+                    }
                     break;
-                }
             }
         }
 

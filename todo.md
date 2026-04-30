@@ -17,11 +17,55 @@ The two scope-specific live files (`application/workflow/doc/todo.md`, `workflow
 
 ## Pre-1.0
 
+### Concurrent-run policy for JCWFs (serialize by default)
+Surfaced 2026-04-29 during sitting-4 verification.  When the `--with-ai --auto-approve` test suite exercised `run_workflow`, the AI picked `jarvisCppDocu` (141 tasks) and started it multiple times — the runs raced on the shared queue folder, each run's `OnOutputFileCreated` callback consumed events the other was waiting for, and 82 tasks ended up stranded in `waiting_external` with output files already on disk that no one would transition.  Today the engine has no concurrency guard: there's no single-instance lock, no serialization, nothing.  The dashboard greys out the Run button while a run is active, which **looks** like a guard but only blocks the UI path — REST/MCP/test callers bypass it entirely.  That UX-vs-engine gap is itself a finding to fix.
+
+Three policies, picked in `global.json`:
+- `parallel` — current behaviour; both runs proceed concurrently.  Right for genuinely fan-out-by-design workflows but they need per-run queue folders to be safe (separate work).
+- `serialize` — second run accepted, sits in `pending` until the first completes; FIFO drain.  Right for "I clicked Run twice / cron stacked / test fired Run twice" — preserves runId observability without overlap.
+- `reject` — second run returns 409 Conflict; caller decides retry/fail/log.  Right for IO-exclusive jobs.
+
+**Default policy:** `serialize` — safer surprise.  Workflows that legitimately want parallel execution opt in via `"concurrency": "parallel"` in `global.json` and pair it with the per-run queue folder work below.
+
+Implementation lives in `WorkflowRuntimeManager`:
+- New `m_PendingByWorkflow: unordered_map<workflowId, deque<RunRequest>>`, mutex-guarded.
+- `EnqueueWorkflowRunAndGetRunId` checks the JCWF's policy.  If `serialize` and there's already an active run for `workflowId`, push to the deque and return the new runId in `pending` state.
+- On run completion (succeeded / failed / cancelled / stopped), pop the front of the deque and start the next run.
+- Cap the deque (e.g., 32).  Overflow either rejects or drops oldest with `LOG_APP_ERROR`.
+
+Dashboard work pairs with this:
+- Render `pending` runs distinctly from `running` runs (different badge / state column).
+- Stop button on a pending run dequeues cleanly — no AI calls dispatched yet, just remove from queue.
+- Match the dashboard's existing "grey out Run button" UX to the actual engine behaviour: with serialize-default, the Run button can stay enabled and queue the request rather than reject it.
+
+Per-run queue folder (separate, deeper work, not blocking this entry): `queue/<workflowId>/<runId>/<NN>_<task>/` instead of `queue/<workflowId>/<NN>_<task>/`.  Required for `parallel`-opted workflows to be hermetic.  Tracked here as a follow-up rather than its own entry because it only matters once `parallel` is opt-in.
+
 ### Cyber-security hardening pass
 Plan: `doc/misc/cybersec-hardening-dev-plan.md`.  Source: `doc/combinedCyberSecAudit.md` (729 findings: 54 CRITICAL, 239 HIGH, 279 MEDIUM, 157 LOW).  4-domain split, 4 combined sessions with §19.  Session order: S1=D2 web+cloud+assistant (densest CRITICAL surface), S2=D3 core engine, S3=D1 workflow orchestration, S4=D4 app infrastructure.
 
 ### C++ safety hardening pass
 Plan: `doc/misc/cpp-safety-hardening-dev-plan.md`.  Source: `doc/combinedSafetyAudit.md` (1243 findings: 13 CRITICAL, 277 HIGH, 483 MEDIUM, 470 LOW).  Same 4-session schedule as cyber-sec, run together.  Memo organized as Rust-emulating C++ defaults.
+
+### Per-interface mock transport for parser fault injection
+Sequenced after the 4 hardening sessions.  New `IInterfaceTransport` abstraction with two impls per real `InterfaceType` (API1–API5 + API6 reusing API1's parser): `LiveTransport` (real curl + auth signer, current behavior) and `MockTransport` (canned responses from disk fixtures).  Switch is dispatch-time, driven by the request: if the request carries a `X-J9T-Mock-Fixture: <name>` header (and a hermetic-mode flag), `MockTransport` is selected and serves bytes from `test/dispatch/fixtures/<api>/<name>.json` (or similar); otherwise `LiveTransport` runs unchanged.  Match strategy is **InterfaceType + fixture-name header only** — no URL or full-header matching, keeping the mock cheap to maintain.
+
+Goal trio: (1) byte-level fault injection through real parsers (malformed UTF-8, surrogate halves, truncated multi-byte, overlong encodings) — closes the §19 SanitizeUtf8 verification gap that today's hermetic dispatcher can't reach; (2) per-interface contract tests catching response-shape drift (provider adds/renames fields) without burning quota; (3) reproducible parser regression fixtures.
+
+**Complementary to existing HTTP mocks** (`aoai-api-simulator` for API6, LocalStack for API5) — those keep covering auth + curl + multi-dispatcher behavior with realistic well-formed bodies.  The routing-layer mock focuses on parser/byte pathology where the HTTP mocks are weak.  Not redundant: different layers, different bug classes.
+
+Implementation skeleton:
+- New header `engine/curlWrapper/interfaceTransport.h` defines `IInterfaceTransport` (one virtual dispatch method matching today's `CurlMultiDispatcher` request shape).
+- `LiveTransport` wraps the existing curl path verbatim (refactor, not rewrite).
+- `MockTransport` reads `<fixture>.json` (or `.bin` for binary-pathology fixtures) plus an optional `<fixture>.meta.json` for HTTP status / headers / latency injection.
+- Selection at `AiRequestPool::Submit` time: if `m_MockFixture` is set on the envelope, use Mock; else Live.
+- Fixtures committed under `test/dispatch/fixtures/api{1..6}/`.  Each interface gets a baseline `golden_response.json` + a battery of pathology fixtures (`malformed_utf8.json`, `truncated_multibyte.json`, `surrogate_half.json`, `overlong.json`, `empty_choices.json`, `missing_finish_reason.json`, etc.).
+- New test files `test/dispatch/test_api{1..6}_mock_*.py` per interface drive the dispatcher with fixture names and assert downstream invariants.
+
+### Dogfood the workflow editor (JC)
+Write a few non-trivial JCWFs **directly in the editor** rather than as raw JSON: sub-workflow nesting, per-item fan-out, mixed task types (ai_call + python + shell + cloud), file_watch trigger, error-branching edges.  The editor exists and has a 70-test suite, but it's never been driven by JC in anger.  Goal: surface UX gaps, validation-surprise messaging, broken-state visibility, inspector quirks.  Findings inform 1.0 polish or post-1.0 backlog depending on severity.
+
+### Dogfood the AI assistant (JC)
+Drive a real conversation through the assistant chat surface: multi-turn tool-use loop, approval flow for mutating tools, the eight `jcwf_*` tools (read / explain / validate / read_plan / write_plan / generate / fix_task / write_script), runtime-control tools (`workflow_pause/resume/stop`, `get_dashboard_status`), slash commands, ghost-text auto-completion, history search, persistent session save/load.  Cross-references §18 D2 hardening triage: the assistant is exactly where the cyber-sec audit found its densest CRITICAL cluster (`assistantTools.h` has five shell-injection findings in a single file + the tool-approval bypass in `assistantController.h`).  Findings reachable in real use should jump the §18 D2 queue; findings unreachable in any plausible workflow get a "skip with reason" entry.  Two-for-one: dogfood validation **and** sharper hardening triage.
 
 ### Repository layout + root-folder hygiene
 Group sources under `code/{backend,frontend,mcp}`; gitignore runtime folders (`queue/`, `workflows/`); prune root artefacts (`.npm-tools/`, `jarvis_agent.example.env`); consider moving Docker files to `packaging/Docker/`.  Rollout in 4 phases (runtime folders → root cleanup → Docker relocation → source tree reorg).  GitHub first impression matters before 1.0.
@@ -54,15 +98,6 @@ The AI dispatch refactor's main work is committed; these are slice items the §5
 - **`EventCategoryAi` consumers** — events posted from the dispatch lifecycle; only the aggregated "in flight" LED reads them today.  TUI / dashboard could surface per-call AI events.
 - **More `test/dispatch/` contract test slices** — many landed (hermetic, relaxed env, output-schema roundtrip, chunking, markitdown, cross-workflow concurrency, Tier A, Tier B, TUI stress).  Remaining slices tracked as follow-ups; no specific list yet.
 - **Live-backed E2E tests for schema-validation retry, chunking, and markitdown** — flagged in `doc/misc/AI dispatch refactor.md` post-merge follow-ups: today these paths are hermetic-only (TestInterface).  Live-backed versions hitting real providers would catch tokenizer / quirk drift the hermetic tests don't.
-
----
-
-## §19 deferred companion work (from today's hand-off)
-
-Today's TUI invalid-UTF-8 stress test surfaced and fixed the leak at the TestInterface boundary.  These two related boundaries were spec'd but punted into §19, scheduled for D1 (S3):
-
-- **`SanitizeUtf8` at real AI reply parsers** — `application/json/replyParser{API1..API5}.cpp`.  Defense in depth for the rare-but-possible "provider returns corrupt bytes" case.
-- **`SanitizeUtf8` at captured stdout/stderr** — `application/workflow/shellTaskExecutor.cpp` + `pythonTaskExecutor.cpp`.  `TruncateUtf8Safe` only handles boundary cuts, not bad bytes within the buffer.
 
 ---
 

@@ -375,7 +375,7 @@ namespace AIAssistant
 
                     if (!line.empty())
                     {
-                        LOG_APP_INFO("[shell:{}] {}", taskId, line);
+                        LOG_APP_INFO("[shell:{}] {}", taskId, SanitizeUtf8(line));
                     }
                 }
             }
@@ -389,7 +389,7 @@ namespace AIAssistant
 
                 if (!pending.empty())
                 {
-                    LOG_APP_INFO("[shell:{}] {}", taskId, pending);
+                    LOG_APP_INFO("[shell:{}] {}", taskId, SanitizeUtf8(pending));
                 }
             }
 
@@ -422,7 +422,7 @@ namespace AIAssistant
                             }
                             if (!line.empty())
                             {
-                                LOG_APP_INFO("[shell:{}:stderr] {}", taskId, line);
+                                LOG_APP_INFO("[shell:{}:stderr] {}", taskId, SanitizeUtf8(line));
                             }
                         }
                     }
@@ -570,7 +570,7 @@ namespace AIAssistant
 
                     if (!line.empty())
                     {
-                        LOG_APP_INFO("[shell:{}{}] {}", taskId, logTag, line);
+                        LOG_APP_INFO("[shell:{}{}] {}", taskId, logTag, SanitizeUtf8(line));
                     }
                 }
             };
@@ -1231,6 +1231,12 @@ namespace AIAssistant
             executed = ExecuteCommandWithCapturedOutput(fullCommand, taskDefinition.m_Id, taskWorkingDirectoryPathAbsolute,
                                                         argumentList, exitCode, capturedStdout, capturedStderr);
         }
+
+        // Sanitize at the external-byte boundary: child-process stdout/stderr can emit non-UTF-8
+        // bytes (binary blobs, mojibake from C locale).  Downstream consumers — stdout.txt /
+        // stderr.txt files, dashboard JSON, ncurses TUI — all assume well-formed UTF-8.
+        capturedStdout = SanitizeUtf8(capturedStdout);
+        capturedStderr = SanitizeUtf8(capturedStderr);
 
         // Write stdout.txt and stderr.txt to the task working directory (full size).
         {

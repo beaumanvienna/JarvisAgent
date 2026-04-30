@@ -1,7 +1,7 @@
 # AI Assistant — Technical Documentation
 
 **Status:** Implemented
-**Last updated:** 2026-03-30
+**Last updated:** 2026-04-29
 
 ---
 
@@ -65,6 +65,12 @@ in the response actually exist in the workspace.
 │       ├── ResponseValidator         │
 │       └── AI provider (existing)    │
 │                                     │
+│  Shared helpers:                    │
+│       assistantHelpers (RandomHex,  │
+│         IsValidOpaqueId)            │
+│       JsonHelper::EscapeJsonString  │
+│       ToolRegistry::DefangToolMarkers│
+│                                     │
 │  Existing infrastructure:           │
 │  WebServer, AiRequestPool,          │
 │  WorkflowRegistry, RuntimeManager,  │
@@ -90,36 +96,56 @@ in the response actually exist in the workspace.
 ```
 assistant/
 ├── sessions/
-│   ├── sess_1711234567.jsonl       # conversation history (append-only)
-│   └── sess_1711234999.jsonl
-├── memory.json                     # persistent key-value memory store
+│   ├── sess_4f2e8a1c9d3b7e1604d8a2f15c9e3b27.jsonl   # 128-bit RandomHex IDs, 0600 perms on POSIX
+│   └── sess_b1c4e2f7a8d916302c5d8f1e4a7b96e3.jsonl
+├── memory.json                                       # persistent key-value memory store
 └── index/
-    └── file_index.jsonl            # workspace file index with cached summaries
+    └── file_index.jsonl                              # workspace file index with cached summaries
 ```
+
+Session and memory IDs are 128-bit cryptographically random hex strings (16 bytes from `RAND_bytes`).  The previous timestamp+counter scheme was replaced after a session-ID-prediction finding — see `assistantHelpers::RandomHex`.
 
 ### File formats
 
-**Session history (`sessions/*.jsonl`)** — one JSON object per line:
+**Session history (`sessions/*.jsonl`)** — one JSON object per line, parsed by `simdjson::ondemand`:
 ```jsonl
 {"role":"user","text":"Why did cyber2 fail?","ts":"2026-03-23T21:06:19Z"}
 {"role":"assistant","text":"Looking at the logs...","ts":"2026-03-23T21:06:21Z"}
 ```
+Per-line bytes are bounded by `AssistantSession::kMaxLineBytes` (1 MiB) and the total turn count by `kMaxTurnsPerSession` (10 000).  Each turn's text is clamped to `kMaxTurnTextBytes` (256 KiB) at load time.  Roles outside `{user, assistant, system}` are dropped.
 
-**Memory store (`memory.json`)** — JSON array of key-value entries with tags:
+**Memory store (`memory.json`)** — JSON array of entries:
 ```json
 [
-  {"key":"user_name","value":"John","tags":["personal"],"created_at":"2026-03-24T10:00:00Z"}
+  {"id":"mem_a3c8e1...","key":"user_name","value":"John","tags":["personal"],"createdAt":"2026-03-24T10:00:00Z","sourceSessionId":"sess_..."}
 ]
 ```
+Bounded by `MemoryStore::kMaxEntries` (10 000), `kMaxKeyBytes` (256), `kMaxValueBytes` (64 KiB), `kMaxTagBytes` (256), `kMaxTagsPerEntry` (32).  Inputs that exceed caps are clamped; new entries past `kMaxEntries` are rejected.
 
 **File index (`index/file_index.jsonl`)** — one entry per indexed file:
 ```jsonl
 {"path":"application/assistant/assistantController.cpp","ext":".cpp","size":45000,"mtime":1711234567,"summary":"Manages the /ws/assistant WebSocket...","summary_mtime":1711234567}
 ```
+Bounded by `WorkspaceIndexer::kMaxIndexEntries` (100 000) and `kMaxSummaryBytes` (8 KiB).  Every `path` field read from disk is re-validated against the workspace root captured at startup (`ResolveAndConfine`); paths that escape the workspace are dropped with a `LOG_SECURITY_WARN`.
 
 ---
 
 ## Backend modules
+
+### assistantHelpers (`assistantHelpers.h/.cpp`)
+
+Shared helpers used across the assistant subsystem.  Lifted out of
+`assistantController.cpp`'s anonymous namespace once a third caller appeared.
+
+- `std::string RandomHex(size_t numBytes)` — cryptographically secure hex
+  token from `RAND_bytes` (no `std::mt19937` anywhere).  Returns empty string
+  on RAND_bytes failure (logged at `LOG_CORE_ERROR`); callers MUST treat empty
+  as fail-closed.  Used for session IDs (16 bytes), memory IDs (16 bytes), and
+  approval requestIds (16 bytes).
+- `bool IsValidOpaqueId(std::string const&)` — strict allowlist
+  `[A-Za-z0-9_-]{1,128}` for any opaque assistant identifier (session IDs,
+  approval requestIds, memory IDs).  Used at every site where an
+  attacker-influenced ID feeds into a filesystem path or audit-log substring.
 
 ### AssistantController (`assistantController.h/.cpp`)
 
@@ -128,11 +154,45 @@ assistant/
 - Manages per-connection state (active session)
 - Handles AI calls via background threads using `AiRequestPool`
 - Multi-step tool loop with up to 10 iterations (L3)
-- Tool approval flow (L3): tools requiring approval send `approval_request` to
-  frontend, then block the background thread on a `std::condition_variable`
-  inside a `PendingApproval` struct (mutex-protected map keyed by request ID).
-  Frontend `approval_response` sets the result and notifies the CV. 60s timeout
-  auto-denies with "Approval timed out".
+- **Sessions are stored as `std::shared_ptr<AssistantSession>`.** Background
+  AI lambdas capture the shared_ptr so the session stays alive across the
+  multi-step tool loop regardless of `m_Sessions` evictions or `Shutdown`
+  ordering.  Callers should declare
+  `std::shared_ptr<AssistantSession> session = GetSession(sid);` rather than
+  hold a raw `AssistantSession*` past the immediate handler.
+- **`GetSession` gates on `IsValidOpaqueId`** before any path construction;
+  resolved file is canonicalised under the sessions dir (`weakly_canonical` +
+  `lexically_relative` containment check) as defense-in-depth against symlinks.
+  Rejections log `[security] assistant_session_invalid_id length=…` /
+  `[security] assistant_session_path_escape sid_len=…` (length only, never the
+  value).
+- **Tool approval flow (L3) is connection-bound.**
+  `PendingApproval` carries an `originConn` pointer (identity-only — never
+  dereferenced).  `RunAiCallAsync` threads the connection through via lambda
+  capture; `HandleApprovalResponse(conn, requestId, approved)` rejects any
+  conn-mismatch with `LOG_SECURITY_WARN`.  `OnClose` calls
+  `CancelApprovalsForConnection(&conn)` to fail-close any approvals owned by
+  the disconnecting client (otherwise the AI loop would hang on the 60s
+  timeout, and a future connection that reuses the pointer address could
+  match by identity).  `Shutdown`'s `notify_all` snapshots under
+  `m_ApprovalsMutex` then notifies outside the lock to avoid lock inversion.
+- **`requestId = "apr_" + RandomHex(16)`.** The previous sequential counter is
+  gone — sequential request IDs were predictable across reconnects.
+- **WS frame size cap.** `OnMessage` rejects frames > 64 KB before
+  constructing `simdjson::padded_string` (logs
+  `[security] assistant_ws_frame_too_large bytes=…`).
+- **`get_history maxEntries` clamped via `std::clamp<int64_t>(val, 1, 500)`**
+  before the cast — a negative value previously caused an unbounded loop.
+- **Tool-result reflection runs through `ToolRegistry::DefangToolMarkers`.**
+  Externally-sourced text re-entering the AI's view as a `<tool_result>...`
+  block is defanged at five sites in `assistantTools.cpp` plus
+  `RunAiCallAsync`.
+- **`HandleListSessions` / `HandleCompletionRequest` snapshot under
+  `m_SessionsMutex` then iterate outside the lock** — closes both the
+  lock-order TOCTOU and the controller-mutex-while-session-side-mutex
+  inversion.
+- **`HandleLogCommand` is pure C++ tail-reader** on `std::ifstream` seek-tail
+  — the prior popen + `tail` shell composition is gone (no shell on this path).
 - Provides `MakeToolAiCall()` callback for tools that need nested AI calls
 - `ValidateResponse()` — heuristic relevance checking before final response (L3):
   extracts keywords from user message (lowercase, ≥3 chars, stop-words filtered),
@@ -147,17 +207,69 @@ assistant/
 
 - One instance per conversation session
 - Owns the JSONL history file (append-only)
-- `GetRecentTurns(maxTokens)` — returns recent turns within a token budget
-- `AddUserMessage()`, `AddAssistantMessage()`
-- Session ID generated from milliseconds timestamp + atomic counter at creation
+- `GetRecentTurns(maxTokens)` — returns recent turns within a token budget;
+  `maxTokens == 0` returns an empty vector (the prior `!result.empty()` guard
+  that always returned ≥1 turn was removed)
+- **`[[nodiscard]] bool AddUserMessage()` / `AddAssistantMessage()`** — true
+  iff the turn was both pushed in-memory and durably written to disk.
+  Implementation writes-then-commits: `AppendTurnLocked` writes to disk first
+  with explicit `flush()` + `good()` check, only commits to `m_Turns` on
+  success.  On any failure the sticky `m_FileBroken` flag is set so subsequent
+  appends fail fast with an ERROR log; no further writes are attempted until
+  operator intervention.
+- **Session IDs are `"sess_" + RandomHex(16)`** — 128-bit entropy, no
+  timestamp, no counter.  The previous `sess_<ms>_<n>` scheme is gone, along
+  with the same-millisecond-restart corruption it enabled.
+- **Resume constructor validates `sessionId` via `IsValidOpaqueId`** as
+  defense-in-depth alongside the controller-layer gate.
+- **Logs use `LogSafeSessionId`** — first 8 hex chars + `…` — so log
+  aggregators can't be used as a session-hijacking oracle.
+- **`LoadFromFileLocked`** is the single load path; called from the
+  constructor without acquiring the per-instance mutex (the object is not yet
+  shared).  Public methods that need to load again would acquire the lock
+  themselves.  Caps enforced at load: `kMaxLineBytes` (1 MiB),
+  `kMaxTurnsPerSession` (10 000), `kMaxTurnTextBytes` (256 KiB).
+- **Parsing uses `simdjson::ondemand`** — the prior home-built
+  `ExtractJsonString` parser couldn't decode `\uXXXX` escapes and corrupted
+  any round-trip through `JsonEscape` for control bytes.
+- **`ListSessions` constructs `directory_iterator` directly with `error_code`** —
+  no TOCTOU `exists()` pre-check.  Foreign `.jsonl` files are filtered by
+  `IsValidOpaqueId` before surfacing as sessions.
+- **POSIX file permissions are restricted to 0600** on first write
+  (best-effort, `permissions(replace)`); Windows relies on inherited NTFS
+  DACLs.
 
 ### MemoryStore (`assistantMemory.h/.cpp`)
 
 - Persistent key-value store backed by `assistant/memory.json`
-- `Save(key, value, tags)`, `Delete(key)`, `ListAll()`
-- `GetRelevant(query, maxResults)` — keyword-based relevance search
+- `[[nodiscard]] Save(key, value, tags)`, `[[nodiscard]] Delete(key)`,
+  `[[nodiscard]] Recall(query)`, `[[nodiscard]] ListAll()`,
+  `[[nodiscard]] GetRelevant(query, maxResults)`,
+  `[[nodiscard]] Size()`, `ClearAll()`
+- **IDs are `"mem_" + RandomHex(16)`** — 128-bit entropy.  The previous
+  process-local `std::mt19937_64` had a data race across instances and
+  predictable seeds.
+- **`GetRelevant` acquires the lock once** and calls a private `RecallLocked`
+  helper that assumes the lock is held — the prior "drop lock between Recall
+  return and resize" atomicity gap is closed, and a future inline of `Recall`
+  inside `GetRelevant` would no longer deadlock on the non-recursive mutex.
+- **`SaveToDiskLocked` returns `bool`.** Failure logs at `LOG_APP_ERROR`,
+  sets sticky `m_FileBroken`, and `Save` rolls back the in-memory mutation so
+  disk and memory stay consistent.  `Delete` similarly returns false on
+  persistence failure.
+- **Caps enforced:** `kMaxEntries` (10 000), `kMaxKeyBytes` (256),
+  `kMaxValueBytes` (64 KiB), `kMaxTagBytes` (256), `kMaxTagsPerEntry` (32).
+  Oversized inputs are clamped at `Save`; new entries past the entry cap are
+  rejected.
+- **Logs use `LogSafeKey`** — control bytes replaced with `?`, capped at 64
+  chars, original byte length appended in parens — to prevent log injection
+  via newline-bearing keys and to bound the log line.
+- **`Scored` struct stores `size_t idx` rather than `MemoryEntry const*`** —
+  the prior raw-pointer-into-vector pattern was one refactor away from a
+  use-after-free.
 - Punctuation stripping for robust keyword matching
-- Thread-safe (mutex-protected)
+- Thread-safe (mutex-protected, all public methods hold the lock for the whole
+  operation)
 
 ### ContextAssembler (`contextAssembler.h/.cpp`)
 
@@ -170,6 +282,22 @@ Assembles the full prompt for each AI call:
 4. **Recalled memories** — keyword-matched entries from `MemoryStore`
 5. **Relevant file summaries** — keyword-matched entries from `WorkspaceIndexer`
 6. **User message** — the current input
+
+Every user-origin string (prior turn text + the new user message) runs through
+`DefangContextSentinels` before placement in the prompt:
+
+- Delegates `<tool_call>` / `</tool_call>` / `<tool_result>` / `</tool_result>`
+  to `ToolRegistry::DefangToolMarkers` (mathematical-angle-bracket replacement,
+  `U+27E8` / `U+27E9`).
+- Replaces any run of 3+ `=` characters with the same number of `U+2550`
+  (BOX DRAWINGS DOUBLE HORIZONTAL).  The system prompt uses literal `===` to
+  delimit `=== Tool System ===`-style headers; without this defang a
+  user-supplied `===…===` would spoof those structural boundaries.
+
+Caps: `kMaxUserMessageBytes` (64 KiB), `kMaxTurnTextBytes` (32 KiB),
+`kMaxConversationContextBytes` (128 KiB), `kMaxToolDescriptionsBytes`
+(64 KiB).  Per-turn truncation + total-context truncation prevent OOM via
+crafted long turns.
 
 ### ToolRegistry (`assistantTools.h/.cpp`)
 
@@ -188,9 +316,8 @@ invoked via `<tool_call>` blocks in AI responses.
 | `get_task_output` | Captured stdout/stderr | No |
 | `list_recent_runs` | Last N completed/failed runs | No |
 | `read_file` | Read file content (line range, 100 KB limit) | No |
-| `search_files` | Grep-style search | No |
-| `list_files` | Directory listing | No |
-| `get_log_tail` | Last N log lines | No |
+| `search_files` | Grep-style search (ripgrep, argv exec) | No |
+| `list_files` | Directory listing (`std::filesystem`, no shell) | No |
 | `save_memory` | Save a key-value fact | No |
 | `recall_memory` | Search memories by keyword | No |
 | `list_memories` | List all stored memories | No |
@@ -258,8 +385,44 @@ Indexes source files for fast lookup and summary caching.
 - Summary caching per file with mtime-based invalidation
 - `GetRelevantFiles(query, maxResults)` — keyword-based relevance scoring
 - Persistence via `assistant/index/file_index.jsonl` (JSONL, simdjson read)
-- Thread-safe (mutex-protected)
+- Thread-safe (mutex-protected, all public methods hold the lock for the whole
+  operation — including `LastScanTime()`, which previously read
+  `m_LastScanTime` racily without the lock)
 - `/index rescan` slash command for manual re-scan
+
+**Path confinement.**  The constructor captures
+`m_WorkspaceRoot = fs::weakly_canonical(fs::current_path())` at startup
+(typically right after `main()` sets cwd to the project root).  All later
+path resolution anchors against this snapshot, so a future cwd change cannot
+widen access.  The private `ResolveAndConfine(relativePath)` does
+`weakly_canonical(root / raw)` and a `lexically_relative(root)` containment
+check; symlinks pointing out of tree are caught at resolution.  Absolute
+paths are rejected up front.
+
+**`ReadFileContent(relativePath, maxBytes)` is an instance method** (the
+prior `static` version had no anchoring).  Callers route through
+`m_WorkspaceIndexer->ReadFileContent(...)`.  This is workspace-confinement
+only — it is **not** a deny-list against sensitive files.  Sensitive-file
+gating (e.g., `config.json`, `.env`, `*.pem`, `*.key`) lives in
+`ToolRegistry::IsPathDenied` and must be applied separately at the call
+site (e.g., `ExecGetFileSummary` applies both gates).
+
+**Untrusted index data is re-validated.**  Every `relativePath` parsed from
+`assistant/index/file_index.jsonl` runs through `ResolveAndConfine` again
+before being trusted into `m_PathToIndex`.  Rejections log
+`[security] indexer_index_path_escape len=…`.
+
+**`Scored` struct stores `size_t idx` rather than `FileIndexEntry const*`**
+in `GetRelevantFiles` — same lifetime-hardening as `MemoryStore::RecallLocked`.
+
+**Filesystem-error propagation.**  `ScanDirectory` and the top-level-files
+block check `ec` after every `fs::file_size` / `fs::last_write_time` and
+skip the entry on failure; the prior code stored
+`UINTMAX_MAX` / implementation-defined values into the index.
+
+**Caps:** `kMaxIndexEntries` (100 000), `kMaxSummaryBytes` (8 KiB).
+`SetFileSummary` clamps to `kMaxSummaryBytes` so a runaway provider response
+or prompt-injected mega-summary cannot bloat the index file.
 
 ---
 
@@ -364,18 +527,27 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 
 | Concern | Mitigation |
 |---------|-----------|
-| Shell commands | `run_shell` requires approval (all commands go through approval flow), 30s timeout on all platforms: process group kill on Linux/macOS; `TerminateProcess` on Windows |
+| Shell commands | `run_shell` requires approval; **POSIX path uses argv-array exec via `RunArgvCapture` (no shell parser), Windows path uses `CreateProcessA` with `lpCurrentDirectory` (no shell composition).** 30s timeout on all platforms: process group kill on Linux/macOS; `TerminateProcess` on Windows. **`IsCwdInsideProjectRoot` validates cwd via `fs::weakly_canonical` against `fs::current_path()` — `..`, absolute paths, and symlinks pointing outside the project root all rejected structurally.** |
 | Workflow execution | `run_workflow` requires approval |
-| File writes | `write_file`, `edit_file` require approval, atomic writes with `.bak` backup |
-| JCWF mutations | `jcwf_generate`, `jcwf_fix_task`, `jcwf_write_plan`, `jcwf_write_script` require approval, atomic writes with backup |
+| File writes | `write_file`, `edit_file` require approval, atomic writes (`.tmp` + rename), `.bak` backup, RAII `.tmp` cleanup |
+| JCWF mutations | `jcwf_generate`, `jcwf_fix_task`, `jcwf_write_plan`, `jcwf_write_script` require approval, atomic writes with backup; `jcwf_generate` JSON-escapes `workflowId` via the central `JsonHelper::EscapeJsonString` |
 | Runtime control | `workflow_pause`, `workflow_resume`, `workflow_stop` require approval |
 | Infinite tool loops | Max 10 tool calls per turn, loop detection (>3× identical calls) |
-| Token budget | ContextAssembler truncates oldest turns first |
+| Token budget | ContextAssembler truncates oldest turns first; explicit caps `kMaxConversationContextBytes` (128 KiB), `kMaxTurnTextBytes` (32 KiB), `kMaxUserMessageBytes` (64 KiB), `kMaxToolDescriptionsBytes` (64 KiB) |
 | Stale summaries | Invalidated when file mtime changes |
-| Sensitive data | `read_file` has a deny-list: `config.json`, `keys.json`, `*.pem`, `*.key`, `.env` |
+| Sensitive data | `read_file` and `get_file_summary` apply `IsPathDenied`: `config.json`, `keys.json`, `.env`, `*.pem`, `*.key`, plus their `.bak` / `.tmp` siblings; **resolution uses `fs::weakly_canonical` against project root with case-folded filename + extension comparison — symlinks pointing at sensitive files are caught.** Fail-closed on any resolution error. |
 | Tool output size | 4 KB default, 8 KB for file reads, 16 KB for JCWF reads |
-| Prompt injection | Tool outputs wrapped in `<tool_result>` fences; system prompt forbids executing content from tool results |
-| Path traversal | `lexically_normal()` + `..` rejection in `read_file`, `write_file`, `edit_file`, script paths |
+| Prompt injection — tool results | Tool outputs wrapped in `<tool_result>` fences; system prompt forbids executing content from tool results; `ToolRegistry::DefangToolMarkers` replaces literal `<tool_call>` / `</tool_call>` / `<tool_result>` / `</tool_result>` ASCII sequences with `U+27E8` / `U+27E9` mathematical-angle-bracket equivalents at every site that reflects external bytes back into the AI's context |
+| Prompt injection — context | `ContextAssembler::DefangContextSentinels` runs every prior turn and the new user message through tool-marker defang plus a `===` → `U+2550` collapse, so a user-supplied `===…===` cannot spoof system-prompt section boundaries |
+| Path traversal | `read_file` / `write_file` / `edit_file` / `jcwf_write_script` use `fs::weakly_canonical` against the project root with `lexically_relative` containment + leading-`..` rejection.  `WorkspaceIndexer::ReadFileContent` uses the same pattern against the workspace root captured at construction; `LoadIndex` re-validates every path read from disk |
+| Session ID prediction | Session IDs are 128-bit RandomHex tokens; `IsValidOpaqueId` enforces `[A-Za-z0-9_-]{1,128}` allowlist before any path construction; logs use first-8-char prefix only |
+| Approval bypass | `PendingApproval` carries the originating connection identity; `HandleApprovalResponse` rejects any conn-mismatch with `LOG_SECURITY_WARN`; `OnClose` cancels approvals owned by the disconnecting client (otherwise the AI loop would hang on the 60s timeout) |
+| Sequential requestId guessing | Approval `requestId = "apr_" + RandomHex(16)` (128-bit entropy) — replaces the prior process-local atomic counter |
+| WS frame DoS | `OnMessage` rejects frames > 64 KB before parsing; `get_history maxEntries` clamped to `[1, 500]` |
+| Persistence integrity | `AssistantSession::AppendTurnLocked` writes-then-commits with `flush()` + `good()` checks, sticky `m_FileBroken` on failure; `MemoryStore::SaveToDiskLocked` returns `bool` and `Save` rolls back the in-memory mutation on failure; failures log at `LOG_APP_ERROR` (not WARN) so the dashboard run analyzer surfaces them |
+| Memory growth | All persistence paths capped: `kMaxTurnsPerSession`, `kMaxLineBytes`, `kMaxTurnTextBytes`, `kMaxEntries`, `kMaxKeyBytes`, `kMaxValueBytes`, `kMaxIndexEntries`, `kMaxSummaryBytes`; oversized inputs are clamped at write, oversized lines drop the load with an ERROR + `m_FileBroken` |
+| Log injection / PII in logs | `MemoryStore::LogSafeKey` strips control bytes and caps at 64 chars + length; `AssistantSession::LogSafeSessionId` truncates to first 8 hex chars + `…`; the home-built `ExtractJsonString` is gone — simdjson is the project's only JSON parser |
+| Session file permissions | POSIX: 0600 set on first write (best-effort); Windows: relies on inherited NTFS DACLs |
 | Script safety | `jcwf_write_script` validates shebang + `set -euo pipefail` for `.sh`; validates `# @jarvis-script` + `Set-StrictMode` for `.ps1`; rejects absolute paths |
 | Off-topic responses | Keyword overlap check (≥30% threshold) appends warning if response seems irrelevant |
 | Hallucinated paths | File paths in AI responses verified against workspace; missing paths flagged with note |
@@ -389,12 +561,19 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 
 | File | Purpose |
 |------|---------|
-| `assistantController.h/.cpp` | WS handler, message routing, AI calls, slash commands, approval flow, completion, history, response validation |
-| `assistantSession.h/.cpp` | JSONL session persistence, turn management |
-| `contextAssembler.h/.cpp` | Prompt assembly (system prompt + context + tools + memories + summaries + L3 guidelines) |
-| `assistantTools.h/.cpp` | Tool registry, tool execution, tool descriptions (31 tools) |
-| `assistantMemory.h/.cpp` | Persistent key-value memory store |
-| `workspaceIndexer.h/.cpp` | Workspace file indexing, summary caching |
+| `assistantController.h/.cpp` | WS handler, message routing, AI calls, slash commands, approval flow (connection-bound), completion, history, response validation |
+| `assistantSession.h/.cpp` | JSONL session persistence, turn management, simdjson load, RandomHex IDs, sticky `m_FileBroken` |
+| `contextAssembler.h/.cpp` | Prompt assembly + `DefangContextSentinels` for prior-turn / user-message text |
+| `assistantTools.h/.cpp` | Tool registry, tool execution, tool descriptions (31 tools), argv-only shell, public `DefangToolMarkers` |
+| `assistantMemory.h/.cpp` | Persistent key-value memory store with `RecallLocked` + sticky `m_FileBroken` + `LogSafeKey` redaction |
+| `workspaceIndexer.h/.cpp` | Workspace file indexing, summary caching, workspace-root path anchoring |
+| `assistantHelpers.h/.cpp` | Shared `RandomHex` (RAND_bytes-backed) + `IsValidOpaqueId` (allowlist) used across the subsystem |
+
+### Modified engine files
+
+| File | Changes |
+|------|---------|
+| `engine/json/jsonHelper.h/.cpp` | Rewrite: static `EscapeJsonString` (RFC 8259-compliant, control-byte `\u00XX` escape) is the canonical helper; instance `SanitizeForJson` retained as backwards-compatible thin delegator.  See `engine/json/json.md` §4. |
 
 ### Modified C++ files
 

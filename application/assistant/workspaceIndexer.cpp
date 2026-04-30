@@ -22,6 +22,7 @@
 #include "assistant/workspaceIndexer.h"
 
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
 
 #include <algorithm>
@@ -35,50 +36,14 @@ namespace fs = std::filesystem;
 namespace AIAssistant
 {
     // -----------------------------------------------------------------
-    // JSON string escaping (for manual serialization)
-    // -----------------------------------------------------------------
-
-    static std::string JsonEscapeIdx(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"':
-                    out += "\\\"";
-                    break;
-                case '\\':
-                    out += "\\\\";
-                    break;
-                case '\n':
-                    out += "\\n";
-                    break;
-                case '\r':
-                    out += "\\r";
-                    break;
-                case '\t':
-                    out += "\\t";
-                    break;
-                default:
-                    out += c;
-                    break;
-            }
-        }
-        return out;
-    }
-
-    // -----------------------------------------------------------------
-    // Extensions we index
+    // Extensions / scan config
     // -----------------------------------------------------------------
 
     static std::unordered_set<std::string> const kIndexableExtensions = {
-        ".h",    ".cpp",  ".c",   ".hpp",  ".ts",   ".tsx", ".js",  ".jsx",
-        ".py",   ".lua",  ".sh",  ".md",   ".jcwf", ".json", ".css", ".html",
+        ".h",  ".cpp",  ".c",   ".hpp",  ".ts",   ".tsx", ".js",  ".jsx",
+        ".py", ".lua",  ".sh",  ".md",   ".jcwf", ".json", ".css", ".html",
     };
 
-    // Directories to scan (relative to workspace root).
     static std::vector<std::pair<std::string, int>> const kScanDirs = {
         {"application", 10},
         {"engine", 10},
@@ -87,7 +52,6 @@ namespace AIAssistant
         {"workflows", 5},
     };
 
-    // Directories to skip during scan.
     static std::unordered_set<std::string> const kSkipDirNames = {
         "node_modules", ".git", "bin", "bin-int", "vendor", "__pycache__", ".cache",
     };
@@ -99,6 +63,47 @@ namespace AIAssistant
     WorkspaceIndexer::WorkspaceIndexer(fs::path indexDir) : m_IndexDir(std::move(indexDir))
     {
         m_IndexPath = m_IndexDir / "file_index.jsonl";
+
+        // Capture the workspace root at construction (typically right after main()
+        // has set cwd to the project root).  All later path resolution anchors
+        // against this snapshot, so a future cwd change cannot widen access.
+        std::error_code ec;
+        m_WorkspaceRoot = fs::weakly_canonical(fs::current_path(ec), ec);
+        if (ec)
+        {
+            // Fall through with an empty root — every ResolveAndConfine will then
+            // fail closed.  Real production j9t will never hit this branch.
+            LOG_APP_ERROR("[indexer] Failed to capture workspace root: {}", ec.message());
+            m_WorkspaceRoot.clear();
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Path confinement
+    // -----------------------------------------------------------------
+
+    fs::path WorkspaceIndexer::ResolveAndConfine(std::string const& relativePath) const
+    {
+        if (relativePath.empty() || m_WorkspaceRoot.empty())
+            return {};
+        // Reject absolute paths up front — even if they happen to resolve under the
+        // workspace root, callers using this method are passing relative paths by contract.
+        fs::path raw(relativePath);
+        if (raw.is_absolute())
+            return {};
+
+        std::error_code ec;
+        fs::path const resolved = fs::weakly_canonical(m_WorkspaceRoot / raw, ec);
+        if (ec || resolved.empty())
+            return {};
+
+        // Containment check: lexically_relative returns "..", "../foo", or empty
+        // if `resolved` does not live under m_WorkspaceRoot.
+        fs::path const rel = resolved.lexically_relative(m_WorkspaceRoot);
+        std::string const relGeneric = rel.generic_string();
+        if (rel.empty() || relGeneric == ".." || relGeneric.rfind("../", 0) == 0)
+            return {};
+        return resolved;
     }
 
     // -----------------------------------------------------------------
@@ -112,10 +117,8 @@ namespace AIAssistant
         // Load existing index to preserve cached summaries.
         LoadIndex();
 
-        // Build set of paths we'll see during scan.
-        std::unordered_set<std::string> seenPaths;
-
-        // Save old index for summary preservation.
+        // Snapshot the loaded state for summary preservation, then clear the
+        // working set so ScanDirectory rebuilds from the live filesystem.
         auto oldPathToIndex = m_PathToIndex;
         auto oldEntries = m_Entries;
 
@@ -144,7 +147,6 @@ namespace AIAssistant
                     continue;
 
                 std::string relPath = entry.path().lexically_normal().string();
-                // Remove leading "./" if present.
                 if (relPath.size() > 2 && relPath[0] == '.' && relPath[1] == '/')
                     relPath = relPath.substr(2);
 
@@ -152,8 +154,13 @@ namespace AIAssistant
                     continue;
 
                 auto fileSize = fs::file_size(entry.path(), ec);
+                if (ec)
+                    continue;
                 auto mtime = fs::last_write_time(entry.path(), ec);
-                int64_t mtimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count();
+                if (ec)
+                    continue;
+                int64_t mtimeNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count();
 
                 FileIndexEntry fie;
                 fie.relativePath = relPath;
@@ -161,7 +168,6 @@ namespace AIAssistant
                 fie.sizeBytes = fileSize;
                 fie.mtimeNs = mtimeNs;
 
-                // Preserve summary from old index if file hasn't changed.
                 auto oldIt = oldPathToIndex.find(relPath);
                 if (oldIt != oldPathToIndex.end())
                 {
@@ -178,7 +184,9 @@ namespace AIAssistant
             }
         }
 
-        // Rebuild PathToIndex (ScanDirectory already populated it, but let's be safe).
+        // Rebuild m_PathToIndex once at the end (ScanDirectory builds it incrementally
+        // for duplicate detection during the walk; the rebuild ensures the final state
+        // matches the final m_Entries layout).
         m_PathToIndex.clear();
         for (size_t i = 0; i < m_Entries.size(); ++i)
         {
@@ -224,6 +232,8 @@ namespace AIAssistant
     {
         if (maxDepth <= 0)
             return;
+        if (m_Entries.size() >= kMaxIndexEntries)
+            return;
 
         std::error_code ec;
         for (auto const& entry : fs::directory_iterator(dir, ec))
@@ -242,15 +252,19 @@ namespace AIAssistant
                     continue;
 
                 std::string relPath = entry.path().lexically_normal().string();
-                // Remove leading "./" if present.
                 if (relPath.size() > 2 && relPath[0] == '.' && relPath[1] == '/')
                     relPath = relPath.substr(2);
 
                 if (m_PathToIndex.count(relPath))
                     continue;
 
-                auto fileSize = fs::file_size(entry.path(), ec);
-                auto mtime = fs::last_write_time(entry.path(), ec);
+                std::error_code ecFile;
+                auto fileSize = fs::file_size(entry.path(), ecFile);
+                if (ecFile)
+                    continue;
+                auto mtime = fs::last_write_time(entry.path(), ecFile);
+                if (ecFile)
+                    continue;
                 int64_t mtimeNs =
                     std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count();
 
@@ -262,11 +276,17 @@ namespace AIAssistant
 
                 m_PathToIndex[relPath] = m_Entries.size();
                 m_Entries.push_back(std::move(fie));
+                if (m_Entries.size() >= kMaxIndexEntries)
+                {
+                    LOG_APP_ERROR("[indexer] Index entry cap ({}) reached during scan — truncating",
+                                  kMaxIndexEntries);
+                    return;
+                }
             }
         }
     }
 
-    bool WorkspaceIndexer::IsIndexableExtension(std::string const& ext) const
+    bool WorkspaceIndexer::IsIndexableExtension(std::string const& ext)
     {
         return kIndexableExtensions.count(ext) > 0;
     }
@@ -282,8 +302,7 @@ namespace AIAssistant
         if (it == m_PathToIndex.end())
             return {};
 
-        auto const& entry = m_Entries[it->second];
-        // Summary is stale if file has been modified since it was generated.
+        auto const& entry = m_Entries.at(it->second);
         if (entry.summaryMtimeNs != entry.mtimeNs)
             return {};
         return entry.summary;
@@ -296,41 +315,46 @@ namespace AIAssistant
         if (it == m_PathToIndex.end())
             return;
 
-        auto& entry = m_Entries[it->second];
-        entry.summary = summary;
+        auto& entry = m_Entries.at(it->second);
+        // Cap the cached summary so a runaway provider response (or a prompt-injected
+        // mega-summary) can't bloat the index file unboundedly.
+        if (summary.size() > kMaxSummaryBytes)
+            entry.summary = summary.substr(0, kMaxSummaryBytes);
+        else
+            entry.summary = summary;
         entry.summaryMtimeNs = entry.mtimeNs;
         SaveIndex();
-        LOG_APP_INFO("[indexer] Cached summary for '{}' ({} chars)", relativePath, summary.size());
+        LOG_APP_INFO("[indexer] Cached summary for '{}' ({} chars)", relativePath, entry.summary.size());
     }
 
-    std::string WorkspaceIndexer::ReadFileContent(std::string const& relativePath, size_t maxBytes)
+    std::string WorkspaceIndexer::ReadFileContent(std::string const& relativePath, size_t maxBytes) const
     {
-        fs::path filePath = fs::path(relativePath).lexically_normal();
-
-        // Security: block paths that escape the workspace.
-        std::string normalized = filePath.string();
-        if (normalized.find("..") != std::string::npos)
-            return {};
-        if (normalized.starts_with("/"))
+        // Anchor against the captured workspace root.  `..` traversal, absolute paths,
+        // and symlink targets outside the project root all resolve to empty here.
+        fs::path const filePath = ResolveAndConfine(relativePath);
+        if (filePath.empty())
             return {};
 
-        std::error_code ec;
-        if (!fs::exists(filePath, ec) || !fs::is_regular_file(filePath, ec))
-            return {};
-
-        auto fileSize = fs::file_size(filePath, ec);
-        if (fileSize > maxBytes)
-            fileSize = maxBytes;
-
+        // Drop the redundant exists/is_regular_file pre-check — the open below either
+        // succeeds (regular file or symlink to one we've already confined) or fails.
         std::ifstream ifs(filePath, std::ios::binary);
         if (!ifs)
             return {};
 
-        std::string content(fileSize, '\0');
-        ifs.read(content.data(), static_cast<std::streamsize>(fileSize));
+        // Get the original size before clamping so the truncation marker reflects
+        // the *original* file vs. the read window — not the post-clamp value
+        // compared against itself (the prior bug).
+        std::error_code ec;
+        auto const originalSize = fs::file_size(filePath, ec);
+        if (ec)
+            return {};
+        size_t const readSize = static_cast<size_t>(std::min<uintmax_t>(originalSize, maxBytes));
+
+        std::string content(readSize, '\0');
+        ifs.read(content.data(), static_cast<std::streamsize>(readSize));
         content.resize(static_cast<size_t>(ifs.gcount()));
 
-        if (fileSize < fs::file_size(filePath, ec))
+        if (originalSize > maxBytes)
         {
             content += "\n... [truncated at " + std::to_string(maxBytes) + " bytes]";
         }
@@ -349,7 +373,6 @@ namespace AIAssistant
         if (query.empty())
             return {};
 
-        // Tokenize query into lowercase words, stripping punctuation.
         std::vector<std::string> queryWords;
         {
             std::istringstream iss(query);
@@ -371,46 +394,48 @@ namespace AIAssistant
         if (queryWords.empty())
             return {};
 
-        // Score each entry that has a summary.
+        // Score by index — never store raw pointers into m_Entries.  The lock is held
+        // for the whole call, but storing indices removes the lifetime hazard so the
+        // pattern survives a future refactor that drops the lock early.
         struct Scored
         {
             int score;
-            FileIndexEntry const* entry;
+            size_t idx;
         };
         std::vector<Scored> scored;
 
-        for (auto const& entry : m_Entries)
+        for (size_t i = 0; i < m_Entries.size(); ++i)
         {
+            auto const& entry = m_Entries[i];
             if (entry.summary.empty())
                 continue;
             int s = ScoreMatch(entry, queryWords);
             if (s > 0)
-                scored.push_back({s, &entry});
+                scored.push_back({s, i});
         }
 
-        std::sort(scored.begin(), scored.end(), [](auto const& a, auto const& b) { return a.score > b.score; });
+        std::sort(scored.begin(), scored.end(),
+                  [](Scored const& a, Scored const& b) { return a.score > b.score; });
 
         std::vector<FileIndexEntry> results;
         int count = std::min(maxResults, static_cast<int>(scored.size()));
         results.reserve(count);
         for (int i = 0; i < count; ++i)
-            results.push_back(*scored[i].entry);
+            results.push_back(m_Entries[scored[i].idx]);
 
         return results;
     }
 
     int WorkspaceIndexer::ScoreMatch(FileIndexEntry const& entry, std::vector<std::string> const& queryWords)
     {
-        // Build haystack from path + summary.
         std::string haystack;
         haystack.reserve(entry.relativePath.size() + entry.summary.size() + 32);
 
-        // Path gets extra weight (included twice).
         haystack += entry.relativePath + " " + entry.relativePath + " ";
         haystack += entry.summary + " ";
 
         std::transform(haystack.begin(), haystack.end(), haystack.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
         int score = 0;
         for (auto const& word : queryWords)
@@ -447,7 +472,11 @@ namespace AIAssistant
         return count;
     }
 
-    std::chrono::steady_clock::time_point WorkspaceIndexer::LastScanTime() const { return m_LastScanTime; }
+    std::chrono::steady_clock::time_point WorkspaceIndexer::LastScanTime() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_LastScanTime;
+    }
 
     std::vector<FileIndexEntry> WorkspaceIndexer::GetAllEntries() const
     {
@@ -464,14 +493,14 @@ namespace AIAssistant
         m_Entries.clear();
         m_PathToIndex.clear();
 
-        std::error_code ec;
-        if (!fs::exists(m_IndexPath, ec))
-            return;
-
+        // Open without exists() pre-check.  Distinguish missing-file (silent first run)
+        // from present-but-unreadable (genuine I/O error).
         std::ifstream ifs(m_IndexPath);
         if (!ifs)
         {
-            LOG_APP_WARN("[indexer] Failed to open index file: {}", m_IndexPath.string());
+            std::error_code ec;
+            if (fs::exists(m_IndexPath, ec))
+                LOG_APP_ERROR("[indexer] Index file present but unreadable: {}", m_IndexPath.string());
             return;
         }
 
@@ -495,6 +524,8 @@ namespace AIAssistant
             FileIndexEntry entry;
             std::string_view sv;
 
+            // Each std::string(sv) below copies out of `padded`'s buffer immediately;
+            // the view is invalid past this iteration scope, so do not store sv anywhere.
             if (!obj["path"].get_string().get(sv))
                 entry.relativePath = std::string(sv);
             if (!obj["ext"].get_string().get(sv))
@@ -509,15 +540,34 @@ namespace AIAssistant
                 entry.mtimeNs = i64;
 
             if (!obj["summary"].get_string().get(sv))
-                entry.summary = std::string(sv);
+            {
+                std::string s(sv);
+                if (s.size() > kMaxSummaryBytes)
+                    s.resize(kMaxSummaryBytes);
+                entry.summary = std::move(s);
+            }
 
             if (!obj["summary_mtime"].get_int64().get(i64))
                 entry.summaryMtimeNs = i64;
 
-            if (!entry.relativePath.empty())
+            if (entry.relativePath.empty())
+                continue;
+
+            // Re-validate the path against the workspace root before trusting it.
+            // An attacker who can write to file_index.jsonl could otherwise inject
+            // `../../etc/shadow` and have the AI tool happily summarise it later.
+            if (ResolveAndConfine(entry.relativePath).empty())
             {
-                m_PathToIndex[entry.relativePath] = m_Entries.size();
-                m_Entries.push_back(std::move(entry));
+                LOG_SECURITY_WARN("[security] indexer_index_path_escape len={}", entry.relativePath.size());
+                continue;
+            }
+
+            m_PathToIndex[entry.relativePath] = m_Entries.size();
+            m_Entries.push_back(std::move(entry));
+            if (m_Entries.size() >= kMaxIndexEntries)
+            {
+                LOG_APP_ERROR("[indexer] Index entry cap ({}) reached during load — truncating", kMaxIndexEntries);
+                break;
             }
         }
 
@@ -526,22 +576,32 @@ namespace AIAssistant
 
     void WorkspaceIndexer::SaveIndex() const
     {
-        // Ensure directory exists.
         std::error_code ec;
         fs::create_directories(m_IndexDir, ec);
+        if (ec)
+        {
+            LOG_APP_ERROR("[indexer] Index dir create failed: {} (path='{}')", ec.message(), m_IndexDir.string());
+            return;
+        }
 
         std::ofstream ofs(m_IndexPath, std::ios::out | std::ios::trunc);
         if (!ofs)
         {
-            LOG_APP_WARN("[indexer] Failed to write index file: {}", m_IndexPath.string());
+            LOG_APP_ERROR("[indexer] Index file open-for-write failed: {}", m_IndexPath.string());
             return;
         }
 
         for (auto const& e : m_Entries)
         {
-            ofs << "{\"path\":\"" << JsonEscapeIdx(e.relativePath) << "\",\"ext\":\"" << JsonEscapeIdx(e.extension)
-                << "\",\"size\":" << e.sizeBytes << ",\"mtime\":" << e.mtimeNs << ",\"summary\":\""
-                << JsonEscapeIdx(e.summary) << "\",\"summary_mtime\":" << e.summaryMtimeNs << "}\n";
+            ofs << "{\"path\":\"" << JsonHelper::EscapeJsonString(e.relativePath) << "\",\"ext\":\""
+                << JsonHelper::EscapeJsonString(e.extension) << "\",\"size\":" << e.sizeBytes
+                << ",\"mtime\":" << e.mtimeNs << ",\"summary\":\""
+                << JsonHelper::EscapeJsonString(e.summary) << "\",\"summary_mtime\":" << e.summaryMtimeNs << "}\n";
+        }
+        ofs.flush();
+        if (!ofs.good())
+        {
+            LOG_APP_ERROR("[indexer] Index file write/flush failed: {}", m_IndexPath.string());
         }
     }
 

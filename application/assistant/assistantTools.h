@@ -97,6 +97,14 @@ namespace AIAssistant
         // Returns the tool calls found and the response text with tool_call blocks removed.
         static std::vector<ToolCall> ParseToolCalls(std::string const& responseText, std::string& outCleanText);
 
+        // Replace literal <tool_call>/<tool_result> ASCII bracket sequences in
+        // text that originates from outside the assistant turn (file contents,
+        // captured stdout/stderr, error messages).  Visual content is preserved
+        // (uses U+27E8 / U+27E9 mathematical angle brackets); the parser-keying
+        // ASCII bytes are gone, so a script that prints "<tool_call>" cannot
+        // cause a parsed tool call on the next AI turn.
+        static std::string DefangToolMarkers(std::string const& text);
+
     private:
         // Tool implementations
         ToolResult ExecGetSystemStatus(std::unordered_map<std::string, std::string> const& args);
@@ -108,7 +116,6 @@ namespace AIAssistant
         ToolResult ExecReadFile(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecSearchFiles(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecListFiles(std::unordered_map<std::string, std::string> const& args);
-        ToolResult ExecGetLogTail(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecSaveMemory(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecRecallMemory(std::unordered_map<std::string, std::string> const& args);
         ToolResult ExecListMemories(std::unordered_map<std::string, std::string> const& args);

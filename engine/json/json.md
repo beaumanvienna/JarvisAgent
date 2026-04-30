@@ -277,31 +277,63 @@ private:
 
 ## 4. JsonHelper
 
-**Header:** `json/jsonHelper.h`  
-**Source:** `json/jsonHelper.cpp`  
+**Header:** `json/jsonHelper.h`
+**Source:** `json/jsonHelper.cpp`
 **Namespace:** `AIAssistant`
 
-`JsonHelper` provides small JSON utility helpers.
+`JsonHelper` is the single canonical helper for escaping a `std::string` so its contents can be embedded inside a JSON string literal.  Output is RFC 8259 §7-compliant.
 
-### 4.1 SanitizeForJson()
+### 4.1 EscapeJsonString() — the canonical static API
 
 ```cpp
 class JsonHelper
 {
 public:
-    std::string SanitizeForJson(std::string const& input);
+    // RFC 8259 §7-compliant escape.  Static, no instance required.
+    static std::string EscapeJsonString(std::string_view input);
+
+    // Backwards-compatible instance alias — delegates to EscapeJsonString.
+    std::string SanitizeForJson(std::string const& input) const;
 };
 ```
 
-**Behavior (as implemented):**
+**Behavior:**
 
-- Returns a copy of `input` where:
-  - `"` becomes `\"`
-  - `\` becomes `\\`
-  - newline becomes `\n`
-  - carriage return becomes `\r`
-  - tab becomes `\t`
-- One additional `switch` case in the current source appears as a non-printable / mangled character in some outputs; it is handled with a `break` (skipped). If you want, we can inspect the source file directly in a clean rendering and document that case precisely.
+- The four shorthand cases are emitted as their two-character escapes:
+  - `"`  → `\"`
+  - `\`  → `\\`
+  - `\n` → `\n`
+  - `\r` → `\r`
+  - `\t` → `\t`
+- Every other byte in `0x00–0x1F` is emitted as `\u00XX` (the form RFC 8259 §7 mandates for non-shorthand control characters).  This includes:
+  - `\b` (0x08), `\f` (0x0C), and the full `0x01–0x07`, `0x0B`, `0x0E–0x1F` range.
+  - Bytes that previously slipped through unescaped — see "Why this changed" below.
+- Bytes `>= 0x20`, including UTF-8 continuation bytes, are passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
+
+### 4.2 SanitizeForJson() — backwards-compatible instance method
+
+The instance method is retained as a thin delegator for legacy call sites that construct the helper as `JsonHelper jh; jh.SanitizeForJson(x)` or `JsonHelper().SanitizeForJson(x)`.  Both are still legal and now produce RFC-compliant output for free.  New code should call `JsonHelper::EscapeJsonString(x)` directly.
+
+### 4.3 Why this changed (2026-04-29)
+
+The previous implementation only handled the five shorthand cases and passed every other control byte through unchanged.  The case-statement label for form-feed (`0x0C`) was a literal control character in the source file, which compiled as a `case '\f':` arm whose body simply `break`'d — silently *dropping* form-feed bytes.
+
+That divergence broke RFC 8259 in two distinct ways:
+
+1. Bytes `0x01–0x08`, `0x0B`, `0x0E–0x1F` produced output that downstream JSON parsers (including the project's own `simdjson` consumers) reject as malformed.
+2. Form-feed bytes were silently elided, so a round-trip through `SanitizeForJson` lost data.
+
+The rewrite consolidates four other broken `JsonEscape`-style copies that had spread across the project (`assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, plus the original `SanitizeForJson` itself).  All four sites now route through `JsonHelper::EscapeJsonString`.  Two correct copies remain in `assistantTools.cpp` and `assistantController.cpp` anonymous namespaces; their migration is tracked as a follow-up sweep.
+
+### 4.4 Use sites
+
+Every outbound AI request body and persisted transcript flows through this helper:
+
+- `application/json/requestBuilder.cpp` builds the JSON request body for every AI provider via `JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages))`.
+- `application/workflow/aiTranscript.cpp` writes per-call transcripts with `JsonHelper jsonHelper; jsonHelper.SanitizeForJson(...)` for each text/error/finish-reason field.
+- `application/assistant/assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp` use the new static `JsonHelper::EscapeJsonString` to write their JSONL/JSON files.
+
+These call sites benefit transparently from the fix — any provider response or session content containing control bytes (which previously generated malformed JSON or lost form-feed data) now produces valid output.
 
 ---
 
@@ -309,4 +341,4 @@ public:
 
 - **ConfigParser**: parses `config.json` using `simdjson::ondemand`, populates `EngineConfig`, logs some fields, and logs unknown top-level fields.
 - **ConfigChecker**: validates directories and API selection and applies sensible defaults for thread count, sleep time, and max file size.
-- **JsonHelper**: provides string sanitization for embedding arbitrary text safely in JSON strings.
+- **JsonHelper**: RFC 8259-compliant escape for embedding arbitrary text inside JSON string literals.  Use the static `JsonHelper::EscapeJsonString` for new code; the instance `SanitizeForJson` is retained for legacy callers and delegates to the static path.

@@ -23,6 +23,7 @@
 #include "engine.h"
 #include "json/replyParserAPI1.h"
 #include "json/jsonObjectParser.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
@@ -251,9 +252,8 @@ namespace AIAssistant
                             CORE_ASSERT((messageField.value().type() == ondemand::json_type::string),
                                         "content must be string");
                             std::string_view content = messageField.value().get_string();
-                            LOG_APP_INFO("content:");
-                            std::cout << content << "\n";
-                            choice.m_Message.m_Content = content;
+                            choice.m_Message.m_Content = SanitizeUtf8(std::string(content));
+                            LOG_APP_INFO("content: {}", choice.m_Message.m_Content);
                         }
                         else
                         {
@@ -328,9 +328,8 @@ namespace AIAssistant
             {
                 CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
                 std::string_view message = jsonObject.value().get_string();
-                LOG_APP_INFO("message:");
-                std::cout << message << "\n";
-                errorInfo.m_Message = message;
+                errorInfo.m_Message = SanitizeUtf8(std::string(message));
+                LOG_APP_INFO("message: {}", errorInfo.m_Message);
             }
             else if (key == "type")
             {
