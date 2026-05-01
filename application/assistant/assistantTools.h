@@ -72,12 +72,28 @@ namespace AIAssistant
     // -----------------------------------------------------------------
     // ToolRegistry — registers tools and executes them
     // -----------------------------------------------------------------
+    //
+    // Thread-safety contract:
+    //   - The Set* methods and the constructor are called once on the owning
+    //     thread (AssistantController) BEFORE any AI lambda runs.  After the
+    //     first AI dispatch publishes the registry, the backing pointers
+    //     (m_WorkflowRegistry, m_RuntimeManager, m_MemoryStore,
+    //     m_WorkspaceIndexer, m_AiCallFn) are read-only.
+    //   - Execute / BuildToolDescriptions / GetToolDefs may be called from
+    //     any thread once the registry is fully constructed.  The targets of
+    //     the backing pointers are individually thread-safe (MemoryStore and
+    //     WorkspaceIndexer mutex their state; WorkflowRegistry and
+    //     WorkflowRuntimeManager have their own contracts).
+    //   - The registry itself owns no mutable shared state beyond those
+    //     pointers, so no internal mutex is needed.  If a future change
+    //     introduces post-publication mutable state, add a mutex first.
 
     class ToolRegistry
     {
     public:
         ToolRegistry();
 
+        // Set-once accessors — call before publishing the registry to AI lambdas.
         void SetWorkflowRegistry(WorkflowRegistry* registry) { m_WorkflowRegistry = registry; }
         void SetWorkflowRuntimeManager(WorkflowRuntimeManager* manager) { m_RuntimeManager = manager; }
         void SetMemoryStore(MemoryStore* store) { m_MemoryStore = store; }

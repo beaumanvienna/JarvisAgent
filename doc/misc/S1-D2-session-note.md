@@ -898,3 +898,452 @@ Removed the local `JsonEscapeMem` from `assistantMemory.cpp`, `JsonEscapeIdx` fr
 | Migrate `assistantController.cpp` and `assistantTools.cpp` anon-namespace `JsonEscape` to `JsonHelper::EscapeJsonString` | both | LOW | Both copies are RFC-compliant after sittings 2/3.  Migration is mechanical but ripples to ~50 QueueMessage call sites; bound this sitting's diff. |
 | `JoinFinishedThreads` → engine `ThreadPool` | `assistantController.{h,cpp}` | HIGH (sitting 3 carry-over) | Cross-component refactor; deferred to its own sitting per memory `feedback_no_jthread_use_threadpool`. |
 | `m_ToolRegistry` / `m_MemoryStore` / `m_WorkspaceIndexer` thread-safety contract audit | `assistantController.h` | sitting 3 carry-over | Background-lambda vs main-thread access patterns need a dedicated audit; deferred. |
+
+---
+
+## Sitting 5 — assistant-internal debt closeout (engine ThreadPool, drain CV, JsonEscape sweep, registry contract)
+
+**Scope locked:** the four assistant-internal cross-component items the sitting-4 hand-off enumerated as the natural follow-up cluster: (a) `JoinFinishedThreads` → engine `ThreadPool` migration, (b) `QueueMessage` drain CV so AI replies don't sit until the next `OnMessage`, (c) JsonEscape four-copy convergence (the last two anon-namespace copies in `assistantTools.cpp` + `assistantController.cpp` migrated to `JsonHelper::EscapeJsonString`), (d) thread-safety contract documented on `ToolRegistry` (the only one of the three shared registries that lacked an explicit contract; `MemoryStore` and `WorkspaceIndexer` already carry one post sitting 4).  Boundary at sitting-end: the assistant subsystem is now free of direct `std::thread`s, has no hidden `JsonEscape` duplicates, and has a documented concurrency contract on every component the AI lambda touches concurrently.  D2 web/cloud surface is now the next densest cluster — kicks off in sitting 6.
+
+### Anon-namespace `JsonEscape` migrated to `JsonHelper::EscapeJsonString`
+
+**Finding (carry-over from sitting 4):** Two anon-namespace copies of `JsonEscape` remained — `assistantTools.cpp` (1 caller) and `assistantController.cpp` (38 callers).  Both were RFC 8259-compliant after sittings 2–3, so this is convergence, not a fix.  Sittings 1–4 migrated `assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`; this sitting closes the last two.
+
+**Change:** Both files now `#include "json/jsonHelper.h"` and call `JsonHelper::EscapeJsonString(...)` directly.  The local `JsonEscape` definitions are deleted.  In `assistantTools.cpp::ExecJcwfGenerate` the single caller (workflowId embedded in `global.json`) routes through the central helper.  In `assistantController.cpp` all 38 message-construction sites in `OnMessage`, `HandleNewSession`, `HandleResumeSession`, `HandleListSessions`, `HandleGetHistory`, `HandleCompletionRequest`, `RunAiCallAsync` (including the multi-step tool loop), `RequestToolApproval`, and the slash-command handlers route through the central helper.
+
+**Ramifications:**
+- Callers touched: 39 `JsonEscape(...)` call sites (38 + 1) → `JsonHelper::EscapeJsonString(...)` (mechanical `replace_all`).
+- Tests touched: none — protocol-level test suite is unaffected (output bytes identical for the same inputs).
+- Docs touched: none.
+- Blast radius: zero — same RFC 8259 escape, same inputs, same outputs.  The convergence eliminates a future maintenance hazard if `JsonHelper::EscapeJsonString` is updated (e.g. for non-printable Unicode policy) but the assistant copies aren't.
+
+**Tested by:** Studio debug build clean (`make config=debug` after a fresh `premake5 gmake` was unnecessary — no new `.cpp` files); 28-test assistant suite PASS in 2.1 s; `test_testinterface_hermetic.py` PASS (adjacent dispatcher path).
+
+---
+
+### `JoinFinishedThreads` + manual `std::thread` vector → engine `ThreadPool` futures
+
+**Finding (sitting 3 carry-over):** `AssistantController` spawned a fresh `std::thread` for every AI dispatch and stored it in `std::vector<std::thread> m_BackgroundThreads`.  The `JoinFinishedThreads` sweeper was a no-op (the comment in the function admitted so: "We can't easily check if a thread is 'done' in C++"), so the vector grew unbounded across a session and was only drained by `Shutdown`.  Memory `feedback_no_jthread_use_threadpool` calls for reusing `engine/auxiliary/threadPool.h` instead of bespoke `std::thread`s for cross-platform consistency.
+
+**Change:** `m_BackgroundThreads` is now `std::vector<std::shared_future<void>> m_BackgroundFutures`.  `RunAiCallAsync` submits onto `Core::g_Core->GetThreadPool().SubmitTask([...]() {...})` and stores the `.share()`'d future.  `JoinFinishedFutures` (renamed) drops futures whose task has finished via `wait_for(0ms) == ready` — now a real cleanup, not a no-op.  `Shutdown` snapshots the futures under `m_ThreadsMutex`, then calls `wait()` on each outside the lock.  `<thread>` removed from the controller header; `<future>` and `<algorithm>` added.
+
+**Ramifications:**
+- Callers touched: zero external — `JoinFinishedThreads` was private; the rename is invisible.
+- Tests touched: 28-test suite + hermetic dispatcher exercise the dispatch + shutdown paths.
+- Docs touched: header comment on `m_BackgroundFutures` documents why we use the engine pool.
+- Blast radius: lower — no per-turn `std::thread` creation cost; pool size is bounded; the unbounded-vector growth bug is closed.  Lifetime ordering relative to WRM teardown is preserved by the existing jarvisAgent.cpp shutdown sequence (`AssistantController::Shutdown` precedes `WorkflowRuntimeManager` reset).
+- One subtlety: the engine ThreadPool's own `Shutdown` (called later in core teardown) will `wait()` on all submitted tasks.  The assistant's `Shutdown` waits on its own futures first, so by the time the engine pool tears down, the assistant lambdas are already drained.  Net behaviour: identical to the prior `std::thread::join` pattern.
+
+**Tested by:** Studio debug build clean; 28-test assistant suite PASS (covers dispatch + shutdown + reconnect under the new path); hermetic dispatcher PASS.  Live AI dispatch over the new path not directly verified (would need `--with-ai`); structurally covered by the build.
+
+---
+
+### `QueueMessage` drain CV — AI replies surface immediately, not on next `OnMessage`
+
+**Finding (sitting 4 carry-over):** `DrainPendingMessages` was only called from `OnMessage`.  When an AI lambda finished after the user's last message, the response sat in `m_PendingMessages` until the user sent another message.  The 10k cap in `QueueMessage` was a band-aid documenting the bug: "a long-running tool loop can produce many messages without an incoming WS message arriving to drain the queue."
+
+**Change:** New `m_DrainCv` (bound to `m_PendingMutex`) and a `DrainLoop` task submitted to the engine `ThreadPool` from the controller constructor.  `QueueMessage` notifies on every successful enqueue.  `DrainLoop` `wait_for`s 1 s as a backstop, then calls `DrainPendingMessages` — which is unchanged (it already snapshots under locks, so calling from a non-WS thread is safe; Crow's `send_text` is thread-safe via `asio::post` onto the io-context strand, verified in `vendor/crow/include/crow/crow/websocket.h`).  `Shutdown` notifies `m_DrainCv` and waits on `m_DrainLoopFuture`; a final `DrainPendingMessages` flush after the future returns ensures any messages produced by lambdas right before shutdown still reach connected clients before the WS close fires.
+
+**Ramifications:**
+- Callers touched: zero — `QueueMessage` and `DrainPendingMessages` signatures unchanged; the existing `DrainPendingMessages` calls inside `OnMessage` remain (they're now redundant but harmless, and ensure synchronous flush before the handler returns for protocol-error responses).
+- Tests touched: 28-test suite PASS — protocol-level coverage exercises the QueueMessage path on every test, so a deadlock or missed-notify would surface.
+- Docs touched: header comment on `m_DrainCv` and `m_PendingMessages` documents the intent.
+- Blast radius: one extra long-running worker on the engine ThreadPool (alongside file watcher + keyboard input).  Pool sizing is `m_MaxThreads + 2`; bumping `THREADS_REQUIRED_BY_APP` to 3 is defense-in-depth but not strictly needed — the drain loop sleeps on the CV most of the time and doesn't block other tasks.  Left at 2; revisit if pool pressure ever surfaces in `debug_signals`.
+
+**Tested by:** Studio debug build clean; 28-test suite PASS in 2.1 s — and notably, every QueueMessage/drain path now exercises the CV-driven code path.  Hermetic dispatcher PASS.  Live AI multi-step dispatch (the regime where intermediate `tool_status` / `tool_result` messages benefit most) not directly smoked here; would need `--with-ai`.
+
+---
+
+### Thread-safety contract documented on `ToolRegistry`
+
+**Finding (sitting 3 carry-over):** `MemoryStore` and `WorkspaceIndexer` carry an explicit thread-safety contract in their headers since sitting 4: "all public methods acquire `m_Mutex` once and hold it for the whole operation."  `ToolRegistry` does not — its `Execute` method is called from the AI lambda (background thread) while its setters (`SetWorkflowRegistry`, `SetWorkflowRuntimeManager`, `SetMemoryStore`, `SetWorkspaceIndexer`, `SetAiCallFn`) are called from `AssistantController`'s constructor (and from `WebServer` immediately after, on the main thread before any AI dispatch).
+
+**Verification:** Reading the code: `ToolRegistry` owns no post-publication mutable state — `m_ToolDefs` and `m_ToolFns` are populated in the ctor, the four backing pointers are set once in `AssistantController::AssistantController` and `AssistantController::SetWorkflowRegistry` / `SetWorkflowRuntimeManager` (both called from `WebServer::Start` paths before any WS route fires).  The targets of the pointers are individually thread-safe (`MemoryStore` + `WorkspaceIndexer` per their own contracts; `WorkflowRegistry` and `WorkflowRuntimeManager` per their own).  So the registry needs no internal mutex — but the contract was undocumented.
+
+**Change:** `assistantTools.h` now carries an explicit class-level comment block before `class ToolRegistry` documenting (a) the set-once nature of the setters, (b) the after-publication read-only contract on the backing pointers, (c) the targets' individual thread-safety, (d) the explicit "if a future change introduces post-publication mutable state, add a mutex first" forward note.  Each setter docstring is annotated with "set-once".
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: zero.
+- Docs touched: header-only.
+- Blast radius: documentation only — no behavioural change.
+
+**Tested by:** Studio debug build clean; 28-test suite PASS.
+
+---
+
+## Skipped findings table — Sitting 5
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Bump `THREADS_REQUIRED_BY_APP` to 3 to reserve a slot for the assistant drain loop | `engine/core.h` | LOW | The drain loop sleeps on the CV — it doesn't block other tasks.  Pool sizing is `m_MaxThreads + 2` with `m_MaxThreads` typically 32+; one extra long-running worker is well within slack.  Bump if `debug_signals` ever shows pool pressure. |
+| Migrate the dashboard's `WebServer::DrainPendingBroadcasts` to a CV-driven model | `application/web/webServer.cpp` | MEDIUM | Same architectural shape (drain only on WS message), but the dashboard has constant client interaction so the gap is much smaller in practice.  Tracked for sitting 6+ if the dashboard refactor goes there. |
+| Convert AI-dispatch lambda from `[this]` capture to a captured-shared-state struct | `application/assistant/assistantController.cpp` | MEDIUM | Per memory `feedback_capture_by_value_async`: the lambda captures `this` and uses it across long blocking calls.  The current design is safe because `Shutdown` waits on every future before destruction — but documented (not refactored) for now. |
+| Add a per-controller `Shutdown` ordering test | test infra | LOW | The 28-test suite implicitly exercises shutdown via the test harness's `disconnect`-then-`reconnect` flow.  A dedicated stress test (rapid connect / dispatch / disconnect cycles) would harden the new future-based join path; tracked for sitting 6+. |
+| Add Tracy profiler scope to `DrainLoop` | `application/assistant/assistantController.cpp` | LOW | Useful but Tracy is opt-in (`--tracy`); add when the next round of profiling is in progress, not as part of a hardening sitting. |
+
+---
+
+## Sitting 6 — webServer.cpp Cluster A: path/auth/static gating + body caps
+
+**Scope locked:** the seven HIGH+MEDIUM findings on the **pre-auth and pre-role-check perimeter** of `application/web/webServer.cpp` — every input gate that an attacker can hit without first having a valid credential, plus the one role-escalation gap inside the post-auth WS handler (`ai-write-scripts`).  Findings on config-write atomicity (Cluster B) and concurrency (Cluster C — `DrainPendingBroadcasts` UAF, `TryMcpAuth` const_cast, dangling lambdas) are explicitly deferred to sittings 7+ — bound this sitting's diff at the perimeter.  Boundary at sitting-end: every public-or-near-public route on `webServer.cpp` either (a) authenticates before doing real work, (b) confines paths it builds from caller input, (c) bounds body size before allocating, or (d) does all three.  Dashboard + Workflow Editor static handlers no longer accept `..` traversal; the MCP heartbeat now requires a valid MCP key; OAuth callback now explicitly verifies TLS peer + hostname.
+
+### `ServeDashboardStatic` + `ServeWorkflowEditorStatic` canonicalize before filesystem access
+
+**Finding (HIGH cyber-sec):** Both handlers stripped a URL prefix and concatenated the remainder onto `distRoot` without `lexically_normal()` or canonical-path containment.  Crow URL-decodes path parameters before handlers run, so a request like `GET /dash-assets/../../etc/passwd` arrived at the handler as `relative = "../../etc/passwd"` and `distRoot / relative` resolved outside the dist directory.  Same shape for `/assets/...` and `/editor/assets/...` routes.
+
+**Change:** New shared helper `WebServerHelpers::ConfinePathUnder(root, relative)` in `application/web/webServer_helpers.h` — wraps the established `weakly_canonical(root / raw)` + `lexically_relative(root)` containment pattern (same as `WorkspaceIndexer::ResolveAndConfine` from sitting 4).  Returns empty path on rejection (absolute relative, resolution error, or `..` escape).  `ServeDashboardStatic` calls it against `dashboard/ui/dist`; `ServeWorkflowEditorStatic` calls it against `workflow-editor/ui/dist/assets` (both `/assets/` and `/editor/assets/` URL layouts route to the same helper).  On rejection both handlers emit `LOG_SECURITY_WARN("[security] dashboard_static_path_escape len=...")` / `editor_static_path_escape` (length only — never the path) and return HTTP 400.
+
+**Verified at runtime:** `curl --path-as-is "https://localhost:8443/dash-assets/../../etc/passwd"` returns HTTP 400 + `dashboard_static_path_escape len=16` lands in `log/security.txt`.
+
+**Ramifications:**
+- Callers touched: zero external — the URL-route signatures are unchanged.
+- Tests touched: 28-test assistant suite + hermetic dispatcher pass; no static-asset traversal regression test exists yet (added to skipped findings as "future test fixture").
+- Docs touched: none (handler comment documents the gate).
+- Blast radius: any legitimate request that previously resolved a `..` segment (none — Vite-built bundles never produce `..` paths) would now 400.
+
+---
+
+### `ReadLogFile` path confinement under launch-cwd `log/` + `fromOffset` clamp
+
+**Finding (HIGH cyber-sec):** `ReadLogFile` is a public method on `WebServer`; while current call-sites pass hardcoded `"log/log.txt"` and `"log/security.txt"`, the method has no internal containment — a future refactor that lets the caller influence `logPath` would expose path traversal.  Bonus MEDIUM: `fromOffset > fileSize` can produce a large `deltaSize` allocation in the cast path before the existing guard catches it.
+
+**Change:** Resolve `logPath` against the launch cwd via `WebServerHelpers::ConfinePathUnder` and assert the result lives under `<launchCwd>/log/`.  On rejection: `LOG_SECURITY_WARN("[security] readlog_path_escape len=...")`, return HTTP 400.  Bonus: explicit `if (fromOffset > fileSize) fromOffset = fileSize;` clamp documents the invariant the existing guard relies on.  The two callers — `HandleLogGet` and `HandleSecurityLogGet` — both pass relative literals that resolve cleanly under the gate.
+
+**Ramifications:**
+- Callers touched: zero external — `ReadLogFile` signature unchanged; call-site behaviour for legitimate requests unchanged.
+- Tests touched: 28-test suite + hermetic pass.
+- Docs touched: none.
+- Blast radius: zero for the two existing callers; defense-in-depth for any future caller.
+
+---
+
+### `ai-write-scripts` requires admin role (per-connection role pinning)
+
+**Finding (HIGH cyber-sec + HIGH safety):** The `/ws` upgrade authenticated *any* role at `.onaccept`.  The `ai-write-scripts` message branch wrote arbitrary content under `scripts/` and chmod-ed `+x` on `.sh` files without re-checking that the connection's role was admin.  An operator or viewer with a valid MCP key or session cookie could plant scripts that subsequent admin-triggered workflow runs would then execute.
+
+**Change:** Role pinned to each WS connection at upgrade time:
+- New `m_WsClientRoles : std::unordered_map<crow::websocket::connection*, std::string>` (guarded by `m_Mutex`) in `webServer.h`.
+- `.onaccept` lambda now writes `auth.m_Role` into the connection's `userdata` (Crow's per-connection void* slot — same mechanism Crow uses internally).
+- `.onopen` reads userdata, frees the heap copy, and stores the role in `m_WsClientRoles` under the connection pointer.  Logging refactor as a side effect: snapshot client/connect/peak counts under lock, log outside (closes the HIGH safety finding "onopen reads m_Clients.size() outside lock").
+- `.onclose` erases from `m_WsClientRoles` at the same site as `m_Clients.erase`.
+- The `ai-write-scripts` branch reads the role from `m_WsClientRoles` (under m_Mutex), and if it's not `"admin"`, emits `LOG_SECURITY_WARN("[security] ai_write_scripts_role_denied role='...' ip=...")` and sends a `{"type":"ai-write-scripts-result","ok":false,"error":"forbidden"}` reply before returning early.
+
+**Ramifications:**
+- Callers touched: zero external — the WS protocol contract is unchanged (admins see no behaviour change; non-admins see the new `forbidden` reply for one specific message type).
+- Tests touched: 28-test assistant suite covers the assistant WS path (separate route `/ws/assistant`) and passes; no test covers the dashboard `/ws` `ai-write-scripts` flow yet.
+- Docs touched: none.
+- Blast radius: any non-admin client that was previously *successfully* writing scripts via the dashboard → AI assistant flow would now be rejected.  Per the audit, that path is itself a vulnerability; rejecting it is the goal.
+
+**Tested by:** Studio debug build clean; 28-test suite PASS.  Live ai-write-scripts admin-vs-operator test deferred (would need a multi-role test fixture; not yet built).
+
+---
+
+### `HandleMcpHeartbeatPost` requires MCP key + body cap + pre-auth rate limit
+
+**Finding (HIGH cyber-sec + MEDIUM body-cap):** `POST /api/mcp/heartbeat` was registered as public — any unauthenticated caller could pin `IsMcpConnected()` to `true` indefinitely by writing `m_McpLastHeartbeat`, suppressing dashboard alerts on a stalled sidecar.  The handler also ignored the request body entirely without a size cap.
+
+**Change:** Signature updated from `HandleMcpHeartbeatPost()` to `HandleMcpHeartbeatPost(crow::request const&)`.  Three gates added at the top of the handler in this order:
+1. `IsRateLimited(RateLimitTier::PreAuth, req.remote_ip_address)` — first line of defense against unauthenticated floods; returns `MakeAuthErrorResponse("rate_limited")` (HTTP 429).
+2. `IsBodyTooLarge(req, 1)` — heartbeat carries no body content; 1 KB cap is generous slack for future fields.  Returns `MakePayloadTooLargeResponse(1)` (HTTP 413).
+3. `TryMcpAuth(req)` — must produce a valid `AuthResult`.  On miss: `LOG_SECURITY_WARN("[security] mcp_heartbeat_unauthorized ip=...")`, `RecordAuthFailure(...)`, return `MakeAuthErrorResponse("forbidden")` (HTTP 403).
+
+**Verified at runtime:**
+- `curl -X POST https://localhost:8443/api/mcp/heartbeat` (no auth) → HTTP 403 + `{"error":"forbidden"}`.
+- `curl -X POST -H "Authorization: Bearer $J9T_TOKEN" https://localhost:8443/api/mcp/heartbeat` → HTTP 200 + `{"ok":true}`.
+
+**Ramifications:**
+- Callers touched: the MCP sidecar (`mcp/dist/index.js`) already sends an admin MCP key on every request — verified live (debug_signals counters tick).
+- Tests touched: 28-test assistant + hermetic dispatcher pass.
+- Docs touched: handler comment documents the new gates.
+- Blast radius: any caller that was hitting the heartbeat unauthenticated would now be rejected.  No legitimate client does this.
+
+---
+
+### `HandleN8nStartPost` + `HandleWebhookPost` validate caller-supplied `runId`
+
+**Finding (MEDIUM cyber-sec × 2):** Both handlers built a persisted-request file path as `workflowsDir / workflowId / [taskName | "webhook"] / runId / "request.json"`.  `workflowId` and `taskName` were validated by `IsValidWorkflowId` / `IsValidTaskName`, but `runId` — when caller-supplied via the JSON body — was used directly without validation.  `runId = "../../../"` would escape the run dir and write `request.json` wherever the process can write.
+
+**Change:** Both handlers now validate `runId` against `IsValidWorkflowId` (the same alnum + `_`/`-` allowlist used for workflowId/taskName).  In the n8n handler, the check goes in the `else if` branch immediately after the `runId.empty() → GenerateIntegrationRunId` fallback (so server-generated IDs are always trusted).  In the webhook handler, the check is colocated with the `runId` parse from the JSON body (rejected on the spot rather than later when the path is built).  Both return `MakeWorkflowJsonError(400, "invalid_run_id", ...)` on rejection.
+
+**Ramifications:**
+- Callers touched: legitimate clients (n8n, webhook senders) generate server-friendly IDs already.  This validates *caller-supplied* IDs only.
+- Tests touched: hermetic dispatcher pass; no n8n / webhook traversal regression test exists.
+- Docs touched: handler comment documents why the gate exists.
+- Blast radius: a caller passing an exotic runId (containing `/`, `.`, etc.) would now 400.  The legitimate clients use either server-generated IDs or simple alphanumeric strings.
+
+---
+
+### `HandleOAuthCallbackGet` explicit `CURLOPT_SSL_VERIFYPEER` + `CURLOPT_SSL_VERIFYHOST`
+
+**Finding (HIGH cyber-sec):** The OAuth token-exchange POST never explicitly set `CURLOPT_SSL_VERIFYPEER` or `CURLOPT_SSL_VERIFYHOST`.  libcurl's defaults are correct (verification on), but a future libcurl rebuild with different defaults — or a project-managed CA bundle path becoming empty — could silently open a MitM window where token exchange occurs over an unverified connection.
+
+**Change:** Two new explicit `curl_easy_setopt` calls before the CAINFO block: `CURLOPT_SSL_VERIFYPEER, 1L` (CA validation) and `CURLOPT_SSL_VERIFYHOST, 2L` (hostname match).  When `CurlWrapper::GetCaBundlePath()` returns empty (Linux/macOS — system CA bundle), an `LOG_APP_INFO` line records that we're using the system trust store, so an operator with a misconfigured build sees the early-warning signal in the log.
+
+**Ramifications:**
+- Callers touched: zero external — the OAuth callback URL is unchanged; legitimate tokens still complete successfully.
+- Tests touched: hermetic dispatcher pass (different code path; OAuth flow not exercised by either test).
+- Docs touched: none.
+- Blast radius: a misconfigured token endpoint with a non-trusted certificate would now fail verification (correct behaviour).
+
+---
+
+### `HandleKeysUnlockPost` rate-limited + auth-failure recorded on wrong password
+
+**Finding (MEDIUM cyber-sec):** `POST /api/settings/keys/unlock` is intentionally pre-auth (the master password IS the credential), but the handler had no pre-auth rate limit, no body-size cap, and didn't record auth failures on wrong-password responses.  An attacker could brute-force the master password against the live API at libcurl speed.
+
+**Change:** Three gates at the top of the handler:
+1. `IsRateLimited(RateLimitTier::PreAuth, req.remote_ip_address)` — first line of defense; returns `MakeAuthErrorResponse("rate_limited")` (HTTP 429) with the standard pre-auth bucket sized for legitimate operator traffic.
+2. `IsBodyTooLarge(req, 1)` — the body carries only a master password string; 1 MB cap bounds malformed-body memory use.
+3. On wrong-password (`!keyManager.Unlock(masterPassword)`): `RecordAuthFailure(req.remote_ip_address)` + `LOG_SECURITY_WARN("[security] keys_unlock_wrong_password ip=...")`.  Auth-failure tracking flows into the standard `kMaxAuthFailures` (10) within `kAuthFailureWindow` (5 min) lockout.
+
+**Ramifications:**
+- Callers touched: zero external — the `/api/settings/keys/unlock` endpoint contract is unchanged for legitimate single-attempt unlocks.
+- Tests touched: this session's restart of j9t exercises the unlock endpoint (the handler succeeds on the right password as before).
+- Docs touched: handler comment documents the new gates.
+- Blast radius: an attacker hammering the endpoint hits the pre-auth rate limit first, then the failed-auth lockout.  Legitimate operators (one or two password attempts) are unaffected.
+
+---
+
+## Skipped findings table — Sitting 6
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| `HandleAiInterfacesSavePost` / `HandleConfigSettingsPut` / `HandleConnectionsSavePost` non-atomic write + naive string-replace | `webServer.cpp` | HIGH × 4 | Cluster B — separate sitting (atomic writes + simdjson round-trip).  Don't bundle with the perimeter cluster; the changes touch large code regions and the existing string-replace is dangerous enough to deserve its own review pass. |
+| `DrainPendingBroadcasts` use-after-free (m_Clients re-check then send_text without holding lock) | `webServer.cpp` | CRITICAL safety | Cluster C — concurrency.  Same architectural shape as the assistant `DrainPendingMessages` path that sitting 5 left alone (it relies on Crow's send_text being asio-posted, which makes the UAF window narrower than the audit assumes — but a defensive fix is still warranted).  Tracked for sitting 7. |
+| `TryMcpAuth` `const_cast<WebServer*>(this)` to call `RecordAuthFailure` | `webServer.cpp` | CRITICAL safety | Cluster C.  Fix: drop `const` from `Authenticate`, `TryMcpAuth`, `TrySessionAuth`, `AttachMcpExpiryHeader`, `CheckAuth`.  Touches many declarations + every call site.  Bound this sitting's diff. |
+| `SetWorkflowRuntimeManager` captures raw `m_AdhocManager.get()` — dangling on reset | `webServer.cpp` | CRITICAL safety | Cluster C lifetime.  Fix: weak_ptr or explicit observer-clear before `m_AdhocManager` reset.  Defer. |
+| `m_ClientCount` atomic vs `m_Clients` set consistency window | `webServer.cpp` | HIGH safety | Cluster C.  The atomic is acknowledged-as-hint in the audit's own analysis; "benign over-sends" is the worst case.  Defer for now. |
+| `fs::exists()` then open() TOCTOU in `ServeDashboardIndex`, `HandleWorkflowVersionGetGet`, `HandleWorkflowVersionRestorePost` | `webServer.cpp` + `webServer_studio.cpp` | HIGH safety | Cluster C TOCTOU.  Fix: drop the `exists` precheck and rely on the `ifstream` open status (matches `TryReadBinaryFile` pattern).  Mechanical sweep — bundle with the cluster B / C sittings. |
+| `ExtractSessionCookie` doesn't validate cookie value characters | `webServer.cpp` | LOW cyber-sec | Defense in depth; benign in practice (C++ string handles null bytes safely; the only consumer is a hash lookup).  Bundle with WebSessionManager hardening. |
+| `HandleMcpKeysEnrollPost` doesn't validate `key_expiry_days`/`enrollment_ttl_minutes` upper bounds | `webServer.cpp` | LOW cyber-sec | Admin-only endpoint; an admin who wants a never-expiring key can edit the JSON file directly.  The audit-level concern is policy hardening, not exploit prevention.  Defer to the keys/MCP cluster. |
+| `HandleLogAnalyzeLastRunGet` reads entire log into memory | `webServer.cpp` | MEDIUM cyber-sec | Authenticated endpoint; the audit's concern is operator-OOM-via-large-log.  Real fix is the same tail-bytes pattern as `ReadLogFile`.  Bundle with a "log endpoints hardening" mini-sitting. |
+| Trusted proxy header strip `\r\n` | `webServer.cpp` | MEDIUM cyber-sec | Operator-controlled gateway; log injection requires the gateway itself to be misconfigured.  Defer with the auth funnel hardening cluster. |
+| OAuth `codeVerifier` percent-encoding consistency | `webServer.cpp` | MEDIUM correctness | Robustness/correctness, not security.  Bundle with the OAuth code path hardening sitting. |
+| WebSessionManager findings (role allowlist, constant-time compare, max sessions cap, RAND_bytes failure handling) | `webSessionManager.cpp` | MEDIUM × 3 + LOW | Separate file with its own audit section; bundle as a single mini-sitting. |
+
+---
+
+## Sitting 7 — webServer.cpp Cluster B: config-write atomicity
+
+**Scope locked:** the four HIGH findings in **Cluster B** that sitting 6 explicitly deferred — three safety HIGHs ("writes config file non-atomically" × 3) and one cyber-sec HIGH ("writes config by naive string replacement without JSON escaping" — covers `HandleAiInterfacesSavePost` and `HandleConfigSettingsPut`).  The three handlers all share the same shape: read the existing file as raw text, splice or patch values inline, write back through `std::ofstream` with `std::ios::trunc` (or default trunc).  A failure midway — disk full, concurrent SIGTERM, exception during write — leaves the on-disk file empty or partially written; an admin who supplies a string field with `"` or `\` corrupts the JSON.  Boundary at sitting-end: every Cluster B handler routes through `WebServerHelpers::WriteTextFileAtomic` (tmp-file + rename), every caller-supplied string field goes through `JsonHelper::EscapeJsonString` before reaching the file, and every patched result is re-parsed with simdjson before the rename happens.  Cluster C (concurrency: `DrainPendingBroadcasts` UAF, `TryMcpAuth` `const_cast`, `SetWorkflowRuntimeManager` dangling lambda, `m_ClientCount` consistency window, fs::exists TOCTOU sweep) remains queued for sitting 8.
+
+### `HandleConnectionsSavePost` — atomic write + ERROR-level fail log
+
+**Finding (HIGH safety):** `std::ofstream file(connectionsFilePath); ... file << json;` — default-mode ofstream truncates on open, so a write failure leaves `connections.json` empty.  Bonus gap: the failure branch logged at neither ERROR level nor in `log/security.txt` — the audit's "log all failures at ERROR level" rule from memory `feedback_log_failures` was being violated for a security-relevant on-disk file.
+
+**Verification:** Holds up.  Original code opens the file via the default-mode `ofstream` constructor (which uses `std::ios::out` ⇒ truncate-on-open), writes the JSON, calls `file.close()`.  No tmp-file dance, no atomicity barrier between the truncate and the write.
+
+**Change:** Single substitution: the `std::ofstream` block becomes a `WriteTextFileAtomic(connectionsFilePath, json, writeError)` call.  The helper writes to `<path>.tmp`, flushes, then `fs::rename`s onto the target — POSIX guarantees this rename is atomic.  On failure the tmp file is unlinked and the target is untouched.  Failure path now emits both `LOG_APP_ERROR` (dashboard run-analyzer surface) AND `LOG_SECURITY_WARN("[security] connections_save_failed ...")` (security log surface).  `connectionManager.SerializeToJson()` already JSON-escapes its output (separate copy of the assistant-subsystem `JsonEscape` lineage, RFC-correct on inspection), so no escape gap to address here.
+
+**Verified at runtime:** `curl -X POST -H "Authorization: Bearer $J9T_TOKEN" https://localhost:8443/api/connections/save` → HTTP 200 + `{"ok":true,"path":"..."}`.  `connections.json` rewritten with byte-identical content; no `connections.json.tmp` lingers post-rename.  `git diff connections.json` clean.
+
+**Ramifications:**
+- Callers touched: zero external — the endpoint contract (`POST /api/connections/save`, response shape) is unchanged.
+- Tests touched: 28-test assistant suite + hermetic dispatcher pass.
+- Docs touched: handler comment documents the new atomic-write gate.
+- Blast radius: zero for the success path; failure-path responses now carry the underlying `WriteTextFileAtomic` error message rather than the previous generic "Failed to open" string — slightly more diagnosable.
+
+---
+
+### `HandleAiInterfacesSavePost` — JSON-escape every string field + atomic write + simdjson tripwire
+
+**Finding (HIGH cyber-sec + HIGH safety):**  Two flaws in one handler.  (1) The "API interfaces" array is rebuilt as a string with raw `+ iface.m_Name +`-style concatenation across `m_Name`, `m_Description`, `m_Url`, `m_Model`, `m_KeyName` — none JSON-escaped.  An admin saving an interface whose description contains `"`, `\`, newline, or any control byte produced corrupt JSON that broke `config.json` on next parse.  (2) The find-replace splices the new array into the existing config text, then writes back via `std::ofstream(configPath, std::ios::binary | std::ios::trunc)` — a partial write leaves `config.json` truncated.
+
+**Verification:** Holds up.  Read the original code at `webServer.cpp` ~4849: every `newArray += "..." + iface.m_X + "..."` call site is a verbatim splice of the user-controlled string into JSON-string-content position with no escaping.  The closing write block opens with `std::ios::trunc`.
+
+**Change:** Three changes routed through one handler:
+1. **JSON-escape every caller-supplied string field** — every embed of `iface.m_Name`, `iface.m_Description`, `iface.m_Url`, `iface.m_Model`, `iface.m_KeyName` now passes through `JsonHelper::EscapeJsonString(...)` before the `+` concatenation.  `apiStr` comes from a closed enum (`InterfaceType` → `"API1"`/`"API2"`/etc.) and needs no escaping.  The numeric fields (rate-limit knobs) format through `std::to_string` / `snprintf("%g")` and are inherently safe.  `JsonHelper::EscapeJsonString` is the canonical RFC 8259 escaper that the entire assistant subsystem standardised on in sitting 4 — extending its usage to webServer.cpp is the natural next step.
+2. **simdjson tripwire** — after the bracket-counted text replacement but **before** the on-disk write, the patched `fileContent` is parsed with `simdjson::ondemand::parser`, the `"API interfaces"` array is iterated, and the element count is compared against `config.m_ApiInterfaces.size()`.  Any structural breakage (escape bug, bracket-counter miscount on an exotic string, future replaceField logic regression) surfaces here as `LOG_APP_ERROR("post-replacement validation failed ...")` + HTTP 500 with the original `config.json` left untouched.
+3. **Atomic write** — the `ofstream + trunc` block becomes `WriteTextFileAtomic(configPath, fileContent, writeError)`.  Failure branch emits `LOG_APP_ERROR` + the helper's diagnostic message in the response body.
+
+**Verified at runtime:**
+- Baseline save (no field changes): `POST /api/settings/ai-interfaces/save` → HTTP 200, `config.json` byte-identical (md5 unchanged), no `config.json.tmp` lingering.
+- **JSON-escape verification under hostile input:** `PUT /api/settings/ai-interfaces/api.openai.com%2Fgpt-4.1%2FAPI1` with `{"description":"audit-test value with \"quotes\" and \\backslash and a\nnewline"}` → HTTP 200; subsequent `POST .../save` → HTTP 200; the resulting `config.json` parses cleanly under `python3 json.load`, and the on-disk bytes show `"audit-test value with \"quotes\" and \\backslash and a\nnewline"` — i.e. RFC 8259 `\"`, `\\`, `\n` escapes correctly applied.  Pre-fix the same payload would have produced a config.json that failed on next reload (literal newline in a JSON string is a parse error).
+- After verification, the test description was reverted to its pre-sitting value; `git diff config.json` clean.
+
+**Ramifications:**
+- Callers touched: zero external — the `POST /api/settings/ai-interfaces/save` contract is unchanged.
+- Tests touched: 28-test assistant suite PASS.  Live curl smokes confirm both the escape path and the atomic-write path.
+- Docs touched: handler-internal comments document the escape gate, the simdjson tripwire, and the atomic write — three short blocks each citing the audit finding they close.
+- Blast radius: an admin who previously saved an interface with `"` or `\n` in a field had silent corruption on next reload; that path is now well-formed.  No legitimate flow was previously round-trippable with such characters.
+
+---
+
+### `HandleConfigSettingsPut` — depth-aware `replaceField` + atomic write + simdjson tripwire
+
+**Finding (HIGH cyber-sec + HIGH safety):**  Same family as the AI interfaces handler, but for the seven top-level scalar settings (`API index`, `max threads`, `verbose`, `max file size in kB`, `jcwf batch size`, `jcwf AI interface`, `use_bash`).  Three flaws: (1) the `replaceField` lambda does `fileContent.find(searchKey)` — a brace-scope-unaware substring match.  Today's config schema has no key collisions between top-level and nested objects (`"API interfaces"` array elements use `name`/`url`/`model`/`API`/`key_name`, none of which overlap with the seven top-level scalar names).  But the lambda's contract — "replaces the value of the named key" — silently breaks if a future schema introduces such an overlap.  (2) Same `ofstream + trunc` non-atomicity as the interfaces handler.  (3) No post-replacement validation; if the lambda ever miscalculated value boundaries, corrupt JSON would land on disk.
+
+**Verification:** Holds up.  Read the lambda body at `webServer.cpp` ~5322: `auto pos = fileContent.find(searchKey);` — first match anywhere, no depth tracking.  The write block uses `std::ios::trunc`.
+
+**Change:** Three changes:
+1. **Depth-aware replaceField** — the lambda is rewritten to walk `fileContent` byte-by-byte, tracking object depth via `{` / `}` and skipping string contents (honouring `\\`-escapes inside JSON strings).  The key match only fires when the candidate key-string is encountered at object depth 1 (immediately inside the root `{`).  Same shape as the existing `arrayEnd` scanner in `HandleAiInterfacesSavePost`, just specialised for "find a top-level key's value range".  Closes the cyber-sec finding's "no brace/object scope awareness" gap before any future schema introduces a key collision.
+2. **simdjson tripwire** — after all seven `replaceField` calls, the patched `fileContent` is iterated with `simdjson::ondemand::parser`; both `validateDoc.error()` and `validateDoc.get_object()` are checked.  Any structural breakage (clobbered closing brace, mismatched delimiters, future replaceField bug) surfaces as HTTP 500 + ERROR log; the on-disk `config.json` is left untouched.
+3. **Atomic write** — `ofstream + trunc` → `WriteTextFileAtomic`.
+
+**Verified at runtime:**
+- `PUT /api/settings/config` with `{"max_threads":42,"verbose":true,"jcwf_batch_size":7}` → HTTP 200; `config.json` updated atomically (no `config.json.tmp` lingering); `python3 json.load` parses cleanly with `max threads=42`, `verbose=True`, `jcwf batch size=7`.
+- Reverted via second PUT (`max_threads=20`, `verbose=false`, `jcwf_batch_size=1`); `git diff config.json` clean post-revert.
+- Depth-aware behaviour can't be directly demonstrated end-to-end because the current schema has no top-level/nested key collisions, but the lambda's correctness is verifiable by inspection (same shape as the well-tested `arrayEnd` scanner immediately above it).
+
+**Ramifications:**
+- Callers touched: zero external — the `PUT /api/settings/config` contract is unchanged.
+- Tests touched: 28-test assistant suite + hermetic dispatcher pass.
+- Docs touched: handler-internal comments document the depth-awareness rationale and the audit finding it closes.
+- Blast radius: a future schema that introduces a key shared between top-level and a nested object would, on the old lambda, replace the *first occurrence anywhere* (likely the nested one).  Now it correctly targets only the top-level field.
+
+---
+
+## Skipped findings table — Sitting 7
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Full parse-mutate-serialize through simdjson + custom serializer | `webServer.cpp` | (audit-suggested fix variant) | The audit suggested `parse the full document with simdjson, mutate the fields, dump back` as an alternative to the find-replace approach.  `config.json` is hand-edited (custom field ordering, comments, layout) — a parse-and-reserialize roundtrip would lose all of that.  Per memory `feedback_simdjson_only` simdjson is parse-only; rolling a custom JSON serializer is itself a meaningful engineering exercise.  The find-replace + JSON-escape + simdjson-tripwire posture is the pragmatic intermediate that addresses the cyber-sec and safety findings without rewriting the file's layout.  Defer the serializer work to a future "config.json schema migration" sitting if needed. |
+| `cloudConnectionManager.cpp::JsonEscape` | `application/cloud/cloudConnectionManager.cpp` | (sitting 4 lineage) | A 6th anon-namespace `JsonEscape` copy lives outside the assistant subsystem and is correct on inspection.  Sitting 4 closed five copies inside `application/assistant/`; this one lives in `application/cloud/` and was out of cluster B scope.  Track for the connection-manager audit cluster (likely sitting 9+ when the cloud surface comes around). |
+| Cluster C concurrency CRITICALs | `webServer.cpp` | CRITICAL × 3 | `DrainPendingBroadcasts` UAF, `TryMcpAuth` `const_cast`, `SetWorkflowRuntimeManager` dangling lambda — full cluster queued for sitting 8.  Bound this sitting at the config-write surface to keep the diff reviewable. |
+| Cluster C concurrency HIGHs | `webServer.cpp` + `webServer_studio.cpp` | HIGH × 3 | `m_ClientCount` consistency window, `fs::exists()` then open() TOCTOU sweep — same cluster, same sitting. |
+| Live curl smoke for `HandleAiInterfacesSavePost` write-failure path (e.g. parent dir read-only) | `webServer.cpp` | (verification gap) | Would need a controlled disk-failure fixture (read-only mount, full /tmp etc.).  The success path was verified live; the failure path's `WriteTextFileAtomic` returns false and the response carries the underlying error — same code path as `HandleN8nStartPost`'s atomic-write fail branch which has been exercised in prior sittings.  Defer to a "fault-injection regression test" tracked under the broader cybersec dev plan. |
+| `replaceField` depth-aware behaviour under a synthetic schema with top-level/nested key overlap | `webServer.cpp` | (verification gap) | Current schema has no overlap.  Would need a temporary schema mutation plus a unit test; bundles cleanly with the future "JCWF schema overlap regression test" fixture.  Defer. |
+
+---
+
+## Sitting 8 — webServer.cpp Cluster C: concurrency
+
+**Scope locked:** the six findings sitting 7 explicitly deferred — three **CRITICAL** concurrency / lifetime issues (`DrainPendingBroadcasts` UAF, `TryMcpAuth` / `Authenticate` `const_cast<WebServer*>(this)` cascade, `SetWorkflowRuntimeManager` raw-pointer-captured-lambda dangling at shutdown) plus two **HIGH** items (`m_ClientCount` atomic-vs-set consistency window, `fs::exists()` followed-by-open TOCTOU sweep across `ServeDashboardIndex` / `HandleWorkflowVersionGetGet` / `HandleWorkflowVersionRestorePost`).  Boundary at sitting-end: webServer.cpp's auth funnel no longer hides mutation behind `const_cast`, the WebSocket broadcast path holds `m_Mutex` continuously over the per-client `send_text` loop, the run-terminal observer is detached on both swap *and* shutdown before any teardown that could unwind `m_AdhocManager`, the `m_ClientCount` atomic carries a complete contract comment, and the three handlers that read files no longer use the `fs::exists()` precheck pattern.  After this sitting, the audit's `webServer.cpp` CRITICAL/HIGH cluster — Clusters A (sitting 6) + B (sitting 7) + C — is closed; the remaining `webServer.cpp` findings are MEDIUM/LOW and bundle naturally with the cloud surface (sitting 9+).
+
+### `const`-cast cascade — drop `const` from the auth funnel
+
+**Finding (CRITICAL safety):**  `TryMcpAuth` and `Authenticate` were declared `const`, but mutate shared state on the failure path: `TryMcpAuth` calls `RecordAuthFailure(ip)` which writes to `m_AuthFailures` under `m_RateLimitMutex`, and `Authenticate` calls `IsRateLimited(...)` (also non-const).  Both worked around their `const`-ness by `const_cast<WebServer*>(this)`-ing — `TryMcpAuth` did this once for the `RecordAuthFailure` call, `Authenticate` did it as `auto* self = const_cast<WebServer*>(this);` and then routed every member access (`self->m_RateLimitMutex`, `self->m_AuthFailures`, `self->IsRateLimited(...)`) through `self`.  Compiles, locks correctly today — but breaks the C++ contract that `const` member functions are safe to call concurrently from multiple threads.  Future code that adds a genuinely-read-only concurrent caller (or a refactor that removes the locking inside `RecordAuthFailure`) loses the type-system signal that mutation is happening.
+
+**Verification:** Holds up.  The two `const_cast<WebServer*>(this)` sites at `webServer.cpp:602` and `:668` were verbatim as the audit described.
+
+**Change:** Drop `const` from six declarations in `webServer.h` (`AttachMcpExpiryHeader`, `Authenticate`, `CheckAdminAuth`, both `CheckAuth` overloads, `TryMcpAuth`, `TrySessionAuth`) and the matching definitions in `webServer.cpp`.  Delete the `const_cast<WebServer*>(this)->RecordAuthFailure(ip);` line in `TryMcpAuth` and replace with `RecordAuthFailure(ip);`.  Delete the `auto* self = const_cast<WebServer*>(this);` line in `Authenticate` and rewrite every `self->m_RateLimitMutex` / `self->m_AuthFailures` / `self->IsRateLimited(...)` as plain `m_RateLimitMutex` / `m_AuthFailures` / `IsRateLimited(...)`.  Six callers across `webServer.cpp` and `webServer_studio.cpp` (which all use `CheckAuth(req, "viewer")` / `CheckAuth(req, "admin")` / `Authenticate(req)`) are unaffected — they were already invoking from non-const handlers.  Header comments updated to document why each method is non-const ("Non-const: calls RecordAuthFailure / IsRateLimited; marking these methods const and const_cast-ing inside hides the mutation from the type system and creates a foot-gun for future readers who assume const = thread-safe.").
+
+**Verified at runtime:**
+- Studio debug build clean.  No diagnostics from clangd; six caller sites compiled unmodified.
+- `curl -H "Authorization: Bearer $J9T_TOKEN" /api/auth/whoami` → HTTP 200 + `{"role":"admin","user":"admin","ok":true}` — happy path.
+- `curl /api/auth/whoami` (no auth) → HTTP 401 + `auth_failure reason=missing_credential` log line — pre-auth path.
+- `curl -H "Authorization: Bearer mcp_invalid_token_xx" /api/auth/whoami` → HTTP 401 + `mcp_auth_failure reason=invalid_key` security log line — confirms `RecordAuthFailure` runs from the rewritten path (`debug_signals` reports `auth_failure_records: 1` post-call).
+
+**Ramifications:**
+- Callers touched: zero external — the authorization contract on every endpoint is unchanged; only the type-system signal moved.
+- Tests touched: 28-test assistant non-AI suite + hermetic dispatcher PASS; both exercise the auth funnel end-to-end.
+- Docs touched: none (the header comment is the canonical doc).
+- Blast radius: zero behaviour change.  Type-safety improvement only.
+
+---
+
+### `DrainPendingBroadcasts` UAF — hold `m_Mutex` over the per-client send loop
+
+**Finding (CRITICAL safety):**  The drain pattern was: take `m_Mutex`, swap `m_PendingBroadcasts` into local + snapshot `m_Clients` into local, drop the lock, build the JSON batch outside the lock, then per-client lock-find-unlock-send.  The "lock-find-unlock-send" window was the UAF: between the per-client `m_Clients.find(client) == m_Clients.end()` re-validation under lock and the subsequent `client->send_text(safeBatch)` call (with the lock dropped), `.onclose` could fire on another ASIO thread, erase the connection from `m_Clients`, and Crow could destroy the connection — leaving `client` a dangling pointer at `send_text` time.  The narrowness of the window made the bug rare in practice (Crow's `send_text` is asio::post-based, see arch table), but the pattern is fundamentally wrong.
+
+**Verification:** Holds up.  Code at `webServer.cpp:4261` was the snapshot-then-per-client-lock pattern, exactly as audited.
+
+**Change:** Restructure to hold `m_Mutex` for the entire send loop.  Remove the `clients` snapshot variable (no longer needed) and iterate `m_Clients` directly under the lock.  The architecture-table-justified asio::post-internals of Crow's `send_text` mean each call returns in microseconds (post to the connection's strand and return), so the lock window stays small even with many clients.  `.onclose` is automatically gated on `m_Mutex` (it acquires the same mutex to erase from `m_Clients`), so while we hold the lock no connection in our iteration set can be destroyed.  In-code comment documents the rationale + cites the Crow internals path that makes the lock window cheap.
+
+**Verified at runtime:**
+- 28-test assistant suite + hermetic dispatcher PASS.
+- **Live WS smoke:** Connected a Python `websockets.connect()` client to `wss://localhost:8443/ws` with the admin bearer token, sent one ping frame, received the drain output, disconnected.  `debug_signals` post-test: `websocket_total_connects: 1`, `websocket_total_drains: 1`, `websocket_last_drain_bytes: 722`, `websocket_last_drain_messages: 4`, `websocket_peak_drain_duration_us: 44`, `websocket_total_disconnects: 1`, `websocket_clients: 0`.  44 μs drain duration with the lock held confirms the "lock window stays small" claim — and the new code path runs without crash on an actual client connection.
+- **Not directly verified:** the pre-fix UAF window itself.  Reproducing the original bug requires concurrent disconnect-during-drain timing that's hard to engineer without a stress fixture.  The new code is structurally immune (no unlock-send window exists) so the verification posture is "the bug class is gone by construction" rather than "the specific bug instance was reproduced and fixed".
+
+**Ramifications:**
+- Callers touched: zero — only `DrainPendingBroadcasts`'s internal structure changed; producers (`Broadcast` / `BroadcastJSON` / `EnqueueLogLine` / etc.) still enqueue under the same locking contract.
+- Tests touched: 28-test assistant suite + hermetic dispatcher PASS; the live WS smoke exercises the new code path end-to-end.
+- Docs touched: none (the in-code comment is the canonical doc; `doc/architecture.md` line 394 already enshrines "drain on the IO thread, asio-posted send_text" as the design decision).
+- Blast radius: drain duration (formerly: lock-snapshot, then unlocked send) now serializes against `.onopen` and `.onclose`.  At the observed 44 μs with one client, the back-pressure on connect/disconnect during drain is negligible.  If a future workload runs hundreds of concurrent clients with long batches, the trade-off may need re-examination — but that's far past current scale.
+
+---
+
+### `SetWorkflowRuntimeManager` dangling lambda — observer detach on swap and shutdown
+
+**Finding (CRITICAL safety):** `SetWorkflowRuntimeManager` installs a `RunTerminalObserver` lambda on the WRM that captures `m_AdhocManager.get()` as a raw pointer.  `m_AdhocManager` is a `unique_ptr` member of `WebServer`; the lambda's captured raw pointer is valid only as long as `WebServer` lives.  Two failure modes: (a) `SetWorkflowRuntimeManager` re-called with a different WRM pointer leaves the *old* WRM still holding the lambda — if the old WRM later fires the observer after `WebServer` has rotated `m_AdhocManager` (or itself been destroyed), the lambda dispatches into a dead pointer.  (b) Shutdown ordering is fragile: `WebServer::~WebServer()` runs `Stop()` which currently does NOT clear the observer; if the WRM is destroyed *after* `WebServer` (process-exit ordering), and a run terminal-fires during that window, the lambda's `adhoc->OnRunCompleted(runId)` is a use-after-free.
+
+**Verification:** Holds up.  Code at `webServer.cpp:179` captures `AdhocWorkflowManager* adhoc = m_AdhocManager.get();` and routes the WRM observer through it.  `SignalStop()` does not detach.
+
+**Change:** Two checkpoints.
+1. **Swap-detach in `SetWorkflowRuntimeManager`**: when the in-coming `workflowRuntimeManager` differs from the existing `m_WorkflowRuntimeManager` and the existing one is non-null, call `m_WorkflowRuntimeManager->SetRunTerminalObserver({})` (an empty `std::function`) before swapping.  Holds the existing `m_Mutex` already; `WorkflowRuntimeManager::SetRunTerminalObserver` acquires its own `m_Mutex` internally, no lock-order issue.
+2. **Shutdown-detach in `SignalStop`**: at the very top of `SignalStop` (before `m_AiJcwfService.Shutdown()` / `m_AssistantController.Shutdown()` / WS-close loop), take `m_Mutex` and clear the observer if `m_WorkflowRuntimeManager` is non-null.  This is the defensive belt — `m_AdhocManager` won't be touched by an in-flight observer dispatch from this point forward.
+
+Each checkpoint also emits a permanent `LOG_APP_INFO` trace immediately after the clear:
+- `WebServer::SetWorkflowRuntimeManager: detached run-terminal observer from previous WRM before swap`
+- `[shutdown] WebServer::SignalStop: detached run-terminal observer from WRM`
+
+This is observability, not just instrumentation — both events are one-shot per transition (zero log volume in steady state) but provide positive evidence in `log/log.txt` that the new lifetime contract is enforced when the transition fires.  In-code comments at both checkpoints cite the audit and explain why both are needed.
+
+**Verified at runtime:**
+- Build clean.
+- 28-test assistant suite PASS — exercises the controller-shutdown path which transitively exercises `SignalStop`.
+- A workflow run that completed during this session emitted no observer-related crash logs (`adhoc_runs_active: 1` from a prior test pre-existed; `workflow_runs_total_completed: 2` ticked over correctly during the sitting).
+- **Shutdown-detach observable post-sitting:** restarted the debug binary, triggered `POST /api/shutdown`, and confirmed `[2026-04-30 20:30:58.377] [Application] [info] [shutdown] WebServer::SignalStop: detached run-terminal observer from WRM` lands in `log/log.txt`.  The new code path runs at every clean shutdown — the lifetime contract is observable, not merely structural.
+- **Not directly verified:** the swap-detach branch (re-init `SetWorkflowRuntimeManager` with a different non-null WRM).  `SetWorkflowRuntimeManager` is called exactly once at startup in current production, so the new branch is exercise-pending — the matching `LOG_APP_INFO` trace is in place to surface the event when (if) a future re-init flow lands.  The "destroy WRM after WebServer + fire a run-terminal" race is similarly fixture-dependent; the fix is structural ("observer is cleared on every transition") rather than reactive ("we caught the bug fire"), so the verification posture is "the lifetime contract is now enforced and observable at every transition".
+
+**Ramifications:**
+- Callers touched: `SetWorkflowRuntimeManager` and `SignalStop` only.
+- Tests touched: 28-test suite PASS.
+- Docs touched: none (in-code comments document the contract).
+- Blast radius: a re-init of WRM (currently unused — the function is called once at startup) now correctly detaches the old observer.  Existing single-init flows are unchanged.
+
+---
+
+### `m_ClientCount` consistency — explicit performance-hint contract
+
+**Finding (HIGH safety):**  `m_ClientCount` was a `std::atomic<size_t>` mirror of `m_Clients.size()`, updated under `m_Mutex` alongside the set in `.onopen` / `.onclose`, but read without the lock in the hot logging-path early-exits (`Broadcast` / `BroadcastJSON` / `EnqueueLogLine`).  The audit's concern: the atomic creates a "false sense of lock-free correctness" — the comment `// lock-free mirror of m_Clients.size() for EnqueueLogLine` doesn't make the racy-by-design semantics explicit.  Under load, the load may not match the locked set, leading to benign over-sends.
+
+**Verification:** Holds up.  Code at `webServer.h:405` was the terse one-line comment.
+
+**Change:** Replace the one-line `// lock-free mirror …` comment with a multi-line contract block making three things explicit: (1) it's a *performance hint*, never a routing source-of-truth — `m_Clients` under `m_Mutex` is authoritative; (2) the worst-case race is a benign over-send (broadcast queued for a just-disconnected client) or under-send (broadcast skipped for a just-connecting client); (3) the rule for future readers — "never use this atomic to decide whether a client receives a message — only whether the broadcast machinery runs at all on the producer side".  No code change.
+
+**Verified at runtime:**  Trivial (comment only).  Build clean.
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: 28-test suite + hermetic PASS (no behaviour change).
+- Docs touched: none beyond the in-code comment.
+- Blast radius: zero.
+
+---
+
+### TOCTOU sweep — drop `fs::exists()` precheck on three handlers
+
+**Finding (HIGH safety):**  Three sites used the `fs::exists(path); if (!exists) return 404; std::ifstream ifs(path); if (!ifs.is_open()) return 500;` pattern.  Between the existence check and the open, another process or thread can delete or replace the file.  For `ServeDashboardIndex`, the consequence is a 500 instead of 404 (mostly cosmetic).  For `HandleWorkflowVersionGetGet` and `HandleWorkflowVersionRestorePost`, a replaced version file could serve unintended content.
+
+**Verification:** Holds up.  Three sites flagged in the audit, all present in the current code.
+
+**Change:** Drop the `fs::exists()` precheck at all three sites; rely on the open-status to drive the response.
+1. **`ServeDashboardIndex`**: directly call `ServeStaticFile(distIndex)`; on 404 from the helper, substitute the developer-friendly "Dashboard UI build not found. Please run …" 500 response (preserves the UX for the missing-build case while closing the TOCTOU).
+2. **`HandleWorkflowVersionGetGet`**: drop the precheck; conflate `ifs.is_open()==false` into a single 404 `version_not_found` response (covers both "missing" and "permission denied"; for a read-only endpoint, the distinction is not actionable).
+3. **`HandleWorkflowVersionRestorePost`**: same treatment for the version-read step.  Bonus: drop the inner `fs::exists(targetPath)` precheck around the best-effort backup-current branch — `fs::copy_file` already populates `std::error_code` on missing-source, so the `ec`-absorbing pattern handles it cleanly.
+
+In-code comments at each site cite the TOCTOU class + the new error-routing rationale.
+
+**Verified at runtime (initial, in-sitting):**
+- `curl https://localhost:8443/` → HTTP 200 (dashboard index serves cleanly).
+- `curl /api/workflows/foo-bar-baz/versions/20260101T000000` (no such workflow) → HTTP 404 + `{"error":"version_not_found", ...}` — the new error-routing produces the right code.
+- 28-test suite + hermetic PASS.
+
+**Verified at runtime (post-sitting follow-up pass):**
+- **`ServeDashboardIndex` missing-build path**: `mv dashboard/ui/dist/index.html /tmp/...; curl /` → HTTP 500 with the developer-friendly `"Dashboard UI build not found. Please run: cd dashboard/ui && npm install && npm run build"` body; restored the file → HTTP 200 again.  `git diff dashboard/ui/dist/index.html` clean post-test.  Confirms the substitution branch (`ServeStaticFile` 404 → developer-friendly 500) runs as designed without re-introducing the TOCTOU.
+- **`HandleWorkflowVersionRestorePost` TOCTOU verified, but exposed a pre-existing bug**: `POST /api/workflows/exampleMakefile4/versions/20260430T022450/restore` (a real version timestamp) returned `restore_failed: UNCLOSED_STRING` — but the failure was at a *downstream* step (`WorkflowRegistry::SaveOrUpdateWorkflowFromJson` parsing zip-container bytes as JSON), not at the TOCTOU-touched read or backup paths.  Sitting 8's actual changes verified clean:
+  - The `is_open()`-driven 404 path tested via the bogus-version POST above.
+  - The dropped inner `fs::exists(targetPath)` precheck → `fs::copy_file`-with-`ec` pattern produced the expected best-effort backup artefact: `workflows/.history/exampleMakefile4/20260501T032250.jcwf` with md5 `2398043b...` matching the pre-restore live workflow byte-for-byte.
+  - Live workflow md5 unchanged before and after the failed restore — the TOCTOU code paths are **not corrupting state** when the downstream JSON-parse fails.
+  - The pre-existing bug ("restore handler reads `.jcwf` zip bytes as JSON") is tracked in `todo.md` under "Loose follow-ups" as `HandleWorkflowVersionRestorePost is broken since JCWF moved to zip containers`.  Out of cluster C scope; sitting 8's TOCTOU work is unaffected.
+
+**Ramifications:**
+- Callers touched: zero external.
+- Tests touched: above.
+- Docs touched: none beyond the `todo.md` entry for the surfaced pre-existing bug.
+- Blast radius: a request that previously got 404 + a precise "version_not_found" error and is now permission-denied gets the same 404 + same error message (the distinction is lost).  Acceptable for these endpoints.
+
+---
+
+## Skipped findings table — Sitting 8
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| `DrainPendingBroadcasts` per-client `m_Mutex` acquisition cost | `webServer.cpp` | MEDIUM safety | Audit's MEDIUM finding: the per-client lock acquisition makes the drain O(N) lock waits; suggests a single lock for the whole loop.  This sitting's CRITICAL fix already produces the single-lock-loop shape (sitting 8 task B), so the MEDIUM is closed as a structural side-effect.  No separate work item. |
+| `HandleOAuthCallbackGet` CURL handle leak on exception paths | `webServer.cpp` | HIGH resource | Out of cluster C scope (CURL/RAII concern, not concurrency).  Bundle with a future "curl wrapper RAII pass" that also covers the OAuth signing path. |
+| `WriteTextFileAtomic` failure-path verification under fault injection | `webServer.cpp` (sitting 7 carry) | (verification gap) | Not a sitting 8 finding; carried from sitting 7's skipped list. |
+| `replaceField` depth-aware verification under synthetic key collision | `webServer.cpp` (sitting 7 carry) | (verification gap) | Not a sitting 8 finding; carried from sitting 7's skipped list. |
+| Stress fixture for the `DrainPendingBroadcasts` UAF reproducer | `webServer.cpp` | (verification gap) | The fix is structural ("no unlock-send window can exist"), so the absence of a reproducer is acceptable.  A future stress-test fixture (N concurrent clients each connecting / disconnecting / sending random pings) would harden confidence — track for the eventual cybersec test fixture sitting. |
+| Teardown-order test fixture for the `SetWorkflowRuntimeManager` observer dangling | `webServer.cpp` + WRM | (verification gap) | Same shape as above — fix is structural; a fixture that re-initialises WRM mid-process plus shuts down out-of-order would harden confidence.  Defer with the cybersec fixture sitting. |

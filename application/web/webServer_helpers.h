@@ -48,6 +48,35 @@ namespace AIAssistant
 {
     namespace WebServerHelpers
     {
+        // Resolve `relative` under `root` (using weakly_canonical) and assert
+        // the result remains under root.  Returns empty path on rejection:
+        // absolute `relative`, resolution error, or `..` escape after
+        // canonicalisation.  Crow URL-decodes path parameters before handlers
+        // run, so a request like `/dash-assets/../../etc/passwd` arrives at
+        // the handler as `relative = "../../etc/passwd"`; without this gate,
+        // a naive `root / relative` resolves outside the intended tree.
+        inline std::filesystem::path ConfinePathUnder(std::filesystem::path const& root,
+                                                      std::string const& relative)
+        {
+            if (relative.empty())
+                return {};
+            std::filesystem::path raw(relative);
+            if (raw.is_absolute())
+                return {};
+            std::error_code ec;
+            std::filesystem::path const canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+            if (ec || canonicalRoot.empty())
+                return {};
+            std::filesystem::path const resolved = std::filesystem::weakly_canonical(canonicalRoot / raw, ec);
+            if (ec || resolved.empty())
+                return {};
+            std::filesystem::path const rel = resolved.lexically_relative(canonicalRoot);
+            std::string const relGeneric = rel.generic_string();
+            if (rel.empty() || relGeneric == ".." || relGeneric.rfind("../", 0) == 0)
+                return {};
+            return resolved;
+        }
+
         inline std::string GenerateIntegrationRunId(std::string const& workflowId)
         {
             auto const now = std::chrono::system_clock::now().time_since_epoch();

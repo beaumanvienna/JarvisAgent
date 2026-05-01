@@ -24,6 +24,7 @@
 #include "assistant/workspaceIndexer.h"
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "json/jsonHelper.h"
 #include "python/pythonEnginePool.h"
 #include "web/aiJcwfService.h"
 #include "workflow/workflowRegistry.h"
@@ -268,41 +269,7 @@ namespace
     }
 #endif // !_WIN32
 
-    // Minimal RFC 8259 string-content escape — matches the existing JsonEscape pattern
-    // in assistantSession.cpp (and workspaceIndexer.cpp).  Three copies now in this code
-    // base; convergence to a single helper in `engine/json/jsonHelper.h` is tracked as
-    // a follow-up rather than landed inline (would balloon this sitting's diff).  Used
-    // for JSON values that must round-trip as strings — e.g. AI-supplied workflowId
-    // embedded in global.json by ExecJcwfGenerate.
-    std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20)
-                    {
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += c;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
+    // (JsonEscape removed — converged into JsonHelper::EscapeJsonString)
 } // namespace
 
 namespace AIAssistant
@@ -2052,8 +2019,8 @@ namespace AIAssistant
         CloseHandle(pi.hThread);
 
         std::string header = "Exit code: " + std::to_string(exitCode) + "\n";
-        if (!cwd.empty() && cwd != ".")
-            header += "Working directory: " + cwdPath.string() + "\n";
+        if (cwdArg != ".")
+            header += "Working directory: " + canonicalCwd.string() + "\n";
         header += "\n";
 
         return {"run_shell", exitCode == 0, TruncateOutput(header + output, 16384)};
@@ -2933,7 +2900,7 @@ namespace AIAssistant
             std::ofstream ofs(extractedDir / "global.json", std::ios::out | std::ios::binary);
             if (ofs)
             {
-                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << JsonEscape(workflowId)
+                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << JsonHelper::EscapeJsonString(workflowId)
                     << "\",\n  \"manual_start\": true\n}";
             }
         }

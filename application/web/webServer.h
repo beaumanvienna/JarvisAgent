@@ -119,27 +119,31 @@ namespace AIAssistant
         // Attach `X-Key-Expires-In` and `X-Key-Self-Renew` headers when the request
         // was authenticated via an MCP key whose remaining lifetime is <= 30 days.
         // No-op when the request was not MCP-authenticated or the key is healthy.
-        void AttachMcpExpiryHeader(crow::response& resp, crow::request const& req) const;
+        // Non-const: the funnel mutates m_AuthFailures / rate-limit buckets via
+        // RecordAuthFailure / IsRateLimited; marking these methods const and
+        // const_cast-ing inside hides the mutation from the type system and
+        // creates a foot-gun for future readers who assume const = thread-safe.
+        void AttachMcpExpiryHeader(crow::response& resp, crow::request const& req);
 
         // Authenticate the request. Returns AuthResult with error/user/role.
-        AuthResult Authenticate(crow::request const& req) const;
+        AuthResult Authenticate(crow::request const& req);
         // Check if the auth result's role meets the minimum required level.
         static bool HasRole(AuthResult const& auth, std::string_view requiredRole);
 
         // Wrapper for routes that require admin role — returns empty string on success,
         // or an error code ("missing", "forbidden", "locked_out", ...) for MakeAuthErrorResponse.
-        std::string CheckAdminAuth(crow::request const& req) const;
+        std::string CheckAdminAuth(crow::request const& req);
         // Role-parametrized auth check. Used by viewer/operator routes that would
         // otherwise over-restrict themselves to admin via CheckAdminAuth.
         // Returns "" on success, error code on failure.
-        std::string CheckAuth(crow::request const& req, std::string_view minRole) const;
+        std::string CheckAuth(crow::request const& req, std::string_view minRole);
         // Same as above but populates `outAuth` on success — for handlers that
         // need the user/role on the success path (e.g. for downstream audit
         // logging or quota lookups).  Both overloads emit the
         // `forbidden reason=insufficient_role …` security log line on a role
         // denial; never roll your own role check inline.
         std::string CheckAuth(crow::request const& req, std::string_view minRole,
-                              AuthResult& outAuth) const;
+                              AuthResult& outAuth);
 
         // MCP key store lifecycle (shared with the existing KeyManager master password).
         // Returns true if the store is now initialised (loaded from disk, or empty-ready).
@@ -148,9 +152,11 @@ namespace AIAssistant
         bool SaveMcpKeyStore();
 
         // Lookup an MCP auth result from a raw bearer token; returns nullopt if not MCP.
-        std::optional<AuthResult> TryMcpAuth(crow::request const& req) const;
+        // Non-const: calls RecordAuthFailure on invalid-key path.
+        std::optional<AuthResult> TryMcpAuth(crow::request const& req);
         // Lookup a session result from the request cookie; returns nullopt if no cookie.
-        std::optional<AuthResult> TrySessionAuth(crow::request const& req) const;
+        // Non-const for consistency with the rest of the auth funnel — see AttachMcpExpiryHeader.
+        std::optional<AuthResult> TrySessionAuth(crow::request const& req);
         // Extract the "session=" value from the Cookie header, or empty if not present.
         static std::string ExtractSessionCookie(crow::request const& req);
         // Extract the token after "Bearer " from the Authorization header, or empty.
@@ -213,7 +219,7 @@ namespace AIAssistant
         crow::response ServeDashboardStatic(std::string const& requestPath) const;
 
         // ---- MCP heartbeat ----
-        crow::response HandleMcpHeartbeatPost();
+        crow::response HandleMcpHeartbeatPost(crow::request const& req);
         std::chrono::steady_clock::time_point m_McpLastHeartbeat{}; // guarded by m_Mutex
         std::string m_McpVersion;                                   // guarded by m_Mutex
 
@@ -396,7 +402,25 @@ namespace AIAssistant
         std::mutex m_Mutex;
 
         std::unordered_set<crow::websocket::connection*> m_Clients;
-        std::atomic<size_t> m_ClientCount{0}; // lock-free mirror of m_Clients.size() for EnqueueLogLine
+        // Performance hint, NOT a source of truth.  Skips taking m_Mutex on the
+        // hot logging path (EnqueueLogLine / Broadcast / BroadcastJSON early-
+        // exit) when no dashboard clients are connected — the common case for
+        // headless / engine-edition deployments.  Updated under m_Mutex
+        // alongside m_Clients in onopen / onclose, but read without the lock,
+        // so a load may race with a concurrent connect/disconnect.  Acceptable:
+        // the worst case is a benign over-send (a broadcast queued for a client
+        // that just disconnected, or skipped for a client that just connected).
+        // m_Clients (under m_Mutex) is the authoritative routing set; this
+        // atomic must never decide whether a client receives a message — only
+        // whether the broadcast machinery runs at all on the producer side.
+        std::atomic<size_t> m_ClientCount{0};
+
+        // Per-connection role captured at the WS upgrade handshake (.onaccept).
+        // The connection pointer is identity-only — never dereferenced.  Used
+        // by message-type branches that mutate disk state (currently
+        // ai-write-scripts) so an operator/viewer credential cannot escalate
+        // to admin-only operations once the WS is open.  Guarded by m_Mutex.
+        std::unordered_map<crow::websocket::connection*, std::string> m_WsClientRoles;
 
         // WebSocket accumulation statistics (all guarded by m_Mutex)
         size_t m_WsTotalConnects{0};

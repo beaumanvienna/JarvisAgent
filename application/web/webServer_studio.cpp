@@ -68,6 +68,7 @@ namespace AIAssistant
     crow::response WebServer::ServeWorkflowEditorStatic(std::string const& requestPath) const
     {
         std::filesystem::path const distRoot = std::filesystem::path("workflow-editor") / "ui" / "dist";
+        std::filesystem::path const assetsRoot = distRoot / "assets";
 
         if (requestPath == "/editor" || requestPath == "/editor/")
         {
@@ -77,15 +78,27 @@ namespace AIAssistant
         // Serve assets from dist under two possible URL layouts:
         //  - "/assets/..." (Vite default when base is "/")
         //  - "/editor/assets/..." (if base is later set to "/editor/")
+        // ConfinePathUnder rejects `..` traversal and absolute paths, so a
+        // request like `/assets/../../etc/passwd` cannot escape assetsRoot.
+        std::string relative;
         if (requestPath.rfind("/assets/", 0) == 0)
         {
-            std::string const relative = requestPath.substr(std::string("/assets/").size());
-            return ServeStaticFile(distRoot / "assets" / relative);
+            relative = requestPath.substr(std::string("/assets/").size());
         }
-        if (requestPath.rfind("/editor/assets/", 0) == 0)
+        else if (requestPath.rfind("/editor/assets/", 0) == 0)
         {
-            std::string const relative = requestPath.substr(std::string("/editor/assets/").size());
-            return ServeStaticFile(distRoot / "assets" / relative);
+            relative = requestPath.substr(std::string("/editor/assets/").size());
+        }
+
+        if (!relative.empty())
+        {
+            std::filesystem::path const resolved = ConfinePathUnder(assetsRoot, relative);
+            if (resolved.empty())
+            {
+                LOG_SECURITY_WARN("[security] editor_static_path_escape len={}", relative.size());
+                return crow::response(400, "Bad Request");
+            }
+            return ServeStaticFile(resolved);
         }
 
         // SPA fallback: any /editor/* route should serve index.html

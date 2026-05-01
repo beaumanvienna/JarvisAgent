@@ -29,10 +29,10 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -141,7 +141,14 @@ namespace AIAssistant
         std::shared_ptr<AssistantSession> GetSession(std::string const& sessionId);
         std::shared_ptr<AssistantSession> CreateSession();
 
-        void JoinFinishedThreads();
+        // Drop already-finished AI lambda futures from m_BackgroundFutures.
+        // Bounds the vector so a long-running session doesn't accrete entries
+        // for every completed turn.  Authoritative join still happens in Shutdown().
+        void JoinFinishedFutures();
+
+        // Drain loop body: pulled out of the controller-owned thread so the
+        // engine ThreadPool can host it.  Returns when m_ShuttingDown is set.
+        void DrainLoop();
 
         std::filesystem::path GetSessionsDir() const;
         static bool WriteFile(std::filesystem::path const& path, std::string const& content, std::string& outError);
@@ -159,13 +166,22 @@ namespace AIAssistant
         std::mutex m_SessionsMutex;
         std::unordered_map<std::string, std::shared_ptr<AssistantSession>> m_Sessions;
 
-        // Pending messages to send to clients.
+        // Pending messages to send to clients.  m_DrainCv lets QueueMessage
+        // wake the drain loop immediately rather than waiting on the next
+        // OnMessage to call DrainPendingMessages — without this, an AI reply
+        // that lands after the user's last message stays queued indefinitely.
         std::mutex m_PendingMutex;
+        std::condition_variable m_DrainCv;
         std::vector<std::string> m_PendingMessages;
 
-        // Background AI call threads.
+        // Background AI lambdas, dispatched onto Core::g_Core->GetThreadPool().
+        // Reuses the engine pool (memory feedback_no_jthread_use_threadpool)
+        // instead of spawning a fresh std::thread per AI turn.  Future is
+        // shared so JoinFinishedFutures can poll wait_for(0ms) without
+        // consuming the result.
         std::mutex m_ThreadsMutex;
-        std::vector<std::thread> m_BackgroundThreads;
+        std::vector<std::shared_future<void>> m_BackgroundFutures;
+        std::shared_future<void> m_DrainLoopFuture;
         std::atomic<bool> m_ShuttingDown{false};
         std::atomic<int> m_NextRequestSeq{1};
 

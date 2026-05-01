@@ -21,11 +21,12 @@ j9t accepts exactly three auth mechanisms; there is no legacy bearer-token fallb
 
 | Tier | Endpoints | Engine | Studio |
 |------|-----------|--------|--------|
-| Public | `GET /api/status`, `POST /api/mcp/heartbeat`, `GET /`, `/dash-assets/*` | No auth | No auth |
-| Auth bootstrap | `POST /api/auth/mcp-keys/activate`, `POST /api/auth/login` | No auth | No auth |
+| Public | `GET /api/status`, `GET /`, `/dash-assets/*` | No auth | No auth |
+| Auth bootstrap | `POST /api/auth/mcp-keys/activate`, `POST /api/auth/login`, `POST /api/settings/keys/unlock` | No auth (rate-limited per-IP, master password IS the credential on `/keys/unlock`) | Same |
+| MCP heartbeat | `POST /api/mcp/heartbeat` | MCP key required | MCP key required |
 | Webhook | `POST /api/webhook/<id>` | HMAC-SHA256 (required) | HMAC-SHA256 (optional) |
 | Programmatic / admin | All other endpoints | MCP key / session / gateway | Same for `mcp_` tokens; browser UI open on localhost |
-| WebSocket | `WS /ws` | Session cookie validated at `.onaccept` handshake | No auth (localhost browser) |
+| WebSocket | `WS /ws` | Session cookie validated at `.onaccept` handshake; role pinned per-connection and re-checked for admin-only message types (`ai-write-scripts`) | No auth (localhost browser); role still pinned + re-checked |
 
 **First-run bootstrap:** on Engine's first start with an empty key store, j9t prints an admin enrollment token to stderr (60-minute TTL). Activate it with `POST /api/auth/mcp-keys/activate` to receive your MCP admin key. Subsequent keys are created via `POST /api/auth/mcp-keys/enroll` from an admin session or MCP admin key.
 
@@ -40,8 +41,9 @@ j9t accepts exactly three auth mechanisms; there is no legacy bearer-token fallb
 | Method | Path | Edition | Description |
 |--------|------|---------|-------------|
 | GET | `/` | Both | Serves the dashboard (React SPA from `dashboard/ui/dist`). |
+| GET | `/dash-assets/<path>` | Both | Serves Vite-built static assets for the dashboard. Path is canonicalised under `dashboard/ui/dist`; `..`-traversal returns `400 Bad Request`. |
 | GET | `/editor` | Studio | Serves the Workflow Editor (React SPA from `workflow-editor/ui/dist`). |
-| GET | `/assets/<path>` | Studio | Serves Vite-built static assets for the editor. |
+| GET | `/assets/<path>` | Studio | Serves Vite-built static assets for the editor. Path is canonicalised under `workflow-editor/ui/dist/assets`; `..`-traversal returns `400 Bad Request`. |
 | GET | `/editor/<path>` | Studio | SPA fallback — serves the editor index for any sub-route. |
 
 ---
@@ -106,12 +108,17 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/mcp/heartbeat` | Records an MCP sidecar heartbeat. Called every 15 seconds by the MCP server. |
+| POST | `/api/mcp/heartbeat` | Records an MCP sidecar heartbeat. Called every 15 seconds by the MCP server. Requires a valid MCP key (`Authorization: Bearer mcp_…`). Body capped at 1 KB; pre-auth rate limiter applied per-IP. |
 
 **Response (200):**
 ```json
 { "ok": true }
 ```
+
+**Errors:**
+- `403 forbidden` — missing or invalid MCP credential.
+- `413 payload_too_large` — request body exceeds 1 KB.
+- `429 rate_limited` — pre-auth rate limit exceeded; respect `Retry-After`.
 
 ### Debug Signals — Debug builds only
 
@@ -722,10 +729,21 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 ```
 
 ### POST /api/settings/ai-interfaces/save
-Writes the in-memory interfaces back to the `config.json` file by replacing the `"API interfaces"` array.
+Writes the in-memory interfaces back to the `config.json` file by replacing the `"API interfaces"` array.  String fields (`name`, `description`, `url`, `model`, `key_name`) are JSON-escaped, the patched document is re-parsed with simdjson before the on-disk write, and the rename is atomic — on any 5xx error the existing `config.json` is left unchanged.
+
 **Response (200):**
 ```json
 { "ok": true, "path": "/abs/path/config.json" }
+```
+
+**Response (500) — validation failed (the patched text did not re-parse cleanly):**
+```json
+{ "ok": false, "error": "validation_failed", "message": "Generated config.json did not re-parse cleanly; aborting write." }
+```
+
+**Response (500) — atomic write failed (parent directory unwritable, disk full, etc.):**
+```json
+{ "ok": false, "error": "write_failed", "message": "Failed to write '/abs/path/config.json': <underlying-error>" }
 ```
 
 ### POST /api/settings/ai-interfaces/test
@@ -807,7 +825,8 @@ Read and update the scalar runtime configuration fields stored in `config.json`.
 | `platform` | Read-only: `"linux"`, `"macos"`, or `"windows"`. Used by the frontend to gate Windows-only UI controls (e.g. the `use_bash` checkbox). |
 
 ### PUT /api/settings/config
-Updates the specified fields in memory and persists them to `config.json`.
+Updates the specified fields in memory and persists them to `config.json`.  Persistence patches the named top-level keys in the existing file (preserving comments, field ordering, and layout); the patched text is validated with simdjson and the rename is atomic — on any 5xx error the existing `config.json` is left unchanged.
+
 **Request body (all fields optional):**
 ```json
 {
@@ -834,6 +853,16 @@ Updates the specified fields in memory and persists them to `config.json`.
 }
 ```
 Returns 400 if a required field is missing or malformed. Validation errors (e.g. `api_index` out of range) return `{ "ok": false, "message": "..." }`.
+
+**Response (500) — patched config did not re-parse cleanly:**
+```json
+{ "ok": false, "error": "validation_failed", "message": "Generated config.json did not re-parse cleanly; aborting write." }
+```
+
+**Response (500) — atomic write failed:**
+```json
+{ "ok": false, "error": "write_failed", "message": "Failed to write '/abs/path/config.json': <underlying-error>" }
+```
 
 ---
 
@@ -1221,8 +1250,11 @@ Tests the connection using the `ICloudConnector::TestConnection()` method for th
 **Response (400):** `{ "ok": false, "error": "no_connector", "message": "No connector registered for type 'xyz'" }`
 
 ### POST /api/connections/save
-Serializes all connections to `connections.json` in the launch directory.
+Serializes all connections to `connections.json` in the launch directory.  The write is atomic (tmp-file + rename) — on a 5xx response the existing `connections.json` is left unchanged.
+
 **Response (200):** `{ "ok": true, "path": "/abs/path/connections.json" }`
+
+**Response (500):** `{ "ok": false, "error": "save_failed", "message": "Failed to write '/abs/path/connections.json': <underlying-error>" }`
 
 ### GET /api/connections/\<name\>/oauth/authorize
 Initiates an OAuth 2.0 authorization code flow with PKCE for the named connection. The connection must have `auth_type: "oauth2"` and a `client_id` parameter.

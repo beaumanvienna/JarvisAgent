@@ -323,7 +323,7 @@ That divergence broke RFC 8259 in two distinct ways:
 1. Bytes `0x01–0x08`, `0x0B`, `0x0E–0x1F` produced output that downstream JSON parsers (including the project's own `simdjson` consumers) reject as malformed.
 2. Form-feed bytes were silently elided, so a round-trip through `SanitizeForJson` lost data.
 
-The rewrite consolidates four other broken `JsonEscape`-style copies that had spread across the project (`assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, plus the original `SanitizeForJson` itself).  All four sites now route through `JsonHelper::EscapeJsonString`.  Two correct copies remain in `assistantTools.cpp` and `assistantController.cpp` anonymous namespaces; their migration is tracked as a follow-up sweep.
+The rewrite consolidates four other broken `JsonEscape`-style copies that had spread across the project (`assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, plus the original `SanitizeForJson` itself).  All sites now route through `JsonHelper::EscapeJsonString` — including the last two that remained in the assistant subsystem post-2026-04-29 (`assistantTools.cpp`, `assistantController.cpp`), which were converged in the 2026-04-30 sweep.  No anon-namespace `JsonEscape` copies remain in the codebase.
 
 ### 4.4 Use sites
 
@@ -331,7 +331,7 @@ Every outbound AI request body and persisted transcript flows through this helpe
 
 - `application/json/requestBuilder.cpp` builds the JSON request body for every AI provider via `JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages))`.
 - `application/workflow/aiTranscript.cpp` writes per-call transcripts with `JsonHelper jsonHelper; jsonHelper.SanitizeForJson(...)` for each text/error/finish-reason field.
-- `application/assistant/assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp` use the new static `JsonHelper::EscapeJsonString` to write their JSONL/JSON files.
+- `application/assistant/assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, `assistantController.cpp`, and `assistantTools.cpp` all use the static `JsonHelper::EscapeJsonString` for their JSON-string embeds (session JSONL, memory JSON, index JSONL, WS protocol messages, generated `global.json`).
 
 These call sites benefit transparently from the fix — any provider response or session content containing control bytes (which previously generated malformed JSON or lost form-feed data) now produces valid output.
 

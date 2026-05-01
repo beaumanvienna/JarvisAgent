@@ -1,7 +1,7 @@
 # AI Assistant — Technical Documentation
 
 **Status:** Implemented
-**Last updated:** 2026-04-29
+**Last updated:** 2026-04-30
 
 ---
 
@@ -152,7 +152,8 @@ Shared helpers used across the assistant subsystem.  Lifted out of
 - Owns the `/ws/assistant` WebSocket route (registered in `WebServer`)
 - Parses incoming messages, routes to appropriate handler
 - Manages per-connection state (active session)
-- Handles AI calls via background threads using `AiRequestPool`
+- AI dispatch runs on the **engine `ThreadPool`** (`Core::g_Core->GetThreadPool().SubmitTask(...)`); the controller stores the `.share()`'d `std::shared_future<void>` per call and drops finished futures via `wait_for(0ms) == ready`.  No bespoke `std::thread` spawning per turn.
+- **Drain CV (`m_DrainCv`).**  `QueueMessage` notifies on every successful enqueue; a long-running `DrainLoop` task (also on the engine ThreadPool) wakes from `wait_for(1s)` and calls `DrainPendingMessages` directly.  Without this loop, AI replies produced after the user's last message used to sit until the next inbound `OnMessage` triggered a drain.  The existing `OnMessage`-side drain calls remain as a synchronous flush before the handler returns (useful for protocol-error responses).  Crow's `send_text` is thread-safe (`asio::post` onto the io-context strand), so calling `DrainPendingMessages` from the drain loop is correct without bouncing through io_context.
 - Multi-step tool loop with up to 10 iterations (L3)
 - **Sessions are stored as `std::shared_ptr<AssistantSession>`.** Background
   AI lambdas capture the shared_ptr so the session stays alive across the
@@ -304,6 +305,17 @@ crafted long turns.
 Registers and executes AI tools. Tools are described in the system prompt and
 invoked via `<tool_call>` blocks in AI responses.
 
+**Thread-safety contract** (header-documented): the `Set*` methods and the
+constructor are called once on the owning thread (`AssistantController`)
+*before* any AI lambda runs.  After publication, the backing pointers
+(`m_WorkflowRegistry`, `m_RuntimeManager`, `m_MemoryStore`,
+`m_WorkspaceIndexer`, `m_AiCallFn`) are read-only.  `Execute` /
+`BuildToolDescriptions` / `GetToolDefs` may be called from any thread.  The
+targets of the backing pointers are individually thread-safe (MemoryStore +
+WorkspaceIndexer mutex their state; the workflow registries have their own
+contracts).  No internal mutex needed — but if a future change introduces
+post-publication mutable state, add a mutex first.
+
 **Implemented tools:**
 
 *L1/L2 read-only tools:*
@@ -454,9 +466,12 @@ or prompt-injected mega-summary cannot bloat the index file.
 
 ### WebSocket hook (`hooks/useAssistantWebSocket.ts`)
 
-- Connects to `ws://localhost:8080/ws/assistant`
+- Connects to `/ws/assistant` (scheme + host inferred from `window.location`;
+  `wss://` when the dashboard is loaded over HTTPS, `ws://` otherwise)
 - Auto-reconnect on disconnect (2s delay)
-- 500ms ping interval for message draining
+- 500ms ping interval — keepalive only.  AI replies surface via the server-side
+  drain CV without needing the client to poll; the ping serves as a liveness
+  check + a redundant in-handler drain trigger.
 - Handles: `session_active`, `assistant_done`, `tool_status`, `tool_result`,
   `session_history`, `error`, `clear`, `batch`, `approval_request`,
   `completion_response`, `history`
@@ -552,6 +567,9 @@ is configured. A tooltip explains: "No AI provider configured. Add one in AI Man
 | Off-topic responses | Keyword overlap check (≥30% threshold) appends warning if response seems irrelevant |
 | Hallucinated paths | File paths in AI responses verified against workspace; missing paths flagged with note |
 | Approval timeout | 60s timeout — denied if user doesn't respond |
+| Background-thread lifetime | AI lambdas run on the engine `ThreadPool` (`Core::g_Core->GetThreadPool().SubmitTask(...)`), not bespoke `std::thread`s.  Sessions are `std::shared_ptr<AssistantSession>` so the lambda holds the session alive across the multi-step tool loop.  `Shutdown` waits on every `m_BackgroundFutures` entry + the drain loop future before returning, so no lambda outlives the controller. |
+| ToolRegistry concurrency | Set-once setters called on the owning thread before any AI lambda runs; backing pointers immutable post-publication; `Execute` / `BuildToolDescriptions` / `GetToolDefs` safe from any thread.  Targets of the backing pointers (`MemoryStore`, `WorkspaceIndexer`, workflow registries) are individually thread-safe. |
+| Stale messages on idle session | Server-side drain CV (`m_DrainCv`) wakes a long-running `DrainLoop` task on every `QueueMessage` enqueue; AI replies surface immediately rather than waiting on the next inbound `OnMessage`.  Pre-sitting-5 the queue would sit until the user typed again. |
 
 ---
 

@@ -61,7 +61,7 @@ Start a workflow run via the **webhook trigger**. The workflow JCWF must have a 
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `runId` | No | Custom run ID (auto-generated if omitted). |
+| `runId` | No | Custom run ID (auto-generated if omitted). When supplied, must match `[A-Za-z0-9_-]+` — j9t uses it as a path segment under the run folder, so anything outside that allowlist is rejected `400 invalid_run_id`. |
 | `callbackUrl` | No | URL to POST completion results to when the run finishes. |
 | `context` | No | Key-value pairs injected into the workflow run context. Tasks can reference these via declared `inputs`. |
 
@@ -113,7 +113,7 @@ Older endpoint that also starts workflow runs. Still works but **POST /api/webho
 | Field | Required | Description |
 |-------|----------|-------------|
 | `workflowId` | **Yes** | ID of the JCWF workflow to run. |
-| `runId` | No | Custom run ID. |
+| `runId` | No | Custom run ID. When supplied, must match `[A-Za-z0-9_-]+` (path-segment safety); rejected `400 invalid_run_id` otherwise. |
 | `taskName` | No | Disk traceability folder name (default: `n8n`). |
 | `callbackUrl` | No | Callback URL. |
 | `context` | No | Context key-value pairs. |

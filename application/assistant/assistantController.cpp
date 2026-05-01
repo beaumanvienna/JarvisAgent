@@ -24,6 +24,7 @@
 #include "assistant/contextAssembler.h"
 #include "engine.h"
 #include "jarvisAgent.h"
+#include "json/jsonHelper.h"
 #include "python/pythonEnginePool.h"
 #include "workflow/aiInvocation.h"
 #include "workflow/aiReply.h"
@@ -32,6 +33,7 @@
 #include "workflow/workflowRuntimeManager.h"
 #include "crow.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <future>
@@ -45,46 +47,6 @@
 namespace
 {
     namespace fs = std::filesystem;
-
-    std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"':
-                    out += "\\\"";
-                    break;
-                case '\\':
-                    out += "\\\\";
-                    break;
-                case '\n':
-                    out += "\\n";
-                    break;
-                case '\r':
-                    out += "\\r";
-                    break;
-                case '\t':
-                    out += "\\t";
-                    break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20)
-                    {
-                        char buf[8];
-                        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += c;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
 
     fs::path GetQueueBasePath() { return fs::absolute(AIAssistant::Core::g_Core->GetConfig().m_QueueFolderFilepath); }
 } // namespace
@@ -105,6 +67,17 @@ namespace AIAssistant
 
         // Run initial workspace scan (indexes files, preserves cached summaries).
         m_WorkspaceIndexer.ScanWorkspace();
+
+        // Submit the drain loop onto the engine ThreadPool.  Without it, AI
+        // replies produced after the user's last message sit in
+        // m_PendingMessages until the next OnMessage triggers a drain.
+        // QueueMessage notifies m_DrainCv so the loop wakes immediately;
+        // the 1s wait_for timeout is a backstop for missed wake-ups.
+        if (Core::g_Core != nullptr)
+        {
+            m_DrainLoopFuture =
+                Core::g_Core->GetThreadPool().SubmitTask([this]() { DrainLoop(); }).share();
+        }
 
         LOG_APP_INFO("[assistant] AssistantController created ({} memories, {} indexed files, {} summaries)",
                      m_MemoryStore.Size(), m_WorkspaceIndexer.FileCount(), m_WorkspaceIndexer.SummaryCount());
@@ -259,13 +232,13 @@ namespace AIAssistant
             }
             else
             {
-                QueueMessage(R"({"type":"error","message":"Unknown message type: )" + JsonEscape(type) + "\"}");
+                QueueMessage(R"({"type":"error","message":"Unknown message type: )" + JsonHelper::EscapeJsonString(type) + "\"}");
             }
         }
         catch (std::exception const& e)
         {
             LOG_APP_WARN("[assistant] Error parsing message: {}", e.what());
-            QueueMessage(std::string(R"({"type":"error","message":"Parse error: )") + JsonEscape(e.what()) + "\"}");
+            QueueMessage(std::string(R"({"type":"error","message":"Parse error: )") + JsonHelper::EscapeJsonString(e.what()) + "\"}");
         }
 
         DrainPendingMessages();
@@ -308,7 +281,7 @@ namespace AIAssistant
         }
 
         // Notify client which session is active.
-        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonEscape(resolvedSessionId) + "\"}");
+        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(resolvedSessionId) + "\"}");
 
         // Check for slash commands.
         if (text.size() > 1 && text[0] == '/')
@@ -331,7 +304,7 @@ namespace AIAssistant
         (void)session->AddUserMessage(text);
 
         // Send "thinking" indicator.
-        QueueMessage("{\"type\":\"assistant_thinking\",\"sessionId\":\"" + JsonEscape(resolvedSessionId) + "\"}");
+        QueueMessage("{\"type\":\"assistant_thinking\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(resolvedSessionId) + "\"}");
 
         // Dispatch AI call on background thread.  Pin approvals to this
         // specific client connection — only this conn can approve later.
@@ -357,14 +330,14 @@ namespace AIAssistant
         }
         else if (command == "clear")
         {
-            QueueMessage("{\"type\":\"clear\",\"sessionId\":\"" + JsonEscape(sessionId) + "\"}");
+            QueueMessage("{\"type\":\"clear\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\"}");
             return;
         }
         else if (command == "new")
         {
             auto session = CreateSession();
-            QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonEscape(session->GetSessionId()) + "\"}");
-            QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(session->GetSessionId()) +
+            QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(session->GetSessionId()) + "\"}");
+            QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(session->GetSessionId()) +
                          "\",\"text\":\"New session started.\"}");
             return;
         }
@@ -388,8 +361,8 @@ namespace AIAssistant
             {
                 list += "  " + id + "\n";
             }
-            QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"text\":\"" +
-                         JsonEscape(list) + "\"}");
+            QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\",\"text\":\"" +
+                         JsonHelper::EscapeJsonString(list) + "\"}");
             return;
         }
         else
@@ -407,8 +380,8 @@ namespace AIAssistant
             }
         }
 
-        QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"text\":\"" +
-                     JsonEscape(response) + "\"}");
+        QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\",\"text\":\"" +
+                     JsonHelper::EscapeJsonString(response) + "\"}");
     }
 
     void AssistantController::HandleListSessions(crow::websocket::connection& /*conn*/)
@@ -455,7 +428,7 @@ namespace AIAssistant
             else
                 session = GetSession(ids[i]); // disk-loaded, not in snapshot
             size_t turns = session ? session->GetTurnCount() : 0;
-            json += "{\"id\":\"" + JsonEscape(ids[i]) + "\",\"turns\":" + std::to_string(turns) + "}";
+            json += "{\"id\":\"" + JsonHelper::EscapeJsonString(ids[i]) + "\",\"turns\":" + std::to_string(turns) + "}";
         }
         json += "]}";
         QueueMessage(json);
@@ -466,7 +439,7 @@ namespace AIAssistant
         auto session = GetSession(sessionId);
         if (!session)
         {
-            QueueMessage("{\"type\":\"error\",\"message\":\"Session not found: " + JsonEscape(sessionId) + "\"}");
+            QueueMessage("{\"type\":\"error\",\"message\":\"Session not found: " + JsonHelper::EscapeJsonString(sessionId) + "\"}");
             return;
         }
 
@@ -478,17 +451,17 @@ namespace AIAssistant
 
         // Send session history to client.
         auto turns = session->GetAllTurns();
-        std::string json = "{\"type\":\"session_history\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"turns\":[";
+        std::string json = "{\"type\":\"session_history\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\",\"turns\":[";
         for (size_t i = 0; i < turns.size(); ++i)
         {
             if (i > 0)
                 json += ",";
-            json += "{\"role\":\"" + JsonEscape(turns[i].role) + "\",\"text\":\"" + JsonEscape(turns[i].text) +
-                    "\",\"ts\":\"" + JsonEscape(turns[i].timestamp) + "\"}";
+            json += "{\"role\":\"" + JsonHelper::EscapeJsonString(turns[i].role) + "\",\"text\":\"" + JsonHelper::EscapeJsonString(turns[i].text) +
+                    "\",\"ts\":\"" + JsonHelper::EscapeJsonString(turns[i].timestamp) + "\"}";
         }
         json += "]}";
         QueueMessage(json);
-        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonEscape(sessionId) + "\"}");
+        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\"}");
     }
 
     void AssistantController::HandleNewSession(crow::websocket::connection& conn)
@@ -499,7 +472,7 @@ namespace AIAssistant
             if (m_ClientStates.count(&conn))
                 m_ClientStates[&conn].activeSessionId = session->GetSessionId();
         }
-        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonEscape(session->GetSessionId()) + "\"}");
+        QueueMessage("{\"type\":\"session_active\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(session->GetSessionId()) + "\"}");
     }
 
     // -----------------------------------------------------------------
@@ -549,7 +522,7 @@ namespace AIAssistant
         {
             if (i > 0)
                 json += ",";
-            json += "\"" + JsonEscape(history[i]) + "\"";
+            json += "\"" + JsonHelper::EscapeJsonString(history[i]) + "\"";
         }
         json += "]}";
         QueueMessage(json);
@@ -650,12 +623,12 @@ namespace AIAssistant
         }
 
         // Build JSON response.
-        std::string json = "{\"type\":\"completion_response\",\"prefix\":\"" + JsonEscape(prefix) + "\",\"candidates\":[";
+        std::string json = "{\"type\":\"completion_response\",\"prefix\":\"" + JsonHelper::EscapeJsonString(prefix) + "\",\"candidates\":[";
         for (size_t i = 0; i < candidates.size(); ++i)
         {
             if (i > 0)
                 json += ",";
-            json += "\"" + JsonEscape(candidates[i]) + "\"";
+            json += "\"" + JsonHelper::EscapeJsonString(candidates[i]) + "\"";
         }
         json += "]}";
         QueueMessage(json);
@@ -668,13 +641,22 @@ namespace AIAssistant
     void AssistantController::RunAiCallAsync(std::string const& sessionId, std::string const& userMessage,
                                               crow::websocket::connection* originConn)
     {
-        JoinFinishedThreads();
+        // Trim the future vector before pushing a new entry; otherwise it
+        // grows unbounded across a long-lived session.
+        JoinFinishedFutures();
+
+        if (m_ShuttingDown.load() || Core::g_Core == nullptr)
+            return;
 
         std::string sessionIdCopy = sessionId;
         std::string messageCopy = userMessage;
 
-        std::lock_guard<std::mutex> lock(m_ThreadsMutex);
-        m_BackgroundThreads.emplace_back(
+        // Submit onto the engine ThreadPool instead of spawning a fresh
+        // std::thread per turn.  Captures are by value (sid/msg moved in;
+        // origin pointer is identity-only and never dereferenced from this
+        // lambda — see CancelApprovalsForConnection contract).  this is
+        // safe because Shutdown waits on every future before destruction.
+        auto future = Core::g_Core->GetThreadPool().SubmitTask(
             [this, sid = std::move(sessionIdCopy), msg = std::move(messageCopy), origin = originConn]()
             {
                 if (m_ShuttingDown.load())
@@ -686,7 +668,7 @@ namespace AIAssistant
                 std::shared_ptr<AssistantSession> session = GetSession(sid);
                 if (!session)
                 {
-                    QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonEscape(sid) +
+                    QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) +
                                  "\",\"message\":\"Session not found\"}");
                     return;
                 }
@@ -817,8 +799,8 @@ namespace AIAssistant
                     {
                         std::string errorMsg = "AI call failed: " + error;
                         (void)session->AddAssistantMessage(errorMsg);
-                        QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"message\":\"" +
-                                     JsonEscape(errorMsg) + "\"}");
+                        QueueMessage("{\"type\":\"error\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) + "\",\"message\":\"" +
+                                     JsonHelper::EscapeJsonString(errorMsg) + "\"}");
                         return;
                     }
 
@@ -875,8 +857,8 @@ namespace AIAssistant
                         }
 
                         (void)session->AddAssistantMessage(finalText);
-                        QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"text\":\"" +
-                                     JsonEscape(finalText) + "\"}");
+                        QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) + "\",\"text\":\"" +
+                                     JsonHelper::EscapeJsonString(finalText) + "\"}");
                         return;
                     }
 
@@ -923,8 +905,8 @@ namespace AIAssistant
                         }
 
                         // Notify frontend about tool execution.
-                        QueueMessage("{\"type\":\"tool_status\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"tool\":\"" +
-                                     JsonEscape(call.name) + "\",\"status\":\"running\"}");
+                        QueueMessage("{\"type\":\"tool_status\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) + "\",\"tool\":\"" +
+                                     JsonHelper::EscapeJsonString(call.name) + "\",\"status\":\"running\"}");
 
                         // Check if tool requires approval.
                         bool needsApproval = false;
@@ -972,9 +954,9 @@ namespace AIAssistant
                         }
 
                         // Notify frontend of result.
-                        QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonEscape(sid) + "\",\"tool\":\"" +
-                                     JsonEscape(call.name) + "\",\"ok\":" + (result.ok ? "true" : "false") +
-                                     ",\"summary\":\"" + JsonEscape(result.output.substr(0, 200)) + "\"}");
+                        QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) + "\",\"tool\":\"" +
+                                     JsonHelper::EscapeJsonString(call.name) + "\",\"ok\":" + (result.ok ? "true" : "false") +
+                                     ",\"summary\":\"" + JsonHelper::EscapeJsonString(result.output.substr(0, 200)) + "\"}");
 
                         // Build tool results text for next AI iteration.
                         // Defang any literal tool-call/tool-result markers in
@@ -1016,9 +998,12 @@ namespace AIAssistant
                 (void)session->AddAssistantMessage("Reached maximum tool call iterations (" +
                                                    std::to_string(MAX_TOOL_ITERATIONS) +
                                                    "). Please try a simpler query.");
-                QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonEscape(sid) +
+                QueueMessage("{\"type\":\"assistant_done\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sid) +
                              "\",\"text\":\"Reached maximum tool call iterations. Please try a simpler query.\"}");
             });
+
+        std::lock_guard<std::mutex> lock(m_ThreadsMutex);
+        m_BackgroundFutures.emplace_back(future.share());
     }
 
     // -----------------------------------------------------------------
@@ -1668,16 +1653,16 @@ namespace AIAssistant
             {
                 if (!first)
                     argsJson += ",";
-                argsJson += "\"" + JsonEscape(k) + "\":\"" + JsonEscape(v) + "\"";
+                argsJson += "\"" + JsonHelper::EscapeJsonString(k) + "\":\"" + JsonHelper::EscapeJsonString(v) + "\"";
                 first = false;
             }
         }
         argsJson += "}";
 
         // Send approval_request to frontend.
-        QueueMessage("{\"type\":\"approval_request\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"requestId\":\"" +
-                     JsonEscape(requestId) + "\",\"tool\":\"" + JsonEscape(call.name) + "\",\"args\":" + argsJson +
-                     ",\"description\":\"" + JsonEscape(description) + "\"}");
+        QueueMessage("{\"type\":\"approval_request\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\",\"requestId\":\"" +
+                     JsonHelper::EscapeJsonString(requestId) + "\",\"tool\":\"" + JsonHelper::EscapeJsonString(call.name) + "\",\"args\":" + argsJson +
+                     ",\"description\":\"" + JsonHelper::EscapeJsonString(description) + "\"}");
 
         // Log shape only — `description` carries the rendered tool args,
         // which may include secret values.  The full description still goes
@@ -1698,8 +1683,8 @@ namespace AIAssistant
             else
             {
                 LOG_APP_WARN("[assistant] Approval timed out or shutdown: requestId_prefix={}", requestId.substr(0, 8));
-                QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonEscape(sessionId) + "\",\"tool\":\"" +
-                             JsonEscape(call.name) + "\",\"ok\":false,\"summary\":\"Approval timed out after " +
+                QueueMessage("{\"type\":\"tool_result\",\"sessionId\":\"" + JsonHelper::EscapeJsonString(sessionId) + "\",\"tool\":\"" +
+                             JsonHelper::EscapeJsonString(call.name) + "\",\"ok\":false,\"summary\":\"Approval timed out after " +
                              std::to_string(APPROVAL_TIMEOUT_S) + " seconds.\"}");
             }
         }
@@ -1783,17 +1768,40 @@ namespace AIAssistant
 
     void AssistantController::QueueMessage(std::string const& jsonMessage)
     {
-        // Hard cap: a long-running tool loop can produce many messages without
-        // an incoming WS message arriving to drain the queue.  10k is well
-        // above any real session and below "process OOM".
+        // Hard cap: a long-running tool loop can produce many messages.  10k is
+        // well above any real session and below "process OOM".  The drain loop
+        // is woken on every successful enqueue so messages don't wait on the
+        // next inbound OnMessage to surface.
         constexpr size_t kMaxPendingMessages = 10000;
-        std::lock_guard<std::mutex> lock(m_PendingMutex);
-        if (m_PendingMessages.size() >= kMaxPendingMessages)
         {
-            LOG_APP_ERROR("[assistant] Pending message queue full (>={}); dropping message", kMaxPendingMessages);
-            return;
+            std::lock_guard<std::mutex> lock(m_PendingMutex);
+            if (m_PendingMessages.size() >= kMaxPendingMessages)
+            {
+                LOG_APP_ERROR("[assistant] Pending message queue full (>={}); dropping message", kMaxPendingMessages);
+                return;
+            }
+            m_PendingMessages.push_back(jsonMessage);
         }
-        m_PendingMessages.push_back(jsonMessage);
+        m_DrainCv.notify_one();
+    }
+
+    void AssistantController::DrainLoop()
+    {
+        // Sleeps on m_DrainCv until notified by QueueMessage or a 1s timeout
+        // fires (backstop in case a notify is missed during shutdown teardown).
+        // Holds no locks while invoking DrainPendingMessages so it doesn't
+        // contend with QueueMessage producers or the WS-handler thread.
+        while (!m_ShuttingDown.load())
+        {
+            {
+                std::unique_lock<std::mutex> lock(m_PendingMutex);
+                m_DrainCv.wait_for(lock, std::chrono::seconds(1),
+                                   [this]() { return m_ShuttingDown.load() || !m_PendingMessages.empty(); });
+            }
+            if (m_ShuttingDown.load())
+                break;
+            DrainPendingMessages();
+        }
     }
 
     void AssistantController::DrainPendingMessages()
@@ -1965,32 +1973,50 @@ namespace AIAssistant
             }
         }
 
-        // Join background threads.
+        // Wake the drain loop so it can observe m_ShuttingDown and exit.
+        m_DrainCv.notify_all();
+
+        // Wait for every AI lambda + the drain loop to drain.  The futures
+        // come from the engine ThreadPool, which is shut down later in the
+        // overall sequence; waiting here is safe and keeps lifetime of any
+        // captured registry pointers correct (per the jarvisAgent.cpp shutdown
+        // ordering, AssistantController::Shutdown precedes WRM teardown).
+        std::vector<std::shared_future<void>> futuresSnapshot;
+        std::shared_future<void> drainLoopSnapshot;
         {
             std::lock_guard<std::mutex> lock(m_ThreadsMutex);
-            for (auto& t : m_BackgroundThreads)
-            {
-                if (t.joinable())
-                    t.join();
-            }
-            m_BackgroundThreads.clear();
+            futuresSnapshot.swap(m_BackgroundFutures);
+            drainLoopSnapshot = m_DrainLoopFuture;
         }
+        for (auto& f : futuresSnapshot)
+        {
+            if (f.valid())
+                f.wait();
+        }
+        if (drainLoopSnapshot.valid())
+            drainLoopSnapshot.wait();
+
+        // Final flush so any messages produced by lambdas right before
+        // shutdown still reach connected clients before they close.
+        DrainPendingMessages();
 
         LOG_APP_INFO("[assistant] AssistantController shutdown complete");
     }
 
-    void AssistantController::JoinFinishedThreads()
+    void AssistantController::JoinFinishedFutures()
     {
         std::lock_guard<std::mutex> lock(m_ThreadsMutex);
-        // Simple: try to join threads that are done. Move non-joinable ones to a new vector.
-        // This is best-effort cleanup — Shutdown() does the authoritative join.
-        std::vector<std::thread> remaining;
-        for (auto& t : m_BackgroundThreads)
-        {
-            // We can't easily check if a thread is "done" in C++, so we just
-            // keep all threads and let Shutdown() join them. This avoids blocking.
-            remaining.push_back(std::move(t));
-        }
-        m_BackgroundThreads = std::move(remaining);
+        // Drop futures whose underlying task has finished.  wait_for(0ms)
+        // returns ready without blocking; deferred and timeout cases are
+        // kept for the next sweep.  Authoritative join still happens in
+        // Shutdown().
+        auto const newEnd = std::remove_if(m_BackgroundFutures.begin(), m_BackgroundFutures.end(),
+                                           [](std::shared_future<void> const& f)
+                                           {
+                                               return f.valid() &&
+                                                      f.wait_for(std::chrono::milliseconds(0)) ==
+                                                          std::future_status::ready;
+                                           });
+        m_BackgroundFutures.erase(newEnd, m_BackgroundFutures.end());
     }
 } // namespace AIAssistant

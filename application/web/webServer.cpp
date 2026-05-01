@@ -48,6 +48,7 @@
 #include "simdjson/simdjson.h"
 
 #include "core.h"
+#include "json/jsonHelper.h"
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "python/pythonEnginePool.h"
@@ -178,12 +179,29 @@ namespace AIAssistant
     void WebServer::SetWorkflowRuntimeManager(WorkflowRuntimeManager* workflowRuntimeManager)
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        // If we're swapping to a different WRM, detach the old observer first.
+        // The old observer captures `m_AdhocManager.get()` as a raw pointer;
+        // leaving it installed on a WRM whose lifetime we don't control would
+        // dangle as soon as `m_AdhocManager` is reset.
+        if (m_WorkflowRuntimeManager && m_WorkflowRuntimeManager != workflowRuntimeManager)
+        {
+            m_WorkflowRuntimeManager->SetRunTerminalObserver({});
+            LOG_APP_INFO("WebServer::SetWorkflowRuntimeManager: detached run-terminal observer "
+                         "from previous WRM before swap");
+        }
+
         m_WorkflowRuntimeManager = workflowRuntimeManager;
 #ifdef J9T_STUDIO
         m_AssistantController.SetWorkflowRuntimeManager(workflowRuntimeManager);
 #endif
         // Plumb terminal-state notifications through to the adhoc manager so
-        // on_completion runs are cleaned up the moment they finish.
+        // on_completion runs are cleaned up the moment they finish.  The lambda
+        // captures `m_AdhocManager.get()` by raw pointer; the observer MUST be
+        // cleared from this WRM before `m_AdhocManager` is destroyed.  Two
+        // checkpoints guarantee that: (a) the swap-detach above when a new WRM
+        // arrives, and (b) the explicit clear in SignalStop() before WebServer
+        // teardown unwinds `m_AdhocManager`.
         if (workflowRuntimeManager && m_AdhocManager)
         {
             AdhocWorkflowManager* adhoc = m_AdhocManager.get();
@@ -445,6 +463,7 @@ namespace AIAssistant
             outContent = buffer.str();
             return true;
         }
+
     } // namespace
 
     crow::response WebServer::ServeStaticFile(std::filesystem::path const& filePath) const
@@ -482,13 +501,17 @@ namespace AIAssistant
     crow::response WebServer::ServeDashboardIndex() const
     {
         std::filesystem::path const distIndex = std::filesystem::path("dashboard") / "ui" / "dist" / "index.html";
-        if (!std::filesystem::exists(distIndex))
+        // Try the read directly — fs::exists() followed by ServeStaticFile is
+        // a TOCTOU window where the file can disappear between the two calls.
+        // ServeStaticFile returns 404 on missing/unreadable; we substitute the
+        // build-instruction message to keep the developer-facing UX.
+        crow::response resp = ServeStaticFile(distIndex);
+        if (resp.code == 404)
         {
             return crow::response(
                 500, "Dashboard UI build not found. Please run: cd dashboard/ui && npm install && npm run build");
         }
-
-        return ServeStaticFile(distIndex);
+        return resp;
     }
 
     crow::response WebServer::ServeDashboardStatic(std::string const& requestPath) const
@@ -499,7 +522,13 @@ namespace AIAssistant
         if (requestPath.rfind("/dash-assets/", 0) == 0)
         {
             std::string const relative = requestPath.substr(std::string("/dash-assets/").size());
-            return ServeStaticFile(distRoot / relative);
+            std::filesystem::path const resolved = ConfinePathUnder(distRoot, relative);
+            if (resolved.empty())
+            {
+                LOG_SECURITY_WARN("[security] dashboard_static_path_escape len={}", relative.size());
+                return crow::response(400, "Bad Request");
+            }
+            return ServeStaticFile(resolved);
         }
 
         // Fallback to dashboard index (SPA)
@@ -578,7 +607,7 @@ namespace AIAssistant
         return {};
     }
 
-    std::optional<WebServer::AuthResult> WebServer::TryMcpAuth(crow::request const& req) const
+    std::optional<WebServer::AuthResult> WebServer::TryMcpAuth(crow::request const& req)
     {
         std::string token = ExtractBearerToken(req);
         if (token.rfind("mcp_", 0) != 0)
@@ -591,7 +620,7 @@ namespace AIAssistant
         if (!result)
         {
             LOG_SECURITY_WARN("[security] mcp_auth_failure reason=invalid_key ip={}", ip);
-            const_cast<WebServer*>(this)->RecordAuthFailure(ip);
+            RecordAuthFailure(ip);
             return AuthResult{"invalid_token", "", ""};
         }
         if (!result->m_Record.m_Enabled)
@@ -614,7 +643,7 @@ namespace AIAssistant
         return out;
     }
 
-    void WebServer::AttachMcpExpiryHeader(crow::response& resp, crow::request const& req) const
+    void WebServer::AttachMcpExpiryHeader(crow::response& resp, crow::request const& req)
     {
         // Re-run the bearer-token extraction; the auth cache is not exposed by Crow per-response,
         // so we look up once more. McpKeyManager::Authenticate is a cheap hash + map lookup.
@@ -628,7 +657,7 @@ namespace AIAssistant
         resp.add_header("X-Key-Self-Renew", "POST /api/auth/mcp-keys/self-renew");
     }
 
-    std::optional<WebServer::AuthResult> WebServer::TrySessionAuth(crow::request const& req) const
+    std::optional<WebServer::AuthResult> WebServer::TrySessionAuth(crow::request const& req)
     {
         std::string sessionId = ExtractSessionCookie(req);
         if (sessionId.empty()) return std::nullopt;
@@ -637,7 +666,7 @@ namespace AIAssistant
         return AuthResult{"", session->m_User, session->m_Role};
     }
 
-    WebServer::AuthResult WebServer::Authenticate(crow::request const& req) const
+    WebServer::AuthResult WebServer::Authenticate(crow::request const& req)
     {
         // Unified auth funnel — identical across Studio and Engine.  Edition
         // controls *which routes are registered*, never *how requests are
@@ -657,15 +686,14 @@ namespace AIAssistant
         // (HMAC compare on a 256-bit key) so doing it before throttling is
         // affordable; the lockout (step 1) handles persistent attackers.
 
-        auto* self = const_cast<WebServer*>(this);
         std::string const& ip = req.remote_ip_address;
         std::string const& endpoint = req.url;
 
         // ---- 1. Lockout check (locked IPs short-circuit before any rate-limit work) ----
         {
-            std::lock_guard<std::mutex> lock(self->m_RateLimitMutex);
-            auto it = self->m_AuthFailures.find(ip);
-            if (it != self->m_AuthFailures.end())
+            std::lock_guard<std::mutex> lock(m_RateLimitMutex);
+            auto it = m_AuthFailures.find(ip);
+            if (it != m_AuthFailures.end())
             {
                 auto const elapsed = std::chrono::steady_clock::now() - it->second.m_FirstFailure;
                 if (it->second.m_Count >= kMaxAuthFailures && elapsed < kLockoutDuration)
@@ -689,7 +717,7 @@ namespace AIAssistant
             // pre-auth path so a flood of invalid keys is cheap to reject.
             if (!mcp->m_Error.empty())
             {
-                if (self->IsRateLimited(RateLimitTier::PreAuth, ip))
+                if (IsRateLimited(RateLimitTier::PreAuth, ip))
                 {
                     LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint={}", ip, endpoint);
                     return {"rate_limited", "", ""};
@@ -706,7 +734,7 @@ namespace AIAssistant
         {
             // No valid credential — pre-auth rate limit applies before logging
             // the rejection so a flood of empty/garbage requests is throttled.
-            if (self->IsRateLimited(RateLimitTier::PreAuth, ip))
+            if (IsRateLimited(RateLimitTier::PreAuth, ip))
             {
                 LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint={}", ip, endpoint);
                 return {"rate_limited", "", ""};
@@ -724,7 +752,7 @@ namespace AIAssistant
         }
 
         // ---- 3. Authenticated rate limit (per-user) ----
-        if (self->IsRateLimited(RateLimitTier::Authenticated, auth.m_User))
+        if (IsRateLimited(RateLimitTier::Authenticated, auth.m_User))
         {
             LOG_SECURITY_WARN("[security] rate_limited_authenticated user={} ip={} endpoint={}",
                               auth.m_User, ip, endpoint);
@@ -771,19 +799,19 @@ namespace AIAssistant
     // Legacy wrapper — used by existing route lambdas that require admin.
     // Returns empty string if the request is authenticated with admin-equivalent privileges,
     // or an error code ("forbidden", "missing", ...) otherwise.
-    std::string WebServer::CheckAdminAuth(crow::request const& req) const
+    std::string WebServer::CheckAdminAuth(crow::request const& req)
     {
         return CheckAuth(req, "admin");
     }
 
-    std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole) const
+    std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole)
     {
         AuthResult unused;
         return CheckAuth(req, minRole, unused);
     }
 
     std::string WebServer::CheckAuth(crow::request const& req, std::string_view minRole,
-                                     AuthResult& outAuth) const
+                                     AuthResult& outAuth)
     {
         outAuth = Authenticate(req);
         if (!outAuth.m_Error.empty()) return outAuth.m_Error;
@@ -898,9 +926,12 @@ namespace AIAssistant
         // ---- Public: GET /api/status — no auth (health checks, load balancers) ----
         CROW_ROUTE(m_Server, "/api/status")([this]() { return HandleStatusGet(); });
 
-        // ---- Public: POST /api/mcp/heartbeat — MCP sidecar liveness ----
+        // ---- POST /api/mcp/heartbeat — MCP sidecar liveness (admin-key auth) ----
+        // Previously unauthenticated; an attacker on the network could spoof
+        // MCP-connected status indefinitely.  Now requires a valid MCP key
+        // (TryMcpAuth) and applies the pre-auth rate limiter as defense in depth.
         CROW_ROUTE(m_Server, "/api/mcp/heartbeat")
-            .methods("POST"_method)([this](crow::request const& req) { return HandleMcpHeartbeatPost(); });
+            .methods("POST"_method)([this](crow::request const& req) { return HandleMcpHeartbeatPost(req); });
 
         // ---- MCP API keys + dashboard auth (both editions) ----
         // Activation is public: the enrollment token IS the auth.
@@ -1631,8 +1662,34 @@ namespace AIAssistant
     }
 
 
-    crow::response WebServer::HandleMcpHeartbeatPost()
+    crow::response WebServer::HandleMcpHeartbeatPost(crow::request const& req)
     {
+        // Pre-auth rate limit on the source IP — first line of defense against
+        // unauthenticated floods that try to keep the heartbeat fresh.
+        if (IsRateLimited(RateLimitTier::PreAuth, req.remote_ip_address))
+        {
+            LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint=mcp_heartbeat",
+                              req.remote_ip_address);
+            return MakeAuthErrorResponse("rate_limited");
+        }
+
+        // Body cap before any allocation-heavy work.  A heartbeat carries no
+        // body content; 1 KB is generous slack for future fields.
+        if (IsBodyTooLarge(req, 1))
+        {
+            return MakePayloadTooLargeResponse(1);
+        }
+
+        // Require a valid MCP key.  Without this gate, any unauthenticated
+        // caller could pin IsMcpConnected() to true and suppress staleness alerts.
+        std::optional<AuthResult> const auth = TryMcpAuth(req);
+        if (!auth.has_value())
+        {
+            LOG_SECURITY_WARN("[security] mcp_heartbeat_unauthorized ip={}", req.remote_ip_address);
+            RecordAuthFailure(req.remote_ip_address);
+            return MakeAuthErrorResponse("missing or invalid MCP credential");
+        }
+
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
             m_McpLastHeartbeat = std::chrono::steady_clock::now();
@@ -2087,16 +2144,15 @@ namespace AIAssistant
         }
 
         fs::path const versionPath = workflowsDirectoryAbsolute / ".history" / workflowId / (timestamp + ".jcwf");
-        if (!fs::exists(versionPath))
-        {
-            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
-                                         "GET /api/workflows/{id}/versions/{ts}", workflowId);
-        }
-
+        // Drop the fs::exists() precheck — it forms a TOCTOU window where the
+        // version file can be deleted between the existence check and the open.
+        // The is_open() check below covers both "file gone" and "permission
+        // denied"; for this read-only endpoint, conflating both into 404 is
+        // fine (the caller can't act on the distinction).
         std::ifstream ifs(versionPath);
         if (!ifs.is_open())
         {
-            return MakeWorkflowJsonError(500, "read_failed", "Failed to read version file",
+            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
                                          "GET /api/workflows/{id}/versions/{ts}", workflowId);
         }
 
@@ -2133,26 +2189,25 @@ namespace AIAssistant
         }
 
         fs::path const versionPath = workflowsDirectoryAbsolute / ".history" / workflowId / (timestamp + ".jcwf");
-        if (!fs::exists(versionPath))
-        {
-            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
-                                         "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
-        }
-
         fs::path const targetPath = (workflowsDirectoryAbsolute / (workflowId + ".jcwf")).lexically_normal();
 
-        // Read the version content
+        // Read the version content directly.  Dropping the fs::exists() precheck
+        // closes a TOCTOU window where the version file could be deleted between
+        // the check and the open; the is_open() failure below covers both
+        // "file gone" and "permission denied".
         std::ifstream ifs(versionPath);
         if (!ifs.is_open())
         {
-            return MakeWorkflowJsonError(500, "read_failed", "Failed to read version file",
+            return MakeWorkflowJsonError(404, "version_not_found", "Version not found: " + timestamp,
                                          "POST /api/workflows/{id}/versions/{ts}/restore", workflowId);
         }
         std::string versionContent((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         ifs.close();
 
-        // Backup current before restoring
-        if (fs::exists(targetPath))
+        // Backup current before restoring (best-effort).  Drop the
+        // fs::exists(targetPath) precheck and let fs::copy_file's std::error_code
+        // signal "source missing" — the copy is best-effort either way; a missing
+        // source just means there was nothing to back up.
         {
             fs::path const historyDir = workflowsDirectoryAbsolute / ".history" / workflowId;
             std::error_code ec;
@@ -2172,6 +2227,7 @@ namespace AIAssistant
 
                 fs::path const backupPath = historyDir / (std::string(timestampBuf) + ".jcwf");
                 fs::copy_file(targetPath, backupPath, fs::copy_options::overwrite_existing, ec);
+                // ec absorbed: best-effort backup, restore proceeds regardless.
             }
         }
 
@@ -2698,6 +2754,15 @@ namespace AIAssistant
             {
                 runId = GenerateIntegrationRunId(workflowId);
             }
+            // runId becomes a path segment (workflowsDir / workflowId / taskName / n8n / runId).
+            // Without this validation a caller-supplied "../../foo" escapes the run dir
+            // and writes request.json wherever the process can write.  The same allowlist
+            // (alnum + `_`/`-`) used for workflowId / taskName applies here.
+            else if (!IsValidWorkflowId(runId))
+            {
+                return MakeWorkflowJsonError(400, "invalid_run_id", "runId contains invalid characters",
+                                             "POST /api/integrations/n8n/start", workflowId);
+            }
 
             // Persist the raw request body to disk for traceability.
             std::string workflowsDirError;
@@ -2902,12 +2967,22 @@ namespace AIAssistant
                 simdjson::padded_string json(req.body);
                 auto doc = parser.iterate(json);
 
-                // Optional runId
+                // Optional runId.  When provided by the caller, the value
+                // becomes a path segment under the webhook run dir
+                // (workflowsDir / workflowId / "webhook" / runId / request.json).
+                // Without this allowlist, a runId like "../../foo" escapes that
+                // dir and writes request.json wherever the process can write.
                 {
                     auto runIdField = doc["runId"].get_string();
                     if (runIdField.error() == simdjson::SUCCESS)
                     {
                         runId = std::string(runIdField.value());
+                        if (!runId.empty() && !IsValidWorkflowId(runId))
+                        {
+                            return MakeWorkflowJsonError(400, "invalid_run_id",
+                                                         "runId contains invalid characters",
+                                                         kEndpoint, workflowId);
+                        }
                     }
                 }
 
@@ -3034,6 +3109,35 @@ namespace AIAssistant
         // GET ...?offset=N      — return lines appended since byte offset N (delta polling)
         // Returns: { ok, lines[], byteOffset, totalSize }
 
+        // Path confinement: resolve `logPath` under the launch cwd and reject
+        // anything that doesn't land inside the launch cwd's `log/` directory.
+        // Current call sites pass hardcoded "log/log.txt" / "log/security.txt"
+        // — the gate exists so a future refactor that lets the caller influence
+        // logPath cannot read arbitrary files.
+        std::filesystem::path const launchCwd =
+            (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute() : std::filesystem::path{};
+        std::filesystem::path const logsRoot = launchCwd / "log";
+        std::filesystem::path const resolvedPath = WebServerHelpers::ConfinePathUnder(launchCwd, logPath);
+        std::error_code ec;
+        std::filesystem::path const canonicalLogsRoot = std::filesystem::weakly_canonical(logsRoot, ec);
+        bool const insideLogsRoot = !resolvedPath.empty() && !ec && !canonicalLogsRoot.empty() &&
+                                    [&]()
+                                    {
+                                        std::filesystem::path const rel =
+                                            resolvedPath.lexically_relative(canonicalLogsRoot);
+                                        std::string const relGeneric = rel.generic_string();
+                                        return !rel.empty() && relGeneric != ".." &&
+                                               relGeneric.rfind("../", 0) != 0;
+                                    }();
+        if (!insideLogsRoot)
+        {
+            LOG_SECURITY_WARN("[security] readlog_path_escape len={}", logPath.size());
+            crow::json::wvalue resp;
+            resp["ok"] = false;
+            resp["error"] = "Invalid log path";
+            return MakeJsonResponse(400, resp);
+        }
+
         int tailLines = 5000;
         auto const tailParam = req.url_params.get("tail");
         if (tailParam != nullptr)
@@ -3048,7 +3152,7 @@ namespace AIAssistant
             fromOffset = std::atoll(offsetParam);
         }
 
-        std::ifstream file(logPath, std::ios::binary | std::ios::ate);
+        std::ifstream file(resolvedPath, std::ios::binary | std::ios::ate);
         if (!file.is_open())
         {
             crow::json::wvalue resp;
@@ -3058,6 +3162,13 @@ namespace AIAssistant
         }
 
         int64_t const fileSize = static_cast<int64_t>(file.tellg());
+
+        // Defense-in-depth: clamp fromOffset to [0, fileSize] before any
+        // arithmetic uses it.  The two `if` guards below already prevent the
+        // overflow path, but explicit clamping documents the invariant and
+        // bounds any future refactor that drops one of the guards.
+        if (fromOffset > fileSize)
+            fromOffset = fileSize;
 
         // --- Delta mode: read from offset to end ---
         if (fromOffset >= 0)
@@ -3437,7 +3548,7 @@ namespace AIAssistant
             // anonymous WS clients otherwise receive workflow-run snapshots
             // and log lines on connect, which is a real data leak.
             .onaccept(
-                [this](crow::request const& req, void**)
+                [this](crow::request const& req, void** userdata)
                 {
                     auto auth = Authenticate(req);
                     if (!auth.Ok())
@@ -3446,24 +3557,47 @@ namespace AIAssistant
                                           req.remote_ip_address, auth.m_Error);
                         return false;
                     }
+                    // Pin the role to this specific connection.  ai-write-scripts
+                    // (and any future admin-only message type) re-checks the role
+                    // before mutating disk state, so a session/MCP key with role
+                    // "operator" or "viewer" cannot escalate to admin via the
+                    // shared /ws upgrade.  The string is freed in .onopen.
+                    if (userdata != nullptr)
+                    {
+                        *userdata = new std::string(auth.m_Role);
+                    }
                     return true;
                 })
             .onopen(
                 [this](crow::websocket::connection& conn)
                 {
+                    std::string role;
+                    if (auto* rolePtr = static_cast<std::string*>(conn.userdata()))
+                    {
+                        role = std::move(*rolePtr);
+                        delete rolePtr;
+                        conn.userdata(nullptr);
+                    }
+
+                    size_t clients = 0;
+                    size_t totalConnects = 0;
+                    size_t peak = 0;
                     {
                         std::lock_guard<std::mutex> lock(m_Mutex);
                         m_Clients.insert(&conn);
+                        m_WsClientRoles[&conn] = std::move(role);
                         m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
                         ++m_WsTotalConnects;
                         if (m_Clients.size() > m_WsPeakClients)
                         {
                             m_WsPeakClients = m_Clients.size();
                         }
-
+                        clients = m_Clients.size();
+                        totalConnects = m_WsTotalConnects;
+                        peak = m_WsPeakClients;
                     }
-                    LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})", m_Clients.size(),
-                                 m_WsTotalConnects, m_WsPeakClients);
+                    LOG_APP_INFO("WebSocket client connected (total: {}, lifetime: {}, peak: {})", clients,
+                                 totalConnects, peak);
 
                     // Queue current workflow run snapshots.
                     BroadcastWorkflowRunsSnapshot();
@@ -3472,12 +3606,19 @@ namespace AIAssistant
             .onclose(
                 [this](crow::websocket::connection& conn, const std::string& reason, uint16_t code)
                 {
-                    std::lock_guard<std::mutex> lock(m_Mutex);
-                    m_Clients.erase(&conn);
-                    m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
-                    ++m_WsTotalDisconnects;
+                    size_t clients = 0;
+                    size_t totalDisconnects = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(m_Mutex);
+                        m_Clients.erase(&conn);
+                        m_WsClientRoles.erase(&conn);
+                        m_ClientCount.store(m_Clients.size(), std::memory_order_relaxed);
+                        ++m_WsTotalDisconnects;
+                        clients = m_Clients.size();
+                        totalDisconnects = m_WsTotalDisconnects;
+                    }
                     LOG_APP_INFO("WebSocket client disconnected ({}, code {}) (remaining: {}, lifetime disconnects: {})",
-                                 reason, code, m_Clients.size(), m_WsTotalDisconnects);
+                                 reason, code, clients, totalDisconnects);
                 })
             .onmessage(
                 [this](crow::websocket::connection& conn, const std::string& data, bool /*is_binary*/)
@@ -3581,6 +3722,34 @@ namespace AIAssistant
 
                         else if (type == "ai-write-scripts")
                         {
+                            // ai-write-scripts mutates disk state (writes files
+                            // under scripts/, sets +x on .sh) so it requires
+                            // admin role.  Without this gate, any operator/viewer
+                            // who held a valid /ws upgrade could plant scripts
+                            // that would then run on the next workflow trigger.
+                            std::string role;
+                            {
+                                std::lock_guard<std::mutex> lock(m_Mutex);
+                                auto it = m_WsClientRoles.find(&conn);
+                                if (it != m_WsClientRoles.end())
+                                {
+                                    role = it->second;
+                                }
+                            }
+                            if (role != "admin")
+                            {
+                                LOG_SECURITY_WARN(
+                                    "[security] ai_write_scripts_role_denied role='{}' ip={}",
+                                    role, conn.get_remote_ip());
+                                crow::json::wvalue err;
+                                err["type"] = "ai-write-scripts-result";
+                                err["ok"] = false;
+                                err["error"] = "forbidden";
+                                err["message"] = "ai-write-scripts requires admin role";
+                                conn.send_text(err.dump());
+                                return;
+                            }
+
                             crow::json::wvalue result;
                             result["type"] = "ai-write-scripts-result";
                             crow::json::wvalue::list writtenList;
@@ -3876,6 +4045,23 @@ namespace AIAssistant
 
         m_Running = false;
 
+        // Detach our run-terminal observer from the WRM before any teardown can
+        // start unwinding `m_AdhocManager`.  The observer's lambda captures
+        // `m_AdhocManager.get()` as a raw pointer; if WRM outlives WebServer
+        // (e.g. teardown order at process exit) and a run terminates after
+        // `m_AdhocManager` is destroyed, the lambda's dispatch into
+        // `adhoc->OnRunCompleted()` would be a use-after-free.  Clearing here
+        // is defensive — the swap-detach in SetWorkflowRuntimeManager covers
+        // re-init flows; this covers final shutdown.
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            if (m_WorkflowRuntimeManager)
+            {
+                m_WorkflowRuntimeManager->SetRunTerminalObserver({});
+                LOG_APP_INFO("[shutdown] WebServer::SignalStop: detached run-terminal observer from WRM");
+            }
+        }
+
 #ifdef J9T_STUDIO
         // Shut down the AI JCWF service so background threads are joined.
         m_AiJcwfService.Shutdown();
@@ -3972,7 +4158,6 @@ namespace AIAssistant
         auto const drainStart = std::chrono::steady_clock::now();
         std::vector<std::string> pending;
         std::vector<std::string> logLines;
-        std::unordered_set<crow::websocket::connection*> clients;
 
         // Drain log lines under m_LogMutex first (separate lock to avoid deadlock
         // when logging happens inside a m_Mutex scope).
@@ -4040,7 +4225,6 @@ namespace AIAssistant
             if (m_PendingBroadcasts.empty())
                 return;
             pending.swap(m_PendingBroadcasts);
-            clients = m_Clients; // snapshot
         }
 
         // Build a single JSON batch envelope to avoid multiple rapid send_text calls
@@ -4108,22 +4292,30 @@ namespace AIAssistant
         {
             LOG_APP_WARN("[ws] SanitizeUtf8 changed batch: {}B -> {}B", batch.size(), safeBatch.size());
         }
-        for (auto* client : clients)
+
+        // Hold m_Mutex for the entire send loop.  The previous pattern (snapshot
+        // m_Clients under lock, drop lock, build the JSON batch outside lock,
+        // then per-client lock-find-unlock-send) had a UAF window: between the
+        // per-client re-validation and the send_text call, onclose on another
+        // ASIO thread could erase the connection and Crow could destroy it,
+        // leaving a dangling pointer.  Holding m_Mutex throughout the send loop
+        // keeps onclose blocked on the lock — which guarantees the connections
+        // we're sending to are alive for the duration of the loop.  Crow's
+        // send_text is asio::post-based (verified in vendor/crow/include/crow/
+        // crow/websocket.h::send_data — the actual write happens on the
+        // connection's io-context strand), so the send_text call itself is
+        // microseconds; the lock window stays small.
         {
-            // Re-check that the client is still alive under the lock.
-            // Between the snapshot and here, onclose may have fired on another ASIO
-            // thread, destroying the connection and leaving a dangling pointer.
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            for (auto* client : m_Clients)
             {
-                std::lock_guard<std::mutex> lock(m_Mutex);
-                if (m_Clients.find(client) == m_Clients.end())
-                    continue;
-            }
-            try
-            {
-                client->send_text(safeBatch);
-            }
-            catch (...)
-            {
+                try
+                {
+                    client->send_text(safeBatch);
+                }
+                catch (...)
+                {
+                }
             }
         }
 
@@ -4766,19 +4958,24 @@ namespace AIAssistant
                 budget.m_MinSeconds              != defaultBudget.m_MinSeconds ||
                 budget.m_MaxSeconds              != defaultBudget.m_MaxSeconds;
 
+            // RFC 8259 escape every caller-supplied string field — without this an admin
+            // submitting a name / description / url / model / key_name with `"`, `\`,
+            // newline, or any control byte would corrupt the resulting config.json
+            // (cybersec audit HIGH: "writes config by naive string replacement without
+            // JSON escaping").  apiStr comes from a closed enum and needs no escaping.
             newArray += "        {\n";
-            newArray += "            \"name\": \"" + iface.m_Name + "\",\n";
+            newArray += "            \"name\": \"" + JsonHelper::EscapeJsonString(iface.m_Name) + "\",\n";
             if (!iface.m_Description.empty())
             {
-                newArray += "            \"description\": \"" + iface.m_Description + "\",\n";
+                newArray += "            \"description\": \"" + JsonHelper::EscapeJsonString(iface.m_Description) + "\",\n";
             }
-            newArray += "            \"url\": \"" + iface.m_Url + "\",\n";
-            newArray += "            \"model\": \"" + iface.m_Model + "\",\n";
+            newArray += "            \"url\": \"" + JsonHelper::EscapeJsonString(iface.m_Url) + "\",\n";
+            newArray += "            \"model\": \"" + JsonHelper::EscapeJsonString(iface.m_Model) + "\",\n";
             newArray += "            \"API\": \"" + apiStr + "\"";
             if (!iface.m_KeyName.empty())
             {
                 newArray += ",\n";
-                newArray += "            \"key_name\": \"" + iface.m_KeyName + "\"";
+                newArray += "            \"key_name\": \"" + JsonHelper::EscapeJsonString(iface.m_KeyName) + "\"";
             }
             if (iface.m_DefaultOutputTokens != 4096)
             {
@@ -4883,18 +5080,60 @@ namespace AIAssistant
 
         fileContent.replace(arrayStart, arrayEnd - arrayStart + 1, newArray);
 
-        // Write back
+        // Tripwire: parse the post-replacement text with simdjson and confirm the
+        // "API interfaces" array round-trips with the expected element count.  This
+        // catches any future bug in the bracket-counting find-replace (e.g. a
+        // mismatched `]` inside a string that the scanner misclassifies) before
+        // the corrupt content lands on disk.
         {
-            std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
-            if (!ofs)
+            simdjson::ondemand::parser validateParser;
+            simdjson::padded_string padded(fileContent);
+            auto validateDoc = validateParser.iterate(padded);
+            auto interfacesField = validateDoc["API interfaces"].get_array();
+            if (interfacesField.error() != simdjson::SUCCESS)
             {
+                LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: post-replacement validation failed "
+                              "path='{}' reason=interfaces_field_unparsable",
+                              configPath.string());
                 crow::json::wvalue err;
                 err["ok"] = false;
-                err["error"] = "write_failed";
-                err["message"] = "Failed to write config file.";
+                err["error"] = "validation_failed";
+                err["message"] = "Generated config.json did not re-parse cleanly; aborting write.";
                 return MakeJsonResponse(500, err);
             }
-            ofs << fileContent;
+            size_t reparsedCount = 0;
+            for (auto element : interfacesField.value())
+            {
+                (void)element;
+                ++reparsedCount;
+            }
+            if (reparsedCount != config.m_ApiInterfaces.size())
+            {
+                LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: post-replacement count mismatch "
+                              "path='{}' expected={} got={}",
+                              configPath.string(), config.m_ApiInterfaces.size(), reparsedCount);
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "validation_failed";
+                err["message"] = "Generated config.json had wrong interface count; aborting write.";
+                return MakeJsonResponse(500, err);
+            }
+        }
+
+        // Atomic write — tmp-file + rename.  A failed / partial write previously
+        // truncated config.json (safety audit HIGH: "writes config file
+        // non-atomically").  WriteTextFileAtomic returns false without touching
+        // the target file on any failure.
+        std::string writeError;
+        if (!WriteTextFileAtomic(configPath, fileContent, writeError))
+        {
+            LOG_APP_ERROR("WebServer::HandleAiInterfacesSavePost: atomic write failed path='{}' reason='{}'",
+                          configPath.string(), writeError);
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "write_failed";
+            err["message"] = "Failed to write '" + configPath.string() + "': " + writeError;
+            return MakeJsonResponse(500, err);
         }
 
         LOG_CORE_INFO("WebServer: saved {} AI interfaces to '{}'", config.m_ApiInterfaces.size(), configPath.string());
@@ -5169,46 +5408,93 @@ namespace AIAssistant
 
             if (!fileContent.empty())
             {
-                // Helper: replace a JSON scalar field value in-place.
+                // Replace a top-level scalar field value in-place.  Object-depth-aware
+                // so a key that also appears inside a nested object (e.g. inside the
+                // "API interfaces" array elements) does not collide with the same
+                // top-level key — closes the cybersec audit HIGH: "key search is a
+                // simple find() with no brace/object scope awareness".  Only matches
+                // at object depth 1 (immediately inside the root `{`).
                 auto replaceField = [&](std::string const& key, std::string const& newValue)
                 {
                     std::string const searchKey = "\"" + key + "\"";
-                    auto pos = fileContent.find(searchKey);
-                    if (pos == std::string::npos)
-                        return;
-                    auto colonPos = fileContent.find(':', pos + searchKey.size());
-                    if (colonPos == std::string::npos)
-                        return;
-                    // Find start of value (skip whitespace)
-                    size_t valStart = colonPos + 1;
-                    while (valStart < fileContent.size() && (fileContent[valStart] == ' ' || fileContent[valStart] == '\t'))
-                        ++valStart;
-                    // Find end of value (next comma, newline, or closing brace)
-                    size_t valEnd = valStart;
-                    if (fileContent[valEnd] == '"')
+                    int objectDepth = 0;
+                    bool insideRootObject = false;
+                    size_t i = 0;
+                    while (i < fileContent.size())
                     {
-                        // String value
-                        ++valEnd;
-                        while (valEnd < fileContent.size() && fileContent[valEnd] != '"')
+                        char const c = fileContent[i];
+                        if (c == '"')
                         {
-                            if (fileContent[valEnd] == '\\')
-                                ++valEnd;
-                            ++valEnd;
+                            // Walk to the closing quote, honouring escapes.
+                            size_t const stringStart = i;
+                            ++i;
+                            while (i < fileContent.size() && fileContent[i] != '"')
+                            {
+                                if (fileContent[i] == '\\' && i + 1 < fileContent.size())
+                                    ++i;
+                                ++i;
+                            }
+                            if (i >= fileContent.size())
+                                return;
+                            size_t const stringLen = i - stringStart + 1;
+                            if (insideRootObject && objectDepth == 1 && stringLen == searchKey.size() &&
+                                fileContent.compare(stringStart, stringLen, searchKey) == 0)
+                            {
+                                // Found a top-level key match.  Scan past whitespace to the colon.
+                                size_t colonPos = i + 1;
+                                while (colonPos < fileContent.size() &&
+                                       (fileContent[colonPos] == ' ' || fileContent[colonPos] == '\t'))
+                                    ++colonPos;
+                                if (colonPos >= fileContent.size() || fileContent[colonPos] != ':')
+                                {
+                                    ++i;
+                                    continue;
+                                }
+                                size_t valStart = colonPos + 1;
+                                while (valStart < fileContent.size() &&
+                                       (fileContent[valStart] == ' ' || fileContent[valStart] == '\t'))
+                                    ++valStart;
+                                size_t valEnd = valStart;
+                                if (valEnd < fileContent.size() && fileContent[valEnd] == '"')
+                                {
+                                    ++valEnd;
+                                    while (valEnd < fileContent.size() && fileContent[valEnd] != '"')
+                                    {
+                                        if (fileContent[valEnd] == '\\' && valEnd + 1 < fileContent.size())
+                                            ++valEnd;
+                                        ++valEnd;
+                                    }
+                                    if (valEnd < fileContent.size())
+                                        ++valEnd;
+                                }
+                                else
+                                {
+                                    while (valEnd < fileContent.size() && fileContent[valEnd] != ',' &&
+                                           fileContent[valEnd] != '\n' && fileContent[valEnd] != '\r' &&
+                                           fileContent[valEnd] != '}')
+                                        ++valEnd;
+                                    while (valEnd > valStart &&
+                                           (fileContent[valEnd - 1] == ' ' || fileContent[valEnd - 1] == '\t'))
+                                        --valEnd;
+                                }
+                                fileContent.replace(valStart, valEnd - valStart, newValue);
+                                return;
+                            }
+                            ++i;
+                            continue;
                         }
-                        if (valEnd < fileContent.size())
-                            ++valEnd; // past closing quote
+                        if (c == '{')
+                        {
+                            ++objectDepth;
+                            if (objectDepth == 1)
+                                insideRootObject = true;
+                        }
+                        else if (c == '}')
+                        {
+                            --objectDepth;
+                        }
+                        ++i;
                     }
-                    else
-                    {
-                        // Numeric/bool value
-                        while (valEnd < fileContent.size() && fileContent[valEnd] != ',' && fileContent[valEnd] != '\n' &&
-                               fileContent[valEnd] != '\r' && fileContent[valEnd] != '}')
-                            ++valEnd;
-                        // Trim trailing whitespace from the value
-                        while (valEnd > valStart && (fileContent[valEnd - 1] == ' ' || fileContent[valEnd - 1] == '\t'))
-                            --valEnd;
-                    }
-                    fileContent.replace(valStart, valEnd - valStart, newValue);
                 };
 
                 replaceField("API index", std::to_string(config.m_ApiIndex));
@@ -5219,12 +5505,55 @@ namespace AIAssistant
                 replaceField("jcwf AI interface", std::to_string(config.m_JcwfAiInterfaceIndex));
                 replaceField("use_bash", config.m_UseBashOnWindows ? "true" : "false");
 
-                std::ofstream ofs(configPath, std::ios::binary | std::ios::trunc);
-                if (ofs)
+                // Tripwire: confirm the patched text re-parses as valid JSON before
+                // it lands on disk.  Catches any future replaceField bug that would
+                // otherwise corrupt config.json silently.
                 {
-                    ofs << fileContent;
-                    LOG_CORE_INFO("WebServer: saved config settings to '{}'", configPath.string());
+                    simdjson::ondemand::parser validateParser;
+                    simdjson::padded_string padded(fileContent);
+                    auto validateDoc = validateParser.iterate(padded);
+                    if (validateDoc.error() != simdjson::SUCCESS)
+                    {
+                        LOG_APP_ERROR("WebServer::HandleConfigSettingsPut: post-replacement parse failed "
+                                      "path='{}' reason=document_unparsable",
+                                      configPath.string());
+                        crow::json::wvalue err;
+                        err["ok"] = false;
+                        err["error"] = "validation_failed";
+                        err["message"] = "Generated config.json did not re-parse cleanly; aborting write.";
+                        return MakeJsonResponse(500, err);
+                    }
+                    // Accessing one field forces real parse work; any structural break
+                    // (e.g. a clobbered closing brace) surfaces here rather than silently
+                    // producing a half-broken file.
+                    auto rootCheck = validateDoc.get_object();
+                    if (rootCheck.error() != simdjson::SUCCESS)
+                    {
+                        LOG_APP_ERROR("WebServer::HandleConfigSettingsPut: post-replacement root-not-object "
+                                      "path='{}'",
+                                      configPath.string());
+                        crow::json::wvalue err;
+                        err["ok"] = false;
+                        err["error"] = "validation_failed";
+                        err["message"] = "Generated config.json root is not an object; aborting write.";
+                        return MakeJsonResponse(500, err);
+                    }
                 }
+
+                // Atomic write — tmp-file + rename.  Closes safety audit HIGH:
+                // "writes config file non-atomically".
+                std::string writeError;
+                if (!WriteTextFileAtomic(configPath, fileContent, writeError))
+                {
+                    LOG_APP_ERROR("WebServer::HandleConfigSettingsPut: atomic write failed path='{}' reason='{}'",
+                                  configPath.string(), writeError);
+                    crow::json::wvalue err;
+                    err["ok"] = false;
+                    err["error"] = "write_failed";
+                    err["message"] = "Failed to write '" + configPath.string() + "': " + writeError;
+                    return MakeJsonResponse(500, err);
+                }
+                LOG_CORE_INFO("WebServer: saved config settings to '{}'", configPath.string());
             }
         }
 
@@ -5282,6 +5611,25 @@ namespace AIAssistant
 
     crow::response WebServer::HandleKeysUnlockPost(crow::request const& req)
     {
+        // Pre-auth rate limit on the source IP — this endpoint is intentionally
+        // unauthenticated (the master password IS the credential), so without a
+        // throttle an attacker could brute-force the password against the live
+        // API.  The pre-auth bucket is sized for legitimate operator traffic
+        // (a handful of attempts, then login).
+        if (IsRateLimited(RateLimitTier::PreAuth, req.remote_ip_address))
+        {
+            LOG_SECURITY_WARN("[security] rate_limited_preauth ip={} endpoint=keys_unlock",
+                              req.remote_ip_address);
+            return MakeAuthErrorResponse("rate_limited");
+        }
+
+        // Body cap before any parsing.  The body carries only a master password
+        // string; 16 KB is generous slack and bounds malformed-body memory use.
+        if (IsBodyTooLarge(req, 1))
+        {
+            return MakePayloadTooLargeResponse(1);
+        }
+
         auto& keyManager = Core::g_Core->GetKeyManager();
 
         // Parse master_password from request body
@@ -5323,6 +5671,13 @@ namespace AIAssistant
             // Existing install — try to decrypt with the submitted password.
             if (!keyManager.Unlock(masterPassword))
             {
+                // Record the failure so repeated wrong passwords trigger the
+                // standard auth-failure lockout (kMaxAuthFailures within
+                // kAuthFailureWindow), and log at SECURITY level so the
+                // dashboard's run analyser surfaces brute-force attempts.
+                RecordAuthFailure(req.remote_ip_address);
+                LOG_SECURITY_WARN("[security] keys_unlock_wrong_password ip={}",
+                                  req.remote_ip_address);
                 crow::json::wvalue err;
                 err["ok"] = false;
                 err["status"] = "wrong_password";
@@ -6092,22 +6447,27 @@ namespace AIAssistant
 
         std::string json = connectionManager.SerializeToJson();
 
-        // Save to connections.json in the launch directory
+        // Save to connections.json in the launch directory.  Atomic write
+        // (tmp-file + rename) so a partial / failed write never leaves the
+        // existing connections.json truncated or empty — see safety audit
+        // [HIGH] HandleConnectionsSavePost writes connections file non-atomically.
         std::filesystem::path const connectionsFilePath =
             Core::g_Core->GetLaunchCWDAbsolute() / "connections.json";
 
-        std::ofstream file(connectionsFilePath);
-        if (!file)
+        std::string writeError;
+        if (!WriteTextFileAtomic(connectionsFilePath, json, writeError))
         {
+            LOG_APP_ERROR("WebServer::HandleConnectionsSavePost: atomic write failed path='{}' reason='{}'",
+                          connectionsFilePath.string(), writeError);
+            LOG_SECURITY_WARN("[security] connections_save_failed path={} reason={}",
+                              connectionsFilePath.string(), writeError);
             crow::json::wvalue err;
             err["ok"] = false;
             err["error"] = "save_failed";
-            err["message"] = "Failed to open '" + connectionsFilePath.string() + "' for writing";
+            err["message"] = "Failed to write '" + connectionsFilePath.string() + "': " + writeError;
             return MakeJsonResponse(500, err);
         }
 
-        file << json;
-        file.close();
         connectionManager.ClearDirty();
 
         LOG_SECURITY_INFO("[security] cloud_connections saved to {}", connectionsFilePath.string());
@@ -6442,10 +6802,28 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
 
+        // Verify the OAuth provider's TLS certificate.  Set explicitly rather
+        // than relying on libcurl's defaults, so a future change to the build
+        // (or a libcurl rebuild with --without-ssl-verifypeer) cannot silently
+        // open a MitM window.  CURLOPT_SSL_VERIFYPEER=1 enables CA validation;
+        // CURLOPT_SSL_VERIFYHOST=2 enforces hostname match against the cert.
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
         auto const& caBundle = CurlWrapper::GetCaBundlePath();
         if (!caBundle.empty())
         {
             curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+        }
+        else
+        {
+            // No project-managed CA bundle — libcurl falls back to the system
+            // trust store, which is the desired behaviour on Linux distros and
+            // macOS.  Logged once so an operator with a misconfigured build
+            // (no system CA either) sees the early-warning signal.
+            LOG_APP_INFO(
+                "OAuth callback for '{}': using system CA bundle (CurlWrapper::GetCaBundlePath() empty)",
+                connectionName);
         }
 
         struct curl_slist* headers = nullptr;
