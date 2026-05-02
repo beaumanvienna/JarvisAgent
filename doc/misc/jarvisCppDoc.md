@@ -13,6 +13,7 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/assistant/contextAssembler.h` | `application/assistant/contextAssembler.cpp` |
 | `application/assistant/workspaceIndexer.h` | `application/assistant/workspaceIndexer.cpp` |
 | `application/cloud/azureBlobCloudTaskExecutor.h` | `application/cloud/azureBlobCloudTaskExecutor.cpp` |
+| `application/cloud/connectorHttp.h` | `application/cloud/connectorHttp.cpp` |
 | `application/cloud/azureBlobConnector.h` | `application/cloud/azureBlobConnector.cpp` |
 | `application/cloud/azureSharedKeySigner.h` | `application/cloud/azureSharedKeySigner.cpp` |
 | `application/cloud/cloudCircuitBreaker.h` | `application/cloud/cloudCircuitBreaker.cpp` |

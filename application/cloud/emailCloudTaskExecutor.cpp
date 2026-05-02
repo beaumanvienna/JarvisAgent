@@ -21,6 +21,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#include <algorithm>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -35,7 +36,9 @@
 #include "engine.h"
 #include "cloud/emailCloudTaskExecutor.h"
 #include "cloud/emailConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 #include <openssl/bio.h>
@@ -236,36 +239,9 @@ namespace AIAssistant
         return {};
     }
 
-    // JSON-escape a string for building JSON manually
-    static std::string JsonEscapeEmail(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 32);
-        for (char ch : input)
-        {
-            switch (ch)
-            {
-                case '"':  out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(ch) < 0x20)
-                    {
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(ch));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += ch;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
+    // IMAP folder + UID validators live as public static methods on EmailConnector
+    // (lifted in sitting 13 to share a single source of truth between the executor
+    // and the connector layer's defense-in-depth gates).  Use those directly.
 
     static std::vector<std::string> ParseSearchUids(std::string const& searchResponse)
     {
@@ -305,6 +281,22 @@ namespace AIAssistant
             folder = "INBOX";
         }
 
+        // Folder is interpolated into the IMAP URL path; an attacker-controlled value
+        // such as `INBOX@evil.internal:1234` redirects the connection.  Reject any
+        // value outside the strict allowlist before any URL composition.
+        if (!EmailConnector::IsValidImapFolder(folder))
+        {
+            taskState.m_LastErrorMessage = "Invalid IMAP folder name: contains characters outside the allowed "
+                                           "set [A-Za-z0-9._/-] or violates structural rules";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[email_read] task='{}' workflow='{}': invalid folder name rejected (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, folder.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] email_read_invalid_folder task='{}' workflow='{}' folder_length={}",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, folder.size());
+            return false;
+        }
+
         std::string subjectFilter = getStringParam("subject_filter");
 
         int maxMessages = 10;
@@ -312,7 +304,16 @@ namespace AIAssistant
             uint64_t val;
             if (doc["max_messages"].get_uint64().get(val) == simdjson::SUCCESS)
             {
-                maxMessages = static_cast<int>(val);
+                // Clamp to a sane range.  Pre-clamp the unbounded uint64_t cast to int
+                // wrapped to a negative number on inputs > INT_MAX (silent corruption);
+                // values in the 1..INT_MAX range allowed an attacker to fetch enormous
+                // numbers of emails per task, exhausting memory and IMAP server quota.
+                static constexpr int kMaxMessageCap = 500;
+                if (val > static_cast<uint64_t>(kMaxMessageCap))
+                {
+                    val = kMaxMessageCap;
+                }
+                maxMessages = std::clamp(static_cast<int>(val), 1, kMaxMessageCap);
             }
         }
 
@@ -363,6 +364,16 @@ namespace AIAssistant
 
         for (auto const& uid : uids)
         {
+            // UID comes from the server's SEARCH response but is still untrusted input
+            // for this module — interpolating an unvalidated value into the FETCH URL
+            // would let a malicious or buggy IMAP server inject URL components.
+            if (!EmailConnector::IsValidImapUid(uid))
+            {
+                LOG_APP_WARN("[email_read] task='{}' workflow='{}': skipping UID with invalid format (length={})",
+                             taskDefinition.m_Id, workflowDefinition.m_Id, uid.size());
+                continue;
+            }
+
             std::string fetchUrl = imapBaseUrl + "/" + folder + "/;UID=" + uid;
             std::string rawEmail;
 
@@ -398,12 +409,12 @@ namespace AIAssistant
                 summaryJson << ",";
             }
 
-            summaryJson << "{\"uid\":\"" << JsonEscapeEmail(uid) << "\""
-                        << ",\"from\":\"" << JsonEscapeEmail(fromAddr) << "\""
-                        << ",\"to\":\"" << JsonEscapeEmail(toAddr) << "\""
-                        << ",\"subject\":\"" << JsonEscapeEmail(subject) << "\""
-                        << ",\"date\":\"" << JsonEscapeEmail(date) << "\""
-                        << ",\"body\":\"" << JsonEscapeEmail(body) << "\"}";
+            summaryJson << "{\"uid\":\"" << JsonHelper::EscapeJsonString(uid) << "\""
+                        << ",\"from\":\"" << JsonHelper::EscapeJsonString(fromAddr) << "\""
+                        << ",\"to\":\"" << JsonHelper::EscapeJsonString(toAddr) << "\""
+                        << ",\"subject\":\"" << JsonHelper::EscapeJsonString(subject) << "\""
+                        << ",\"date\":\"" << JsonHelper::EscapeJsonString(date) << "\""
+                        << ",\"body\":\"" << JsonHelper::EscapeJsonString(body) << "\"}";
 
             ++fetchCount;
         }
@@ -424,7 +435,7 @@ namespace AIAssistant
             }
 
             std::string responseStr = "{\"ok\":true,\"count\":" + std::to_string(fetchCount) +
-                                      ",\"folder\":\"" + JsonEscapeEmail(folder) + "\"}";
+                                      ",\"folder\":\"" + JsonHelper::EscapeJsonString(folder) + "\"}";
             WriteResponseJson(workDir, taskState, responseStr);
         }
 
@@ -488,10 +499,28 @@ namespace AIAssistant
         std::string bodyFile = getStringParam("body_file");
         if (!bodyFile.empty())
         {
-            std::ifstream ifs(bodyFile);
+            // body_file resolves relative to the task's working_directory per
+            // JCWF spec §3.2.1.  Absolute values (e.g. {{ai_reply.output_file}}
+            // templates) pass through; both cases are confined under launchCwd
+            // by ValidateLocalPath as the project-tree security boundary.  Same
+            // convention as the attachments branch below.
+            std::filesystem::path const workflowBaseDir =
+                TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+            std::filesystem::path const workDir = TaskPathResolver::ResolveTaskWorkingDirectoryPath(
+                workflowBaseDir, taskDefinition.m_WorkingDirectory);
+            if (!ValidateLocalPath(bodyFile, workDir, taskDefinition.m_Id))
+            {
+                taskState.m_LastErrorMessage = "email_send: body_file path is invalid or escapes the project tree";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[email_send] task='{}' workflow='{}' run='{}': body_file path rejected",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+                return false;
+            }
+            std::filesystem::path const fullBodyPath = workDir / bodyFile;
+            std::ifstream ifs(fullBodyPath);
             if (!ifs.is_open())
             {
-                taskState.m_LastErrorMessage = "email_send: cannot open body_file '" + bodyFile + "'";
+                taskState.m_LastErrorMessage = "email_send: cannot open body_file '" + fullBodyPath.string() + "'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
@@ -512,6 +541,24 @@ namespace AIAssistant
                                ? fromIt->second
                                : credentials.m_Username;
 
+        // Reject CR/LF in any header field value.  An attacker supplying e.g.
+        // `subject: "Hello\r\nBcc: victim@example.com"` would otherwise inject an
+        // arbitrary BCC into the outgoing message.  Header fields concatenated by
+        // BuildEmailMessage are: from, to, cc, subject.  Body is separately allowed
+        // to contain newlines (it's the body content, not a header).
+        if (ICloudTaskExecutor::ContainsCrlf(from) || ICloudTaskExecutor::ContainsCrlf(to) ||
+            ICloudTaskExecutor::ContainsCrlf(cc) || ICloudTaskExecutor::ContainsCrlf(subject))
+        {
+            taskState.m_LastErrorMessage = "email_send: header field value contains CR/LF "
+                                           "(from/to/cc/subject must not contain newlines)";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[email_send] task='{}' workflow='{}' run='{}': CRLF rejected in header field",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            LOG_SECURITY_WARN("[security] email_send_header_injection task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+
         // Load attachments if specified
         std::vector<std::pair<std::string, std::string>> attachments;
         {
@@ -528,15 +575,44 @@ namespace AIAssistant
                     std::string_view attachPath;
                     if (item.get_string().get(attachPath) == simdjson::SUCCESS)
                     {
-                        std::filesystem::path fullPath = workDir / std::string(attachPath);
+                        // Confine each attachment path under workDir.  An absolute
+                        // path or `../etc/shadow` would otherwise escape the task's
+                        // working directory and exfiltrate arbitrary files as
+                        // base64-encoded MIME parts to whatever recipient the task
+                        // params name.
+                        std::string attachPathStr(attachPath);
+                        if (!ValidateLocalPath(attachPathStr, workDir, taskDefinition.m_Id))
+                        {
+                            LOG_APP_WARN("[email_send] task='{}' workflow='{}' run='{}': attachment path rejected",
+                                         taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+                            continue;
+                        }
+                        std::filesystem::path fullPath = workDir / attachPathStr;
                         std::ifstream file(fullPath, std::ios::binary | std::ios::ate);
                         if (file.is_open())
                         {
-                            auto fileSize = file.tellg();
+                            auto const fileSize = file.tellg();
+                            // Bound the attachment read.  Without this cap a hostile
+                            // (or buggy) workflow could place a multi-GB file in workDir
+                            // and exhaust process memory — the contents are read into a
+                            // std::string and then base64-encoded (1.33x growth) into
+                            // the MIME body.  25 MB matches typical SMTP server limits
+                            // (Gmail / Outlook / most providers) and still leaves
+                            // headroom for the encoded MIME message size.
+                            static constexpr std::streamoff kMaxAttachmentBytes = 25 * 1024 * 1024;
+                            if (fileSize < 0 || fileSize > kMaxAttachmentBytes)
+                            {
+                                LOG_APP_WARN("[email_send] task='{}' workflow='{}' run='{}': attachment '{}' size {} "
+                                             "bytes exceeds {} byte cap; skipping",
+                                             taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                                             attachPathStr, static_cast<long long>(fileSize),
+                                             static_cast<long long>(kMaxAttachmentBytes));
+                                continue;
+                            }
                             file.seekg(0, std::ios::beg);
                             std::string content(static_cast<size_t>(fileSize), '\0');
                             file.read(content.data(), fileSize);
-                            attachments.emplace_back(std::filesystem::path(attachPath).filename().string(),
+                            attachments.emplace_back(std::filesystem::path(attachPathStr).filename().string(),
                                                      std::move(content));
                         }
                         else
@@ -573,12 +649,36 @@ namespace AIAssistant
             curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
         }
 
-        // STARTTLS for port 587
-        auto portIt = connection.m_Params.find("smtp_port");
-        std::string port = (portIt != connection.m_Params.end() && !portIt->second.empty()) ? portIt->second : "587";
-        if (port == "587")
+        // TLS posture follows the connection's use_ssl param (matches the IMAP path
+        // above).  Default is true — production deployments without an explicit
+        // opt-out get strict TLS-required transport with full certificate +
+        // hostname verification, regardless of the SMTP port.  An attacker-
+        // configured non-587 port (or a typo on a real connection) can no longer
+        // silently drop the TLS gate.  use_ssl=false is the local-testing escape
+        // hatch (GreenMail / Mailpit on plaintext ports) and emits a SECURITY_WARN
+        // so an operator running this against a real server sees the deviation.
+        auto sslIt = connection.m_Params.find("use_ssl");
+        bool const smtpUseTls = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+        if (smtpUseTls)
         {
+            // CURLUSESSL_ALL — refuse to proceed without TLS.  Covers both 465
+            // (smtps:// implicit TLS via libcurl scheme detection) and 587
+            // (STARTTLS).  CURLUSESSL_TRY would silently fall back to plaintext
+            // on a MITM-stripped STARTTLS, which is exactly the attack we want
+            // to close.
             curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_ALL));
+            // VERIFYPEER + VERIFYHOST set explicitly: libcurl's defaults can
+            // silently fail-open on builds where the trust store is empty or
+            // unreachable.  Asserting the values means an unverified TLS session
+            // becomes a hard error rather than a silent compromise.
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        }
+        else
+        {
+            LOG_SECURITY_WARN("[security] email_send_tls_disabled task='{}' workflow='{}' run='{}' connection='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                              connection.m_Name);
         }
 
         // Sender
@@ -622,7 +722,11 @@ namespace AIAssistant
 
         LOG_APP_INFO("[email] sent to {} via connection '{}' (subject: {})", to, connection.m_Name, subject);
 
-        std::string summary = "{\"ok\":true,\"to\":\"" + to + "\",\"subject\":\"" + subject +
+        // Escape `to` and `subject` before splicing — sitting 11's CRLF gate stops the
+        // worst injection (newlines), but `"` and `\` would still corrupt the JSON or
+        // smuggle additional fields.  JsonHelper produces RFC 8259 §7-compliant escapes.
+        std::string summary = "{\"ok\":true,\"to\":\"" + JsonHelper::EscapeJsonString(to) +
+                              "\",\"subject\":\"" + JsonHelper::EscapeJsonString(subject) +
                               "\",\"attachments\":" + std::to_string(attachments.size()) + "}";
 
         taskState.m_CapturedStdout = summary.substr(0, std::min(summary.size(), kMaxCaptureChars));

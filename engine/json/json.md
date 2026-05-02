@@ -327,13 +327,17 @@ The rewrite consolidates four other broken `JsonEscape`-style copies that had sp
 
 ### 4.4 Use sites
 
-Every outbound AI request body and persisted transcript flows through this helper:
+Every outbound AI request body, persisted transcript, and cloud-surface JSON splice flows through this helper:
 
 - `application/json/requestBuilder.cpp` builds the JSON request body for every AI provider via `JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages))`.
 - `application/workflow/aiTranscript.cpp` writes per-call transcripts with `JsonHelper jsonHelper; jsonHelper.SanitizeForJson(...)` for each text/error/finish-reason field.
 - `application/assistant/assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, `assistantController.cpp`, and `assistantTools.cpp` all use the static `JsonHelper::EscapeJsonString` for their JSON-string embeds (session JSONL, memory JSON, index JSONL, WS protocol messages, generated `global.json`).
+- **Cloud surface** — every executor and connector that splices user-controlled values into a JSON request or response body uses `JsonHelper::EscapeJsonString`.  This covers both directions:
+  - **Request bodies** (data going OUT to the cloud API): slack `chat.postMessage` channel/text/thread_ts; jira `create` projectKey/summary/issueType/description/priority/labels and `transition` transitionId and `comment` body; gitHub `issue` title/body/labels and `comment` body; snowflake `statement.query` (the SQL string itself) and warehouse/database/schema; polarionWrite work-item field-value bodies; dbQuery column-name and value embedding; sheets `values` cells; redmine `issue.notes` / `assigned_to_id` (string form).
+  - **Response bodies the executor synthesises** (when the upstream returned `204 No Content`): jira `update` and `transition` success-response objects, polarionWrite download success-response, every cloud-storage executor's synthesised `{"ok":true,...}` summary.  Every value spliced into these is escaped at the splice site.
+  - **Result-write JSON** (the on-disk artefact written by query operations): snowflake `result.json` row data with both column names AND values escaped; dbQuery column names and PG values escaped; sheets read-output column names and values escaped.
 
-These call sites benefit transparently from the fix — any provider response or session content containing control bytes (which previously generated malformed JSON or lost form-feed data) now produces valid output.
+These call sites benefit transparently from the fix — any provider response, session content, or cloud-API value containing control bytes (which previously generated malformed JSON or lost form-feed data) now produces valid output.  No raw `+` / `<<` JSON splice with a user-controlled value remains in the cloud surface; future cloud-executor edits must keep this discipline (a raw splice is a code-review reject).
 
 ---
 

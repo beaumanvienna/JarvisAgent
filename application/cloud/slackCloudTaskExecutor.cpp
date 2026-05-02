@@ -32,43 +32,14 @@
 #include "engine.h"
 #include "cloud/slackCloudTaskExecutor.h"
 #include "cloud/slackConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
-
-    // JSON-escape a string for embedding in a JSON body
-    static std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20)
-                    {
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += c;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
 
     // Read entire file into a string. Returns empty string on failure.
     static std::string ReadFileToString(std::string const& path)
@@ -124,13 +95,9 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteBodyCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — Slack Web API at
+        // `slack.com/api/*` responds directly for all endpoints.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string authHeader = "Authorization: Bearer " + token;
@@ -281,11 +248,11 @@ namespace AIAssistant
 
         // POST /api/chat.postMessage
         std::string url = SlackConnector::GetApiBaseUrl(connection) + "/chat.postMessage";
-        std::string requestBody = "{\"channel\":\"" + JsonEscape(channel) +
-                                  "\",\"text\":\"" + JsonEscape(text) + "\"";
+        std::string requestBody = "{\"channel\":\"" + JsonHelper::EscapeJsonString(channel) +
+                                  "\",\"text\":\"" + JsonHelper::EscapeJsonString(text) + "\"";
         if (!threadTs.empty())
         {
-            requestBody += ",\"thread_ts\":\"" + JsonEscape(threadTs) + "\"";
+            requestBody += ",\"thread_ts\":\"" + JsonHelper::EscapeJsonString(threadTs) + "\"";
         }
         requestBody += "}";
 
@@ -470,9 +437,9 @@ namespace AIAssistant
         for (size_t i = 0; i < messages.size(); ++i)
         {
             if (i > 0) summary << ",";
-            summary << "{\"ts\":\"" << JsonEscape(messages[i].m_Ts) << "\""
-                    << ",\"user\":\"" << JsonEscape(messages[i].m_User) << "\""
-                    << ",\"text\":\"" << JsonEscape(messages[i].m_Text) << "\"}";
+            summary << "{\"ts\":\"" << JsonHelper::EscapeJsonString(messages[i].m_Ts) << "\""
+                    << ",\"user\":\"" << JsonHelper::EscapeJsonString(messages[i].m_User) << "\""
+                    << ",\"text\":\"" << JsonHelper::EscapeJsonString(messages[i].m_Text) << "\"}";
         }
         summary << "]";
         std::string summaryStr = summary.str();
@@ -509,8 +476,8 @@ namespace AIAssistant
             }
 
             std::string responseJson = "{\"ok\":true,\"count\":" + std::to_string(messages.size()) +
-                                       ",\"channel\":\"" + JsonEscape(channel) + "\"" +
-                                       ",\"latest_ts\":\"" + JsonEscape(latestTs) + "\"}";
+                                       ",\"channel\":\"" + JsonHelper::EscapeJsonString(channel) + "\"" +
+                                       ",\"latest_ts\":\"" + JsonHelper::EscapeJsonString(latestTs) + "\"}";
             WriteResponseJson(workDir, taskState, responseJson);
         }
 

@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -44,15 +46,24 @@ namespace AIAssistant
         bool UpdateConnection(std::string const& name, CloudConnection connection);
         bool RemoveConnection(std::string const& name);
 
-        // Read access (thread-safe)
-        CloudConnection const* GetConnection(std::string const& name) const;
+        // Read access (thread-safe).  GetConnection returns by-value (std::optional)
+        // rather than a raw pointer so the caller receives a copy that has no lifetime
+        // dependency on the live map.  Pre-fix the raw pointer outlived the shared_lock
+        // guard inside GetConnection — any concurrent writer (Add/Update/Remove/Parse)
+        // could rehash the map or erase the entry while the caller still dereferenced
+        // the pointer (use-after-free).  The copy is performed while the lock is held;
+        // after return the optional owns its bytes regardless of subsequent map state.
+        [[nodiscard]] std::optional<CloudConnection> GetConnection(std::string const& name) const;
         std::vector<std::string> GetConnectionNames() const;
         std::vector<CloudConnection> GetAllConnections() const;
         bool HasConnections() const;
 
-        // Dirty flag: true when in-memory state differs from on-disk state
-        bool IsDirty() const { return m_Dirty; }
-        void ClearDirty() { m_Dirty = false; }
+        // Dirty flag: true when in-memory state differs from on-disk state.  Atomic so
+        // that IsDirty / ClearDirty are lock-free and cannot race with writers that
+        // set m_Dirty = true under m_Mutex (the atomic store from inside the lock is
+        // a well-ordered write that the lock-free loaders observe).
+        bool IsDirty() const { return m_Dirty.load(std::memory_order_acquire); }
+        void ClearDirty() { m_Dirty.store(false, std::memory_order_release); }
 
         // Serialization for persistence
         bool ParseConnectionsJson(std::string const& json);
@@ -61,6 +72,6 @@ namespace AIAssistant
     private:
         std::unordered_map<std::string, CloudConnection> m_Connections;
         mutable std::shared_mutex m_Mutex;
-        bool m_Dirty{false};
+        std::atomic<bool> m_Dirty{false};
     };
 } // namespace AIAssistant

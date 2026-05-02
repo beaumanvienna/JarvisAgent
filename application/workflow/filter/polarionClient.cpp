@@ -34,6 +34,7 @@
 #include "core.h"
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
+#include "cloud/connectorHttp.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 
@@ -246,14 +247,7 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        // Cross-distro CA bundle (same probe as CurlWrapper)
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string const authHeader = "Authorization: Bearer " + bearerToken;
@@ -320,13 +314,7 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string const authHeader = "Authorization: Bearer " + bearerToken;
@@ -394,13 +382,7 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS * 3); // longer timeout for downloads
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string const authHeader = "Authorization: Bearer " + bearerToken;
@@ -469,13 +451,7 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS * 3);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string const authHeader = "Authorization: Bearer " + bearerToken;

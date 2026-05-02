@@ -72,8 +72,12 @@ namespace AIAssistant
             connectionName = std::string(sv);
         }
 
-        // Look up the connection config
-        CloudConnection const* connection = m_ConnectionManager.GetConnection(connectionName);
+        // Look up the connection config.  GetConnection returns std::optional<CloudConnection>
+        // by value; the optional owns the bytes for the rest of this function so the
+        // CloudConnection reference passed to ResolveCredentials / ExecuteCloud below
+        // (which may run for seconds during cloud I/O) is stable regardless of any
+        // concurrent connection-manager mutation.
+        auto connection = m_ConnectionManager.GetConnection(connectionName);
         if (!connection)
         {
             taskState.m_LastErrorMessage = "Cloud connection '" + connectionName + "' not found";
@@ -196,23 +200,31 @@ namespace AIAssistant
             return true;
         }
 
-        // Reject obvious traversal patterns
-        if (localPath.find("..") != std::string::npos)
-        {
-            LOG_SECURITY_INFO("[security] path_traversal_blocked: task='{}' local_path='{}' contains '..'", taskId,
-                              localPath);
-            return false;
-        }
+        // Per JCWF spec §3.2.1: task-scoped relative file paths resolve relative
+        // to the task's working_directory; the spec also explicitly allows `..`
+        // segments in working_directory and (by extension) file paths, resolving
+        // via lexical normalization.  And the upstream-output template
+        // `{{A.output_file}}` produces an ABSOLUTE path — that's the canonical
+        // way a downstream cloud task consumes an upstream ai_call's output.
+        //
+        // The security boundary therefore lives at the project tree (the
+        // JarvisAgent launch CWD), NOT the task working_directory.  That's wide
+        // enough for both literal relative paths under any task's workDir AND
+        // absolute template values pointing into queue/, while still rejecting
+        // paths that escape the project (e.g. `/etc/passwd`).
+        std::filesystem::path const inputPath(localPath);
+        std::filesystem::path const resolved =
+            (inputPath.is_absolute() ? inputPath : baseDir / inputPath).lexically_normal();
+        std::filesystem::path const launchCwd =
+            std::filesystem::path(Core::g_Core->GetLaunchCWDAbsolute()).lexically_normal();
 
-        // Resolve and verify the path stays within the base directory
-        std::filesystem::path resolved = (baseDir / localPath).lexically_normal();
-        std::string resolvedStr = resolved.string();
-        std::string baseDirStr = baseDir.lexically_normal().string();
+        std::string const resolvedStr = resolved.string();
+        std::string const launchCwdStr = launchCwd.string();
 
-        if (resolvedStr.find(baseDirStr) != 0)
+        if (resolvedStr.find(launchCwdStr) != 0)
         {
-            LOG_SECURITY_INFO("[security] path_traversal_blocked: task='{}' resolved='{}' escapes base='{}'", taskId,
-                              resolvedStr, baseDirStr);
+            LOG_SECURITY_INFO("[security] path_traversal_blocked: task='{}' resolved='{}' escapes launch_cwd='{}'",
+                              taskId, resolvedStr, launchCwdStr);
             return false;
         }
 
@@ -254,5 +266,10 @@ namespace AIAssistant
         {
             responseFile << responseBody;
         }
+    }
+
+    bool ICloudTaskExecutor::ContainsCrlf(std::string const& s)
+    {
+        return s.find('\r') != std::string::npos || s.find('\n') != std::string::npos;
     }
 } // namespace AIAssistant

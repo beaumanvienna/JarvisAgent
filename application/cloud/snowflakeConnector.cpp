@@ -22,19 +22,31 @@
 */
 
 #include "cloud/snowflakeConnector.h"
+#include "cloud/connectorHttp.h"
 
 #include <curl/curl.h>
+#include <cctype>
 
 #include "simdjson/simdjson.h"
 
 #include "core.h"
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "keys/keyManager.h"
 #include "keys/jwtGenerator.h"
 #include "curlWrapper/curlWrapper.h"
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Local response-body cap for the connector's TestConnection writeCallback.
+        // Test connection responses are tiny (a single SELECT 1 result), so the
+        // 1 MB cap is generous.  Set independently of the executor's larger cap
+        // because the test connection's working set is much smaller.
+        constexpr size_t kMaxConnectorResponseBytes = 1 * 1024 * 1024;
+    } // namespace
+
     std::string SnowflakeConnector::GetType() const
     {
         return "snowflake";
@@ -48,10 +60,34 @@ namespace AIAssistant
         {
             base.pop_back();
         }
-        // If it already looks like a full URL, use as-is
-        if (base.find("https://") == 0 || base.find("http://") == 0)
+        // Snowflake account locator allowlist: alphanumeric + `.` + `-` + `_`.
+        // Reject empty, oversized, scheme-prefixed (no `http://` or `https://`
+        // — caller is supposed to pass an account locator like
+        // `xy12345.us-east-1`, NOT a full URL), and any URL-meaningful or
+        // protocol-injection chars.  This closes the SSRF vector where
+        // `m_Endpoint = "http://evil.com/path?x="` would otherwise sail
+        // through the previous "if it looks like a URL, use as-is" branch.
+        if (base.empty() || base.size() > 128)
         {
-            return base;
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] snowflake_invalid_endpoint reason=size endpoint_length={}", endpoint.size());
+            return {};
+        }
+        for (char c : base)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '.' || c == '-' || c == '_')
+            {
+                continue;
+            }
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] snowflake_invalid_endpoint reason=charset endpoint_length={}",
+                              endpoint.size());
+            return {};
         }
         return "https://" + base + ".snowflakecomputing.com";
     }
@@ -124,8 +160,25 @@ namespace AIAssistant
             return false;
         }
 
-        // POST /api/v2/statements with SELECT 1
+        // POST /api/v2/statements with SELECT 1.  BuildApiBaseUrl validates the
+        // endpoint allowlist (sitting 14 fix) and returns "" on rejection — already
+        // logged at the helper.
         std::string apiBase = BuildApiBaseUrl(connection.m_Endpoint);
+        if (apiBase.empty())
+        {
+            errorMessage = "Snowflake endpoint rejected: invalid account locator (see security log)";
+            return false;
+        }
+        // Reject CR/LF in the JWT before splicing into the Authorization header
+        // (parallel to the executor's check).
+        if (credentials.m_Token.find('\r') != std::string::npos ||
+            credentials.m_Token.find('\n') != std::string::npos)
+        {
+            errorMessage = "Snowflake JWT contains CR/LF — refusing to send";
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] snowflake_test_jwt_crlf_rejected connection='{}'", connection.m_Name);
+            return false;
+        }
         std::string url = apiBase + "/api/v2/statements";
 
         // Build request body
@@ -140,17 +193,19 @@ namespace AIAssistant
             schemaIt != connection.m_Params.end())
         {
             requestBody = "{\"statement\":\"SELECT 1\",\"timeout\":10";
+            // Escape warehouse/database/schema before splicing — same JSON injection
+            // vector the executor closed (sitting 14).
             if (warehouseIt != connection.m_Params.end() && !warehouseIt->second.empty())
             {
-                requestBody += ",\"warehouse\":\"" + warehouseIt->second + "\"";
+                requestBody += ",\"warehouse\":\"" + JsonHelper::EscapeJsonString(warehouseIt->second) + "\"";
             }
             if (databaseIt != connection.m_Params.end() && !databaseIt->second.empty())
             {
-                requestBody += ",\"database\":\"" + databaseIt->second + "\"";
+                requestBody += ",\"database\":\"" + JsonHelper::EscapeJsonString(databaseIt->second) + "\"";
             }
             if (schemaIt != connection.m_Params.end() && !schemaIt->second.empty())
             {
-                requestBody += ",\"schema\":\"" + schemaIt->second + "\"";
+                requestBody += ",\"schema\":\"" + JsonHelper::EscapeJsonString(schemaIt->second) + "\"";
             }
             requestBody += "}";
         }
@@ -166,8 +221,15 @@ namespace AIAssistant
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
         {
             auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
+            size_t const incoming = size * nmemb;
+            // Cap the response buffer (matches the executor's pattern; this
+            // connector's responses are tiny, 1 MB is generous).
+            if (buf->size() + incoming > kMaxConnectorResponseBytes)
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), incoming);
+            return incoming;
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
@@ -176,13 +238,12 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following + DNS post-resolve check —
+        // Snowflake's API never legitimately redirects (hostile redirect →
+        // attacker-controlled pivot) and is always reached via
+        // `https://*.snowflakecomputing.com` (per BuildApiBaseUrl), so the
+        // post-resolve callback installs and rejects any DNS-time SSRF.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string authHeader = "Authorization: Bearer " + credentials.m_Token;
@@ -215,11 +276,11 @@ namespace AIAssistant
 
         if (httpCode >= 400)
         {
+            // Don't embed the raw response body in errorMessage.  Same rationale
+            // as the executor's submit/poll error paths: Snowflake error responses
+            // can include schema names + partial query data that shouldn't leak
+            // into persisted error state.
             errorMessage = "Snowflake test failed: HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
-            {
-                errorMessage += ": " + responseBody;
-            }
             return false;
         }
 

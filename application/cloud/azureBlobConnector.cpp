@@ -31,6 +31,8 @@
 #include "keys/keyManager.h"
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
+#include "cloud/cloudTaskExecutor.h"
+#include "cloud/connectorHttp.h"
 
 namespace AIAssistant
 {
@@ -142,9 +144,26 @@ namespace AIAssistant
             return false;
         }
 
+        if (!connection.m_Endpoint.empty() &&
+            !ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        {
+            LOG_SECURITY_WARN("[security] azure_blob_endpoint_rejected connection='{}' reason='{}'",
+                              connection.m_Name, errorMessage);
+            return false;
+        }
+
         CloudCredentials credentials;
         if (!ResolveCredentials(connection, credentials, errorMessage))
         {
+            return false;
+        }
+
+        if (credentials.m_AuthType == CloudAuthType::OAuth2 &&
+            ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        {
+            errorMessage = "Azure Blob bearer token contains CR/LF — refusing to send";
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] azure_blob_test_bearer_crlf_rejected connection='{}'", connection.m_Name);
             return false;
         }
 
@@ -160,26 +179,12 @@ namespace AIAssistant
         }
 
         std::string responseBody;
-        auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
-        {
-            auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
-        };
-        using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
-
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ConnectorHttp::BoundedStringWriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
 

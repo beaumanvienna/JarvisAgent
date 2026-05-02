@@ -33,7 +33,9 @@
 #include "engine.h"
 #include "cloud/gcsCloudTaskExecutor.h"
 #include "cloud/gcsConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
@@ -42,11 +44,57 @@ namespace AIAssistant
     static constexpr long kTimeoutSeconds = 300;
     static constexpr curl_off_t kMaxDownloadBytes = 256 * 1024 * 1024; // 256 MB
 
+    // Bound on the response body — closes the audit's HIGH "unbound growth of
+    // responseBody in GcsRequest" finding.  64 MB matches the cloud-surface
+    // pattern; GCS metadata responses are typically tens of KB.
+    static constexpr size_t kMaxGcsResponseBytes = 64 * 1024 * 1024;
+
+    // GCS bucket name validator.  Per Google's bucket-naming rules:
+    //   https://cloud.google.com/storage/docs/buckets#naming
+    // Allowed chars: lowercase letters, digits, `.`, `_`, `-`.  Length 3..63.
+    // Cannot start/end with a hyphen.  This sweep uses the strict allowlist
+    // form — bucket names containing URL-meaningful chars (`/`, `?`, `#`, `:`,
+    // `@`, `%`) are rejected before any URL build.
+    static bool IsValidGcsBucket(std::string const& bucket)
+    {
+        if (bucket.size() < 3 || bucket.size() > 63)
+        {
+            return false;
+        }
+        if (bucket.front() == '-' || bucket.back() == '-')
+        {
+            return false;
+        }
+        for (char c : bucket)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::islower(uc) || std::isdigit(uc))
+            {
+                continue;
+            }
+            if (c == '.' || c == '_' || c == '-')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
     // Helper: perform GCS HTTP request with Bearer token auth
     static bool GcsRequest(std::string const& method, std::string const& url, std::string const& accessToken,
                            std::string& responseBody, long& httpCode, std::string const& contentType = {},
                            char const* uploadData = nullptr, size_t uploadSize = 0)
     {
+        // Reject CR/LF in the bearer token before splicing into the Authorization
+        // header.  Same defensive check as sitting 14's Snowflake JWT.
+        if (ICloudTaskExecutor::ContainsCrlf(accessToken))
+        {
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] gcs_bearer_crlf_rejected");
+            return false;
+        }
+
         CURL* curl = curl_easy_init();
         if (!curl)
         {
@@ -58,8 +106,13 @@ namespace AIAssistant
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
         {
             auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
+            size_t const incoming = size * nmemb;
+            if (buf->size() + incoming > kMaxGcsResponseBytes)
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), incoming);
+            return incoming;
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
@@ -68,13 +121,10 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — GCS JSON API
+        // (`storage.googleapis.com`) responds directly; legitimate flows
+        // never 30x.  See ConnectorHttp::ApplyHardenedDefaults docstring.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (uploadData && uploadSize > 0)
         {
@@ -102,6 +152,15 @@ namespace AIAssistant
     static bool GcsDownload(std::string const& url, std::string const& accessToken, std::string const& outputPath,
                             std::string& errorMessage)
     {
+        // Reject CR/LF in the bearer token (parallel to GcsRequest).
+        if (ICloudTaskExecutor::ContainsCrlf(accessToken))
+        {
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] gcs_bearer_crlf_rejected (download)");
+            errorMessage = "GCS bearer token contains CR/LF — refusing to send";
+            return false;
+        }
+
         CURL* curl = curl_easy_init();
         if (!curl)
         {
@@ -121,14 +180,10 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, kMaxDownloadBytes);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — GCS responds directly on
+        // download too.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, ("Authorization: Bearer " + accessToken).c_str());
@@ -231,6 +286,26 @@ namespace AIAssistant
             return false;
         }
 
+        // Validate bucket against GCS naming rules before any URL build.  An
+        // attacker-controlled bucket value containing `/`, `?`, `#`, or `:` would
+        // otherwise inject URL components past the canonical
+        // `https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?...`
+        // path — closes the audit's CRITICAL "Path Traversal via object_name /
+        // Unvalidated bucket in URL Construction" finding (the bucket half;
+        // object_name is already URL-encoded via the existing UrlEncode lambda).
+        if (!IsValidGcsBucket(bucket))
+        {
+            taskState.m_LastErrorMessage = "Invalid GCS bucket name: must match GCS naming rules "
+                                           "([a-z0-9._-], 3-63 chars, no leading/trailing hyphen)";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': invalid bucket name (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, bucket.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] gcs_invalid_bucket task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+
         std::string objectName = getStringParam("object_name");
         std::string localPath = getStringParam("local_path");
 
@@ -240,6 +315,25 @@ namespace AIAssistant
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
+
+        // local_path resolves relative to the task's working_directory per JCWF
+        // spec §3.2.1.  Absolute values (e.g. {{ai.output_file}} templates)
+        // pass through; both cases are confined under launchCwd by
+        // ValidateLocalPath as the project-tree security boundary.
+        std::filesystem::path const workflowBaseDir =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        std::filesystem::path const workDir =
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
+        if (!ValidateLocalPath(localPath, workDir, taskDefinition.m_Id))
+        {
+            taskState.m_LastErrorMessage =
+                "gcs: local_path is invalid or escapes the project tree";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': local_path rejected",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+        std::filesystem::path const fullLocalPath = workDir / localPath;
 
         std::string endpointUrl = GcsConnector::BuildEndpointUrl(connection);
         std::string responseBody;
@@ -256,15 +350,29 @@ namespace AIAssistant
         if (isUpload)
         {
             // Read file into memory
-            std::ifstream file(localPath, std::ios::binary | std::ios::ate);
+            std::ifstream file(fullLocalPath, std::ios::binary | std::ios::ate);
             if (!file.is_open())
             {
-                taskState.m_LastErrorMessage = "Cannot open file for upload: " + localPath;
+                taskState.m_LastErrorMessage = "Cannot open file for upload: " + fullLocalPath.string();
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
 
-            auto fileSize = file.tellg();
+            auto const fileSize = file.tellg();
+            // Cap on upload file size — closes the audit's HIGH "unbounded file
+            // read into memory on upload" finding for GCS.  256 MB matches Phase 9b's
+            // existing CURLOPT_MAXFILESIZE_LARGE for downloads.
+            static constexpr std::streamoff kMaxGcsUploadBytes = 256 * 1024 * 1024;
+            if (fileSize < 0 || fileSize > kMaxGcsUploadBytes)
+            {
+                taskState.m_LastErrorMessage = "gcs upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
+                                               " exceeds " + std::to_string(static_cast<long long>(kMaxGcsUploadBytes)) + " byte cap";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[gcs] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                              static_cast<long long>(fileSize));
+                return false;
+            }
             file.seekg(0, std::ios::beg);
             std::string fileData(static_cast<size_t>(fileSize), '\0');
             file.read(fileData.data(), fileSize);
@@ -293,14 +401,15 @@ namespace AIAssistant
                 return false;
             }
 
-            responseBody = "{\"ok\":true,\"operation\":\"upload\",\"bucket\":\"" + bucket +
-                           "\",\"object_name\":\"" + objectName + "\"}";
-            LOG_APP_INFO("[gcs] uploaded {} to gs://{}/{}", localPath, bucket, objectName);
+            responseBody = "{\"ok\":true,\"operation\":\"upload\",\"bucket\":\"" +
+                           JsonHelper::EscapeJsonString(bucket) + "\",\"object_name\":\"" +
+                           JsonHelper::EscapeJsonString(objectName) + "\"}";
+            LOG_APP_INFO("[gcs] uploaded {} to gs://{}/{}", fullLocalPath.string(), bucket, objectName);
         }
         else // isDownload
         {
             // Ensure output directory exists
-            std::filesystem::path outputDir = std::filesystem::path(localPath).parent_path();
+            std::filesystem::path outputDir = fullLocalPath.parent_path();
             if (!outputDir.empty())
             {
                 std::error_code ec;
@@ -312,28 +421,26 @@ namespace AIAssistant
                 endpointUrl + "/storage/v1/b/" + bucket + "/o/" + encodedObjectName + "?alt=media";
             std::string downloadError;
 
-            if (!GcsDownload(url, credentials.m_Token, localPath, downloadError))
+            if (!GcsDownload(url, credentials.m_Token, fullLocalPath.string(), downloadError))
             {
                 taskState.m_LastErrorMessage = "GCS download failed: " + downloadError;
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
 
-            responseBody = "{\"ok\":true,\"operation\":\"download\",\"bucket\":\"" + bucket +
-                           "\",\"object_name\":\"" + objectName + "\"}";
-            LOG_APP_INFO("[gcs] downloaded gs://{}/{} to {}", bucket, objectName, localPath);
+            responseBody = "{\"ok\":true,\"operation\":\"download\",\"bucket\":\"" +
+                           JsonHelper::EscapeJsonString(bucket) + "\",\"object_name\":\"" +
+                           JsonHelper::EscapeJsonString(objectName) + "\"}";
+            LOG_APP_INFO("[gcs] downloaded gs://{}/{} to {}", bucket, objectName, fullLocalPath.string());
         }
 
         taskState.m_CapturedStdout = responseBody.substr(0, std::min(responseBody.size(), kMaxCaptureChars));
         taskState.m_State = TaskInstanceStateKind::Succeeded;
 
-        // Write response to task working directory
-        std::filesystem::path workflowBaseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        // Write response to task working directory (workflowBaseDir + workDir
+        // already resolved earlier in ExecuteCloud).
         if (!workflowBaseDir.empty())
         {
-            std::filesystem::path workDir =
-                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
-
             WriteResponseJson(workDir, taskState, responseBody);
         }
 

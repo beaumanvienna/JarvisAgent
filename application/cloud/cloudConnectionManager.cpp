@@ -27,29 +27,10 @@
 
 #include "engine.h"
 #include "cloud/cloudConnectionManager.h"
+#include "json/jsonHelper.h"
 
 namespace AIAssistant
 {
-    // Escape a string for safe JSON output (handles quotes, backslashes, control chars).
-    static std::string JsonEscape(std::string const& s)
-    {
-        std::string result;
-        result.reserve(s.size());
-        for (char c : s)
-        {
-            switch (c)
-            {
-                case '"': result += "\\\""; break;
-                case '\\': result += "\\\\"; break;
-                case '\n': result += "\\n"; break;
-                case '\r': result += "\\r"; break;
-                case '\t': result += "\\t"; break;
-                default: result += c; break;
-            }
-        }
-        return result;
-    }
-
     bool CloudConnectionManager::AddConnection(CloudConnection connection)
     {
         std::unique_lock lock(m_Mutex);
@@ -98,15 +79,21 @@ namespace AIAssistant
         return true;
     }
 
-    CloudConnection const* CloudConnectionManager::GetConnection(std::string const& name) const
+    std::optional<CloudConnection> CloudConnectionManager::GetConnection(std::string const& name) const
     {
+        // Value-copy under shared_lock: the returned optional owns its bytes after this
+        // function exits, so a concurrent writer that subsequently rehashes or erases
+        // m_Connections cannot invalidate the caller's view.  This is the C++ idiom for
+        // Rust's Option<&T> with the borrow checker enforcing that no reference outlives
+        // the lock guard.  See header comment + cybersec audit (cloudConnectionManager,
+        // HIGH "Dangling pointer from GetConnection across lock boundary").
         std::shared_lock lock(m_Mutex);
         auto const it = m_Connections.find(name);
         if (it == m_Connections.end())
         {
-            return nullptr;
+            return std::nullopt;
         }
-        return &it->second;
+        return it->second;
     }
 
     std::vector<std::string> CloudConnectionManager::GetConnectionNames() const
@@ -141,8 +128,26 @@ namespace AIAssistant
 
     bool CloudConnectionManager::ParseConnectionsJson(std::string const& json)
     {
-        std::unique_lock lock(m_Mutex);
-        m_Connections.clear();
+        // Input size cap: bounds the total memory the parse can allocate.  Hostile or
+        // corrupt input that exceeds this is rejected before simdjson sees it.  The
+        // padded_string + on-demand iteration each multiply the input size, so an
+        // unbounded read here is the seed for a multi-megabyte allocation chain.
+        static constexpr size_t kMaxConnectionsJsonBytes = 1 * 1024 * 1024;
+        // Per-array, per-field, per-params caps: each individual element is bounded so
+        // a single oversized field cannot push memory pressure past the input cap by a
+        // large multiplicative factor (string copies into CloudConnection).
+        static constexpr size_t kMaxConnections = 1024;
+        static constexpr size_t kMaxFieldBytes = 4096;
+        static constexpr size_t kMaxParamsPerConnection = 256;
+        static constexpr size_t kMaxParamFieldBytes = 1024;
+
+        if (json.size() > kMaxConnectionsJsonBytes)
+        {
+            LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: input size {} bytes exceeds {} byte cap; "
+                           "rejecting and leaving in-memory connections untouched",
+                           json.size(), kMaxConnectionsJsonBytes);
+            return false;
+        }
 
         simdjson::ondemand::parser parser;
         simdjson::padded_string paddedJson(json);
@@ -151,7 +156,8 @@ namespace AIAssistant
         auto error = parser.iterate(paddedJson).get(doc);
         if (error)
         {
-            LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: parse error: {}",
+            LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: parse error: {}; "
+                           "leaving in-memory connections untouched",
                            simdjson::error_message(error));
             return false;
         }
@@ -159,68 +165,139 @@ namespace AIAssistant
         simdjson::ondemand::array connections;
         if (doc["connections"].get_array().get(connections) != simdjson::SUCCESS)
         {
-            LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: 'connections' array not found");
+            LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: 'connections' array not found; "
+                           "leaving in-memory connections untouched");
             return false;
         }
 
+        // Parse into a local scratch map.  m_Connections is only replaced at the end on
+        // full-parse success.  Failure mid-parse leaves the live state untouched (the
+        // pre-fix behaviour wiped m_Connections at function entry, so any malformed
+        // payload erased all connections — fail-open).
+        std::unordered_map<std::string, CloudConnection> staging;
+
+        size_t elementIndex = 0;
         for (auto element : connections)
         {
+            size_t const idx = elementIndex++;
+
+            if (staging.size() >= kMaxConnections)
+            {
+                LOG_CORE_ERROR("CloudConnectionManager::ParseConnectionsJson: connection count exceeds {}; "
+                               "rejecting at element index {}; leaving in-memory connections untouched",
+                               kMaxConnections, idx);
+                return false;
+            }
+
             simdjson::ondemand::object obj;
             if (element.get_object().get(obj) != simdjson::SUCCESS)
             {
+                LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping malformed element at index {}",
+                              idx);
                 continue;
             }
 
             CloudConnection conn;
             std::string_view sv;
+            bool elementFieldTooLong = false;
 
-            if (obj["name"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                conn.m_Name = std::string(sv);
-            }
-            if (obj["type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                conn.m_Type = std::string(sv);
-            }
-            if (obj["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                conn.m_Endpoint = std::string(sv);
-            }
-            if (obj["key_name"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                conn.m_KeyName = std::string(sv);
-            }
+            auto readBoundedField = [&](char const* fieldName, std::string& dst) {
+                if (obj[fieldName].get_string().get(sv) == simdjson::SUCCESS)
+                {
+                    if (sv.size() > kMaxFieldBytes)
+                    {
+                        LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping element at index {}: "
+                                      "field '{}' size {} exceeds {} byte cap",
+                                      idx, fieldName, sv.size(), kMaxFieldBytes);
+                        elementFieldTooLong = true;
+                        return;
+                    }
+                    dst.assign(sv);
+                }
+            };
+
+            readBoundedField("name", conn.m_Name);
+            if (elementFieldTooLong) continue;
+            readBoundedField("type", conn.m_Type);
+            if (elementFieldTooLong) continue;
+            readBoundedField("endpoint", conn.m_Endpoint);
+            if (elementFieldTooLong) continue;
+            readBoundedField("key_name", conn.m_KeyName);
+            if (elementFieldTooLong) continue;
+
             if (obj["auth_type"].get_string().get(sv) == simdjson::SUCCESS)
             {
+                if (sv.size() > kMaxFieldBytes)
+                {
+                    LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping element at index {}: "
+                                  "field 'auth_type' size {} exceeds {} byte cap",
+                                  idx, sv.size(), kMaxFieldBytes);
+                    continue;
+                }
                 conn.m_AuthType = StringToAuthType(sv);
             }
 
-            // Parse type-specific params
+            // Parse type-specific params with both per-entry-count and per-field-length bounds.
             simdjson::ondemand::object params;
             if (obj["params"].get_object().get(params) == simdjson::SUCCESS)
             {
+                bool paramsOverflow = false;
                 for (auto field : params)
                 {
+                    if (conn.m_Params.size() >= kMaxParamsPerConnection)
+                    {
+                        LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping element at index {}: "
+                                      "params count exceeds {}",
+                                      idx, kMaxParamsPerConnection);
+                        paramsOverflow = true;
+                        break;
+                    }
                     std::string_view key = field.unescaped_key();
                     std::string_view val;
-                    if (field.value().get_string().get(val) == simdjson::SUCCESS)
+                    if (field.value().get_string().get(val) != simdjson::SUCCESS)
                     {
-                        conn.m_Params[std::string(key)] = std::string(val);
+                        continue;
                     }
+                    if (key.size() > kMaxParamFieldBytes || val.size() > kMaxParamFieldBytes)
+                    {
+                        LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping params entry at "
+                                      "element index {}: key/value size exceeds {} byte cap",
+                                      idx, kMaxParamFieldBytes);
+                        continue;
+                    }
+                    conn.m_Params[std::string(key)] = std::string(val);
+                }
+                if (paramsOverflow)
+                {
+                    continue;
                 }
             }
 
-            if (!conn.m_Name.empty())
+            if (conn.m_Name.empty())
             {
-                m_Connections[conn.m_Name] = std::move(conn);
+                LOG_CORE_WARN("CloudConnectionManager::ParseConnectionsJson: skipping element at index {}: "
+                              "missing or empty 'name'",
+                              idx);
+                continue;
             }
+            staging[conn.m_Name] = std::move(conn);
         }
 
+        // Atomic swap: only here, after the entire parse has succeeded, do we replace
+        // the live state.  Any earlier return left m_Connections untouched.
+        std::unique_lock lock(m_Mutex);
+        m_Connections = std::move(staging);
+        m_Dirty = true;
         return true;
     }
 
     std::string CloudConnectionManager::SerializeToJson() const
     {
+        // Hold shared_lock across the entire iteration: rehash from a concurrent writer
+        // (AddConnection / RemoveConnection / ParseConnectionsJson) would invalidate the
+        // range-for iterator and produce garbled JSON or a crash.
+        std::shared_lock lock(m_Mutex);
+
         std::ostringstream oss;
         oss << "{\n";
         oss << "    \"connections\": [\n";
@@ -229,10 +306,10 @@ namespace AIAssistant
         for (auto const& [name, conn] : m_Connections)
         {
             oss << "        {\n";
-            oss << "            \"name\": \"" << JsonEscape(conn.m_Name) << "\",\n";
-            oss << "            \"type\": \"" << JsonEscape(conn.m_Type) << "\",\n";
-            oss << "            \"endpoint\": \"" << JsonEscape(conn.m_Endpoint) << "\",\n";
-            oss << "            \"key_name\": \"" << JsonEscape(conn.m_KeyName) << "\",\n";
+            oss << "            \"name\": \"" << JsonHelper::EscapeJsonString(conn.m_Name) << "\",\n";
+            oss << "            \"type\": \"" << JsonHelper::EscapeJsonString(conn.m_Type) << "\",\n";
+            oss << "            \"endpoint\": \"" << JsonHelper::EscapeJsonString(conn.m_Endpoint) << "\",\n";
+            oss << "            \"key_name\": \"" << JsonHelper::EscapeJsonString(conn.m_KeyName) << "\",\n";
             oss << "            \"auth_type\": \"" << AuthTypeToString(conn.m_AuthType) << "\"";
 
             if (!conn.m_Params.empty())
@@ -241,7 +318,8 @@ namespace AIAssistant
                 size_t j = 0;
                 for (auto const& [key, val] : conn.m_Params)
                 {
-                    oss << "                \"" << JsonEscape(key) << "\": \"" << JsonEscape(val) << "\"";
+                    oss << "                \"" << JsonHelper::EscapeJsonString(key) << "\": \""
+                        << JsonHelper::EscapeJsonString(val) << "\"";
                     if (++j < conn.m_Params.size())
                     {
                         oss << ",";

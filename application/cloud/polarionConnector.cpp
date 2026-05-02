@@ -27,6 +27,8 @@
 #include "core.h"
 #include "engine.h"
 #include "keys/keyManager.h"
+#include "cloud/cloudTaskExecutor.h"
+#include "cloud/connectorHttp.h"
 
 namespace AIAssistant
 {
@@ -43,6 +45,13 @@ namespace AIAssistant
             return false;
         }
 
+        if (!ConnectorHttp::ValidatePublicHttpEndpoint(connection.m_Endpoint, errorMessage))
+        {
+            LOG_SECURITY_WARN("[security] polarion_endpoint_rejected connection='{}' reason='{}'",
+                              connection.m_Name, errorMessage);
+            return false;
+        }
+
         auto it = connection.m_Params.find("project_id");
         if (it == connection.m_Params.end() || it->second.empty())
         {
@@ -54,6 +63,14 @@ namespace AIAssistant
         CloudCredentials credentials;
         if (!ResolveCredentials(connection, credentials, errorMessage))
         {
+            return false;
+        }
+
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        {
+            errorMessage = "Polarion PAT contains CR/LF — refusing to send";
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] polarion_test_pat_crlf_rejected connection='{}'", connection.m_Name);
             return false;
         }
 

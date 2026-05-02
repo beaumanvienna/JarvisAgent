@@ -28,6 +28,7 @@
 
 #include "engine.h"
 #include "cloud/polarionWriteTaskExecutor.h"
+#include "json/jsonHelper.h"
 #include "workflow/filter/polarionClient.h"
 #include "workflow/taskPathResolver.h"
 
@@ -35,42 +36,12 @@ namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
 
-    static std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 32);
-        for (char ch : input)
-        {
-            switch (ch)
-            {
-                case '"':  out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n";  break;
-                case '\r': out += "\\r";  break;
-                case '\t': out += "\\t";  break;
-                default:
-                    if (static_cast<unsigned char>(ch) < 0x20)
-                    {
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(ch));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += ch;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
-
     static std::string BuildFieldUpdateBody(std::string const& projectId, std::string const& workItemId,
                                             std::string const& fieldName, std::string const& fieldValue)
     {
-        return "{\"data\":{\"type\":\"workitems\",\"id\":\"" + JsonEscape(projectId) + "/" +
-               JsonEscape(workItemId) + "\",\"attributes\":{\"" + JsonEscape(fieldName) +
-               "\":{\"type\":\"text/plain\",\"value\":\"" + JsonEscape(fieldValue) + "\"}}}}";
+        return "{\"data\":{\"type\":\"workitems\",\"id\":\"" + JsonHelper::EscapeJsonString(projectId) + "/" +
+               JsonHelper::EscapeJsonString(workItemId) + "\",\"attributes\":{\"" + JsonHelper::EscapeJsonString(fieldName) +
+               "\":{\"type\":\"text/plain\",\"value\":\"" + JsonHelper::EscapeJsonString(fieldValue) + "\"}}}}";
     }
 
     bool PolarionWriteTaskExecutor::ExecuteCloud(WorkflowDefinition const& workflowDefinition,
@@ -264,7 +235,7 @@ namespace AIAssistant
                 return false;
             }
 
-            responseBody = "{\"ok\":true,\"file_path\":\"" + filePath + "\"}";
+            responseBody = "{\"ok\":true,\"file_path\":\"" + JsonHelper::EscapeJsonString(filePath) + "\"}";
             LOG_APP_INFO("[polarion_write] downloaded attachment {} to {}", attachmentId, filePath);
         }
         else if (operation == "linked_items")

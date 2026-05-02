@@ -124,7 +124,7 @@ Creates an `ISSUE_<id>.txt` file in the queue directory under the given subsyste
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime. Returns 404 on Release builds. |
+| GET | `/api/debug/signals` | Live engine introspection — AI dispatcher, controllers, workflow runs, websocket, python pool, uptime, plus cloud-surface security counters (`cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`).  Returns 404 on Release builds. |
 | POST | `/api/debug/parse-rate-limit-headers` | Hermetic-test entry point. Body: `{interface_type, model, header_buffer, body, http_status}`. Calls `IRateLimitStrategy::Parse(...)` and returns the parsed `RateLimitObservation` plus `quota_key` + `initial_concurrency_probe`. Lets `test/dispatch/test_rate_limit_observation_parse.py` exercise every provider strategy without a live HTTP round-trip. Returns 404 on Release builds. |
 
 **Selected fields (rate-limit refactor):**
@@ -1264,6 +1264,8 @@ Initiates an OAuth 2.0 authorization code flow with PKCE for the named connectio
 The frontend opens `authorize_url` in a popup window. After user consent, the browser is redirected to the callback endpoint.
 
 ### GET /api/connections/\<name\>/oauth/callback
-OAuth redirect callback. Microsoft redirects here with `?code=...` after user consent. The backend exchanges the authorization code + PKCE code_verifier for access/refresh tokens, stores them in `OAuthTokenManager`, and returns an HTML page that auto-closes.
+OAuth redirect callback. Microsoft / Google redirect here with `?code=...&state=...` after user consent. The backend validates the `state` parameter against the server-side single-use nonce generated at `/oauth/authorize` time, exchanges the authorization code + PKCE code_verifier for access/refresh tokens, stores them in `OAuthTokenManager`, and returns an HTML page that auto-closes.
 **Response (200):** HTML page confirming authorization success.
 **Response (400):** Error message if code is missing or the OAuth flow state is invalid.
+
+**Authentication:** This endpoint is **intentionally unauthenticated** — the user-agent redirect from the OAuth provider cannot carry the j9t admin Bearer token.  The CSRF gate is the `state` query parameter (16-byte random nonce, server-side single-use, verified before any code-for-token exchange).  Per RFC 6749 §10.12, `state` IS the security mechanism for an OAuth callback.  The `/oauth/authorize` endpoint that creates the flow remains admin-gated.

@@ -32,42 +32,14 @@
 #include "engine.h"
 #include "cloud/redmineCloudTaskExecutor.h"
 #include "cloud/redmineConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
-
-    static std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20)
-                    {
-                        char buf[8];
-                        std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        out += buf;
-                    }
-                    else
-                    {
-                        out += c;
-                    }
-                    break;
-            }
-        }
-        return out;
-    }
 
     static std::string ReadFileToString(std::string const& path)
     {
@@ -119,13 +91,9 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — self-hosted Redmine responds
+        // directly for `/issues/*.json` endpoints.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (!requestBody.empty())
         {
@@ -310,7 +278,7 @@ namespace AIAssistant
             bool first = true;
             if (!notes.empty())
             {
-                body << "\"notes\":\"" << JsonEscape(notes) << "\"";
+                body << "\"notes\":\"" << JsonHelper::EscapeJsonString(notes) << "\"";
                 first = false;
             }
             if (!assignedToId.empty())
@@ -326,7 +294,7 @@ namespace AIAssistant
                 }
                 else
                 {
-                    body << "\"assigned_to_id\":\"" << JsonEscape(assignedToId) << "\"";
+                    body << "\"assigned_to_id\":\"" << JsonHelper::EscapeJsonString(assignedToId) << "\"";
                 }
             }
             body << "}}";

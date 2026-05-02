@@ -32,6 +32,7 @@
 #include "engine.h"
 #include "cloud/dbQueryCloudTaskExecutor.h"
 #include "cloud/postgresConnector.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
@@ -72,24 +73,6 @@ namespace AIAssistant
         return escaped;
     }
 
-    // Escape a string for JSON output.
-    static std::string JsonEscape(std::string const& value)
-    {
-        std::string escaped;
-        for (char c : value)
-        {
-            switch (c)
-            {
-                case '"': escaped += "\\\""; break;
-                case '\\': escaped += "\\\\"; break;
-                case '\n': escaped += "\\n"; break;
-                case '\r': escaped += "\\r"; break;
-                case '\t': escaped += "\\t"; break;
-                default: escaped += c; break;
-            }
-        }
-        return escaped;
-    }
 
     bool DbQueryCloudTaskExecutor::ExecuteCloud(WorkflowDefinition const& workflowDefinition,
                                                 WorkflowRun& workflowRun, TaskDef const& taskDefinition,
@@ -144,6 +127,48 @@ namespace AIAssistant
         if (outputFile.empty())
         {
             outputFile = (format == "csv") ? "result.csv" : "result.json";
+        }
+
+        // Tripwire: reject forbidden libpq cert/key/file-path params before
+        // building the connection string.  See PostgresConnector::ValidatePostgresParams
+        // docstring.  Mirrors the same gate in PostgresConnector::TestConnection.
+        {
+            std::string forbiddenErr;
+            if (!PostgresConnector::ValidatePostgresParams(connection, forbiddenErr))
+            {
+                taskState.m_LastErrorMessage = "db_query: " + forbiddenErr;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[db_query] task='{}' workflow='{}' run='{}': {}",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, forbiddenErr);
+                LOG_SECURITY_WARN("[security] postgres_forbidden_param connection='{}' message='{}'",
+                                  connection.m_Name, forbiddenErr);
+                return false;
+            }
+        }
+
+        // Gate on sslmode allowlist + non-localhost production posture before
+        // building the connection string.  Mirrors the same check in
+        // PostgresConnector::TestConnection so an unsafe sslmode never reaches
+        // libpq's connect.
+        {
+            std::string host;
+            std::string port;
+            PostgresConnector::ParseHostPort(connection, host, port);
+            auto const sslmodeIt = connection.m_Params.find("sslmode");
+            std::string const sslmode = (sslmodeIt != connection.m_Params.end() && !sslmodeIt->second.empty())
+                                             ? sslmodeIt->second
+                                             : "require";
+            std::string sslErr;
+            if (!PostgresConnector::IsValidSslMode(host, sslmode, sslErr))
+            {
+                taskState.m_LastErrorMessage = "db_query: " + sslErr;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[db_query] task='{}' workflow='{}' run='{}': {}",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, sslErr);
+                LOG_SECURITY_WARN("[security] postgres_invalid_sslmode connection='{}' host='{}' sslmode='{}'",
+                                  connection.m_Name, host, sslmode);
+                return false;
+            }
         }
 
         // Connect to PostgreSQL
@@ -265,7 +290,7 @@ namespace AIAssistant
                     {
                         out << ", ";
                     }
-                    out << "\"" << JsonEscape(colNames[static_cast<size_t>(col)]) << "\": ";
+                    out << "\"" << JsonHelper::EscapeJsonString(colNames[static_cast<size_t>(col)]) << "\": ";
 
                     if (PQgetisnull(res, row, col))
                     {
@@ -273,7 +298,7 @@ namespace AIAssistant
                     }
                     else
                     {
-                        out << "\"" << JsonEscape(PQgetvalue(res, row, col)) << "\"";
+                        out << "\"" << JsonHelper::EscapeJsonString(PQgetvalue(res, row, col)) << "\"";
                     }
                 }
                 out << "}";

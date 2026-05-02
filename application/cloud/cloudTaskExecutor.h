@@ -46,6 +46,16 @@ namespace AIAssistant
         bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
                      TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
 
+        // Reject CR/LF in caller-supplied strings before splicing into HTTP / SMTP
+        // headers (bearer tokens, JWT, RFC 2822 field values).  Embedded `\r\n`
+        // terminates the current header and starts a new one — an attacker who
+        // controls e.g. `subject: "Hi\r\nBcc: victim@evil.com"` can inject an
+        // arbitrary BCC.  libcurl recent versions strip embedded newlines but the
+        // behaviour is version-dependent; never rely on the library for a check
+        // we can perform cheaply ourselves.  Public because some cloud executors
+        // call this from file-local static helpers (not member functions).
+        static bool ContainsCrlf(std::string const& s);
+
     protected:
         // Subclasses implement this with the actual cloud operation.
         // The cancellationToken allows cooperative cancellation of long-running operations.

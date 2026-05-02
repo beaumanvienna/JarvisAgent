@@ -34,7 +34,16 @@ namespace AIAssistant
     //
     // CloudConnection.m_Params keys:
     //   "database"   — database name (required)
-    //   "sslmode"    — "disable", "require", "verify-ca", "verify-full" (optional, default "prefer")
+    //   "sslmode"    — libpq sslmode (optional).  Allowlist: "disable", "allow",
+    //                  "prefer", "require", "verify-ca", "verify-full".  Default
+    //                  "require" for production posture (TLS mandatory; libpq's
+    //                  built-in "prefer" silently falls back to plaintext, which
+    //                  is MITM-vulnerable).  For non-localhost hosts, the three
+    //                  plaintext-fallback modes ("disable", "allow", "prefer")
+    //                  are rejected — only TLS-required modes are acceptable
+    //                  (mirrors email's `allowLocal = !useSsl` heuristic).  For
+    //                  local-network hosts (loopback / RFC 1918 / link-local),
+    //                  any allowlisted mode is accepted as a dev-mode opt-out.
     //
     // The connector builds a libpq connection string from these fields.
     class PostgresConnector : public ICloudConnector
@@ -44,6 +53,42 @@ namespace AIAssistant
         bool TestConnection(CloudConnection const& connection, std::string& errorMessage) override;
         bool ResolveCredentials(CloudConnection const& connection, CloudCredentials& credentials,
                                 std::string& errorMessage) override;
+
+        // Parse "host[:port]" from connection.m_Endpoint.  Defaults to
+        // host="localhost", port="5432" if Endpoint is empty or unparseable.
+        // Public so dbQueryCloudTaskExecutor can extract host for IsValidSslMode
+        // before calling BuildConnectionString.
+        static void ParseHostPort(CloudConnection const& connection, std::string& host, std::string& port);
+
+        // Validate sslmode against libpq's allowlist + j9t's production posture.
+        // Returns true if (host, sslmode) is acceptable.  Populates errorMessage
+        // on rejection.  Public so dbQueryCloudTaskExecutor can gate before
+        // BuildConnectionString.  See class-level docstring for the rules.
+        static bool IsValidSslMode(std::string const& host, std::string const& sslmode,
+                                    std::string& errorMessage);
+
+        // Reject any libpq keyword/value param that would resolve to a local
+        // file path or external file lookup.  j9t's posture: credentials live
+        // in the encrypted KeyManager, NOT on the local filesystem; any param
+        // that asks libpq to read a path is a path-traversal vector waiting to
+        // happen (an attacker-controlled value like `/etc/passwd` for
+        // `sslrootcert` would let libpq attempt to read sensitive files
+        // server-side).  Forbidden keys: sslcert, sslkey, sslrootcert, sslcrl,
+        // sslcrldir, service, passfile, sslpassword.
+        //
+        // BuildConnectionString currently only forwards `database` and
+        // `sslmode` to libpq — everything else in m_Params is silently
+        // ignored.  This validator is preventive: if a future PR adds
+        // `paramOrDefault("sslcert", ...)` etc. to BuildConnectionString
+        // without first removing this gate, the gate fires and rejects the
+        // request before it reaches libpq.  Removing this gate without
+        // adding `ValidateLocalPath` confinement on the cert/key paths is a
+        // code-review reject.
+        //
+        // Returns true if no forbidden keys are present.  Populates
+        // errorMessage on rejection.  Public so dbQueryCloudTaskExecutor can
+        // gate before BuildConnectionString.
+        static bool ValidatePostgresParams(CloudConnection const& connection, std::string& errorMessage);
 
         // Build a libpq connection string from connection config + credentials.
         static std::string BuildConnectionString(CloudConnection const& connection,

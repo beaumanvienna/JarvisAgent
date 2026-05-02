@@ -73,6 +73,7 @@
 #include "cloud/cloudConnectorRegistry.h"
 #include "cloud/cloudConnectionManager.h"
 #include "cloud/cloudCircuitBreaker.h"
+#include "cloud/connectorHttp.h"
 #include "cloud/oneDriveConnector.h"
 #include "keys/oauthTokenManager.h"
 #include "curlWrapper/curlWrapper.h"
@@ -1632,12 +1633,17 @@ namespace AIAssistant
                     return HandleOAuthAuthorizeGet(connectionName);
                 });
 
+        // OAuth2 redirect endpoint.  Intentionally unauthenticated — the user-agent
+        // redirect from Google / Microsoft cannot carry the j9t admin Bearer.  The
+        // CSRF gate is the `state` query parameter, which is a single-use random
+        // nonce stored server-side at `/oauth/authorize` time and verified inside
+        // HandleOAuthCallbackGet (see line ~6685).  Per RFC 6749 §10.12, `state`
+        // IS the security mechanism for an OAuth callback — adding Bearer auth on
+        // top breaks the legitimate flow without adding security.
         CROW_ROUTE(m_Server, "/api/connections/<string>/oauth/callback")
             .methods("GET"_method)(
                 [this](crow::request const& req, std::string const& connectionName)
                 {
-                    auto err = CheckAdminAuth(req);
-                    if (!err.empty()) return MakeAuthErrorResponse(err);
                     return HandleOAuthCallbackGet(req, connectionName);
                 });
 
@@ -6296,7 +6302,7 @@ namespace AIAssistant
     {
         auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
 
-        CloudConnection const* existing = connectionManager.GetConnection(connectionName);
+        auto existing = connectionManager.GetConnection(connectionName);
         if (!existing)
         {
             crow::json::wvalue err;
@@ -6306,7 +6312,9 @@ namespace AIAssistant
             return MakeJsonResponse(404, err);
         }
 
-        // Start with existing config and overlay provided fields
+        // Start with existing config and overlay provided fields.  *existing returns the
+        // CloudConnection by reference (the optional owns the bytes); the copy below
+        // makes a private working copy that the request handler can mutate freely.
         CloudConnection updated = *existing;
 
         simdjson::ondemand::parser parser;
@@ -6395,7 +6403,7 @@ namespace AIAssistant
         auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
         auto& connectorRegistry = Core::g_Core->GetCloudConnectorRegistry();
 
-        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        auto connection = connectionManager.GetConnection(connectionName);
         if (!connection)
         {
             crow::json::wvalue err;
@@ -6482,7 +6490,7 @@ namespace AIAssistant
     {
         auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
 
-        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        auto connection = connectionManager.GetConnection(connectionName);
         if (!connection)
         {
             crow::json::wvalue err;
@@ -6652,7 +6660,7 @@ namespace AIAssistant
     {
         auto& connectionManager = Core::g_Core->GetCloudConnectionManager();
 
-        CloudConnection const* connection = connectionManager.GetConnection(connectionName);
+        auto connection = connectionManager.GetConnection(connectionName);
         if (!connection)
         {
             return crow::response(400, "Connection not found: " + connectionName);
@@ -8498,6 +8506,26 @@ namespace AIAssistant
             signals["rate_limit_buckets_authenticated"] = static_cast<int64_t>(m_AuthenticatedBuckets.size());
             signals["auth_failure_records"] = static_cast<int64_t>(m_AuthFailures.size());
         }
+
+        // ---- Cloud surface security counters ----
+        // Lifetime totals from each cloud-surface security gate.  Per-instance
+        // forensic detail (timestamps, task/run/connection identifiers,
+        // rejected values) is in the security log; these counters answer the
+        // "is this gate firing at all?" question without grepping the log.
+        // See connectorHttp.h docstring on each Get*RejectionCount accessor
+        // for the gate's responsibility.
+        signals["cloud_dns_resolved_ip_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetDnsResolvedIpRejectionCount());
+        signals["cloud_endpoint_ssrf_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetEndpointSsrfRejectionCount());
+        signals["cloud_credential_crlf_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetCredentialCrlfRejectionCount());
+        signals["cloud_input_validation_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetInputValidationRejectionCount());
+        signals["cloud_postgres_invalid_sslmode_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetPostgresInvalidSslmodeRejectionCount());
+        signals["cloud_postgres_forbidden_param_rejections"] =
+            static_cast<int64_t>(ConnectorHttp::GetPostgresForbiddenParamRejectionCount());
 
         // ---- Workflow runs ----
         size_t activeRuns = 0;

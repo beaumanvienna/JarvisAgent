@@ -21,6 +21,8 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -34,7 +36,9 @@
 #include "engine.h"
 #include "cloud/snowflakeCloudTaskExecutor.h"
 #include "cloud/snowflakeConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
@@ -43,6 +47,42 @@ namespace AIAssistant
     static constexpr long kCurlTimeoutSeconds = 60;
     static constexpr int kDefaultPollIntervalSeconds = 2;
     static constexpr int kDefaultStatementTimeoutSeconds = 3600;
+    // Bound on the response body the writeCallback will accept.  64 MB matches the
+    // audit recommendation — Snowflake result sets are paged, so a single response
+    // larger than this is already pathological (or attacker-controlled).
+    static constexpr size_t kMaxSnowflakeResponseBytes = 64 * 1024 * 1024;
+    // Bounds on the timeout / poll interval params.  Pre-clamp the uint64_t value
+    // BEFORE any int cast so values larger than INT_MAX cannot wrap to negative
+    // (which disables the timeout entirely) and cannot pin a worker thread for
+    // years on a typo'd workflow.
+    static constexpr int kMaxStatementTimeoutSeconds = 24 * 3600; // 24 hours
+    static constexpr int kMaxPollIntervalSeconds = 60;
+
+    // Snowflake statement handles look like UUIDs (alphanumeric + `-`).  Validate
+    // before interpolating into the poll / cancel URL — the value comes from the
+    // Snowflake server response, which is a trusted boundary in practice but
+    // hostile in threat-model terms (compromised endpoint or response tampering).
+    static bool IsValidSnowflakeHandle(std::string const& handle)
+    {
+        if (handle.empty() || handle.size() > 64)
+        {
+            return false;
+        }
+        for (char c : handle)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '-')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
 
     // Helper: perform an authenticated Snowflake REST API request
     static bool SnowflakeRequest(std::string const& method, std::string const& url, std::string const& jwt,
@@ -60,8 +100,18 @@ namespace AIAssistant
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
         {
             auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
+            size_t const incoming = size * nmemb;
+            // Bound the response buffer.  Without this an attacker-controlled or
+            // compromised Snowflake endpoint can stream arbitrary bytes into our
+            // process.  Returning 0 from the libcurl write callback aborts the
+            // transfer with CURLE_WRITE_ERROR, which the caller surfaces as a
+            // regular Snowflake error.
+            if (buf->size() + incoming > kMaxSnowflakeResponseBytes)
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), incoming);
+            return incoming;
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
@@ -70,13 +120,12 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kCurlTimeoutSeconds);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following + DNS post-resolve check —
+        // Snowflake's API never legitimately redirects, so any 30x is treated
+        // as hostile.  Snowflake is always reached via `https://*.snowflakecomputing.com`
+        // (per `SnowflakeConnector::BuildApiBaseUrl`), so the post-resolve
+        // callback installs and rejects any DNS resolution to a local-network IP.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (!requestBody.empty())
         {
@@ -187,7 +236,14 @@ namespace AIAssistant
             uint64_t val;
             if (doc["timeout"].get_uint64().get(val) == simdjson::SUCCESS)
             {
-                statementTimeout = static_cast<int>(val);
+                // Pre-clamp BEFORE int cast: values > INT_MAX wrap to negative
+                // (disabling the timeout entirely) which lets a hostile workflow
+                // pin a worker thread for years.  Cap at 24 hours; lower bound 1.
+                if (val > static_cast<uint64_t>(kMaxStatementTimeoutSeconds))
+                {
+                    val = kMaxStatementTimeoutSeconds;
+                }
+                statementTimeout = std::clamp(static_cast<int>(val), 1, kMaxStatementTimeoutSeconds);
             }
         }
 
@@ -196,8 +252,28 @@ namespace AIAssistant
             uint64_t val;
             if (doc["poll_interval"].get_uint64().get(val) == simdjson::SUCCESS)
             {
-                pollInterval = static_cast<int>(std::max(val, uint64_t(1)));
+                if (val > static_cast<uint64_t>(kMaxPollIntervalSeconds))
+                {
+                    val = kMaxPollIntervalSeconds;
+                }
+                pollInterval = std::clamp(static_cast<int>(val), 1, kMaxPollIntervalSeconds);
             }
+        }
+
+        // JWT must contain no CR/LF before splicing into the Authorization header
+        // (sitting 14 cluster fix).  ResolveCredentials produces the JWT via
+        // JwtGenerator which is well-behaved, but a future credential type or
+        // renewal flow could inject hostile bytes; check defensively.
+        if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
+        {
+            taskState.m_LastErrorMessage = "Snowflake JWT contains CR/LF — refusing to send";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': JWT CRLF rejected",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] snowflake_jwt_crlf_rejected task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
         }
 
         // Build warehouse/database/schema context — task params override connection defaults
@@ -224,41 +300,43 @@ namespace AIAssistant
             schema = getConnectionParam("schema");
         }
 
-        // Build the SQL submit request body
-        // Escape the query for JSON embedding
-        std::string escapedQuery;
-        for (char c : query)
-        {
-            switch (c)
-            {
-                case '"': escapedQuery += "\\\""; break;
-                case '\\': escapedQuery += "\\\\"; break;
-                case '\n': escapedQuery += "\\n"; break;
-                case '\r': escapedQuery += "\\r"; break;
-                case '\t': escapedQuery += "\\t"; break;
-                default: escapedQuery += c; break;
-            }
-        }
-
-        std::string requestBody = "{\"statement\":\"" + escapedQuery + "\"";
+        // Build the SQL submit request body — RFC 8259-compliant escape via
+        // the canonical helper (also escapes control bytes 0x00..0x1F that the
+        // prior inline 5-case switch passed through raw, producing technically
+        // invalid JSON when the query contained e.g. an embedded NUL).
+        std::string requestBody = "{\"statement\":\"" + JsonHelper::EscapeJsonString(query) + "\"";
         requestBody += ",\"timeout\":" + std::to_string(statementTimeout);
         requestBody += ",\"resultSetMetaData\":{\"format\":\"jsonv2\"}";
+        // Escape warehouse / database / schema with the canonical helper.  Pre-fix
+        // these were spliced raw — a value containing `","timeout":0,"x":"` would
+        // override the timeout (or any other request field) by closing the JSON
+        // string early.  JsonHelper produces RFC 8259 §7-compliant escapes.
         if (!warehouse.empty())
         {
-            requestBody += ",\"warehouse\":\"" + warehouse + "\"";
+            requestBody += ",\"warehouse\":\"" + JsonHelper::EscapeJsonString(warehouse) + "\"";
         }
         if (!database.empty())
         {
-            requestBody += ",\"database\":\"" + database + "\"";
+            requestBody += ",\"database\":\"" + JsonHelper::EscapeJsonString(database) + "\"";
         }
         if (!schema.empty())
         {
-            requestBody += ",\"schema\":\"" + schema + "\"";
+            requestBody += ",\"schema\":\"" + JsonHelper::EscapeJsonString(schema) + "\"";
         }
         requestBody += "}";
 
-        // Submit the statement
+        // Submit the statement.  BuildApiBaseUrl validates the endpoint allowlist
+        // and returns "" on rejection (already logged at the connector layer).
         std::string apiBase = SnowflakeConnector::BuildApiBaseUrl(connection.m_Endpoint);
+        if (apiBase.empty())
+        {
+            taskState.m_LastErrorMessage =
+                "Snowflake endpoint rejected: invalid account locator (see security log)";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': endpoint rejected",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
         std::string submitUrl = apiBase + "/api/v2/statements";
 
         std::string responseBody;
@@ -273,11 +351,13 @@ namespace AIAssistant
 
         if (httpCode >= 400)
         {
+            // Don't embed the raw response body.  Snowflake error responses contain
+            // schema names, partial query data, and other operational metadata that
+            // shouldn't leak into m_LastErrorMessage (which is persisted to the
+            // workflow state store and may surface in the dashboard / API).  The
+            // structured error code + message is parsed below as a separate path
+            // when the response is well-formed JSON.
             taskState.m_LastErrorMessage = "Snowflake statement submission failed: HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
-            {
-                taskState.m_LastErrorMessage += ": " + responseBody;
-            }
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
@@ -303,6 +383,21 @@ namespace AIAssistant
         }
 
         std::string handle(statementHandle);
+
+        // Server-supplied handle, but interpolated into the poll + cancel URL —
+        // a compromised endpoint or response tampering could inject URL components
+        // (path traversal, query string).  Validate before any URL build.
+        if (!IsValidSnowflakeHandle(handle))
+        {
+            taskState.m_LastErrorMessage = "Snowflake server returned an invalid statement handle";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': server-supplied handle rejected (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, handle.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] snowflake_invalid_handle task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
 
         std::string_view statusCode;
         submitDoc["statementStatusUrl"].get_string(); // consume if present
@@ -362,12 +457,10 @@ namespace AIAssistant
 
                 if (httpCode >= 400)
                 {
+                    // Same rationale as the submit error path: don't embed the raw
+                    // Snowflake response in m_LastErrorMessage.
                     taskState.m_LastErrorMessage =
                         "Snowflake poll failed: HTTP " + std::to_string(httpCode);
-                    if (!responseBody.empty() && responseBody.size() < 500)
-                    {
-                        taskState.m_LastErrorMessage += ": " + responseBody;
-                    }
                     taskState.m_State = TaskInstanceStateKind::Failed;
                     return false;
                 }
@@ -492,6 +585,19 @@ namespace AIAssistant
             std::filesystem::create_directories(workDir, ec);
         }
 
+        // Confine outputFile under workDir.  An attacker-controlled value such as
+        // `../../etc/cron.d/evil` or an absolute path would otherwise let the task
+        // overwrite arbitrary files writable by the j9t process.  Same gate as
+        // sitting 11's email attachment path-traversal fix.
+        if (!ValidateLocalPath(outputFile, workDir, taskDefinition.m_Id))
+        {
+            taskState.m_LastErrorMessage =
+                "snowflake_query: output_file path is invalid or escapes the working directory";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': output_file path rejected",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
         std::filesystem::path outputPath = workDir / outputFile;
 
         // Write output
@@ -515,28 +621,16 @@ namespace AIAssistant
                     {
                         out << ", ";
                     }
-                    out << "\"" << columnNames[c] << "\": ";
+                    out << "\"" << JsonHelper::EscapeJsonString(columnNames[c]) << "\": ";
                     if (rows[r][c].empty())
                     {
                         out << "null";
                     }
                     else
                     {
-                        // JSON-escape the value
-                        out << "\"";
-                        for (char ch : rows[r][c])
-                        {
-                            switch (ch)
-                            {
-                                case '"': out << "\\\""; break;
-                                case '\\': out << "\\\\"; break;
-                                case '\n': out << "\\n"; break;
-                                case '\r': out << "\\r"; break;
-                                case '\t': out << "\\t"; break;
-                                default: out << ch; break;
-                            }
-                        }
-                        out << "\"";
+                        // RFC 8259 escape via canonical helper — superset of the prior
+                        // inline 5-case switch (also handles control bytes 0x00..0x1F).
+                        out << "\"" << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
                     }
                 }
                 out << "}" << (r + 1 < rows.size() ? "," : "") << "\n";

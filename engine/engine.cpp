@@ -224,23 +224,42 @@ int engine(int argc, char* argv[])
 
         if (std::filesystem::exists(connectionsPath))
         {
-            std::ifstream file(connectionsPath);
-            if (file)
+            // Pre-read size cap: stat the file first so a multi-GB file can never
+            // expand the in-process std::string before ParseConnectionsJson's own cap
+            // sees it.  Same 1 MB threshold as the parser-side cap (defense in depth).
+            static constexpr std::uintmax_t kMaxConnectionsFileBytes = 1 * 1024 * 1024;
+            std::error_code sizeEc;
+            auto const fileSize = std::filesystem::file_size(connectionsPath, sizeEc);
+            if (sizeEc)
             {
-                std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                file.close();
+                LOG_CORE_ERROR("CloudConnectionManager: failed to stat '{}': {}",
+                               connectionsPath.string(), sizeEc.message());
+            }
+            else if (fileSize > kMaxConnectionsFileBytes)
+            {
+                LOG_CORE_ERROR("CloudConnectionManager: '{}' size {} bytes exceeds {} byte cap; refusing to load",
+                               connectionsPath.string(), fileSize, kMaxConnectionsFileBytes);
+            }
+            else
+            {
+                std::ifstream file(connectionsPath);
+                if (file)
+                {
+                    std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                    file.close();
 
-                auto& connectionManager = engine->GetCloudConnectionManager();
-                if (connectionManager.ParseConnectionsJson(json))
-                {
-                    auto names = connectionManager.GetConnectionNames();
-                    LOG_CORE_INFO("CloudConnectionManager: loaded {} connection(s) from '{}'", names.size(),
-                                  connectionsPath.string());
-                    connectionManager.ClearDirty();
-                }
-                else
-                {
-                    LOG_CORE_WARN("CloudConnectionManager: failed to parse '{}'", connectionsPath.string());
+                    auto& connectionManager = engine->GetCloudConnectionManager();
+                    if (connectionManager.ParseConnectionsJson(json))
+                    {
+                        auto names = connectionManager.GetConnectionNames();
+                        LOG_CORE_INFO("CloudConnectionManager: loaded {} connection(s) from '{}'", names.size(),
+                                      connectionsPath.string());
+                        connectionManager.ClearDirty();
+                    }
+                    else
+                    {
+                        LOG_CORE_WARN("CloudConnectionManager: failed to parse '{}'", connectionsPath.string());
+                    }
                 }
             }
         }

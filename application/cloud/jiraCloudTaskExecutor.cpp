@@ -31,31 +31,14 @@
 #include "engine.h"
 #include "cloud/jiraCloudTaskExecutor.h"
 #include "cloud/jiraConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
-
-    static std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default: out += c; break;
-            }
-        }
-        return out;
-    }
 
     static bool JiraRequest(std::string const& method, std::string const& url,
                             CloudCredentials const& credentials, std::string& responseBody, long& httpCode,
@@ -82,13 +65,10 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — Atlassian Jira REST at the
+        // user's `*.atlassian.net` host responds directly for `/rest/api/3/*`
+        // endpoints; legitimate flows never 30x.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (!requestBody.empty())
         {
@@ -229,19 +209,19 @@ namespace AIAssistant
 
             // Build Jira REST API v3 create issue body
             std::string requestBody = "{\"fields\":{";
-            requestBody += "\"project\":{\"key\":\"" + JsonEscape(projectKey) + "\"}";
-            requestBody += ",\"summary\":\"" + JsonEscape(summary) + "\"";
-            requestBody += ",\"issuetype\":{\"name\":\"" + JsonEscape(issueType) + "\"}";
+            requestBody += "\"project\":{\"key\":\"" + JsonHelper::EscapeJsonString(projectKey) + "\"}";
+            requestBody += ",\"summary\":\"" + JsonHelper::EscapeJsonString(summary) + "\"";
+            requestBody += ",\"issuetype\":{\"name\":\"" + JsonHelper::EscapeJsonString(issueType) + "\"}";
 
             if (!description.empty())
             {
                 // Jira v3 uses ADF for description; use simple paragraph
-                requestBody += ",\"description\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + JsonEscape(description) + "\"}]}]}";
+                requestBody += ",\"description\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + JsonHelper::EscapeJsonString(description) + "\"}]}]}";
             }
 
             if (!priority.empty())
             {
-                requestBody += ",\"priority\":{\"name\":\"" + JsonEscape(priority) + "\"}";
+                requestBody += ",\"priority\":{\"name\":\"" + JsonHelper::EscapeJsonString(priority) + "\"}";
             }
 
             // Labels
@@ -256,7 +236,7 @@ namespace AIAssistant
                     if (label.get_string().get(sv) == simdjson::SUCCESS)
                     {
                         if (!first) requestBody += ",";
-                        requestBody += "\"" + JsonEscape(std::string(sv)) + "\"";
+                        requestBody += "\"" + JsonHelper::EscapeJsonString(std::string(sv)) + "\"";
                         first = false;
                     }
                 }
@@ -329,7 +309,8 @@ namespace AIAssistant
 
             if (responseBody.empty())
             {
-                responseBody = "{\"ok\":true,\"issue_key\":\"" + issueKey + "\",\"operation\":\"update\"}";
+                responseBody = "{\"ok\":true,\"issue_key\":\"" + JsonHelper::EscapeJsonString(issueKey) +
+                               "\",\"operation\":\"update\"}";
             }
 
             LOG_APP_INFO("[jira] updated issue {}", issueKey);
@@ -345,7 +326,7 @@ namespace AIAssistant
                 return false;
             }
 
-            std::string requestBody = "{\"transition\":{\"id\":\"" + JsonEscape(transitionId) + "\"}}";
+            std::string requestBody = "{\"transition\":{\"id\":\"" + JsonHelper::EscapeJsonString(transitionId) + "\"}}";
             std::string url = baseUrl + "/rest/api/3/issue/" + issueKey + "/transitions";
 
             if (!JiraRequest("POST", url, credentials, responseBody, httpCode, requestBody))
@@ -364,7 +345,8 @@ namespace AIAssistant
 
             if (responseBody.empty())
             {
-                responseBody = "{\"ok\":true,\"issue_key\":\"" + issueKey + "\",\"transition_id\":\"" + transitionId + "\"}";
+                responseBody = "{\"ok\":true,\"issue_key\":\"" + JsonHelper::EscapeJsonString(issueKey) +
+                               "\",\"transition_id\":\"" + JsonHelper::EscapeJsonString(transitionId) + "\"}";
             }
 
             LOG_APP_INFO("[jira] transitioned issue {} with transition {}", issueKey, transitionId);
@@ -381,7 +363,7 @@ namespace AIAssistant
             }
 
             // Jira v3 comment uses ADF format
-            std::string requestBody = "{\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + JsonEscape(body) + "\"}]}]}}";
+            std::string requestBody = "{\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + JsonHelper::EscapeJsonString(body) + "\"}]}]}}";
             std::string url = baseUrl + "/rest/api/3/issue/" + issueKey + "/comment";
 
             if (!JiraRequest("POST", url, credentials, responseBody, httpCode, requestBody))

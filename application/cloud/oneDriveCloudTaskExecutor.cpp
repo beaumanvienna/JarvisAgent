@@ -32,7 +32,9 @@
 #include "engine.h"
 #include "cloud/oneDriveCloudTaskExecutor.h"
 #include "cloud/oneDriveConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
@@ -42,11 +44,56 @@ namespace AIAssistant
     static constexpr curl_off_t kMaxDownloadBytes = 256 * 1024 * 1024; // 256 MB safety limit
 
     // Helper: perform an authenticated Graph API request
+    // Bound on the response body — same DoS posture as the other cloud
+    // executors; 64 MB matches the established pattern.
+    static constexpr size_t kMaxOneDriveResponseBytes = 64 * 1024 * 1024;
+
+    // Validator for OneDrive remote_path.  The path is interpolated into
+    //   /me/drive/root:/{remote_path}:/content
+    // — Microsoft Graph's path-based addressing.  Pre-fix, an attacker-controlled
+    // `remote_path` like `../../../foo:/content?x=` could escape the path
+    // segment and inject URL components.  Allow only safe path-component chars:
+    // alphanumeric, `.`, `_`, `-`, `/` (hierarchy delimiter), space (legitimate
+    // in OneDrive folder/file names).  Reject `..` segments (path traversal in
+    // the Graph URL), `?` `#` `:` `@` `%` (URL-meaningful), `\\` `\r` `\n`.
+    static bool IsValidOneDriveRemotePath(std::string const& path)
+    {
+        if (path.empty() || path.size() > 1024)
+        {
+            return false;
+        }
+        if (path.find("..") != std::string::npos)
+        {
+            return false;
+        }
+        for (char c : path)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '.' || c == '_' || c == '-' || c == '/' || c == ' ')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
     static bool GraphRequest(std::string const& method, std::string const& url, std::string const& bearerToken,
                              std::string& responseBody, long& httpCode,
                              char const* uploadData = nullptr, size_t uploadSize = 0,
                              std::string const& contentType = {})
     {
+        if (ICloudTaskExecutor::ContainsCrlf(bearerToken))
+        {
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] onedrive_bearer_crlf_rejected");
+            return false;
+        }
+
         CURL* curl = curl_easy_init();
         if (!curl)
         {
@@ -58,8 +105,13 @@ namespace AIAssistant
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
         {
             auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
+            size_t const incoming = size * nmemb;
+            if (buf->size() + incoming > kMaxOneDriveResponseBytes)
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), incoming);
+            return incoming;
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
@@ -68,13 +120,14 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + redirect-following capped to https — Microsoft Graph
+        // legitimately 30x's: `GET /me/drive/items/{id}/content` returns 302
+        // to a SharePoint / `download.microsoft*` CDN URL, and large-file
+        // upload sessions can pivot to `*.up.1drv.com` endpoints.
+        // `ApplyExecutorRedirectDefaults` restricts redirect targets to https,
+        // caps follow depth at 10, and applies explicit verify-peer +
+        // verify-host.  Microsoft Graph is HTTPS-only.
+        ConnectorHttp::ApplyExecutorRedirectDefaults(curl, url);
 
         if (uploadData && uploadSize > 0)
         {
@@ -103,6 +156,14 @@ namespace AIAssistant
     static bool GraphDownload(std::string const& url, std::string const& bearerToken, std::string const& outputPath,
                               std::string& errorMessage)
     {
+        if (ICloudTaskExecutor::ContainsCrlf(bearerToken))
+        {
+            ConnectorHttp::IncrementCredentialCrlfRejection();
+            LOG_SECURITY_WARN("[security] onedrive_bearer_crlf_rejected (download)");
+            errorMessage = "OneDrive bearer token contains CR/LF — refusing to send";
+            return false;
+        }
+
         CURL* curl = curl_easy_init();
         if (!curl)
         {
@@ -122,14 +183,13 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, kTimeoutSeconds);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, kMaxDownloadBytes);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + redirect-following capped to https — same posture
+        // as the GraphRequest helper above.  This download path is THE
+        // primary reason redirects must be allowed: Graph's content endpoint
+        // 302's to a SharePoint / `download.microsoft*` CDN URL on every
+        // download request.
+        ConnectorHttp::ApplyExecutorRedirectDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
         std::string authHeader = "Authorization: Bearer " + bearerToken;
@@ -204,6 +264,23 @@ namespace AIAssistant
             return false;
         }
 
+        // Validate remote_path before any URL build — closes the audit's CRITICAL
+        // "Path Traversal via remote_path in URL Construction (SSRF / Injection)"
+        // finding.  Pre-fix `graphBase + "/me/drive/root:/" + remotePath + ":/content"`
+        // would interpolate `../../etc/passwd` or `?x=&y=` directly.
+        if (!IsValidOneDriveRemotePath(remotePath))
+        {
+            taskState.m_LastErrorMessage =
+                "Invalid OneDrive remote_path: must be alphanumeric + ._-/ + space, no `..` segments";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': invalid remote_path (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, remotePath.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] onedrive_invalid_remote_path task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+
         std::string localPath = getStringParam("local_path");
         if (localPath.empty())
         {
@@ -212,19 +289,31 @@ namespace AIAssistant
             return false;
         }
 
+        // Resolve workDir once and confine local_path under it.  Both upload and
+        // download branches need the same resolved fullLocalPath; lifting both
+        // out of the per-branch blocks lets a single ValidateLocalPath gate cover
+        // both file-I/O sites and removes the duplicated TaskPathResolver calls.
+        std::filesystem::path const workflowBaseDir =
+            TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        std::filesystem::path const workDir =
+            TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
+        if (!ValidateLocalPath(localPath, workDir, taskDefinition.m_Id))
+        {
+            taskState.m_LastErrorMessage =
+                "onedrive: local_path is invalid or escapes the working directory";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': local_path rejected",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+        std::filesystem::path const fullLocalPath = workDir / localPath;
+
         std::string graphBase = OneDriveConnector::GetGraphBaseUrl(connection);
         std::string responseBody;
         long httpCode = 0;
 
         if (operation == "upload")
         {
-            // Resolve local_path relative to task working directory
-            std::filesystem::path workflowBaseDir =
-                TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
-            std::filesystem::path workDir =
-                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
-            std::filesystem::path fullLocalPath = workDir / localPath;
-
             // Read file into memory
             std::ifstream file(fullLocalPath, std::ios::binary | std::ios::ate);
             if (!file.is_open())
@@ -234,7 +323,21 @@ namespace AIAssistant
                 return false;
             }
 
-            auto fileSize = file.tellg();
+            auto const fileSize = file.tellg();
+            // Cap on upload file size — closes the audit's HIGH "uncontrolled file
+            // read into memory on upload" finding.  256 MB matches Phase 9b's
+            // existing CURLOPT_MAXFILESIZE_LARGE for downloads.
+            static constexpr std::streamoff kMaxOneDriveUploadBytes = 256 * 1024 * 1024;
+            if (fileSize < 0 || fileSize > kMaxOneDriveUploadBytes)
+            {
+                taskState.m_LastErrorMessage = "onedrive upload: file size " + std::to_string(static_cast<long long>(fileSize)) +
+                                               " exceeds " + std::to_string(static_cast<long long>(kMaxOneDriveUploadBytes)) + " byte cap";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[onedrive] task='{}' workflow='{}' run='{}': upload size {} exceeds cap",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                              static_cast<long long>(fileSize));
+                return false;
+            }
             file.seekg(0, std::ios::beg);
             std::string fileData(static_cast<size_t>(fileSize), '\0');
             file.read(fileData.data(), fileSize);
@@ -266,12 +369,8 @@ namespace AIAssistant
         }
         else if (operation == "download")
         {
-            // Resolve local_path relative to task working directory
-            std::filesystem::path workflowBaseDir =
-                TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
-            std::filesystem::path workDir =
-                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
-            std::filesystem::path fullLocalPath = workDir / localPath;
+            // workDir + fullLocalPath were resolved + validated above the branch;
+            // both branches share the same confined fullLocalPath.
 
             // Ensure output directory exists
             std::filesystem::path outputDir = fullLocalPath.parent_path();
@@ -292,7 +391,8 @@ namespace AIAssistant
                 return false;
             }
 
-            responseBody = "{\"ok\":true,\"operation\":\"download\",\"remote_path\":\"" + remotePath + "\"}";
+            responseBody = "{\"ok\":true,\"operation\":\"download\",\"remote_path\":\"" +
+                           JsonHelper::EscapeJsonString(remotePath) + "\"}";
             LOG_APP_INFO("[onedrive] downloaded onedrive:/{} to {}", remotePath, fullLocalPath.string());
         }
         else
@@ -306,13 +406,10 @@ namespace AIAssistant
         taskState.m_CapturedStdout = responseBody.substr(0, std::min(responseBody.size(), kMaxCaptureChars));
         taskState.m_State = TaskInstanceStateKind::Succeeded;
 
-        // Write response to task working directory
-        std::filesystem::path workflowBaseDir = TaskPathResolver::ResolveWorkflowBaseDirectory(workflowDefinition);
+        // Write response to task working directory.  Reuses the workDir resolved
+        // above the upload/download branch.
         if (!workflowBaseDir.empty())
         {
-            std::filesystem::path workDir =
-                TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
-
             WriteResponseJson(workDir, taskState, responseBody);
         }
 

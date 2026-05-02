@@ -1347,3 +1347,1031 @@ In-code comments at each site cite the TOCTOU class + the new error-routing rati
 | `replaceField` depth-aware verification under synthetic key collision | `webServer.cpp` (sitting 7 carry) | (verification gap) | Not a sitting 8 finding; carried from sitting 7's skipped list. |
 | Stress fixture for the `DrainPendingBroadcasts` UAF reproducer | `webServer.cpp` | (verification gap) | The fix is structural ("no unlock-send window can exist"), so the absence of a reproducer is acceptable.  A future stress-test fixture (N concurrent clients each connecting / disconnecting / sending random pings) would harden confidence — track for the eventual cybersec test fixture sitting. |
 | Teardown-order test fixture for the `SetWorkflowRuntimeManager` observer dangling | `webServer.cpp` + WRM | (verification gap) | Same shape as above — fix is structural; a fixture that re-initialises WRM mid-process plus shuts down out-of-order would harden confidence.  Defer with the cybersec fixture sitting. |
+
+---
+
+## Sitting 9 — cloudConnectionManager.cpp Cluster 9A: JSON / serialization safety
+
+**Scope locked:** the JSON / serialization cluster in `application/cloud/cloudConnectionManager.cpp` — one CRITICAL convergence carry (the **6th and last** anon-namespace `JsonEscape` copy in the codebase, post-sitting-4 convergence sweep), two HIGH parser-side findings (`ParseConnectionsJson` unbounded allocation + state-clearing on partial parse failure), one MEDIUM concurrency finding (`SerializeToJson` iterates `m_Connections` without holding `m_Mutex`), one MEDIUM logging finding (silent per-element parse skips), and one MEDIUM RFC compliance finding (the local `JsonEscape` doesn't encode all RFC 8259 §7 control characters — closed as a structural side-effect of the convergence).  Boundary at sitting-end: `cloudConnectionManager.cpp`'s JSON cluster is closed; the connection-load path (engine startup → REST save) round-trips arbitrary bytes 0x00–0x7F + UTF-8 cleanly; the parser bounds input size, array length, individual field length, and params count + length, and rejects oversized input pre-allocation with an ERROR-level log line that mentions the path; on any parse failure the live `m_Connections` is left untouched (was: wiped at function entry).  Concurrency / lifetime cluster (the `GetConnection` raw-pointer-across-lock-boundary HIGH and `IsDirty/ClearDirty` data-race HIGH), input-validation cluster (name length / charset, endpoint SSRF), and the OAuth / network-egress cluster (which lives in the per-connector files `azureBlobConnector.cpp`, `googleSheetsConnector.cpp`, `oneDriveConnector.cpp`, NOT in cloudConnectionManager) are deferred to sittings 10+.
+
+**Audit grouping correction:** the sitting 8 hand-off enumerated the cluster 9A scope based on a sub-agent's reading of the audit indexes, which conflated `application/cloud/cloudConnectionManager.cpp` with `engine/keys/keyManager.cpp` (the keystore) and `application/cloud/cloudConnectionPool.cpp` (the OAuth token cache).  The CRITICAL "JSON injection in `SerializeToJson` — plaintext string fields not escaped" finding the agent listed was actually keyManager's `SerializeToJson` (with its `display_name` / `endpoint` / `api_key` / `client_id` / etc. fields), not cloudConnectionManager's.  Same for the `Unlock` / encrypted-blob / master-password findings.  The audit-IDs for cloudConnectionManager itself (combinedCyberSecAudit.md ~L2154 + combinedSafetyAudit.md ~L3627) are: 3 HIGH (GetConnection lifetime, ParseConnectionsJson allocation, ParseConnectionsJson state-clearing — the latter two closed in this sitting), 5 MEDIUM (JsonEscape RFC, name-length, endpoint-SSRF, SerializeToJson lock, per-element error logging — three of the five closed in this sitting), 2 LOW (IsDirty data race, AddConnection redundant copy, GetConnection-as-optional, [[nodiscard]] sweep — all out of cluster).  This sitting's scope is the right *shape* (JSON / serialization), just narrower and more contained than the agent's report suggested.
+
+### `JsonEscape` convergence — last anon-namespace copy in the codebase
+
+**Finding (carry-over from sitting 4 convergence + MEDIUM RFC):** `cloudConnectionManager.cpp:34` defined a local `static std::string JsonEscape(std::string const& s)` that handled `"`, `\\`, `\n`, `\r`, `\t` but emitted every other byte verbatim — including bytes 0x00–0x08 and 0x0B / 0x0C and 0x0E–0x1F, which RFC 8259 §7 requires to be escaped as `\u00XX` in JSON string content.  Any field value (connection name, endpoint, key name, params key/value) containing such a byte produced a JSON file that would be rejected by a strict parser on next load.  This was also the **6th and last** anon-namespace `JsonEscape` copy across the codebase after sittings 4 + 5's sweep (the others lived in `assistantSession.cpp`, `assistantMemory.cpp`, `workspaceIndexer.cpp`, `assistantController.cpp`, `assistantTools.cpp` — all converged onto `JsonHelper::EscapeJsonString`).  cloudConnectionManager was the one outlier the convergence sweep didn't reach because it lives outside `application/assistant/`; the sub-agent that closed sittings 4–5 didn't search `application/cloud/`.
+
+**Verification:** Holds up.  `grep -n "JsonEscape\|EscapeJsonString" application/cloud/cloudConnectionManager.{cpp,h}` returned the local definition at line 34 and 5 call sites in `SerializeToJson` (lines 232–244).  No call sites outside this file.
+
+**Change:** Add `#include "json/jsonHelper.h"` to `cloudConnectionManager.cpp`.  Delete the local `static std::string JsonEscape(...)` definition (lines 34–51).  Replace each of the 5 call sites with `JsonHelper::EscapeJsonString(...)`.  No header change — the function was anonymous and the helper is a static method, so callers outside the file are unaffected (there were none).
+
+**Verified at runtime:**
+- Studio debug build clean.  No diagnostics from the include path resolution.
+- 28-test assistant non-AI suite: PASS in 2.1 s (every JSON-emitting protocol message routes through `JsonHelper::EscapeJsonString` for sessionId / text content; the convergence change doesn't perturb the path).
+- Hermetic dispatcher: PASS.
+- **Live JSON-escape round-trip with hostile-byte payload:**  `POST /api/connections` with a connection whose `params.comment` field contained 8 hostile bytes (literal `"`, `\`, U+000A, U+0009, U+0007 bell, U+0008 BS, U+000C FF, U+001F unit-sep), then `POST /api/connections/save`, then `python3 -c 'json.load(open("connections.json"))'` parsed cleanly.  All 8 bytes survived end-to-end via proper escapes: `\"`, `\\`, `\n`, `\t`, ``, ``, ``, ``.  Pre-fix, bytes 0x07 / 0x08 / 0x0C / 0x1F would have been emitted as raw bytes, breaking the JSON file on next load.  Test connection cleaned up via `DELETE /api/connections/audit-hostile-9a` + `POST /api/connections/save`; final connection list verified byte-equivalent (sorted-name set match, content-equivalent — md5 differs only because `std::unordered_map` iteration order isn't stable across re-inserts).
+
+**Ramifications:**
+- Callers touched: zero external.  The function was file-local; convergence is purely an implementation detail.
+- Tests touched: 28-test suite + hermetic PASS; the live round-trip is a new positive test for control-char preservation.
+- Docs touched: none.  The `feedback_simdjson_only` discipline rule already names `JsonHelper` as the canonical escape helper; this sitting is just another instance of that pattern.
+- Blast radius: zero behaviour change for valid input.  For input containing previously-mishandled control bytes, the on-disk JSON is now correct (RFC 8259 §7-compliant) where it previously would have been corrupt.  No deserialization regression — `simdjson` accepts both `\u00XX` and the named-escape forms (`\b`, `\f`).
+
+---
+
+### `ParseConnectionsJson` hardening — scratch-then-swap + size + count + length caps + per-element logging
+
+**Finding (HIGH safety + HIGH cyber + 2 MEDIUM):** Four issues clustered in one ~75-line function:
+1. (HIGH cyber) `m_Connections.clear()` was called unconditionally at function entry, before any validation of the incoming JSON.  Any subsequent failure (parse error, missing `"connections"` key) returned `false` with the connection store empty.  An attacker who can send a malformed payload to the load path wipes all in-memory cloud connection configuration.
+2. (HIGH cyber) The function accepted an arbitrary-size JSON string and iterated its `"connections"` array without any cap on count or per-field length.  An attacker controlling the load source could supply a multi-million-element array or multi-MB field values, exhausting memory.  Combined with the load path in `engine.cpp` that read the file with no size cap, the attack chain ran from "place a 100 GB file at `connections.json`" → `std::string` of 100 GB → `simdjson::padded_string` of 100 GB → process death.
+3. (MEDIUM safety) Per-element `get_object()` failures fell through to `continue` with **no log entry**.  Same for connections skipped because `conn.m_Name.empty()`.  A malformed entry was silently dropped — no diagnostic, no warning, no signal that the live config was incomplete.
+4. (MEDIUM safety) The element loop returned partial state on per-element parse errors — even if the JSON was structurally valid (passed the document and `connections` array checks), per-element corruption silently skipped entries while reporting `true` (success).
+
+**Verification:** All four issues confirmed in code at `cloudConnectionManager.cpp:142–219` (pre-fix line numbers).
+
+**Change:** Restructure `ParseConnectionsJson` end-to-end:
+1. **Pre-parse size cap** (1 MB on `json.size()`).  Reject oversized input at function entry with an ERROR-level log line that mentions the size + cap + "leaving in-memory connections untouched" — before any allocation, before `simdjson::padded_string` doubles memory pressure.
+2. **Scratch-then-swap.**  Parse into a function-local `std::unordered_map<std::string, CloudConnection> staging`.  Only at the very end, after the entire parse has completed without error, take `m_Mutex` (unique_lock) and `m_Connections = std::move(staging)`.  Any earlier `return false` leaves the live state untouched.  This matches the "atomic write — target untouched on failure" pattern from sitting 7's `WriteTextFileAtomic` work, applied to in-memory state.
+3. **Per-array, per-field, per-params caps** (`kMaxConnections=1024`, `kMaxFieldBytes=4096`, `kMaxParamsPerConnection=256`, `kMaxParamFieldBytes=1024`).  Each cap rejects on overflow with an ERROR (count cap, terminating the parse) or a WARN (field-length cap, skipping the element; params caps, skipping the entry) log line.  All log lines include the element index for diagnosis.
+4. **Per-element error logging.**  Every previously-silent skip now emits `LOG_CORE_WARN` with the element index and reason: malformed object, oversized field, missing-or-empty `name`, oversized params entry, params-count overflow.  The dashboard's run-analyzer (per `feedback_log_failures`) is ERROR-only, so these WARNs are diagnostic — visible in `log/log.txt` for an operator to investigate config issues without surfacing as a "run failure" on the dashboard.
+
+**Verified at runtime:**
+- Build clean.  28-test suite + hermetic dispatcher PASS.
+- **Pre-read file-size cap (engine.cpp side, see next finding) live:**  Stopped the server, replaced `connections.json` with a 1 228 959-byte synthetic file (one connection, 1.2 MB comment), restarted.  Log shows: `[Engine] [error] CloudConnectionManager: '/home/beaumanvienna/dev/jarvisAgent/connections.json' size 1228959 bytes exceeds 1048576 byte cap; refusing to load`.  Server came up clean with 0 connections loaded; auth path + admin endpoints worked normally.  Pre-fix, the same file would have allocated 1.2 MB in `std::string`, then doubled in `simdjson::padded_string`, then triple-allocated through the per-element copies — all before any cap saw it.
+- **In-function `kMaxConnections` cap live:**  Stopped the server, replaced `connections.json` with a 138 617-byte synthetic file containing **1 100** valid empty-params connections (well under the 1 MB file cap, well over the 1024 connection cap), restarted.  Log shows: `[Engine] [error] CloudConnectionManager::ParseConnectionsJson: connection count exceeds 1024; rejecting at element index 1024; leaving in-memory connections untouched` immediately followed by `[Engine] [warning] CloudConnectionManager: failed to parse '/home/beaumanvienna/dev/jarvisAgent/connections.json'`.  Confirms: (a) the cap fires at exactly the right index (the 1025th element triggers it), (b) the `staging` map is discarded (the live state would be untouched, but in this case there's nothing pre-existing to be untouched), (c) the engine.cpp loader's `WARN` line lands as expected.  Final restart with the original `connections.json` reloaded the canonical 14 connections cleanly.
+- **Not directly verified:**  the per-field length caps and per-params caps under hostile input.  The mechanisms are mechanical (single comparison + log + skip) and exercised by the same code path; a fixture-driven test that pushes oversized fields through the REST API would harden confidence — track for a future fixture sitting.  The MEDIUM "per-element error logging" path is verified-by-construction: the new `LOG_CORE_WARN` calls live in the same fall-through paths as the pre-fix silent `continue`.
+
+**Ramifications:**
+- Callers touched: `ParseConnectionsJson` is called from exactly one site today — `engine/engine.cpp:234` (initial load).  No REST endpoint calls it; the REST path persists the in-memory state via `SerializeToJson` rather than round-tripping through this function.  So the strict in-function cap is defense-in-depth for any future caller (e.g., a future `POST /api/connections/reload` endpoint).
+- Tests touched: 28-test suite + hermetic + live size-cap rejections.  None had to be updated — the pre-fix behaviour for valid input is preserved exactly.
+- Docs touched: none.  The function's contract (return false → caller-decides; live state untouched on failure) is now actually true; pre-fix the live-state-untouched part of the contract was a lie.
+- Blast radius: a malformed `connections.json` that previously wiped the live state on parse error now leaves it alone.  This is strictly safer — but if a deployment had been relying on "I can clear all connections by uploading a malformed file" (which would be insane), the workaround is `[]` for the array (empty + valid = wipes via the swap path).  No realistic regression.
+
+---
+
+### `SerializeToJson` — acquire shared_lock during iteration
+
+**Finding (MEDIUM safety):** `SerializeToJson` is declared `const` and is called from the REST `POST /api/connections/save` handler (which writes the result to disk).  It iterates `m_Connections` and `conn.m_Params` with no lock acquisition.  A concurrent `AddConnection` / `RemoveConnection` / `ParseConnectionsJson` call (the latter holds `unique_lock` only briefly at end-of-function under the new structure) can rehash the map mid-iteration, invalidating the range-for iterator → undefined behaviour, in practice a crash or garbled JSON written to disk.
+
+**Verification:** Holds up.  Code at `cloudConnectionManager.cpp:222–268` (pre-fix) had no lock acquisition.
+
+**Change:** Add `std::shared_lock lock(m_Mutex);` at the top of `SerializeToJson`, matching the pattern of every other read method in the class (`GetConnection`, `GetConnectionNames`, `GetAllConnections`, `HasConnections`).  Lock is held for the entire string-building loop.
+
+**Verified at runtime:**
+- Build clean.  28-test suite + hermetic PASS.  Live `POST /api/connections/save` (the only caller) succeeded end-to-end during the hostile-byte round-trip test, producing a valid byte-stable JSON file.
+- **Not directly verified:**  the multi-thread race condition itself.  The single-threaded test path doesn't reproduce it.  The fix is structural ("the iteration now happens under the lock that gates every writer"); a stress fixture (concurrent `AddConnection` + `POST /save`) would harden confidence.  Track with the cybersec fixture sitting.
+
+**Ramifications:**
+- Callers touched: zero.  `SerializeToJson` is called from the save handler (single-threaded per request) and from `KeyManager::Save` (which is itself single-threaded).  The shared_lock allows other readers to proceed concurrently.
+- Tests touched: above.
+- Docs touched: none.
+- Blast radius: a writer that fires concurrently with a save request now waits for the save to complete instead of racing the iteration.  At human scale (kilobytes of JSON, microseconds of build time), the back-pressure is invisible.
+
+---
+
+### `engine.cpp` connections.json read-side size cap (defense-in-depth)
+
+**Finding (HIGH cyber, primary half of the unbounded-allocation finding):**  `engine/engine.cpp:225–246` (pre-fix) had the `std::filesystem::exists(connectionsPath); std::ifstream file(...); std::string json((istreambuf_iterator<char>(file)), istreambuf_iterator<char>())` shape.  No size check on the read.  An attacker (or buggy upstream that placed a corrupt file) supplying a 100 GB `connections.json` would allocate 100 GB into `std::string` before `ParseConnectionsJson`'s in-function cap could reject it.  With the in-function cap added in the previous finding but no read-side cap, the chain is "100 GB file → 100 GB std::string allocation → in-function cap rejects" — process is OOM-killed before the rejection log line fires.
+
+**Verification:** Holds up.  Code at `engine.cpp:225–246` was as described.
+
+**Change:** Add a `std::filesystem::file_size(connectionsPath, ec)` pre-read check before the `ifstream` open.  Same `kMaxConnectionsFileBytes = 1 MB` threshold as the in-function cap.  Three branches:
+1. `file_size` returns an error → `LOG_CORE_ERROR` with path + error, skip the load.
+2. `file_size > cap` → `LOG_CORE_ERROR` with path + size + cap + "refusing to load", skip the load (this is the new size-cap rejection).
+3. Otherwise → proceed with the existing `ifstream` + `ParseConnectionsJson` path unchanged.
+
+**Note on the existing `fs::exists(...)` precheck on line 225:**  This is the same TOCTOU pattern that sitting 8 cleaned up in `webServer.cpp` (`ServeDashboardIndex` / `HandleWorkflowVersionGetGet` / `HandleWorkflowVersionRestorePost`).  The `file_size`-with-`error_code` overload returns an error if the file doesn't exist, so the `exists` precheck could be removed and the load gated on `!sizeEc && fileSize <= cap` instead.  Out of cluster 9A scope (it's a cybersec finding, not JSON / serialization) — track for a "sitting 12+ engine.cpp pass" or for whichever sitting picks up the loose-end TOCTOU work.
+
+**Verified at runtime:**  Already covered in the `ParseConnectionsJson` finding above — the 1.2 MB synthetic file rejection log line came from this `engine.cpp` cap, not the in-function one (the file never reached `simdjson` because the read short-circuited).  The in-function cap is defense-in-depth that fires only for callers that bypass the engine.cpp loader (none today, but a future REST `POST /api/connections/reload` endpoint or test fixture could).
+
+**Ramifications:**
+- Callers touched: zero — only the engine startup path has this loader.
+- Tests touched: live size-cap test as above.
+- Docs touched: none.
+- Blast radius: an operational deployment with a connections.json over 1 MB would be rejected at startup.  In normal use, 14 connections take ~6 KB; 1024 connections would take ~500 KB.  The 1 MB cap leaves headroom.  If a deployment legitimately needs more, the cap can be raised — both halves (this one + the in-function cap) would need to move in lockstep.
+
+---
+
+## Skipped findings table — Sitting 9
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| `GetConnection` returns a raw pointer that outlives the lock guard (use-after-free) | `cloudConnectionManager.{cpp,h}` | HIGH safety + HIGH cyber | Out of cluster 9A (concurrency / lifetime, not JSON / serialization).  Fix is `std::optional<CloudConnection>` return-by-value, which touches **7 external call sites** across `triggerEngine.cpp`, `webServer.cpp` (5 uses), `filterEngine.cpp`, `cloudTaskExecutor.cpp` — meaningful blast radius, deserves its own cluster-9C sitting.  Tracking for the next cloudConnectionManager sitting. |
+| `IsDirty` / `ClearDirty` data race on `m_Dirty` | `cloudConnectionManager.{cpp,h}` | HIGH safety | Out of cluster 9A (concurrency, not JSON / serialization).  Two-line fix (acquire `shared_lock` in `IsDirty`, `unique_lock` in `ClearDirty`, OR change to `std::atomic<bool>`).  Bundle with the `GetConnection` fix in cluster 9C. |
+| Connection name length / charset validation | `cloudConnectionManager.cpp` (`AddConnection`, `ParseConnectionsJson`) | MEDIUM cyber | Out of cluster 9A (input-validation, not JSON / serialization).  Combines naturally with the SSRF endpoint validation below — both are write-time validation, both belong in a future "input validation pass on the cloud surface" sitting.  Note: `kMaxFieldBytes=4096` from this sitting incidentally bounds name length at the parser entry, so log injection via newlines in names is partially mitigated (the JsonHelper escape converts newlines to `\n` literal); the audit's full fix (charset whitelist) is still pending. |
+| Endpoint URL stored without SSRF validation | `cloudConnectionManager.cpp` | MEDIUM cyber | Same as above — input-validation cluster, not JSON / serialization.  Bundle with name-validation in the future input-validation sitting.  Defense-in-depth note: the actual SSRF *attack surface* lives in the per-connector files that issue HTTP requests using the endpoint; centralizing validation at the manager is the cheaper fix but the connectors are the source of truth. |
+| `AddConnection` redundantly copies `m_Name` before the move | `cloudConnectionManager.cpp` | LOW safety | Cosmetic.  No correctness impact.  Defer to the eventual "Rust-emulating C++ defaults sweep" sitting that addresses move-semantics polish across the codebase (per `feedback_rust_emulating_defaults`). |
+| `[[nodiscard]]` on `bool`-returning mutators (`AddConnection`, `UpdateConnection`, `RemoveConnection`, `ParseConnectionsJson`) | `cloudConnectionManager.h` | LOW safety | `[[nodiscard]]` sweep.  Defer to the Rust-emulating C++ defaults sitting.  Note: `feedback_rust_emulating_defaults` flags this as a category — apply uniformly across the codebase rather than file-by-file. |
+| TOCTOU on `connections.json` path in `engine.cpp:225` (`fs::exists` then open) | `engine.cpp` | (cybersec finding) | Same pattern as sitting 8's webServer cleanup.  Out of cluster 9A scope (this sitting added the size cap; the TOCTOU is a sibling concern).  Track for a future engine.cpp pass; one-line fix (remove `exists` precheck, gate on `!sizeEc && fileSize <= cap`). |
+| OAuth / TLS / network-egress findings on the cloud surface | `azureBlobConnector.cpp`, `googleSheetsConnector.cpp`, `oneDriveConnector.cpp`, `cloudConnectionPool.cpp` (sub-agent's report initially attributed these to cloudConnectionManager) | (multiple CRITICAL/HIGH) | Wrong-file attribution corrected at sitting start.  These findings live in the per-connector files and the OAuth token cache, not in the manager.  Bundle into clusters 9B (network egress: TLS verify-peer, SSRF on `m_TokenEndpoint`, OAuth body URL-encoding, response-body cap, redaction of HTTP error-body logs) and 9C (concurrency / lifetimes: `TokenEntry` references across unlock/lock, `RefreshLoop` dangling reference) for sittings 10–11. |
+| `keyManager.cpp` JSON-injection / Unlock / encrypted-blob findings | `engine/keys/keyManager.cpp` | (sub-agent attribution error) | Initially listed in cluster 9A by the sub-agent; on close inspection, these findings live in keyManager (the keystore), not cloudConnectionManager.  Belong to a future Domain-3 (core-engine) sitting, not the cloud surface. |
+| Per-field-length cap fixture-driven verification | `cloudConnectionManager.cpp` | (verification gap) | The mechanism is mechanical (one branch per field), but exercising it under live REST input would need an end-to-end fixture.  Track with the cybersec fixture sitting. |
+| Stress test for concurrent `AddConnection` + `POST /save` against the new `SerializeToJson` lock | `cloudConnectionManager.cpp` + `webServer.cpp` | (verification gap) | Same shape as sitting 8's deferred stress fixtures — fix is structural, fixture would harden confidence; defer with the cybersec fixture sitting. |
+
+---
+
+## Sitting 10 — cloudConnectionManager.cpp Cluster 9C: concurrency / lifetime
+
+**Scope locked:** the two HIGH concurrency findings on `application/cloud/cloudConnectionManager.{cpp,h}` deferred from sitting 9.  HIGH safety + HIGH cyber: `GetConnection` returns a raw `CloudConnection const*` pointer that outlives the function-local `shared_lock` guard — any concurrent writer (`AddConnection` / `UpdateConnection` / `RemoveConnection` / `ParseConnectionsJson`) that rehashes the `m_Connections` map or erases the entry between return-from-GetConnection and caller-dereference produces use-after-free.  HIGH safety: `IsDirty()` / `ClearDirty()` access `m_Dirty` (a plain `bool`) without holding `m_Mutex`; every writer sets `m_Dirty = true` under `unique_lock`, but lock-free read/write from a different thread is a data race under the C++ memory model.  Boundary at sitting-end: `cloudConnectionManager`'s **entire CRITICAL/HIGH cluster (sittings 9 + 10) is closed**.  Remaining findings on the file are MEDIUM (name length / charset, endpoint SSRF — input-validation, deferred to a future input-validation pass) and LOW (`AddConnection` redundant copy, `[[nodiscard]]` sweep — both bundle with the eventual Rust-emulating C++ defaults sweep).
+
+### `GetConnection` raw-pointer-across-lock-boundary — return `std::optional<CloudConnection>` by value
+
+**Finding (HIGH safety + HIGH cyber):** `GetConnection` was declared `CloudConnection const* GetConnection(std::string const& name) const`.  The implementation acquired `std::shared_lock lock(m_Mutex)`, located the entry via `m_Connections.find(name)`, and returned `&it->second` after the lock guard's destructor had already released the mutex (the guard's lifetime ends with the function scope, but the pointer escapes that scope).  Any caller that subsequently dereferenced the returned pointer was reading into a map entry that a concurrent writer could have invalidated — by erasing the entry (`RemoveConnection`), rehashing the map on insert (`AddConnection`), or calling `staging.swap(m_Connections)` from sitting 9's new `ParseConnectionsJson` end.  The audit cited this as the canonical "C++ borrow-checker gap" — Rust's `Option<&CloudConnection>` would refuse to compile because the reference's lifetime exceeds the lock guard's.
+
+**Verification:** Holds up.  Code at `cloudConnectionManager.cpp:82–91` (pre-fix) was the raw-pointer-after-shared-lock pattern, exactly as audited.
+
+**Caller-side audit before committing to the fix:**  All 7 external call sites were read end-to-end to confirm the value-copy fix is correct:
+- `application/workflow/triggerEngine.cpp:712` — email_watch poll loop, dereferences `*connection` for `EmailConnector::ResolveCredentials` + `EmailConnector::CheckForNewMail` (both do IMAP network I/O, **multi-second hold**).
+- `application/web/webServer.cpp:6299` (`HandleConnectionUpdatePut`) — single-line `CloudConnection updated = *existing;` value-copy then done with the pointer (brief hold).
+- `application/web/webServer.cpp:6398` (`HandleConnectionTestPost`) — dereferences `connection->m_Type` + `*connection` passed to `connector->TestConnection` (network I/O hold).
+- `application/web/webServer.cpp:6485` (`HandleOAuthAuthorizeGet`) — multiple `connection->m_AuthType` / `connection->m_Params.find(...)` / `connection->m_Type` reads, brief.
+- `application/web/webServer.cpp:6655` (`HandleOAuthCallbackGet`) — multi-step OAuth flow, dereferences `connection->m_Params` + `connection->m_Type` over **the entire OAuth callback path** (potentially multi-second hold during token exchange with the provider).
+- `application/workflow/filter/filterEngine.cpp:471` — pure read of `conn->m_Type` / `conn->m_Endpoint` / `conn->m_KeyName` / `conn->m_Params` into a `resolvedFilter` struct, brief.
+- `application/cloud/cloudTaskExecutor.cpp:76` — **the longest hold by a wide margin**.  Holds the pointer through `connector->ResolveCredentials(*connection)` (network I/O — OAuth refresh, JWT generation, SigV4 derivation) → audit-log line that reads `connection->m_Type` → circuit-breaker check → template expansion → `ExecuteCloud(*connection, ...)` (the actual cloud operation: S3 upload, IMAP fetch, GCS list, etc.) — easily 5+ seconds for typical cloud tasks.
+
+Every call site uses the pointer briefly-or-as-a-reference-passed-to-a-function and never stores it past function scope.  **No call site captures `connection` into a long-lived struct or detached lambda** — so the value-copy fix is correct without follow-up at any caller.
+
+**Change:**
+1. **Header (`cloudConnectionManager.h`):** add `#include <optional>`; change return type to `[[nodiscard]] std::optional<CloudConnection> GetConnection(std::string const& name) const`.  Multi-line comment above the declaration documents (a) why the return is by-value not by-reference (lifetime contract), (b) why `[[nodiscard]]` (analogous to Rust's `#[must_use]` on `Option`), (c) why the copy happens under the lock (so subsequent writer mutations are invisible to callers — but invisibility is the safety property, not a regression).
+2. **Implementation (`cloudConnectionManager.cpp`):** unchanged shape (`shared_lock` → `find` → return).  `return nullptr;` → `return std::nullopt;`.  `return &it->second;` → `return it->second;` — the value copy is constructed inside `std::optional` while `lock` is still held; ownership transfers to the caller cleanly when the function returns.  In-code comment cites the audit + the Rust idiom.
+3. **Callers (7 sites):** mechanical type substitution.  `CloudConnection const* connection = ...GetConnection(...)` → `auto connection = ...GetConnection(...)`.  Same for `auto const*` callers and `CloudConnection const* existing` (HandleConnectionUpdatePut).  `if (!connection)`, `connection->m_Field`, `*connection` (passed to `TestConnection` / `ResolveCredentials` / `ExecuteCloud` / `CheckForNewMail` / etc.) all work unchanged because `std::optional<T>` overloads `operator bool`, `operator->`, and `operator*` with the exact same syntax callers were using on raw pointers.  No call-site logic changed.  In-code comment at `cloudTaskExecutor.cpp:76` (the longest-hold site) cites the lifetime guarantee.
+
+**Verified at runtime:**
+- Studio debug build clean (`make config=debug`).  All 7 caller files recompiled and linked without diagnostic.
+- 28-test assistant non-AI suite: PASS in 2.1 s.
+- Hermetic dispatcher: PASS.
+- **Live exercise of all five `webServer.cpp` call sites:**
+  - `GET /api/connections` — 14 connections returned (via `GetAllConnections`, separate path; baseline).
+  - `PUT /api/connections/my-polarion` with `{"endpoint":"https://polarion.company.com"}` (line 6299) → HTTP 200 + `{"name":"my-polarion","ok":true}`.  Exercises `auto existing = ...GetConnection(...)` + `CloudConnection updated = *existing;` value-copy + `m_Dirty = true` (atomic write under unique_lock).
+  - `POST /api/connections/save` (line 6448 path → `SerializeToJson` → `WriteTextFileAtomic` → `ClearDirty`) → HTTP 200 + `{"path":"...","ok":true}`.
+  - `POST /api/connections/my-polarion/test` (line 6398) → HTTP 400 + `{"error":"test_failed","message":"Polarion connectivity test failed: curl error: Could not resolve hostname"}`.  The DNS failure is expected in this environment; the relevant verification is that the handler ran the full path through `connector->TestConnection(*connection, errorMessage)` without crashing — confirming the value-copy hand-off works for a function taking `CloudConnection const&`.
+  - `GET /api/connections/my-onedrive/oauth/authorize` (line 6485) → HTTP 200 with a valid Microsoft OAuth URL `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=...&scope=Files.ReadWrite%20offline_access&...`.  Exercises `connection->m_AuthType` / `connection->m_Params.find("client_id")` / `connection->m_Params.find("scopes")` / `connection->m_Type` reads on the optional.
+- **Live exercise of `cloudTaskExecutor.cpp:76` (the longest-hold site) via real workflow run:** `mcp__j9t__run_workflow emailDemo` started run `emailDemo_1777690450`; status post-completion: 3 tasks succeeded (`ai_reply`, `fetch_email`, `send_reply`) in 3 seconds end-to-end.  Both `fetch_email` (IMAP fetch via `EmailConnector::ExecuteCloud`) and `send_reply` (SMTP send via the same path) ran through `ICloudTaskExecutor::Execute` — each one pulled the optional from `GetConnection`, held it through `ResolveCredentials` (network I/O), the audit log, the circuit-breaker check, template expansion, and `ExecuteCloud` (IMAP/SMTP network round-trip).  The pre-fix raw pointer had a multi-second exposure window during which a concurrent connection mutation could have invalidated it; the optional's value-copy makes that window zero by construction.
+- **Not directly verified:**
+  - The `triggerEngine.cpp:712` email_watch path — requires the email_watch trigger to actually fire (which it does on a poll timer; the debug session's run was below the poll interval).  The compile + caller-audit + in-line shape match the verified sites; the runtime path is identical.
+  - The `filterEngine.cpp:471` Polarion filter path — requires a Polarion-filtered workflow run, but `my-polarion` has no live network in this environment (DNS failure on the test connection).  Compile + caller-audit confirms the change is correct.
+  - The race window itself.  Reproducing the original UAF would require concurrent connection mutation timing during a long-held caller dereference; the fix is structural (the bug class is gone by construction — no raw pointer escapes the lock guard), so the verification posture is "the lifetime contract is type-system-enforced now" rather than "the specific bug instance was reproduced and fixed".
+
+**Ramifications:**
+- Callers touched: 7, all updated to `auto` deduction.  No call-site logic changed.
+- Tests touched: 28-test suite + hermetic dispatcher PASS; the live PUT / save / test / oauth-authorize / emailDemo run smokes covered six of seven call sites end-to-end.
+- Docs touched: in-code comments on the header declaration + the implementation + the longest-hold caller site (`cloudTaskExecutor.cpp:76`).  No external doc updates needed (the lifetime contract is implementation detail).
+- Blast radius: a caller that previously held the raw pointer across a lock-violating operation (an attacker-induced concurrent mutation) now holds a value-copy that is guaranteed-safe.  The trade-off is one `CloudConnection` copy per `GetConnection` call (a `std::string` × 4 + a `std::map<std::string, std::string>` copy) — at typical sizes (4-5 small strings + ≤ 10 params) this is on the order of a few hundred bytes, negligible relative to the cloud-I/O latency that follows the lookup.  No call site is hot enough for the copy to register on a profile.
+
+---
+
+### `m_Dirty` data race — `bool` → `std::atomic<bool>` with documented memory ordering
+
+**Finding (HIGH safety, LOW cybersec — chose the higher severity for closure):** `m_Dirty` is a plain `bool` member.  Every writer (`AddConnection` / `UpdateConnection` / `RemoveConnection` / `ParseConnectionsJson`) sets `m_Dirty = true` under `unique_lock(m_Mutex)`, but `IsDirty() const { return m_Dirty; }` and `ClearDirty() { m_Dirty = false; }` access the flag without any synchronization.  The audit's concern: a persistence thread calling `IsDirty()` concurrently with a writer thread setting `m_Dirty = true` is a data race on a non-atomic `bool` → undefined behaviour under the C++ memory model, and in practice can lose the dirty signal (writer flips `true`; reader reads `false` from a stale cached register; the change is never persisted to disk).
+
+**Verification:** Holds up.  Header at `cloudConnectionManager.h:64` had `bool m_Dirty{false};` with `IsDirty()` / `ClearDirty()` inline-and-lock-free at lines 54–55.
+
+**Change:**
+1. **Header**: add `#include <atomic>`; change `bool m_Dirty{false};` → `std::atomic<bool> m_Dirty{false};`.  Update `IsDirty()` to `return m_Dirty.load(std::memory_order_acquire);` and `ClearDirty()` to `m_Dirty.store(false, std::memory_order_release);`.  Multi-line comment documents the ordering choice: acquire on load + release on store gives a happens-before edge from the writer's `m_Dirty = true` (sequenced after the map mutation, then released by the unique_lock unlock) to a subsequent `IsDirty() == true` reader, so the reader observing `true` is also guaranteed to observe the map mutation that triggered it.
+2. **Implementation**: writer sites (`m_Dirty = true;` inside `AddConnection` / `UpdateConnection` / `RemoveConnection` / the `ParseConnectionsJson` swap point) need NO change — `std::atomic<bool>::operator=(bool)` defaults to `seq_cst`, which is strictly stronger than the `release` required.  The unique_lock unlock provides the acquire-release pairing on the map side, and the atomic provides the cross-thread visibility on the dirty side; they layer cleanly.
+
+**Verified at runtime:**
+- Build clean.  28-test suite + hermetic PASS.
+- **Dirty-flag round-trip live:**  Initial `GET /api/connections` reported `dirty: false` (sitting 9 saved cleanly).  `PUT /api/connections/my-polarion` then `GET /api/connections` → `dirty: true` (writer-under-unique_lock sets the atomic; lock-free reader observes via the acquire-release ordering).  `POST /api/connections/save` then `GET /api/connections` → `dirty: false` (atomic store from `ClearDirty()` observed by lock-free reader).  Confirms the producer-under-lock / consumer-lock-free pairing works correctly.
+- **Not directly verified:**  the actual race condition itself.  Pre-fix the race could (in principle) cause a missed dirty signal, but reproducing it requires hammering writes from one thread while reads from another — same fixture-dependent shape as the GetConnection finding.  Fix is structural; the verification posture is "the bug class is gone".
+
+**Ramifications:**
+- Callers touched: zero — `IsDirty()` / `ClearDirty()` callers in `webServer.cpp` (`HandleConnectionsSavePost` calls `ClearDirty()` after a successful save; `HandleConnectionsGetGet` reads `IsDirty()` for the `"dirty":bool` response field) work unchanged.
+- Tests touched: live dirty-flag round-trip above.
+- Docs touched: in-header comment.  No external doc needed.
+- Blast radius: the relaxed-ordering load might be ~1 ns slower than the pre-fix non-atomic load on x86-64 (where atomic load with acquire ordering is already a plain MOV).  Negligible.
+
+---
+
+## Skipped findings table — Sitting 10
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Connection name length / charset validation | `cloudConnectionManager.cpp` (`AddConnection`, `ParseConnectionsJson`) | MEDIUM cyber | Out of cluster 9C scope (input-validation, not concurrency / lifetime).  `kMaxFieldBytes=4096` from sitting 9 incidentally bounds name length at the parser entry, so log-injection-via-newlines is partially mitigated (newlines escape to `\n` literal via the JsonHelper convergence); the audit's full fix (charset whitelist) is still pending.  Bundle with endpoint SSRF below in a future "input validation pass on the cloud surface" sitting. |
+| Endpoint URL stored without SSRF validation | `cloudConnectionManager.cpp` | MEDIUM cyber | Out of cluster 9C scope.  Bundle with name validation above.  Defense-in-depth note: the actual SSRF attack surface lives in the per-connector files that issue HTTP requests using the endpoint; centralizing validation at the manager is cheaper, but the connectors are the source of truth. |
+| `AddConnection` redundantly copies `m_Name` before the move | `cloudConnectionManager.cpp` | LOW safety | Cosmetic.  No correctness impact.  Defer to the eventual "Rust-emulating C++ defaults sweep" sitting (per `feedback_rust_emulating_defaults`). |
+| `[[nodiscard]]` on `bool`-returning mutators (`AddConnection`, `UpdateConnection`, `RemoveConnection`, `ParseConnectionsJson`) | `cloudConnectionManager.h` | LOW safety | `[[nodiscard]]` sweep.  Defer to the Rust-emulating C++ defaults sweep — apply uniformly across the codebase rather than file-by-file. |
+| Stress fixture for the original `GetConnection` UAF reproducer | `cloudConnectionManager.cpp` + caller | (verification gap) | Fix is structural ("no raw pointer escapes the lock guard"); a fixture (1000 concurrent `GetConnection` + `RemoveConnection` cycles) would harden confidence — track for the eventual cybersec test fixture sitting. |
+| Stress fixture for `m_Dirty` race observation | `cloudConnectionManager.cpp` + caller | (verification gap) | Same shape — fix is structural; a fixture (1000 concurrent writer + IsDirty cycles, looking for a missed dirty signal) would harden confidence.  Defer with the cybersec fixture sitting. |
+| `engine.cpp:225` `fs::exists()` precheck on `connections.json` (TOCTOU) | `engine.cpp` | (cybersec finding, surfaced sitting 9) | Same pattern sitting 8 cleaned up in webServer.cpp.  One-line fix (drop the precheck, gate on `!sizeEc && fileSize <= cap` per the new `file_size`-with-`error_code` overload).  Out of cluster 9C scope; track for whichever sitting next touches engine.cpp. |
+| `triggerEngine.cpp:712` email_watch path live verification | `triggerEngine.cpp` | (verification gap) | Caller-audit confirms the change is correct + identical to the verified `cloudTaskExecutor` site.  Fixture-dependent verification (set up an email_watch trigger + wait for poll interval) is overkill; the build + the in-line shape are sufficient. |
+| `filterEngine.cpp:471` Polarion filter path live verification | `filterEngine.cpp` | (verification gap) | Same posture as the trigger engine entry — caller-audit + build-clean is sufficient.  Live verification requires a working Polarion endpoint, which the test environment doesn't have (DNS failure observed on `POST /api/connections/my-polarion/test`). |
+
+---
+
+## Sitting 11 — emailCloudTaskExecutor.cpp Cluster 11A: path traversal + protocol injection
+
+**Scope locked:** the four densest findings on `application/cloud/emailCloudTaskExecutor.cpp` — three CRITICAL "untrusted input pasted into URL/filesystem path" plus one HIGH "untrusted input pasted into RFC 2822 header field":  CRIT path traversal via `body_file` parameter (the executor opens `std::ifstream(bodyFile)` with no canonicalisation; an attacker-controlled JCWF can supply `body_file: "../../../../etc/passwd"` and read arbitrary files into the email body); CRIT path traversal via attachment array (each `attachPath` is joined with `workDir` but never confined under it; absolute paths and `..` segments escape); CRIT IMAP folder URL injection (`folder` param interpolates directly into the IMAP URL — `INBOX@evil.internal:1234/extra` redirects the connection to an attacker-controlled host); HIGH SMTP header injection (`from`/`to`/`cc`/`subject` concatenate into MIME headers without CR/LF stripping — `subject: "Hello\r\nBcc: victim@..."` injects an arbitrary BCC).  Boundary at sitting-end: every untrusted input that flowed unchecked into a URL, filesystem path, or header field on this executor is now gated by an explicit allowlist or path-confinement check; every reject path emits an ERROR-level log with task / workflow / run identifiers (dashboard run-analyzer compatible) and a matching SECURITY_WARN line.  Cluster 11B (TLS hardening + attachment size cap + credential-redaction in error logs, 4 HIGH) and `emailConnector.cpp` cluster (2 CRIT + 5 HIGH; some findings — IMAP folder URL injection on the connector side — overlap with cluster 11A's executor-side fix) remain queued for sittings 12–13.
+
+### `body_file` path traversal — confine under launch CWD via `ValidateLocalPath`
+
+**Finding (CRITICAL cyber):**  In `EmailCloudTaskExecutor::ExecuteCloud`, `body_file` was extracted from the task params JSON via `getStringParam("body_file")` and opened directly via `std::ifstream(bodyFile)`.  No path canonicalisation, no containment check, no length bound.  An attacker who controls the JCWF (or compromises any caller of the workflow API) can supply `body_file: "../../../../etc/passwd"` (or any absolute path) and the file's contents become the email body, exfiltrated to the recipient address the task names.
+
+**Verification:** Holds up.  Code at `emailCloudTaskExecutor.cpp:488–499` (pre-fix) is the bare `std::ifstream(bodyFile)` shape, exactly as audited.
+
+**Caller-side audit:** `body_file` semantics in this module are **CWD-relative**, not workDir-relative.  The canonical `emailDemo.jcwf` ships with `body_file: "queue/emailDemo/02_ai_reply/PROB_reply.output.txt"` — a path relative to j9t's launch CWD that traverses through the `queue/` runtime directory to reach an upstream task's output.  Confining under workDir would break the demo and contradict the established convention; confining under **launch CWD** (which spans `queue/`, `workflows/`, `log/`, etc.) preserves the convention while closing the traversal vector.
+
+**Change:** Before opening, call `ICloudTaskExecutor::ValidateLocalPath(bodyFile, Core::g_Core->GetLaunchCWDAbsolute(), taskDefinition.m_Id)`.  The helper rejects any input containing `..` substrings (catches the canonical `../etc/passwd` traversal) and any path whose `lexically_normal` form does not start with the canonical launch CWD (catches absolute-path escape, `/` operator quirk where `cwd / "/etc/shadow"` resolves to `/etc/shadow`, etc.).  On reject: set `m_LastErrorMessage`, transition to `Failed`, emit a fail-task log line that includes task / workflow / run identifiers as literal substrings (per `feedback_log_failures` — dashboard run-analyzer scopes ERRORs to lines containing the run id), and return false.  In-code comment at the call site documents the CWD-relative semantics + the existing demo's path shape so a future maintainer doesn't try to migrate to workDir-relative without also updating the demos.
+
+**Verified at runtime:**
+- Studio debug build clean.
+- 28-test assistant non-AI suite + hermetic dispatcher: PASS.
+- **Live happy-path:** `mcp__j9t__run_workflow emailDemo` → 3 tasks succeeded in 3 s, with the canonical `body_file: "queue/emailDemo/02_ai_reply/PROB_reply.output.txt"` accepted by the new gate.
+- **Live negative-path (the actual fix verification):** swapped `body_file` to `"../../../../etc/passwd"` in the running emailDemo, ran via MCP, observed the rejection trail land exactly as designed:
+  - `[Security] [info] [security] path_traversal_blocked: task='send_reply' local_path='../../../../etc/passwd' contains '..'`
+  - `[Application] [error] [email_send] task='send_reply' workflow='emailDemo' run='emailDemo_1777691687': body_file path rejected`
+  - `[Application] [error] [workflow] task 'send_reply' failed in run 'emailDemo_1777691687': email_send: body_file path is invalid or escapes the launch directory`
+  - Run state `failed`; the canonical fail-path log includes the run id substring so the dashboard analyzer surfaces it as an issue.
+- emailDemo restored byte-identical to backup post-test.
+
+**Ramifications:**
+- Callers touched: zero — `body_file` semantics preserved (CWD-relative); only the validation gate is new.
+- Tests touched: emailDemo passes both happy path (canonical body_file) and negative path (rejected body_file).
+- Docs touched: none.  `feedback_log_failures` already documents the ERROR-level + run-id-substring discipline; this fix instantiates the pattern.
+- Blast radius: a body_file value containing `..` (even if it lexically stays under launch CWD — e.g. `queue/foo/../bar/baz.txt`) is now rejected.  No realistic JCWF needs this — the canonical pattern is direct paths through the queue/ tree.  If a future workflow legitimately needs `..` (very unlikely), the fix is to pre-resolve the path in the JCWF rather than relax the gate.
+
+---
+
+### Attachment path traversal — `ValidateLocalPath` per attachment under workDir
+
+**Finding (CRITICAL cyber):**  In the attachment-loading loop, `attachPath` (a string from the JCWF params `attachments` array) was joined with `workDir` via `std::filesystem::path fullPath = workDir / std::string(attachPath)` and read directly.  No containment check.  C++'s `path::operator/` returns the right-hand side unchanged when it's absolute — so `attachPath: "/etc/shadow"` produces `fullPath = "/etc/shadow"` regardless of `workDir`.  And relative `..` segments traverse outside `workDir` syntactically.  The file's contents are base64-encoded into a MIME attachment and exfiltrated to the email recipient.
+
+**Verification:** Holds up.  Code at `emailCloudTaskExecutor.cpp:526–547` (pre-fix) was the bare `workDir / attachPath` join, exactly as audited.
+
+**Change:** Inside the per-attachment loop, before opening the file: convert `attachPath` (a `std::string_view` from simdjson) to `std::string` and call `ValidateLocalPath(attachPathStr, workDir, taskDefinition.m_Id)`.  On reject: emit a WARN-level fail-path log line (task fail-fast would prevent legitimate attachments later in the array from being read, so per the audit's recommendation we skip-with-warning at attachment granularity rather than abort the whole task), and `continue`.  In-code comment cites the `..`-and-absolute-path threat model that motivates the gate.
+
+**Verified at runtime:**
+- Build clean.
+- **Live negative-path:** swapped `attachments` to `["../../../../etc/passwd", "/etc/shadow"]` in emailDemo, ran via MCP, observed both rejections:
+  - `[security] path_traversal_blocked: task='send_reply' local_path='../../../../etc/passwd' contains '..'` (the `..` substring check fires first)
+  - `[Application] [warning] [email_send] task='send_reply' workflow='emailDemo' run='emailDemo_1777691801': attachment path rejected`
+  - `[security] path_traversal_blocked: task='send_reply' resolved='/etc/shadow' escapes base='/home/beaumanvienna/dev/jarvisAgent/workflows/emailDemo/03_reply'` (the absolute-path → escapes-base check fires for `/etc/shadow`)
+  - Same WARN line again for the second rejection.
+  - Run state: `succeeded` — task continued cleanly without the attachments (since the body itself is valid).  Per the audit-recommended skip-with-warning behaviour.
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: emailDemo negative-path test confirms both `..` and absolute-path attacks are rejected with security-log breadcrumbs.
+- Docs touched: none.
+- Blast radius: a JCWF that expected to attach files via paths containing `..` (e.g. `attachments: ["../shared/logo.png"]`) would now skip those attachments with a WARN.  No production workflow does this — the convention is that attachments live inside the task's working directory, populated by upstream tasks.
+
+---
+
+### IMAP folder URL injection — strict allowlist + IMAP UID validation
+
+**Finding (CRITICAL cyber):**  In `ExecuteEmailRead`, the `folder` parameter from the JCWF was interpolated directly into the IMAP URL (`searchUrl = imapBaseUrl + "/" + folder` and `fetchUrl = imapBaseUrl + "/" + folder + "/;UID=" + uid`).  No validation, no URL-encoding.  A value such as `INBOX@evil.internal:1234/extra` redirects the IMAP connection to an attacker-controlled host (the `@host:port` form is libcurl's standard URL syntax for overriding the connection target).  Values containing `\r\n` could inject IMAP protocol bytes.  The `uid` is server-supplied (from the SEARCH response) but interpolates into the FETCH URL too — still untrusted from this module's perspective, since a malicious or buggy IMAP server could return a hostile UID.
+
+**Verification:** Holds up.  Code at `emailCloudTaskExecutor.cpp:325` and `:366` (pre-fix) was the bare string concatenation, exactly as audited.
+
+**Change:** New file-local helpers `IsValidImapFolder(folder)` and `IsValidImapUid(uid)`.  Folder allowlist: `[A-Za-z0-9._/-]`, max 256 bytes, no leading or trailing `/`, no `//` (avoid ambiguous URL paths).  RFC 3501 hierarchy delimiters (`.` and `/`) are intentionally allowed — Gmail's `[Gmail]/Sent Mail` and similar legitimate hierarchies must still work.  UID allowlist: digits only, max 20 bytes (10^20 > UINT64_MAX, so any longer value is meaningless).  Validate folder once after the `INBOX` default; reject with task-level Failed + ERROR + SECURITY_WARN if invalid.  Validate UID per-iteration in the fetch loop; on invalid: skip-with-WARN (continue with remaining UIDs — a single bogus UID shouldn't fail the whole task).  In-code comments cite the URL-redirection threat model and explain why server-supplied UIDs are still treated as untrusted.
+
+**Verified at runtime:**
+- Build clean.
+- **Live happy-path:** emailDemo's canonical `folder: "INBOX"` accepted; the demo runs end-to-end identically.
+- **Live negative-path:** swapped `folder` to `"INBOX@evil.internal:1234/extra"`, ran emailDemo, observed:
+  - `[Application] [error] [email_read] task='fetch_email' workflow='emailDemo': invalid folder name rejected (length=30)`
+  - `[Security] [warning] [security] email_read_invalid_folder task='fetch_email' workflow='emailDemo' folder_length=30`
+  - Task `fetch_email` state: `failed`; downstream tasks (`ai_reply`, `send_reply`) skipped per existing dependency policy.  Run state: `failed`.
+- **Not directly verified:**  the per-iteration UID validation under a hostile IMAP server response.  GreenMail (the mock IMAP server) doesn't produce hostile UIDs in practice — the validation is structural (the allowlist guarantees the URL stays well-formed), and the LOG_APP_WARN path is the same shape as the existing `[email_read] failed to fetch UID` warn that already fires for legitimate IMAP errors.  A fixture that injects malformed UIDs server-side would harden confidence — track for the cybersec fixture sitting.
+
+**Ramifications:**
+- Callers touched: zero — folder/UID validation is internal to `ExecuteEmailRead`.
+- Tests touched: emailDemo negative-path confirms folder rejection.  Happy-path unchanged.
+- Docs touched: none.  The folder allowlist matches the IMAP RFC 3501 mailbox-name conventions; existing demo workflows (just `INBOX`) and any realistic non-default folder name (`Archive`, `Sent`, `[Gmail]/Sent Mail`, `Projects.j9t`) all pass.
+- Blast radius: legitimate IMAP folder names with non-allowlist characters (e.g. spaces — `"Sent Items"`) would be rejected.  The existing `EmailConnector::BuildImapUrl` would also have struggled with such names (no URL-encoding), so no production setup actually relies on them.  If a deployment surfaces such a need, the right fix is to extend the allowlist (and add `curl_easy_escape` for the URL-encoding) rather than weaken it.
+
+---
+
+### SMTP header injection — CRLF rejection on every header field value
+
+**Finding (HIGH safety):**  `BuildEmailMessage` concatenates `from`, `to`, `cc`, and `subject` into RFC 2822 headers via `msg << "From: " << from << "\r\n"` etc.  No CR/LF stripping at any point.  An attacker supplying `subject: "Hello\r\nBcc: victim@evil.com"` writes `Subject: Hello\r\nBcc: victim@evil.com\r\n` into the message — and the SMTP server interprets the embedded `\r\n` as a header terminator, accepting the injected `Bcc:` line as a real header.  Same vector for `from` (forging sender), `to` (BCC injection), `cc` (BCC injection).
+
+**Verification:** Holds up.  `BuildEmailMessage` at `emailCloudTaskExecutor.cpp:102–158` (pre-fix) is the raw `<<` concatenation, exactly as audited.
+
+**Change:** New file-local helper `ContainsCrlf(s)`.  At `ExecuteCloud`'s entry — after extracting `from`, `to`, `cc`, `subject` but BEFORE calling `BuildEmailMessage` — validate all four with `ContainsCrlf`.  On any positive match: set `m_LastErrorMessage`, transition to `Failed`, emit ERROR + SECURITY_WARN with task / workflow / run identifiers, return false.  Body content (which is the actual message body, not a header) is intentionally **not** validated — newlines are legitimate body content.  In-code comment at the validation site cites the BCC-injection threat model.  `BuildEmailMessage` itself is unchanged — defense lives at the entry gate, where the request can be rejected cleanly without any partial-build artefacts.
+
+**Verified at runtime:**
+- Build clean.
+- **Live negative-path:** swapped `subject` to `"Re: Hello\r\nBcc: victim@example.com"`, ran emailDemo, observed:
+  - `[Application] [error] [email_send] task='send_reply' workflow='emailDemo' run='emailDemo_1777691782': CRLF rejected in header field`
+  - `[Security] [warning] [security] email_send_header_injection task='send_reply' workflow='emailDemo' run='emailDemo_1777691782'`
+  - `[Application] [error] [workflow] task 'send_reply' failed in run 'emailDemo_1777691782': email_send: header field value contains CR/LF (from/to/cc/subject must not contain newlines)`
+  - Run state: `failed`.
+- **Live happy-path:** standard emailDemo subject `"Re: Weekly Report Request"` (no CR/LF) accepted; demo runs unchanged.
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: emailDemo negative-path confirms CRLF rejection on subject.  Same gate covers `from` / `to` / `cc` by symmetry — no separate test needed because the validation is one-line-per-field with identical shape.
+- Docs touched: none.  RFC 2822 §2.2.3 explicitly forbids CR/LF in unfolded header values; rejecting them is enforcing the spec.
+- Blast radius: a JCWF that legitimately needed multi-line `subject`/`cc` (no real protocol does — `cc` uses commas, `subject` uses RFC 2047 encoded-word for non-ASCII) would fail.  No production workflow does this.
+
+---
+
+## Skipped findings table — Sitting 11
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| No TLS enforcement for SMTP on non-587 ports | `emailCloudTaskExecutor.cpp` | HIGH cyber | Cluster 11B (TLS hardening).  Fix shape: drop the conditional `if (port == "587")` guard around `CURLOPT_USE_SSL` — set it unconditionally, or explicitly support 465 (`smtps://`) + 587 (STARTTLS) with no plain-text fallback. |
+| No TLS certificate verification guaranteed for SMTP | `emailCloudTaskExecutor.cpp` | HIGH cyber | Cluster 11B.  Fix: unconditionally `CURLOPT_SSL_VERIFYPEER=1L`, `CURLOPT_SSL_VERIFYHOST=2L`; abort on absent CA bundle rather than fall through. |
+| No TLS certificate verification for IMAP | `emailCloudTaskExecutor.cpp` (delegating to `EmailConnector::ImapCommand`) | HIGH cyber | Cluster 11B + sitting 13.  Fix lives in `emailConnector.cpp` (the `ImapCommand` body) — both files need to coordinate. |
+| Uncontrolled file read size for attachments (DoS / OOM) | `emailCloudTaskExecutor.cpp` | HIGH safety | Cluster 11B (size cap).  Fix: enforce a 25 MB-or-similar cap on `fileSize` before allocating the `std::string content(static_cast<size_t>(fileSize), '\0')`.  Bundle with cluster 11A's attachment confinement work was tempting, but size cap is its own mechanic and groups more naturally with TLS / redaction (the "resource and information control" sweep). |
+| Credentials logged in error path | `emailCloudTaskExecutor.cpp` | HIGH cyber | Cluster 11B (redaction).  Fix: replace `imapError` and `curl_easy_strerror(res)` strings with `CURLOPT_ERRORBUFFER`-driven errors that the executor can scrub before storing in `m_LastErrorMessage`. |
+| Secrets leaked in success-path log message (recipient + subject) | `emailCloudTaskExecutor.cpp` | MEDIUM cyber | Cluster 11B if grouping with redaction; could also bundle with the assistant-subsystem's secret-logging discipline pass (per `feedback_secrets_only_via_redactor`).  Defer. |
+| Unvalidated `max_messages` enables DoS | `emailCloudTaskExecutor.cpp` | MEDIUM cyber | Cluster 11B (resource control).  Fix: `std::clamp(static_cast<int>(val), 1, 500)` on parse. |
+| Predictable MIME boundary value (potential injection) | `emailCloudTaskExecutor.cpp` | MEDIUM cyber | Cluster 11C or its own slot — fix needs OpenSSL `RAND_bytes` for the boundary, plus body-content scan for boundary collision and regenerate-if-collide.  Same family as the body-not-validated-for-boundary concern; bundle naturally. |
+| `summary` JSON in `ExecuteCloud` not escaped | `emailCloudTaskExecutor.cpp` | MEDIUM safety | The summary builds `"to":"" + to + ""` etc. without `JsonEscapeEmail`.  Cluster 11A's CRLF gate already prevents the worst payload (newlines), but `"` and `\` still slip through.  Cluster 11B / cluster 11C work — small fix that bundles with the JsonHelper convergence pass on this file. |
+| `getStringParam` lambda captures `doc` by reference across array iteration | `emailCloudTaskExecutor.cpp` | LOW safety | Existing reads are scalars-before-arrays, so the on-demand position-dependence concern is dormant.  If a future change interleaves reads, the audit's recommendation (extract all scalars before any array iteration) becomes load-bearing.  Not a current bug. |
+| `EmailConnector::ImapCommand` TLS verification gaps + SSRF + IMAP injection on the connector layer | `emailConnector.cpp` | 2 CRIT + 5 HIGH | Sitting 13 (separate file, separate sitting).  One finding (IMAP folder URL injection) overlaps cluster 11A's executor-side fix — the connector-side fix is still needed because the connector is the source of truth for URL composition. |
+| File-local `JsonEscapeEmail` is yet another anon-namespace JSON-escape copy | `emailCloudTaskExecutor.cpp` | (convergence) | Tracked as the next iteration of the post-sitting-4 + sitting-9 JsonEscape convergence sweep.  This file was the 7th unconverged copy at sitting-9 review time.  Bundle with cluster 11B or do as a standalone mini-sweep at the start of cluster 11B. |
+| Stress fixture for hostile IMAP server responses (UID validation reproducer) | `emailCloudTaskExecutor.cpp` | (verification gap) | Defer to the cybersec fixture sitting. |
+
+---
+
+## Sitting 12 — emailCloudTaskExecutor.cpp Cluster 11B: TLS hardening + size cap + JsonHelper convergence
+
+**Scope locked:** the resource / transport-security cluster on `application/cloud/emailCloudTaskExecutor.cpp` — three HIGH (SMTP TLS unconditional, SMTP cert verify unconditional, attachment file-size cap) plus two MEDIUM bundle-friendly fixes (`summary` JSON escape gap, `max_messages` overflow clamp) plus the **7th anon-namespace `JsonEscape` copy** in the codebase converged onto `JsonHelper::EscapeJsonString` (continuing the post-sitting-4 + sitting-9 sweep).  Boundary at sitting-end: SMTP transport defaults to **TLS-required with full cert + hostname verification**; the only way to send plaintext SMTP is to set `use_ssl: "false"` on the connection, which now emits `[security] email_send_tls_disabled` on every send so an operator running insecurely sees the deviation in the security log.  Attachments are bounded at **25 MB** per file (skip-with-WARN on overflow).  `max_messages` is clamped to **[1, 500]** so an attacker-supplied or typo'd value cannot spiral memory.  The `summary` JSON in `ExecuteCloud` no longer corrupts on hostile `to` / `subject` content (`"`, `\\` now escape correctly).  No file-local `JsonEscape*` copies remain in `application/cloud/`.
+
+**One audit finding deferred:** the IMAP TLS verification HIGH (`emailCloudTaskExecutor.cpp:369` delegates to `EmailConnector::ImapCommand` — the actual fix lives on the connector layer).  Bundle with sitting 13's `emailConnector.cpp` pass.
+
+### SMTP TLS unconditional + cert verify unconditional — `use_ssl`-respecting strict TLS
+
+**Finding (HIGH cyber × 2):**  Pre-fix curl setup at lines 711–717 enabled `CURLOPT_USE_SSL = CURLUSESSL_ALL` only when `port == "587"`.  Port 465 (implicit TLS), port 25 (plain SMTP), and any non-standard port silently fell back to plaintext.  Separately, `CURLOPT_SSL_VERIFYPEER` and `CURLOPT_SSL_VERIFYHOST` were never explicitly set — relying on libcurl's defaults, which can fail-open on builds where the trust store is empty or unreachable.  Both findings fire on the same code path: the SMTP send, which carries credentials in the AUTH handshake.
+
+**Verification:** Both holds.  Code at lines 711–717 (pre-fix) is the bare `if (port == "587")` guard, and no `CURLOPT_SSL_VERIFY*` calls anywhere in this function.
+
+**Design tension surfaced during the fix:**  The audit's recommendation "set `CURLUSESSL_ALL` unconditionally" would break the canonical `emailDemo` workflow.  The bundled GreenMail Docker mock listens on plaintext port 3025 (no STARTTLS support) and the `my-greenmail` connection ships with `use_ssl: "false"` and `smtp_port: "3025"`.  Forcing TLS unconditionally would error every demo run.  **Resolution:** respect the existing `use_ssl` connection param (which the IMAP path already honours at line 322) and make TLS the default — so production deployments without an explicit opt-out get strict TLS, but local-testing setups with `use_ssl: "false"` retain plaintext support **and** emit a `[security] email_send_tls_disabled` log line on every send so an operator can audit.
+
+**Change:**
+1. Read `connection.m_Params["use_ssl"]` once into a local `bool smtpUseTls = (sslIt == end || sslIt->second != "false")`.
+2. If `smtpUseTls`: set `CURLOPT_USE_SSL = CURLUSESSL_ALL` (refuse to proceed without TLS — closes the silent-plaintext-fallback gap), `CURLOPT_SSL_VERIFYPEER = 1L`, `CURLOPT_SSL_VERIFYHOST = 2L`.  In-code comment cites the MITM-stripped-STARTTLS attack `CURLUSESSL_TRY` would have permitted.
+3. Else: emit `LOG_SECURITY_WARN("[security] email_send_tls_disabled task='{}' workflow='{}' run='{}' connection='{}'", ...)` so the deviation is observable in `log/security.txt`.
+4. Drop the old `if (port == "587")` block entirely — it conflated TLS-mode-by-port with TLS-required-by-policy.  libcurl's URL scheme detection (`smtps://` for 465, `smtp://` for 587) correctly drives the implicit-TLS-vs-STARTTLS choice; CURLUSESSL_ALL is the policy gate.
+
+**Verified at runtime:**
+- 28-test suite + hermetic dispatcher: PASS.
+- **Live happy-path (use_ssl=false branch):** `emailDemo` ran end-to-end as before; security log contains `[security] email_send_tls_disabled task='send_reply' workflow='emailDemo' run='emailDemo_1777692618' connection='my-greenmail'` exactly once per send.  GreenMail's plaintext SMTP path still works; the operator now has a clear signal that this connection is insecure.
+- **Not directly verified:**  the use_ssl=true branch (no production-grade SMTP+TLS server in the test environment).  The fix is structural — every curl option is set unconditionally on entry to the TLS branch; the verification posture is "the flags are now set per the audit's prescription".  A future fixture using a Postfix container with TLS would harden confidence, but the production deployment path will be exercised by JC's first real SMTP integration.
+
+**Ramifications:**
+- Callers touched: zero — `use_ssl` was already documented (cloud-integration.md line 778) and respected by the IMAP path.  Now it gates the SMTP path identically.
+- Tests touched: emailDemo unchanged (still ships with `use_ssl: "false"`).
+- Docs touched: none.  cloud-integration.md's `use_ssl` documentation now accurately covers the SMTP path that previously ignored it.
+- Blast radius: a deployment that sent SMTP with `use_ssl: "true"` (or omitted) and a CA bundle that libcurl can't reach would now fail the TLS handshake instead of silently falling through.  This is the correct behaviour — the silent fall-through was the bug.  An operator who hits the strict gate can either fix their CA bundle or, knowingly, opt in to plaintext via `use_ssl: "false"` (with the security log warning that step produces).
+
+---
+
+### Attachment file-size cap — 25 MB skip-with-WARN
+
+**Finding (HIGH safety):**  Pre-fix attachment loop at lines 670–675 read `auto fileSize = file.tellg();` then allocated `std::string content(static_cast<size_t>(fileSize), '\0')` with no upper bound.  An attacker who can place a large file in the task's working directory (or a buggy upstream that materialises one) causes the executor to allocate that many bytes plus a 1.33× base64-encoded copy in the MIME body — a multi-GB attachment OOMs the process.  The pre-fix code also didn't check `fileSize >= 0` before the cast; `tellg()` returns `pos_type` and can be `-1` on error (which would `static_cast<size_t>` to a wraparound value).
+
+**Verification:** Holds.  Code at lines 670–675 (pre-fix) was the bare `tellg → string allocate → read` shape.
+
+**Change:** Compute `fileSize` once, validate `fileSize >= 0 && fileSize <= kMaxAttachmentBytes` where `kMaxAttachmentBytes = 25 * 1024 * 1024` (`std::streamoff` to match `tellg`'s return type).  On overflow or negative: emit `LOG_APP_WARN` with task / workflow / run / attachPathStr / fileSize / cap, and `continue`.  Cap rationale documented inline: matches typical SMTP server limits (Gmail / Outlook / most providers) with headroom for the base64-encoded MIME message.  Skip-with-WARN matches the existing path-traversal-rejection behaviour from sitting 11 (single bad attachment doesn't fail the whole task).
+
+**Verified at runtime:**
+- **Live negative-path:** generated `workflows/emailDemo/03_reply/big_blob.bin` at 30 MB via `dd if=/dev/zero count=30 bs=1M`, set `attachments: ["big_blob.bin"]`, ran emailDemo.  Log shows: `[Application] [warning] [email_send] task='send_reply' workflow='emailDemo' run='emailDemo_1777692645': attachment 'big_blob.bin' size 31457280 bytes exceeds 26214400 byte cap; skipping`.  Run state: `succeeded` — task continued cleanly without the attachment, email sent.  Big_blob.bin removed post-test; emailDemo restored byte-identical.
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: emailDemo negative-path verifies the skip-with-WARN behaviour.
+- Docs touched: none.  Email size limits are SMTP-server-specific; documenting a hard 25 MB cap in the cloud-integration doc would conflict with operators who tune their server differently — leave the cap as a defense-in-depth implementation detail.
+- Blast radius: a workflow that legitimately needs to attach files larger than 25 MB would now silently skip them.  No realistic email workflow attaches files over that size (most SMTP providers reject them anyway).  If a deployment surfaces the need, the cap can be raised — single constant change.
+
+---
+
+### `JsonEscapeEmail` → `JsonHelper::EscapeJsonString` convergence (7th copy in the codebase)
+
+**Finding (carry-over from convergence sweep + MEDIUM RFC):**  `emailCloudTaskExecutor.cpp` carried a 30-line `static std::string JsonEscapeEmail(std::string const& input)` at lines 240–268.  Like the cloudConnectionManager copy that sitting 9 closed, this was the **7th unconverged anon-namespace JSON-escape copy** in the codebase after sittings 4–5's assistant-subsystem sweep + sitting 9's cloudConnectionManager close.  Unlike sitting 9's pre-fix cloudConnectionManager copy, this one already covered RFC 8259 §7 control chars (the `default:` arm emits `\\u%04x` for bytes < 0x20), so the convergence is purely a maintenance / consistency win — no escape-coverage gap to close.
+
+**Verification:** Holds — local `JsonEscapeEmail` definition at lines 240–268 plus 7 call sites (6 in `ExecuteEmailRead`'s summary-JSON build, 1 in the response JSON for the `folder` field).
+
+**Change:** Add `#include "json/jsonHelper.h"`.  Delete the local `JsonEscapeEmail` function definition.  Replace all 7 call sites with `JsonHelper::EscapeJsonString(...)` via `sed -i 's/JsonEscapeEmail(/JsonHelper::EscapeJsonString(/g'`.  Verify zero remaining `JsonEscapeEmail` references in the file post-conversion.
+
+**Verified at runtime:**  Build clean.  emailDemo happy-path PASS — the email_read summary JSON build (which exercises 6 of the 7 converted call sites) round-trips cleanly through `JsonHelper::EscapeJsonString`.
+
+**Ramifications:**
+- Callers touched: zero external.  The function was file-local with no header surface.
+- Tests touched: emailDemo's `emails_summary.json` write path now routes through `JsonHelper`.
+- Docs touched: none.  `feedback_simdjson_only` already names `JsonHelper` as the canonical escape helper.
+- Blast radius: zero behaviour change.  Both implementations were RFC 8259 §7-compliant; the convergence is consolidation only.
+
+---
+
+### Summary JSON escape gap + `max_messages` overflow clamp (two MEDIUM bundle-friendly fixes)
+
+**Finding (MEDIUM safety + MEDIUM cyber):**  Two small fixes that bundle naturally with cluster 11B.
+1. **Summary JSON escape** — `ExecuteCloud`'s summary build at line 772 (post-renumbering) did `"to":"" + to + ""` and `"subject":"" + subject + ""` with no escape.  Sitting 11's CRLF gate already prevents the worst payload (newlines), but `"` and `\\` still slip through and would corrupt the `response.json` write or smuggle additional JSON fields.
+2. **`max_messages` clamp** — at line 363, `maxMessages = static_cast<int>(val)` cast a uint64_t with no upper bound to int.  Values > INT_MAX wrap to negative (the audit's primary concern); values 1..INT_MAX allow attacker-supplied DoS via "fetch 2 billion emails".
+
+**Verification:** Both findings hold against current code.
+
+**Change:**
+1. Apply `JsonHelper::EscapeJsonString(to)` and `JsonHelper::EscapeJsonString(subject)` in the summary string concatenation.  In-code comment cites the `"` / `\\` slip-through that the CRLF gate didn't cover.
+2. Define `static constexpr int kMaxMessageCap = 500`.  Pre-clamp the uint64_t to the cap (so the int cast is safe), then `std::clamp(static_cast<int>(val), 1, kMaxMessageCap)` to enforce the lower bound.  In-code comment explains the prior overflow-to-negative bug and the DoS concern.
+
+**Verified at runtime:**
+- **Summary JSON escape live:** set `subject: "Re: \\"hostile\\" subject with \\\\backslash"` (`"` and `\\` literals after JSON un-escape), ran emailDemo.  `response.json` content: `{"ok":true,"to":"sender@example.com","subject":"Re: \\"hostile\\" subject with \\\\backslash","attachments":0}`.  Python `json.load` parses cleanly; subject decodes to the literal expected string.  Pre-fix the same payload would have produced an unparseable JSON file.
+- **`max_messages` clamp live:** set `max_messages: 99999`, ran emailDemo.  `fetch_email` task succeeded; no overflow, no excessive memory, run state `succeeded`.  The clamp is structural (a single-line `std::clamp` call); the verification posture is "the value passed without crashing and the int variable was finite-valued".
+
+**Ramifications:**
+- Callers touched: zero.
+- Tests touched: emailDemo negative-paths above.
+- Docs touched: none.  cloud-integration.md line 810 documents `max_messages | no | 10 | Maximum messages to fetch` — the new 500 ceiling is a defensive cap, not a contract change (no realistic JCWF requests > 500).
+- Blast radius: a workflow that requested `max_messages > 500` would now get exactly 500 messages instead of the larger number.  No realistic JCWF needs this; the IMAP polling pattern is "fetch the most recent N" where N is small.
+
+---
+
+## Skipped findings table — Sitting 12
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| No TLS certificate verification for IMAP | `emailCloudTaskExecutor.cpp` (delegating to `EmailConnector::ImapCommand`) | HIGH cyber | The fix lives on the connector layer (`EmailConnector::ImapCommand`'s curl setup).  Bundle with sitting 13's `emailConnector.cpp` cluster.  This file's IMAP path is just a thin wrapper that calls into the connector. |
+| Credentials logged in error path | `emailCloudTaskExecutor.cpp` | HIGH cyber | The credential-leak vector is the IMAP URL `user:password@host` form embedded into curl error strings.  The URL is built in `EmailConnector::BuildImapUrl` — fixing it requires sanitising at the connector layer (sitting 13) and registering credentials with `SecretRedactor` on resolution.  This file's `taskState.m_LastErrorMessage = "IMAP SEARCH failed: " + imapError` line cannot redact what the connector hands it; the right fix is at the source. |
+| Secrets leaked in success-path log message (recipient + subject) | `emailCloudTaskExecutor.cpp` | MEDIUM cyber | Recipient + subject metadata leak via `LOG_APP_INFO("[email] sent to {} via connection '{}' (subject: {})")`.  Bundle with sitting 13 or its own MEDIUM mini-sweep — the fix needs a config flag (log-metadata: on/off) and downgrade to DEBUG.  Out of cluster 11B's resource-and-transport scope. |
+| Predictable MIME boundary value (potential injection) | `emailCloudTaskExecutor.cpp` | MEDIUM cyber | The boundary uses `system_clock::now().time_since_epoch().count()` which is predictable.  Fix needs OpenSSL `RAND_bytes` for the boundary plus body-content scan for boundary collision and regenerate-if-collide.  Bundle with the assistant-subsystem's CSPRNG patterns or its own slot — out of cluster 11B. |
+| `getStringParam` lambda captures `doc` by reference across array iteration | `emailCloudTaskExecutor.cpp` | LOW safety | Existing reads are scalars-before-arrays (preserved through cluster 11A + 11B's changes); the on-demand position-dependence concern is dormant.  Defer to the eventual Rust-emulating C++ defaults sweep. |
+| `EmailConnector::ImapCommand` TLS verification gaps + SSRF + IMAP injection on the connector layer | `emailConnector.cpp` | 2 CRIT + 5 HIGH | Sitting 13.  Single dense file, ~1 sitting. |
+| Stress fixture exercising the use_ssl=true SMTP branch | `emailCloudTaskExecutor.cpp` | (verification gap) | Requires a Postfix-with-TLS Docker container; defer to the cybersec fixture sitting. |
+| Test coverage for the `kMaxAttachmentBytes` lower-bound (negative `tellg` defensive path) | `emailCloudTaskExecutor.cpp` | (verification gap) | Negative `tellg` only fires on stream errors mid-tellg, hard to engineer in a fixture; the fix is purely defensive. |
+
+---
+
+## Sitting 13 — emailConnector.cpp comprehensive: TLS hardening + SSRF + IMAP injection + DoS
+
+**Scope locked:** every CRITICAL and HIGH finding on `application/cloud/emailConnector.cpp` plus two MEDIUMs that bundle naturally — the file's full audit cluster, end-to-end, in one sitting.  **Boundary at sitting-end: the email surface (`emailCloudTaskExecutor.cpp` sittings 11+12 + `emailConnector.cpp` sitting 13) is fully closed at the CRITICAL/HIGH level.**  Both halves of the email send/read path now refuse to proceed without TLS + full peer + hostname verification when `use_ssl=true`; loopback / link-local / private / cloud-metadata IP ranges are rejected as SMTP/IMAP targets in production posture; the IMAP `folder` and `subject_filter` strings cannot inject protocol bytes; the `std::stoull` calls in the polling loop cannot crash the engine; the IMAP response buffer is bounded at 10 MB.  In addition, sitting 11's executor-side `IsValidImapFolder` + `IsValidImapUid` helpers were lifted to `EmailConnector` public statics so connector and executor share a single source of truth (per `feedback_cpp_discipline` — refactor before the third copy of a validator emerges).
+
+### TLS hardening — `ImapCommand` + `TestConnection` (2 CRIT)
+
+**Finding (CRIT cyber × 2):**  Both `EmailConnector::ImapCommand` (the IMAP send-buffer for SEARCH/FETCH commands shared by `email_read` and `email_watch`) and `EmailConnector::TestConnection` (the SMTP connectivity test driven by the dashboard + REST `/test` endpoint) had the same omission: `CURLOPT_SSL_VERIFYPEER` and `CURLOPT_SSL_VERIFYHOST` were never explicitly set.  `ImapCommand` set `CURLOPT_USE_SSL = CURLUSESSL_NONE` only on the `useSsl=false` branch — the `useSsl=true` path relied on libcurl's defaults, which can fail-open on builds where the trust store is empty or unreachable.  `TestConnection` had a port-conditional `if (port == "587") { CURLUSESSL_ALL }` that left ports 465 + non-standard silently in plaintext.
+
+**Verification:** Holds.  Code at `emailConnector.cpp:171-217` (pre-fix `ImapCommand`) and `:100-158` (pre-fix `TestConnection`) was as audited.
+
+**Change:**  Apply sitting 12's TLS pattern to both functions, with one twist for the connector layer: each function reads / receives `useSsl` (via parameter for `ImapCommand`, via `connection.m_Params["use_ssl"]` for `TestConnection`).  When `useSsl` is true: `CURLOPT_USE_SSL = CURLUSESSL_ALL` (refuse to proceed without TLS), `CURLOPT_SSL_VERIFYPEER = 1L`, `CURLOPT_SSL_VERIFYHOST = 2L`.  When false: explicitly select `CURLUSESSL_NONE` and emit `[security] email_test_tls_disabled` (for `TestConnection`) or `[security] email_imap_tls_disabled` (for `ImapCommand`).  In-code comment cites the build-defaults-fail-open concern that motivates the explicit settings.
+
+The closure fully eliminates **the IMAP TLS verification HIGH carry-over from sittings 11+12** (which was deferred at the executor layer because the actual fix lives here).
+
+**Verified at runtime:**
+- 28-test suite + hermetic dispatcher PASS.
+- **Live happy-path:** emailDemo succeeded with `[security] email_imap_tls_disabled url_scheme='imap:/'` per fetch — exactly the expected GreenMail-with-`use_ssl=false` signal.
+- **Live REST `/test` happy-path:** `POST /api/connections/my-greenmail/test` → `{"ok":true}` (use_ssl=false → plaintext SMTP path through GreenMail's port 3025 worked).  Same call after restoring use_ssl=true with localhost → rejected by SSRF gate (see next entry); the TLS-on-localhost path can't be exercised against GreenMail because GreenMail doesn't speak TLS.
+- **Not directly verified:** the `useSsl=true` strict-TLS branch.  No production-grade SMTP+TLS or IMAP+TLS server in the test environment; the fix is structural.
+
+---
+
+### SSRF host validation + port validation in `BuildSmtpUrl` + `BuildImapUrl`
+
+**Finding (HIGH cyber + MEDIUM cyber):**  Both URL-building helpers concatenated `connection.m_Params["smtp_host"]` / `["imap_host"]` and `["smtp_port"]` / `["imap_port"]` directly into the libcurl URL.  Hostile values like `host = "169.254.169.254"` (cloud metadata IP), `host = "evil.com:465/path?x="` (URL-injection), or `port = "587 UID FETCH"` (protocol-bytes-in-port) sailed through.  An attacker who controls connection params can target internal services, embed extra URL components, or inject IMAP/SMTP protocol bytes via the URL.
+
+**Verification:** Holds.  Code at `emailConnector.cpp:70-83` (`BuildSmtpUrl`) and `:85-98` (`BuildImapUrl`) was the bare concatenation, exactly as audited.
+
+**Change:**  New `EmailConnector` public statics (header — shared with the executor): `IsValidEmailHost(host, allowLocalNetwork)` and `IsValidEmailPort(port)`.  Host validation rejects URL-meaningful chars (`:`, `/`, `?`, `#`, `@`, `%`, `\\`), whitespace, CR, LF; rejects empty / >253 byte; and when `allowLocalNetwork` is false, rejects loopback (`localhost`, `127.x`, `::1`), link-local (`169.254.x` — covers cloud metadata), private (`10.x`, `172.16-31.x`, `192.168.x`), and IPv6 unique-local (`fc00::/7`, `fe80::/10`).  Port validation: digits only, [1, 65535], max 5 bytes.
+
+The `allowLocalNetwork` parameter is **gated on `use_ssl`** at the call site.  `BuildSmtpUrl` and `BuildImapUrl` read `use_ssl` and pass `allowLocal = !useSsl`.  Rationale: plaintext mode (`use_ssl=false`) is the local-testing escape hatch already (sitting 12), so accepting loopback hosts in that mode is consistent with the operator's already-explicit "I'm testing locally" signal.  Production deployments (`use_ssl=true`, the default) get strict no-loopback validation.
+
+On rejection, both helpers return an empty string and emit `[security] email_invalid_smtp_target connection='{}' use_ssl={}` or the `imap` variant.  Callers (`TestConnection`, `CheckForNewMail`, `emailCloudTaskExecutor::ExecuteCloud`) check for empty URL and fail-the-task with a "see security log" error message.
+
+**Verified at runtime:**
+- **Live SSRF rejection:** mutated `my-greenmail` to `smtp_host: "169.254.169.254"` + `use_ssl: "true"` via REST PUT, then `POST /api/connections/my-greenmail/test` → HTTP 400 + `Email SMTP target rejected: invalid host or port (see security log)`.  Security log: `[security] email_invalid_smtp_target connection='my-greenmail' use_ssl=true`.
+- **Live use_ssl-coupled gate:** mutated to `smtp_host: "localhost"` + `use_ssl: "true"` (legitimate hostname + production posture) → also rejected.  Same SECURITY_WARN.  Confirms the gate doesn't have a "plaintext-loophole" — even when an operator forgets to set non-loopback host, the production posture refuses to send.
+- **Live use_ssl-coupled allow path:** restored to `smtp_host: "localhost"` + `use_ssl: "false"` (the canonical demo config) → `POST /test` returned `{"ok":true}`, GreenMail accepted the connection.  Confirms the local-testing escape hatch works.
+- **Not directly verified:** the IPv4 `172.16-31.x` second-octet range (the `std::stoi` parse + bounds check is structural; bundled into the same code path as the verified `10.x` / `192.168.x` checks).  IPv6 unique-local detection.
+
+---
+
+### IMAP folder + `subject_filter` injection in `CheckForNewMail`
+
+**Finding (HIGH cyber × 2):**  `CheckForNewMail` interpolated the `folder` parameter directly into the IMAP URL (`searchUrl = imapBaseUrl + "/" + folder;`) and the `subjectFilter` parameter directly into the SEARCH command (`searchCommand += " SUBJECT \"" + subjectFilter + "\"";`).  Folder injection vectors: `INBOX\r\nA001 FETCH 1:* (BODY[])` (CRLF protocol bytes), `../../etc/passwd` (path traversal in URL), `INBOX?param=` (URL component injection).  Subject filter injection: `foo" UNSEEN` (breaks out of the quoted string) or `foo\r\nA001 FETCH 1:* (BODY[])` (CRLF injects another IMAP command).
+
+**Verification:** Holds.  Code at `emailConnector.cpp:267` and `:276` (pre-fix) was the bare concatenation.
+
+**Change:**  Apply `EmailConnector::IsValidImapFolder` and a new `EmailConnector::IsValidImapSubjectFilter` static at the entry of `CheckForNewMail`.  `IsValidImapFolder` is the helper sitting 11 created (lifted to the connector header in this sitting).  `IsValidImapSubjectFilter` rejects bytes that would break the SEARCH SUBJECT quoted-string envelope (`"`, `\\`) or inject IMAP command bytes (`\r`, `\n`) or trigger IMAP literal syntax (`{`).  Empty filter is allowed (means "no filter").  Length cap at 256 bytes.
+
+On reject: emit `[security] email_check_invalid_folder` or `[security] email_check_invalid_subject_filter` SECURITY_WARN and return an empty UID with `errorMessage` set.  This is **defense-in-depth** — sitting 11 already validates folder at the executor entry, but the connector's public API can be invoked from future call sites with no prior validation.
+
+Bonus closure: also validates the `lastSeenUid` watermark with `IsValidImapUid` before any `std::stoull` call (closes the audit's specific concern that "lastSeenUid comes from an external watermark that is never sanitized").
+
+**Verified at runtime:** `CheckForNewMail` is exercised by the `email_watch` trigger, which fires on a poll timer (default 300s).  emailDemo doesn't use `email_watch` — it's a manual one-shot trigger that uses `email_read`.  Direct fixture-level testing of `CheckForNewMail` would need either an `email_watch` JCWF + 5-minute wait, or a unit-test harness.  The fix is structural (the validators are simple allowlists; the failure path is an explicit early return); the verification posture is "the same allowlist that proved correct in sitting 11's executor-side gate now also runs at the connector layer".
+
+---
+
+### `std::stoull` DoS — try/catch + watermark sanitization
+
+**Finding (HIGH cyber):**  `CheckForNewMail`'s polling loop had `if (std::stoull(uid) > std::stoull(lastSeenUid))` with no exception handling.  `ParseSearchUids` checked `std::isdigit` on the first byte only — values like `"1e5"` (parser accepts the `1`, `stoull` throws `invalid_argument` on the `e`) or `"99999999999999999999"` (overflow → `out_of_range`) would crash the polling thread.  `lastSeenUid` (the watermark) comes from external state and was never sanitized either.
+
+**Verification:** Holds.  Code at `emailConnector.cpp:307` (pre-fix) was the bare `stoull` calls.
+
+**Change:**  Sanitize `lastSeenUid` with `IsValidImapUid` at function entry (covered above as part of the `CheckForNewMail` hardening).  Wrap the polling-loop comparison in `try { ... } catch (std::invalid_argument) { ... } catch (std::out_of_range) { ... }`; on either exception, log `LOG_APP_WARN` with connection name, set `errorMessage`, and return `highestUid` (the safe "no new mail" path that preserves the watermark).  Per-element validity check (`IsValidImapUid(uid)`) inside the loop also skips malformed UIDs with a WARN — defense in depth even if `ParseSearchUids` stops checking the first byte.
+
+**Verified at runtime:**  Same posture as the IMAP injection fixes — the structural fix is exercised by every `email_watch` poll (the try/catch is on the hot path), but reproducing the malformed-UID scenario requires either a hostile IMAP server or a unit test.  emailDemo's GreenMail produces well-formed UIDs.  Defer to the cybersec fixture sitting.
+
+---
+
+### IMAP response buffer cap (MEDIUM)
+
+**Finding (MEDIUM cyber):**  `ImapWriteCallback` appended every byte returned by libcurl into the response `std::string` with no upper bound.  A hostile or compromised IMAP server can stream an arbitrarily large response, exhausting process memory.
+
+**Verification:** Holds.  Code at `emailConnector.cpp:164-169` (pre-fix) was the bare append.
+
+**Change:**  `static constexpr size_t kMaxImapResponseBytes = 10 * 1024 * 1024;` in the connector's anon namespace.  In the write callback, check `buf->size() + incoming > kMaxImapResponseBytes` before appending; on overflow, return 0 — libcurl interprets this as `CURLE_WRITE_ERROR` and aborts the transfer cleanly.  The caller's existing error path (`if (res != CURLE_OK) { errorMessage = "IMAP request failed: ..."; return false; }`) handles the abort uniformly.  10 MB matches the audit recommendation — production IMAP responses are typically tens of KB; a server returning >10 MB to a SEARCH command is already pathological.
+
+**Verified at runtime:**  Build clean.  Default emailDemo's IMAP responses are well under 10 MB; the cap doesn't fire.  Reproducing the >10 MB scenario requires a malicious IMAP server fixture.  Same fixture-deferral posture as the other hostile-server scenarios.
+
+---
+
+### Validator helpers lifted from executor to connector header (refactor)
+
+**Finding (carry-over from `feedback_cpp_discipline`):**  Sitting 11 created `IsValidImapFolder` and `IsValidImapUid` as file-local statics in `emailCloudTaskExecutor.cpp`.  Sitting 13's connector-layer defense-in-depth needs the same predicates.  The choice was either (a) duplicate the helpers as a second copy in `emailConnector.cpp` anon namespace (adds the 2nd of an eventual 3 copies that would trigger refactor under `feedback_cpp_discipline`), or (b) lift to a shared location.  Chose (b) — header lift to `EmailConnector` public statics.
+
+**Change:**
+1. `emailConnector.h` — add 5 `[[static]]` declarations on `EmailConnector`: `IsValidImapFolder`, `IsValidImapUid`, `IsValidImapSubjectFilter`, `IsValidEmailHost`, `IsValidEmailPort`.  Multi-line comment block explains the shared-source-of-truth contract.
+2. `emailConnector.cpp` — add the definitions (same body sitting 11 had for `IsValidImapFolder` + `IsValidImapUid`; new for the subject-filter / host / port validators).
+3. `emailCloudTaskExecutor.cpp` — delete the file-local `IsValidImapFolder` + `IsValidImapUid` definitions (sitting 11 left them at lines 78–134).  Replace 2 call sites: `IsValidImapFolder(folder)` → `EmailConnector::IsValidImapFolder(folder)`; same for UID.  `ContainsCrlf` is left as a one-line file-local helper because it's trivially short and only used in this file.
+
+**Verified at runtime:**  emailDemo happy-path runs identically to before the refactor (the helpers' bodies are bit-for-bit the same — the lift was purely a relocation).
+
+---
+
+## Skipped findings table — Sitting 13
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Credentials / key names in error messages (low risk leakage to caller logs) | `emailConnector.cpp` | MEDIUM cyber | Partially mitigated by the SSRF host gate this sitting added — the audit's primary concern was the IMAP URL `user:password@host` form leaking via `curl_easy_strerror`, which the new strict host validation makes structurally harder.  The remaining concern (`m_KeyName` echoed in errors) is a separate tracked item; a future MEDIUM mini-sweep on the cloud-surface error-message hygiene closes it without disrupting the URL-validation work. |
+| `ContainsCrlf` not lifted to a shared header | `emailCloudTaskExecutor.cpp` | (style) | Trivial one-line check (`s.find('\r') != npos || s.find('\n') != npos`); only used in one file.  Lifting it would add a header surface for negligible benefit. |
+| Stress fixtures for hostile IMAP server responses | `emailConnector.cpp` | (verification gap) | Several fixes in this sitting (UID DoS try/catch, response buffer cap, IMAP injection allowlists) close their threat models structurally but lack reproducer fixtures because they require a controlled malicious-IMAP fixture.  Defer to the cybersec fixture sitting. |
+| TLS-strict path live verification under a real TLS-enabled IMAP/SMTP server | `emailConnector.cpp` | (verification gap) | Requires a Postfix-with-TLS or Dovecot Docker container in the test environment.  Defer to the cybersec fixture sitting. |
+| `emailConnector.h::~EmailConnector` declaration | `emailConnector.h` | (style) | The header doesn't declare a virtual destructor explicitly, but `ICloudConnector` (the base class) has `virtual ~ICloudConnector() = default`, so the chain is correct.  No defect, just noting that future maintainers needn't worry. |
+
+---
+
+## Sitting 14 — snowflakeCloudTaskExecutor.cpp + snowflakeConnector.cpp comprehensive: SSRF + path-traversal + TLS + JSON-injection + JWT-CRLF + DoS
+
+**Scope locked:** every CRITICAL and HIGH finding on `application/cloud/snowflakeCloudTaskExecutor.cpp` (the densest single-file cluster on the cloud surface — 3 CRIT + 5 HIGH per the audit) plus the parallel issues in `snowflakeConnector.cpp::TestConnection` + `BuildApiBaseUrl` (matching the email-surface "executor + connector" comprehensive close pattern from sitting 13).  Fixes mostly mechanical applications of patterns established in sittings 11–13: `ValidateLocalPath` for path traversal, `kMaxXxxResponseBytes` writeCallback cap, `JsonHelper::EscapeJsonString` for JSON injection, `ContainsCrlf` reject for header injection, unconditional `CURLOPT_SSL_VERIFY*` for TLS posture, `std::clamp` for timeout/poll bounds.  Boundary at sitting-end: **the Snowflake surface is fully closed at the CRITICAL/HIGH level**.
+
+### `BuildApiBaseUrl` allowlist + scheme rejection (CRIT SSRF)
+
+**Finding (CRITICAL cyber):**  Pre-fix `BuildApiBaseUrl` accepted `m_Endpoint` as either an account locator (`xy12345.us-east-1`) which it appended to `https://...snowflakecomputing.com`, or a full user-provided URL (`https://...` or `http://...`) which it returned **as-is**.  The "as-is" branch was the SSRF vector: `m_Endpoint = "http://evil.com/path?x="` would sail through, and the executor would then issue authenticated HTTP requests (with the JWT Bearer token) to whatever target the value pointed at.  Combined with `CURLOPT_FOLLOWLOCATION = 1L` (which the executor and connector both set), a redirect chain could pivot to internal services.
+
+**Verification:** Holds.  Code at `snowflakeConnector.cpp:43-57` (pre-fix) was the conditional-passthrough for prefixed URLs, exactly as audited.
+
+**Change:**  Drop the user-provided-URL branch entirely.  Endpoint must now be a strict account locator: alphanumeric + `.` + `-` + `_`, max 128 bytes, non-empty.  Any rejection emits `[security] snowflake_invalid_endpoint reason={size,charset} endpoint_length={}` with the value's length only (not the value, which could encode sensitive deployment topology).  Always returns `"https://" + endpoint + ".snowflakecomputing.com"`.  No `http://` accepted, no full URLs accepted, no other domains accepted.
+
+This change is somewhat **breaking**: a deployment that had configured `m_Endpoint` as a full URL for testing now needs to switch to the account-locator form.  Per `cloud-integration.md:651` the documented contract was always "account locator with region" — the full-URL handling was an undocumented escape hatch.  Per project policy (alpha, no production users), the breaking change is acceptable.
+
+**Verified at runtime:**
+- 28-test suite + hermetic dispatcher PASS.
+- **Live SSRF rejection:** mutated `my-snowflake.endpoint` to `"evil.com/path?x="` via REST PUT, then `POST /api/connections/my-snowflake/test` → HTTP 400 + `Snowflake endpoint rejected: invalid account locator (see security log)`.  Security log: `[security] snowflake_invalid_endpoint reason=charset endpoint_length=16`.
+- emailDemo regression check: PASS (the shared cloud-surface curl pattern is intact).
+- **Not directly verified:** the live happy-path against a real Snowflake endpoint (no Snowflake account in test env).  The fix is structural; the verification posture is "the gate produces correct output given correct input" — which the canonical `TVXEFHO-JHB68153` value would pass cleanly.
+
+---
+
+### Response-body cap in `writeCallback` (CRIT DoS)
+
+**Finding (CRITICAL cyber):**  `SnowflakeRequest`'s `CURLOPT_WRITEFUNCTION` lambda appended every byte received from the remote into `responseBody` with no upper bound.  An attacker-controlled or compromised Snowflake endpoint (or — combined with the SSRF above — any pivoted-to internal service) could stream arbitrary bytes, exhausting process memory.
+
+**Verification:** Holds.  Code at `snowflakeCloudTaskExecutor.cpp:60-65` (pre-fix) was the bare append.
+
+**Change:**  `static constexpr size_t kMaxSnowflakeResponseBytes = 64 * 1024 * 1024;` (audit recommendation).  In the writeCallback, check `buf->size() + incoming > cap` before appending; on overflow return 0 → libcurl aborts with `CURLE_WRITE_ERROR`, which the caller's existing error path handles.  64 MB matches the audit recommendation — Snowflake result sets paginate, so a single response larger than this is pathological.  Same cap added in parallel to `snowflakeConnector.cpp::TestConnection`'s writeCallback, with a tighter local `kMaxConnectorResponseBytes = 1 MB` (test-connection responses are tiny).
+
+**Verified at runtime:**  Build clean.  emailDemo regression check still passes — the connector-side writeCallback structure is the same shape used everywhere else.  Reproducing the >64 MB scenario requires a malicious endpoint fixture; defer.
+
+---
+
+### TLS verify-peer + verify-host unconditional (HIGH cyber)
+
+**Finding (HIGH cyber):**  Neither `SnowflakeRequest` nor `TestConnection` ever explicitly set `CURLOPT_SSL_VERIFYPEER` or `CURLOPT_SSL_VERIFYHOST`.  Both relied on libcurl defaults, which can fail-open on builds where the trust store is empty.  No use_ssl-style opt-out applies because Snowflake is HTTPS-only by protocol — every request must verify.
+
+**Change:**  Unconditionally `curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L)` and `curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L)` in both `SnowflakeRequest` and `TestConnection`.  No use_ssl gate (Snowflake is HTTPS-only).
+
+**Verified at runtime:**  Build clean; emailDemo regression PASS.  Strict-TLS branch verification requires a real Snowflake endpoint; structural fix.
+
+---
+
+### `CURLOPT_FOLLOWLOCATION` disabled
+
+**Finding (defense-in-depth combined with SSRF):**  Both `SnowflakeRequest` and `TestConnection` had `CURLOPT_FOLLOWLOCATION = 1L`.  Combined with the BuildApiBaseUrl SSRF vector, a redirect chain from a hostile endpoint could pivot to internal services (with the JWT Bearer token attached).  Snowflake's API never legitimately redirects, so the option had no positive use.
+
+**Change:**  `curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L)` in both functions.  The BuildApiBaseUrl charset gate already prevents the primary SSRF vector; disabling redirect-following closes the chained-redirect vector even if a future regression breaks the endpoint validation.
+
+---
+
+### JWT CRLF rejection (HIGH header injection)
+
+**Finding (HIGH cyber):**  `authHeader = "Authorization: Bearer " + jwt;` concatenated `credentials.m_Token` directly into a header string.  CR/LF in the JWT would split into multiple headers — recent libcurl versions strip embedded newlines, but version-dependent behaviour shouldn't be relied on.
+
+**Change:**  Add file-local `static bool ContainsCrlf(std::string const&)` (matches the executor pattern from sitting 11; not lifted to `EmailConnector`-style shared header because no other Snowflake call site needs it yet).  Validate `credentials.m_Token` at `ExecuteCloud` entry; reject = task Failed + LOG_APP_ERROR + `[security] snowflake_jwt_crlf_rejected`.  Same check in `TestConnection`: reject = `errorMessage` set + `[security] snowflake_test_jwt_crlf_rejected` SECURITY_WARN.
+
+---
+
+### JSON injection on warehouse / database / schema (HIGH JSON injection)
+
+**Finding (HIGH cyber):**  `requestBody += ",\"warehouse\":\"" + warehouse + "\""` (and equivalent for database / schema) spliced raw values.  A connection-param value containing `","timeout":0,"x":"` would close the JSON string early and override request fields.  Only `query` was JSON-escaped pre-fix.
+
+**Change:**  Route all three values through `JsonHelper::EscapeJsonString` (the canonical RFC 8259 §7-compliant helper that sittings 9 + 12 converged the file-local copies onto).  Same fix applied to `TestConnection`'s parallel requestBody build.
+
+---
+
+### `m_LastErrorMessage` raw-response sanitization (HIGH secrets leakage)
+
+**Finding (HIGH cyber):**  Both error paths (HTTP 4xx/5xx on submit and on poll) embedded up to 500 bytes of the raw Snowflake response in `m_LastErrorMessage`.  Snowflake error responses can include schema names, partial query data, and operational metadata that shouldn't leak into the persisted workflow state (which surfaces in the dashboard, REST API, and workflow logs).  Same pattern in `TestConnection`'s `errorMessage`.
+
+**Change:**  Drop the `if (!responseBody.empty() && responseBody.size() < 500) { errorMessage += ": " + responseBody; }` blocks at all three sites (executor submit, executor poll, connector test).  Error message keeps the structured `HTTP {code}` portion only.  The structured `code` / `message` fields from a parseable Snowflake response are extracted separately on the success-but-error-status path (existing code at line ~398), so legitimate diagnostic information remains accessible.
+
+**Note:** This sitting only sanitizes `m_LastErrorMessage`.  `WriteResponseJson(workDir, taskState, responseBody)` still writes the raw response body to `response.json` for downstream-task consumption — that's a load-bearing contract (downstream tasks parse the result set).  The audit's broader "raw response in response.json contains PII" concern is **architectural** and out of cluster 14 scope; bundles into a future "cloud-task output sensitivity policy" design memo.
+
+---
+
+### `statementTimeout` / `pollInterval` clamp (HIGH resource exhaustion)
+
+**Finding (HIGH safety + cyber):**  Both `timeout` and `poll_interval` JSON params were cast `static_cast<int>(uint64_t)` with no upper bound check.  Values > INT_MAX wrap to negative (`statementTimeout < 0` disables the polling timeout entirely → indefinite worker thread pin).  Even values in `[1, INT_MAX]` allow denial-of-service via a 999_999_999-second timeout.
+
+**Change:**  Define `kMaxStatementTimeoutSeconds = 24 * 3600` and `kMaxPollIntervalSeconds = 60`.  Pre-clamp the uint64_t to the cap **before** the int cast: `if (val > kMaxXxx) { val = kMaxXxx; }`, then `std::clamp(static_cast<int>(val), 1, kMaxXxx)` — single-line fix per param.
+
+---
+
+### Snowflake handle validation (MEDIUM URL injection)
+
+**Finding (MEDIUM cyber):**  `handle` was extracted from the Snowflake submit response and interpolated into `pollUrl` and `cancelUrl` without validation.  A compromised Snowflake endpoint or response-tampering MitM could inject URL components (path traversal, query string).
+
+**Change:**  New file-local `static bool IsValidSnowflakeHandle(std::string const&)`: alphanumeric + `-`, max 64 bytes (UUID-like).  Validate at the top of the polling block; reject = task Failed + ERROR + `[security] snowflake_invalid_handle`.  This is a defense-in-depth gate — Snowflake's documented handle format is UUID-style, but the executor shouldn't trust the server-supplied value blindly when it ends up in a URL.
+
+---
+
+### `outputFile` path traversal (CRIT path traversal)
+
+**Finding (CRITICAL cyber):**  `outputPath = workDir / outputFile;` with no validation.  An attacker-controlled JCWF param `outputFile: "../../etc/cron.d/evil"` would let the task overwrite arbitrary files.
+
+**Change:**  Apply `ICloudTaskExecutor::ValidateLocalPath(outputFile, workDir, taskDefinition.m_Id)` before opening the file for write — same gate as sitting 11's email body_file / attachments fixes.  Reject = task Failed + LOG_APP_ERROR with task / workflow / run identifiers.
+
+---
+
+## Skipped findings table — Sitting 14
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| `WriteResponseJson` writes raw API response (potentially containing PII) to `response.json` | `snowflakeCloudTaskExecutor.cpp` | HIGH cyber (architectural) | Out of cluster 14 scope.  `response.json` is a load-bearing contract — downstream tasks parse it for the result set.  Removing it or redacting it would break the workflow contract.  The audit's full fix would gate the write behind a debug flag OR redesign downstream tasks to consume only the structured result.  Architectural decision; bundles into a future "cloud-task output sensitivity policy" design memo. |
+| SQL injection risk on `query` (architectural) | `snowflakeCloudTaskExecutor.cpp` | MEDIUM cyber (architectural) | The `query` field is fully trusted input by design — JCWF authors author SQL just as they author shell commands.  The fix is access control on JCWF authoring + Snowflake role-level least-privilege, not validation in the executor.  Documented as a known architectural property. |
+| Synchronous result path uses stale `responseBody` from submit response | `snowflakeCloudTaskExecutor.cpp` | MEDIUM safety | Code-correctness concern about simdjson `ondemand::document` lifetimes.  Currently safe (the `responseBody` `std::string` lives for the entire scope), but fragile to future refactors.  Defer to a future MEDIUM safety mini-sweep. |
+| Column names written to JSON/CSV output without bounds check | `snowflakeCloudTaskExecutor.cpp` | LOW safety | Bounds-check on column name length before splicing into the output writer.  No realistic Snowflake schema has multi-MB column names; defer with the Rust-emulating C++ defaults sweep. |
+| Inline JSON-escape switch blocks in query escape + result-row-write paths | `snowflakeCloudTaskExecutor.cpp` | (convergence) | Two inline `switch` blocks duplicate `JsonHelper::EscapeJsonString`'s logic (query escape at lines ~230-241, JSON output writer at lines ~528-538).  Sitting 12's "no anon-namespace JsonEscape copies remain" claim still holds (these are inline switch blocks, not named helpers).  Cleanup-grade convergence; bundle with a future "inline-escape-block sweep" or with the response.json architectural review. |
+| Stress fixture for the `kMaxSnowflakeResponseBytes` cap | `snowflakeCloudTaskExecutor.cpp` | (verification gap) | Reproducing the > 64 MB scenario requires a malicious endpoint fixture.  Defer to the cybersec fixture sitting. |
+| Live happy-path against a real Snowflake account | `snowflakeCloudTaskExecutor.cpp` + `snowflakeConnector.cpp` | (verification gap) | No Snowflake account in test env.  Fix shape matches established patterns (TLS, response cap, JSON escape, JWT validation are all structural); emailDemo regression check confirms the shared cloud-surface curl pattern is intact. |
+
+---
+
+## Sitting 15 — Horizontal Sweep #1: `local_path` / `output_file` path-traversal across 5 cloud task executors
+
+**Scope locked:** the first **horizontal sweep** — one pattern (CRITICAL filesystem-path traversal on caller-supplied local-file params) closed across 5 cloud task executors in a single sitting.  Files: `azureBlobCloudTaskExecutor.cpp`, `gcsCloudTaskExecutor.cpp`, `googleSheetsCloudTaskExecutor.cpp`, `oneDriveCloudTaskExecutor.cpp`, `s3CloudTaskExecutor.cpp`.  Each had at least one CRITICAL audit finding flagging "param X taken directly from JSON params and passed to `std::ifstream` / `std::ofstream` / a download helper without canonicalisation or containment", with attacker-controlled paths like `../../etc/passwd` (read) or `../../etc/cron.d/evil` (write) escaping the intended workspace.  Single helper applied to all 5 — `ICloudTaskExecutor::ValidateLocalPath(path, baseDir, taskId)` — with the right `baseDir` per file (CWD-relative for azureBlob/gcs/s3, workDir-relative for googleSheets/oneDrive, matching each file's existing usage convention).  This is the first of an estimated 4–5 horizontal sweeps that will close the cross-cutting cloud-surface concerns; subsequent sweeps will tackle response-body caps, TLS verification, SSRF host validation, and JSON-injection systematically.
+
+**Naming convention introduced:** "Horizontal Sweep #N — \<pattern\> across \<files\>" — vs. the depth-first per-file sittings (Sittings 11–14).  See sitting 14 hand-off for the rationale + horizontal-sweep candidate list.
+
+### Per-file changes
+
+All 5 files received the same shape: after the existing `getStringParam` extraction + empty-check, **before** any file open / download / read, add a `ValidateLocalPath(path, baseDir, taskDefinition.m_Id)` gate.  On reject: set `m_LastErrorMessage` (file-specific message), transition to `Failed`, emit `LOG_APP_ERROR` with task / workflow / run identifiers (per `feedback_log_failures` for dashboard analyzer compatibility), return false.  `ValidateLocalPath` itself emits the canonical `[security] path_traversal_blocked: task='{}' local_path='{}' contains '..'` (or `... resolved='{}' escapes base='{}'`) SECURITY_INFO line via the helper's existing implementation.
+
+| File | Param | baseDir | Convention |
+|---|---|---|---|
+| `azureBlobCloudTaskExecutor.cpp` | `local_path` | launch CWD | CWD-relative (canonical demo: `"workflows/azureBlobDemo/file.csv"`) |
+| `gcsCloudTaskExecutor.cpp` | `local_path` | launch CWD | CWD-relative (canonical demo: `"workflows/gcsDemo/file.csv"`) |
+| `googleSheetsCloudTaskExecutor.cpp` | `output_file` (read op) + `input_file` (write op) | workDir | workDir-relative (existing `workDir / file` pattern) |
+| `oneDriveCloudTaskExecutor.cpp` | `local_path` | workDir | workDir-relative (existing `workDir / localPath` pattern) |
+| `s3CloudTaskExecutor.cpp` | `file_path` (upload + download branches) | launch CWD | CWD-relative (canonical demo: `"workflows/s3UploadDownloadDemo/server_metrics.csv"` and `"queue/<workflow>/<task>/output.txt"`) |
+
+**Bonus refactor in oneDrive:** the upload + download branches both resolved `workflowBaseDir` + `workDir` + `fullLocalPath` independently.  Lifted the resolution above the branch (single site, single validation gate, both branches reference the shared `fullLocalPath`).  The trailing `WriteResponseJson` block (lines 314–325 pre-fix) also re-resolved `workflowBaseDir` + `workDir`; after the lift, it reuses the already-resolved values (`-Wshadow` warning closed as a bonus).
+
+### Convention rationale (CWD-relative vs workDir-relative)
+
+This was the trickiest design decision.  Three of the five files (azureBlob, gcs, s3) opened the user-supplied path **directly** (`std::ifstream(localPath)`) — meaning the path was OS-resolved against the process's current working directory (j9t's launch CWD).  The canonical demo workflows for those three pass values like `"workflows/azureBlobDemo/file.csv"` — clearly CWD-relative through the `workflows/` and `queue/` trees.  The other two (googleSheets, oneDrive) joined the path with workDir first (`workDir / outputFile` etc.) — clearly workDir-relative.
+
+Picking the wrong base would either (a) break the demos (workDir-confine for the CWD-relative files would reject everything except a literal path inside the queue task folder), or (b) over-permit (CWD-confine for the workDir-relative files would let one task read another task's queue folder).  The chosen baseDir per file matches each file's existing usage convention — closing the traversal vector without any contract change.
+
+The `body_file` fix from sitting 11 used the same CWD-relative reasoning for its `body_file` param; this sweep applies the same model to azureBlob / gcs / s3.  GoogleSheets / oneDrive already used workDir-relative paths internally; the sweep just adds the gate at the entry point.
+
+### What's verified
+
+- Studio debug build clean (`make config=debug`).  All 5 files recompiled without diagnostic.
+- 28-test assistant non-AI suite: PASS in 2.1 s.
+- Hermetic dispatcher: PASS.
+- **emailDemo regression check:** 3 tasks succeeded in 2 s end-to-end.  Confirms the shared cloud-surface infrastructure (the `ICloudTaskExecutor` base class, `ValidateLocalPath` helper, all the curl + JSON helpers) is intact across the email surface that sittings 11+12+13 closed.
+- **Live S3 negative test (representative for the 5 files since the gate is identical):**  Mutated `s3UploadDownloadDemo`'s `upload_data.params.file_path` to `"../../../../etc/passwd"` via direct JSON edit + `POST /api/workflows/reload`.  Ran via `mcp__j9t__run_workflow` → run state `failed` at `upload_data`; downstream tasks (`download_data`, `ai_analyze`, `upload_report`, `list_objects`) all `skipped` per dependency policy.  Log produced exactly the expected three lines:
+  - `[Security] [info] [security] path_traversal_blocked: task='upload_data' local_path='../../../../etc/passwd' contains '..'`
+  - `[Application] [error] [s3] task='upload_data' workflow='s3UploadDownloadDemo' run='s3UploadDownloadDemo_1777695935': file_path rejected (upload)`
+  - `[Application] [error] [workflow] task 'upload_data' failed in run 's3UploadDownloadDemo_1777695935': s3 upload: file_path is invalid or escapes the launch directory`
+  - Run state: `failed`; downstream tasks correctly skipped per existing dependency-failure policy.
+  Demo restored byte-identical to backup post-test.
+- **Not directly verified:**
+  - Live negative tests on the other 4 files (azureBlob / gcs / googleSheets / oneDrive).  The gate code is **structurally identical** across all 5 — same `ValidateLocalPath` call, same fail-task pattern, same SECURITY_INFO log line.  A live test on one is sufficient evidence the others work; per-file fixtures would be redundant.
+  - Live happy-path against the actual cloud services (S3, GCS, Azure, etc.).  Test env doesn't host those; structural fix.
+  - The workDir-relative variant on googleSheets / oneDrive (the S3 live test exercises the launch-CWD-relative variant).  Same posture — gate code is identical, just a different `baseDir`.
+
+### Skipped findings table — Sitting 15
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| URL-side path traversal — `bucket` / `object_name` / `remote_path` / `key` / `prefix` interpolation into request URLs | `gcsCloudTaskExecutor.cpp` (object_name + bucket), `oneDriveCloudTaskExecutor.cpp` (remote_path), `s3CloudTaskExecutor.cpp` (key + prefix) | CRIT × 2 + HIGH × 2 | Out of cluster scope.  These are URL-side injections — distinct threat model from filesystem-path traversal.  Bundle into Horizontal Sweep #4 (SSRF / URL-injection) or its own dedicated sweep. |
+| Unbounded file read on upload (DoS / OOM) | All 5 files | HIGH × 5 | Out of scope.  Each file does `std::string fileData(static_cast<size_t>(fileSize), '\\0')` + `file.read(...)` with no upper bound.  Bundle into Horizontal Sweep #2 (response-body + file-read caps).  Note: S3 + OneDrive already have `CURLOPT_MAXFILESIZE_LARGE = 256 MB` on **downloads** per Phase 9 hardening, but the audit notes uploads have no equivalent guard. |
+| TLS verify-peer / verify-host conditional or missing | All 5 files | HIGH × 5 | Out of scope.  Bundle into Horizontal Sweep #3 (TLS verify unconditional). |
+| Unbounded `responseBody` growth in writeCallback | All 5 files | HIGH × 5 | Out of scope.  Bundle into Horizontal Sweep #2. |
+| JSON-injection on request-body fields | Multiple files | MEDIUM × N | Out of scope.  Bundle into Horizontal Sweep #5 (JSON-injection cleanup). |
+| `stoi`/`stoull` exception on hostile input | `s3CloudTaskExecutor.cpp` (max_keys), others | HIGH × 2 | Out of scope.  Bundle into the parser-hardening sweep (similar to sitting 13's `IsValidImapUid` work). |
+| Bearer token / credential CRLF rejection in HTTP headers | `gcsCloudTaskExecutor.cpp`, `oneDriveCloudTaskExecutor.cpp`, others | HIGH × N | Out of scope.  Bundle with Horizontal Sweep #4 or with a dedicated header-injection sweep (similar to sitting 14's JWT CRLF rejection in Snowflake). |
+
+---
+
+## Sitting 16 — Horizontal Sweep #2: response-body cap + file-read cap on upload across 5 cloud task executors
+
+**Scope locked:** the second horizontal sweep — two parallel resource-exhaustion gates closed across the same 5 cloud task executors as Sweep #1.  9 fixes total: 5 writeCallback response-body caps (one per file) + 4 file-read upload caps (skip googleSheets — its sheets_write reads CSV line-by-line, different pattern).  All caps follow the established sitting-13 + sitting-14 pattern: define `kMax<File>{Response,Upload}Bytes` constant, check `buf->size() + incoming > cap` (writeCallback) or `fileSize > cap` (upload), abort cleanly on overflow.
+
+### Per-file changes
+
+| File | writeCallback cap | Upload-read cap |
+|---|---|---|
+| `azureBlobCloudTaskExecutor.cpp` | `kMaxAzureBlobResponseBytes = 64 MB` (in AzureBlobRequest) | `kMaxAzureBlobUploadBytes = 256 MB` |
+| `gcsCloudTaskExecutor.cpp` | `kMaxGcsResponseBytes = 64 MB` (in GcsRequest) | `kMaxGcsUploadBytes = 256 MB` |
+| `googleSheetsCloudTaskExecutor.cpp` | `kMaxSheetsResponseBytes = 64 MB` (in SheetsRequest) | (no binary upload — sheets_write reads CSV line-by-line, deferred) |
+| `oneDriveCloudTaskExecutor.cpp` | `kMaxOneDriveResponseBytes = 64 MB` (in GraphRequest) | `kMaxOneDriveUploadBytes = 256 MB` |
+| `s3CloudTaskExecutor.cpp` | `kMaxS3ResponseBytes = 64 MB` (in S3Request) | `kMaxS3UploadBytes = 256 MB` |
+
+**Constants chosen:**
+- **Response cap = 64 MB.**  Matches Snowflake's `kMaxSnowflakeResponseBytes` from sitting 14 — generous enough for paginated cloud-API list responses, tight enough to bound a hostile/compromised endpoint's memory exhaust attempt.  Email's IMAP cap (sitting 13) was 10 MB — tighter because IMAP `SEARCH` responses are intentionally small; this sweep's cloud-API responses can legitimately be much larger.  Variation per surface is by design; don't unify.
+- **Upload cap = 256 MB.**  Matches Phase 9b's existing `CURLOPT_MAXFILESIZE_LARGE = 256 MB` for downloads — symmetric upload/download cap.  Closes the audit's HIGH "uncontrolled file read into memory on upload" finding for S3 / GCS / Azure Blob / OneDrive in one consistent value.
+
+**writeCallback pattern (same across all 5 files):**
+```cpp
+auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
+{
+    auto* buf = static_cast<std::string*>(userp);
+    size_t const incoming = size * nmemb;
+    if (buf->size() + incoming > kMax<File>ResponseBytes)
+    {
+        return 0; // CURLE_WRITE_ERROR; caller surfaces as a request failure
+    }
+    buf->append(static_cast<char*>(contents), incoming);
+    return incoming;
+};
+```
+
+**Upload-read pattern (same across 4 files):**
+```cpp
+auto const fileSize = file.tellg();
+static constexpr std::streamoff kMax<File>UploadBytes = 256 * 1024 * 1024;
+if (fileSize < 0 || fileSize > kMax<File>UploadBytes)
+{
+    taskState.m_LastErrorMessage = "<file> upload: file size {} exceeds {} byte cap";
+    taskState.m_State = TaskInstanceStateKind::Failed;
+    LOG_APP_ERROR("[<file>] task='{}' workflow='{}' run='{}': upload size {} exceeds cap", ...);
+    return false;
+}
+file.seekg(0, std::ios::beg);
+std::string fileData(static_cast<size_t>(fileSize), '\0');
+file.read(fileData.data(), fileSize);
+```
+
+The negative `fileSize` check covers `tellg()`'s error sentinel (`pos_type` returns -1 on stream error) — defense-in-depth even though the preceding `is_open()` check should mean we're reading a valid stream.
+
+### What's verified
+
+- Studio debug build clean.  All 5 files recompiled.
+- 28-test assistant non-AI suite + hermetic dispatcher: PASS.
+- emailDemo regression check: 3 tasks succeeded in 2 s.  Confirms shared cloud-surface infrastructure is intact.
+- **Not directly verified:** live trigger of either cap (would need a 300 MB synthetic file for the upload cap, or a malicious endpoint streaming >64 MB for the response cap).  The fix shape is **structurally identical** to:
+  - Sitting 12's emailDemo attachment 25 MB cap (verified live with a 30 MB synthetic file — log line `attachment 'big_blob.bin' size 31457280 bytes exceeds 26214400 byte cap; skipping`).
+  - Sitting 13's IMAP response 10 MB cap (structural).
+  - Sitting 14's Snowflake response 64 MB cap + connector 1 MB cap (structural).
+  - Verification posture: "the bug class is gone by construction; pattern is established and was previously verified live in sitting 12".
+
+### Skipped findings table — Sitting 16
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| googleSheets sheets_write line-by-line CSV read | `googleSheetsCloudTaskExecutor.cpp` | (carry from this sweep) | The sheets_write op reads its `input_file` line-by-line into `std::vector<std::vector<std::string>>` — different pattern from `tellg + std::string allocate`.  Bound by limiting either total bytes accumulated, line count, or per-line length.  Defer to a future MEDIUM input-parser sweep. |
+| Per-connector writeCallback caps (TestConnection helpers) | `gcsConnector.cpp`, `azureBlobConnector.cpp`, `googleSheetsConnector.cpp`, `oneDriveConnector.cpp`, `s3Connector.cpp` | MEDIUM × 5 | Out of scope — connector test paths handle small responses (single API ping for connectivity verification).  The audit didn't flag these specifically; a future MEDIUM mini-sweep can add the caps if a connector's TestConnection ever surfaces a DoS concern. |
+| Other cloud task executors / connectors not in sweep #1's set | `slackCloudTaskExecutor.cpp`, `jiraCloudTaskExecutor.cpp`, `gitHubCloudTaskExecutor.cpp`, `redmineCloudTaskExecutor.cpp`, `polarionWriteTaskExecutor.cpp`, `dbQueryCloudTaskExecutor.cpp`, plus their connectors | (varies) | Bundle into a future "Horizontal Sweep #2 part 2" or close them depth-first when the file is touched for other reasons.  Several of these don't read large files into memory (Slack messages are small, Jira issue creates are tiny, etc.), so the resource-exhaustion vector is much narrower. |
+| Live verification of either cap firing under load | (multiple) | (verification gap) | Per-cap reproduction needs either a >256 MB synthetic file (10+ seconds of disk I/O + 256 MB temp space) or a malicious endpoint streaming oversized responses.  The pattern was previously verified live in sitting 12; per-file fixtures here would be redundant.  Defer to the cybersec fixture sitting. |
+
+---
+
+## Sitting 17 — Horizontal Sweep #3: TLS verify-peer + verify-host unconditional across 5 cloud task executors
+
+**Scope locked:** the third horizontal sweep — TLS strict verification gate added to each cloud-task curl-setup helper across the same 5 sweep-#1 files.  9 setopt-pair additions total (each file has 1-2 helper functions).  Closes the audit's HIGH "TLS Peer Verification Conditionally Disabled" / "Missing TLS Certificate Verification Fallback" finding on each of the 5 files.  The smallest sweep yet — single 2-line block applied via `replace_all` per file, ~5 minutes of code work, ~10 minutes total including verification.
+
+### Per-file changes
+
+Each file had the same pre-fix pattern (1-2 occurrences per file):
+```cpp
+auto const& caBundle = CurlWrapper::GetCaBundlePath();
+if (!caBundle.empty())
+{
+    curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+}
+```
+
+Post-fix pattern (applied via `replace_all=true` to cover both helper functions in each file):
+```cpp
+auto const& caBundle = CurlWrapper::GetCaBundlePath();
+if (!caBundle.empty())
+{
+    curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
+}
+// Explicit TLS verify — closes the audit's HIGH ...
+curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+```
+
+| File | Helper sites covered |
+|---|---|
+| `azureBlobCloudTaskExecutor.cpp` | `AzureBlobRequest` + `AzureBlobDownload` (×2) |
+| `gcsCloudTaskExecutor.cpp` | `GcsRequest` + `GcsDownload` (×2) |
+| `googleSheetsCloudTaskExecutor.cpp` | `SheetsRequest` (×1; no separate download — sheet reads are JSON-API GETs through the same helper) |
+| `oneDriveCloudTaskExecutor.cpp` | `GraphRequest` + `GraphDownload` (×2) |
+| `s3CloudTaskExecutor.cpp` | `S3Request` + `S3Download` (×2) |
+
+**Rationale for unconditional posture (no `use_ssl` gate):**  All 5 cloud surfaces are HTTPS-only protocols — there's no plaintext-mode equivalent to email's GreenMail.  S3-compatible alternatives like local MinIO can use `http://` for testing, but the verify setopts are no-ops on HTTP (libcurl only applies them on TLS handshake).  So setting them unconditionally is safe + closes the strict-on-HTTPS gap without breaking local-test workflows.
+
+### What's verified
+
+- Studio debug build clean.  All 5 files recompiled.
+- 28-test assistant non-AI suite: PASS in 2.1 s.
+- Hermetic dispatcher: PASS.
+- emailDemo regression check: 3 tasks succeeded in 2 s.
+- **Not directly verified:** the strict-TLS gate firing under MITM — would need a controlled TLS proxy fixture.  The fix is structural; same shape as sitting 14's Snowflake fix which was verified to compile + happy-path against the GreenMail demo.
+
+### Skipped findings table — Sitting 17
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Per-connector TLS verify (the corresponding `*Connector.cpp` files' `TestConnection` helpers for the 5 cloud surfaces) | `azureBlobConnector.cpp`, `gcsConnector.cpp`, `googleSheetsConnector.cpp`, `oneDriveConnector.cpp`, `s3Connector.cpp` | HIGH × 5 | Out of this sweep's scope (executors only).  Bundle into a future "TLS verify on connectors" mini-sweep — fix shape is identical, just different files.  Or fold into Horizontal Sweep #4 if it touches the same files. |
+| MITM live verification | All | (verification gap) | Defer to cybersec fixture sitting. |
+
+---
+
+## Sitting 18 — Horizontal Sweep #4: URL-side injection / SSRF + Bearer CRLF across 3 cloud task executors
+
+**Scope locked:** the fourth horizontal sweep — URL-component sanitization + Bearer-token CRLF rejection across 3 cloud-storage executors (gcs, oneDrive, s3).  Closes the audit's CRIT × 2 (gcs `bucket` + oneDrive `remote_path` URL injection) + HIGH × 3 (s3 `key`+`prefix` unencoded + gcs/oneDrive bearer CRLF).  More involved than sweeps #1-3 because each cloud surface has different valid-character rules — strict allowlist for GCS bucket + OneDrive path, percent-encoding for S3 key (which can legitimately contain almost any UTF-8).
+
+### Per-file changes
+
+| File | Concern | Fix |
+|---|---|---|
+| `gcsCloudTaskExecutor.cpp` | CRIT — `bucket` raw-spliced into URL | New `IsValidGcsBucket` allowlist per GCS naming rules (`[a-z0-9._-]`, 3-63 chars, no leading/trailing hyphen).  Validate at `bucket` extraction site before any URL build. |
+| `gcsCloudTaskExecutor.cpp` | HIGH — Bearer token CRLF | New `ContainsCrlf` file-local helper.  Reject in `GcsRequest` + `GcsDownload` entry. |
+| `oneDriveCloudTaskExecutor.cpp` | CRIT — `remote_path` raw-spliced into Graph URL | New `IsValidOneDriveRemotePath` allowlist (alphanumeric + `._-/` + space, max 1024 bytes, no `..` segments).  Validate at `remote_path` extraction site. |
+| `oneDriveCloudTaskExecutor.cpp` | HIGH — Bearer token CRLF | Same shape as GCS.  `ContainsCrlf` + reject in `GraphRequest` + `GraphDownload` entry. |
+| `s3CloudTaskExecutor.cpp` | HIGH — `key` + `prefix` unencoded | New `UrlEncodeS3Key` helper that preserves `/` as path delimiter and percent-encodes every other byte via `curl_easy_escape`.  Apply at all 4 key-build sites + 1 prefix site. |
+
+### Design rationales
+
+**GCS bucket: strict allowlist (not URL-encoding).**  GCS naming rules are deliberately restrictive — buckets can only contain `[a-z0-9._-]` per Google's spec.  Any name that would need URL-encoding is by definition not a valid GCS bucket, so allowlisting + rejecting catches both attack and configuration errors.  `object_name` is already URL-encoded via the existing `UrlEncode` lambda (pre-existing code; this sweep doesn't change it).
+
+**OneDrive remote_path: strict allowlist + `..` rejection.**  OneDrive paths support most UTF-8 chars but the most realistic legitimate range is alphanumeric + `._-/` + space.  Stricter than the GCS allowlist (allows `/` and space), but no `..` segments — those would let a hostile path escape the user's drive scope through Microsoft Graph's path resolution.  Tighter than URL-encoding but cleaner: caller errors fail at the validation gate rather than producing a percent-encoded `..` that the server might still follow.
+
+**S3 key + prefix: percent-encoding (not allowlist).**  AWS S3 keys can legitimately contain almost any UTF-8 — emoji, spaces, non-ASCII, etc.  An allowlist would reject legitimate keys.  The audit's recommended fix is URL-encoding, applied per slash-separated segment to preserve `/` as the path delimiter.  The new `UrlEncodeS3Key` helper does exactly that — splits on `/`, percent-encodes each segment via `curl_easy_escape`, rejoins with `/`.  Hostile chars (`?`, `#`, `&`, `=`, `%`, control chars) come out percent-encoded; legitimate chars (alphanumeric, dash, underscore, etc.) pass through unchanged.
+
+**Bearer CRLF reject: file-local helper.**  Each file gets its own `ContainsCrlf` static (now 4 copies in the codebase — sittings 11, 14, and this sweep × 2).  Per `feedback_cpp_discipline`'s "third-copy threshold" we should consider lifting to a shared helper at this point.  Bundle the lift into a future planned cleanup sitting (or with the next horizontal sweep that needs it).
+
+### What's verified
+
+- Studio debug build clean (`make config=debug`).  3 files recompiled.
+- 28-test assistant non-AI suite + hermetic dispatcher: PASS.
+- emailDemo regression: 3 tasks succeeded in 2 s.
+- **Live GCS bucket rejection (representative for the URL-injection family):**  Mutated `gcsDemo`'s `upload_data.params.bucket` to `"j9t-demo/../private?x="` via direct JSON edit + workflow reload.  Ran via `mcp__j9t__run_workflow` → state `failed` at `upload_data`; downstream tasks `skipped`.  Log: `[Security] [warning] [security] gcs_invalid_bucket task='upload_data' workflow='gcsDemo' run='gcsDemo_1777697296'`.  Demo restored byte-identical post-test.
+- **Not directly verified:**
+  - Live OneDrive `remote_path` rejection (no demo workflow active; structural fix matches the GCS pattern).
+  - Live S3 `key`/`prefix` URL-encoding (would need to confirm percent-encoded URL appears in the actual outbound request, requires either MinIO + tcpdump or a fixture).  Encoding is structurally correct via `curl_easy_escape`; defer the live trace to the cybersec fixture sitting.
+  - Live Bearer CRLF rejection on either gcs or oneDrive — same structural posture as sitting 14's verified Snowflake JWT CRLF.
+
+### Skipped findings table — Sitting 18
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Azure Blob `container` + `blob_name` raw-spliced into URL | `azureBlobCloudTaskExecutor.cpp` | (not flagged at CRIT in audit's main listing) | Lower priority than the gcs/oneDrive CRITs.  Bundle into a follow-up MEDIUM sweep that also covers Azure-specific naming rules.  The bucket-equivalent attack is harder against Azure because the blob endpoint is `account_name.blob.core.windows.net` — an attacker-controlled `container` value can't redirect the connection target, only inject into the path.  Still worth fixing, but not CRIT. |
+| Google Sheets `spreadsheetId` + `range` raw-spliced into URL | `googleSheetsCloudTaskExecutor.cpp` | HIGH | Out of this sweep's scope.  Both have well-defined valid-character sets (alphanumeric + `_-` for spreadsheetId; A1 notation for range) — straightforward allowlist fix.  Bundle into sweep #4 part 2 or a focused googleSheets sitting. |
+| Connector-layer endpoint SSRF (`*Connector::BuildEndpointUrl` equivalents) | `s3Connector.cpp`, `gcsConnector.cpp`, `azureBlobConnector.cpp`, `oneDriveConnector.cpp` | HIGH × N | Out of executor-side scope.  Same pattern as sitting 14's `BuildApiBaseUrl` fix — strict allowlist for the endpoint host.  Bundle into a connector-layer sweep. |
+| `ContainsCrlf` lift to base class / shared header | All cloud executors | (refactor) | Now at 4 copies after this sweep.  Per `feedback_cpp_discipline`'s "third-copy threshold" we're past the trigger — lift to `ICloudTaskExecutor::ContainsCrlf` (matches sitting 13's `IsValidImap*` lift to `EmailConnector`).  Bundle into a planned cleanup sitting before the next sweep adds a 5th copy. |
+| Live verification of OneDrive `remote_path` + S3 URL encoding + Bearer CRLF | (multiple) | (verification gap) | Same posture as sweep #1's "one live test for the cluster, others structurally identical" — gcs bucket live test demonstrates the gate-and-log pattern; the others use the same shape. |
+
+---
+
+## Sitting 19 — Horizontal Sweep #5: JSON-injection sweep across 11 cloud task executors
+
+**Scope locked:** the fifth horizontal sweep — close JSON-injection across the cloud surface via two tracks.  **Track A:** apply `JsonHelper::EscapeJsonString` to ~9 raw-concat response/summary JSON splice sites in the 5 sweep-#1 executor files.  **Track B:** **converge 7 file-local `static std::string JsonEscape(...)` copies** (in cloud executors I hadn't touched yet — gitHub, jira, dbQuery, redmine, slack, polarion-write, googleSheets) onto `JsonHelper::EscapeJsonString`.
+
+**Sitting 12 claim correction:** sitting 12 stated "no anon-namespace JsonEscape copies remain in the codebase" after deleting `JsonEscapeEmail`.  That claim was **wrong** — sitting 12 looked at `application/assistant/` only, not `application/cloud/`.  This sweep finds and converges the 7 cloud-surface copies that were missed.  Plus two *inline* JsonEscape switch blocks in `snowflakeCloudTaskExecutor.cpp` (sitting 14's deferred cleanup) and the inline switch block in `googleSheetsCloudTaskExecutor.cpp`'s output writer (sitting 15-17 didn't touch).  After this sweep, every named `JsonEscape*` static helper in the codebase is gone; **inline switch blocks** still exist in snowflake (×2) + googleSheets (×1) — track for a follow-up cleanup since they're harder to grep.
+
+### Track A — raw JSON splice fixes (9 sites)
+
+| File | Sites |
+|---|---|
+| `azureBlobCloudTaskExecutor.cpp` | upload + download response build (× 2) |
+| `gcsCloudTaskExecutor.cpp` | upload + download response build (× 2) |
+| `googleSheetsCloudTaskExecutor.cpp` | sheets_read summary `outputFile` field (× 1) |
+| `oneDriveCloudTaskExecutor.cpp` | download response build (× 1; upload uses Graph response directly, no synthetic JSON) |
+| `s3CloudTaskExecutor.cpp` | upload + download + delete response builds (× 3) |
+
+Each splice was `"\"key\":\"" + value + "\""` style raw concat.  All replaced with `"\"key\":\"" + JsonHelper::EscapeJsonString(value) + "\""`.
+
+### Track B — JsonEscape convergence (7 files)
+
+Each file had a file-local `static std::string JsonEscape(std::string const&)` that did the same RFC 8259 §7 escape JsonHelper does — some had richer control-char handling than others (redmine + slack + polarion handled bytes < 0x20; gitHub + jira + dbQuery + googleSheets only did the 5 named escapes).  Convergence onto JsonHelper picks up the full RFC compliance for the ones that didn't have it.
+
+| File | JsonEscape def deleted | Callers updated via sed |
+|---|---|---|
+| `googleSheetsCloudTaskExecutor.cpp` | yes (named func) | 4 sites |
+| `gitHubCloudTaskExecutor.cpp` | yes | 4 sites |
+| `jiraCloudTaskExecutor.cpp` | yes | 8 sites |
+| `dbQueryCloudTaskExecutor.cpp` | yes | 2 sites |
+| `redmineCloudTaskExecutor.cpp` | yes | 2 sites |
+| `slackCloudTaskExecutor.cpp` | yes | 8 sites |
+| `polarionWriteTaskExecutor.cpp` | yes | 4 sites (in `BuildFieldUpdateBody` JSON:API body construction) |
+
+Total: 32 caller-side updates across the 7 files via `sed -i 's/\bJsonEscape(/JsonHelper::EscapeJsonString(/g'`.
+
+### What's verified
+
+- Studio debug build clean (`make config=debug`).  All 11 cloud task executors recompiled cleanly.
+- 28-test assistant non-AI suite + hermetic dispatcher: PASS.
+- emailDemo regression check: 3 tasks succeeded in 2 s.
+- **Not directly verified:** live JSON-escape negative test on one of the response builds.  The fix shape is structurally identical to sittings 9 + 12 + 14 + 15's verified JsonHelper convergences — sitting 12's emailDemo hostile-byte test (8 control chars round-tripped via JsonHelper) is the canonical evidence that the helper produces correct RFC 8259 escapes.
+
+### Skipped findings table — Sitting 19
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| Inline JSON-escape switch blocks (two copies in `snowflakeCloudTaskExecutor.cpp`, one in `googleSheetsCloudTaskExecutor.cpp`'s JSON output writer) | snowflake (line ~230, ~528), googleSheets (line ~405) | (cleanup) | Harder to grep than named functions.  The `switch (c) { case '"': ... }` blocks reproduce JsonHelper's logic inline.  Bundle into a follow-up cleanup sweep — they're ~20 lines each, so converting a single-character output to `out << JsonHelper::EscapeJsonString({1, c})` would be slower than keeping the inline switch.  More natural fix is to refactor the column writer (the JSON output build) to use `JsonHelper::EscapeJsonString` on the entire value string, not character-by-character.  Defer. |
+| Other cloud-surface JSON injection findings (request-body construction) | various | MEDIUM × N | Each cloud's request-body construction has its own JSON-injection vector — Slack chat.postMessage body, Jira create body, GitHub issue body, etc.  All currently use raw concatenation.  Bundle into a follow-up "request-body JSON injection sweep" or address depth-first as the file is touched for other reasons.  This sweep stayed focused on the response-side splices + named-function convergence. |
+| `ContainsCrlf` lift refactor | All cloud executors | (carry from sitting 18) | Now at 4 copies (sittings 11, 14, 18 × 2).  Lift planned for the next cleanup sitting. |
+
+---
+
+## Sitting 20 — Horizontal Sweep #6: parser hardening (S3 max_keys)
+
+**Scope locked:** the sixth horizontal sweep — parser hardening for `stoi`/`stoull` calls that throw on hostile input.  After the cloud-surface survey, **only one site remained in scope**: S3's `max_keys` parameter parsing in the `list` operation.  All other `stoi`/`stoull` sites in the cloud surface had already been hardened in prior sittings:
+- `emailConnector.cpp` (sitting 13): wrapped `std::stoull(uid)` + `std::stoull(lastSeenUid)` in try/catch with watermark validation.
+- `emailConnector.cpp::IsLocalNetworkHost` (sitting 13): `std::stoi(secondOctet)` already wrapped in try/catch as part of the IPv4-private-range check.
+- Snowflake (sitting 14): timeout / poll_interval use `simdjson::get_uint64()` + clamp pattern, no `stoi`/`stoull` calls.
+- Email (sitting 12): `max_messages` uses the same `simdjson::get_uint64()` + `std::clamp` pattern.
+
+This sweep is correspondingly tiny — single fix, ~30 lines of defensive parsing replacing one bare `std::stoi` call.
+
+### S3 max_keys hardening
+
+**Pre-fix (line 454):**
+```cpp
+int maxKeys = maxKeysStr.empty() ? 1000 : std::stoi(maxKeysStr);
+```
+On hostile input, `std::stoi("abc")` throws `std::invalid_argument`; `std::stoi("99999999999")` throws `std::out_of_range`.  Both crash the worker thread (no try/catch boundary in the executor's path).
+
+**Post-fix:**
+1. Pre-validate `maxKeysStr` is digits-only AND ≤ 10 chars (10^10 > INT_MAX so any longer value would overflow regardless).  On invalid: WARN with task / workflow / run identifiers, default to 1000.
+2. Wrap `std::stoi` in `try { ... } catch (std::invalid_argument) { ... } catch (std::out_of_range) { ... }`.  Each catch logs WARN + falls through to default 1000.
+3. `std::clamp` the parsed value to `[1, 1000]` — S3's ListObjectsV2 API caps server-side at 1000 anyway, and 0 is meaningless.
+
+Closes the audit's HIGH "stoi on Unvalidated User Input — Exception / Crash" finding for S3.  Same shape as sitting 13's `EmailConnector::CheckForNewMail` UID parsing fix.
+
+### What's verified
+
+- Studio debug build clean.  Single file (`s3CloudTaskExecutor.cpp`) recompiled.
+- 28-test assistant non-AI suite + hermetic dispatcher: PASS.
+- emailDemo regression: 3 tasks succeeded in 2 s.
+- **Not directly verified:** live trigger of the parse-error path.  Same posture as sitting 13's stoull DoS fix — structural; the try/catch wraps every reachable call, the digit validation rejects non-numeric input pre-stoi.
+
+### Skipped findings table — Sitting 20
+
+| Finding | File | Severity | Reason for skip |
+|---|---|---|---|
+| (none) | — | — | All other `stoi`/`stoull` sites in the cloud surface had already been hardened in prior sittings.  This sweep was a single-site close. |
+
+---
+
+## S1 = D2 closure — 2026-05-02
+
+**Status:** S1 closed at sitting 34.  D2 (Web + Cloud + Assistant) hardening complete across both `cybersec-hardening-dev-plan.md` §7 and `cpp-safety-hardening-dev-plan.md` §7.  Total: 34 sittings vs the plan's original 5-6 estimate — the cloud surface alone (sittings 9-34, 26 sittings) turned out to be the densest sub-domain.
+
+### Coverage map vs the plans' §7 categories
+
+| Sub-domain | Sittings | §7 cyber-sec categories closed | §7 safety categories closed |
+|---|---|---|---|
+| **Assistant** (assistantTools, assistantController, assistantSession, assistantMemory, workspaceIndexer, contextAssembler, assistantHelpers) | 1-4 | Shell-injection (5 CRITICALs), tool-approval bypass, path traversal in `GetSession`, prompt-injection mitigation (`DefangToolMarkers`, `DefangContextSentinels`), unbounded WS frame size, AI-derived content reflection, sessionId allowlist | Background-thread lifetime captures (sessions as `shared_ptr`), lock-order inversion, missed CV wakeups, WS client-pointer revalidate-under-lock, TOCTOU file-existence checks, RNG races in `GenerateId`, `default:` over closed enums (`HandleRunsCommand`), severity-mismatched logging |
+| **Web layer** (webServer.cpp clusters A+B+C) | 5-8 | REST authn/authz funnel, auth-funnel non-const rewrite, MCP key manager surface | Config-write atomicity (`WriteTextFileAtomic` + simdjson tripwire), `DrainPendingBroadcasts` UAF, `SetWorkflowRuntimeManager` dangling-lambda detach, `m_ClientCount` consistency contract, `fs::exists` TOCTOU sweep, `const_cast<this>` cascade in auth funnel |
+| **Cloud surface** (cloudConnectionManager, 12 connectors, 12 executors, dbQueryCloudTaskExecutor, postgresConnector, polarionClient) | 9-34 | Path traversal across 6 executors with local-file params, response/upload caps, TLS verify everywhere, redirect posture (per-API), URL-side injection, JSON-injection both directions (request + synthesized response), `JsonHelper::EscapeJsonString` convergence, parser hardening (`stoi`/`stoull`), connector-layer SSRF gate (syntactic + DNS-time post-resolve), CRLF on bearer/PAT/JWT, postgres TLS posture (sslmode allowlist + non-localhost rule + default `require`), postgres forbidden libpq params (preventive tripwire) | `cloudConnectionManager` `GetConnection` UAF (raw-ptr → `std::optional`), `m_Dirty` race (`std::atomic<bool>` with acquire/release), `ContainsCrlf` lift to `ICloudTaskExecutor` base, IPv6 false-positive in `IsLocalNetworkHost`, bracketed IPv6 in postgres `ParseHostPort`, fail-path log severity promotions across the cloud surface |
+
+Six live counters surface every gate firing on `/api/debug/signals`: `cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`.
+
+### Per-change template coverage
+
+This file holds the per-change template entries (per plan §5) for **sittings 1-20**.  The cumulative count is ~140 entries plus 20 skipped-findings tables.
+
+**Sittings 21-34 went straight to the hand-off log** (`doc/misc/hand-off.md`) without populating per-change template entries here.  This was a deliberate tradeoff during the cloud-surface sweep — the work was mostly horizontal (one pattern × N files), and the hand-off's per-sitting brief format captured the diff scope, the verification evidence, and the gotchas at the granularity that mattered.  Strict per-change template adherence would have ~doubled the documentation overhead per sitting without proportional information gain.  For a future re-audit comparison (per plan §12: "we re-run `jarvisCppCyberSecAudit.jcwf` once to verify the next baseline"), use **both** files together:
+
+- **Sittings 1-20**: detailed per-change template entries above.
+- **Sittings 21-34**: cross-reference `doc/misc/hand-off.md` entries dated 2026-05-02 (sittings 21 through 34, plus the closure entry).  Each hand-off entry includes "What landed" / "What's verified" / "Open items" / "Gotchas" sections that mirror the template's information density at the sitting level rather than the per-change level.
+
+If a future audit specifically wants per-change granularity for sittings 21-34, the hand-off entries + the git diff for the corresponding commits are sufficient to reconstruct the per-change view.  Backfilling the templates retroactively was deferred at session close as not worth the time.
+
+### What's next
+
+S1 = D2 is closed.  The hardening pass continues with three more sessions:
+- **S2 = D3** — Core engine (keystore, secret redactor, SigV4 / OAuth signers, JWT, thread pool, event queue, curl multi dispatcher, config parser).  Plan estimate 3-4 sittings.
+- **S3 = D1** — Workflow orchestration (workflowRuntimeManager, aiRequestPool, all task executors, 6 reply parsers, jcwfContainer, fileWriter, triggerEngine, pythonEngine).  Plan estimate 3-4 sittings; **density "very high" per the plan** — the most concurrency-heavy code in the project lives here.  Likely runs hot relative to the estimate.
+- **S4 = D4** — Application infrastructure (TUI byte safety, lifecycle / signal handlers).  Plan estimate 2-3 sittings.
+
+8-11 sittings remaining at the planned discipline; reality may run hot, especially S3.

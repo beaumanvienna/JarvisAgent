@@ -32,30 +32,78 @@
 #include "engine.h"
 #include "cloud/googleSheetsCloudTaskExecutor.h"
 #include "cloud/googleSheetsConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
 
-    static std::string JsonEscape(std::string const& input)
+    // Google Sheets spreadsheet_id validator.  Per Google's documented format
+    // (drive file IDs), spreadsheet IDs are URL-safe base64 chars:
+    //   https://developers.google.com/sheets/api/guides/concepts#spreadsheet-id
+    // [A-Za-z0-9_-], typically 44 chars but variable.  This sweep splices the
+    // value unencoded into `apiBase + "/" + spreadsheetId + "/values/..."`;
+    // an attacker-controlled value containing `/`, `?`, `#`, `:`, `@`, or `%`
+    // would otherwise inject URL components past the canonical
+    // `https://sheets.googleapis.com/v4/spreadsheets/{id}/values/{range}`
+    // layout.  Closes the audit's HIGH "Unvalidated spreadsheet_id in URL
+    // Construction" finding (deferred from sitting 18).
+    static bool IsValidSpreadsheetId(std::string const& spreadsheetId)
     {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
+        if (spreadsheetId.empty() || spreadsheetId.size() > 128)
         {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default: out += c; break;
-            }
+            return false;
         }
-        return out;
+        for (char c : spreadsheetId)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '_' || c == '-')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // Google Sheets range validator.  A1-notation range like `Sheet1!A1:B10`
+    // or `'Quiz Data'!A1:B10` (sheet names with spaces require single-quote
+    // escaping; the Sheets API also accepts unquoted simple sheet names).
+    // The range value IS URL-encoded by `UrlEncode` before splicing, so the
+    // SSRF risk is bounded — but a value containing CR / LF would still
+    // appear in error logs and `LOG_APP_INFO("[sheets] read {} rows from
+    // range '{}'", ...)`, and the hard length cap defends against
+    // pathological inputs.  Allowed chars: alphanumeric, `!`, `:`, `$`
+    // (absolute refs), `_`, `-`, `.`, `'`, single-quoted spaces are common
+    // for quoted sheet names.  Reject control bytes and URL-meaningful chars
+    // that would break A1 parsing on the API side.
+    static bool IsValidSheetsRange(std::string const& range)
+    {
+        if (range.empty() || range.size() > 256)
+        {
+            return false;
+        }
+        for (char c : range)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '!' || c == ':' || c == '$' || c == '_' || c == '-' || c == '.' || c == '\'' || c == ' ')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 
     // URL-encode a string for query parameters
@@ -154,6 +202,11 @@ namespace AIAssistant
         return fields;
     }
 
+    // Bound on the response body — closes the audit's "uncontrolled response
+    // body accumulation" concern.  64 MB matches the cloud-surface pattern;
+    // Sheets values responses are bounded by Google's API quotas.
+    static constexpr size_t kMaxSheetsResponseBytes = 64 * 1024 * 1024;
+
     static bool SheetsRequest(std::string const& method, std::string const& url,
                               CloudCredentials const& credentials, CloudConnection const& connection,
                               std::string& responseBody, long& httpCode, std::string const& requestBody = {})
@@ -169,8 +222,13 @@ namespace AIAssistant
         auto writeCallback = [](void* contents, size_t size, size_t nmemb, void* userp) -> size_t
         {
             auto* buf = static_cast<std::string*>(userp);
-            buf->append(static_cast<char*>(contents), size * nmemb);
-            return size * nmemb;
+            size_t const incoming = size * nmemb;
+            if (buf->size() + incoming > kMaxSheetsResponseBytes)
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), incoming);
+            return incoming;
         };
         using WriteFunc = size_t (*)(void*, size_t, size_t, void*);
 
@@ -189,13 +247,9 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — Sheets API at
+        // `sheets.googleapis.com` responds directly for v4 endpoints.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (!requestBody.empty())
         {
@@ -283,6 +337,36 @@ namespace AIAssistant
             return false;
         }
 
+        // Validate spreadsheet_id + range before any URL build.  spreadsheet_id
+        // flows unencoded into the URL path; range is URL-encoded but still
+        // validated for protocol-syntactic sanity + to keep audit logs clean.
+        // Closes the audit's HIGH "Unvalidated spreadsheet_id / range in URL
+        // Construction" finding (deferred from sitting 18).
+        if (!IsValidSpreadsheetId(spreadsheetId))
+        {
+            taskState.m_LastErrorMessage = "Invalid Google Sheets spreadsheet_id: must be 1-128 chars, "
+                                           "[A-Za-z0-9_-] only";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': invalid spreadsheet_id (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, spreadsheetId.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] sheets_invalid_spreadsheet_id task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+        if (!IsValidSheetsRange(range))
+        {
+            taskState.m_LastErrorMessage = "Invalid Google Sheets range: must be 1-256 chars, A1-notation chars only "
+                                           "([A-Za-z0-9!:_$.\\- ' ])";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': invalid range (length={})",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, range.size());
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] sheets_invalid_range task='{}' workflow='{}' run='{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+            return false;
+        }
+
         std::string apiBase = GoogleSheetsConnector::GetApiBaseUrl(connection);
         std::string responseBody;
         long httpCode = 0;
@@ -306,6 +390,19 @@ namespace AIAssistant
             if (outputFile.empty())
             {
                 outputFile = (outputFormat == "json") ? "result.json" : "result.csv";
+            }
+
+            // Confine output_file under workDir.  Pre-fix `outputPath = workDir / outputFile`
+            // happily followed `..` segments and absolute paths, letting an
+            // attacker-controlled JCWF overwrite arbitrary files.
+            if (!ValidateLocalPath(outputFile, workDir, taskDefinition.m_Id))
+            {
+                taskState.m_LastErrorMessage =
+                    "sheets_read: output_file is invalid or escapes the working directory";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': output_file rejected",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
+                return false;
             }
 
             // GET /{spreadsheetId}/values/{range}
@@ -393,7 +490,7 @@ namespace AIAssistant
                     for (size_t c = 0; c < headers.size() && c < rows[r].size(); ++c)
                     {
                         if (c > 0) out << ", ";
-                        out << "\"" << JsonEscape(headers[c]) << "\": \"" << JsonEscape(rows[r][c]) << "\"";
+                        out << "\"" << JsonHelper::EscapeJsonString(headers[c]) << "\": \"" << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
                     }
                     out << "}" << (r + 1 < rows.size() ? "," : "") << "\n";
                 }
@@ -421,7 +518,7 @@ namespace AIAssistant
             }
 
             std::string summary = "{\"ok\":true,\"operation\":\"read\",\"rows\":" + std::to_string(rows.size()) +
-                                  ",\"output\":\"" + outputFile + "\"}";
+                                  ",\"output\":\"" + JsonHelper::EscapeJsonString(outputFile) + "\"}";
             taskState.m_CapturedStdout = summary.substr(0, std::min(summary.size(), kMaxCaptureChars));
 
             LOG_APP_INFO("[sheets] read {} rows from range '{}'", rows.size(), range);
@@ -433,6 +530,19 @@ namespace AIAssistant
             {
                 taskState.m_LastErrorMessage = "sheets_write requires 'input_file'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                return false;
+            }
+
+            // Confine input_file under workDir — same gate as the read path's output_file
+            // (an absolute path or `..` segment would otherwise let the task read
+            // arbitrary files into the request body, exfiltrating to the sheet).
+            if (!ValidateLocalPath(inputFile, workDir, taskDefinition.m_Id))
+            {
+                taskState.m_LastErrorMessage =
+                    "sheets_write: input_file is invalid or escapes the working directory";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[sheets] task='{}' workflow='{}' run='{}': input_file rejected",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId);
                 return false;
             }
 
@@ -472,7 +582,7 @@ namespace AIAssistant
                 for (size_t c = 0; c < values[r].size(); ++c)
                 {
                     if (c > 0) requestBody += ",";
-                    requestBody += "\"" + JsonEscape(values[r][c]) + "\"";
+                    requestBody += "\"" + JsonHelper::EscapeJsonString(values[r][c]) + "\"";
                 }
                 requestBody += "]";
             }
@@ -501,7 +611,7 @@ namespace AIAssistant
             }
 
             std::string summary = "{\"ok\":true,\"operation\":\"write\",\"rows\":" + std::to_string(values.size()) +
-                                  ",\"range\":\"" + JsonEscape(range) + "\"}";
+                                  ",\"range\":\"" + JsonHelper::EscapeJsonString(range) + "\"}";
             taskState.m_CapturedStdout = summary.substr(0, std::min(summary.size(), kMaxCaptureChars));
 
             LOG_APP_INFO("[sheets] wrote {} rows to range '{}'", values.size(), range);

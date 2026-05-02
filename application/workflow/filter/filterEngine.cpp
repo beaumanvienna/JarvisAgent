@@ -467,7 +467,7 @@ namespace AIAssistant
         FilterDef resolvedFilter = filter;
         if (!filter.m_Source.m_Connection.empty())
         {
-            auto const* conn =
+            auto conn =
                 Core::g_Core->GetCloudConnectionManager().GetConnection(filter.m_Source.m_Connection);
             if (!conn)
             {

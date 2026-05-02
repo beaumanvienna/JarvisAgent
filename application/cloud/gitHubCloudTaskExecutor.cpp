@@ -31,7 +31,9 @@
 #include "engine.h"
 #include "cloud/gitHubCloudTaskExecutor.h"
 #include "cloud/gitHubConnector.h"
+#include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 #include <openssl/bio.h>
@@ -42,24 +44,6 @@ namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
 
-    static std::string JsonEscape(std::string const& input)
-    {
-        std::string out;
-        out.reserve(input.size() + 16);
-        for (char c : input)
-        {
-            switch (c)
-            {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default: out += c; break;
-            }
-        }
-        return out;
-    }
 
     // Base64-decode (for GitHub file content which is base64-encoded)
     static std::string Base64Decode(std::string const& input)
@@ -119,14 +103,11 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<WriteFunc>(writeCallback));
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBody);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "j9t/1.0");
-
-        auto const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
-        }
+        // Hardened TLS + no redirect-following — the GitHub REST API at
+        // `api.github.com` responds directly for JSON endpoints; legitimate
+        // flows never 30x.  See ConnectorHttp::ApplyHardenedDefaults docstring.
+        ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         if (!requestBody.empty())
         {
@@ -220,10 +201,10 @@ namespace AIAssistant
                 return false;
             }
 
-            std::string requestBody = "{\"title\":\"" + JsonEscape(title) + "\"";
+            std::string requestBody = "{\"title\":\"" + JsonHelper::EscapeJsonString(title) + "\"";
             if (!body.empty())
             {
-                requestBody += ",\"body\":\"" + JsonEscape(body) + "\"";
+                requestBody += ",\"body\":\"" + JsonHelper::EscapeJsonString(body) + "\"";
             }
 
             // Labels array
@@ -238,7 +219,7 @@ namespace AIAssistant
                     if (label.get_string().get(sv) == simdjson::SUCCESS)
                     {
                         if (!first) requestBody += ",";
-                        requestBody += "\"" + JsonEscape(std::string(sv)) + "\"";
+                        requestBody += "\"" + JsonHelper::EscapeJsonString(std::string(sv)) + "\"";
                         first = false;
                     }
                 }
@@ -280,7 +261,7 @@ namespace AIAssistant
             }
 
             std::string url = apiBase + "/repos/" + owner + "/" + repo + "/issues/" + issueNumber + "/comments";
-            std::string requestBody = "{\"body\":\"" + JsonEscape(body) + "\"}";
+            std::string requestBody = "{\"body\":\"" + JsonHelper::EscapeJsonString(body) + "\"}";
 
             if (!GitHubRequest("POST", url, credentials.m_Token, responseBody, httpCode, requestBody))
             {

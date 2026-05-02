@@ -75,5 +75,41 @@ namespace AIAssistant
                                            std::string const& lastSeenUid,
                                            bool& hasNewMail,
                                            std::string& errorMessage);
+
+        // ===================================================================
+        // Input validators (used by both this connector and emailCloudTaskExecutor).
+        // Public statics so callers across the email surface share a single source
+        // of truth for the allowlists; sitting 11's executor-side gates and
+        // sitting 13's connector-side gates use the same predicates.
+        // ===================================================================
+
+        // IMAP mailbox name: alphanumeric + `.` + `_` + `/` + `-`, max 256 bytes,
+        // no leading/trailing `/`, no `//`.  Matches RFC 3501 hierarchy delimiters
+        // (`.` and `/`) so legitimate folder names like `[Gmail]/Sent Mail` and
+        // `Projects.j9t` validate; injection chars `:`, `@`, `?`, `#`, `%`, CR, LF,
+        // whitespace are rejected.
+        static bool IsValidImapFolder(std::string const& folder);
+
+        // IMAP UID: digits only, max 20 bytes (10^20 > UINT64_MAX so longer values
+        // are meaningless).  RFC 3501 nz-number per the protocol grammar.
+        static bool IsValidImapUid(std::string const& uid);
+
+        // IMAP SEARCH SUBJECT filter: rejects bytes that would break out of the
+        // quoted-string envelope or inject IMAP literal syntax (`"`, `\\`, `\r`,
+        // `\n`, `{`).  Empty filter means "no subject filter" and validates as true.
+        // Length capped at 256 bytes to bound the SEARCH command size.
+        static bool IsValidImapSubjectFilter(std::string const& filter);
+
+        // SMTP/IMAP host: rejects URL-meaningful chars (`:`, `/`, `?`, `#`, `@`,
+        // `%`, `\\`, CR, LF, whitespace), empty, and >253-byte values.  When
+        // `allowLocalNetwork` is false (production posture, gated on use_ssl=true),
+        // also rejects loopback / link-local / private / cloud-metadata IP ranges
+        // and the literal `localhost` hostname — closing SSRF to internal
+        // services.  When true (gated on use_ssl=false, the local-testing
+        // opt-out), local-network hosts are permitted.
+        static bool IsValidEmailHost(std::string const& host, bool allowLocalNetwork);
+
+        // SMTP/IMAP port: digits only, [1, 65535], max 5 bytes.
+        static bool IsValidEmailPort(std::string const& port);
     };
 } // namespace AIAssistant

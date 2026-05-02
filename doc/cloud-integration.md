@@ -497,11 +497,18 @@ CloudConnection params:
 | Key | Description |
 |-----|-------------|
 | `database` | Database name (required) |
-| `sslmode` | `disable`, `prefer` (default), `require`, `verify-ca`, `verify-full` |
+| `sslmode` | `disable`, `allow`, `prefer`, `require` (**default**), `verify-ca`, `verify-full`.  For non-localhost hosts the three plaintext-fallback modes (`disable` / `allow` / `prefer`) are rejected — only the TLS-required modes are accepted (mirrors email's `allowLocal = !useSsl` posture).  For local-network hosts (loopback / RFC 1918 / link-local), all 6 modes are accepted as a dev-mode opt-out. |
 
-- **Endpoint**: `host:port` (default `localhost:5432`)
+- **Endpoint**: `host:port` (default `localhost:5432`).  Bracketed IPv6 literals `[fc00::1]:5432` are supported — the brackets are stripped before host extraction so `IsLocalNetworkHost` recognizes the address.
 - **Auth type**: BasicAuth (username/password from KeyManager)
 - **TestConnection()**: connects and runs `SELECT 1`
+- **Forbidden libpq params** — `m_Params` keys that would resolve to local file paths or external file lookups are rejected before any libpq call: `sslcert`, `sslkey`, `sslrootcert`, `sslcrl`, `sslcrldir`, `sslpassword`, `service`, `passfile`.  j9t's posture is "credentials live in KeyManager, not on disk" — any libpq param that asks the server to read a path is a path-traversal vector, so the validator (`PostgresConnector::ValidatePostgresParams`) rejects with `[security] postgres_forbidden_param` before reaching libpq.  `BuildConnectionString` only forwards `database` and `sslmode` to libpq; the validator is preventive — if a future PR adds `paramOrDefault("sslcert", ...)` to `BuildConnectionString` without first removing this gate, the gate fires and the security log catches it.
+
+**Choosing an `sslmode` value:**
+
+- **`require`** is the right floor for almost any j9t deployment.  TLS is mandatory; libpq won't fall back to plaintext.  Cert chain is NOT validated, so an attacker who can MITM the connection AND present a self-signed cert can intercept — but a passive eavesdropper can't.  Use `require` for local development (the typical pg dev install ships a self-signed cert that doesn't validate against a CA chain) and for production deployments where you accept the MITM-with-valid-cert risk for simpler ops.
+- **`verify-ca`** validates the cert chain against a CA bundle.  Requires the bundle to be available at libpq's default search path (`~/.postgresql/root.crt`) or in the OS trust store accessed via libpq's `sslrootcert=system` (which j9t's forbid-list does NOT block since it's a literal string, not a path — `sslrootcert` itself is forbidden, but the special `=system` value applies through libpq's connection-config layer separately).  Doesn't validate hostname.
+- **`verify-full`** validates BOTH the cert chain AND the hostname.  Same CA-bundle requirement as `verify-ca` plus the cert's CN (or SAN) must match the connection's host.  This is the production posture for managed pg services (Supabase, RDS, Cloud SQL, etc.) where the cert chain rolls up to a public CA already in the OS trust store and the hostname is a real DNS name.  For self-signed local-pg dev (CN typically the machine hostname, not `localhost`), `verify-full` won't work without per-machine CA provisioning — accept `require` for dev and use `verify-full` for production.
 
 ### db_query Task Type
 
@@ -728,7 +735,7 @@ JCWF task type `"slack_message"` sends messages to Slack channels via `POST /api
 | `connection` | yes | Named CloudConnection (type `slack`) |
 | `channel` | yes | Slack channel name or ID (e.g. `#alerts`, `C01ABCDEF`) |
 | `text` | yes (or `text_file`) | Inline message text (supports template variables) |
-| `text_file` | yes (or `text`) | Read message text from file (relative to j9t cwd); trims trailing whitespace. Use for long AI-generated content (mirrors `email_send` `body_file`). |
+| `text_file` | yes (or `text`) | Read message text from file (resolved per JCWF spec §3.2.1: relative paths under the task `working_directory`; absolute values from `{{<task>.output_file}}` templates pass through); trims trailing whitespace. Use for long AI-generated content (mirrors `email_send` `body_file`). |
 | `thread_ts` | no | Post as a threaded reply to this parent message ts. |
 | `thread_ts_file` | no | Read `thread_ts` from file. Used to wire an upstream `slack_read` task's `latest_ts.txt` into the reply. |
 
@@ -774,7 +781,7 @@ Implements `ICloudConnector` for SMTP send and IMAP read via libcurl.
 | `imap_host` | IMAP server (e.g. `"imap.gmail.com"`), required for email_watch |
 | `imap_port` | IMAP port (default: `"993"`) |
 | `from` | Sender address (default: credential username) |
-| `use_ssl` | `"true"` (default) or `"false"` |
+| `use_ssl` | `"true"` (default) or `"false"`.  Gates strict TLS on **both** SMTP and IMAP — when `"true"`, the connection refuses to proceed without TLS and enforces full certificate + hostname verification.  Setting `"false"` is the local-testing escape hatch (GreenMail / Mailpit on plaintext ports); each plaintext send emits a `[security] email_send_tls_disabled` line in `log/security.txt` so an operator can audit which connections opt out. |
 
 - **Auth type**: BasicAuth (email + password/app password from KeyManager)
 - **TestConnection()**: SMTP `CONNECT_ONLY` handshake via libcurl
@@ -807,7 +814,7 @@ JCWF task type `"email_read"` fetches emails from an IMAP mailbox via libcurl.
 |-------|----------|---------|-------------|
 | `connection` | yes | | Named CloudConnection with `imap_host`/`imap_port` params |
 | `folder` | no | `INBOX` | IMAP folder to read from |
-| `max_messages` | no | `10` | Maximum messages to fetch |
+| `max_messages` | no | `10` | Maximum messages to fetch (clamped to `[1, 500]`) |
 | `subject_filter` | no | | Only include messages whose subject contains this string |
 
 **Outputs:**
@@ -973,10 +980,19 @@ Implements `ICloudConnector` for Google Sheets API v4. Supports API key auth (re
 
 - **Audit logging** — all cloud task executions logged to `log/security.txt` with task ID, connection name, type, and run ID.
 - **OAuth CSRF protection** — `state` parameter added to OAuth authorize URL, validated on callback. Random 16-byte token per flow.
-- **Download size limits** — `CURLOPT_MAXFILESIZE_LARGE` set to 256 MB on S3 and OneDrive download operations.
-- **Path traversal validation** — `ICloudTaskExecutor::ValidateLocalPath()` rejects `local_path` params containing `..` or resolving outside the task working directory. Logged to security log.
+- **Resource caps (downloads + uploads + responses)** — Phase 9 set `CURLOPT_MAXFILESIZE_LARGE = 256 MB` on S3 and OneDrive **download** operations.  Subsequently extended (sittings 15-20) with matching **upload** caps (256 MB on S3, GCS, Azure Blob, OneDrive uploads — symmetric with downloads) and **response-body caps** in writeCallbacks (64 MB on the 5 cloud-storage executors; 10 MB on email IMAP; 64 MB on Snowflake; 1 MB on Snowflake's TestConnection; 25 MB on email attachments).
+- **Path traversal validation** — `ICloudTaskExecutor::ValidateLocalPath()` is the security gate for every `local_path` / `file_path` / `body_file` / `attachments` param across the cloud surface.  Resolution follows JCWF spec §3.2.1: a relative path resolves under the caller-supplied base (the task `working_directory` for every executor), an absolute path (typically a `{{<task>.output_file}}` template) passes through.  Both forms are then confined under the JarvisAgent launch CWD as the project-tree security boundary — anything resolving outside the project (e.g. `/etc/passwd`) is rejected.  The 6 cloud executors with local-file params (azureBlob, email, gcs, oneDrive, s3, sheets) all share this gate.  Each rejection emits a `[security] path_traversal_blocked` line to `log/security.txt`.
 - **RSA key minimum 2048 bits** — enforced in `JwtGenerator::Generate()` (Phase 0).
-- **SSL verification** — `CURLOPT_SSL_VERIFYPEER` is never disabled; libcurl defaults to enabled.
+- **TLS verification** — `CURLOPT_SSL_VERIFYPEER = 1L` and `CURLOPT_SSL_VERIFYHOST = 2L` are set **explicitly** (not relying on libcurl defaults) across the entire cloud surface: email + Snowflake + the 6 executor data paths (azureBlob, gcs, googleSheets, oneDrive, s3, sheets) AND every `*Connector::TestConnection` HTTP path via the shared `ConnectorHttp::ApplyHardenedDefaults()` helper.  When the connection's `use_ssl` param is `"true"` (default for email; HTTP cloud surfaces are HTTPS-only and always verify), the gate is unconditional; the email surface's `use_ssl: "false"` opt-out emits a `[security] email_*_tls_disabled` log line so an operator running plaintext sees the deviation.
+- **Connector-layer SSRF gate (two layers)** — every connector's `TestConnection` validates a user-supplied endpoint URL via two complementary gates:
+  1. **Syntactic** — `ConnectorHttp::ValidatePublicHttpEndpoint()` runs before any network I/O.  Enforces scheme (http/https only), conservative host charset (alphanumeric + `.` + `-`), and rejects IP literals in RFC 1918 / loopback / link-local / cloud-metadata ranges via `IsLocalNetworkHost()` (which uses a structural IPv6 classifier so public hostnames starting with `fc` / `fd` / `fe80` aren't false-positive flagged).  Rejected endpoints emit `[security] <type>_endpoint_rejected` lines.
+  2. **DNS-resolution-time** — `ConnectorHttp::ApplyHardenedDefaults()` and `ApplyExecutorRedirectDefaults()` install a `CURLOPT_OPENSOCKETFUNCTION` callback when the URL scheme is `https://`.  The callback fires after libcurl resolves DNS but before TCP connect; if the resolved IP is in the local-network ranges, it returns `CURL_SOCKET_BAD` and the request fails.  Closes the SSRF vector where a public DNS name (`evil.example.com`) resolves to an internal IP at attacker-controlled DNS time.  Rejections emit `[security] dns_resolved_ip_local_network_rejected resolved_ip='...'`.
+  Plain `http://` URLs allow local-network hosts as a dev-mode opt-out at both gates (mirrors email's `allowLocal = !useSsl` heuristic); production `https://` does not.
+- **Redirect-following has a deliberate per-API posture across the cloud surface** — set via two shared helpers in `ConnectorHttp`:
+  - `ApplyHardenedDefaults()` enforces `CURLOPT_FOLLOWLOCATION = 0L`.  Used on every HTTP-based `TestConnection`, every `PolarionClient::Http*` call, and the 10 executor data paths whose vendor APIs respond directly: azureBlob, gcs, gitHub, googleSheets, jira, redmine, sheets, slack, snowflake.  A 30x from any of these is treated as hostile — the redirect-amplified SSRF vector would otherwise leak the bearer/PAT to an attacker-controlled host.  `emailConnector` and `emailCloudTaskExecutor` use libcurl SMTP/IMAP rather than HTTP and have their own `use_ssl`-gated TLS-verify dance — they do NOT route through `ApplyHardenedDefaults` (different protocol family).
+  - `ApplyExecutorRedirectDefaults()` enforces `CURLOPT_FOLLOWLOCATION = 1L` + `CURLOPT_REDIR_PROTOCOLS_STR = "https"` (no http downgrade) + `CURLOPT_MAXREDIRS = 10L`.  Used only where the vendor API legitimately 30x's on the data path: the 4 sites in S3 (cross-region 301s, presigned-URL flows) and Microsoft Graph (CDN 302s on download, large-file upload session pivots).  An unencrypted-protocol redirect target is refused by libcurl as a hard error; the follow-depth cap prevents an attacker-controlled redirect loop pinning a worker thread.
+  Both helpers also set explicit `CURLOPT_SSL_VERIFYPEER = 1L` + `CURLOPT_SSL_VERIFYHOST = 2L` and `CAINFO` from `CurlWrapper::GetCaBundlePath()` if available.
+- **Live counters for every gate** — every cloud-surface security gate has both a security log line and an atomic lifetime counter on `/api/debug/signals` (DEBUG-builds, admin-gated).  Six counters total: `cloud_dns_resolved_ip_rejections`, `cloud_endpoint_ssrf_rejections`, `cloud_credential_crlf_rejections`, `cloud_input_validation_rejections`, `cloud_postgres_invalid_sslmode_rejections`, `cloud_postgres_forbidden_param_rejections`.  Counters reset to 0 on server restart.  See `doc/cyber security.md` § "Cloud Connection Security" for which gate each counter covers.
 
 ### Deployment & Ops (9c)
 
@@ -1215,7 +1231,7 @@ Writes the raw response body to `response.json` in the working directory. The `c
 | `operation` | yes | `"update_issue"` |
 | `issue_id` | yes | Integer Redmine issue id (accepts string or int in JSON) |
 | `notes` | no* | Inline comment text |
-| `notes_file` | no* | Read comment text from file (relative to j9t cwd) |
+| `notes_file` | no* | Read comment text from file (resolved per JCWF spec §3.2.1: relative paths under task `working_directory`; absolute template values pass through) |
 | `assigned_to_id` | no* | Inline numeric Redmine user id |
 | `assigned_to_id_file` | no* | Read assignee id from file (one integer per line) |
 

@@ -709,7 +709,7 @@ namespace AIAssistant
         // Email watch: perform IMAP UID checks outside the lock (network I/O)
         for (auto const& job : emailPollJobs)
         {
-            auto const* connection = Core::g_Core->GetCloudConnectionManager().GetConnection(job.m_ConnectionName);
+            auto connection = Core::g_Core->GetCloudConnectionManager().GetConnection(job.m_ConnectionName);
             if (!connection)
             {
                 LOG_APP_WARN("[email_watch] connection '{}' not found, skipping IMAP check", job.m_ConnectionName);

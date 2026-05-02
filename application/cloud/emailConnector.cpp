@@ -24,15 +24,140 @@
 #include "cloud/emailConnector.h"
 
 #include <curl/curl.h>
+#include <cctype>
 #include <sstream>
+#include <stdexcept>
 
 #include "core.h"
 #include "engine.h"
 #include "keys/keyManager.h"
 #include "curlWrapper/curlWrapper.h"
+#include "cloud/connectorHttp.h"
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Used at the IMAP send-buffer cap.  10 MB matches the audit recommendation
+        // (a SEARCH response that large is already pathological — production
+        // mailboxes rarely produce more than tens of KB per response).
+        constexpr size_t kMaxImapResponseBytes = 10 * 1024 * 1024;
+    } // namespace
+
+    bool EmailConnector::IsValidImapFolder(std::string const& folder)
+    {
+        if (folder.empty() || folder.size() > 256)
+        {
+            return false;
+        }
+        if (folder.front() == '/' || folder.back() == '/')
+        {
+            return false;
+        }
+        if (folder.find("//") != std::string::npos)
+        {
+            return false;
+        }
+        for (char c : folder)
+        {
+            unsigned char const uc = static_cast<unsigned char>(c);
+            if (std::isalnum(uc))
+            {
+                continue;
+            }
+            if (c == '.' || c == '_' || c == '-' || c == '/')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    bool EmailConnector::IsValidImapUid(std::string const& uid)
+    {
+        if (uid.empty() || uid.size() > 20)
+        {
+            return false;
+        }
+        for (char c : uid)
+        {
+            if (!std::isdigit(static_cast<unsigned char>(c)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool EmailConnector::IsValidImapSubjectFilter(std::string const& filter)
+    {
+        if (filter.size() > 256)
+        {
+            return false;
+        }
+        for (char c : filter)
+        {
+            // `"` and `\\` would break out of the SEARCH SUBJECT quoted string;
+            // CR / LF would terminate the IMAP command and inject the next one;
+            // `{` is the IMAP literal-syntax sentinel.
+            if (c == '"' || c == '\\' || c == '\r' || c == '\n' || c == '{')
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool EmailConnector::IsValidEmailHost(std::string const& host, bool allowLocalNetwork)
+    {
+        if (host.empty() || host.size() > 253)
+        {
+            return false;
+        }
+        for (char c : host)
+        {
+            // URL-meaningful chars that would let `host = "evil.com:465/path?x="`
+            // smuggle additional URL components past the SMTP/IMAP libcurl URL.
+            if (c == ':' || c == '/' || c == '?' || c == '#' || c == '@' || c == '%' || c == '\\')
+            {
+                return false;
+            }
+            // Whitespace / line terminators have no place in a hostname.
+            if (c == '\r' || c == '\n' || c == ' ' || c == '\t')
+            {
+                return false;
+            }
+        }
+        if (!allowLocalNetwork && ConnectorHttp::IsLocalNetworkHost(host))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    bool EmailConnector::IsValidEmailPort(std::string const& port)
+    {
+        if (port.empty() || port.size() > 5)
+        {
+            return false;
+        }
+        int value = 0;
+        for (char c : port)
+        {
+            if (!std::isdigit(static_cast<unsigned char>(c)))
+            {
+                return false;
+            }
+            value = value * 10 + (c - '0');
+            if (value > 65535)
+            {
+                return false;
+            }
+        }
+        return value >= 1;
+    }
+
     std::string EmailConnector::GetType() const
     {
         return "email";
@@ -78,6 +203,17 @@ namespace AIAssistant
         auto sslIt = connection.m_Params.find("use_ssl");
         bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
 
+        // Local-network hosts (loopback / link-local / private / cloud-metadata IP) are
+        // accepted only when use_ssl is explicitly false — the same opt-out the SMTP TLS
+        // gate uses.  Production posture (use_ssl=true) rejects them as SSRF vectors.
+        bool const allowLocal = !useSsl;
+        if (!IsValidEmailHost(host, allowLocal) || !IsValidEmailPort(port))
+        {
+            LOG_SECURITY_WARN("[security] email_invalid_smtp_target connection='{}' use_ssl={}",
+                              connection.m_Name, useSsl ? "true" : "false");
+            return {};
+        }
+
         std::string scheme = (useSsl && port == "465") ? "smtps" : "smtp";
         return scheme + "://" + host + ":" + port;
     }
@@ -92,6 +228,15 @@ namespace AIAssistant
 
         auto sslIt = connection.m_Params.find("use_ssl");
         bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+
+        // Same SSRF + URL-injection gate as BuildSmtpUrl above.
+        bool const allowLocal = !useSsl;
+        if (!IsValidEmailHost(host, allowLocal) || !IsValidEmailPort(port))
+        {
+            LOG_SECURITY_WARN("[security] email_invalid_imap_target connection='{}' use_ssl={}",
+                              connection.m_Name, useSsl ? "true" : "false");
+            return {};
+        }
 
         std::string scheme = useSsl ? "imaps" : "imap";
         return scheme + "://" + host + ":" + port;
@@ -114,6 +259,12 @@ namespace AIAssistant
 
         // Test SMTP connectivity with EHLO handshake via libcurl
         std::string smtpUrl = BuildSmtpUrl(connection);
+        if (smtpUrl.empty())
+        {
+            // BuildSmtpUrl already emitted a SECURITY_WARN with the rejection reason.
+            errorMessage = "Email SMTP target rejected: invalid host or port (see security log)";
+            return false;
+        }
 
         CURL* curl = curl_easy_init();
         if (!curl)
@@ -134,12 +285,21 @@ namespace AIAssistant
             curl_easy_setopt(curl, CURLOPT_CAINFO, caBundle.c_str());
         }
 
-        // Use STARTTLS for port 587
-        auto portIt = connection.m_Params.find("smtp_port");
-        std::string port = (portIt != connection.m_Params.end() && !portIt->second.empty()) ? portIt->second : "587";
-        if (port == "587")
+        // TLS posture: same shape as the SMTP send path in emailCloudTaskExecutor —
+        // gated on the connection's use_ssl param.  Strict mode unconditionally
+        // requires TLS plus full peer + hostname verification; opt-out emits a
+        // SECURITY_WARN so an operator running plaintext sees the deviation.
+        auto sslIt = connection.m_Params.find("use_ssl");
+        bool const smtpUseTls = (sslIt == connection.m_Params.end() || sslIt->second != "false");
+        if (smtpUseTls)
         {
             curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_ALL));
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        }
+        else
+        {
+            LOG_SECURITY_WARN("[security] email_test_tls_disabled connection='{}'", connection.m_Name);
         }
 
         // CONNECT_ONLY: just establish connection and authenticate, don't send mail
@@ -164,8 +324,17 @@ namespace AIAssistant
     static size_t ImapWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
     {
         auto* buf = static_cast<std::string*>(userp);
-        buf->append(static_cast<char*>(contents), size * nmemb);
-        return size * nmemb;
+        size_t const incoming = size * nmemb;
+        // Cap the response buffer so a hostile or compromised IMAP server cannot
+        // exhaust process memory by streaming an unbounded SEARCH response.
+        // Returning 0 from the libcurl write callback aborts the transfer with
+        // CURLE_WRITE_ERROR, which the caller surfaces as a regular IMAP error.
+        if (buf->size() + incoming > kMaxImapResponseBytes)
+        {
+            return 0;
+        }
+        buf->append(static_cast<char*>(contents), incoming);
+        return incoming;
     }
 
     bool EmailConnector::ImapCommand(std::string const& url, std::string const& username,
@@ -193,9 +362,23 @@ namespace AIAssistant
             curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, customRequest.c_str());
         }
 
-        if (!useSsl)
+        // TLS posture: matches the SMTP path's gate.  When useSsl is true (production
+        // default), unconditionally require TLS + full cert + hostname verification —
+        // refuse to fall through to libcurl's build-defaults, which can fail-open on
+        // builds where the trust store is empty or unreachable.  When useSsl is
+        // false (local-testing opt-out), explicitly select CURLUSESSL_NONE and emit
+        // a SECURITY_WARN so the deviation is observable in the security log.
+        if (useSsl)
+        {
+            curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_ALL));
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+        }
+        else
         {
             curl_easy_setopt(curl, CURLOPT_USE_SSL, static_cast<long>(CURLUSESSL_NONE));
+            LOG_SECURITY_WARN("[security] email_imap_tls_disabled url_scheme='{}'",
+                              url.substr(0, std::min<size_t>(url.size(), 6)));
         }
 
         auto const& caBundle = CurlWrapper::GetCaBundlePath();
@@ -260,7 +443,48 @@ namespace AIAssistant
     {
         hasNewMail = false;
 
+        // Defense-in-depth folder validation.  The executor (sitting 11) already
+        // validates upstream, but the connector's public API can be invoked from
+        // future call sites with no prior validation — and the folder is
+        // interpolated directly into the IMAP URL below.
+        if (!IsValidImapFolder(folder))
+        {
+            errorMessage = "Invalid IMAP folder name: contains characters outside the allowed "
+                           "set [A-Za-z0-9._/-] or violates structural rules";
+            ConnectorHttp::IncrementInputValidationRejection();
+            LOG_SECURITY_WARN("[security] email_check_invalid_folder connection='{}' folder_length={}",
+                              connection.m_Name, folder.size());
+            return {};
+        }
+
+        // SearchFilter is interpolated into a quoted IMAP SEARCH SUBJECT argument; rejecting
+        // `"`, `\\`, `\r`, `\n`, `{` closes the IMAP command-injection vector.
+        if (!IsValidImapSubjectFilter(subjectFilter))
+        {
+            errorMessage = "Invalid IMAP subject filter: contains characters that would break the "
+                           "SEARCH command (\\\", \\\\, CR, LF, {)";
+            LOG_SECURITY_WARN("[security] email_check_invalid_subject_filter connection='{}' filter_length={}",
+                              connection.m_Name, subjectFilter.size());
+            return {};
+        }
+
+        // The watermark is read back from the trigger-engine's persisted state — sanitize before
+        // any std::stoull call so a tampered watermark doesn't crash the polling thread.
+        if (!lastSeenUid.empty() && !IsValidImapUid(lastSeenUid))
+        {
+            errorMessage = "Invalid lastSeenUid watermark: must be a non-empty digit string";
+            LOG_SECURITY_WARN("[security] email_check_invalid_watermark connection='{}' watermark_length={}",
+                              connection.m_Name, lastSeenUid.size());
+            return {};
+        }
+
         std::string imapBaseUrl = BuildImapUrl(connection);
+        if (imapBaseUrl.empty())
+        {
+            // BuildImapUrl already emitted a SECURITY_WARN.
+            errorMessage = "IMAP target rejected: invalid host or port (see security log)";
+            return {};
+        }
         auto sslIt = connection.m_Params.find("use_ssl");
         bool useSsl = (sslIt == connection.m_Params.end() || sslIt->second != "false");
 
@@ -299,16 +523,42 @@ namespace AIAssistant
             return highestUid;
         }
 
-        // IMAP UID SEARCH <N>:* can return UID == lastSeenUid when no newer messages exist
-        // (the range is inclusive and the server returns the boundary UID).
-        // Only report new mail if we found a UID strictly greater than the watermark.
-        for (auto const& uid : uids)
+        // Compare numeric UIDs.  ParseSearchUids does an isdigit check on the first
+        // byte so the per-element validity is mostly assured, but stoull can still
+        // throw out_of_range on a 30-byte all-digits string the parser accepts —
+        // wrap the comparisons defensively so a malformed server response cannot
+        // crash the polling thread.
+        try
         {
-            if (std::stoull(uid) > std::stoull(lastSeenUid))
+            uint64_t const watermark = std::stoull(lastSeenUid);
+            for (auto const& uid : uids)
             {
-                hasNewMail = true;
-                break;
+                if (!IsValidImapUid(uid))
+                {
+                    LOG_APP_WARN("[email_watch] connection='{}': skipping malformed UID (length={})",
+                                 connection.m_Name, uid.size());
+                    continue;
+                }
+                if (std::stoull(uid) > watermark)
+                {
+                    hasNewMail = true;
+                    break;
+                }
             }
+        }
+        catch (std::invalid_argument const& e)
+        {
+            errorMessage = std::string("Invalid IMAP UID format in poll response: ") + e.what();
+            LOG_APP_WARN("[email_watch] connection='{}': stoull invalid_argument — treating as no-new-mail",
+                         connection.m_Name);
+            return highestUid;
+        }
+        catch (std::out_of_range const& e)
+        {
+            errorMessage = std::string("IMAP UID overflow in poll response: ") + e.what();
+            LOG_APP_WARN("[email_watch] connection='{}': stoull out_of_range — treating as no-new-mail",
+                         connection.m_Name);
+            return highestUid;
         }
 
         return highestUid;
