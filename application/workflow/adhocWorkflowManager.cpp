@@ -32,6 +32,7 @@
 
 #include "engine.h"
 #include "file/fileWatcher.h"
+#include "json/jsonHelper.h"
 #include "web/mcpKeyManager.h"
 #include "workflow/workflowRegistry.h"
 
@@ -72,39 +73,6 @@ namespace AIAssistant
 #endif
             if (t == static_cast<std::time_t>(-1)) return std::nullopt;
             return std::chrono::system_clock::from_time_t(t);
-        }
-
-        // Minimal JSON string escaper for values we emit by hand — we don't pull
-        // in a full JSON writer for a file that only ever needs ~10 fields.
-        std::string JsonEscape(std::string_view s)
-        {
-            std::string out;
-            out.reserve(s.size() + 2);
-            for (unsigned char ch : s)
-            {
-                switch (ch)
-                {
-                    case '"':  out += "\\\""; break;
-                    case '\\': out += "\\\\"; break;
-                    case '\n': out += "\\n"; break;
-                    case '\r': out += "\\r"; break;
-                    case '\t': out += "\\t"; break;
-                    case '\b': out += "\\b"; break;
-                    case '\f': out += "\\f"; break;
-                    default:
-                        if (ch < 0x20)
-                        {
-                            char buf[8];
-                            std::snprintf(buf, sizeof(buf), "\\u%04x", ch);
-                            out += buf;
-                        }
-                        else
-                        {
-                            out.push_back(static_cast<char>(ch));
-                        }
-                }
-            }
-            return out;
         }
 
         std::chrono::seconds PolicyTtl(std::string const& policy)
@@ -296,10 +264,10 @@ namespace AIAssistant
         // Minimal hand-built JSON; fields are validated server-side so no escaping
         // pass is needed. owner_slug is the filesystem-safe derivative of user.
         os << "{\n"
-           << "  \"user\": \"" << JsonEscape(meta.m_User) << "\",\n"
-           << "  \"role\": \"" << JsonEscape(meta.m_Role) << "\",\n"
-           << "  \"cleanup_policy\": \"" << JsonEscape(meta.m_CleanupPolicy) << "\",\n"
-           << "  \"owner_slug\": \"" << JsonEscape(meta.m_OwnerSlug) << "\"\n"
+           << "  \"user\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
+           << "  \"role\": \"" << JsonHelper::EscapeJsonString(meta.m_Role) << "\",\n"
+           << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
+           << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\"\n"
            << "}\n";
     }
 
@@ -558,19 +526,19 @@ namespace AIAssistant
         }
 
         os << "{\n"
-           << "  \"runId\": \"" << JsonEscape(runId) << "\",\n"
-           << "  \"owner\": \"" << JsonEscape(meta.m_User) << "\",\n"
-           << "  \"owner_slug\": \"" << JsonEscape(meta.m_OwnerSlug) << "\",\n"
-           << "  \"cleanup_policy\": \"" << JsonEscape(meta.m_CleanupPolicy) << "\",\n"
-           << "  \"delete_at\": \"" << JsonEscape(deleteAtStr) << "\",\n"
+           << "  \"runId\": \"" << JsonHelper::EscapeJsonString(runId) << "\",\n"
+           << "  \"owner\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
+           << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\",\n"
+           << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
+           << "  \"delete_at\": \"" << JsonHelper::EscapeJsonString(deleteAtStr) << "\",\n"
            << "  \"files\": [";
         for (size_t i = 0; i < entries.size(); ++i)
         {
             if (i > 0) os << ",";
             os << "\n    {"
-               << "\"path\": \"" << JsonEscape(entries[i].m_RelPath) << "\", "
+               << "\"path\": \"" << JsonHelper::EscapeJsonString(entries[i].m_RelPath) << "\", "
                << "\"size_bytes\": " << entries[i].m_SizeBytes << ", "
-               << "\"modified_at\": \"" << JsonEscape(entries[i].m_ModifiedIso) << "\""
+               << "\"modified_at\": \"" << JsonHelper::EscapeJsonString(entries[i].m_ModifiedIso) << "\""
                << "}";
         }
         if (!entries.empty()) os << "\n  ";

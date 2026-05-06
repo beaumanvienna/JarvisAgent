@@ -37,8 +37,10 @@
 #include "file/scriptRegistry.h"
 #include "json/jcwfGenerationGuide.generated.h"
 #include "json/jcwfSchema.generated.h"
+#include "json/jsonHelper.h"
 #include "json/replyParser.h"
 #include "json/requestBuilder.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 #include "workflow/aiCallTaskExecutor.h"
@@ -151,48 +153,6 @@ namespace AIAssistant
             }
             return "Linux (distro unknown)";
 #endif
-        }
-
-        // Build a simple JSON string for WebSocket broadcast.
-        // This avoids pulling in crow::json for a background thread.
-        static std::string JsonEscape(std::string const& input)
-        {
-            std::string out;
-            out.reserve(input.size() + 32);
-            for (char c : input)
-            {
-                switch (c)
-                {
-                    case '"':
-                        out += "\\\"";
-                        break;
-                    case '\\':
-                        out += "\\\\";
-                        break;
-                    case '\n':
-                        out += "\\n";
-                        break;
-                    case '\r':
-                        out += "\\r";
-                        break;
-                    case '\t':
-                        out += "\\t";
-                        break;
-                    default:
-                        if (static_cast<unsigned char>(c) < 0x20)
-                        {
-                            char buf[8];
-                            snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
-                            out += buf;
-                        }
-                        else
-                        {
-                            out += c;
-                        }
-                        break;
-                }
-            }
-            return out;
         }
 
         // GeneratedScript is defined in workflow/workflowValidator.h
@@ -1195,12 +1155,24 @@ namespace AIAssistant
         std::string apiKey;
         std::unordered_map<std::string, std::string> providerParams;
         {
-            auto const* provider = iface.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
-                                                           : Core::g_Core->GetKeyManager().GetProvider(iface.m_KeyName);
-            if (provider != nullptr)
+            auto const* cred = iface.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
+                                                       : Core::g_Core->GetKeyManager().GetCredential(iface.m_KeyName);
+            if (cred != nullptr)
             {
-                apiKey = provider->m_ApiKey;
-                providerParams = provider->m_Params;
+                // ApiKeyCredential is the bearer-secret case (OpenAI, Anthropic, Gemini, Azure).
+                // OAuthCredential carries the cached access token in m_AccessToken (rotated by
+                // OAuthTokenManager's hydrate / refresh paths; the cache is what gets persisted
+                // into KeyManager and read here).  Other subtypes don't fit AI dispatch and
+                // leave apiKey empty — the empty-check below produces a clear error.
+                if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
+                {
+                    apiKey = std::string(api->m_ApiKey.Get());
+                }
+                else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
+                {
+                    apiKey = std::string(oauth->m_AccessToken.Get());
+                }
+                providerParams = cred->m_Params;
             }
         }
 
@@ -1511,7 +1483,7 @@ namespace AIAssistant
                 if (!stage1Ok)
                 {
                     LOG_APP_ERROR("[workflow] task 'explain_stage1' failed in run '{}': {}", runId, stage1Error);
-                    Broadcast(R"({"type":"ai-explain-result","ok":false,"error":")" + JsonEscape(stage1Error) + R"("})");
+                    Broadcast(R"({"type":"ai-explain-result","ok":false,"error":")" + JsonHelper::EscapeJsonString(stage1Error) + R"("})");
                     LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
                     return;
                 }
@@ -1565,7 +1537,7 @@ namespace AIAssistant
                 {
                     LOG_APP_INFO("[workflow] task 'explain_stage2' completed in run '{}' (workflow '{}')", runId,
                                  workflowId);
-                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage2Response) + R"("})");
+                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonHelper::EscapeJsonString(stage2Response) + R"("})");
                     LOG_APP_INFO("[workflow] run '{}' completed (workflow '{}')", runId, workflowId);
                 }
                 else
@@ -1573,7 +1545,7 @@ namespace AIAssistant
                     // Stage 2 failed — fall back to Stage 1 result (still useful).
                     LOG_APP_WARN("[workflow] task 'explain_stage2' failed in run '{}': {} — returning stage 1 result", runId,
                                  stage2Error);
-                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonEscape(stage1Response) + R"("})");
+                    Broadcast(R"({"type":"ai-explain-result","ok":true,"summary":")" + JsonHelper::EscapeJsonString(stage1Response) + R"("})");
                     LOG_APP_INFO("[workflow] run '{}' completed with stage 1 fallback (workflow '{}')", runId, workflowId);
                 }
             });
@@ -1606,7 +1578,7 @@ namespace AIAssistant
                 {
                     std::ostringstream ss;
                     ss << R"({"type":"ai-generate-progress","stage":)" << stage << R"(,"totalStages":)" << totalStages
-                       << R"(,"message":")" << JsonEscape(message) << R"("})";
+                       << R"(,"message":")" << JsonHelper::EscapeJsonString(message) << R"("})";
                     Broadcast(ss.str());
                 };
 
@@ -1628,8 +1600,8 @@ namespace AIAssistant
                             {
                                 if (i > 0)
                                     ss << ",";
-                                ss << R"({"path":")" << JsonEscape(generatedScripts[i].path) << R"(","content":")"
-                                   << JsonEscape(generatedScripts[i].content) << R"(","executable":)"
+                                ss << R"({"path":")" << JsonHelper::EscapeJsonString(generatedScripts[i].path) << R"(","content":")"
+                                   << JsonHelper::EscapeJsonString(generatedScripts[i].content) << R"(","executable":)"
                                    << (generatedScripts[i].executable ? "true" : "false") << "}";
                             }
                             ss << "]";
@@ -1641,7 +1613,7 @@ namespace AIAssistant
                     }
                     else
                     {
-                        Broadcast(R"({"type":"ai-generate-result","ok":false,"error":")" + JsonEscape(jcwfOrError) +
+                        Broadcast(R"({"type":"ai-generate-result","ok":false,"error":")" + JsonHelper::EscapeJsonString(jcwfOrError) +
                                   R"("})");
                         LOG_APP_ERROR("[workflow] run '{}' failed (workflow '{}')", runId, workflowId);
                     }
@@ -2656,7 +2628,7 @@ namespace AIAssistant
                     if (!ifs)
                     {
                         Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":"Cannot read script: )" +
-                                  JsonEscape(scriptPath) + R"("})");
+                                  JsonHelper::EscapeJsonString(scriptPath) + R"("})");
                         return;
                     }
                     std::ostringstream ss;
@@ -2731,7 +2703,7 @@ namespace AIAssistant
 
                 if (!ok)
                 {
-                    Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":")" + JsonEscape(fixError) + R"("})");
+                    Broadcast(R"({"type":"ai-fix-script-result","ok":false,"error":")" + JsonHelper::EscapeJsonString(fixError) + R"("})");
                     return;
                 }
 
@@ -2740,8 +2712,8 @@ namespace AIAssistant
 
                 // Broadcast result with the fixed script for review
                 std::ostringstream ss;
-                ss << R"({"type":"ai-fix-script-result","ok":true,"scripts":[{"path":")" << JsonEscape(scriptPath)
-                   << R"(","content":")" << JsonEscape(fixedContent) << R"(","executable":)" << (isShell ? "true" : "false")
+                ss << R"({"type":"ai-fix-script-result","ok":true,"scripts":[{"path":")" << JsonHelper::EscapeJsonString(scriptPath)
+                   << R"(","content":")" << JsonHelper::EscapeJsonString(fixedContent) << R"(","executable":)" << (isShell ? "true" : "false")
                    << R"(}]})";
                 Broadcast(ss.str());
 

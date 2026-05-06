@@ -165,6 +165,32 @@ When a workflow run finishes (succeeded, failed, cancelled, or stopped), JarvisA
 
 The callback is **fire-and-forget** with a 15-second timeout. If the target server is unreachable, the failure is logged but does not affect the workflow run result.
 
+### Callback URL safety gate (SSRF defense)
+
+The `callbackUrl` is workflow context, which is partially attacker-influenced (any webhook payload or JCWF can seed context).  Before any payload is built, JarvisAgent enforces:
+
+- **`https://` scheme only** — plain `http` would leak the payload over the wire and remove peer-cert verification.
+- **DNS resolution + per-address rejection** — if any A/AAAA record for the host falls in loopback (127/8, ::1), RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT (100.64/10), link-local (169.254/16, fe80::/10), unique-local (fc00::/7), multicast (224/4, ff00::/8), or unspecified (0/8, ::), the call is refused.  Closes the cloud-metadata vector explicitly (`169.254.169.254`) and the DNS-rebinding case where a hostname resolves to both public and private records.
+- **TLS hardening** — `CURLOPT_SSL_VERIFYPEER`, `CURLOPT_SSL_VERIFYHOST`, `CURLOPT_FOLLOWLOCATION = 0`, `CURLOPT_PROTOCOLS_STR/REDIR_PROTOCOLS_STR = "https"`.  A redirect to `http://` or to an internal IP cannot silently downgrade the request.
+
+Refusals emit `[error] [callback] refused completion callback for run '...' to '...': <reason>` so the dashboard's run analyser surfaces them as issues against the run.
+
+### Opt-out for output content (`callback_include_outputs`)
+
+By default the `tasks` object includes each succeeded task's `outputs` (slot name → value, with file content read up to 65 KB per slot).  For runs handling PII, secrets, or large output blobs that shouldn't traverse the network, set `"callback_include_outputs": "false"` (or `"0"` / `"no"`) in the run context — the state + per-task state + error messages are still delivered, only the outputs payload is stripped.
+
+```jsonc
+// Webhook body / n8n start body
+{
+  "workflowId": "...",
+  "callbackUrl": "https://my-server.com/webhook/callback",
+  "context": {
+    "date": "2026-03-21",
+    "callback_include_outputs": "false"   // strip task outputs from the callback
+  }
+}
+```
+
 ---
 
 ## How Context Injection Works

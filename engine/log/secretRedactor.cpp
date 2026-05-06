@@ -21,13 +21,18 @@
 
 #include <algorithm>
 
+#include "engine.h"
 #include "log/secretRedactor.h"
 
 namespace AIAssistant
 {
     static constexpr char REDACTED[] = "[REDACTED]";
     static constexpr size_t REDACTED_LEN = sizeof(REDACTED) - 1;
-    static constexpr size_t MIN_SECRET_LENGTH = 4;
+
+    // Minimum length for a value to register as a secret.  Below 8 chars,
+    // common dev-mock passwords ("test", "demo", "1234") collide with normal
+    // log substrings and the redactor over-redacts every line containing them.
+    static constexpr size_t MIN_SECRET_LENGTH = 8;
 
     SecretRedactor& SecretRedactor::Get()
     {
@@ -35,10 +40,15 @@ namespace AIAssistant
         return instance;
     }
 
-    void SecretRedactor::AddSecret(std::string const& secret)
+    void SecretRedactor::AddSecret(std::string_view secret)
     {
         if (secret.size() < MIN_SECRET_LENGTH)
         {
+            // Length is logged but value is not — devs need to spot the silent
+            // skip, but we can't reveal the secret itself.
+            LOG_CORE_WARN("SecretRedactor::AddSecret: secret too short (length {} < {}), not registered — log "
+                          "redaction will not protect this value",
+                          secret.size(), MIN_SECRET_LENGTH);
             return;
         }
 
@@ -53,13 +63,17 @@ namespace AIAssistant
             }
         }
 
-        m_Secrets.push_back(secret);
+        m_Secrets.emplace_back(secret);
+        m_HasSecretsHint.store(true, std::memory_order_release);
     }
 
-    void SecretRedactor::RemoveSecret(std::string const& secret)
+    void SecretRedactor::RemoveSecret(std::string_view secret)
     {
         std::lock_guard lock(m_Mutex);
-        m_Secrets.erase(std::remove(m_Secrets.begin(), m_Secrets.end(), secret), m_Secrets.end());
+        m_Secrets.erase(std::remove_if(m_Secrets.begin(), m_Secrets.end(),
+                                       [&](std::string const& s) { return s == secret; }),
+                        m_Secrets.end());
+        m_HasSecretsHint.store(!m_Secrets.empty(), std::memory_order_release);
     }
 
     std::string SecretRedactor::Redact(std::string const& message) const
@@ -82,11 +96,5 @@ namespace AIAssistant
             }
         }
         return result;
-    }
-
-    bool SecretRedactor::HasSecrets() const
-    {
-        std::lock_guard lock(m_Mutex);
-        return !m_Secrets.empty();
     }
 } // namespace AIAssistant

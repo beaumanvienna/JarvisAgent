@@ -28,6 +28,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/connectorHttp.h"
@@ -48,8 +49,8 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
@@ -57,21 +58,29 @@ namespace AIAssistant
 
         credentials.m_AuthType = CloudAuthType::SigV4;
 
-        // Support two storage conventions:
-        // 1. BasicAuthCredential: username = access key ID, password = secret key
-        // 2. ApiKeyCredential: api_key = "ACCESS_KEY_ID:SECRET_KEY"
-        if (!provider->m_Username.empty() && !provider->m_Password.empty())
+        // Support three storage conventions, in order of preference:
+        // 1. AwsCredential — typed access_key_id + secret_access_key (the new path).
+        // 2. BasicAuthCredential — username = access key ID, password = secret key (legacy).
+        // 3. ApiKeyCredential — api_key = "ACCESS_KEY_ID:SECRET_KEY" colon-split (legacy).
+        // Fail closed if none match.
+        if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
         {
-            credentials.m_AccessKeyId = provider->m_Username;
-            credentials.m_SecretKey = provider->m_Password;
+            credentials.m_AccessKeyId = aws->m_AccessKeyId;
+            credentials.m_SecretKey   = std::string(aws->m_SecretAccessKey.Get());
         }
-        else if (!provider->m_ApiKey.empty())
+        else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
         {
-            size_t colonPos = provider->m_ApiKey.find(':');
-            if (colonPos != std::string::npos && colonPos > 0 && colonPos < provider->m_ApiKey.size() - 1)
+            credentials.m_AccessKeyId = basic->m_Username;
+            credentials.m_SecretKey   = std::string(basic->m_Password.Get());
+        }
+        else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
+        {
+            std::string_view apiKeyView = api->m_ApiKey.Get();
+            size_t const colonPos = apiKeyView.find(':');
+            if (colonPos != std::string_view::npos && colonPos > 0 && colonPos < apiKeyView.size() - 1)
             {
-                credentials.m_AccessKeyId = provider->m_ApiKey.substr(0, colonPos);
-                credentials.m_SecretKey = provider->m_ApiKey.substr(colonPos + 1);
+                credentials.m_AccessKeyId = std::string(apiKeyView.substr(0, colonPos));
+                credentials.m_SecretKey   = std::string(apiKeyView.substr(colonPos + 1));
             }
             else
             {
@@ -83,7 +92,13 @@ namespace AIAssistant
         else
         {
             errorMessage = "Credential '" + connection.m_KeyName +
-                           "' has no access key — use username/password or api_key in 'ID:SECRET' format";
+                           "' must be AwsCredential, BasicAuthCredential, or ApiKeyCredential ('ID:SECRET' format)";
+            return false;
+        }
+
+        if (credentials.m_AccessKeyId.empty() || credentials.m_SecretKey.empty())
+        {
+            errorMessage = "Credential '" + connection.m_KeyName + "' has empty access key or secret";
             return false;
         }
 

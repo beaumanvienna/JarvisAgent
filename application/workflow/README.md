@@ -9,7 +9,7 @@ DAG-based workflow execution engine. Parses JCWF files, resolves dependencies, d
 | `workflowTypes.h` | Task types, trigger types, run state, TaskDef, WorkflowRun |
 | `workflowJsonParser.h/cpp` | JCWF JSON parsing into WorkflowDefinition |
 | `workflowRegistry.h/cpp` | Loads and indexes .jcwf containers from the workflows folder |
-| `workflowRuntimeManager.h/cpp` | Run lifecycle, task dispatch, dependency resolution, cancellation |
+| `workflowRuntimeManager.h/cpp` | Run lifecycle, task dispatch, dependency resolution, cancellation. `Update()` holds `m_Mutex` for the entire tick (drain + propagate + tick + finalize + erase) so REST snapshot readers cannot tear-read mutating run state; external calls (`AiRequestPool::CancelRequestsForRun`, `FireCompletionCallback`, `RunTerminalObserver`) are deferred to a `postTickActions` vector and fired AFTER the lock is released. Worker-thread lambdas in `TickActiveRun` capture `WorkflowDefinition` by value. Path-bearing operations (`CleanWorkflow`'s deletes) are gated through `application/file/pathConfinement.h`. The completion-callback `callbackUrl` is gated through `IsCallbackUrlAllowed` (https-only + DNS-resolved internal-IP rejection + TLS verify) before any payload is built. See `doc/architecture.md` "Key Design Decisions" rows for rationale. |
 | `workflowValidator.h/cpp` | JCWF validation (structure, references, working_directory) |
 | `workflowFileIndex.h/cpp` | File freshness tracking (SHA-256 manifests) |
 | `jcwfContainer.h/cpp` | JCWF zip container read/write |

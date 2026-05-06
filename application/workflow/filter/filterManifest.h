@@ -92,9 +92,6 @@ namespace AIAssistant
 
         // Get file modification time as string.
         static std::string FileMtimeString(std::string const& path);
-
-        // Escape a string for JSON output.
-        static std::string JsonEscape(std::string const& s);
     };
 
 } // namespace AIAssistant

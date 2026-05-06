@@ -30,6 +30,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/connectorHttp.h"
@@ -172,14 +173,21 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
+        auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred);
+        if (!basic)
+        {
+            errorMessage = "Credential '" + connection.m_KeyName +
+                           "' must be BasicAuthCredential — Email requires username + password";
+            return false;
+        }
 
-        if (provider->m_Username.empty())
+        if (basic->m_Username.empty())
         {
             errorMessage = "Credential '" + connection.m_KeyName +
                            "' has no username — Email requires a credentials (username + password) entry";
@@ -187,8 +195,8 @@ namespace AIAssistant
         }
 
         credentials.m_AuthType = CloudAuthType::BasicAuth;
-        credentials.m_Username = provider->m_Username;
-        credentials.m_Password = provider->m_Password;
+        credentials.m_Username = basic->m_Username;
+        credentials.m_Password = std::string(basic->m_Password.Get());
         return true;
     }
 

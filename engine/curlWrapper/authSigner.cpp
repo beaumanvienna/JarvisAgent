@@ -21,58 +21,93 @@
 
 #include "curlWrapper/authSigner.h"
 #include "curlWrapper/awsSigV4.h"
+#include "curlWrapper/credValidation.h"
 #include "engine.h"
+
+#include <stdexcept>
+#include <string>
 
 namespace AIAssistant
 {
     namespace
     {
+        // Validate the API key for static-header signers (Bearer, XGoog, Anthropic, Azure).
+        // Centralised so a future signer addition automatically benefits.
+        bool ValidateApiKey(CurlWrapper::QueryData const& q, char const* styleName, std::string& errorMessage)
+        {
+            if (IsBlank(q.m_ApiKey))
+            {
+                errorMessage = std::string(styleName) + ": API key is empty or whitespace";
+                return false;
+            }
+            return true;
+        }
+
         class BearerSigner final : public IAuthSigner
         {
         public:
-            void Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h) override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
+                                     std::string& errorMessage) const override
             {
+                if (!ValidateApiKey(q, "Bearer", errorMessage)) return false;
                 h.push_back("Authorization: Bearer " + q.m_ApiKey);
+                return true;
             }
         };
 
         class XGoogApiKeySigner final : public IAuthSigner
         {
         public:
-            void Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h) override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
+                                     std::string& errorMessage) const override
             {
+                if (!ValidateApiKey(q, "XGoogApiKey", errorMessage)) return false;
                 h.push_back("x-goog-api-key: " + q.m_ApiKey);
+                return true;
             }
         };
 
         class AnthropicXApiKeySigner final : public IAuthSigner
         {
         public:
-            void Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h) override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
+                                     std::string& errorMessage) const override
             {
-                h.push_back("x-api-key: " + q.m_ApiKey);
-                h.push_back("anthropic-version: 2023-06-01");
+                if (!ValidateApiKey(q, "AnthropicXApiKey", errorMessage)) return false;
+                // Reserve before push so the two header pushes are effectively atomic
+                // (no reallocation between them; both succeed or neither does).  If
+                // bad_alloc fires on either string construction or the reserve, the
+                // caller's vector is unchanged because nothing was pushed yet.
+                std::string h1 = "x-api-key: " + q.m_ApiKey;
+                std::string h2 = "anthropic-version: 2023-06-01";
+                h.reserve(h.size() + 2);
+                h.push_back(std::move(h1));
+                h.push_back(std::move(h2));
+                return true;
             }
         };
 
         class AzureApiKeySigner final : public IAuthSigner
         {
         public:
-            void Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h) override
+            [[nodiscard]] bool Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& h,
+                                     std::string& errorMessage) const override
             {
+                if (!ValidateApiKey(q, "AzureApiKey", errorMessage)) return false;
                 h.push_back("api-key: " + q.m_ApiKey);
+                return true;
             }
         };
 
     } // namespace
 
-    IAuthSigner& IAuthSigner::Get(CurlWrapper::AuthStyle style)
+    IAuthSigner const& IAuthSigner::Get(CurlWrapper::AuthStyle style)
     {
-        static BearerSigner s_Bearer;
-        static XGoogApiKeySigner s_XGoog;
-        static AnthropicXApiKeySigner s_Anthropic;
-        static AzureApiKeySigner s_Azure;
-        static SigV4Signer s_SigV4;
+        static BearerSigner const s_Bearer;
+        static XGoogApiKeySigner const s_XGoog;
+        static AnthropicXApiKeySigner const s_Anthropic;
+        static AzureApiKeySigner const s_Azure;
+        static SigV4Signer const s_SigV4;
 
         switch (style)
         {
@@ -82,6 +117,13 @@ namespace AIAssistant
             case CurlWrapper::AuthStyle::AzureApiKey: return s_Azure;
             case CurlWrapper::AuthStyle::AwsSigV4: return s_SigV4;
         }
-        return s_Bearer;
+        // Reachable only if a new AuthStyle variant is added without extending the
+        // switch above.  -Wswitch catches the missing case at compile time on most
+        // builds; this throw is the runtime backstop for the rest.  Pre-fix the
+        // function silently fell back to Bearer here, which masked the bug as a
+        // 401 from upstream — the same anti-debugging armor pattern called out
+        // in CLAUDE.md's CurlMultiDispatcher silent-Bearer-fallback example.
+        throw std::logic_error("IAuthSigner::Get: unhandled AuthStyle " +
+                               std::to_string(static_cast<int>(style)));
     }
 } // namespace AIAssistant

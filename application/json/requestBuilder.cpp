@@ -51,7 +51,7 @@ namespace AIAssistant
         public:
             std::string BuildBody(AiInvocation const& envelope, std::string const& model) const override
             {
-                std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+                std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
                 std::string json = R"({"model": ")" + model + R"(","messages": [{"role": "user", "content": ")" +
                                     sanitized + R"("}])";
                 if (envelope.m_Settings.m_Temperature != 0.0)
@@ -90,7 +90,7 @@ namespace AIAssistant
         public:
             std::string BuildBody(AiInvocation const& envelope, std::string const& model) const override
             {
-                std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+                std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
                 std::string json = R"({"model": ")" + model + R"(", "input": ")" + sanitized + R"(", "store": false)";
                 if (envelope.m_Settings.m_Temperature != 0.0)
                 {
@@ -116,7 +116,7 @@ namespace AIAssistant
         public:
             std::string BuildBody(AiInvocation const& envelope, std::string const& /*model*/) const override
             {
-                std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+                std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
                 std::string json =
                     R"({"contents": [{"parts": [{"text": ")" + sanitized + R"("}], "role": "user"}])";
                 if (envelope.m_Settings.m_Temperature != 0.0)
@@ -144,7 +144,7 @@ namespace AIAssistant
         public:
             std::string BuildBody(AiInvocation const& envelope, std::string const& model) const override
             {
-                std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+                std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
                 int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(4096);
                 std::string json = R"({"model": ")" + model + R"(","max_tokens": )" + std::to_string(maxTokens) +
                                     R"(,"messages": [{"role": "user", "content": ")" + sanitized + R"("}])";
@@ -175,7 +175,7 @@ namespace AIAssistant
         // Reply parser delegates symmetrically (replyParser.cpp).
         std::string BuildBedrockAnthropicBody(AiInvocation const& envelope)
         {
-            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
             int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(4096);
             std::string json = R"({"anthropic_version": "bedrock-2023-05-31","max_tokens": )" + std::to_string(maxTokens) +
                                 R"(,"messages": [{"role": "user", "content": ")" + sanitized + R"("}])";
@@ -189,7 +189,7 @@ namespace AIAssistant
 
         std::string BuildBedrockLlamaBody(AiInvocation const& envelope)
         {
-            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
             int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(2048);
             std::string json = R"({"prompt": ")" + sanitized + R"(","max_gen_len": )" + std::to_string(maxTokens);
             if (envelope.m_Settings.m_Temperature != 0.0)
@@ -202,7 +202,7 @@ namespace AIAssistant
 
         std::string BuildBedrockTitanNovaBody(AiInvocation const& envelope)
         {
-            std::string const sanitized = JsonHelper().SanitizeForJson(ConcatMessages(envelope.m_Messages));
+            std::string const sanitized = JsonHelper::EscapeJsonString(ConcatMessages(envelope.m_Messages));
             int32_t const maxTokens = envelope.m_Settings.m_MaxTokens.value_or(2048);
             std::string json = R"({"inputText": ")" + sanitized + R"(","textGenerationConfig": {"maxTokenCount": )" +
                                 std::to_string(maxTokens);

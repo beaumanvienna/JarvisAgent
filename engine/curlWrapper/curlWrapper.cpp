@@ -179,17 +179,20 @@ namespace AIAssistant
         bool dataEmpty = m_Data.empty();
         bool keyEmpty = m_ApiKey.empty();
 
+        // ERROR-level: an empty field here is a per-request misconfiguration
+        // (legacy caller forgot to populate m_ApiKey, etc.), not an
+        // engine-level "wake the operator" condition that CRITICAL would imply.
         if (urlEmpty)
         {
-            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): url empty");
+            LOG_CORE_ERROR("CurlWrapper::QueryData::IsValid(): url empty");
         }
         if (dataEmpty)
         {
-            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): data empty");
+            LOG_CORE_ERROR("CurlWrapper::QueryData::IsValid(): data empty");
         }
         if (keyEmpty)
         {
-            LOG_CORE_CRITICAL("CurlWrapper::QueryData::IsValid(): API key empty");
+            LOG_CORE_ERROR("CurlWrapper::QueryData::IsValid(): API key empty");
         }
 
         return !urlEmpty && !dataEmpty && !keyEmpty;
@@ -271,32 +274,68 @@ namespace AIAssistant
             return QueryResult::Fail(QueryErrorCode::CurlNotInitialized, "curl not initialized");
         }
 
-        if (queryData.m_ApiKey.empty())
-        {
-            LOG_CORE_CRITICAL("CurlWrapper::Query: API key empty");
-            return QueryResult::Fail(QueryErrorCode::NoApiKey, "No API key configured");
-        }
-
         if (!queryData.IsValid())
         {
             return QueryResult::Fail(QueryErrorCode::InvalidQueryData, "Invalid query data (empty URL or payload)");
         }
 
+        // Clear the response accumulator at the START of every Query so
+        // sequential calls on the same CurlWrapper (notably via the
+        // CurlManager::GetThreadCurl() thread-local) don't accumulate the
+        // previous response into the next one.  Pre-fix, callers had to
+        // remember to invoke Clear() between Query() calls; forgetting it
+        // produced silent response-concatenation bugs that only manifested
+        // downstream (parser confusion, doubled content).
+        m_ReadBuffer.clear();
+
         CurlSlist headers;
         std::vector<std::string> authHeaders;
-        IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, authHeaders);
+        std::string authError;
+        // Per-style validation now happens inside the signer (covers empty/whitespace
+        // m_ApiKey for static-header styles AND the SigV4 dual-secret + region case
+        // that the old front-end m_ApiKey.empty() pre-check missed).
+        if (!IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, authHeaders, authError))
+        {
+            LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='{}' quotaKey='{}': {}",
+                           queryData.m_Url, queryData.m_QuotaKey, authError);
+            return QueryResult::Fail(QueryErrorCode::NoApiKey, authError);
+        }
         for (auto const& h : authHeaders) { headers.Append(h); }
         headers.Append("Content-Type: application/json");
 
         auto& url = queryData.m_Url;
         auto& data = queryData.m_Data;
 
-        // lambda for write callback
+        // Hard cap on response body — a runaway server can otherwise stream
+        // gigabytes into m_ReadBuffer and OOM the engine.  Same 32 MiB cap
+        // CurlMultiDispatcher uses for the async path; rationale lives there.
+        // Local constant rather than a shared header because curlWrapper has
+        // exactly one write callback site and the cap is implementation
+        // detail, not a public tunable.
+        static constexpr size_t kMaxResponseBodyBytes = 32ULL * 1024 * 1024;
+
+        // lambda for write callback.  libcurl is C; an exception escaping back
+        // through the C frame is UB.  std::string::append can throw bad_alloc /
+        // length_error, so wrap in try / catch and signal a short-write on any
+        // exception so libcurl aborts cleanly.
         auto write_callback = [](void* contents, size_t size, size_t numberOfMembers, void* userPointer) -> size_t
         {
-            auto* buffer = reinterpret_cast<std::string*>(userPointer);
             const size_t totalSize = size * numberOfMembers;
-            buffer->append(static_cast<char*>(contents), totalSize);
+            try
+            {
+                auto* buffer = reinterpret_cast<std::string*>(userPointer);
+                // Overflow-safe form: buffer->size() never exceeds kMax (we enforce
+                // it here), so kMax - buffer->size() can't underflow.
+                if (totalSize > kMaxResponseBodyBytes - buffer->size())
+                {
+                    return static_cast<size_t>(0);
+                }
+                buffer->append(static_cast<char*>(contents), totalSize);
+            }
+            catch (...)
+            {
+                return static_cast<size_t>(0);
+            }
             return totalSize;
         };
 
@@ -336,7 +375,12 @@ namespace AIAssistant
             LOG_CORE_INFO("url: {}, data: {}", url, data);
         }
 
-        LOG_CORE_INFO("sending query {}", ++m_QueryCounter);
+        // Capture qnum locally so subsequent log lines don't read m_QueryCounter
+        // again — concurrent Query() calls on OTHER CurlWrapper instances can
+        // advance the static counter between dispatch and error logs, making
+        // the qnum in error lines diverge from the qnum we logged on dispatch.
+        uint32_t const qnum = ++m_QueryCounter;
+        LOG_CORE_INFO("sending query {}", qnum);
         CURLcode res;
         {
 #ifdef TRACY_ENABLE
@@ -352,11 +396,16 @@ namespace AIAssistant
             std::string msg = curl_easy_strerror(res);
             if (res == CURLE_ABORTED_BY_CALLBACK)
             {
-                LOG_CORE_INFO("[shutdown] curl request aborted (query {})", m_QueryCounter.load());
+                LOG_CORE_INFO("[shutdown] curl request aborted (query {})", qnum);
             }
             else
             {
-                LOG_CORE_ERROR("curl error (code {}): {}", curlCode, msg);
+                // quotaKey + URL on the fail path so the dashboard run analyzer
+                // can surface the line by run-identifier substring (per CLAUDE.md
+                // "Failure-path logs are ERROR-level AND mention the runId or
+                // workflowId as a literal substring").
+                LOG_CORE_ERROR("curl error (code {}): {} url='{}' quotaKey='{}'",
+                               curlCode, msg, queryData.m_Url, queryData.m_QuotaKey);
             }
             return QueryResult::Fail(curlCode, std::move(msg));
         }
@@ -371,18 +420,21 @@ namespace AIAssistant
         long httpCode = 0;
         curl_easy_getinfo(m_Curl, CURLINFO_RESPONSE_CODE, &httpCode);
 
-        LOG_CORE_INFO("query {} used {} (HTTP {})", m_QueryCounter.load(), versionLabel, httpCode);
+        LOG_CORE_INFO("query {} used {} (HTTP {})", qnum, versionLabel, httpCode);
 
         if (httpCode >= 400)
         {
             std::string msg = QueryErrorCode::Describe(static_cast<int>(httpCode));
             if (httpCode == 429)
             {
-                LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request (too many requests or insufficient credits)", m_QueryCounter.load());
+                LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request "
+                               "(too many requests or insufficient credits) url='{}' quotaKey='{}'",
+                               qnum, queryData.m_Url, queryData.m_QuotaKey);
             }
             else
             {
-                LOG_CORE_ERROR("HTTP error {} for query {}", httpCode, m_QueryCounter.load());
+                LOG_CORE_ERROR("HTTP error {} for query {} url='{}' quotaKey='{}'",
+                               httpCode, qnum, queryData.m_Url, queryData.m_QuotaKey);
             }
             return QueryResult::Fail(static_cast<int>(httpCode), std::move(msg));
         }

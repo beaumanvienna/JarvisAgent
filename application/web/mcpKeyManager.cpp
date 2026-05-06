@@ -39,7 +39,9 @@
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "keys/keyEncryption.h"
+#include "log/secretRedactor.h"
 
 namespace AIAssistant
 {
@@ -143,38 +145,6 @@ namespace AIAssistant
             return *tp < std::chrono::system_clock::now();
         }
 
-        // Escape a string for safe inclusion in hand-built JSON. Matches the style used
-        // elsewhere in this codebase (KeyManager::SerializeToJson).
-        std::string JsonEscape(std::string const& in)
-        {
-            std::string out;
-            out.reserve(in.size() + 8);
-            for (char c : in)
-            {
-                switch (c)
-                {
-                    case '"':  out += "\\\""; break;
-                    case '\\': out += "\\\\"; break;
-                    case '\n': out += "\\n";  break;
-                    case '\r': out += "\\r";  break;
-                    case '\t': out += "\\t";  break;
-                    default:
-                        if (static_cast<unsigned char>(c) < 0x20)
-                        {
-                            char buf[8];
-                            std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                            out += buf;
-                        }
-                        else
-                        {
-                            out += c;
-                        }
-                        break;
-                }
-            }
-            return out;
-        }
-
         // Safe string-field read from a simdjson object. Returns default if missing/non-string.
         std::string ReadString(simdjson::ondemand::object& obj, char const* field, std::string const& def = "")
         {
@@ -225,8 +195,7 @@ namespace AIAssistant
             return false;
         }
 
-        // KeyEncryption takes std::string; SecureString::Get() gives us a view, copy once.
-        std::string json = KeyEncryption::Decrypt(blob, std::string(masterPassword));
+        std::string json = KeyEncryption::Decrypt(blob, masterPassword);
         if (json.empty())
         {
             LOG_CORE_ERROR("McpKeyManager::Load: decryption failed for '{}'", path.string());
@@ -253,7 +222,7 @@ namespace AIAssistant
             json = SerializeToJson();
         }
 
-        std::vector<uint8_t> blob = KeyEncryption::Encrypt(json, std::string(masterPassword));
+        std::vector<uint8_t> blob = KeyEncryption::Encrypt(json, masterPassword);
         if (blob.empty())
         {
             LOG_CORE_ERROR("McpKeyManager::Save: encryption failed");
@@ -309,6 +278,13 @@ namespace AIAssistant
             m_Enrollments.push_back(std::move(rec));
         }
 
+        // Register the raw token with the redactor.  Once issued, the token may pass
+        // through any number of downstream logs (web handlers, audit log, the admin's
+        // own diagnostic trace) — the redactor scrubs every appearance.  Registration
+        // outlives the enrollment's TTL on purpose: a leaked stale token is still a
+        // leaked credential pattern that should not appear in logs.
+        SecretRedactor::Get().AddSecret(rawEnrollmentToken);
+
         return rawEnrollmentToken;
     }
 
@@ -361,6 +337,11 @@ namespace AIAssistant
         m_Keys.push_back(rec);
         m_Enrollments.erase(it);
 
+        // Register the raw key before the std::move-out so any subsequent log line
+        // containing it (response logging, audit log, etc.) gets scrubbed.  See
+        // CreateEnrollment for the lifetime rationale.
+        SecretRedactor::Get().AddSecret(rawKey);
+
         ActivateResult out;
         out.m_KeyId = keyId;
         out.m_RawKey = std::move(rawKey);
@@ -388,6 +369,13 @@ namespace AIAssistant
         // Update last-used opportunistically — this is best-effort and not persisted
         // until the next Save() call from a mutating endpoint.
         rec->m_LastUsedAt = Iso8601NowUtc();
+
+        // Register the raw key only on successful auth: failed attempts (wrong hash,
+        // unknown keyId) take the early-return paths above without registering, so an
+        // attacker spamming guesses cannot pollute the redactor's value pool with
+        // attacker-chosen strings.
+        SecretRedactor::Get().AddSecret(rawKey);
+
         return out;
     }
 
@@ -422,6 +410,9 @@ namespace AIAssistant
         rec.m_Description = "Bootstrap admin key created during first-run master-password setup";
 
         m_Keys.push_back(rec);
+
+        // Register the raw key before std::move-out — see CreateEnrollment.
+        SecretRedactor::Get().AddSecret(rawKey);
 
         ActivateResult out;
         out.m_KeyId = keyId;
@@ -464,6 +455,9 @@ namespace AIAssistant
             }
         }
         m_Keys.push_back(renewed);
+
+        // Register the raw key before std::move-out — see CreateEnrollment.
+        SecretRedactor::Get().AddSecret(rawKey);
 
         RenewResult out;
         out.m_KeyId = keyId;
@@ -554,18 +548,18 @@ namespace AIAssistant
             Record const& r = m_Keys[i];
             oss << (i == 0 ? "\n" : ",\n");
             oss << "        {\n";
-            oss << "            \"key_id\": \""                 << JsonEscape(r.m_KeyId) << "\",\n";
-            oss << "            \"key_hash\": \""               << JsonEscape(r.m_KeyHash) << "\",\n";
-            oss << "            \"user\": \""                   << JsonEscape(r.m_User) << "\",\n";
-            oss << "            \"role\": \""                   << JsonEscape(r.m_Role) << "\",\n";
+            oss << "            \"key_id\": \""                 << JsonHelper::EscapeJsonString(r.m_KeyId) << "\",\n";
+            oss << "            \"key_hash\": \""               << JsonHelper::EscapeJsonString(r.m_KeyHash) << "\",\n";
+            oss << "            \"user\": \""                   << JsonHelper::EscapeJsonString(r.m_User) << "\",\n";
+            oss << "            \"role\": \""                   << JsonHelper::EscapeJsonString(r.m_Role) << "\",\n";
             oss << "            \"adhoc_enabled\": "            << (r.m_AdhocEnabled ? "true" : "false") << ",\n";
             oss << "            \"disk_quota_mb\": "            << r.m_DiskQuotaMb << ",\n";
-            oss << "            \"default_cleanup_policy\": \"" << JsonEscape(r.m_DefaultCleanupPolicy) << "\",\n";
-            oss << "            \"created_at\": \""             << JsonEscape(r.m_CreatedAt) << "\",\n";
-            oss << "            \"expires_at\": \""             << JsonEscape(r.m_ExpiresAt) << "\",\n";
-            oss << "            \"last_used_at\": \""           << JsonEscape(r.m_LastUsedAt) << "\",\n";
+            oss << "            \"default_cleanup_policy\": \"" << JsonHelper::EscapeJsonString(r.m_DefaultCleanupPolicy) << "\",\n";
+            oss << "            \"created_at\": \""             << JsonHelper::EscapeJsonString(r.m_CreatedAt) << "\",\n";
+            oss << "            \"expires_at\": \""             << JsonHelper::EscapeJsonString(r.m_ExpiresAt) << "\",\n";
+            oss << "            \"last_used_at\": \""           << JsonHelper::EscapeJsonString(r.m_LastUsedAt) << "\",\n";
             oss << "            \"enabled\": "                  << (r.m_Enabled ? "true" : "false") << ",\n";
-            oss << "            \"description\": \""            << JsonEscape(r.m_Description) << "\"\n";
+            oss << "            \"description\": \""            << JsonHelper::EscapeJsonString(r.m_Description) << "\"\n";
             oss << "        }";
         }
         oss << (m_Keys.empty() ? "" : "\n    ") << "],\n";
@@ -576,17 +570,17 @@ namespace AIAssistant
             EnrollmentRecord const& r = m_Enrollments[i];
             oss << (i == 0 ? "\n" : ",\n");
             oss << "        {\n";
-            oss << "            \"token_hash\": \""             << JsonEscape(r.m_TokenHash) << "\",\n";
-            oss << "            \"user\": \""                   << JsonEscape(r.m_User) << "\",\n";
-            oss << "            \"role\": \""                   << JsonEscape(r.m_Role) << "\",\n";
+            oss << "            \"token_hash\": \""             << JsonHelper::EscapeJsonString(r.m_TokenHash) << "\",\n";
+            oss << "            \"user\": \""                   << JsonHelper::EscapeJsonString(r.m_User) << "\",\n";
+            oss << "            \"role\": \""                   << JsonHelper::EscapeJsonString(r.m_Role) << "\",\n";
             oss << "            \"adhoc_enabled\": "            << (r.m_AdhocEnabled ? "true" : "false") << ",\n";
             oss << "            \"disk_quota_mb\": "            << r.m_DiskQuotaMb << ",\n";
-            oss << "            \"default_cleanup_policy\": \"" << JsonEscape(r.m_DefaultCleanupPolicy) << "\",\n";
-            oss << "            \"description\": \""            << JsonEscape(r.m_Description) << "\",\n";
+            oss << "            \"default_cleanup_policy\": \"" << JsonHelper::EscapeJsonString(r.m_DefaultCleanupPolicy) << "\",\n";
+            oss << "            \"description\": \""            << JsonHelper::EscapeJsonString(r.m_Description) << "\",\n";
             oss << "            \"key_expiry_days\": "          << r.m_KeyExpiryDays << ",\n";
-            oss << "            \"expires_at\": \""             << JsonEscape(r.m_ExpiresAt) << "\",\n";
-            oss << "            \"created_by\": \""             << JsonEscape(r.m_CreatedBy) << "\",\n";
-            oss << "            \"created_at\": \""             << JsonEscape(r.m_CreatedAt) << "\"\n";
+            oss << "            \"expires_at\": \""             << JsonHelper::EscapeJsonString(r.m_ExpiresAt) << "\",\n";
+            oss << "            \"created_by\": \""             << JsonHelper::EscapeJsonString(r.m_CreatedBy) << "\",\n";
+            oss << "            \"created_at\": \""             << JsonHelper::EscapeJsonString(r.m_CreatedAt) << "\"\n";
             oss << "        }";
         }
         oss << (m_Enrollments.empty() ? "" : "\n    ") << "]\n";

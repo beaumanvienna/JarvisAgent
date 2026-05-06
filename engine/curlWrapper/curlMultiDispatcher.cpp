@@ -26,6 +26,8 @@
 
 #include <cstdio>
 #include <ctime>
+#include <exception>
+#include <unordered_set>
 
 #include "core.h"
 #include "curlWrapper/authSigner.h"
@@ -38,17 +40,57 @@ namespace AIAssistant
     // Static callbacks (no class state needed)
     // ---------------------------------------------------------------------------
 
+    // Hard caps on per-request response body and header accumulation.  A buggy or
+    // hostile upstream could otherwise stream gigabytes into m_ReadBuffer /
+    // m_HeaderBuffer and OOM the engine.  On overflow the callback returns a
+    // short-write to libcurl, which translates to CURLE_WRITE_ERROR and fails
+    // the request through the existing curl-error path.
+    //   Body cap   = 32 MiB.  AI responses are typically < 1 MiB; 32 MiB is
+    //                generous for very long structured-output completions.
+    //   Header cap =  1 MiB.  HTTP/2 header sizes are typically <16 KiB.
+    static constexpr size_t kMaxResponseBodyBytes = 32ULL * 1024 * 1024;
+    static constexpr size_t kMaxHeaderBytes        = 1ULL  * 1024 * 1024;
+
     static size_t MultiWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
     {
         size_t const totalSize = size * nmemb;
-        static_cast<std::string*>(userp)->append(static_cast<char*>(contents), totalSize);
+        // libcurl is C; an exception escaping this callback is UB.  Catch
+        // bad_alloc / length_error from std::string::append and signal a
+        // short-write so libcurl aborts the transfer cleanly.
+        try
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            // Overflow-safe form: buf->size() never exceeds kMax (we enforce it
+            // here), so kMax - buf->size() can't underflow.
+            if (totalSize > kMaxResponseBodyBytes - buf->size())
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), totalSize);
+        }
+        catch (...)
+        {
+            return 0;
+        }
         return totalSize;
     }
 
     static size_t MultiHeaderCallback(void* contents, size_t size, size_t nmemb, void* userp)
     {
         size_t const totalSize = size * nmemb;
-        static_cast<std::string*>(userp)->append(static_cast<char*>(contents), totalSize);
+        try
+        {
+            auto* buf = static_cast<std::string*>(userp);
+            if (totalSize > kMaxHeaderBytes - buf->size())
+            {
+                return 0;
+            }
+            buf->append(static_cast<char*>(contents), totalSize);
+        }
+        catch (...)
+        {
+            return 0;
+        }
         return totalSize;
     }
 
@@ -98,12 +140,32 @@ namespace AIAssistant
 
     void CurlMultiDispatcher::Submit(CurlWrapper::QueryData const& data, Callback callback)
     {
+        // Atomic stopping-check + inbox push: prevents a Submit landing AFTER
+        // the I/O thread's final shutdown drain, which would orphan the
+        // callback (the caller would block forever).  m_Stopping is monotonic
+        // (false → true once), so a check under m_InboxMutex serialises with
+        // the I/O thread's drain-on-shutdown which also takes m_InboxMutex.
+        bool stopping = false;
         {
             std::lock_guard<std::mutex> lock(m_InboxMutex);
-            PendingRequest pending;
-            pending.m_QueryData = data;
-            pending.m_Callback = std::move(callback);
-            m_Inbox.push(std::move(pending));
+            stopping = m_Stopping.load();
+            if (!stopping)
+            {
+                PendingRequest pending;
+                pending.m_QueryData = data;
+                pending.m_Callback = std::move(callback);
+                m_Inbox.push(std::move(pending));
+            }
+        }
+        if (stopping)
+        {
+            // Fire callback after lock release — callbacks may re-enter the
+            // dispatcher (e.g. file-write side effects).  `callback` was not
+            // moved-from in the stopping branch above, so it's still valid.
+            callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                       "request rejected (dispatcher stopping)"),
+                     {});
+            return;
         }
         // §14 Tier B: capture submission for size-aware-budget hermetic tests.
         // Separate mutex to avoid contending with the inbox lock.
@@ -274,19 +336,68 @@ namespace AIAssistant
     // Private helpers (I/O thread only)
     // ---------------------------------------------------------------------------
 
-    CURL* CurlMultiDispatcher::SetupEasyHandle(ActiveRequest& req)
+    std::unordered_map<std::string, RateLimitController>::iterator
+    CurlMultiDispatcher::EnsureController(std::string const& quotaKey,
+                                          CurlWrapper::QueryData const& queryData)
     {
+        auto it = m_Controllers.find(quotaKey);
+        if (it != m_Controllers.end())
+        {
+            return it;
+        }
+
+        // Initial probe = strategy.InitialConcurrencyProbe() when the interface
+        // is known; otherwise a generic 4 (matches the pre-helper inline default
+        // in DrainInbox for QueryData with InvalidAPI / -1 interfaceType).
+        int initialProbe = 4;
+        if (queryData.m_InterfaceType >= 0 &&
+            queryData.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
+        {
+            auto const interfaceType =
+                static_cast<ConfigParser::EngineConfig::InterfaceType>(queryData.m_InterfaceType);
+            initialProbe = IRateLimitStrategy::Get(interfaceType).InitialConcurrencyProbe();
+        }
+        int const hardCap = (queryData.m_MaxConcurrency > 0) ? queryData.m_MaxConcurrency
+                                                             : static_cast<int>(kMaxActivePerHost);
+        auto inserted = m_Controllers.emplace(quotaKey, RateLimitController(initialProbe, hardCap));
+        return inserted.first;
+    }
+
+    CURL* CurlMultiDispatcher::SetupEasyHandle(ActiveRequest& req,
+                                               SetupError& errorKind,
+                                               std::string& errorMessage)
+    {
+        errorKind = SetupError::None;
+        errorMessage.clear();
+
         CURL* easy = curl_easy_init();
         if (easy == nullptr)
         {
-            LOG_CORE_ERROR("CurlMultiDispatcher: curl_easy_init() failed");
+            errorKind = SetupError::CurlInit;
+            errorMessage = "curl_easy_init() failed";
+            LOG_CORE_ERROR("CurlMultiDispatcher: curl_easy_init() failed url='{}' cancelKey='{}' quotaKey='{}'",
+                           req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
             return nullptr;
         }
 
         // Auth headers are produced by IAuthSigner so AwsSigV4 / AzureApiKey are
         // covered identically to CurlWrapper::Query — no per-style branching here.
+        // Pre-fix the async path silently produced unsigned / sentinel-signed requests
+        // when credentials were empty; AWS / OpenAI rejected them as 401 with no
+        // local indication of the root cause.  Now the signer rejects locally and
+        // we emit a structured ERROR with the request's CancelKey (= per-task ID)
+        // for the dashboard's run analyzer.
         std::vector<std::string> authHeaders;
-        IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, authHeaders);
+        std::string authError;
+        if (!IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, authHeaders, authError))
+        {
+            errorKind = SetupError::AuthSigner;
+            errorMessage = authError;
+            LOG_CORE_ERROR("CurlMultiDispatcher: auth signer rejected url='{}' cancelKey='{}' quotaKey='{}': {}",
+                           req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey, authError);
+            curl_easy_cleanup(easy);
+            return nullptr;
+        }
         for (auto const& h : authHeaders)
         {
             req.m_Headers = curl_slist_append(req.m_Headers, h.c_str());
@@ -369,6 +480,14 @@ namespace AIAssistant
                 ++activePerKey[key];
         }
 
+        // Selective throttle re-queue: when the controller for one QuotaKey
+        // refuses admission, we used to dump the entire `local` queue back to
+        // the inbox.  That blocked items targeting OTHER QuotaKeys (e.g. an
+        // Anthropic Opus throttle blocked queued OpenAI requests).  Now we
+        // remember the throttled keys and only defer items that hit them;
+        // everything else continues through the dispatch path.
+        std::unordered_set<std::string> throttledKeys;
+
         while (!local.empty())
         {
             auto& pending = local.front();
@@ -377,10 +496,18 @@ namespace AIAssistant
                                              ? host
                                              : pending.m_QueryData.m_QuotaKey;
 
-            // Resolve the controller, creating one on first contact with this
-            // QuotaKey.  Initial cap = strategy.InitialConcurrencyProbe();
-            // hard cap = kMaxActivePerHost (HTTP/2 stream ceiling) — Phase 4
-            // will plumb config.rate_limit.max_concurrency in here.
+            // Fast-path: this iteration already throttled this key — defer
+            // without re-running ShouldAdmit (the answer can't have changed
+            // since the last in-iteration check; in-flight count for this key
+            // hasn't moved because we haven't dispatched any same-key items).
+            if (!quotaKey.empty() && throttledKeys.count(quotaKey) > 0)
+            {
+                std::lock_guard<std::mutex> lock(m_InboxMutex);
+                m_Inbox.push(std::move(pending));
+                local.pop();
+                continue;
+            }
+
             char const* throttleReason = nullptr;
             std::chrono::steady_clock::time_point nextAttemptAt{};
             int64_t const estTokens = pending.m_QueryData.m_EstimatedInputTokens >= 0
@@ -390,24 +517,7 @@ namespace AIAssistant
 
             if (!quotaKey.empty())
             {
-                auto controllerIt = m_Controllers.find(quotaKey);
-                if (controllerIt == m_Controllers.end())
-                {
-                    int initialProbe = 4;
-                    if (pending.m_QueryData.m_InterfaceType >= 0 &&
-                        pending.m_QueryData.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
-                    {
-                        auto const interfaceType =
-                            static_cast<ConfigParser::EngineConfig::InterfaceType>(pending.m_QueryData.m_InterfaceType);
-                        initialProbe = IRateLimitStrategy::Get(interfaceType).InitialConcurrencyProbe();
-                    }
-                    int const hardCap = (pending.m_QueryData.m_MaxConcurrency > 0)
-                                            ? pending.m_QueryData.m_MaxConcurrency
-                                            : static_cast<int>(kMaxActivePerHost);
-                    auto inserted = m_Controllers.emplace(quotaKey, RateLimitController(initialProbe, hardCap));
-                    controllerIt = inserted.first;
-                }
-
+                auto controllerIt = EnsureController(quotaKey, pending.m_QueryData);
                 RateLimitController::Decision const decision =
                     controllerIt->second.ShouldAdmit(static_cast<int>(inflightForKey), estTokens);
                 if (!decision.m_Admit)
@@ -420,8 +530,13 @@ namespace AIAssistant
             if (throttleReason != nullptr)
             {
                 ++m_TotalThrottled;
+                throttledKeys.insert(quotaKey);
                 auto& state = m_HostRateLimits[host];
                 auto const now = std::chrono::steady_clock::now();
+                // Per-host rate limit on the throttle log (once per 5s).  Multiple
+                // QuotaKeys may share a host (e.g. Anthropic Sonnet + Opus on
+                // api.anthropic.com); the host-keyed rate-limiter catches them
+                // all so we don't spam the log.
                 if (now - state.m_LastThrottleLog >= std::chrono::seconds(5))
                 {
                     auto const secsUntil = [&now](std::chrono::steady_clock::time_point t) -> long {
@@ -438,12 +553,9 @@ namespace AIAssistant
                 }
 
                 std::lock_guard<std::mutex> lock(m_InboxMutex);
-                while (!local.empty())
-                {
-                    m_Inbox.push(std::move(local.front()));
-                    local.pop();
-                }
-                break;
+                m_Inbox.push(std::move(pending));
+                local.pop();
+                continue;
             }
 
             auto req = std::make_unique<ActiveRequest>();
@@ -454,20 +566,52 @@ namespace AIAssistant
             req->m_RetryCount    = pending.m_RetryCount;
             req->m_InterfaceType = pending.m_QueryData.m_InterfaceType;
 
-            CURL* easy = SetupEasyHandle(*req);
+            SetupError setupErrorKind = SetupError::None;
+            std::string setupErrorMsg;
+            CURL* easy = SetupEasyHandle(*req, setupErrorKind, setupErrorMsg);
             if (easy != nullptr)
             {
-                curl_multi_add_handle(m_MultiHandle, easy);
-                m_Active[easy] = std::move(req);
-                if (!host.empty())
-                    ++activePerHost[host];
-                if (!quotaKey.empty())
-                    ++activePerKey[quotaKey];
-                ++m_TotalDispatched;
+                // Check curl_multi_add_handle return — failure (e.g. CURLM_OUT_OF_MEMORY)
+                // would otherwise leak the easy handle and add a stale entry to m_Active.
+                // Free the slist we built in SetupEasyHandle, cleanup the easy handle,
+                // and surface the failure through the request callback.
+                CURLMcode const addResult = curl_multi_add_handle(m_MultiHandle, easy);
+                if (addResult == CURLM_OK)
+                {
+                    m_Active[easy] = std::move(req);
+                    if (!host.empty())
+                        ++activePerHost[host];
+                    if (!quotaKey.empty())
+                        ++activePerKey[quotaKey];
+                    ++m_TotalDispatched;
+                }
+                else
+                {
+                    LOG_CORE_ERROR("CurlMultiDispatcher: curl_multi_add_handle failed code={} url='{}' "
+                                   "cancelKey='{}' quotaKey='{}'",
+                                   static_cast<int>(addResult), req->m_Url,
+                                   req->m_QueryData.m_CancelKey, req->m_QueryData.m_QuotaKey);
+                    curl_slist_free_all(req->m_Headers);
+                    req->m_Headers = nullptr;
+                    curl_easy_cleanup(easy);
+                    req->m_Callback(QueryResult::Fail(QueryErrorCode::CurlNotInitialized,
+                                                      "curl_multi_add_handle failed"),
+                                    {});
+                }
             }
             else
             {
-                req->m_Callback(QueryResult::Fail(QueryErrorCode::CurlNotInitialized, "curl_easy_init() failed"), {});
+                // Map the closed-set failure mode onto the unified QueryErrorCode
+                // scheme.  -Wswitch will flag this if a SetupError variant is added.
+                int code = QueryErrorCode::CurlNotInitialized;
+                switch (setupErrorKind)
+                {
+                    case SetupError::CurlInit:    code = QueryErrorCode::CurlNotInitialized; break;
+                    case SetupError::AuthSigner:  code = QueryErrorCode::NoApiKey;           break;
+                    case SetupError::None:        // unreachable when easy == nullptr
+                        break;
+                }
+                req->m_Callback(QueryResult::Fail(code, setupErrorMsg), {});
             }
 
             local.pop();
@@ -481,10 +625,23 @@ namespace AIAssistant
     std::string CurlMultiDispatcher::ExtractHost(std::string const& url)
     {
         // "https://api.openai.com/v1/chat/completions" → "api.openai.com"
+        // "https://[::1]:8443/path"                    → "::1"
         size_t start = url.find("://");
         if (start == std::string::npos)
             return {};
         start += 3;
+
+        // RFC 3986 IPv6 literal: bracketed host runs `[<addr>]`, optionally
+        // followed by `:<port>`.  Without this branch the generic `find(':')`
+        // below clips at the first `:` of `::1` and returns "[".
+        if (start < url.size() && url[start] == '[')
+        {
+            size_t close = url.find(']', start);
+            if (close == std::string::npos)
+                return {};
+            return url.substr(start + 1, close - start - 1);
+        }
+
         size_t end = url.find('/', start);
         if (end == std::string::npos)
             end = url.size();
@@ -522,15 +679,7 @@ namespace AIAssistant
         std::string const quotaKey = req.m_QueryData.m_QuotaKey.empty() ? host : req.m_QueryData.m_QuotaKey;
         if (!quotaKey.empty())
         {
-            auto controllerIt = m_Controllers.find(quotaKey);
-            if (controllerIt == m_Controllers.end())
-            {
-                int const initialProbe = strategy.InitialConcurrencyProbe();
-                int const hardCap = (req.m_QueryData.m_MaxConcurrency > 0) ? req.m_QueryData.m_MaxConcurrency
-                                                                           : static_cast<int>(kMaxActivePerHost);
-                auto inserted = m_Controllers.emplace(quotaKey, RateLimitController(initialProbe, hardCap));
-                controllerIt = inserted.first;
-            }
+            auto controllerIt = EnsureController(quotaKey, req.m_QueryData);
             bool const was429 = (httpCode == 429);
             controllerIt->second.Observe(observation, was429);
         }
@@ -840,6 +989,12 @@ namespace AIAssistant
             }
 
             // --- Handle transient HTTP errors (400, 500, 502, 503) with limited auto-retry ---
+            // Note: curl-level errors (timeout, couldnt-connect, SSL handshake failure)
+            // do NOT enter this retry path — the `res == CURLE_OK` guard means only
+            // server-side HTTP statuses retry here.  Curl-level errors typically indicate
+            // persistent network/auth/cert issues where retrying inside the dispatcher
+            // would burn the per-request timeout budget without changing the outcome;
+            // the higher-level WorkflowRuntimeManager owns retry policy for those.
             bool const isTransientError = (httpCode == 400 || httpCode == 500 || httpCode == 502 || httpCode == 503);
             if (res == CURLE_OK && isTransientError && req.m_RetryCount < maxRetriesTransient && !m_Stopping.load())
             {
@@ -894,7 +1049,12 @@ namespace AIAssistant
                 }
                 else
                 {
-                    LOG_CORE_ERROR("curl error (code {}): {}", curlCode, errMsg);
+                    // cancelKey + quotaKey lets the dashboard run analyzer surface
+                    // this line — it filters issues to ERROR lines containing the
+                    // run's identifiers (per CLAUDE.md "Failure-path logs").
+                    LOG_CORE_ERROR("curl error (code {}): {} cancelKey='{}' quotaKey='{}'",
+                                   curlCode, errMsg,
+                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
                 }
                 result = QueryResult::Fail(curlCode, std::move(errMsg));
             }
@@ -903,13 +1063,17 @@ namespace AIAssistant
                 std::string errMsg = QueryErrorCode::Describe(static_cast<int>(httpCode));
                 if (httpCode == 429)
                 {
-                    LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; retries exhausted ({}x)",
-                                   qnum, req.m_RetryCount);
+                    LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; "
+                                   "retries exhausted ({}x) cancelKey='{}' quotaKey='{}'",
+                                   qnum, req.m_RetryCount,
+                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
                     ++m_TotalRetriesExhausted;
                 }
                 else
                 {
-                    LOG_CORE_ERROR("HTTP error {} for query {}", httpCode, qnum);
+                    LOG_CORE_ERROR("HTTP error {} for query {} cancelKey='{}' quotaKey='{}'",
+                                   httpCode, qnum,
+                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
                 }
                 result = QueryResult::Fail(static_cast<int>(httpCode), std::move(errMsg));
             }
@@ -942,77 +1106,102 @@ namespace AIAssistant
 
     void CurlMultiDispatcher::IoThreadFunc()
     {
+        // Loop body wrapped in try/catch so a transient bad_alloc anywhere
+        // inside DrainInbox / DrainCompleted / DrainPendingCancellations does
+        // NOT silently terminate the I/O thread (which would freeze every
+        // subsequent dispatch with no log line pointing at the cause).  The
+        // policy is "log loudly + continue": the next iteration retries the
+        // failed work from its source state (m_Inbox / m_Active / m_RetryQueue
+        // are all unchanged on throw), so transient OOM is recoverable.  For
+        // unknown exception types we log and continue too — better a noisy
+        // log than a silent thread death.
         while (true)
         {
-            bool const stopping = m_Stopping.load();
-
-            if (stopping)
+            try
             {
-                // Drain inbox and reject any queued-but-not-yet-started requests.
-                std::queue<PendingRequest> local;
+                bool const stopping = m_Stopping.load();
+
+                if (stopping)
                 {
-                    std::lock_guard<std::mutex> lock(m_InboxMutex);
-                    local.swap(m_Inbox);
+                    // Drain inbox and reject any queued-but-not-yet-started requests.
+                    std::queue<PendingRequest> local;
+                    {
+                        std::lock_guard<std::mutex> lock(m_InboxMutex);
+                        local.swap(m_Inbox);
+                    }
+                    while (!local.empty())
+                    {
+                        local.front().m_Callback(
+                            QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                              "curl request aborted (shutdown)"),
+                            {});
+                        local.pop();
+                    }
+
+                    // Cancel pending retries on shutdown.
+                    for (auto& entry : m_RetryQueue)
+                    {
+                        entry.m_Request.m_Callback(
+                            QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
+                                              "curl request aborted (shutdown)"),
+                            {});
+                    }
+                    m_RetryQueue.clear();
                 }
-                while (!local.empty())
+                else
                 {
-                    local.front().m_Callback(
-                        QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
-                                          "curl request aborted (shutdown)"),
-                        {});
-                    local.pop();
+                    // Cancellations first so cancelled requests don't churn through
+                    // the throttle gate or get re-dispatched from the retry queue
+                    // before being aborted.
+                    DrainPendingCancellations();
+                    DrainInbox();
+                    DrainRetryQueue();
                 }
 
-                // Cancel pending retries on shutdown.
-                for (auto& entry : m_RetryQueue)
+                int running = 0;
+                curl_multi_perform(m_MultiHandle, &running);
+                DrainCompleted();
+
+                if (stopping && m_Active.empty())
                 {
-                    entry.m_Request.m_Callback(
-                        QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
-                                          "curl request aborted (shutdown)"),
-                        {});
+                    break;
                 }
-                m_RetryQueue.clear();
-            }
-            else
-            {
-                // Cancellations first so cancelled requests don't churn through
-                // the throttle gate or get re-dispatched from the retry queue
-                // before being aborted.
-                DrainPendingCancellations();
-                DrainInbox();
-                DrainRetryQueue();
-            }
 
-            int running = 0;
-            curl_multi_perform(m_MultiHandle, &running);
-            DrainCompleted();
-
-            if (stopping && m_Active.empty())
-            {
-                break;
-            }
-
-            // Sleep until socket activity or curl_multi_wakeup() (from Submit/SignalStop).
-            // Use shorter timeout when retries are pending so we wake up to process them.
-            long timeout_ms = 1000L;
-            if (!m_Active.empty())
-            {
-                timeout_ms = 50L;
-            }
-            else if (!m_RetryQueue.empty())
-            {
-                // Wake up when the earliest retry is ready (or at least every 100ms).
-                auto earliest = m_RetryQueue.front().m_ReadyAt;
-                for (auto const& entry : m_RetryQueue)
+                // Sleep until socket activity or curl_multi_wakeup() (from Submit/SignalStop).
+                // Use shorter timeout when retries are pending so we wake up to process them.
+                long timeout_ms = 1000L;
+                if (!m_Active.empty())
                 {
-                    if (entry.m_ReadyAt < earliest)
-                        earliest = entry.m_ReadyAt;
+                    timeout_ms = 50L;
                 }
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    earliest - std::chrono::steady_clock::now()).count();
-                timeout_ms = std::clamp(static_cast<long>(ms), 10L, 1000L);
+                else if (!m_RetryQueue.empty())
+                {
+                    // Wake up when the earliest retry is ready (or at least every 100ms).
+                    auto earliest = m_RetryQueue.front().m_ReadyAt;
+                    for (auto const& entry : m_RetryQueue)
+                    {
+                        if (entry.m_ReadyAt < earliest)
+                            earliest = entry.m_ReadyAt;
+                    }
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        earliest - std::chrono::steady_clock::now()).count();
+                    timeout_ms = std::clamp(static_cast<long>(ms), 10L, 1000L);
+                }
+                curl_multi_poll(m_MultiHandle, nullptr, 0, timeout_ms, nullptr);
             }
-            curl_multi_poll(m_MultiHandle, nullptr, 0, timeout_ms, nullptr);
+            catch (std::bad_alloc const&)
+            {
+                LOG_CORE_ERROR("CurlMultiDispatcher: I/O thread caught std::bad_alloc; sleeping 100ms then continuing");
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            catch (std::exception const& e)
+            {
+                LOG_CORE_ERROR("CurlMultiDispatcher: I/O thread caught std::exception: {}; continuing", e.what());
+            }
+            catch (...)
+            {
+                LOG_CORE_ERROR("CurlMultiDispatcher: I/O thread caught unknown exception; continuing");
+            }
         }
 
         LOG_CORE_INFO("CurlMultiDispatcher: I/O thread exiting (rate limit retries served: {})",

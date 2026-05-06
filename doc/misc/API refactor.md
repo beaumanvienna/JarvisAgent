@@ -1,5 +1,13 @@
 # API refactor — AWS Bedrock + Azure OpenAI adapters
 
+> **STATUS — implemented (2026 Q1).**  Both adapters shipped; the credential storage
+> moved from a flat `KeyManager::ProviderConfig` to the typed `ICredential` hierarchy
+> in S2=D3 sittings 17-20 (2026-05-04).  References below to `ProviderConfig::m_Params`
+> describe the planned-then-implemented intermediate state; current code uses
+> `AwsCredential::m_Region` / `m_SecretAccessKey` / `m_SessionToken` (typed `SecureString`
+> fields) instead.  See `doc/cloud-integration.md` "Credential Hierarchy" for the
+> current contract; `engine/keys.md` Section 6 for the KeyManager API surface.
+
 Plan for adding two new AI provider adapters to j9t. Tracks TODO list section 5h.
 
 ## Sequencing

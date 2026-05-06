@@ -28,8 +28,10 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "keys/oauthTokenManager.h"
+#include "log/secretRedactor.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -70,8 +72,8 @@ namespace AIAssistant
         }
 
         // Default: Azure Shared Key auth
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
@@ -79,22 +81,38 @@ namespace AIAssistant
 
         credentials.m_AuthType = CloudAuthType::AzureSharedKey;
 
-        // The account key is stored as api_key (Base64-encoded Azure Storage key)
-        if (!provider->m_ApiKey.empty())
+        // Two storage conventions supported, in order of preference:
+        // 1. ApiKeyCredential — api_key holds the Base64-encoded Azure Storage key.
+        // 2. BasicAuthCredential — password holds the account key (account name in username,
+        //    or in connection.m_Params["account_name"] below).
+        // Fail closed if neither matches.
+        if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
         {
-            credentials.m_SecretKey = provider->m_ApiKey;
+            credentials.m_SecretKey = std::string(api->m_ApiKey.Get());
         }
-        else if (!provider->m_Password.empty())
+        else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
         {
-            // Also support BasicAuth: username = account_name, password = account key
-            credentials.m_SecretKey = provider->m_Password;
+            credentials.m_SecretKey = std::string(basic->m_Password.Get());
         }
         else
         {
             errorMessage = "Credential '" + connection.m_KeyName +
-                           "' has no account key — use api_key (Base64 account key) or username/password";
+                           "' must be ApiKeyCredential (Base64 account key) or BasicAuthCredential";
             return false;
         }
+
+        if (credentials.m_SecretKey.empty())
+        {
+            errorMessage = "Credential '" + connection.m_KeyName + "' has empty Azure Storage account key";
+            return false;
+        }
+
+        // Defense-in-depth: KeyManager already registered this value via the credential's
+        // typed `RegisterSecrets()` (ApiKeyCredential::m_ApiKey or BasicAuthCredential::m_Password),
+        // so the redactor's dedupe makes this a no-op today.  Kept so a future code path
+        // that bypasses KeyManager (e.g. Azure SAS pulled from connection.m_Params) still
+        // gets its transient secret scrubbed from logs.
+        SecretRedactor::Get().AddSecret(credentials.m_SecretKey);
 
         // Account name from connection params
         auto accountIt = connection.m_Params.find("account_name");

@@ -122,7 +122,7 @@ Namespace:
 namespace AIAssistant
 ```
 
-JarvisAgent wraps the upstream `BS::thread_pool` class to centralize thread‑pool usage and add a small amount of synchronization.
+JarvisAgent wraps the upstream `BS::thread_pool` class to centralize thread‑pool usage, add a small amount of synchronization, and expose a two-phase shutdown gate (`RequestStop` → `Shutdown`) that lets curl callbacks and other long-running work observe shutdown without prematurely refusing in-flight tasks.
 
 ### Class definition
 
@@ -132,9 +132,12 @@ class ThreadPool
 public:
     ThreadPool();
 
-    void Wait();
-    void Reset(size_t numThreads);
+    void RequestStop();    // Flip stop flag (curl callbacks abort); pool keeps running queued work.
+    void Shutdown();       // Refuse new tasks (atomic with concurrent Submit), drain queue. Idempotent.
+    void Reset(size_t numThreads);  // Reconfigure thread count. Rejected post-Shutdown.
+
     [[nodiscard]] size_t Size() const;
+    [[nodiscard]] bool IsStopped() const;
 
     template <typename FunctionType,
               typename ReturnType = std::invoke_result_t<std::decay_t<FunctionType>>>
@@ -143,8 +146,12 @@ public:
     [[nodiscard]] std::vector<std::thread::id> GetThreadIDs() const;
 
 private:
+    void LogPostShutdownSubmit() const;  // Defined in cpp to avoid an engine.h cycle in the header.
+
     BS::thread_pool<> m_Pool;
     std::mutex m_Mutex;
+    std::atomic<bool> m_Stopped{false};
+    std::atomic<bool> m_ShutdownDrained{false};
 };
 ```
 
@@ -155,17 +162,18 @@ ThreadPool::ThreadPool();
 ```
 
 - Default‑constructs `BS::thread_pool<> m_Pool;`.
-- Per upstream library semantics, this **immediately creates a pool of worker threads**, typically with `std::thread::hardware_concurrency()` threads (unless configured otherwise).
-- JarvisAgent does not change this behavior; the wrapper simply holds the pool instance.
+- Per upstream library semantics, this **immediately creates a pool of worker threads**, typically with `std::thread::hardware_concurrency()` threads (unless configured otherwise).  `Core::Start()` calls `Reset(maxThreads + THREADS_REQUIRED_BY_APP)` afterwards to set the actual engine thread count.
 
-### Waiting for tasks
+### Lifecycle gates — `RequestStop` vs `Shutdown`
 
-```cpp
-void ThreadPool::Wait();
-```
+The two "stop"-flavoured methods serve distinct purposes; pick the right one:
 
-- Delegates to `m_Pool.wait()`.
-- Blocks until **all currently queued and running tasks** in the underlying `BS::thread_pool` have completed.
+| Method | Effect | Use case |
+|---|---|---|
+| `RequestStop()` | Atomically sets `m_Stopped=true`.  `IsStopped()` now returns true so curl progress callbacks abort in-flight transfers; `SubmitTask` short-circuits.  Does NOT join workers or drain the queue. | Phase 1 of engine shutdown — tell long-running work to wind down. |
+| `Shutdown()` | Atomically (under `m_Mutex`) flips `m_Stopped=true`, then calls `m_Pool.wait()` to drain queued tasks, then sets `m_ShutdownDrained=true`.  Idempotent: a second call is a no-op (no re-log, no re-wait). | Phase 2 of engine shutdown — block until every queued task finishes. |
+
+The two-flag design (`m_Stopped` + `m_ShutdownDrained`) is deliberate: a prior `RequestStop` sets `m_Stopped=true`, but a later `Shutdown` must still run its drain.  Using `m_Stopped` for Shutdown's idempotency would short-circuit the drain after `RequestStop`, leaving queued tasks in limbo.
 
 ### Resetting thread count
 
@@ -173,22 +181,16 @@ void ThreadPool::Wait();
 void ThreadPool::Reset(size_t numThreads);
 ```
 
-- Delegates to `m_Pool.reset(numThreads)`.
-- Upstream behavior:
-  - Waits for all currently running tasks to complete.
-  - Keeps queued tasks.
-  - Recreates the internal pool with the new thread count (`numThreads`).
-  - Resumes processing queued and newly submitted tasks.
-- JarvisAgent uses this in `Core::Start()` to configure the engine’s thread count (engine threads + app‑required threads).
+- Delegates to `m_Pool.reset(numThreads)`: waits for currently running tasks to complete, keeps queued tasks, recreates the pool with the new thread count, resumes processing.
+- **Rejected if `m_Stopped` is set.**  Calling `Reset` on a stopped wrapper would create fresh worker threads while `SubmitTask` continued to short-circuit (since `m_Stopped` stays true) — wasted threads + silently-dropped tasks.  Treats the call as a programming error, logs `LOG_CORE_WARN`, and skips the reset.
+- `Core::Start()` calls this once at engine init (`maxThreads + THREADS_REQUIRED_BY_APP`).
 
-### Querying pool size
+### Querying pool size + stop flag
 
 ```cpp
-size_t ThreadPool::Size() const;
+size_t ThreadPool::Size() const;     // current worker thread count
+bool   ThreadPool::IsStopped() const; // m_Stopped.load(); curl callbacks consult this
 ```
-
-- Returns `m_Pool.get_thread_count()` from `BS::thread_pool`.
-- Reflects the **current** number of worker threads.
 
 ### Submitting tasks
 
@@ -197,11 +199,10 @@ template <typename FunctionType, typename ReturnType>
 std::future<ReturnType> ThreadPool::SubmitTask(FunctionType&& task);
 ```
 
-- Acquires `m_Mutex` to serialize calls into `m_Pool.submit_task(task)`.
-- Returns the `std::future<ReturnType>` produced by `BS::thread_pool`.
-- Task semantics are exactly those of `BS::thread_pool::submit_task`:
-  - The task is a callable with no parameters (arguments can be captured in a lambda).
-  - Future can be used to wait for completion and obtain the task’s return value.
+- Acquires `m_Mutex` and reads `m_Stopped` under the lock.  Atomic with `Shutdown`'s flag flip — a Submit either commits before `Shutdown` observes the stop (and the task runs as part of the drain) or sees `m_Stopped=true` and short-circuits.
+- **Post-Shutdown short-circuit.**  When `m_Stopped` is true, `SubmitTask` does NOT call into the underlying pool.  It logs `LOG_CORE_WARN("[ThreadPool] SubmitTask called after Shutdown - returning default-valued future")` and returns a `std::future<ReturnType>` whose backing `std::promise` is already satisfied with `ReturnType{}` (or `void` for void-returning tasks).  Callers that wait on the future see immediate completion with a default-constructed value.
+- **Move semantics preserved.**  The forwarding reference `FunctionType&& task` is passed to `m_Pool.submit_task(std::forward<FunctionType>(task))` so an rvalue callable (e.g. a lambda built with `std::move`'d captures) is moved into the pool, not copied.
+- The log line lives in `threadPool.cpp` (not the header) to avoid pulling `engine.h` into a header that's transitively included by `core.h` — would form a cycle.
 
 ### Inspecting worker IDs
 

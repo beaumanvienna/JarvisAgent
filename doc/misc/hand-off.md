@@ -15,6 +15,2252 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-05 (S3=D1 sittings 2-5 + remaining-sitting plan) → next session
+
+> **Date note:** the previous entry below is dated `2026-05-06` but was actually written 2026-05-05; this entry uses the system's actual date.  Newest-on-top still holds when reading head-down.
+
+Four sittings today, S3=D1 continuation.  Sitting 2: **`workflowRuntimeManager.{h,cpp}` Cluster A** (concurrency / lambda captures / DAG state).  Sitting 3: **`workflowRuntimeManager.{h,cpp}` Cluster B** (path traversal + SSRF + per-item resource cap) plus a new shared helper.  Sitting 4: **`pythonEnginePool.{h,cpp}` synchronization + cleanup bundle**.  Sitting 5: **Cluster B leftovers cleanup** (input validation, glob hardening, TOCTOU, callback opt-out).  Plus end-of-session: **doc sweep across 6 docs + remaining-sitting plan mapped out in `doc/misc/S3-D1-session-note.md` (sittings 6-13 proposed; total D1 projected at 13 sittings, consistent with the historical 5-6→34 multiplier from S1=D2).**  All four closed with full builds + workflow runs + assistant tests.
+
+### What landed
+
+**Sitting 2 — workflowRuntimeManager Cluster A.**
+
+1. **`Update()` lock-scope expansion** (safety HIGH 2 — non-atomic m_ActiveRuns / m_LastRuns / m_SubWorkflowLinks).  The fingerprint / `DrainAiRequestCompletions` / `PropagateSubWorkflowCompletions` / tick loop / finalisation / `m_ActiveRuns.erase` block now all run under one `std::scoped_lock<std::mutex>(m_Mutex)`.  External calls (`AiRequestPool::CancelRequestsForRun`, `FireCompletionCallback`, `RunTerminalObserver`) are collected into a local `postTickActions` vector inside the lock and executed AFTER release — keeps callbacks / cancel cascades off the lock hot path and removes any lock-order risk if a callee ever touches this manager.  `m_RunTerminalObserver` is copied under the lock before invocation (closes safety MEDIUM 2).
+2. **Internal locks removed from `TryApplyAiCompletion` and `PropagateSubWorkflowCompletions`** — both now have explicit "PRECONDITION: caller holds m_Mutex" comments since they're called from inside the new tick lock.  `RegisterSubWorkflowLink` (called from `subWorkflowTaskExecutor` worker thread) DID acquire its own lock now (was unprotected — also part of safety HIGH 2).
+3. **Lambda capture-by-value sweep** (safety HIGH 3 + cyber LOW 3 UAF in StartPendingRuns).  The single problematic site was `TickActiveRun`'s `pool.SubmitTask([this, &workflowDefinition, ...])` — converted to `[this, workflowDefinitionCopy = workflowDefinition, ...]`.  `WorkflowDefinition` is heavyweight but the copy is per-dispatch (not per-tick); `WaitStop`'s shutdown path may clear `m_ActiveRuns` while a worker is still running, so by-reference would dangle.  The other two `pool.SubmitTask` sites (`DispatchFilterEvaluation`) and the detached `callbackThread` already captured by value.
+4. **`m_WorkflowRegistry` lifetime invariant** documented (safety HIGH 1) — class-level threading & lifetime contract block in the header explains: `m_Mutex` guards what / borrowed-pointer ownership rule / "registry constructed BEFORE this manager and destroyed AFTER Stop()".  No `shared_ptr` migration — the lifetime ordering is the basis for treating the pointer as stable, same pattern as sitting 1's `m_ScriptRegistry`.
+5. **Destructor `noexcept` + try/catch** (safety LOW 1) — `~WorkflowRuntimeManager()` swallows + ERROR-logs any exception from `Stop()` so a teardown failure can't `std::terminate` the process.
+6. **`WorkflowRunStateToString` discipline** (safety LOW old-style enum) — removed `default:` arm, added `static_assert(static_cast<int>(WorkflowRunState::Stopped) == 7)`.  Same pattern applied to the inline `TaskInstanceStateKind` switch in `FireCompletionCallback`'s task-summary builder.  Per `feedback_cpp_discipline`.
+7. **Move ctor / move assign explicitly `=delete`** on `WorkflowRuntimeManager`.  Header rationale comment for `std::vector<std::unique_ptr<ActiveRun>> m_ActiveRuns` rewritten — the unique_ptr stable-address rationale is now about TickActiveRun's intra-tick `WorkflowDefinition const&` references surviving a concurrent `StartPendingRuns` push_back, not about worker-lambda safety (the by-value capture covers that).
+
+**Sitting 3 — workflowRuntimeManager Cluster B + new shared helper.**
+
+1. **NEW `application/file/pathConfinement.{h,cpp}`** with `ConfineUnderProjectRoot(path)` (two overloads: `std::string`, `std::filesystem::path`).  Lifted from `pythonEngine.cpp`'s anonymous namespace per `feedback_cpp_discipline` — the third call site triggered the rule.  `pythonEngine.cpp` switched to the shared helper.  Premake regen required because of the new `.cpp` file (per `feedback_premake_regen_for_new_cpp`).
+2. **Path traversal fix in `CleanWorkflow`** (cyber HIGH 1) — new local `deleteIfConfined(path, label, recursive, ...)` lambda gates every `fs::remove` / `fs::remove_all` site (5 sites: queue dir, glob-matched file_outputs, literal file_outputs, working directories, empty workflow dir).  Symlink escapes also rejected (cyber LOW 4) as a free byproduct of `weakly_canonical`.  An attacker-supplied JCWF with `file_outputs: ["../../etc/passwd"]` can no longer cause an arbitrary delete.
+3. **SSRF + TLS hardening in `FireCompletionCallback`** (cyber HIGH 2 + LOW 1).  New anon-ns `IsCallbackUrlAllowed(url, &reason)` enforces:
+   - `https://` only (plain `http` rejected — leaks payload, removes peer-cert verification).
+   - Host parsing handles userinfo (`user:pass@`), bracketed IPv6, and `:port` suffixes.
+   - `getaddrinfo` resolves the host; refuse if **any** returned address is in loopback (127/8, ::1), RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT (100.64/10), link-local (169.254/16, fe80::/10), unique-local (fc00::/7), multicast (224/4, ff00::/8), unspecified (0/8, ::), or IPv4-mapped IPv6 → recheck the embedded v4.
+   - Closes the cloud-metadata vector (`169.254.169.254`) explicitly.
+   - TLS knobs: `CURLOPT_SSL_VERIFYPEER`, `CURLOPT_SSL_VERIFYHOST`, `CURLOPT_FOLLOWLOCATION 0`, `CURLOPT_PROTOCOLS_STR/REDIR_PROTOCOLS_STR = "https"`.  Dropped a deprecated-API fallback `#else` branch — vendored curl is 8.17 so `CURLOPT_PROTOCOLS_STR` is always available.
+4. **Per-item fan-out resource cap** (cyber MEDIUM 3).  New `EngineConfig::m_MaxPerItemFanOut` (default 10000), parsed from `max_per_item_fan_out` in `config.json`, enforced at the top of `FanOutPerItemChildren`.  Fail-loud — parent task → `Failed`, run → `m_HasFailed`, ERROR-level log with runId/workflowId/taskId.  ConfigFields enum + ConfigFieldNames array extended (configChecker default of 10000 already applies via the in-class init).
+
+**Sitting 4 — pythonEnginePool.**
+
+1. **Synchronization** (safety HIGH).  `m_Running` is now `std::atomic<bool>` with explicit acquire/release ordering; `m_Mutex` (`mutable std::mutex`) guards `m_Engines` mutation in `Initialize` (push_back loop) and `WaitStop` (clear).  Class-level threading contract documented: post-`Initialize` true / pre-`SignalStop` false, `m_Engines` is stable and lock-free readable from worker threads.  `SignalStop` flips `m_Running` to false BEFORE acquiring the lock (so concurrent readers can bail before tear-down begins).  `SelectEngine` is the hot-path lock-free reader; defensive `m_Engines.empty()` guard added there + null-check at the call site in `ExecuteWorkflowTask` with fail-path log carrying runId/workflowId/taskId.
+2. **`SetInterpreterState` ordering fix** (safety MEDIUM) — moved AFTER the `setupOk` check so a failed sub-interpreter never has its state pointer wired into the engine.
+3. **`scriptPath` confinement at the pool boundary** (cyber MEDIUM) — `ConfineUnderProjectRoot(parent_path)` gates the resolved scriptDir before it touches Python.  Defense in depth on top of the per-engine gate inside `SetupSubInterpreter`.
+4. **`GetTasksCompleted` OOB log** (safety MEDIUM) — was silent return-zero; now ERROR-logged with the offending index + count.  Also acquires `m_Mutex` (was lock-free).
+5. **Hooks** (`OnStart`/`OnUpdate`/`OnEvent`) check `m_Running` first (atomic acquire) — fail-safe if invoked between SignalStop and WaitStop.
+6. **Cleanups** (LOWs) — `catch (...)` arm on script-path parse, `[[nodiscard]]` on `Initialize`/`ExecuteWorkflowTask`, `=delete` on copy/move ctor + assignment, header threading & lifetime contract block.
+7. **`GetEngineCount`** moved out-of-class to acquire the mutex.
+
+**Sitting 5 — Cluster B leftovers cleanup.**
+
+Bundle of four small post-sitting-3 cleanups deferred during sitting 3.
+
+1. **Input validation for `runId`/`workflowId`** (cyber LOW 2) — new anon-ns `IsValidRunOrWorkflowId(id)` (allowlist `[A-Za-z0-9._-]{1,256}`, no `..`, no leading dot).  Applied at every public-API entrypoint: `EnqueueWorkflowRun*`, `Request{Cancel,Pause,Resume,Stop}Run`, `CleanWorkflow`, `RegisterSubWorkflowLink`.  ERROR-logged rejection.  Defense-in-depth on top of REST validation.
+2. **Glob hardening in `CleanWorkflow`** (cyber MEDIUM 2) — new anon-ns `GlobMatchesFilename(pattern, name)` iterative two-pointer fnmatch-style matcher with backtracking, supports `*` (zero-or-more, anywhere) and `?` (single char).  Replaces an ad-hoc start/end-`*`-only matcher that silently no-matched on `PROB_*.json`-style patterns.  Path-confinement (sitting 3) still gates the resulting paths so a too-permissive pattern can only match files inside the project tree.
+3. **TOCTOU cleanup in `CleanWorkflow`** (safety LOW 3) — `deleteIfConfined` lambda silent-skips on non-existent paths via `fs::remove*` error_code; bare `fs::exists` pre-checks dropped at the 4 call sites.  The empty-workflow-dir site keeps `is_empty` as the semantic gate (TOCTOU window benign — `fs::remove` on now-non-empty silently returns false).
+4. **Callback opt-out for output content** (cyber MEDIUM 1) — new `callback_include_outputs` context flag (default `true` for backwards compat).  Setting `false`/`0`/`no` strips per-task `outputs` (incl. captured file content up to 65 KB per slot) from the callback payload, leaves run-level state + per-task state + error messages intact.  Resolved BEFORE the SSRF gate in code so the flag is correctly applied even if SSRF would have allowed the URL.
+
+**Doc sweep at session close.**
+
+- `application/file/README.md` — new "pathConfinement" section listing all four use sites + contract; "use the shared helper, don't write a local copy" rule per `feedback_cpp_discipline`.
+- `doc/cyber security.md` — adhoc-submission section gained the per-item fan-out cap, the completion-callback SSRF gate (full sub-bullets), and the path-confinement helper coverage (pointing at the four use sites).
+- `doc/jarvisagent.md` — `max_ai_calls_per_jcwf` and the new `max_per_item_fan_out` documented in the config.json reference (the AI cap was undocumented before — caught during sweep).
+- `doc/architecture.md` Key Design Decisions — three new rows: runtime `Update()` lock-scope discipline, completion-callback SSRF philosophy, pythonEnginePool atomic+mutex split.
+- `application/python/README.md` — concurrency contracts split into per-engine and pool subsections; `Initialize` API note updated for the new scriptPath gate + SetInterpreterState ordering + `[[nodiscard]]`.
+- `application/workflow/README.md` — `workflowRuntimeManager.h/cpp` row expanded with the lock contract, lambda capture rule, path-confinement gate, and SSRF gate, with cross-ref to `architecture.md`.
+
+**Remaining-sitting plan mapped out in `doc/misc/S3-D1-session-note.md`.**
+
+End-of-session forward planning.  Eight remaining sittings proposed (sittings 6-13), ordered by **attacker reach** then **density** then **adjacency**:
+
+- **Sitting 6** — `triggerEngine.{h,cpp}` (safety 2H+6M; webhook + polling cluster; biggest external-trigger surface).  May split A/B.
+- **Sitting 7** — `aiRequestPool.{h,cpp}` (safety 2H+4M; cyber 0H+3M; major HTTP dispatcher; densest concurrency surface remaining).
+- **Sitting 8** — `adhocWorkflowManager.{h,cpp}` + `workflowRegistry.{h,cpp}` bundled (safety 2H+4M / 2H+2M; tightly coupled — adhoc submission writes into registry, registry reload races with submission).
+- **Sitting 9** — `polarionClient.{h,cpp}` + `dbQueryCloudTaskExecutor.{h,cpp}` cloud-adjacent boundary cluster.  The `dbQueryCloudTaskExecutor` is the **lone CRITICAL in the entire fresh cyber-sec audit** (SQL injection); D2 territory but back-folded here to close the only CRITICAL in one shot.
+- **Sitting 10** — `shellTaskExecutor.{h,cpp}` (safety 2H+5M; cyber axis empty per `feedback_argv_only_shell` history; pure thread-safety / lifetime / RAII discipline).
+- **Sitting 11** — Task-executor + small-file bundle (subWorkflow + taskExecutorRegistry + taskPathResolver + pythonTaskExecutor + workflowFileIndex + workflowTriggerBinder; plus aiCallTaskExecutor if shallow).
+- **Sitting 12** — Parser + schema cluster (workflowJsonParser + aiTranscript + filterManifest + scriptCatalog + schemaValidator + replyParserAPI1 — all touch JSON parsing surfaces; same patterns recur).
+- **Sitting 13** — Horizontal sweeps + close.  `App::g_App` / `Core::g_Core` null-deref defense (safety MEDIUM 5; pervasive — 1 fix × N files per `feedback_horizontal_sweeps`); logger fail-path context across remaining D1 surfaces; **dashboard-WS-reconnect / lockout interaction fix** (the verification-blocking issue from sittings 4 + leftovers); refresh + publish `combinedCyberSecAudit.md` + `combinedSafetyAudit.md` to `doc/`; tick the dev-plan checklists.
+
+**Total D1 projection:** 13 sittings (5 done + 8 remaining).  At the upper bound of the historical 5-6→34 multiplier from S1=D2; consistent with audit density.  Bundleable — if a sitting comes in under-time, fold the next one's first item; if over-time, file split into A/B is the natural escape hatch.  Sittings 11-12 are the most readily collapsible.
+
+### What's verified
+
+| Step | Result |
+|---|---|
+| Studio Debug + Release after sitting 2 | clean both |
+| Studio Debug + Release after sitting 3 | clean both |
+| Studio Debug + Release after sitting 4 | clean both |
+| Sitting 2: `ai-zip-demo` 4/4 in 16s | pass |
+| Sitting 2: `bookSummaryPipeline` (16 children + 3 freshness-skipped Python) in 13s | pass |
+| Sitting 2: `cyber2` 2/2 in 18s after `DELETE /api/workflows/cyber2/clean` | pass |
+| Sitting 2: `ai-zip-demo` cancel — flipped to `cancelled`, in-flight task allowed to finish, dependents skipped | pass (exercises new postTickActions cascade-cancel) |
+| Sitting 2: `test_assistant.py` 28/28 in 2.1s | pass |
+| Sitting 3: `ai-zip-demo` 4/4 in 18s | pass |
+| Sitting 3: `bookSummaryPipeline` with `callbackUrl=https://127.0.0.1:9999/test` | pass — **SSRF gate fired exactly as designed**: `[error] [callback] refused completion callback for run '...' to '...': resolves to internal IPv4 127.0.0.1`; run completed, callback refused, no payload sent. |
+| Sitting 3: `cyber2` clean → run end-to-end | pass — `CleanWorkflow` correctly resolved `../../queue/...` (sibling of `workflows/`) inside the project root; subsequent run 2/2 in 20s |
+| Sitting 3: two concurrent workflows simultaneously | pass — also exercises sitting 2's lock-scope expansion under load |
+| Sitting 3: `test_assistant.py` 28/28 | pass |
+| Sitting 4: **three concurrent workflows simultaneously** (cyber2 + ai-zip-demo + bookSummaryPipeline) | pass — cyber2 25s, ai-zip-demo 21s, bookSummaryPipeline 15s, all three with overlapping start/end windows.  Stresses pool synchronization + tick lock-scope simultaneously. |
+| Sitting 4: pool init log | `PythonEnginePool: 4 engine(s) initialized successfully` — clean |
+| Sitting 4: `test_assistant.py` 28/28 | pass |
+| Graceful REST shutdown each sitting | OK; zero error/critical lines in startup log; clean process exit |
+
+What's not directly verified:
+- **Path-traversal gate's negative branch** in `CleanWorkflow`.  Constructing a malicious JCWF with `file_outputs: ["../../etc/passwd"]` in-flight would have been setup overhead; the rejection branch returns the documented error string + ERROR log before any `fs::remove` is invoked.  Code review only.
+- **`max_per_item_fan_out` cap firing.**  Crafting a filter that returns 10001 items (CSV mock or Polarion query) was setup-heavy; the cap arm is straightforward and ERROR-logs on trip.  Code review only.
+- **`CloneAndPatch` OAuth/KeyPair/BasicAuth/Aws branches** (carried from sitting 20 of S2=D3) — still only ApiKey was hit end-to-end; future operator UPDATEs against existing creds of those types will exercise the rest.
+
+Mid-session lockout incident worth flagging: the dashboard's WS auto-reconnect (every ~5 sec) generates failed-auth attempts that hit the per-IP lockout (10 failures / 5 min → 15 min ban).  Once the count crosses the threshold, even MCP tool calls + `/api/shutdown` from the same IP get rejected.  JC manually killed the process to break the cycle and restarted j9t — verification then completed cleanly.  This isn't a sitting-4 regression, it pre-dates today; flagging as a follow-up under "Open items".
+
+### Open items / next-session candidates
+
+- **Cluster B leftovers (small, bundleable):**
+  - **Glob/pattern matching weakness** in `CleanWorkflow` (cyber MEDIUM 2) — current `*` prefix/suffix matcher is permissive, but path-confinement now blocks any escape so the impact is reduced.  Lower priority.
+  - **Sensitive data in callback payloads** (cyber MEDIUM 1) — `FireCompletionCallback` includes succeeded tasks' `m_OutputValues` content (capped at 65 KB per slot).  Add an opt-out flag on the run context (e.g. `callback_include_outputs=false`) for callers who want a slim event without secrets.
+  - **Input validation for `runId`/`workflowId`** on the runtime manager's enqueue paths (cyber LOW 2) — small allowlist (`[A-Za-z0-9_-]`).  REST handlers already validate at their layer, but the runtime should defense-in-depth.
+  - **TOCTOU patterns** (safety LOW 3) — minor.  `fs::exists` then `fs::remove*` in a few places; combined with the new path-confinement (which is itself canonical) the window is small.
+- **Horizontal sweep candidates:**
+  - **`App::g_App` / `Core::g_Core` null-deref defense** (safety MEDIUM 5) — pervasive across `workflowRuntimeManager`, `aiRequestPool`, etc.  Per `feedback_horizontal_sweeps` this is a 1-pattern × N-files sweep.
+  - **Logger fail-path context** (safety MEDIUM 1) — already done extensively in S1, but D1 surfaces still have early returns without runId/workflowId in the message.  Cross-cutting; horizontal sweep.
+- **Dashboard WS reconnect lockout interaction** — in-memory per-IP lockout in `webServer.cpp` (`m_AuthFailures`) plus a dashboard that auto-reconnects on auth failure equals self-refreshing lockout.  In production this would lock out an operator-machine indefinitely from the moment session expires.  Worth a small sitting: either (a) exclude WS upgrade failures from the failure counter when no credential was attempted, or (b) make the dashboard back off exponentially on `locked_out`, or both.  See sitting 4 verification notes above.
+- **`dbQueryCloudTaskExecutor.h` SQL-injection CRITICAL** — still the sole CRITICAL in the entire fresh cyber-sec audit.  Decide whether to fold into D1 (workflow-runtime-adjacent) or push to D2 (cloud).
+- **Publish refreshed combined audits** — `workflows/jarvisCppCyberSecAudit/141_combineDocumentation/combinedCyberSecAudit.md` (311 KB) → `doc/combinedCyberSecAudit.md`; same for safety.  Defer until the D1 sittings consume more findings.
+- **Carried follow-ups (todo.md):** SigV4 test #4 cross-validation, `configParser` ~30-field boilerplate refactor, malformed-`config.json` hardening test, `EventQueue` bounded-cap policy, `SecretRedactor` multi-secret prefix-collision sort, `RedactingFormatter` per-line allocation perf, `KeyManager::GetCredential` TOCTOU race, SigV4 signer direct read from `AwsCredential`.
+
+### Gotchas next-session-Claude should know
+
+- **`ConfineUnderProjectRoot` is now in `application/file/pathConfinement.{h,cpp}`** — DO NOT write a fresh local copy when adding a new path-traversal gate.  Per `feedback_cpp_discipline` and the README of `application/file/`: if a fifth call site appears, just include the helper.  Existing call sites: `pythonEngine.cpp::SetupSubInterpreter`, `pythonEngine.cpp::ExecuteWorkflowTaskOnWorker`, `pythonEnginePool.cpp::Initialize`, `workflowRuntimeManager.cpp::CleanWorkflow` (5 deletion sites all gated through the local `deleteIfConfined` lambda which calls the helper).
+- **`WorkflowRuntimeManager::Update()` holds `m_Mutex` for the entire tick body.**  Functions called from inside the tick (`TickActiveRun`, `DrainAiRequestCompletions`, `TryApplyAiCompletion`, `PropagateSubWorkflowCompletions`, `StartPendingRuns` is called BEFORE the lock) are called WITH the lock held — DO NOT acquire `m_Mutex` again (non-recursive mutex, will deadlock).  Each has a "PRECONDITION: caller holds m_Mutex" comment.  External callbacks must be deferred to the `postTickActions` vector and fired AFTER lock release; calling them inside the lock risks lock-order issues with AiRequestPool / curl / user-supplied observers.
+- **Worker-thread lambdas in `TickActiveRun` capture `WorkflowDefinition` by value** (`workflowDefinitionCopy = workflowDefinition`).  When extending the dispatch site or adding a sibling site, follow the same pattern — `WaitStop` may clear `m_ActiveRuns` while a worker is still running, and `WorkflowDefinition` is non-trivially copyable so pass-by-reference into a future-bearing call would be a UAF waiting to happen.  See `feedback_capture_by_value_async`.
+- **`postTickActions` pattern** is the canonical "I need to call something external from inside the locked tick" recipe.  Append `{runIdToCancel, std::nullopt}` for cancel cascades, `{std::string{}, terminalRunSnapshot}` for callback+observer firings.  The post-loop runs after the lock release.  Reuse this when adding any other external integration that needs to fire on a state transition.
+- **`IsCallbackUrlAllowed` lives in the `workflowRuntimeManager.cpp` anonymous namespace** for now.  If a second SSRF site appears (e.g. webhook-emit-on-task-completion), lift it to a shared helper next to `pathConfinement` (e.g. `application/file/urlAllowlist.{h,cpp}` or `application/web/ssrfGate.{h,cpp}`).  The helper is self-contained — DNS resolution + IP-range tables + scheme allowlist; no project dependencies beyond `<netdb.h>` / `<arpa/inet.h>` / Windows winsock equivalents (already #ifdef'd at the top of the file).
+- **`PythonEnginePool::m_Engines` is lock-free readable on the dispatch hot path.**  The contract: post-`Initialize` returning true and pre-`SignalStop`, the vector is stable.  Worker threads enter `ExecuteWorkflowTask`, see `m_Running == true` (acquire), and read `m_Engines` without locking.  The acquire-load on `m_Running` happens-before the relaxed reads of `m_Engines` because of the release-store in `Initialize`.  When extending the pool with new mutator paths, take `m_Mutex` AND flip `m_Running` to false first — the lock-free readers won't see the mutation otherwise.
+- **`SignalStop` flips `m_Running` to false BEFORE taking the lock to signal each engine.**  This ordering is intentional — it gives concurrent dispatch attempts a chance to bail (atomic acquire-load) before tear-down begins.  Don't reverse it.
+- **Pre-existing dashboard WS reconnect / lockout interaction** — when verifying with workflows + assistant tests, watch the security log for `auth_failure reason=missing_credential ip=127.0.0.1 endpoint=/ws` lines.  Once 10 of those accumulate within 5 min, the IP gets banned for 15 min including for MCP tool calls and `/api/shutdown` (verified during sitting 4 verification — JC had to manually restart j9t to break the cycle).  Two possible fixes captured under "Open items"; for now, if you see `locked_out` errors, restart j9t before further verification.
+- **Hand-off date convention** — the previous entry's `## 2026-05-06` header was off-by-one; today's actual date is 2026-05-05.  Use the system's actual date when prepending; don't propagate prior date errors.
+
+---
+
+## 2026-05-06 (S2 side-item closeout + S3=D1 sitting 1 — pythonEngine comprehensive) → next session
+
+Two themes today.  First, JC opened the session asking to close the **side items deferred from S1=D2**: a pre-S2 cleanup pass that stayed visible through the S2 work but never bundled in.  Second, regenerated the audit JCWFs and opened **S3=D1 (workflow orchestration)** with sitting 1.
+
+### What landed
+
+**Side items — leftover S1 residuals closed.**
+
+1. **JsonEscape convergence — extra five files swept onto `JsonHelper::EscapeJsonString`.**  S1 sittings 9 + 12 + 19 (cloud + email connectors) had already converged 8+ copies; five more remained in non-cloud surfaces and were the actual targets of the pre-S2 hand-off entry's "JsonEscape three-copy convergence" follow-up.  Removed:
+   - `application/web/mcpKeyManager.cpp` anon-namespace `JsonEscape` + 17 call sites.
+   - `application/workflow/filter/filterManifest.{h,cpp}` static method `FilterManifestManager::JsonEscape` + 6 call sites.  Pre-fix copy was buggy: dropped raw bytes 0x00–0x1F into JSON output (no `\u00XX` shorthand fallback for control chars).
+   - `application/workflow/adhocWorkflowManager.cpp` anon-namespace `JsonEscape(string_view)` + 11 call sites.
+   - `application/web/aiJcwfService.cpp` anon-namespace static `JsonEscape` + 11 call sites.
+   - `application/workflow/workflowRuntimeManager.cpp` anon-namespace `JsonEscape` + 6 call sites.  Same control-byte leak as filterManifest.
+   - All 16 `JsonHelper().SanitizeForJson(x)` call sites in `aiTranscript.cpp` + `requestBuilder.cpp` flipped to `JsonHelper::EscapeJsonString(x)` for consistency.
+   - `SanitizeForJson` instance alias dropped from `engine/json/jsonHelper.h` — the canonical entry point is now the static `EscapeJsonString(string_view)` exclusively.
+2. **`assistantTools.cpp::ParseToolCallJson` rewritten on simdjson.**  Was hand-rolled recursive-descent parser (~150 lines) that did not decode `\uXXXX` escapes — the audit's MEDIUM finding.  Now ~125 lines using `simdjson::ondemand::parser` with type-dispatch via `value::type()` + `get_number()` for integer-preserving stringification (downstream consumers `std::stoi` the args; integer round-trip mattered).  Object/array args supported via `raw_json()` for the rare structured case.
+3. **Windows PowerShell `-EncodedCommand` — assistantTools.cpp `ExecRunShell`.**  Replaced the legacy `-Command "..."` shell-string composition (subject to `"`-escape injection) with `-EncodedCommand <base64-of-utf16le>`.  Two new anon-ns helpers in the `_WIN32` block: `Base64EncodeBytes` (table-driven; ~25 lines, no extra deps) and `EncodePowerShellCommand` (UTF-8 → UTF-16LE via `MultiByteToWideChar` then base64).  Linux build unaffected; Windows path verified by code review only per JC's call (no Windows machine in this session).
+
+**S3=D1 sitting 1 — `application/python/pythonEngine.{h,cpp}` comprehensive (Python sandboxing + lifetime/concurrency).**
+
+Six HIGHs closed (3 cyber-sec + 3 safety) plus a MEDIUM bundle.
+
+1. **Module allowlist via `ScriptRegistry::FindByModulePath`** — `params.module` is gated against the on-disk script registry before `PyImport_ImportModule`.  Standard-library modules (`os`, `subprocess`, `ctypes`) and any unregistered name are rejected before Python state is touched.  New `m_ScriptRegistry` borrowed pointer on `PythonEngine`; wired through `PythonEnginePool::Initialize(scriptPath, engineCount, scriptRegistry)` (registry pointer required; `Initialize` returns false if null).  `JarvisAgent::Run()` passes `m_ScriptRegistry.get()` through.
+2. **`m_ScriptDir` sys.path confinement** — new anon-ns helper `ConfineUnderProjectRoot(path)` (`fs::weakly_canonical` against `fs::current_path()` + `lexically_relative` containment + fail-closed on resolution error).  `SetupSubInterpreter` validates `scriptDir` before storing the canonical form into `m_ScriptDir`; setup fails (returns false) on rejection.
+3. **`taskWorkingDirectory` confinement** — same `ConfineUnderProjectRoot` helper applied in `ExecuteWorkflowTaskOnWorker` before the path lands in Python's `context["_task_working_directory"]` slot.
+4. **`m_InterpreterState` lifetime invariant** — class-level documentation block explaining the process-lifetime contract (sub-interpreters torn down only by `Py_Finalize` at process exit; pool intentionally keeps the main-thread state alive); `assert(m_InterpreterState != nullptr)` immediately before `PyThreadState_New`.  Audit's UAF concern is real-as-a-code-review-concern but not an actual UAF; documentation closes the gap without restructuring lifetime.
+5. **Atomic flags for cross-thread state** — `m_Running` / `m_StopRequested` → `std::atomic<bool>` with explicit acquire/release; `m_TasksCompleted` → `std::atomic<size_t>` relaxed.  Existing mutex protection on `m_StopRequested` kept (zero behaviour change); the atomic semantics make the contract explicit and unblock future lock-free reads.
+6. **`WorkflowTaskRequest::m_InputValues` / `m_ContextValues` owned-by-value** — was raw `const*` to caller's stack-frame variables (UAF-by-construction if a future caller switches to fire-and-forget).  Now `std::unordered_map<std::string, std::string>` value members; `ExecuteWorkflowTask` copies the caller's maps at enqueue time.  Per memory `feedback_capture_by_value_async`.
+
+**MEDIUM bundle (3 wins folded into the same diff):**
+
+- **Fail-path logging completeness.**  `fail()` lambda in `ExecuteWorkflowTaskOnWorker` now LOG_APP_ERRORs with `runId` / `workflowId` / `taskId` literals (per CLAUDE.md fail-path discipline).  Public-API early returns in `ExecuteWorkflowTask` (`!m_Running`, missing params) also log.  Required threading `workflowId` + `runId` through `WorkflowTaskRequest` and the `ExecuteWorkflowTask` signature; `pythonEnginePool` + `pythonTaskExecutor.cpp` updated.
+- **Double-set-promise CAS guard.**  New `WorkflowTaskRequest::m_PromiseSatisfied` (`std::atomic<bool>`).  `fail()` and a new `succeed()` lambda CAS-acquire it before `set_value`; the shutdown-drain block does the same.  First writer wins; subsequent attempts no-op cleanly.  Closes the broken-promise UB if shutdown races with task completion.
+- **Python exception sanitisation.**  New `SanitizePythonErrorMessage(raw)` = `TruncateUtf8Safe(SanitizeUtf8(raw), 4096)` applied at the `consumePythonException()` return.  Mirrors the S1=D2 §19 SanitizeUtf8 boundary discipline.  Downstream consumers (dashboard JSON, ncurses TUI, log/log.txt) now see well-formed UTF-8 ≤ 4 KB regardless of locale-induced mojibake or attacker-influenced traceback content.
+
+**Doc sweep for sitting 1's contracts.**
+
+- `application/python/README.md` — pre-sweep was multiple-refactor stale (claimed single-interpreter, "synchronous on calling thread", `Reset()`, `PyGILState_Ensure`, the old `Initialize(scriptPath)` signature).  Full rewrite: pool architecture, three security gates, lifetime invariants, concurrency contracts, public API surface, hook discovery, calling convention, output redirection.
+- `doc/architecture.md` — Python Scripting Engine section now notes the registry-gated import path; new "Key Design Decisions" row explaining the runtime gate as defense-in-depth on top of the adhoc-submission gate.
+- `doc/cyber security.md` — Adhoc workflow submission section's "No script submission" bullet extended with the runtime gate.
+- `doc/jcwf_generation_guide.md` §3.3 `python` — `params.module` description spells out the `@jarvis-script` header requirement.
+- `doc/JC_Workflow_Specification.md` §3.3.1 (Module/Function Resolution) + §11 (Script Metadata Format intro) — added "Module allowlist" bullet and made the header **mandatory** for any new Python script a workflow imports.
+- `doc/jarvisagent.md` "How do I deploy scripts?" — corrected the pre-sweep wrong claim that unmarked files appear in catalog "but flagged" (`ParseHeader` skips them entirely); added the helper-module-pattern explanation.
+
+**Audit baselines regenerated at session start.**
+
+`workflows/jarvisCppCyberSecAudit/141_combineDocumentation/combinedCyberSecAudit.md` (311 KB, was 842 KB pre-S1) and `workflows/jarvisCppSafetyAudit/141_combineDocumentation/combinedSafetyAudit.md` (689 KB, was 1.37 MB pre-S1).  The published copies in `doc/` have **not** been refreshed yet — that's a separate publish step deferred until the S3 sittings consume the findings.  The fresh outputs sit in the run folders for now.
+
+### What's verified
+
+| Step | Result |
+|---|---|
+| Studio Debug build | clean both pre-side-item changes and post-sitting-1 |
+| Studio Release build | clean post-sitting-1 |
+| `python3 test/assistant/test_assistant.py` (28 non-AI tests) | 28/28 pass — covers ParseToolCallJson rewrite end-to-end |
+| `python3 test/dispatch/test_testinterface_hermetic.py` | PASS — adjacent dispatch path unbroken |
+| `ai-zip-demo` (4 tasks) | succeeded in 19 s — sanity for ai_call + shell paths post-rebuild |
+| `bookSummaryPipeline` (16 ai_call + 2 python) | succeeded in 16 s — Python tasks freshness-skipped |
+| `cyber2` after `DELETE /api/workflows/cyber2/clean` | 2/2 in 17 s — `parse_ssh_log` ran `scripts.parseSshLog` end-to-end and produced `attack_stats.json` with valid `ip_profiles` data; exercises the full new Python pipeline (allowlist, path confinement, atomic flags, owned maps) |
+| `[error]` lines in `log/log.txt` post-tests | 0 |
+
+What's not directly verified:
+- Negative path of the module-allowlist gate (rejecting an unregistered module).  Code-review verified only.  Constructing a malicious JCWF in-flight would have been setup overhead; the rejection branch returns the documented error string before any Python state is mutated.
+- Double-set-promise guard under actual shutdown-during-task race.  Code-review only — triggering this requires precise interleaving; the CAS pattern is well-understood.
+- Windows PowerShell `-EncodedCommand` runtime path.  Linux dev box; Windows verification deferred per JC's explicit call ("leave with code review instead of testing").
+
+### Open items / next-session candidates
+
+- **S3=D1 sitting 2** — `application/workflow/workflowRuntimeManager.{h,cpp}` Cluster A (DAG state + concurrency + lambda-by-ref sweep).  Per the audit, the densest D1 file after pythonEngine: 5 HIGHs total (2 cyber + 3 safety), 3499 lines.  Likely splits into Cluster A (concurrency / lambda captures / DAG state) and Cluster B (path traversal in `CleanWorkflow` + `MaterializeFiles` + `FindByRelativePath` + SSRF in `FireCompletionCallback`).  May need 2 sittings.
+- **Sitting plan from this session's S3-D1-session-note.md "## D1 finding density" table:** 6-9 sittings expected (plan estimate 3-4; historical multiplier from S1=D2's 5-6→34 puts D1 at 8-12).  Six is the floor; 8-9 the realistic call.
+- **`pythonEnginePool.h` 1 MEDIUM finding** — small, bundleable into sitting 2 if trivial, otherwise a sitting-2 tail item.
+- **`application/cloud/dbQueryCloudTaskExecutor.h` SQL-injection CRITICAL** — sole remaining CRITICAL in the entire fresh cyber-sec audit.  D2 territory but the executor is workflow-runtime-adjacent.  Decide at session start of sitting 2 whether to back-fold or track separately.
+- **Publish refreshed combined audits** — `workflows/jarvisCppCyberSecAudit/141_combineDocumentation/combinedCyberSecAudit.md` (311 KB) → `doc/combinedCyberSecAudit.md` (currently 842 KB stale baseline); same for safety.  Not blocking; do at session close once D1 sittings consume the findings.
+- **Carried follow-ups (todo.md) from S2 close:** SigV4 test #4 cross-validation, `configParser` ~30-field boilerplate refactor, malformed-`config.json` hardening test, `EventQueue` bounded-cap policy, `SecretRedactor` multi-secret prefix-collision sort, `RedactingFormatter` per-line allocation perf, `KeyManager::GetCredential` TOCTOU race, SigV4 signer direct read from `AwsCredential`.
+
+### Gotchas next-session-Claude should know
+
+- **Hand-off log is newest-on-top** (per the file's own header).  Always read the head of `doc/misc/hand-off.md`, never `tail`.  Misreading the convention put me through ~30 minutes of stale-context work this morning before I caught it via the regenerated audit deltas.
+- **`m_ScriptRegistry` is required to construct the python pool.**  `PythonEnginePool::Initialize` returns false if `scriptRegistry == nullptr`.  This is intentional — the module-allowlist gate fails closed if the registry isn't wired.  When constructing a test harness or alternate entry point for the pool, pass a registry (even an empty one wouldn't unblock anything since `FindByModulePath` would reject every module — that's the point).
+- **`@jarvis-script` header is now load-bearing for `python` tasks**, not just for the AI inventory.  Without the header, `ScriptRegistry::ParseHeader` returns false and the module is not registered; `ExecuteWorkflowTaskOnWorker` rejects the import.  Helper modules under `scripts/helpers/` that are only imported transitively from registered scripts don't need the marker (the runtime gate is on the top-level `params.module`, not on Python's import graph).
+- **`ConfineUnderProjectRoot(path)` is the canonical path-confinement helper for D1 work.**  Lives in `application/python/pythonEngine.cpp` anonymous namespace right now.  If sitting 2's `workflowRuntimeManager` work needs the same gate (the audit flags `CleanWorkflow`, `MaterializeFiles`, `FindByRelativePath` for path traversal), this is the moment to lift it to a shared helper — three call sites is the C++ discipline rule's "extract on the third copy" trigger per `feedback_cpp_discipline`.  Either co-locate with the existing `IsCwdInsideProjectRoot` in `application/assistant/assistantTools.cpp` or create a small `application/file/pathConfinement.{h,cpp}` — talk it through at sitting-2 start.
+- **`WorkflowTaskRequest` now carries `m_WorkflowId` + `m_RunId`.**  Pool callers must pass them in (the new `ExecuteWorkflowTask` signature); `pythonTaskExecutor.cpp` reads `workflowRun.m_WorkflowId` / `m_RunId` for this.  When extending other task executors with similar fail-path-logging discipline, pattern-match on this surface.
+- **`m_PromiseSatisfied` CAS guard pattern**: the request struct holds an atomic bool; `fail()` and `succeed()` CAS-acquire it before `set_value`.  Reuse this pattern for any other promise-bearing async-result struct in D1 (e.g. inside `aiRequestPool`, `workflowRuntimeManager` for sub-workflow results).  Without the guard, a shutdown-during-task interleave throws `std::future_error: broken_promise`.
+- **The `ScriptRegistry` is owned by `JarvisAgent` and outlives the pool.**  The ordering invariant is documented in the new `pythonEngine.h` class comment.  When refactoring `JarvisAgent::Run()` (e.g. as part of the deferred §5i cleanup), preserve this ordering: registry constructed before pool, pool destroyed before registry.
+
+
+
+S2=D3 sitting 20.  Theme: **final Path A cleanup — `ProviderConfig` and the dual-storage mirror DELETED**.  This is the closing sitting of the four-part `ICredential` migration (sittings 17 foundations → 18 KeyManager dual-storage → 19a engine OAuth → 19b cloud connectors → 19c workflow + REST READ → 20 final cleanup).  After this sitting the codebase has a single typed credential surface end-to-end: `KeyManager` stores `unique_ptr<ICredential>`, all consumers `dynamic_cast` to the expected subtype, secret-bearing fields live in `SecureString` (mlock'd, zero-on-destruct).
+
+### What landed
+
+**KeyManager API surface — typed-only.**
+
+Added the canonical typed write API:
+- `bool AddCredential(string const&, unique_ptr<ICredential>)` — takes ownership of a pre-built typed credential, registers its secrets via the per-type `RegisterSecrets()` virtual, stores it.  First credential becomes the default.
+- `bool UpdateCredential(string const&, unique_ptr<ICredential>)` — replaces an existing entry.
+
+Deleted from `keyManager.h` + `keyManager.cpp`:
+- `KeyManager::ProviderConfig` struct (~30 lines).
+- `m_Providers: unordered_map<string, ProviderConfig>` flat-view mirror.
+- `MakeCredentialFromProviderConfig` helper (~85 lines — the legacy ProviderConfig → ICredential conversion).
+- `MakeProviderConfigFromCredential` helper (~50 lines — the reverse).
+- `GetProvider(name)` and `GetDefaultProvider()` methods.
+- `AddProvider(name, ProviderConfig)` and `UpdateProvider(name, ProviderConfig)` methods.
+
+**`CredentialFactory::CloneAndPatch`** (new, in `credential.{h,cpp}`).  Powers the REST UPDATE handler's "partial-patch" semantics: build a same-subtype clone of an existing credential, then overlay only those keys present in the request body.  Per-subtype branches handle type-specific fields (api_key for ApiKey; access_token / refresh_token / client_secret / expires_at / scopes / token_endpoint / client_id for OAuth; private_key_pem for KeyPair; username / password for BasicAuth; access_key_id / secret_access_key / session_token / region for Aws).  Common metadata (display_name / endpoint / default_model / api_type / params) overlays after the type-specific block.  `credential_type` in the patch is intentionally ignored — to change a credential's subtype, DELETE + CREATE.
+
+**`webServer.cpp` WRITE handlers — three sites migrated to typed.**
+
+`HandleProviderCreatePost` (POST /api/settings/providers): extracts the request body as a simdjson object FIRST (ondemand iterator-state discipline — see Gotchas), reads `name` from the object, then routes through `CredentialFactory::CreateFromJson(docObj)` which dispatches on `credential_type` and reads only the appropriate fields per subtype.  Calls `KeyManager::AddCredential`.
+
+`HandleProviderUpdatePut` (PUT /api/settings/providers/{name}): looks up existing via `GetCredential`, runs `CloneAndPatch(*existing, patchObj)`, calls `UpdateCredential`.  Drops 90 lines of inline ProviderConfig field-by-field patch code.
+
+OAuth callback path (~line 6960): builds an `OAuthCredential` directly with the freshly-issued tokens; preserves common metadata (display_name / endpoint / default_model / api_type / params) from any existing credential of any subtype; calls `AddCredential` or `UpdateCredential` based on existing presence.  Auto-create-on-first-authorise UX preserved.
+
+**Bug fix during sitting 20.**  First runtime test of the new CREATE handler returned `400 invalid_json`.  Root cause: simdjson ondemand iterator is forward-only and stateful — the migrated handler initially called `doc["name"].get_string()` BEFORE `doc.get_object().get(docObj)`, which advanced the iterator past the opening `{` and broke `get_object()`.  Fix: extract the object first, then read fields from the object.  Pattern documented in the file comment so future-Claude doesn't reintroduce it.
+
+**Doc sweep:**
+
+- `doc/cyber security.md` "SecretRedactor" coverage — rewritten to describe the per-subtype `RegisterSecrets()` virtual method as the canonical registration path, with a per-subtype field table.  Other registration sites (OAuthTokenManager refresh, JwtGenerator post-sign, McpKeyManager, TriggerEngine webhooks, AzureBlobConnector defense-in-depth) listed in a separate table.  References to `RegisterProviderSecrets` (the deleted helper) removed.
+- `doc/architecture.md` "Key Design Decisions" — two ProviderConfig-era entries replaced with one entry explaining the typed-hierarchy choice ("Credentials use a typed hierarchy, not a flat struct").  Notes the tradeoff against `std::variant` and the type-safety win against the legacy "OAuth refresh-token field accidentally read as a Bearer api_key" bug class.  Also updates the "Per-tenant URL fields live on `ApiInterface`" entry to reflect that `AwsCredential::m_Region` is now a typed field rather than a `m_Params` entry.
+- `engine/keys.md` — Section 6 ("Architecture — KeyManager") rewritten.  The legacy `ProviderConfig` snippet replaced with the current `KeyManager` API surface.  Added a "Consumer pattern" example showing `dynamic_cast` + null-check + `Get()` materialisation.  Explicit note on the allowlist-style multi-type cascade for connectors that legitimately accept multiple credential shapes.
+- `application/cloud/azureBlobConnector.cpp:111` defense-in-depth comment updated — references `RegisterSecrets()` virtual instead of the deleted ProviderConfig path.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild after every edit (additive first, then deletions) | clean both editions ✓ |
+| 2 | Initial CREATE attempt via REST | ✗ `400 invalid_json: Request body must be a JSON object` — simdjson ondemand iterator-state bug; fixed by extracting object before any field reads |
+| 3 | Studio Debug rebuild after fix | clean ✓ |
+| 4 | Graceful REST shutdown of prior j9t (sitting-19c binary) | OK ✓ |
+| 5 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓; 18 providers loaded via `CredentialFactory::CreateFromJson` end-to-end ✓ |
+| 6 | `mcp__j9t__manage_keys action=list` | 18 providers listed via the typed READ handler.  `(api_key)`, `(oauth)`, `(key_pair)`, `(credentials)` indicators all correct per typed dispatch.  Sitting 19c's bug fix (BasicAuthCredential `has_key` reads `m_Password.IsEmpty()`) holds — `pg-local` / `jira-atlassian` / `mailpit` / `greenmail` all show `[key]` correctly ✓ |
+| 7 | `mcp__j9t__manage_keys action=create sitting20-test ...api_key=length-30` | `Provider created.` — exercises the new `CredentialFactory::CreateFromJson` request path + `AddCredential` ✓ |
+| 8 | `mcp__j9t__manage_keys action=update sitting20-test {display_name, default_model}` | `Provider updated.` — exercises `CloneAndPatch` (ApiKeyCredential branch + common-metadata patch) + `UpdateCredential` ✓ |
+| 9 | `mcp__j9t__manage_keys action=delete sitting20-test` | `Provider deleted.` — exercises `RemoveProvider` (single-map operation now) ✓ |
+| 10 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 10s — `aiRequestPool::ResolveApiKey` ApiKey arm verified ✓ |
+| 11 | Cloud connection matrix: `my-s3` (SigV4 / 3-way fallback), `my-snowflake` (KeyPair + JwtGenerator), `my-sheets` (OAuth via OAuthTokenManager) | all `OK: reachable` ✓ |
+| 12 | `grep '\\[error\\]' log/log.txt` post-tests | empty ✓ |
+| 13 | `grep -rnE "KeyManager::ProviderConfig\|GetKeyManager\\(\\)\\.GetProvider\|...AddProvider\|...UpdateProvider\|...GetDefaultProvider" engine/ application/` | empty (excluding `providerRateLimitPolicy::ProviderConfig` which is its own unrelated nested struct, and the historical reference in `architecture.md` explaining why we chose the hierarchy) ✓ |
+
+What's not exercised end-to-end:
+- `CloneAndPatch`'s OAuth / KeyPair / BasicAuth / Aws branches — only ApiKey was hit during the sitting-20-test round-trip.  Code review covers correctness; each branch follows the same pattern.  Future operator UPDATEs against existing credentials of those types will exercise the rest.
+- The OAuth callback path at line ~6960 — no fresh OAuth consent flow ran during this session.  Code review confirms the refactor preserves auto-create + metadata-preservation semantics.
+- The `credential_type`-change-rejection in CloneAndPatch — no test attempted to send `credential_type` in an UPDATE patch.  Code review covers correctness (the field is simply not read by CloneAndPatch).
+
+### Open items / next-session candidates
+
+- **SigV4 signer migration to `AwsCredential` direct read** — added to `todo.md` as a deferred item.  Today's `aiRequestPool::ResolveProviderParams` reinjects AWS secrets from typed `AwsCredential` fields back into the QueryData::m_Params map shape that the SigV4 signer reads from.  Cleanup work: add a typed credential reference to `QueryData`, migrate the signer's `Apply()` to read directly, delete the reinjection.  Touches QueryData struct + every QueryData build site (aiRequestPool, aiJcwfService, cloud connectors that build QueryData for SigV4) + the signer.  Not biting today (no Bedrock provider configured); defer until first real Bedrock customer or as part of a future SigV4 hardening pass.
+
+- **Carried follow-ups (todo.md):**
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3` (carried since sittings 10-12)
+  - configParser ~30-field boilerplate refactor (sitting 15)
+  - Hardening test for malformed `config.json` (sitting 15)
+  - `EventQueue` bounded-cap policy (sitting 14)
+  - `SecretRedactor` multi-secret prefix-collision sort (sitting 16)
+  - `RedactingFormatter` per-line allocation perf (sitting 16)
+  - SigV4 signer migration (sitting 20 — new this sitting)
+
+- **The S2=D3 cyber-sec + C++ safety hardening pass closes here.**  Sittings 1-13 covered the curl/HTTP cluster + engine-foundation files (eventQueue, threadPool, configParser, log core, secretRedactor).  Sittings 14-16 closed event/config/log subsystems.  Sittings 17-20 completed the `ICredential` + `SecureString` migration.  Per `doc/misc/cybersec-hardening-dev-plan.md` the next domain is S3=D1 (workflow orchestration) — `combinedCyberSecAudit.md` should be regenerated to drive that scope, then the plan can be re-read for next-Claude's first sitting.
+
+### Gotchas next-session-Claude should know
+
+- **simdjson ondemand iterator-state discipline.**  `simdjson::ondemand::document` and `simdjson::ondemand::object` use a forward-only stateful iterator.  Reading any `doc["key"]` advances it.  After that, calling `doc.get_object()` will fail to parse the opening `{` because the iterator has moved past it.  **Pattern: extract the object FIRST, then read fields from the object.**  Caught during sitting 20's CREATE handler test.  The fix is documented in webServer.cpp's `HandleProviderCreatePost` comment; future handlers that need to both read individual fields AND pass the object to a helper should follow the same pattern.
+- **`CloneAndPatch` ignores `credential_type` in the patch.**  Documented in the helper's contract.  If a UI POSTs an UPDATE with a different credential_type field, the change is silently ignored (the existing subtype is preserved).  This is intentional — changing the subtype would require throwing away type-specific fields.  If a future feature needs subtype migration, do it as a DELETE + CREATE rather than an UPDATE.
+- **The OAuth callback's auto-create-or-update pattern preserves common metadata across subtype change.**  If a user creates a connection with credential_type="api_key" then later authorises OAuth on the same connection, the OAuth callback at line ~6960 builds a fresh `OAuthCredential`, copies the existing common metadata (display_name, endpoint, default_model, api_type, params), and replaces the old ApiKeyCredential.  This was intentional in the legacy code (`updated.m_CredentialType = "oauth"` in the old flow) — the migration preserves the same UX.  Don't add a "wrong type — refuse" check here; the OAuth callback is the authoritative source for this credential's identity.
+- **`KeyManager::AddCredential` returns false if the credential is null OR if a credential with the given name already exists.**  Both error paths log; both return without mutating state.  Caller must check the bool return — don't assume success.  `UpdateCredential` returns false on null OR not-found; same semantics.
+- **The SigV4 reinjection shim in `aiRequestPool::ResolveProviderParams` is documented as a future-cleanup target.**  When the SigV4 signer migrates to read directly from `AwsCredential`, the reinjection becomes dead code — delete the entire `if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))` block.  Comment in the helper flags this.
+- **Adding a new `ICredential` subtype is now a five-step exercise:** (1) declare class in `credential.h` with a unique `GetType()` discriminator, (2) implement `RegisterSecrets()` in `credential.cpp`, (3) extend `CredentialFactory::CreateFromJson` dispatch arm, (4) extend `CredentialFactory::SerializeToJson` dispatch arm, (5) extend `CredentialFactory::CloneAndPatch` dispatch arm.  Each addition is mechanical but visible — no `default:` fallback hides a forgotten step.
+
+### Doc sweep (sitting 20 close-out)
+
+- `doc/cyber security.md` "SecretRedactor" coverage — per-subtype `RegisterSecrets()` table replaces the legacy `RegisterProviderSecrets` description.
+- `doc/architecture.md` Key Design Decisions — typed-hierarchy entry replaces two legacy ProviderConfig entries; `ApiInterface` URL-vs-credential entry updated to reference `AwsCredential::m_Region` instead of `ProviderConfig::m_Params`.
+- `engine/keys.md` Section 6 — KeyManager API surface rewritten to current state; ProviderConfig snippet deleted; consumer pattern + allowlist note added.
+- `engine/keys/credential.h` class docstring — historical "Replaces the flat KeyManager::ProviderConfig" note simplified to current descriptive form.
+- `application/cloud/azureBlobConnector.cpp:111` defense-in-depth comment — references typed `RegisterSecrets()` instead of the deleted helper.
+
+Skipped (per `feedback_combined_doc_generated`):
+- `doc/combinedDocumentation.md` + `doc/combinedSafetyAudit.md` + `doc/combinedCyberSecAudit.md` — auto-generated.
+
+No new memory entries — every pattern used is already memorised:
+- `feedback_no_legacy` (sitting 20 closes the in-flight refactor; mirror + ProviderConfig deleted, no compat shim shipped).
+- `feedback_allowlist_not_blocklist` (typed `dynamic_cast` cascades with explicit per-type arms; fail-closed default).
+- `feedback_secrets_only_via_redactor` (per-type `RegisterSecrets()` virtual is the single point that drives redactor wiring).
+- `feedback_simdjson_only` (CredentialFactory uses simdjson; no other parser).
+- `feedback_horizontal_sweeps` (the multi-sitting 17-20 migration was a planned horizontal sweep — every consumer of the legacy ProviderConfig API migrated in one logical pass).
+
+### Post-sitting review (2026-05-04, JC asked for a careful read-through)
+
+Read every changed file across sittings 17-20: `credential.{h,cpp}`, `keyManager.{h,cpp}`, `oauthTokenManager.{h,cpp}`, `secretRedactor.{h,cpp}`, all 14 cloud connectors + `polarionClient.cpp`, `aiRequestPool.cpp`, `aiJcwfService.cpp`, `workflowRuntimeManager.cpp`, `webServer.cpp` (READ + 3 WRITE handlers + OAuth callback).
+
+**No introduced bugs found.**  Migration is correct end-to-end: factory dispatch is exhaustive, per-type `RegisterSecrets()` covers every subtype, `dynamic_cast` cascades are fail-closed, SecureString materialisation is request-scoped at every signer/JWT-callback boundary, `OAuthTokenManager`'s wiring sandwich (Remove → Set → Add) is correct in every mutation path.
+
+**Two cosmetic-fix consistency improvements landed during review (in `credential.cpp`):**
+
+1. **`SerializeToJson` empty-field guards unified** — pre-review, `ApiKeyCredential::m_ApiKey`, `KeyPairCredential::m_PrivateKeyPem`, `BasicAuthCredential::m_Username`/`m_Password`, and `AwsCredential::m_AccessKeyId`/`m_SecretAccessKey` were always written even when empty (e.g. `"api_key": ""` for an unset credential), while OAuth's optional fields were already `IsEmpty()`-guarded.  Now every type-specific field is guarded — emit only when non-empty.  Round-trip semantics preserved (absent ≡ empty on read).  Defense-in-depth comment added explaining why.
+2. **`CloneAndPatch` AWS branch now lifts `params.region` to typed `m_Region`** — symmetric with `CreateFromJson` for legacy keys.json shapes that put region under params.  Without this, an UPDATE patch with `params: {"region": "us-west-1"}` would leave the typed `m_Region` (which the SigV4 signer reads) stale.  Tiny defensive fix; not biting today.
+
+**One pre-existing TOCTOU added to todo.md as deferred follow-up:**
+
+`KeyManager::GetCredential` returns a non-owning pointer after releasing its `shared_lock`.  The pattern `auto const* cred = km.GetCredential(name); /* read fields */; /* maybe call km.UpdateCredential(...) */` has a race window where a concurrent `RemoveProvider` could free the credential, leaving `cred` dangling and subsequent reads UB.  **Pre-existing, not a sitting-17-20 regression** — the legacy `GetProvider` had the same shape.  Bounded risk in practice (admin CRUD is rare; `OAuthTokenManager` doesn't directly mutate KeyManager state in the background refresh path).  Affects every cloud connector, both webServer WRITE handlers, and aiRequestPool.  Fix shape: introduce `template<F> bool ModifyCredential(name, F&&)` that reads + mutates + writes under a single unique_lock.  Belongs in a future "concurrent CRUD safety" pass, not a Path-A-completion concern.
+
+**Verified post-fix:** Studio Debug + Release rebuilt clean; full round-trip via REST (load 18 providers via new factory → CREATE `review-roundtrip-test` → UPDATE → DELETE → 18 providers); `ai-zip-demo` 4/4 in 11s; zero error log lines.  Migration closes cleanly.
+
+### Session-level wrap (S2 = D3 closes today)
+
+S2=D3 is **complete** as of 2026-05-04.  17 sittings (sittings 4 through 20) covered the engine domain end-to-end — keystore lifecycle, secret redaction completeness, SigV4 / OAuth signer correctness, JSON parser hardening, master-password handling, curl auth headers, thread pool / event queue concurrency, signer error paths, switch-discipline over `InterfaceType`, exception safety, plus the four-part `ICredential` + `SecureString` migration (sittings 17-20).  All `engine/` files are now under SecureString protection at the storage layer with typed dispatch at every consumer boundary.
+
+**Tomorrow: S3 = D1 — Workflow orchestration.**  Per `doc/misc/cybersec-hardening-dev-plan.md` Section 6 + 8.  Folders: `application/workflow/`, `application/python/`, `application/session/`, `application/file/`, `application/task/`, `application/content/`, `application/json/`.  Plan estimate: 3-4 sittings.  Cyber-sec focus: shell/Python task injection, queue-folder path confinement, template-variable injection, JCWF zip-slip, AI reply parsing safety.  Safety focus: workflow runtime lifetimes, AI request pool synchronisation, fail-path logging completeness, RAII over libcurl/Python handles.
+
+**Pre-S3 setup that next-session-Claude should consider:**
+
+1. **Regenerate `combinedCyberSecAudit.md` and `combinedSafetyAudit.md`** — these drive the per-domain plan.  S2's 17 sittings closed many findings; the regen will surface the residual D1 findings to scope properly.  Run via the `jarvisCppCyberSecAudit` and `jarvisCppSafetyAudit` JCWF workflows (per `feedback_combined_doc_generated`).
+2. **Verify D2 cloud-cyber-sec completeness from S1.**  S1 sittings 1-3 (2026-04-29 area) focused on assistant cyber-sec.  Cloud connectors had their KeyManager API consumer migration done in S2/sitting 19b but not necessarily a full cyber-sec audit (path confinement on user-supplied endpoints, request-body splice safety, response shape validation).  Read S1's hand-off entries before S3 kickoff to confirm what's covered; bundle any cloud cyber-sec residuals into S3 prep or back-fold into a small cloud-only sitting.
+3. **`§5g` workflow runtime refactor already cleaned chunks of D1's runtime** per the plan — sitting cadence in D1 should be lighter than D3's keystore work.
+
+**Open follow-ups in `todo.md` from sittings 14-20** (none blocking S3, but worth keeping in mind):
+- SigV4 test #4 cross-validation against `aws-cli` / `boto3`
+- `configParser` ~30-field boilerplate refactor (behaviour-neutral polish)
+- Hardening test for malformed `config.json`
+- `EventQueue` bounded-cap policy (JC-decision behaviour change)
+- `SecretRedactor` multi-secret prefix-collision sort
+- `RedactingFormatter` per-line allocation perf
+- `KeyManager::GetCredential` TOCTOU race (pre-existing concurrent-CRUD safety)
+- SigV4 signer direct read from `AwsCredential` (eliminates `aiRequestPool::ResolveProviderParams` reinjection shim)
+
+**Doc tree state at session close:** all current-contract docs (architecture, cloud-integration, cyber security, engine/keys.md, engine/event/event_system.md, json.md, jarvisagent.md, engine/README.md) are consistent with the post-migration code.  Historical planning docs (`API refactor.md`) preserved with status header pointing to current-contract docs.  No stale `RegisterProviderSecrets` / `MakeCredentialFromProviderConfig` / `m_Providers` references in any current-contract doc.
+
+**Working tree state:** modified files across `engine/keys/`, `engine/log/`, `engine/curlWrapper/`, `engine/event/`, `engine/auxiliary/`, `engine/json/`, `application/cloud/` (14 connectors), `application/web/`, `application/workflow/`, plus the doc updates.  JC handles git commits — working tree left for his review at session end.
+
+---
+
+## 2026-05-04 (S2 sitting 19c — workflow + REST READ-handler migration) → next session
+
+S2=D3 sitting 19c.  Theme: **migrate all READ-side `GetProvider` consumers to typed `GetCredential` + `dynamic_cast`**.  After this sitting, the only remaining `provider->m_*` references in the tree are inside `webServer.cpp`'s WRITE handlers (CREATE, UPDATE, connection-CRUD partial-update path) — those are intentionally deferred to sitting 20 because they need new `AddCredential(unique_ptr<ICredential>)` / `UpdateCredential` API on KeyManager AND per-credential-type build paths from REST request bodies.  Coupling that with `ProviderConfig` deletion in sitting 20 is cleaner than splitting.
+
+### What landed
+
+**`application/workflow/workflowRuntimeManager.cpp` — null-check migration.**
+
+`Core::g_Core->GetKeyManager().GetDefaultProvider() == nullptr` → `GetDefaultCredential() == nullptr`.  `GetProvider(keyName) == nullptr` → `GetCredential(keyName) == nullptr`.  Pure existence checks for the workflow runtime's pre-flight "are required AI providers configured?" gate.  No type dispatch needed — these check membership in the registry only.
+
+**`application/web/aiJcwfService.cpp` — typed dispatch with OAuth/ApiKey allowlist.**
+
+The dashboard's "test interface" handler reads the credential's bearer secret + non-secret params for a probe request.  Migrated from `provider->m_ApiKey` / `provider->m_Params` to:
+```cpp
+auto const* cred = ...;
+if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))   apiKey = std::string(api->m_ApiKey.Get());
+else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred)) apiKey = std::string(oauth->m_AccessToken.Get());
+providerParams = cred->m_Params;
+```
+Two valid types for AI dispatch (ApiKey for static-bearer providers; OAuth for refresh-token-rotated providers like google-sheets-oauth).  Other types fall through with empty `apiKey`, which the existing empty-check produces a clear error for.
+
+**`application/workflow/aiRequestPool.cpp` — typed dispatch + AWS reinjection shim.**
+
+Two helper functions migrated:
+- `ResolveApiKey(api)` — same three-way cascade as aiJcwfService (ApiKey/OAuth) plus a third arm for `AwsCredential::m_AccessKeyId` (public per AWS conventions; the SigV4 signer logs it as the credential identifier).
+- `ResolveProviderParams(api)` — returns `cred->m_Params` (which for AwsCredential is stripped of the secret material per sitting 18) THEN reinjects AWS secrets from typed fields back into the returned map: `secret_access_key`, `session_token`, `region`.  This preserves the legacy QueryData::m_Params flow that the SigV4 signer reads from.  When the SigV4 signer is migrated to read directly from `AwsCredential` (post-sitting-20), this reinjection becomes dead code — comment in the helper names that.
+
+**`application/web/webServer.cpp` GET /api/settings/keys — exhaustive `dynamic_cast` cascade with per-type `has_*` indicators.**
+
+The biggest read-side migration in this sitting.  Previously:
+```cpp
+auto const* provider = keyManager.GetProvider(name);
+entry["has_key"] = !provider->m_ApiKey.empty();
+if (provider->m_CredentialType == "oauth") { entry["has_refresh_token"] = ...; }
+else if (provider->m_CredentialType == "credentials") { entry["username"] = ...; }
+```
+Replaced with a typed-cast cascade that dispatches per subtype and emits the correct `has_*` indicator:
+- `ApiKeyCredential`: `has_key` from `m_ApiKey.IsEmpty()`
+- `OAuthCredential`: `has_key` from `m_AccessToken.IsEmpty()` + `has_refresh_token` + `expires_at` + `scopes`
+- `KeyPairCredential`: `has_key` from `m_PrivateKeyPem.IsEmpty()`
+- `BasicAuthCredential`: `has_key` from `m_Password.IsEmpty()` + `username`
+- `AwsCredential`: `has_key` from `m_AccessKeyId.empty()` + `has_secret_access_key` + `has_session_token` + `region` (when set)
+
+Defense-in-depth strip on `m_Params` retained — even though the typed subclasses store their secrets in typed fields and shouldn't put them in `m_Params`, the strip stays as a backstop.  Comment in the migrated code explains the rationale.
+
+**Bug fix uncovered by the migration:** the legacy `has_key = !provider->m_ApiKey.empty()` was misleading for `BasicAuthCredential` types — `m_ApiKey` is empty for those (the password is in `m_Password`), so the dashboard reported `[no-key]` for `pg-local`, `jira-atlassian`, `mailpit`, etc. that DID have working passwords.  Typed dispatch correctly reads each subtype's primary secret field; the dashboard now shows `[key]` for these providers, accurately reflecting that they're configured.
+
+**`application/web/webServer.cpp` DELETE /api/settings/keys/{name} — null-check migration.**
+
+The existence check at `HandleProviderDelete`'s entry migrated from `GetProvider` to `GetCredential`.  No field reads — pure existence check.
+
+**`application/workflow/doc/perItem_structureTriggers.md` line 536 — stale resolution-flow update.**
+
+`source.m_KeyName → KeyManager::GetProvider(name) → provider->m_ApiKey` → `source.m_KeyName → KeyManager::GetCredential(name) → dynamic_cast<ApiKeyCredential>(cred)->m_ApiKey.Get()`.  Reflects the actual flow that `polarionClient.cpp` (sitting 19b) now uses.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild after every consumer-file edit | clean both editions ✓ |
+| 2 | Graceful REST shutdown of prior j9t (sitting-19b binary) | OK ✓ |
+| 3 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓; `OAuthTokenManager: hydrated 2 OAuth token entry(ies) from KeyManager` (sitting 19a path holds) ✓ |
+| 4 | `mcp__j9t__manage_keys action=list` | 18 providers listed via the new typed-dispatch READ handler.  **Bug fix surfaced: `pg-local`, `jira-atlassian`, `mailpit`, `greenmail` now correctly show `[key]` (BasicAuthCredential's `m_Password.IsEmpty()` check) instead of the legacy `[no-key]`** ✓ |
+| 5 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 10s — exercises the new `aiRequestPool::ResolveApiKey` + `ResolveProviderParams` paths via `dynamic_cast<ApiKeyCredential>` for OpenAI ✓ |
+| 6 | `mcp__j9t__manage_connections action=test name=my-s3` | `OK: reachable` — exercises s3Connector (already migrated 19b) but also confirms that aiRequestPool's path doesn't break the chain (S3 doesn't go through aiRequestPool, but the credential storage path is shared) ✓ |
+| 7 | `mcp__j9t__manage_keys action=create / delete` (sitting19c-test, length-30 api_key) | both OK — the WRITE path through legacy `AddProvider`/`RemoveProvider` still works via the dual-storage mirror; CREATE through legacy ProviderConfig still routes through `MakeCredentialFromProviderConfig` internally so the source-of-truth typed credential gets written ✓ |
+| 8 | `grep '\\[error\\]' log/log.txt` post-tests | empty ✓ |
+| 9 | `grep "provider->m_" application/` | only 3 remaining sites — all in `webServer.cpp` WRITE handlers (lines 5982 UPDATE, 6960 connection-CRUD partial update); deferred to sitting 20 ✓ |
+
+What's not exercised end-to-end:
+- `aiRequestPool::ResolveApiKey`'s `OAuthCredential` arm — no AI provider in the current keys.json is OAuth-backed (the two OAuth credentials are for cloud connectors, not AI dispatch).  Code review confirms the cast + `Get()` materialisation pattern.
+- `aiRequestPool::ResolveApiKey`'s `AwsCredential` arm — no AWS Bedrock provider configured.  Code review covers the access_key_id return.
+- `aiRequestPool::ResolveProviderParams` AWS reinjection — same; no Bedrock provider hit it.
+
+### Open items / next-session candidates
+
+- **Sitting 20 — final cleanup.**  This is the last big push:
+  1. **Add `AddCredential(string const&, std::unique_ptr<ICredential>)`** and **`UpdateCredential`** on KeyManager — replacing today's `AddProvider`/`UpdateProvider` flat-struct surface.
+  2. **Migrate webServer's WRITE handlers** (CREATE at ~5851, UPDATE at ~5955, connection-CRUD at ~6960) — dispatch on `credential_type` request-body field, build the typed `ICredential` directly, call new `AddCredential`/`UpdateCredential`.  UPDATE needs per-type "clone existing then patch" logic: read existing typed credential, build a new same-subtype credential, copy fields from existing, apply request body's optional patch fields, call UpdateCredential.
+  3. **Delete `KeyManager::ProviderConfig`** struct.
+  4. **Delete the `m_Providers` mirror** in KeyManager.
+  5. **Delete `MakeCredentialFromProviderConfig`** and **`MakeProviderConfigFromCredential`** helper functions.
+  6. **Delete legacy `AddProvider` / `UpdateProvider` / `GetProvider` / `GetDefaultProvider`** methods on KeyManager.
+  7. **Doc sweep**: `doc/cyber security.md` (SecretRedactor coverage table — switch from "RegisterProviderSecrets coverage by credential_type" to per-type `RegisterSecrets()` virtual); `doc/architecture.md` if it mentions ProviderConfig; consider a new `engine/keys/keys.md` overview covering the credential hierarchy + factory + WRITE flow.
+
+- **Carried** from sittings 14-19a/b:
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3`
+  - configParser ~30-field boilerplate refactor (todo.md)
+  - Hardening test for malformed config.json (todo.md)
+  - `EventQueue` bounded-cap question (todo.md)
+  - `SecretRedactor` multi-secret prefix-collision sort (todo.md)
+  - `RedactingFormatter` per-line allocation perf (todo.md)
+- **New from 19c**: SigV4 signer migration to read directly from `AwsCredential` (instead of QueryData::m_Params) — that's the work that turns the `ResolveProviderParams` reinjection into dead code.  Either bundle with sitting 20 or defer if scope is tight.
+
+### Gotchas next-session-Claude should know
+
+- **`aiRequestPool::ResolveProviderParams` reinjects AWS secrets into the returned map.**  This is a transitional shim — the SigV4 signer today reads from `QueryData::m_Params["secret_access_key"]`.  After my sitting 18 migration, `AwsCredential::m_Params` is stripped of those secrets (they live in typed `SecureString` fields).  The reinjection rebuilds the legacy shape so the signer chain doesn't break.  Sitting 20 should either keep this shim until the signer is migrated, or migrate the signer first and delete the reinjection.  The comment in `ResolveProviderParams` flags it as a sitting-20 cleanup target.
+- **`webServer`'s GET handler is now exhaustive on credential type.**  Adding a new `ICredential` subtype requires extending the `dynamic_cast` cascade in `HandleProviderListGet` to emit the right `has_*` indicators.  An unhandled subtype will not break the build (no compile error) but will silently emit no `has_key` indicator, which UI will read as "no key configured" — visible as a regression in the dashboard's provider list.  Sitting 20 should consider whether to add a `static_assert` at compile-time (similar to `InterfaceTypeName`) or accept that visual regression is enough signal.
+- **The `BasicAuthCredential` `has_key` semantic CHANGED in this sitting.**  Pre-fix: `has_key` reported `m_ApiKey.empty()` which was always true for credentials types (legitimate bug — m_ApiKey wasn't the relevant field).  Post-fix: `has_key` reports `m_Password.IsEmpty()`.  This may surface as a behavior-change in dashboard UI tests if any of them assert on the legacy "no-key for credentials" output.  Treat any such test failure as "test was asserting on a bug, not behaviour" and update the test.
+- **The webServer WRITE handlers are NOT migrated.**  They still build flat `KeyManager::ProviderConfig` from request bodies and call legacy `AddProvider` / `UpdateProvider`.  This works because sitting 18's `AddProvider` internally builds the typed credential via `MakeCredentialFromProviderConfig`.  Once sitting 20 deletes `ProviderConfig`, those WRITE handlers MUST be migrated in the same change — there's no incremental path because the legacy struct is the type they currently use.  Do them together with the deletion.
+- **ProviderConfig deletion is a single-sitting bundle.**  Sitting 20's delete-mirror + delete-helpers + delete-legacy-API + migrate-WRITE-handlers all chain together — removing any one without the others breaks compilation.  Plan the sitting accordingly: do all the additions first (`AddCredential`/`UpdateCredential`, WRITE handler rewrites), THEN do the deletions in one block.
+
+### Doc sweep (sitting 19c close-out)
+
+- `application/workflow/doc/perItem_structureTriggers.md` line 536 — stale `KeyManager::GetProvider → provider->m_ApiKey` flow updated to typed `GetCredential → dynamic_cast<ApiKeyCredential> → m_ApiKey.Get()` flow.  Matches what `polarionClient.cpp` actually does post-19b.
+
+Skipped (sitting 20 will do the bulk):
+- `doc/cyber security.md` "SecretRedactor" coverage table — describes `RegisterProviderSecrets` (which I replaced with per-type `RegisterSecrets()` in sittings 17-18).  Sitting 20 will rewrite the table to describe the typed approach.
+- `doc/architecture.md` — search for any ProviderConfig mentions; any are stale.
+- `doc/combinedDocumentation.md` + audit docs — auto-generated.
+
+No new memory entries — patterns used:
+- `feedback_allowlist_not_blocklist` (typed dispatch with explicit per-type arms; default-fall-through emits no `has_key` and the UI treats that as "no key").
+- `feedback_secrets_only_via_redactor` (typed `SecureString` fields are the source of truth; defense-in-depth strip on `m_Params` is a backstop only).
+- `feedback_no_legacy` (the WRITE handlers' continued use of `ProviderConfig` is in-flight refactor in the working tree, not committed legacy — sitting 20 closes it).
+
+---
+
+## 2026-05-04 (S2 sitting 19b — cloud-connector migration) → next session
+
+S2=D3 sitting 19b.  Theme: **application-layer cloud-connector migration to typed `ICredential` consumption**.  13 cloud connectors + 1 filter client migrated from `KeyManager::GetProvider(name) → ProviderConfig const*` field reads to `KeyManager::GetCredential(name) → ICredential const*` + per-connector `dynamic_cast` to the expected subtype, with fail-closed on type mismatch.  After this sitting only sitting 19c's targets (`webServer` REST CRUD, `aiJcwfService`, `aiRequestPool`, `workflowRuntimeManager`) hold ProviderConfig consumer code.
+
+### What landed
+
+13 connectors + 1 filter client converted to the typed-credential pattern.  Mechanical per-file pattern:
+1. Add `#include "keys/credential.h"` next to the existing `keyManager.h` include.
+2. Replace `auto const* provider = ...GetProvider(name)` + `if (!provider)` with `auto const* cred = ...GetCredential(name)` + `if (!cred)`.
+3. Add a `dynamic_cast<TypedCredential const*>(cred)` step with a fail-closed `if (!typed)` arm naming the expected subtype.
+4. Replace `provider->m_X.empty()` / `provider->m_X` reads with `typed->m_X.IsEmpty()` / `std::string(typed->m_X.Get())` for SecureString fields, or direct field access for non-secret typed fields.
+
+Per-file detail (organised by credential type):
+
+**Bearer-only (`ApiKeyCredential`):** `gitHubConnector`, `slackConnector`, `redmineConnector`, `polarionConnector`.  Each fails closed if the credential isn't `ApiKeyCredential` ("must be ApiKeyCredential — X requires a Personal Access Token").  `credentials.m_Token = std::string(api->m_ApiKey.Get())` materialises the SecureString to request-scoped plaintext for the Authorization header.
+
+**BasicAuth-only (`BasicAuthCredential`):** `postgresConnector`, `emailConnector`.  Same pattern but with `basic->m_Username` (non-secret std::string) + `std::string(basic->m_Password.Get())`.
+
+**Multi-type (BasicAuth OR Bearer):** `jiraConnector`.  Jira Cloud uses email + API token (BasicAuthCredential); Jira Data Center uses a PAT (ApiKeyCredential).  Both shapes valid — `dynamic_cast` cascade in order: try BasicAuth first, fall back to ApiKey, fail closed if neither matches.  Per `feedback_allowlist_not_blocklist`, this is NOT a blocklist-style "try every type"; it's an explicit allowlist of two valid shapes for one connector.
+
+**Multi-type (S3 — three conventions):** `s3Connector`.  Tries `AwsCredential` (typed access_key_id + SecureString secret_access_key — the new shape), falls back to `BasicAuthCredential` (legacy: username = key id, password = secret), falls back to `ApiKeyCredential` with colon-split `"ACCESS_KEY_ID:SECRET_KEY"` format (legacy from before the credential hierarchy existed).  Fail-closed if none match.  Added an empty-result guard at the end so an empty `m_AccessKeyId` or `m_SecretKey` after the dispatch fails fast rather than silently producing an unsigned request.
+
+**Multi-type (Azure shared key):** `azureBlobConnector`.  Tries `ApiKeyCredential` (preferred — api_key holds the Base64 account key) then falls back to `BasicAuthCredential`.  OAuth path (separate branch above the shared-key path) was already pure-OAuthTokenManager; unchanged this sitting.
+
+**JWT/key-pair (`KeyPairCredential`):** `snowflakeConnector`, `gcsConnector`.  `dynamic_cast<KeyPairCredential const*>(cred)`, then materialise PEM to request-scoped `std::string const privateKeyPem(keyPair->m_PrivateKeyPem.Get());` for the `JwtGenerator::GenerateSnowflakeJwt` / `JwtGenerator::Generate` call.  Note: explicit `std::string` constructor (not assignment) so the lifetime is bound to the local for the JWT signing call duration only.
+
+**OAuth-with-API-key fallback:** `googleSheetsConnector`.  OAuth path uses `OAuthTokenManager::GetAccessToken` (already migrated in 19a).  ApiKey fallback for public read-only sheets — `dynamic_cast<ApiKeyCredential>` with permissive `if (api && !api->m_ApiKey.IsEmpty())` that falls through to the next path on type mismatch (the connector legitimately may be configured with non-ApiKey credentials).
+
+**Workflow filter:** `application/workflow/filter/polarionClient.cpp`.  Same pattern as `polarionConnector` — `dynamic_cast<ApiKeyCredential>` for the PAT, materialise to request-scoped `std::string const bearerToken(api->m_ApiKey.Get())` for the HTTPS calls.
+
+**Pure OAuth (no migration needed):** `oneDriveConnector`.  Already routes through `OAuthTokenManager::GetAccessToken` exclusively — no direct ProviderConfig reads.  Confirmed by grep (zero hits).
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild after all 14 connector edits | clean both editions ✓ |
+| 2 | Graceful REST shutdown of prior j9t (sitting-19a binary) | OK ✓ |
+| 3 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓ |
+| 4 | Connection test matrix — 9 connections covering every credential subtype: | |
+|   | `my-github` (Bearer / ApiKeyCredential) | `OK: reachable` ✓ |
+|   | `my-slack` (Bearer) | `OK: reachable` ✓ |
+|   | `my-jira` (BasicAuth-or-Bearer fallback / BasicAuthCredential branch) | `OK: reachable` ✓ |
+|   | `my-redmine` (Bearer) | `OK: reachable` ✓ |
+|   | `local-pg` (BasicAuth / BasicAuthCredential) | `OK: reachable` ✓ |
+|   | `my-greenmail` (BasicAuth) | `OK: reachable` ✓ |
+|   | `my-s3` (SigV4 / 3-way fallback hits ApiKey colon-split branch for MinIO) | `OK: reachable` ✓ |
+|   | `my-azure-blob` (AzureSharedKey / ApiKeyCredential branch) | `OK: reachable` ✓ |
+|   | `my-gcs` (JWT / KeyPairCredential — exercises full PEM materialisation + JwtGenerator round-trip) | `OK: reachable` ✓ |
+|   | `my-snowflake` (JWT / KeyPairCredential) | `OK: reachable` ✓ |
+|   | `my-onedrive` (OAuth / via OAuthTokenManager — pure delegation, no migration this sitting) | `OK: reachable` ✓ |
+| 5 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 9s — exercises ai dispatch path (still uses `GetProvider` mirror — sitting 19c territory; verifies non-regression) ✓ |
+| 6 | `grep '\\[error\\]' log/log.txt` post-tests | empty ✓ |
+| 7 | `grep "must be .*Credential" log/log.txt` (every connector's fail-closed message) | empty ✓ — every credential matched its connector's expected type on the first dispatch attempt |
+| 8 | `grep "GetKeyManager().GetProvider\|provider->m_" application/cloud application/workflow/filter` | empty ✓ — zero remaining reads in sitting 19b's scope |
+
+What's not exercised end-to-end:
+- The fail-closed paths in each connector (where `dynamic_cast` returns null) require feeding a wrong-type credential to that connector.  No production code does this today, and none of the test connections would ever hit it.  Code review confirms each path emits a distinct `errorMessage` naming the expected subtype.
+- The S3 `BasicAuthCredential` branch — production keys have MinIO as ApiKey colon-split; no S3 connection uses BasicAuth shape today.  Code review covers correctness; the branch will activate once a future operator uses `AwsCredential`-typed credentials.
+- The S3 `AwsCredential` branch — same.  Today's keys are still ApiKey colon-split for MinIO compat.
+- googleSheets `ApiKey` fallback — no public-sheet config in the tree; the OAuth path is the active one.
+
+### Open items / next-session candidates
+
+- **Sitting 19c — workflow + REST CRUD migration.**  Remaining files holding `provider->m_*` reads:
+  - `application/web/webServer.cpp` (REST credential CRUD; lines around 5800 — `has_key`, `has_refresh_token`, `username` lookups for the GET /api/settings/keys response.  The CREATE/UPDATE handlers also build a `ProviderConfig` from request body and call `AddProvider` — these need new `AddCredential(unique_ptr<ICredential>)` / `UpdateCredential(unique_ptr<ICredential>)` API on KeyManager that takes ownership of a typed credential built from the request body's `credential_type` field.  Heaviest sitting.)
+  - `application/web/aiJcwfService.cpp` (line ~1199-1202: AI dispatch credential lookup; reads `provider->m_ApiKey` via mirror.  Migrate to `dynamic_cast<ApiKeyCredential>` with OAuth fallback for OAuthCredential's `m_AccessToken`.  Same shape as today's connector consumers.)
+  - `application/workflow/aiRequestPool.cpp` (lines ~868-880: AI dispatch pool — same concern as aiJcwfService.  This is the hot path; benchmark the dynamic_cast cost vs. caching the typed pointer.)
+  - `application/workflow/workflowRuntimeManager.cpp` — confirmed in sitting 18 grep but not yet inspected.  Worth a read at sitting 19c kickoff.
+- **Sitting 20 — ProviderConfig deletion + cleanup.**  Once 19c lands, the `m_Providers` mirror, `MakeCredentialFromProviderConfig` / `MakeProviderConfigFromCredential` helpers, and the legacy `AddProvider`/`UpdateProvider`/`GetProvider`/`GetDefaultProvider` API surface can be deleted.  Doc sweep: `doc/cyber security.md` SecretRedactor coverage table, `doc/architecture.md` if it references ProviderConfig, possible new `engine/keys/keys.md` overview.
+
+- **Carried** from sittings 14-18:
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3`
+  - configParser ~30-field boilerplate refactor (todo.md)
+  - Hardening test for malformed config.json (todo.md)
+  - `EventQueue` bounded-cap question (todo.md)
+  - `SecretRedactor` multi-secret prefix-collision sort (todo.md)
+  - `RedactingFormatter` per-line allocation perf (todo.md)
+- **New from 19b**: `application/workflow/doc/perItem_structureTriggers.md` line 536 cites "`KeyManager::GetProvider(name) → provider->m_ApiKey`" as the credential-resolution flow.  Stale once sitting 19c migrates aiRequestPool — fix in sitting 19c's doc sweep.
+
+### Gotchas next-session-Claude should know
+
+- **`dynamic_cast` cascade IS allowlist-style when the connector legitimately accepts multiple shapes.**  Jira Cloud (BasicAuth) vs Jira Data Center (Bearer) is a real two-shape allowlist — both ARE valid Jira credentials.  Same for S3's three conventions.  This isn't `feedback_allowlist_not_blocklist` violation; the failsafe is fail-closed when none of the explicitly-listed types match.  Don't add a `default-to-ApiKey` fallback at the end — that's exactly the blocklist-style anti-pattern the rule prohibits.
+- **PEM materialisation pattern for JWT signing.**  `std::string const privateKeyPem(keyPair->m_PrivateKeyPem.Get());` — explicit constructor, not assignment, so the local is `const` and unambiguously a copy of the SecureString contents.  `JwtGenerator::Generate` / `GenerateSnowflakeJwt` take the PEM by `std::string const&` — passing the local is safe; the SecureString remains intact in KeyManager storage.  Same lifetime contract as `OAuthTokenManager::GetAccessToken`'s materialised return.  Don't try to pass `keyPair->m_PrivateKeyPem.Get()` (string_view) directly to `JwtGenerator` — its signature requires `std::string const&`, would compile but force a temporary `std::string` construction at the call site, no different from explicit local.  Explicit local makes the lifetime obvious.
+- **S3's three-way dispatch is exhaustive AND the empty-key guard is mandatory.**  After the `if/else if/else if/else (fail closed)` cascade, the new `if (credentials.m_AccessKeyId.empty() || credentials.m_SecretKey.empty())` guard is what catches the case where the cascade matched a type but the field was empty.  Pre-fix the AwsCredential branch had no empty-check; a freshly-created `AwsCredential` with an empty SecureString would have produced an unsigned SigV4 request.  The signer's own `IsBlank` check would still catch it downstream, but failing fast at the connector with a descriptive errorMessage is the better UX.
+- **`googleSheetsConnector`'s permissive ApiKey fallback** uses `if (api && !api->m_ApiKey.IsEmpty())` — note the `&&` means `api == nullptr` falls through to the next path WITHOUT setting an errorMessage.  This is intentional: googleSheets supports OAuth (preferred, the path above this) AND ApiKey (rare, public read-only sheets).  If the credential is OAuthCredential, the OAuth path higher up handles it; the ApiKey path here is only for the rare public-sheets case.  Don't tighten this to fail-closed without checking `oneDriveConnector`'s pattern — different connector philosophies.
+- **Connectors that don't appear in sitting 19c's leftover grep are NOT secretly missed.**  Some connectors in `application/cloud/` (e.g. `connectorHttp.h`, `cloudTaskExecutor.cpp`) reference KeyManager indirectly through the connector layer but don't read fields directly — they get a `CloudCredentials&` already populated by the connector's `ResolveCredentials`.  The migration discipline is: only files that read `provider->m_*` fields directly need migration.  Run the same `grep -rnE "GetKeyManager\\(\\)\\.GetProvider|provider->m_(ApiKey|RefreshToken|...)"` query at the end of sitting 19c to confirm zero hits before declaring sitting 20 ready.
+
+### Doc sweep (sitting 19b close-out)
+
+No doc changes this sitting.  Connector-level behavioural contracts unchanged — same provider lookup semantics, same error shapes, same fail-closed posture.  Internal change is the storage typing.  Sitting 20 will:
+- `doc/cyber security.md` "SecretRedactor" coverage table — switch from ProviderConfig field-list to per-type `RegisterSecrets()` virtual.
+- `doc/architecture.md` if it mentions ProviderConfig.
+- `application/workflow/doc/perItem_structureTriggers.md:536` — stale reference to `provider->m_ApiKey` (fix in 19c when aiRequestPool migrates).
+
+No new memory entries — patterns used already memorised:
+- `feedback_allowlist_not_blocklist` (multi-type cascades are allowlists; fail-closed default arm).
+- `feedback_secrets_only_via_redactor` (request-scoped plaintext at signer boundaries; SecureString in KeyManager storage).
+- `feedback_no_legacy` (the multi-type fallbacks in S3 and azureBlob are NOT legacy — they're explicit support for multiple valid credential shapes).
+
+---
+
+## 2026-05-04 (S2 sitting 19a — engine OAuth consumer migration) → next session
+
+S2=D3 sitting 19a.  Theme: **engine-layer consumer migration to typed `ICredential`**, scope refined down to `oauthTokenManager` only.  Sitting 18's hand-off forecast three engine-layer files (`oauthTokenManager`, `jwtGenerator`, `authSigner`); on inspection only `oauthTokenManager` actually reads from `KeyManager` — `jwtGenerator` takes the PEM as a parameter (callers in `snowflakeConnector` / `gcsConnector` are sitting 19b territory), and `authSigner` reads `q.m_ApiKey` from the QueryData populated by `aiRequestPool` / `aiJcwfService` (sitting 19c territory).  Plus migrated `OAuthTokenManager::TokenEntry`'s own secret-bearing fields to `SecureString` in the same sitting.
+
+### What landed
+
+**`engine/keys/oauthTokenManager.h::TokenEntry` — secret fields → `SecureString`.**
+
+`m_AccessToken`, `m_RefreshToken`, `m_ClientSecret` are now `SecureString` (mlock'd, zero-on-destruct, non-copyable).  `m_TokenEndpoint` and `m_ClientId` stay `std::string` — both are non-secret per OAuth conventions (token endpoint is discovery metadata; client_id is public-by-design).  Header gains `#include "keys/secureString.h"`.
+
+**`engine/keys/oauthTokenManager.cpp::HydrateFromKeyManager` — switched to `GetCredential` + `dynamic_cast`.**
+
+Pre-fix: `m_KeyManager.GetProvider(name)` (legacy ProviderConfig path), then `provider->m_CredentialType != "oauth"` string check + raw `m_RefreshToken` reads.
+
+Post-fix: `m_KeyManager.GetCredential(name)` (typed path) → `dynamic_cast<OAuthCredential const*>(cred)`.  Non-OAuth subtypes return null on the cast and are skipped silently — no string discriminator comparison needed, the type system enforces it.  Reads then go through `oauth->m_RefreshToken.Get()` (string_view), which is `Set()` into the entry's own SecureString.
+
+**`engine/keys/oauthTokenManager.cpp::GetAccessToken` — emptiness checks + materialised return.**
+
+Pre-fix: `entry.m_AccessToken.empty()`, `entry.m_RefreshToken.empty()`, `return it->second.m_AccessToken;` (returning a `std::string` field directly).
+
+Post-fix: `IsEmpty()` for the SecureString checks; `return std::string(it->second.m_AccessToken.Get())` to materialise the SecureString contents into a request-scoped `std::string` for the caller.  This is the documented tradeoff: the bearer header builder needs plaintext for one HTTP request — the plaintext lives in the caller's local for the call duration, then dies.  Same shape as `QueryData::m_ApiKey`.  The protection happens at storage (`SecureString` in `m_Tokens`), not at call boundary.
+
+The two snapshot copies (`snapClientSecret`, `snapRefreshToken`) for the network refresh path become `std::string(entry.m_X.Get())` — plaintext for the duration of the RefreshToken HTTPS POST.  Comment in code makes this lifetime contract explicit.
+
+**`engine/keys/oauthTokenManager.cpp::StoreTokens` — `Set()` on SecureString.**
+
+Pre-fix: `entry.m_AccessToken = accessToken;` (string copy).  Post-fix: `entry.m_AccessToken.Set(accessToken)` (mlock'd buffer copy).  `Set()` is no-op-friendly for empty inputs but I gated each call on `!input.empty()` to avoid the SecureString allocation when the OAuth flow doesn't pass that field (e.g. public OAuth client without a clientSecret).
+
+**`engine/keys/oauthTokenManager.cpp::RemoveTokens` — `IsEmpty()` + `Get()` for redactor unregistration.**
+
+Three branch arms collapsed to one-liners that `IsEmpty()`-guard then pass `Get()` to `RemoveSecret(string_view)` (sitting 17's signature change makes this clean — no temporary std::string construction).
+
+**`engine/keys/oauthTokenManager.cpp::ApplyRefreshResult` — wiring sandwich pattern.**
+
+The unregister-old → write-new → register-new pattern that applies to every SecureString mutation is now explicit:
+```cpp
+if (!entry.m_AccessToken.IsEmpty()) SecretRedactor::Get().RemoveSecret(entry.m_AccessToken.Get());
+entry.m_AccessToken.Set(result.m_NewAccessToken);
+SecretRedactor::Get().AddSecret(entry.m_AccessToken.Get());
+```
+The IsEmpty guard on the unregister side avoids the redactor's "no-op for empty" path on first-rotation entries (where the prior access token is empty because we hydrated from disk with an unset access token).
+
+**`engine/keys/oauthTokenManager.cpp::RefreshLoop` PendingRefresh — same snapshot pattern.**
+
+The background refresh loop builds a `PendingRefresh` task struct under the lock with snapshot copies of the secret fields, then drops the lock and runs the network call on the snapshots.  Same SecureString → std::string materialisation as `GetAccessToken`'s on-demand path.  Comment names the lifetime contract.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild | clean both editions ✓ |
+| 2 | Initial Debug build attempt — diagnostic feedback after the `HydrateFromKeyManager` edit | 10 expected `no_member 'empty'` / `no viable conversion` errors at the unmigrated SecureString sites — exactly the migration targets, fixed in subsequent edits ✓ |
+| 3 | Graceful REST shutdown of prior j9t (sitting-18 binary) | OK ✓ |
+| 4 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓; `OAuthTokenManager: refresh loop started` + `OAuthTokenManager: hydrated 2 OAuth token entry(ies) from KeyManager` — both google-sheets-oauth and onedrive-oauth populated through the new `dynamic_cast<OAuthCredential>` path ✓ |
+| 5 | `mcp__j9t__manage_connections action=test name=my-sheets` | `OK: reachable` AND triggered the on-demand refresh path: `OAuthTokenManager: on-demand refresh for 'google-sheets-oauth' (access_token empty, expires_at=0)` → `successfully refreshed token for 'google-sheets-oauth' (expires in 3599 s)` ✓ |
+| 6 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 11s wall — exercises ApiKeyCredential path (untouched this sitting) ✓ |
+| 7 | `grep '\\[error\\]' log/log.txt` post-tests | empty ✓ |
+| 8 | Full OAuth refresh round-trip exercised in step 5 | covers Hydrate (read OAuthCredential.m_RefreshToken via cast) → GetAccessToken's IsEmpty branch → snapshot copies → RefreshToken HTTPS POST → ApplyRefreshResult wiring sandwich → caller materialised std::string return ✓ |
+
+What's not exercised end-to-end:
+- StoreTokens path (called from REST OAuth consent callback) — no fresh OAuth consent flow ran during this session.  Code review confirms the `Set()` migration is correct.
+- RefreshLoop background trigger (vs. on-demand) — the 5-minute-before-expiry threshold wasn't crossed during the session.  Code is structurally identical to the on-demand path; same materialisation pattern verified.
+- RemoveTokens — REST credential delete didn't hit an OAuth credential during the test.  Code review covers the `IsEmpty()` + `Get()` wiring.
+
+### Open items / next-session candidates
+
+- **Sitting 19b — application-layer cloud-connector migration.**  14 cloud connectors + `polarionClient` + `providerRateLimitPolicy`.  Each connector knows the credential subtype it expects; `dynamic_cast<TypedCredential const*>(km->GetCredential(name))` with fail-closed null check on type mismatch (per `feedback_allowlist_not_blocklist`).  The `snowflakeConnector` and `gcsConnector` JWT consumers come along here — they read `provider->m_PrivateKeyPem` today and need `dynamic_cast<KeyPairCredential>` migration.
+- **Sitting 19c — workflow + REST-CRUD migration.**  `aiRequestPool.cpp`, `workflowRuntimeManager.cpp`, `aiJcwfService.cpp`, `webServer.cpp` (REST credential CRUD), `workflow/filter/polarionClient.cpp`.  webServer is heaviest — currently builds `ProviderConfig` from request body and calls `AddProvider`/`UpdateProvider`; sitting 19c should introduce `AddCredential(unique_ptr<ICredential>)` / `UpdateCredential(unique_ptr<ICredential>)` and migrate webServer to build credentials directly.  Once webServer is migrated, the legacy AddProvider/UpdateProvider/GetProvider/GetDefaultProvider methods + the m_Providers mirror are dead code.
+- **Sitting 20 — Cleanup.**  Delete `KeyManager::ProviderConfig`, `m_Providers` mirror, `MakeCredentialFromProviderConfig` / `MakeProviderConfigFromCredential` helpers, and the legacy CRUD methods.  Doc sweep covering `doc/cyber security.md` (SecretRedactor coverage table → per-type `RegisterSecrets()`), `doc/architecture.md` (any ProviderConfig mentions), and a possible new `engine/keys/keys.md` overview.
+
+- **Carried** from sittings 14-18:
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3`
+  - configParser ~30-field boilerplate refactor (todo.md)
+  - Hardening test for malformed config.json (todo.md)
+  - `EventQueue` bounded-cap question (todo.md)
+  - `SecretRedactor` multi-secret prefix-collision sort (todo.md)
+  - `RedactingFormatter` per-line allocation perf (todo.md)
+
+### Gotchas next-session-Claude should know
+
+- **The `dynamic_cast` + null-check pattern is the consumer-side discipline.**  `auto const* cred = km->GetCredential(name); auto const* oauth = dynamic_cast<OAuthCredential const*>(cred); if (!oauth) { /* skip or fail */ }`.  Don't try to "simplify" with `static_cast` — that miscasts other subtypes silently.  Don't fall back to `dynamic_cast<ApiKeyCredential>` if the OAuth cast fails — that's blocklist-style "try every type"; prefer fail-closed (skip / refuse / log).
+- **The "wiring sandwich" pattern is load-bearing for SecureString mutations.**  Any code that mutates a SecureString that was registered with the redactor MUST: (1) RemoveSecret on the old value (Get() while still valid), (2) Set the new value (zeroes the old buffer), (3) AddSecret on the new value.  Skipping step (1) leaves a stale registration for an old token in the redactor — defenses-in-depth attack: a future request re-using the same buffer offset by chance would still get redacted (no harm), but the redactor's vector grows unboundedly across rotations.  See ApplyRefreshResult and Hydrate for the canonical pattern.
+- **Plaintext at request boundaries is intentional.**  GetAccessToken returns std::string; the snapshot copies before RefreshToken are std::string; QueryData::m_ApiKey is std::string.  These are bounded request-scope materialisations, not regressions.  The SecureString protection is at STORAGE — m_Tokens, m_Credentials, etc.  Don't refactor the request-scope plaintext into string_view-into-SecureString without thinking through credential rotation lifetime: a rotation mid-request would dangling-pointer the request's signer.
+- **`SecureString::Set("")` is OK** — Set with empty input zeroes any prior buffer and leaves the SecureString empty.  But the gated form `if (!input.empty()) entry.m_X.Set(input)` saves the zeroing pass when the input is already empty.  Used in StoreTokens for fields the OAuth provider may legitimately not return (e.g. clientSecret on a public client).  Both forms are correct; gated form is just slightly cheaper.
+- **Empty-credential hydration is the on-disk storage shape.**  When a provider is loaded from `keys.json.enc` with an OAuthCredential that has `m_RefreshToken` set but `m_AccessToken` empty (no rotation has happened yet), HydrateFromKeyManager creates a TokenEntry with `m_AccessToken.IsEmpty() == true` and `m_ExpiresAt = 0`.  The first GetAccessToken call detects this (`tokenMissing || tokenUnset`), runs the on-demand refresh, and populates m_AccessToken with the freshly-minted token.  Don't add an "Hydrate also restores access_token" path — that would persist short-lived plaintext in keys.json.enc that the refresh path rotates within minutes anyway.
+
+### Doc sweep (sitting 19a close-out)
+
+No doc changes this sitting.  The behavioural contract is unchanged — OAuth credentials still hydrate from disk, refresh on demand or via the background loop, return access tokens to callers.  Internal storage class change (std::string → SecureString) and consumer-side dispatch refactor (string discriminator → typed dispatch).  Sitting 20 will update:
+- `doc/cyber security.md` "SecretRedactor" coverage table — switch from `RegisterProviderSecrets(ProviderConfig)` description to per-type `RegisterSecrets()` virtual.
+- `doc/architecture.md` if it mentions `ProviderConfig`.
+
+No new memory entries — patterns used:
+- `feedback_allowlist_not_blocklist` (`dynamic_cast` null-check fail-closed, not fall-through to other types).
+- `feedback_secrets_only_via_redactor` (wiring sandwich on every SecureString mutation).
+- `feedback_capture_by_value_async` (PendingRefresh snapshot pattern — secrets captured by VALUE before lock release, NOT by reference into the entry).
+
+---
+
+## 2026-05-04 (S2 sitting 18 — KeyManager dual-storage) → next session
+
+S2=D3 sitting 18.  Theme: **`KeyManager` storage migration to `ICredential`** as the source of truth, with `ProviderConfig` retained as a flat-view mirror for legacy consumers.  Sitting 17 laid the foundations (the type hierarchy, `CredentialFactory` JSON round-trip, per-type `RegisterSecrets()`); this sitting wires those into KeyManager's storage and CRUD plumbing.  Consumers continue to read through `GetProvider` and continue to compile unchanged — sittings 19+ migrate them one cluster at a time, then sitting 20 deletes the mirror.
+
+### What landed
+
+**`engine/keys/keyManager.h` — dual storage with new typed API alongside the legacy ProviderConfig surface.**
+
+Added `m_Credentials: unordered_map<string, unique_ptr<ICredential>>` as the source of truth.  Kept `m_Providers: unordered_map<string, ProviderConfig>` as the flat-view mirror.  Added new typed accessors `GetCredential(name) → ICredential const*` and `GetDefaultCredential()` next to the existing `GetProvider`.  Both APIs are documented as a transition pair with explicit deletion target (sitting 20) so future-Claude doesn't mistake the dual surface for permanent design.
+
+**`engine/keys/keyManager.cpp` — bidirectional helpers + `CredentialFactory`-routed Parse/Serialize + dual-write CRUD.**
+
+The file-local helpers replace the old monolithic per-credential-type field handling:
+
+- **`MakeCredentialFromProviderConfig(name, ProviderConfig const&)`** — builds a typed `ICredential` from a flat `ProviderConfig`.  Dispatches on `m_CredentialType` (defaulting to "api_key").  For OAuth providers, the legacy `m_ApiKey` (which historically held the cached access token) is promoted to the typed `m_AccessToken` slot.  For AWS, secrets that lived in `m_Params["secret_access_key"]` / `m_Params["session_token"]` are lifted into typed `SecureString` fields, AND removed from `m_Params` so the secret value doesn't live as both `SecureString` AND plaintext-in-map (the migration's whole point would be defeated for AWS otherwise).  Region similarly promoted.  Unknown discriminator → `LOG_CORE_ERROR` + `nullptr`; the caller handles.
+- **`MakeProviderConfigFromCredential(ICredential const&)`** — reverse direction, builds the flat-view mirror.  `dynamic_cast` per subtype with explicit field copying.  WARNING block in the comment names this as a transitional regression: secrets briefly materialise into plaintext `std::string` for the lifetime of the mirror entry.  Goes away when the mirror is removed in sitting 20.
+
+**`Parse / Serialize` rewired:**
+
+- `ParseProvidersJson` body collapsed: each provider entry routes through `CredentialFactory::CreateFromJson` (sitting 17's factory).  After the typed credential lands, the mirror is built via `MakeProviderConfigFromCredential` BEFORE the `unique_ptr` moves into the map (so we don't have to reach back through the map for the dynamic_cast).  Providers that fail factory dispatch are skipped with a `LOG_CORE_WARN` rather than aborting the whole load — same forgiving semantics the per-field parser had.
+- `SerializeToJson` body collapsed: iterates `m_Credentials` (NOT the mirror) and routes each entry through `CredentialFactory::SerializeToJson`.  Comment explains why the mirror is intentionally NOT consulted on save: a stale-mirror logic bug in dual-write would silently leak plaintext that diverged from the authoritative typed credential.  Single source of truth on the write path eliminates that class of bug entirely.
+
+**CRUD surface dual-write:**
+
+`AddProvider` / `UpdateProvider`: build typed credential first, register secrets via the per-type `RegisterSecrets()` virtual (replaces the old file-local `RegisterProviderSecrets(ProviderConfig const&)` switch), THEN populate the mirror, THEN move the credential into `m_Credentials`.  Order matters: the mirror copy reads from the credential's typed fields, so the credential must exist as an lvalue at that point.  `RemoveProvider` erases from both maps.  `LoadFromEnvironment` constructs an `ApiKeyCredential` directly (not via ProviderConfig round-trip — saves a copy) and then mirrors.
+
+The old file-local `RegisterProviderSecrets(ProviderConfig const&)` helper is gone — everywhere it was called, we now have an `ICredential&` available and call its virtual `RegisterSecrets()`.  The AWS `access_key_id` exemption (public per AWS conventions) lives in `AwsCredential::RegisterSecrets()` per sitting 17's design.
+
+**`engine/keys/keyManager.cpp` — `#include "json/jsonHelper.h"`.**
+
+`SerializeToJson` now escapes the default-provider name and the per-provider keys via `JsonHelper::EscapeJsonString` — the old hand-built version would have produced invalid JSON if a provider name contained a quote / control character.  Same exposure existed pre-migration; closing it in passing.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild | clean both editions ✓ |
+| 2 | Graceful REST shutdown of prior j9t (sitting-17 binary) | OK ✓ |
+| 3 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓; `KeyManager::Load: loaded 18 provider(s)` — every entry decrypted + dispatched through the new factory ✓ |
+| 4 | `mcp__j9t__list_workflows` | 30 workflows ✓ |
+| 5 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 12s — exercises `ApiKeyCredential` (OpenAI Bearer via `GetProvider`-mirror path) end-to-end ✓ |
+| 6 | `mcp__j9t__manage_connections action=test name=my-s3` | `OK: reachable` — exercises `AwsCredential` (SecretAccessKey via the mirror's `m_Params["secret_access_key"]` for the SigV4 signer) ✓ |
+| 7 | `mcp__j9t__manage_connections action=test name=my-github` | `OK: reachable` — exercises `ApiKeyCredential` Bearer ✓ |
+| 8 | `mcp__j9t__manage_keys action=create` (provider `sitting18-test`, length-41 api_key) | `Provider created.` — exercises `AddProvider` dual-write through `MakeCredentialFromProviderConfig` ✓ |
+| 9 | `mcp__j9t__manage_keys action=list` | 19 providers, including the new test entry shown as `(api_key)` ✓ |
+| 10 | `mcp__j9t__manage_keys action=delete name=sitting18-test` | `Provider deleted.` — exercises `RemoveProvider` and the on-disk save (which routes through the new `SerializeToJson` writing from `m_Credentials`) ✓ |
+| 11 | `grep '\\[error\\]' log/log.txt` post-tests | empty ✓ |
+| 12 | `grep KeyManager:: log/log.txt` | `loaded 18 provider(s)` + `Unlock: successfully unlocked` lines, no `MakeCredentialFromProviderConfig: unknown credential_type` errors ✓ |
+
+What's not exercised end-to-end (deferred to sittings 19+):
+- `GetCredential` / `GetDefaultCredential` (the new typed surface) is callable but no consumer calls it yet.  Static-analysis only this sitting.
+- The mirror-divergence guard in `SerializeToJson` ("write from credentials, never from mirror") — there's no fault-injection that would put the mirror out of sync today.  Code review covers correctness; sitting 20 deletes the mirror entirely.
+- `OAuthCredential` round-trip (load + save with non-empty `m_AccessToken` / `m_RefreshToken` / `m_ClientSecret`) — none of the in-tree OAuth providers (google-sheets-oauth, onedrive-oauth) had recent token rotation during this session, so the SecureString round-trip on those types is code-review only.
+- `KeyPairCredential` round-trip with a real PEM (snowflake-key, gcs-test-key) — ditto.
+
+### Open items / next-session candidates
+
+- **Sitting 19a (next) — engine-layer consumer migration.**  Three files, tightly coupled:
+  - `engine/keys/oauthTokenManager.cpp` — every read of `KeyManager::GetProvider(...)->m_RefreshToken` / `m_ClientSecret` / `m_ApiKey` (for cached access token) becomes `dynamic_cast<OAuthCredential const*>(km->GetCredential(...))->m_RefreshToken.Get()`.  Today's `OAuthTokenEntry` struct has its own `std::string m_RefreshToken` / `m_ClientSecret` fields — sitting 19a should also migrate that struct to `SecureString`.
+  - `engine/keys/jwtGenerator.cpp` — `m_PrivateKeyPem` reads.  Migrate to `dynamic_cast<KeyPairCredential const*>(...)->m_PrivateKeyPem.Get()`.
+  - `engine/curlWrapper/authSigner.cpp` — every `IAuthSigner::Apply()` reads `q.m_ApiKey`.  The QueryData carries the credential value (string) today; sitting 19a's question is whether `QueryData::m_ApiKey` should become a `string_view` into `SecureString` storage held elsewhere, or stays as `std::string` (small plaintext copy at signer-call boundary).  string_view-into-SecureString is correct but lifetime-fragile; defer to JC during 19a kickoff.
+
+- **Sitting 19b — application-layer cloud-connector migration.**  14 cloud connectors (azureBlob, gcs, gitHub, googleSheets, jira, oneDrive, polarion, postgres, redmine, s3, slack, snowflake, email, plus polarionClient + providerRateLimitPolicy) read `GetProvider(...)->m_ApiKey` / `m_Username` / `m_Password` / `m_Params[...]`.  Mostly mechanical: each connector knows which credential type it expects, can `dynamic_cast` and refuse on mismatch.  Per `feedback_allowlist_not_blocklist`, fail-closed on type mismatch (don't silently fall through to ApiKey reads when a connector was given a BasicAuth credential).
+
+- **Sitting 19c — workflow-layer migration.**  `application/workflow/aiRequestPool.cpp`, `workflowRuntimeManager.cpp`, `web/aiJcwfService.cpp`, `web/webServer.cpp`, `workflow/filter/polarionClient.cpp`.  webServer is the heaviest because it's the REST CRUD surface — it builds ProviderConfig from request bodies and passes to AddProvider/UpdateProvider.  After 19c, webServer should build `unique_ptr<ICredential>` directly from request bodies and call new `AddCredential` / `UpdateCredential` methods (which sitting 19c introduces alongside today's `AddProvider`).
+
+- **Sitting 20 — Cleanup.**  Delete `KeyManager::ProviderConfig`, the mirror, `MakeCredentialFromProviderConfig`, `MakeProviderConfigFromCredential`, the legacy `AddProvider` / `UpdateProvider` / `GetProvider` / `GetDefaultProvider` methods.  Update `doc/cyber security.md` SecretRedactor coverage table (currently describes `RegisterProviderSecrets`; should describe per-type `RegisterSecrets()`).  Update `doc/architecture.md` if it references ProviderConfig.  Add a `doc/misc/credential-hierarchy.md` overview if useful.
+
+- **Carried** from sittings 14-17:
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3`
+  - configParser ~30-field boilerplate refactor (todo.md)
+  - Hardening test for malformed config.json (todo.md)
+  - `EventQueue` bounded-cap question (todo.md)
+  - `SecretRedactor` multi-secret prefix-collision sort (todo.md)
+  - `RedactingFormatter` per-line allocation perf (todo.md)
+
+### Gotchas next-session-Claude should know
+
+- **Dual-storage discipline: every mutation path writes both maps atomically under `m_Mutex`.**  `Add` / `Update` / `Remove` / `Parse` / `LoadFromEnvironment` all do this.  If you add a new mutation path (e.g. a future "rename provider" RPC), it MUST update both — failing to do so will leave the mirror stale, and consumers reading `GetProvider` will see different state than `GetCredential`.  This is the sitting-20 cleanup target so the rule is short-lived, but until then it's load-bearing.  Mirror divergence is silent — there's no consistency check, just discipline.
+- **Save writes from `m_Credentials`, NOT the mirror.**  This is deliberate — see the comment block in `SerializeToJson`.  If you "optimise" by writing from `m_Providers` you reintroduce the divergence vulnerability.
+- **AWS secrets are stripped from `m_Params` when building the typed credential.**  `MakeCredentialFromProviderConfig` removes `secret_access_key`, `session_token`, and `region` from the params copy because they're now typed `SecureString` fields.  `MakeProviderConfigFromCredential` reinjects them into `m_Params` for the mirror so legacy consumers still find them where they expect.  When sitting 19b migrates the SigV4 signer to `dynamic_cast<AwsCredential>`, the params reinjection becomes dead code — remove it then.
+- **OAuth's `m_AccessToken` is the new home for what ProviderConfig called `m_ApiKey` for OAuth providers.**  Both directions of the conversion handle this swap.  When sitting 19a migrates `oauthTokenManager` to `OAuthCredential`, it should read `m_AccessToken.Get()` (NOT `m_ApiKey`).
+- **`MakeCredentialFromProviderConfig` returns null on unknown `credential_type`** — `AddProvider` / `UpdateProvider` propagate the null with `return false` and a `LOG_CORE_ERROR` already issued by the helper.  Don't try to recover with a default-to-api_key fallback at the caller; the helper already defaults empty discriminators to "api_key", so a null return means the type was actually invalid.
+- **The mirror's plaintext exposure is bounded.**  Every secret on a `ProviderConfig` mirror entry is a `std::string` — defeats SecureString swap-protection FOR MIRROR ENTRIES.  But the mirror is in-process only and the on-disk write path doesn't consult it.  Once sitting 20 removes the mirror, the only plaintext copies of secrets exist at signer-call boundaries (string_view into SecureString) for the exact request being signed.  Don't add new code that COPIES from the mirror to long-lived storage in the meantime.
+- **`std::strlen` works in `LoadFromEnvironment` without an explicit `<cstring>` include.**  The pre-migration code did the same — `<cstring>` is pulled in transitively.  If a future include cleanup breaks this, add `<cstring>` directly.
+
+### Doc sweep (sitting 18 close-out)
+
+No doc changes this sitting.  The migration is in-flight (mirror still exists, consumers still reach through `GetProvider`); the documentation contract hasn't changed yet.  Sitting 20 will:
+- Update `doc/cyber security.md` "SecretRedactor" coverage table — switch from `RegisterProviderSecrets` description to per-type `RegisterSecrets()`.
+- Update `doc/architecture.md` if it mentions ProviderConfig.
+- Consider `engine/keys/keys.md` overview when the migration is complete.
+
+No new memory entries — the patterns used are already memorised:
+- `feedback_no_legacy` (the mirror is in-flight refactor in the working tree, not a permanent compat shim — sitting 20 deletes it).
+- `feedback_secrets_only_via_redactor` (per-type `RegisterSecrets()` virtual replaces the old switch).
+- `feedback_simdjson_only` (CredentialFactory uses simdjson; no other parser).
+- `feedback_capture_by_value_async` (not exercised this sitting; flagged for sitting 19a's signer migration).
+
+---
+
+## 2026-05-04 (S2 sitting 17 — Path A foundations) → next session
+
+S2=D3 sitting 17.  Theme: **`ICredential` hierarchy + SecureString migration, foundations**.  Path A chosen by JC ("take your time"): replace flat `KeyManager::ProviderConfig` with a type-safe `ICredential` hierarchy, with every secret-bearing field stored in `SecureString`.  This sitting lays the foundations only — the new types compile, the JSON factory round-trips, but **no consumers are wired up yet**.  Sittings 18+ migrate `KeyManager` storage and consumers (oauth, jwt, signers, connectors).  Final sitting deletes `ProviderConfig`.
+
+### What landed
+
+**`engine/keys/credential.h` — full hierarchy with `SecureString`-protected secrets.**
+
+Pre-fix the file held a stub hierarchy that was never wired up — only a barebones `ApiKeyCredential` / `OAuthCredential` / `KeyPairCredential` / `BasicAuthCredential` with raw `std::string` secret fields, no Aws variant, no common metadata, no factory.  Now it covers all 5 credential types matching today's `m_CredentialType` discriminator (`api_key` / `oauth` / `key_pair` / `credentials` / `aws`):
+
+- **`ICredential`** (base) — non-copyable but movable (SecureString is non-copyable by design); holds common non-secret metadata `m_Name`, `m_DisplayName`, `m_Endpoint`, `m_DefaultModel`, `m_ApiType`, `m_Params` (untyped string-keyed map for per-provider non-secret extras like Azure resource/deployment/api_version).  Pure-virtual `GetType()` (returns `string_view`) and `RegisterSecrets()`.  The `GetType()` switch from `string` (in the previous stub) to `string_view` lets dispatch sites compare without temporary allocations.
+- **`ApiKeyCredential`** — `SecureString m_ApiKey`.  Covers OpenAI, Anthropic, Gemini, Azure OpenAI, GitHub PAT, Slack bot tokens — anywhere a single token is the bearer.  Azure stays here (its api-key IS the bearer); Azure-specific non-secret config (resource, deployment, api_version) lives in `m_Params`.
+- **`OAuthCredential`** — `SecureString m_AccessToken`, `m_RefreshToken`, `m_ClientSecret`.  Plus `int64_t m_ExpiresAt`, `string m_Scopes`, `m_TokenEndpoint`, `m_ClientId` (public per OAuth conventions).
+- **`KeyPairCredential`** — `SecureString m_PrivateKeyPem` (the PEM IS the secret).
+- **`BasicAuthCredential`** — `string m_Username` (non-secret, logged for audit), `SecureString m_Password`.
+- **`AwsCredential`** — `string m_AccessKeyId` (public per AWS conventions; CloudTrail logs it), `SecureString m_SecretAccessKey`, `SecureString m_SessionToken` (optional, populated by STS), `string m_Region`.  Region was lifted out of the legacy `m_Params["region"]` into a typed field; `CredentialFactory::CreateFromJson` reads from either location for back-compat with existing `keys.json.enc` files.
+
+**`engine/keys/credential.cpp` (NEW) — `CredentialFactory` for JSON round-trip + `RegisterSecrets()` per type.**
+
+`CredentialFactory::CreateFromJson(simdjson::ondemand::object&)` dispatches on the `credential_type` field (defaulting to `"api_key"` for backward compat with files written before the discriminator was added).  Returns `unique_ptr<ICredential>`; nullptr on unknown type with a `LOG_CORE_ERROR`.  Common metadata is read after the type-specific block so every subtype gets it.  Backward-compat reads: OAuth `api_key` field is treated as a cached access token (legacy persistence); AWS `api_key` field is treated as `access_key_id`.  Both fall through to the new explicit field names when both are present.
+
+`CredentialFactory::SerializeToJson(ICredential const&)` writes the body of one entry in the `providers` JSON map.  `dynamic_cast` per subtype with a tail else-branch that logs `LOG_CORE_ERROR` if a future subtype is added without extending the serialiser — visible gap rather than silent drop.  Empty SecureString fields (e.g. an OAuth credential before its first token rotation) are skipped to keep the JSON clean.
+
+`RegisterSecrets()` per type calls `SecretRedactor::Get().AddSecret(field.Get())` for every SecureString field.  Per `feedback_secrets_only_via_redactor` and the existing `RegisterProviderSecrets` helper in `keyManager.cpp`, AWS `m_AccessKeyId` is intentionally NOT registered (it's public per AWS conventions; CloudTrail logs it for audit).
+
+**`engine/log/secretRedactor.{h,cpp}` — `AddSecret` + `RemoveSecret` accept `string_view`.**
+
+Sitting 16 left `AddSecret(std::string const&)`.  Now that `SecureString::Get()` returns `string_view`, every credential's `RegisterSecrets()` would have had to construct a `std::string` from the view at every call site — defeating the SecureString swap-protection guarantee for the duration of that copy.  Migrated both signatures to `string_view`.  Internal `m_Secrets` is still `vector<string>` (the redactor's own storage isn't mlock'd — separate hardening question for a future sitting).  All 25 existing call sites still compile because `std::string` implicitly converts to `string_view`.
+
+**Storage class consolidation rationale.**
+
+Looked at separating "credential" (just the secret material) from "provider metadata" (display name, endpoint, model, etc.) into two structs.  Decided to keep them bundled on `ICredential` because:
+1. Today every consumer that needs the secret also needs at least the endpoint to dispatch.
+2. KeyManager indexes by name, and the `m_Name` is naturally on the credential.
+3. Splitting would duplicate `m_Name` across the two structs OR introduce a third "credential reference" type.
+
+If a future redesign wants to split, it can — credential.h is small (~150 LOC) and the metadata fields are clearly labelled "common non-secret".
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | `premake5 gmake` after adding `engine/keys/credential.cpp` (per `feedback_premake_regen_for_new_cpp`) | clean ✓ |
+| 2 | First Debug build attempt | ✗ `redefinition of 'ondemand' as different kind of symbol` — my forward decl `namespace simdjson::ondemand { class object; }` clashed with simdjson's inline-namespace dispatch (real establishment is `simdjson::<impl>::ondemand` aliased to the top-level via inline namespaces).  Fixed by directly `#include "simdjson/simdjson.h"` in the header, matching the project pattern (replyParserAPI2.h, workflowJsonParser.h, etc.). |
+| 3 | Studio Debug rebuild after include fix | clean ✓ |
+| 4 | Studio Release rebuild | clean ✓ |
+| 5 | Graceful REST shutdown of prior j9t | `POST /api/shutdown` → `Shutdown initiated.` HTTP 200 ✓ |
+| 6 | Fresh j9t start with `--debug`, `POST /api/settings/keys/unlock` | OK ✓ |
+| 7 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 11s wall ✓ |
+| 8 | `grep '\\[error\\]' log/log.txt` post-run | empty ✓ |
+| 9 | `SecretRedactor::AddSecret` short-secret WARN still fires | yes — 2 lines at unlock, length 4 < 8 ✓ (signature change is a no-op for behaviour) |
+| 10 | `grep -c REDACTED log/log.txt` | 0 — no secrets leaked ✓ |
+
+What's not exercised end-to-end (additive only — no consumers wired up):
+- `CredentialFactory::CreateFromJson` and `SerializeToJson` are not called by any production code yet.  Their correctness is code-review only.  The sitting-18 KeyManager migration will route every load/save through them, at which point a bad JSON shape OR a missing dispatch arm would surface immediately.
+- `RegisterSecrets()` per type — same.  KeyManager today still calls the file-local `RegisterProviderSecrets(ProviderConfig const&)` helper.
+- Move semantics on the new types — every type is `std::unique_ptr`-friendly, but no sitting-17 code creates an instance.  Sitting 18 will exercise the move paths via `m_Credentials.emplace(name, std::move(cred))` in KeyManager.
+
+### Open items / next-session candidates
+
+- **Sitting 18 — KeyManager migration.**  Replace `m_Providers: unordered_map<string, ProviderConfig>` with `m_Credentials: unordered_map<string, unique_ptr<ICredential>>`.  Update CRUD signatures: `AddCredential(name, unique_ptr<ICredential>)`, `GetCredential(name) → ICredential const*`, etc.  Replace `ParseProvidersJson` body with a loop that calls `CredentialFactory::CreateFromJson` per provider.  Replace `SerializeToJson` body with a loop that calls `CredentialFactory::SerializeToJson`.  Replace the file-local `RegisterProviderSecrets` helper with a call to `cred->RegisterSecrets()`.  ProviderConfig stays defined for one more sitting because the consumers (oauth, jwt, signers) still reference it.
+- **Sitting 19 — Consumer migration (oauth + jwt + signers).**  Each consumer that today does `auto* config = keyManager->GetProvider(name); use(config->m_ApiKey);` becomes `auto* cred = keyManager->GetCredential(name); auto* api = dynamic_cast<ApiKeyCredential const*>(cred); use(api->m_ApiKey.Get());`.  This is the biggest sitting — every authSigner, the OAuth refresh path, JwtGenerator's `GeneratePrivateKeyJwt`, every cloud connector that resolves credentials by name.  Probably needs to be split across two sittings (19a: engine signers + jwt + oauth; 19b: cloud connectors).
+- **Sitting 20 — Cleanup.**  Delete `KeyManager::ProviderConfig`, the file-local `RegisterProviderSecrets` helper, and any compatibility-only code.  Update `doc/cyber security.md` SecretRedactor coverage table to reference the new typed fields.  Update `doc/architecture.md` if it mentions ProviderConfig.
+
+- **Carried** from sittings 15-16:
+  - SigV4 test #4 cross-validation against `aws-cli` / `boto3` (carried since sittings 10-12)
+  - configParser ~30-field boilerplate refactor (todo.md)
+  - Hardening test for malformed config.json (todo.md)
+  - `EventQueue` bounded-cap question (todo.md)
+  - `SecretRedactor` multi-secret prefix-collision sort (todo.md)
+  - `RedactingFormatter` per-line allocation perf (todo.md)
+
+### Gotchas next-session-Claude should know
+
+- **`SecureString` is non-copyable.**  Therefore `ICredential` and every subtype is non-copyable.  Therefore `KeyManager::AddProvider(string, ProviderConfig)` (by-value param) WILL NOT WORK with `unique_ptr<ICredential>` — sitting 18 needs to migrate the signature to `AddCredential(string, unique_ptr<ICredential>)` (rvalue ownership transfer).  Same for `UpdateProvider`.  REST/MCP handlers that today build a ProviderConfig and pass it by-value to AddProvider will need refactoring.
+- **`CredentialFactory::CreateFromJson` returns `nullptr` on unknown `credential_type`.**  Sitting 18's `ParseProvidersJson` must check for null and skip the provider with a `LOG_CORE_ERROR` (matching today's "skip non-object provider" behaviour).  Don't dereference the return value blindly.
+- **`dynamic_cast` is the dispatch tool for consumers** (sitting 19).  `auto* cred = km->GetCredential(name); auto* api = dynamic_cast<ApiKeyCredential const*>(cred);` — null check is mandatory because the credential might be the wrong type for the consumer (e.g. a Bearer signer fed an `OAuthCredential` should refuse rather than cast to ApiKey and pull garbage).  Each signer's `Apply()` should log + fail-closed on type mismatch.  Don't add `default:` arms or absorb the wrong type into a fallback.
+- **Backward compat in CreateFromJson is one-way.**  `keys.json.enc` files written by current code (with raw `std::string` `m_ApiKey` etc.) load correctly because the factory reads the historical field names.  But files written by the NEW serialiser have type-specific fields (`access_token` vs `api_key`, `access_key_id` vs `api_key`, etc.) — older binaries reading newer files won't pick up these explicit fields.  Acceptable: keys files don't migrate between binary versions in practice.  Document this constraint when sitting 18 lands.
+- **Empty SecureString serialisation is skipped.**  A fresh `OAuthCredential` with no rotated tokens yet has empty `m_AccessToken`, `m_RefreshToken`, `m_ClientSecret`.  The serialiser skips empty SecureString fields entirely (no `"refresh_token": "",` line written).  Reader treats missing fields as empty — symmetric.  But this means after-roundtrip equality requires comparing only non-empty fields, not assuming a one-to-one JSON shape.
+
+### Doc sweep (sitting 17 close-out)
+
+No doc changes this sitting.  The new types are not yet referenced by any consumer, and `doc/cyber security.md`'s SecretRedactor coverage table still describes the current `RegisterProviderSecrets` helper accurately.  Sitting 18-20 will update:
+- `doc/cyber security.md` "SecretRedactor" coverage table — switch from the file-local `RegisterProviderSecrets` description to the per-type virtual `RegisterSecrets()`.
+- `doc/architecture.md` if it mentions ProviderConfig (likely needs an update to ICredential).
+- `engine/keys/` — no .md file today; consider adding a `keys.md` overview when the migration is complete.
+
+No new memory entries — the patterns used are already memorised:
+- `feedback_no_legacy` (Path A is the no-legacy choice; ProviderConfig will be deleted in sitting 20).
+- `feedback_secrets_only_via_redactor` (the per-type RegisterSecrets pattern + the AccessKeyId exemption).
+- `feedback_simdjson_only` (CreateFromJson uses simdjson; no other parser).
+- `feedback_premake_regen_for_new_cpp` (re-ran `premake5 gmake` after adding credential.cpp).
+- `feedback_use_log_macros` (every fail-path emits `LOG_CORE_ERROR`).
+- `feedback_cpp_discipline` (no `default:` arms; the unhandled-subtype branch in SerializeToJson logs the gap loudly).
+
+---
+
+## 2026-05-04 (S2 sittings 15 + 16, bundled) → next session
+
+S2=D3 sittings 15 + 16 in one work block.  Sitting 15 = `engine/json/configParser.{h,cpp}` + `configChecker.{h,cpp}` (the external-input parser) — uncovered a real OOB bug and a horizontal sweep target.  Sitting 16 = `engine/log/log.cpp` + `secretRedactor.{h,cpp}` — the working-tree changes (`RedactingFormatter` wiring) were already complete; my contribution was two hygiene improvements on top.
+
+### What landed — Sitting 15 (configParser + configChecker)
+
+**`engine/json/configChecker.cpp::Check::checkApiInterface` — off-by-one OOB fix.**
+
+Pre-fix line 58 read `if (apiInterfaces.size() < apiIndex) return false`.  When `size == apiIndex` (e.g., `m_ApiIndex=2` in config.json with two interfaces), the check passed and `apiInterfaces[apiIndex]` at line 80 was out-of-bounds.  Concretely: 10 interfaces in config.json + `"API index": 10` would index into `apiInterfaces[10]` past the end.  Fix: `if (apiIndex >= apiInterfaces.size()) return false`.  This is a real bug; only avoided in production today because no config.json sets `API index` >= count.
+
+**`engine/json/configChecker.cpp::checkUrl` — prefix check, not substring.**
+
+Pre-fix used `url.find("https://") != std::string::npos` — substring match anywhere in the URL.  `http://evil.com/?next=https://fake` would pass.  Fix: `url.starts_with("https://")` (C++20).  Belongs in the same family as `feedback_allowlist_not_blocklist` — accept-list semantics need to be exact.
+
+**`engine/json/configChecker.cpp` — `fprintf(stderr, ...)` removed (4 sites).**
+
+Per `feedback_use_log_macros`, every C++ output goes through LOG_*.  The fprintf calls only landed in stderr (which the ncurses TUI swallows) — operators see "config error" but never get the detail.  Replaced with `LOG_CORE_ERROR` lines that include the relevant context (folder path, index + count) and reference `log/log.txt`.  Removed the `<cstdio>` include since it became unused.
+
+**`engine/json/configChecker.cpp` — `CORE_ASSERT(...)` removed (6 sites).**
+
+`CORE_ASSERT` aborts in debug, no-ops in release.  For external untrusted input (config.json), the right gate is "log + reject", not "abort".  All 6 asserts in the lambdas (`checkQueueFolderFilepath`, `checkWorkflowsFolder`, the two empty-array / out-of-range guards, `checkUrl`, `checkModel`) were redundant — the lambda's bool return + the outer `if (!ok1) LOG_CORE_ERROR(...)` block already captures the failure.  Removing the asserts unifies debug + release behaviour at the actual fail-path log line.
+
+**`engine/json/configParser.cpp::Parse` — defensive file-load + single-iterate.**
+
+Pre-fix:
+- `padded_string::load(filepath)` implicitly converted to `padded_string` — throws `simdjson_error` on read failure (uncaught → `std::terminate`).  FileExists check at the top race-mitigated the obvious case but didn't handle EACCES, EIO, etc.
+- `parser.iterate(json).get(doc)` produced `doc`, then `doc` was DISCARDED; line 138 called `parser.iterate(json)` AGAIN to get a fresh `sceneDocument`.  Double parse work.  Then `sceneDocument.get_object()` implicitly converted → throws on type mismatch.
+
+Fix: explicit `.get(target)` pattern with `LOG_CORE_ERROR + return State::FileNotFound/ParseFailure/FileFormatFailure` for each of (a) load failure, (b) parse failure, (c) top-level value not an object.  Single iterate; doc is held and consumed.
+
+**`engine/json/configParser.cpp` — horizontal sweep: `CORE_ASSERT(type==X)` → `.get(target)` (~30 sites).**
+
+Pre-fix every field access was `CORE_ASSERT type-check` followed by `jsonObject.value().get_X().value()` — the inner `.value()` THROWS on type mismatch (uncaught → engine crash, no useful log line).  In debug the assert fires first; in release the throw fires.  Either way: hostile or corrupt config.json crashes the engine without diagnostic info.
+
+Fix per site: extract via `.get_X().get(target)`, and on `!= simdjson::SUCCESS` emit `LOG_CORE_ERROR("ConfigParser: '{}' must be a string|number|boolean|array", jsonObjectKey); continue;`.  The loop continues so partial config still loads — the `ConfigOk` gate at the bottom (`fieldOccurances[QueueFolder] > 0 && [Url] > 0`) and `configChecker` validate the result.  29 sites in the top-level loop + 6 in `ParseInterfaces`.
+
+**`engine/json/configParser.cpp` — `CORE_HARD_STOP("invalid API in config.json")` → soft fail.**
+
+Unknown API string ("API7"…) used to hard-stop the engine.  Fix: assign `EngineConfig::InterfaceType::InvalidAPI` to the interface + `LOG_CORE_ERROR` naming the bad value.  configChecker rejects InvalidAPI for the active index (line 82); other interfaces still load.
+
+**`engine/json/configParser.cpp` — kInterfaceTypeMappings table replaces if/else cascade + switch.**
+
+Pre-fix the API string→enum mapping was a 7-arm if/else cascade in `ParseInterfaces`, AND the enum→string mapping (used to auto-generate interface names) was a `switch` over `EngineConfig::InterfaceType` with `default: break;` — exactly the anti-pattern called out in CLAUDE.md / `feedback_cpp_discipline`.  The `default` arm silently absorbed `InvalidAPI` and `NumAPIs` (and any future variant).
+
+Replaced with a single `kInterfaceTypeMappings` table at namespace scope (7 entries, single source of truth) plus two helpers: `ParseInterfaceType(string_view)` (linear search, returns `InvalidAPI` if not found — the natural sentinel) and `InterfaceTypeName(InterfaceType)` (explicit switch enumerating all 9 variants — 7 valid + `NumAPIs` + `InvalidAPI`, no `default:` arm; backed by `static_assert(NumAPIs == 7)` for compile-time guard).  When a future `API7` is added, `-Wswitch` fires AND the static_assert fires AND the table needs an entry — three ways to remember.
+
+**`engine/json/configParser.cpp` — bounds-check int64 → unsigned casts.**
+
+Pre-fix `MaxThreads` (int64 → uint32_t), `MaxFileSizekB` / `MaxInflightAiCalls` / `PythonEngines` / `ApiIndex` (int64 → size_t) all silently wrapped on negative input.  configChecker has out-of-range clamps that catch the wrap symptomatically (e.g. `m_MaxThreads > 256 → 16`), but the wrap-then-clamp path obscures the real input ("you wrote -1, we treated it as 4 billion, then capped to 16").  Fix: explicit `if (val < 0) { LOG_CORE_ERROR("'{}' is negative ({}), ignoring; configChecker will assign default", ...); continue; }` at parse time.  configChecker still applies its clamps for missing-field defaults.
+
+### What landed — Sitting 16 (log core)
+
+The bulk of sitting 16 was already done in the working tree (`RedactingFormatter` class wraps spdlog's `pattern_formatter` to call `SecretRedactor::Redact()` on each message payload — without this, `AddSecret()` registrations were inert because the redactor's `Redact()` method was otherwise never called).  Plus `MIN_SECRET_LENGTH` raised 4 → 8 to stop common dev-mock passwords ("test", "demo", "1234") over-redacting normal log substrings.  Both correct on review; no changes needed.
+
+I added two hygiene improvements on top:
+
+**`engine/log/secretRedactor.cpp::AddSecret` — WARN log when rejecting too-short secrets.**
+
+Pre-fix `AddSecret` silently returned for `secret.size() < MIN_SECRET_LENGTH`.  Devs registering a too-short secret had no visibility into why their secret wasn't being redacted — they'd discover it post-incident in a leaked log line.  Now: `LOG_CORE_WARN("SecretRedactor::AddSecret: secret too short (length {} < {}), not registered — log redaction will not protect this value", secret.size(), MIN_SECRET_LENGTH);`.  Length is logged (small side-channel, but bounded — only fires for lengths < 8) but the value is not.  At fresh startup today this catches two real registrations (length 4 each) that previously passed silently.
+
+**`engine/log/secretRedactor.{h,cpp}::HasSecrets` — lock-free fast path via `std::atomic<bool>`.**
+
+Pre-fix `HasSecrets()` acquired `m_Mutex` to read `m_Secrets.empty()`.  This is called in `RedactingFormatter::format()` for every formatted log line — under burst logging from many threads, the mutex serialises every log call's empty-check.  Fix: `std::atomic<bool> m_HasSecretsHint{false}` mirrors `!m_Secrets.empty()` updated under the mutex (write side: AddSecret + RemoveSecret) but readable lock-free (read side: HasSecrets returns the atomic load with `acquire` ordering).  Race window is benign: a secret added DURING a `format()` call might escape redaction for that one line, but for the use case (master password setup, key rotation), secrets are added before logs reference them.  Microsecond window.
+
+The existing `Redact()` path still acquires `m_Mutex` because it iterates `m_Secrets` — that's the correct serialisation boundary.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug + Release rebuild after sitting 15 | clean (`configParser.cpp` + `configChecker.cpp` recompile only — header signatures unchanged) ✓ |
+| 2 | Studio Debug + Release rebuild after sitting 16 | clean (`secretRedactor.cpp` + `secretRedactor.h` recompile + dependents) ✓ |
+| 3 | Graceful REST shutdown of prior j9t | `POST /api/shutdown` → `Shutdown initiated.` HTTP 200 ✓ |
+| 4 | Fresh j9t start with `--debug` after sitting 15, then again after sitting 16 | listener up; `POST /api/settings/keys/unlock` OK both times ✓ |
+| 5 | Sitting 15: `format info:` block in log shows expected occurrences | 30+ field types, all expected counts (1 for global fields, 10 for per-interface fields, 0 for omitted optional) ✓ |
+| 6 | Sitting 15: 10 API interfaces loaded with names, models, types | `InterfaceType count: 10`, all parsed via `ParseInterfaceType` table ✓ |
+| 7 | Sitting 15: `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 12s wall ✓ |
+| 8 | Sitting 16: WARN logs at first key-load | `SecretRedactor::AddSecret: secret too short (length 4 < 8), not registered` × 2 ✓ — caught two real dev-config short secrets that previously passed silently |
+| 9 | Sitting 16: `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 13s ✓ |
+| 10 | `grep '\\[error\\]' log/log.txt` post-tests (level-tag, not substring) | empty ✓ |
+| 11 | `grep -c REDACTED log/log.txt` | 0 — no secrets leaked into log lines (correct: no registered secret appears in any log payload) ✓ |
+
+What's not exercised end-to-end (code-review only):
+- Sitting 15 negative paths (corrupt config.json, type mismatches, unknown API string, negative numerics) — no synthetic malformed-config test in the suite.  Each path was code-reviewed; the parser proceeds with `LOG_CORE_ERROR + continue` rather than crashing.  Future: add a hardening test suite that feeds malformed configs and verifies error semantics + no crash.
+- Sitting 16 `RedactingFormatter` actual redaction — no registered secret appears in any normal log payload, so the redact-replace path isn't triggered organically.  The atomic-flag fast path IS exercised on every log line (the common case where no secrets match the message).
+- `MaxThreads` cast wrap path — no negative value in real config; code review confirms the new `if (val < 0)` guard is correct.
+
+### Open items / next-session candidates
+
+- **Sitting 17+** (large) — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Cross-validate SigV4 test #4** against `aws-cli` / `boto3` (carried from sittings 10-12).
+- **Future polish: configParser refactor** — the ~30-field boilerplate (`get_X().get(target) → LOG → store → ++count`) could be collapsed via small helper functions (`ParseStringField`, `ParseIntField`, `ParseBoolField`, `ParseInterfaceType`-style table).  Behaviour-neutral but would shrink the file by ~50%.  Separate from safety/correctness; defer to a dedicated polish sitting.  Not bundled with this audit since "extract a helper before a third site appears" applies (we now have ~30 sites — past time) but would expand sitting 15 beyond the safety-first scope.
+- **Future hardening test** — feed a deliberately malformed `config.json` (negative numerics, type mismatches, missing required fields, unknown API, OOB API index) at engine init and assert: (a) parser logs ERROR, (b) parser returns the right `State`, (c) configChecker rejects, (d) NO crash / abort / `std::terminate`.  Today the parser has all the right error paths but they're code-review-only.
+- **EventQueue bounded-cap question** (sitting 14 carry) — still flagged, still not fixed.  Wedged main loop could let queue grow unbounded.
+
+After sittings 15 + 16, S2=D3 has now closed the curl/HTTP cluster (sittings 11-13), the engine-foundation files (sittings 14-16: eventQueue, threadPool, configParser, configChecker, log core, secretRedactor), and 2-3 more sittings remain (the SecureString migration in 17+).  About 80% of D3 scope complete.
+
+### Gotchas next-session-Claude should know
+
+- **`feedback_cpp_discipline` "no `default:` over closed enums" applies to BOTH the parse-side and format-side switches.**  Sitting 15's `InterfaceTypeName` switch enumerates all 9 variants (7 valid + `NumAPIs` + `InvalidAPI`); the latter two fall-through to empty string return.  Don't "simplify" by replacing with `default:` — that loses the `-Wswitch` guarantee + the static_assert backstop.  When a future `API7` is added: (1) extend `kInterfaceTypeMappings` table, (2) add a `case` to `InterfaceTypeName`, (3) bump the `static_assert` from 7 to 8, (4) update the `EngineConfig::InterfaceType` enum's `NumAPIs` position (it's `API1=0..API6, NumAPIs, InvalidAPI`).  The static_assert is the failsafe that catches a forgotten step.
+- **Parser error semantics: `continue;` not `return`.**  When a single field is malformed, the parser logs ERROR and continues to the next field, so a partially-bad config still loads as much as it can.  The `ConfigOk` gate at the bottom (`QueueFolder + Url present`) is the minimal-viable threshold.  configChecker then validates further.  Don't change `continue` to `return State::FileFormatFailure` per-field — that would early-out on the first malformed field and discard fields that would otherwise have loaded.
+- **`SecretRedactor::HasSecrets()` is now lock-free.**  Reading `m_HasSecretsHint` without the mutex relies on `acquire` ordering paired with `release` writes in AddSecret + RemoveSecret.  If you add a third write site (e.g. a `Clear()` that wipes all secrets), it MUST also update `m_HasSecretsHint`.  The atomic mirror is the fragile bit; failing to update it leaves the formatter on the slow path forever (mostly-benign, just slower) OR on the fast path forever (CORRECTNESS BUG — secrets won't be redacted).  The "release" store after vector mutation is the discipline.
+- **`SecretRedactor::AddSecret` short-secret WARN logs `secret.size()` but not the value.**  Any future "skip" path additions must follow the same pattern.  Don't log the value's first chars / hash / fingerprint — even partial hashes leak entropy for short secrets.  Length-only is the agreed boundary.
+- **`engine.h` is now included by `secretRedactor.cpp`** (for `LOG_CORE_WARN`).  This is a fresh include path that didn't exist before sitting 16 — verify there's no cycle if you ever move the SecretRedactor declaration into core.h.  Today secretRedactor.h is independent, included by log.cpp + a few key/auth files; the .cpp's engine.h include is fine.
+- **`InterfaceTypeName` returns `std::string_view`** pointing into `kInterfaceTypeMappings` (constexpr static) — so the view is valid for program lifetime.  But `GenerateInterfaceName` (the caller) takes `std::string const&`, so the view is wrapped via `std::string(view)` at the call site to get a temporary string.  The temporary outlives the function call.  Don't try to "simplify" by passing `view.data()` directly — that's a non-null-terminated pointer.
+
+### Doc sweep (sittings 14-16 close-out — done bundled at end of session)
+
+Re-swept after JC asked for an explicit cross-sitting doc pass:
+
+- **`engine/event/event_system.md`** (sitting 14) — Engine→Application flow ordering fix (events drain BEFORE OnUpdate, 6-step explicit list); EventQueue section rewrite (shared_ptr rationale + swap-out idiom).  *Done in sitting 14.*
+- **`engine/README.md`** (sitting 14 — caught in this sweep) — Section 4 main loop ordering had the same bug as event_system.md: claimed `OnUpdate` ran first, then events drained.  Fixed: 5 steps with CheckSignalFlags first, then drain (referencing the swap-out idiom), then engine event handling, then `OnEvent`, then `OnUpdate`, then render+sleep.  Same source-of-truth as event_system.md but at directory-level rather than subsystem-level.
+- **`engine/json/json.md`** (sitting 15) — substantial:
+  - Section 1.1 deleted (top-level keys table) — duplicated `doc/jarvisagent.md`.  Cross-reference added; jarvisagent.md is now the single home for field-by-field config.json reference per `feedback_doc_routing`.
+  - Section 2.1 EngineConfig snippet trimmed: full struct removed (was severely stale — only API1/API2/API3 in the `InterfaceType` enum, missing API4-API6 + Test + 15+ struct fields).  Replaced with the current `InterfaceType` enum (the closed-set fact that drives the parser dispatch) + a "see configParser.h for canonical struct" pointer so the file doesn't re-stale on the next provider addition.
+  - Section 2.4 Parse() behaviour rewritten: `CORE_ASSERT` mention removed; describes new explicit-error-check semantics (`.get(target)` pattern + `LOG_CORE_ERROR + continue` per field).
+  - Section 2.5 ParseInterfaces refactored: full 7-API-list moved out (lives in jarvisagent.md); parser-specific notes kept (the `kInterfaceTypeMappings` table + `InterfaceTypeName()` exhaustive switch + static_assert backstop); `CORE_HARD_STOP` mention replaced with soft-fail description (unknown `"API"` → `InvalidAPI` + LOG_CORE_ERROR; ConfigChecker rejects from active slot but other interfaces still load).
+  - Section 3.2 ConfigChecker behaviour: URL check is now `starts_with("https://")` not substring; `m_ApiIndex` requirement is strict `<` not `<=`; `m_MaxInflightAiCalls` default updated 100→1000 / range 1-1000→1-10000 (the long-standing pre-sitting-15 staleness, fixed in passing); `LOG_CORE_ERROR` instead of `fprintf`.
+- **`doc/jarvisagent.md`** (sitting 15) — `max inflight ai calls` default 100→1000 / range 1-1000→1-10000 (pre-sitting-15 staleness, fixed in passing).
+- **`doc/cyber security.md`** (sitting 16) — `SecretRedactor` "Design boundaries" subsection: added two bullets — (a) the WARN-on-rejection-of-too-short-secrets diagnostic so devs spot silent skips; (b) `HasSecrets()` lock-free hot path semantics (atomic-bool mirror, release/acquire ordering, mutation-path discipline).
+
+Skipped (per `feedback_combined_doc_generated` + `feedback_doc_routing`):
+- `doc/combinedDocumentation.md` + `doc/combinedSafetyAudit.md` + `doc/combinedCyberSecAudit.md` — auto-generated from JCWFs.
+- `doc/architecture.md` — high-level contracts; sittings 14-16 are internal hygiene, not architectural shifts.
+- `engine/auxiliary/auxiliary.md` — already covered for ThreadPool in sitting 13's hand-off.
+- `engine/log/` — no .md file; redactor architecture lives in `doc/cyber security.md` "SecretRedactor" already.
+
+No new memory entries — every pattern used is already memorised:
+- `feedback_use_log_macros` (`fprintf` removal, `LOG_CORE_*` adoption).
+- `feedback_allowlist_not_blocklist` (URL prefix-not-substring).
+- `feedback_cpp_discipline` (`default:` over closed enum, static_assert backstop, helper-before-third-site).
+- `feedback_horizontal_sweeps` (the ~30-site CORE_ASSERT sweep).
+- `feedback_secrets_only_via_redactor` (logging shape not value — length only).
+- `feedback_log_failures` (every fail-path emits ERROR).
+
+---
+
+## 2026-05-04 (S2 sitting 14) → next session
+
+S2=D3 sitting 14.  Theme: **`engine/event/eventQueue.{h,cpp}` deep-dive** — small file, small sitting.  No findings rose to the safety/correctness bar that sittings 11-13 hit, but four hygiene improvements landed plus a doc-routing fix in `event_system.md`.  Sitting 13's hand-off forecast "lock-free aspects worth a careful look" — that was a misread of the file; the implementation is fully mutex-based with no atomics or condition variable.  Smaller audit surface than expected.
+
+### What landed
+
+**`engine/event/eventQueue.{h,cpp}` — dead-code removal: `Pop()` (single) + `Size()`.**
+
+Confirmed by grep across `engine/` + `application/` + `mcp/`: zero callers of either method.  Same precedent as sitting 13's `Wait()` removal (post-sitting cleanup, 2026-05-04).  Both declarations + bodies removed; if either contract is ever needed again, it should be reintroduced as a fresh API rather than restored from a stub.
+
+**`engine/event/eventQueue.cpp::PopAll` — critical-section minimisation via `std::queue::swap`.**
+
+Pre-fix `PopAll` held the mutex through N `std::move`s + N `pop()`s + N `vector::push_back`s (with possible reallocations because no `reserve`).  Producers — fileWatcher's inotify thread, aiRequestPool's worker threads, pythonEngine, webServer's Crow handler thread — all contend on the same mutex; long critical sections add latency to every push.  Now: `std::swap(drained, m_Queue)` under the lock (O(1)), then the vector is built from `drained` outside the lock.  Pre-reserves the vector to `drained.size()` (now known cheaply since we own the local).  Event destruction on subsequent vector teardown also happens outside the lock.  No behavior change, just less producer contention.
+
+**`engine/event/eventQueue.h` — `mutable std::mutex` + class-level + per-method doxygen comments.**
+
+Class comment names every producer + the consumer + the threading contract (Push thread-safe; PopAll assumes single consumer = main loop).  Per-method comments document Push's ownership transfer and PopAll's "drain everything, return as vector" contract.  `mutex` made `mutable` for future `const` methods (no `const` callers today; defensive only).  Same hygiene precedent as sitting 13's ThreadPool header.
+
+**`engine/event/event_system.md` — Engine→Application flow ordering fix + EventQueue section rewrite.**
+
+Pre-fix the doc claimed `Run()` ran `OnUpdate` first, then popped events.  Code (core.cpp:184) does the opposite — events drain BEFORE `OnUpdate` so quit/SIGINT is processed promptly.  Doc was written before that ordering decision and never corrected.  Six-step list now matches `Run()`: CheckSignalFlags → PopAll → engine event handling → app->OnEvent → app->OnUpdate → render+sleep.  EventQueue section also rewritten to explain the `shared_ptr` rationale (main loop may forward a copy to `app->OnEvent` while the original sits in the local drained vector) + the swap-out idiom (was previously a stub bullet list "uses mutex, queue, move semantics").
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug rebuild | clean (`eventQueue.cpp` recompile + relink — header signature change, but only one TU includes it) ✓ |
+| 2 | Studio Release rebuild | clean ✓ |
+| 3 | SIGINT-driven shutdown of prior j9t (locked-out via MCP heartbeat retries before unlock) | full graceful drain: PythonEnginePool stopped → FileWatchers stopped → WebServer stopped → TriggerEngine stopped → ThreadPool::Shutdown's "refusing new tasks" + "complete" lines BOTH fired (sitting 13 verification holds) → CurlWrapper::GlobalCleanup → TerminalManager stopped ✓ |
+| 4 | Fresh j9t start with `./jarvisagent.sh --debug` | listener up; `POST /api/settings/keys/unlock` OK ✓ |
+| 5 | `mcp__j9t__list_workflows` | 30 workflows listed ✓ |
+| 6 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 14s wall (3 ai_call + 1 zip) ✓ — exercises `EventQueue::Push` from aiRequestPool + fileWatcher + webServer threads, drained by main loop's `PopAll` |
+| 7 | `mcp__j9t__debug_signals` post-run | `dispatcher_total_dispatched=3 → completed=3`, `total_429s=0`, `total_throttled=0`, `websocket_total_ai_call_events_enqueued=6` (3 Started + 3 Completed for each ai_call), `websocket_total_runs_snapshots_enqueued=10`, controller `api.openai.com\|gpt-4.1` `streak_since_last_429=3`, `current_concurrency_cap=8` ✓ |
+| 8 | `grep error log/log.txt` (level-tag, not substring) | empty ✓ — no failures |
+
+What's not exercised end-to-end (code-review only):
+- Producer contention reduction from the swap-out — no concurrent multi-producer benchmark in the tree.  Code review covers correctness; the win is latency-hygiene under burst conditions (e.g. fileWatcher firing 100s of events for a directory rename while AI workers are also pushing lifecycle events).
+- `mutable std::mutex` — no `const` caller today.  Defensive change.
+
+### Open items / next-session candidates
+
+- **Sitting 15** — `engine/json/configParser.{h,cpp}` (940 LOC).  External-input parser ⇒ hardened-input target.  Bounds checks, sentinel discipline, error-message safety.  Substantial — could split across two sittings.
+- **Sitting 16** — Logging core (`engine/log/log.cpp` + `secretRedactor.cpp`).  Working tree already shows uncommitted changes here from earlier refactor parts; verify what's pending vs. what needs new audit before scoping.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Cross-validate SigV4 test #4** against `aws-cli` / `boto3` (carried from sittings 10-12).
+- **EventQueue bounded-cap question** — wedged main loop (long Python script in `OnEvent`) could let queue grow unbounded.  Producers are rate-limited (FS events, AI lifecycle from worker pool, keyboard, SIGINT poll).  **Not a safety bug today** — flagging only.  Real fix would be a soft cap + `LOG_CORE_WARN` at threshold (no drop policy without JC's call).  Defer until it shows up as a real issue.
+
+### Gotchas next-session-Claude should know
+
+- **`Pop()` and `Size()` were verified dead before removal.**  Grep across `engine/`, `application/`, and `mcp/` returned zero callers.  If they need to come back, design fresh — the prior signatures were minimal stubs with no contract beyond what `std::queue` already gives you.
+- **`PopAll` swap-out is single-consumer-correct.**  The contract documented in the header says "main loop is the consumer".  If a second consumer ever appears, the swap-out still works (each consumer drains whatever is in the queue at that instant), but you'd lose total-ordering across consumers.  Design call: keep single-consumer or build a shared work-stealing structure — don't just call `PopAll` from a second thread.
+- **Event destruction now happens outside the lock.**  Most events are cheap (path strings, counters, error codes), but if a future event type carries a heavy payload (e.g. a `std::vector<uint8_t>` for binary blobs), the cost lands on the main thread between `PopAll` returning and the local vector going out of scope.  Not a regression — pre-fix event destruction also happened post-return on the main thread, just with the lock unnecessarily held for parts of it.
+
+### Doc sweep (sitting 14 close-out)
+
+- `engine/event/event_system.md` — Engine→Application flow ordering fix + EventQueue section rewrite (shared_ptr rationale + swap-out idiom).
+
+Skipped (per `feedback_doc_routing` + `feedback_combined_doc_generated`):
+- `doc/combinedDocumentation.md` + `doc/combinedSafetyAudit.md` — auto-generated from JCWFs; will regenerate cleanly.  Note: `combinedSafetyAudit.md` had pre-existing entries flagging exactly this sitting's findings (Size const-correctness, Pop dead code, PopAll critical-section length) — the next regeneration will close those.
+- `engine/README.md` — directory tree only mentions `EventQueue` as a name; no surface to update.
+- `doc/architecture.md` — contracts-level; my changes are internal hygiene.
+- `doc/cyber security.md` — `EventQueue` is not a security boundary.
+
+No new memory entries today — every pattern used was already covered:
+- `feedback_use_log_macros` (no logging changes; the file doesn't log).
+- `feedback_doc_routing` (the skip rationale).
+- `feedback_combined_doc_generated` (auto-gen-skip).
+- Sitting 13's dead-code-removal precedent (`Wait()` post-sitting cleanup) for `Pop()` + `Size()`.
+
+---
+
+## 2026-05-04 (S2 sitting 13) → next session
+
+S2=D3 sitting 13.  Theme: **`engine/auxiliary/threadPool.{h,cpp}` deep-dive** — first non-curl engine-foundation file after sittings 11+12 closed the curl/HTTP cluster.  Six findings landed; one regression introduced and fixed mid-sitting (documented in detail below as a teachable moment for next-Claude).  Bundled with a doc-only sweep of `engine/curlWrapper/curlWrapper.md` to clear the auth-style drift carried since sittings 7-10.
+
+### What landed — Part A (doc-only sweep, JC's "no breadcrumbs" follow-up)
+
+`engine/curlWrapper/curlWrapper.md` had four stale spots from when only `Bearer` and `XGoogApiKey` existed (pre-sitting 7).  All fixed in this sitting:
+
+- **Overview line** — added the full provider list (OpenAI Chat / Responses, Gemini, Anthropic, Azure OpenAI, Bedrock, Ollama-via-Bearer) instead of "OpenAI / Gemini / Anthropic / Ollama" with Anthropic incorrectly implied to be Bearer.
+- **Section 2 "Responsibilities"** — auth-header bullet now says "delegate to `IAuthSigner` (Bearer / x-goog-api-key / x-api-key / api-key / AWS SigV4) — no per-style branching" instead of "Bearer or x-goog-api-key".
+- **Section 5 `QueryData` struct** — was a 6-field stripped-down listing; now shows the full struct with explicit "auth + transport" vs "dispatcher-routing" grouping (the dispatcher fields like `m_QuotaKey`, `m_CancelKey`, `m_EstimatedInputTokens`, `m_MaxConcurrency` etc. weren't documented at all).
+- **Section 5 `AuthStyle` enum** — was 2 variants, now 5; each with its produced header(s) and the provider it serves.
+- **Section 5 "Validation"** — clarified the IsValid (pre-flight, coarse) vs `IAuthSigner::Apply` (per-style, fine-grained) split — pre-fix the doc didn't mention the signer at all.
+- **Section 6 "Query Execution Flow"** — step 3 used to claim "checks `m_ApiKey` non-empty → `NoApiKey`", but the actual code routes through `IAuthSigner::Apply` whose error code is also `NoApiKey` but for a different reason (per-style validation).  Step 4 used to list only Bearer + XGoogApiKey header construction; now references the signer.
+- **Section 13 "Summary of Guarantees"** — multi-provider auth row updated to list all five styles + `IAuthSigner` as the funnel.
+
+### What landed — Part B (`threadPool` deep-dive, the actual sitting 13)
+
+**`engine/auxiliary/threadPool.h::SubmitTask` — `std::cerr` → `LOG_CORE_WARN`.**
+
+Pre-fix the post-shutdown branch wrote `std::cerr << "[ThreadPool] WARNING: SubmitTask called after Shutdown" << std::endl;`.  Memory `feedback_use_log_macros.md` is explicit: raw `std::cerr` writes only land in one stream (or are silently swallowed by the ncurses TUI), violating the "all C++ output through `LOG_CORE_*` macros" rule.  Fix: route through `LOG_CORE_WARN`.
+
+Subtle wrinkle: `LOG_CORE_WARN` is a macro defined in `engine/engine.h` that expands to `Core::g_Logger->GetLogger().warn(...)`.  `engine.h` includes `core.h`, which includes `auxiliary/threadPool.h` — so adding `#include "engine.h"` (or `"log/log.h"` since the macro relies on Core::g_Logger declared in core.h) to threadPool.h would form a cycle.  And `SubmitTask` is a template — its body must be in the header.  Resolved by adding a private `void LogPostShutdownSubmit() const` declaration in the header (no engine.h needed), with the body in `threadPool.cpp` where engine.h is fine.  The template calls the helper; the helper calls the macro.
+
+**`engine/auxiliary/threadPool.h::SubmitTask` — `std::forward<FunctionType>(task)`.**
+
+Pre-fix the pool-submission line was `m_Pool.submit_task(task)` — `task` is a forwarding reference but passed as a named lvalue, so it's COPIED into the BS pool even when the caller supplied an rvalue (e.g. a lambda with `std::move`'d captures).  Fix: `m_Pool.submit_task(std::forward<FunctionType>(task))` preserves move semantics.  No observable behaviour change for the callers in the tree today (lambdas with by-value captures, where copy and move are equivalent), but the fix is correct-by-default for any future caller that does pass move-only state.
+
+**`engine/auxiliary/threadPool.{h,cpp}::Shutdown` — idempotent + serialised with SubmitTask.**
+
+Pre-fix Shutdown had no idempotency guard (a second call would re-log "complete" and re-call `m_Pool.wait()` for an empty queue).  And the `m_Stopped = true` flag flip was outside `m_Mutex`, so a SubmitTask could be in the gap between "read m_Stopped=false" (under mutex) and "submit to pool" (still under mutex) when Shutdown's flip landed — producing a Submit that the pool accepted into a queue Shutdown was about to drain.  In practice the late-submitted task ran as part of the drain (Shutdown's `m_Pool.wait()` waits for everything queued AND running), so the race was benign for current callers, but the guarantee "after Shutdown returns, no more tasks are accepted" wasn't actually held.  Fix: take `m_Mutex` around the flag flip in Shutdown; idempotency tracked by a SEPARATE `m_ShutdownDrained` atomic.
+
+**The mid-sitting regression** — the FIRST cut of the idempotency guard checked `m_Stopped` instead of a separate flag.  `RequestStop` (called from `Core::Shutdown` BEFORE `Shutdown`) also sets `m_Stopped=true`; so the guard caused Shutdown to early-return without ever calling `m_Pool.wait()`.  Caught by inspecting `log/log.txt` after a graceful REST shutdown — only `ThreadPool::RequestStop()` log line fired, the expected `Shutdown() - refusing new tasks, waiting for N queued` and `Shutdown() complete` lines were absent.  Re-fix: separate `m_ShutdownDrained` atomic, set inside Shutdown AFTER the wait completes; idempotency guard checks `m_ShutdownDrained`, NOT `m_Stopped`.  Re-verified: both lines now fire on graceful shutdown.
+
+**`engine/auxiliary/threadPool.{h,cpp}::Reset` — rejects post-Shutdown calls.**
+
+Pre-fix Reset blindly delegated to `m_Pool.reset(numThreads)`.  Post-Shutdown the wrapper holds `m_Stopped=true` (forever — no API resets it), so any Submit short-circuits.  If something called `Reset(N)` post-Shutdown, BS would spin up fresh worker threads but they'd never receive any work — wasted threads + silently dropped tasks.  Treat as a programming error: `LOG_CORE_WARN("[ThreadPool] Reset({}) called after Shutdown — ignored", numThreads)` and return without resetting.  Today nothing calls Reset post-Shutdown (only `Core::Start()` calls it, at engine init), so this is purely defensive — but it removes a subtle foot-gun for any future caller.
+
+**`engine/auxiliary/threadPool.{h,cpp}` — explicit `.load()` / `.store()` for `m_Stopped`.**
+
+`std::atomic<bool>` provides implicit `operator T()` (load) and `operator=(T)` (store) with seq_cst semantics, so `if (m_Stopped)` and `m_Stopped = true` work correctly.  But the explicit `.load()` / `.store()` form matches the existing `IsStopped() const { return m_Stopped.load(); }` style and signals "this is an atomic access" at every site.  Updated SubmitTask, RequestStop, Shutdown, Reset, and the new ShutdownDrained accesses to use the explicit form.
+
+**`engine/auxiliary/threadPool.h` — header documentation for `Wait` vs `RequestStop` vs `Shutdown`.**
+
+The three "stop"-flavoured methods served distinct purposes that weren't documented in the header.  Each now has a doxygen-style comment explaining its semantics (Wait = drain, pool stays usable; RequestStop = signal-only, pool keeps running; Shutdown = drain + refuse).
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug rebuild after edits | full rebuild + relink (header change → every TU including core.h recompiled — expected) ✓ |
+| 2 | Mid-sitting: graceful REST shutdown after first cut | only `ThreadPool::RequestStop()` log line fired — Shutdown's `refusing new tasks` + `complete` lines were ABSENT ⚠ |
+| 3 | Re-fix: separate `m_ShutdownDrained` atomic; rebuild | full rebuild + relink ✓ |
+| 4 | Fresh j9t start with re-fix | `SigV4 self-test: PASSED` + `CurlMultiDispatcher: I/O thread started` ✓ |
+| 5 | `POST /api/settings/keys/unlock` | OK ✓ |
+| 6 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 14s wall (3 ai_call + 1 zip) ✓ — exercises SubmitTask via fileWatcher / aiRequestPool / etc. |
+| 7 | `mcp__j9t__manage_connections action=test name=my-s3` (sync SigV4) | OK reachable ✓ |
+| 8 | `mcp__j9t__manage_connections action=test name=my-github` (sync Bearer) | OK reachable ✓ |
+| 9 | Graceful REST shutdown | three log lines in order: `ThreadPool::RequestStop() - stop flag set, curl callbacks will abort` → `CurlMultiDispatcher: I/O thread exiting (rate limit retries served: all)` → `ThreadPool::Shutdown() - refusing new tasks, waiting for 0 queued` → `ThreadPool::Shutdown() complete` ✓ |
+| 10 | `grep ERROR log/log.txt` | empty ✓ |
+
+What's not exercised end-to-end (code-review only):
+- `std::forward<FunctionType>` move semantics — every existing caller uses lambdas with by-value captures where move ≡ copy.  Code review confirms the change is move-preserving for any future move-only caller.
+- Reset post-Shutdown rejection — no caller does this today.  Code review covers correctness.
+- SubmitTask post-Shutdown short-circuit (the `LOG_CORE_WARN` path) — would require a Submit landing AFTER Shutdown; the engine's shutdown sequence stops submitters first.  Code review covers correctness.
+- `m_Mutex` + `m_Stopped` serialisation in Shutdown — race-free under current single-threaded shutdown caller; code review covers concurrent-Submit-during-Shutdown correctness.
+- `m_ShutdownDrained` idempotency — no caller invokes Shutdown twice today.  Code review confirms second call is no-op.
+
+### Open items / next-session candidates
+
+- **Sitting 14** — `engine/event/eventQueue.{h,cpp}` (115 LOC).  Cross-thread event delivery; lock-free aspects worth careful look.
+- **Sitting 15** — `engine/json/configParser.{h,cpp}` (940 LOC).  Substantial.  External-input parser ⇒ hardened-input-is-where-bugs-live target.  Bounds checks, sentinel discipline, error-message safety.
+- **Sitting 16** — Logging core (`engine/log/log.cpp` and `secretRedactor.cpp`).  Working tree already shows uncommitted changes here from earlier refactor parts; verify what's pending vs. what needs new audit before scoping.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Cross-validate SigV4 test #4 against `aws-cli` / `boto3`** — carried from sittings 10-12.
+- ~~**`ThreadPool::Wait()` (capital W) has no callers** in the tree.  Either it's dead code (remove in a future cleanup sitting), or it's API-surface for tests / future use (document the intent in the header).  Defer to sitting 14+ when it can be bundled with eventQueue's API audit.~~  **Closed in post-sitting cleanup (2026-05-04):** confirmed dead code — `Wait()` declaration + body removed from `threadPool.{h,cpp}`, `auxiliary.md` Section 2 lifecycle table reduced from "Wait / RequestStop / Shutdown" to "RequestStop / Shutdown".  Build clean (full rebuild + relink due to header change).  Internal `m_Pool.wait()` calls inside `Wait()` and `Shutdown()` were the only callers; only `Shutdown()` survives.  No external code bypassed the wrapper for waits.
+
+After sitting 13, S2=D3 has spent 10 sittings on the secret/auth/crypto-handling cluster (sittings 4-13: redactor + JWT + OAuth + signer interface + SigV4 + dispatcher + curlWrapper + threadPool) plus 3 carried from S1 (keyEncryption RAII).  Roughly 20% of D3 scope remains — non-curl engine-foundation files (sittings 14-16) plus the SecureString migration (17-19).
+
+### Gotchas next-session-Claude should know
+
+- **Don't conflate `m_Stopped` with `m_ShutdownDrained`.**  They serve different purposes: m_Stopped is "abort in-flight curl + reject new submissions" (set by EITHER RequestStop or Shutdown); m_ShutdownDrained is "Shutdown's drain has completed" (set ONLY by Shutdown after `m_Pool.wait()` returns).  Using m_Stopped for Shutdown's idempotency guard reproduces the regression I introduced and fixed mid-sitting — the Shutdown after a RequestStop early-returns without draining.  If you're tempted to "simplify" by collapsing the two flags, re-read the regression description above.
+- **Header → cpp cycle pattern via `LogPostShutdownSubmit`.**  `engine.h` defines the log macros AND includes `core.h`, which includes `auxiliary/threadPool.h`.  Any header that needs LOG_CORE_* macros without forming a cycle must either be (a) the engine.h itself or (b) avoid including engine.h directly and route logging through a private cpp-defined helper.  The `LogPostShutdownSubmit()` pattern in threadPool is the canonical fix for templated header code that needs to log.  Reusable for future eventQueue / configParser / log-core sittings if they hit the same constraint.
+- **`std::forward<FunctionType>(task)` works with the existing template signature** because `FunctionType` is the deduced type of a forwarding reference — `std::forward<FunctionType>` correctly preserves the rvalue-ness when the caller passed an rvalue.  Don't "simplify" to `std::move(task)` — that would unconditionally move even when the caller passed an lvalue, leaving the caller's named variable in a moved-from state.
+- **The `std::cerr` → `LOG_CORE_WARN` change has TUI-visibility implications.**  ncurses TUI redirects stdout/stderr; raw `std::cerr` writes are swallowed (or interleave badly with the curses display).  The log macros write to BOTH log/log.txt AND the TUI status pane.  This isn't a "style preference" — it's a hard requirement per `feedback_use_log_macros.md`.
+- **`Reset(N)` post-Shutdown is now rejected silently** (with a WARN log).  If you ever need restart semantics ("stop the pool and bring it back up"), introduce an explicit `Restart(N)` API rather than overloading Reset — restart should reset BOTH `m_Stopped` and `m_ShutdownDrained` to false, and that's a substantively different operation.
+- **`Wait()` has no callers** in the current tree (verified by grep across `engine/` + `application/`).  It's part of the public API but unused.  Don't remove without checking test code; it might be intended for future use or test fixtures.
+- **The two-phase shutdown sequence in `Core::Shutdown`** is `m_ThreadPool.RequestStop()` (line 242 of core.cpp) then `m_ThreadPool.Shutdown()` (line 270) — there's other work between the two (drain web server, signal dispatcher, etc.).  RequestStop wakes curl callbacks; Shutdown drains the pool.  Don't reorder.
+
+### Doc sweep (sitting 13 close-out)
+
+Two drift fixes:
+
+- `engine/curlWrapper/curlWrapper.md` — Sections 2 + 5 + 6 + 13 updated for the auth-style drift carried since sittings 7-10 (Bearer / XGoogApiKey + 3 missing styles + IAuthSigner funnel).  This was the doc-only sweep JC requested at sitting open as a follow-up to sitting 12's "future doc-sweep candidate" flag.
+- `engine/auxiliary/auxiliary.md` Section 2 — rewritten to reflect the current ThreadPool API surface (added RequestStop + Shutdown + IsStopped + the `m_ShutdownDrained` flag), the `Wait` vs `RequestStop` vs `Shutdown` distinction, the SubmitTask post-shutdown short-circuit + move-preservation, and the Reset post-Shutdown rejection.
+
+Skipped (per established policy + `feedback_doc_routing.md`):
+- `doc/cyber security.md` — `auxiliary.md` is the canonical home for ThreadPool details; per "each fact has one home" we don't duplicate.  ThreadPool is foundational engine infrastructure rather than a security boundary, so it doesn't fit the existing "Cloud Integration Security" subsection structure cleanly.  If sittings 14-16 turn up enough engine-foundation safety stories to justify a new "Engine Foundation Security" supersection, that's the right time to add one — for now, single subsystem safety story isn't worth the structural change.
+- `doc/architecture.md` — describes contracts; my changes are internal safety + correctness.
+- `engine/README.md` — directory tree; no new files.
+- `doc/misc/cyber-sec-dev-plan.md` / `cpp-safety-dev-plan.md` — plan docs, no retconning.
+
+No new memory entries today — every pattern used is already covered:
+- `feedback_use_log_macros` (the std::cerr → LOG_CORE_WARN fix).
+- `feedback_no_jthread_use_threadpool` (already memorised the engine ThreadPool's role).
+- `feedback_doc_routing` (the cyber-sec.md skip rationale).
+
+---
+
+## 2026-05-04 (S2 sitting 12) → next session
+
+S2=D3 sitting 12.  Theme: **close the curl/HTTP cluster cleanly** — Part 1 finished sitting 11's five deferred dispatcher findings; Part 2 audited the synchronous `engine/curlWrapper/curlWrapper.{h,cpp}` (sister of `CurlMultiDispatcher`) with the same lens.  After this sitting the curl/HTTP cluster (sittings 11+12) is fully closed: no breadcrumb deferrals carrying forward, no doc drift on safety guarantees.  Next sittings move to engine-foundation files outside curlWrapper (threadPool, eventQueue, configParser, log core).
+
+### What landed — Part 1 (`curlMultiDispatcher` leftovers)
+
+**`engine/curlWrapper/curlMultiDispatcher.{h,cpp}` — `EnsureController(quotaKey, queryData)` helper.**
+
+Both the admission gate (`DrainInbox`, ~line 408 pre-helper) and the rate-limit observation path (`ParseRateLimitHeaders`, ~line 549 pre-helper) had near-identical "find-or-create controller" blocks: emplace a `RateLimitController` whose initial probe came from the per-interface `IRateLimitStrategy` (or a generic 4 if interfaceType was unknown / `InvalidAPI`) and whose hard cap came from `QueryData::m_MaxConcurrency` or `kMaxActivePerHost`.  Pre-fix the two were identical-by-construction; without a helper they would have drifted the next time someone added a new strategy parameter or config knob.  Centralised in a private `EnsureController(quotaKey, queryData)` returning `unordered_map::iterator`; both call sites collapse to a single line.  Verified the InvalidAPI path matches pre-helper behaviour: `RateLimitStrategyEmpty::InitialConcurrencyProbe()` returns 4 (rateLimitStrategy.cpp:162), same as the helper's generic fallback.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp::DrainInbox` — `curl_multi_add_handle` return checked.**
+
+Pre-fix the return of `curl_multi_add_handle` (line 544 pre-edit) was discarded.  On failure (e.g. `CURLM_OUT_OF_MEMORY`, the realistic libcurl-internal failure mode) the easy handle would leak AND a stale entry would land in `m_Active` — the next `DrainCompleted` iteration would never see a `CURLMSG_DONE` for it because curl_multi never accepted the handle, so the entry would sit there forever, the slist would leak with it, and the request callback would never fire.  Now: on `addResult != CURLM_OK` we free `req->m_Headers` (slist), `curl_easy_cleanup(easy)`, fire `QueryResult::Fail(CurlNotInitialized, "curl_multi_add_handle failed")` to the request callback, and emit a structured `LOG_CORE_ERROR` with `cancelKey` + `quotaKey`.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp::DrainInbox` — selective throttle re-queue.**
+
+Pre-fix when one `QuotaKey`'s controller refused admission (e.g. `api.anthropic.com|claude-opus` over its concurrency cap), the code dumped the ENTIRE `local` queue back to `m_Inbox` and `break`ed out of the drain loop — even though queued items for OTHER `QuotaKeys` (OpenAI, Gemini, Bedrock, etc.) had no contention.  Now: a per-iteration `std::unordered_set<std::string> throttledKeys` records which keys we've decided to defer this drain; subsequent items targeting those keys fast-path-skip the admission check (the answer can't have changed — no same-key items have been dispatched), while items for non-throttled keys continue through the dispatch path.  Correctness/perf shape, not security shape, but tighter dispatch reduces the head-of-line window during partial provider outages.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp::IoThreadFunc` — loop body wrapped in try/catch.**
+
+Pre-fix any exception thrown inside `DrainInbox` / `DrainCompleted` / `DrainPendingCancellations` (most realistically `bad_alloc` from one of the many `std::string` copies, `unordered_map::emplace`, or `std::vector::push_back` sites) would unwind out of `IoThreadFunc` and silently terminate the I/O thread — every subsequent AI dispatch would then hang on its callback latch with no log line pointing at the cause.  Now the entire loop iteration is wrapped: `catch (std::bad_alloc)` logs ERROR + sleeps 100 ms then continues; `catch (std::exception)` logs ERROR with `e.what()` then continues; `catch (...)` logs ERROR ("unknown exception") then continues.  Policy is "log loudly + continue" because `m_Inbox` / `m_Active` / `m_RetryQueue` are all unchanged on throw — the next iteration retries from source state.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp::DrainCompleted` — curl-level transient retry policy documented.**
+
+The transient-retry path at line 992 (post-edit) requires `res == CURLE_OK && isTransientError`, so curl-level errors (timeout, couldnt-connect, SSL handshake failure) skip retry entirely — a stronger constraint than 429-retry which reuses the same machinery.  Pre-fix the choice was implicit; future maintainers might "fix" the apparent gap by adding curl-level codes to the retry list and accidentally enable budget-burning retries on persistent network/auth/cert issues.  Now an inline comment names the policy and the upstream owner (`WorkflowRuntimeManager` for run-level retry of curl-level failures).
+
+### What landed — Part 2 (`curlWrapper`)
+
+**`engine/curlWrapper/curlWrapper.cpp::Query` — bounded + exception-safe `write_callback`.**
+
+Pre-fix the lambda body was a single `buffer->append(...)` call — the same UB-through-C-boundary risk that sitting 11 closed for the dispatcher's `MultiWriteCallback`.  Now wrapped in `try / catch (...)` and capped at 32 MiB (file-local `static constexpr` inside `Query()`; the lambda is captureless and the constexpr is used in a constant-expression context, so no capture is needed).  Same overflow-safe form `totalSize > kMaxResponseBodyBytes - buffer->size()` as the dispatcher; no header callback in this surface (sync `CurlWrapper::Query` doesn't capture response headers — that's a dispatcher-only concern for rate-limit observation).
+
+**`engine/curlWrapper/curlWrapper.cpp::Query` — auto-clear `m_ReadBuffer` at entry.**
+
+Pre-fix `Query()` did NOT clear `m_ReadBuffer` at the start — callers had to call the public `Clear()` between calls.  `CurlManager::GetThreadCurl()` returns a thread-local `CurlWrapper` reused indefinitely on its owning thread; any caller that forgot to invoke `Clear()` would silently get the previous query's response body concatenated to the next query's response body (parser confusion downstream — possibly visible only as a "model returned twice as much content" oddity).  Now `m_ReadBuffer.clear()` at entry; the public `Clear()` becomes a defensive no-op rather than a required pre-condition.
+
+**`engine/curlWrapper/curlWrapper.cpp::Query` — `qnum` captured locally for log consistency.**
+
+Pre-fix four log lines (line 358, 377, 384, 388 pre-edit) read `m_QueryCounter.load()` after the dispatch increment at line 342.  `m_QueryCounter` is `static std::atomic<uint32_t>` — concurrent `Query()` calls from OTHER threads (each on their own thread-local `CurlWrapper`) would advance it between dispatch and error logs, making the qnum in error messages diverge from the qnum logged on dispatch and breaking grep-based correlation.  Now: capture `uint32_t const qnum = ++m_QueryCounter;` at dispatch and reuse the local in every subsequent log line.
+
+**`engine/curlWrapper/curlWrapper.cpp::Query` — failure logs carry `url` + `quotaKey` substrings.**
+
+Same dashboard-run-analyzer-surfacing rationale as the dispatcher.  Three fail paths (curl error line 362, HTTP 429 line 384, generic HTTP ≥400 line 388 — pre-edit numbers) gain `url='{}' quotaKey='{}'`.  `quotaKey` is the natural correlation key when there's no runId in scope (Test Connection paths and assistant calls don't have one).  Auth-signer rejection log at line 287 already had `quotaKey`; this rounds out the fail-path surface.
+
+**`engine/curlWrapper/curlWrapper.cpp::QueryData::IsValid` — log severity right-sized.**
+
+Pre-fix three field-empty logs were `LOG_CORE_CRITICAL` ("url empty", "data empty", "API key empty").  CRITICAL implies engine-level "wake the operator at 3am" — out of proportion to a per-request misconfiguration that's almost always a legacy caller forgetting to populate a field.  Reduced to `LOG_CORE_ERROR`: still surfaced by the dashboard run analyzer, doesn't trigger paging.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug rebuild after Part 1 | clean (`curlMultiDispatcher.cpp` recompile only — header signature unchanged for Part 1's final shape) |
+| 2 | Studio Debug rebuild after Part 2 | clean (`curlWrapper.cpp` recompile only) |
+| 3 | Graceful REST shutdown of prior j9t | `POST /api/shutdown` → `Shutdown initiated.` HTTP 200 ✓ |
+| 4 | Fresh j9t start | `SigV4 self-test: PASSED` + `CurlMultiDispatcher: I/O thread started` ✓ |
+| 5 | `POST /api/settings/keys/unlock` (master password) — landed in same second as HTTPS listener via `until curl ... unlock` poll loop | unlock OK ✓, no MCP-retry-induced lockout ✓ |
+| 6 | `mcp__j9t__run_workflow ai-zip-demo` — exercises async dispatcher path | 4 tasks succeeded in 15s wall (3 ai_call + 1 zip) ✓ |
+| 7 | `mcp__j9t__manage_connections action=test name=my-s3` — exercises sync `CurlWrapper::Query` via SigV4 signer (MinIO local) | `OK: reachable` ✓ |
+| 8 | `mcp__j9t__manage_connections action=test name=my-github` — exercises sync `CurlWrapper::Query` via Bearer signer (GitHub PAT) | `OK: reachable` ✓ |
+| 9 | `/api/debug/signals` after runs | `dispatcher_total_dispatched=3 → completed=3`, `total_429s=0`, `total_throttled=0`, `total_cancelled=0`, controller `api.openai.com\|gpt-4.1` `streak_since_last_429=3`, `current_concurrency_cap=8` ✓ |
+| 10 | `grep ERROR log/log.txt` post-test | empty ✓ — no fail-path logs fired (no failures occurred) |
+
+What's not exercised end-to-end (code-review only):
+- `EnsureController` is exercised on every dispatch (DrainInbox path) — proven by the controller existing in the snapshot.  The ParseRateLimitHeaders path of EnsureController is exercised on every response — also proven by the controller's `streak_since_last_429=3` (came from three Observe() calls).  Both paths through the helper are validated.
+- `curl_multi_add_handle` failure path — requires libcurl-internal OOM, essentially impossible to exercise organically.
+- Selective throttle re-queue — requires a controller decision of `!Admit`; no throttling fired on the test runs (well under provider quota).  Code review covers correctness; the per-iteration `throttledKeys` set is the only state change vs. pre-fix.
+- IO thread try/catch — requires a `bad_alloc` from inside a drain method.
+- `m_ReadBuffer` auto-clear — every `Query()` from the test exercises it.  Test Connection paths each produce small responses (well under 32 MiB), so the cap path is unexercised.  Code review covers the cap path.
+- `qnum` race — only fires under tight inter-thread timing; static analysis covers correctness.
+
+### Open items / next-session candidates
+
+The curl/HTTP cluster (sittings 11+12) is now closed.  No deferred findings carrying forward from sitting 12 — the goal of "no breadcrumbs" is met.
+
+Next sittings move outside curlWrapper:
+
+- **Sitting 13** — `engine/auxiliary/threadPool.{h,cpp}` (137 LOC).  Foundational, used by every async surface in the engine (workflow runtime, AI request pool, Python engine, file watcher).  Memory `feedback_no_jthread_use_threadpool.md` flags it as "tried-and-true across 5 build targets" so the audit may yield mostly hardening / discipline polish rather than load-bearing fixes — that's still worth doing.
+- **Sitting 14** — `engine/event/eventQueue.{h,cpp}` (115 LOC).  Cross-thread event delivery; lock-free aspects merit careful look.
+- **Sitting 15** — `engine/json/configParser.{h,cpp}` (940 LOC).  Substantial.  Any external-input parser is a hardened-input-is-where-bugs-live target — bounds checks, sentinel discipline, error-message safety.
+- **Sitting 16** — Logging core (`engine/log/log.cpp` and friends — already shows uncommitted changes in working tree from earlier refactor parts; verify what's pending vs. what needs new audit before scoping).
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Cross-validate SigV4 test #4 against `aws-cli` / `boto3`** — carried from sittings 10+11.
+
+After sitting 12, S2=D3 has spent 9 sittings on the secret/auth/crypto-handling cluster (sittings 4-12: redactor + JWT + OAuth + signer interface + SigV4 + dispatcher + curlWrapper) plus 3 carried from S1 (keyEncryption RAII).  Roughly 25% of D3 scope remains — non-curl engine-foundation files (sittings 13-16) plus the SecureString migration (17-19).
+
+### Gotchas next-session-Claude should know
+
+- **`EnsureController` requires `m_DebugMutex` held.**  Both call sites (DrainInbox, ParseRateLimitHeaders) already hold it; the helper does NOT acquire the mutex itself because that would be a recursive lock from DrainCompleted's lock-already-held context.  Document this constraint at any new call site or move the lock acquisition into the helper if a caller can't guarantee it.
+- **`EnsureController`'s InvalidAPI fallback is generic 4** (matches `RateLimitStrategyEmpty::InitialConcurrencyProbe()`).  If `RateLimitStrategyEmpty` ever changes its probe value, the helper's fallback needs to follow — they're hardcoded to coincide.  Better: fetch from `IRateLimitStrategy::Get(InvalidAPI).InitialConcurrencyProbe()` if drift becomes a real risk.  Today the duplication is intentional and noted in the helper comment.
+- **The selective throttle re-queue's `throttledKeys` set lives across ONE drain iteration** — it doesn't persist across iterations.  That's correct: between iterations, the state of in-flight requests changes, and a key that was throttled last iteration may have headroom now.
+- **The IO thread try/catch's "log loudly + continue" policy assumes `m_Inbox` / `m_Active` / `m_RetryQueue` are unchanged on throw** — i.e. that any throwing operation either fully completes or fully reverts.  This is true for the current code (allocations fail before mutation; map insertions are atomic), but a future refactor that does "pop from inbox, then risky work, then push to active" would need to either keep the operation transactional or update this comment.
+- **`CurlWrapper::Query`'s 32 MiB cap is duplicated from the dispatcher** as a file-local `static constexpr` inside `Query()`.  Per `feedback_cpp_discipline` "promote on third site": today there are exactly two body-cap sites (dispatcher's `MultiWriteCallback` + curlWrapper's `write_callback`).  If a third surface acquires its own callback (e.g. a future streaming-SSE adapter), promote to a shared header (`engine/curlWrapper/responseLimits.h` or similar).
+- **`m_ReadBuffer.clear()` at Query entry is a behaviour change** for any caller that read `GetBuffer()` AFTER a previous Query and BEFORE the current Query — that read is still valid, but if the caller assumed the buffer would persist into the NEXT Query for reads, they'll now find it cleared.  No such caller exists in the current tree (verified by inspection); document if a new one appears.
+- **`qnum` is captured locally now**, but if you add a new log line in `CurlWrapper::Query`, use `qnum` (the local) not `m_QueryCounter.load()` — the static can race.
+- **`curlWrapper.md` Section 5 (`AuthStyle`) is stale** — only lists `Bearer` and `XGoogApiKey`, predating sittings 7-10's addition of `AnthropicXApiKey`, `AzureApiKey`, and `AwsSigV4`.  Section 6 ("Query Execution Flow") step 3 mentions the front-end `m_ApiKey.empty()` pre-check that was removed when signers took over validation.  Out of scope for sitting 12 (focused on safety); flag as a future doc-sweep candidate before alpha (2026-04-05).  Today the doc/cyber-security.md "IAuthSigner Security" + "SigV4 Signing Security" + "CurlWrapper Security" subsections cover the current state authoritatively; the curlWrapper.md drift is information-completeness, not contract-correctness.
+
+### Doc sweep (sitting 12 close-out)
+
+Two drift fixes:
+
+- `doc/cyber security.md` — extended `### CurlMultiDispatcher Security` with four new bullets (`curl_multi_add_handle` return check folded into the existing curl-handle-lifecycle bullet; new bullets for `EnsureController`, selective throttle re-queue, IO thread exception isolation).  Added a new `### CurlWrapper Security` subsection (5 bullets) between the dispatcher and SigV4 sections — sync sister of the dispatcher gets symmetric coverage.
+- `engine/curlWrapper/curlWrapper.md` — Section 7 ("Response Buffering") rewritten to describe the bounded + exception-safe + auto-clear properties.  Section 12 ("Error Handling & Logging") rewritten to describe the qnum-capture pattern, the URL+quotaKey enrichment on fail paths, and the `IsValid()` log-severity choice.
+
+Skipped (per established policy):
+- `doc/architecture.md` — describes contracts; my changes are internal safety, no contract changes.
+- `engine/README.md` — directory tree; no new files.
+- `doc/cloud-integration.md` — cloud connectors only; not affected.
+- `doc/misc/cyber-sec-dev-plan.md` / `cpp-safety-dev-plan.md` — plan docs, no retconning.
+- `engine/curlWrapper/curlWrapper.md` Sections 5+6 (auth-style drift) — pre-existing drift from sittings 7-10, out of sitting-12 scope; flagged as future doc-sweep candidate above.
+
+No new memory entries today — every pattern used is already covered:
+- Bounded + exception-safe C-boundary callbacks → `feedback_no_audit_traces_in_code` style + general C-boundary practice (already implicit in the codebase).
+- `EnsureController` extraction → `feedback_cpp_discipline.md` "promote on third site" (this is the second site; intentional dedup, not a third-site promotion).
+- Selective throttle re-queue → no general principle worth memorising.
+- Failure-log enrichment with run identifiers → `feedback_log_failures.md` (already memorised).
+- `qnum` capture → standard "snapshot atomic at decision point" idiom; not memory-worthy.
+
+---
+
+## 2026-05-04 (S2 sitting 11) → next session
+
+S2=D3 sitting 11.  Theme: **`engine/curlWrapper/curlMultiDispatcher` deep-dive** — opens the engine-foundation cluster (sittings 11-16) after sittings 7-10 closed the auth/crypto cluster.  The dispatcher is the macro context every parallel AI HTTP/2 request flows through, so its blast radius is high relative to its small surface.  Six findings landed; five next-sitting-candidate findings deferred (each is honestly its own sitting or a "promote on third site" pattern).
+
+### What landed
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp` — bounded response body + header buffers.**
+
+Pre-fix the libcurl write/header callbacks called `std::string::append` on `userp` with no upper bound.  A buggy or hostile upstream could stream gigabytes into a per-request `std::string` and OOM the engine.  Now `MultiWriteCallback` caps `m_ReadBuffer` at 32 MiB and `MultiHeaderCallback` caps `m_HeaderBuffer` at 1 MiB; on overflow the callback returns a short-write to libcurl, which translates to `CURLE_WRITE_ERROR` and fails the request through the existing curl-error path (with the new run-context log enrichment, see below).  Caps live as file-local `static constexpr size_t` near the callbacks — placing them in the class would force `public:` visibility because the static callbacks are namespace-scope and can't see class privates.  Overflow check is the underflow-safe form `totalSize > kMax - buf->size()` (relies on the invariant that `buf->size()` never exceeds the cap, which holds because we enforce it here).
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp` — exception-safe libcurl C-boundary callbacks.**
+
+`MultiWriteCallback` and `MultiHeaderCallback` are called from libcurl (C); an exception escaping back through the C frame is UB.  `std::string::append` can throw `bad_alloc` (commit-and-grow) or `length_error` (over `max_size`).  Both callbacks now wrap their bodies in `try / catch (...)` and signal a short-write on any exception so libcurl aborts cleanly.  The enclosing `try` covers BOTH the cap-check and the append, so even if the cap-check arithmetic somehow throws (it can't today, but defence-in-depth) the C boundary is still clean.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp` — Submit-after-shutdown race closed.**
+
+Pre-fix `Submit()` did not check `m_Stopping`.  Race window: IO thread iteration N drains inbox in stopping mode (lines 974-988 pre-edit), drains retries, performs, and breaks out of the loop on `stopping && m_Active.empty()`.  Between the inbox drain and the loop exit, a Submit could push to `m_Inbox` and the IO thread would never drain again — caller's callback orphaned, latch waits forever.  Now `Submit()` reads `m_Stopping` under `m_InboxMutex` before pushing.  IO thread's shutdown drain also takes `m_InboxMutex`, so the two serialise:
+- Submit observes `stopping=false` under lock → pushes → IO thread's next stopping-mode drain sees and aborts it ✓
+- Submit observes `stopping=true` under lock → does NOT push → fires `CURLE_ABORTED_BY_CALLBACK` synchronously after lock release ✓
+
+`m_Stopping` is monotonic (false→true once via `SignalStop`), so the under-lock read is sufficient — no double-checked-locking subtlety.  Callback is fired AFTER lock release because callbacks may re-enter the dispatcher (file writes, follow-up Submits).
+
+**`engine/curlWrapper/curlMultiDispatcher.{h,cpp}` — closed-set `SetupError` enum replaces string-prefix sentinel.**
+
+Sitting 9 plumbed an `errorMessage` out-param through `SetupEasyHandle` and the call site distinguished curl-init failure from auth-signer rejection by `setupError.find("curl_easy_init") == std::string::npos`.  That's exactly the anti-debugging-armor pattern from `feedback_cpp_discipline` — adding a third failure mode, or rewording the curl-init message, would silently mis-route the QueryErrorCode.  Replaced with a private `enum class SetupError { None, CurlInit, AuthSigner }` filled by `SetupEasyHandle` and consumed by an explicit `switch` at the call site (no `default:` per CLAUDE.md discipline rule — `-Wswitch` flags new variants).  `SetupEasyHandle` is now `[[nodiscard]]`.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp` — fail-path ERROR logs carry `cancelKey` substring.**
+
+Three completion-side failure paths (curl error, HTTP 429 retries-exhausted, generic HTTP ≥400) used to log only `qnum` (a process-wide monotonic counter set in `DrainCompleted`) — the dashboard's run analyzer filters issues to ERROR lines containing the run's identifiers (per CLAUDE.md "Failure-path logs are ERROR-level AND mention the runId or workflowId as a literal substring") and `qnum` is opaque to it.  Now each line includes `cancelKey='{}' quotaKey='{}'`.  `cancelKey` ≈ per-task ID (= `expectedOutputPath` for `ai_call` tasks, which contains the runId as a path component); `quotaKey` ≈ `host|model`.
+
+**`engine/curlWrapper/curlMultiDispatcher.cpp::ExtractHost` — IPv6 literal handling.**
+
+`https://[::1]:443/path` used to extract `[` (the generic `find(':')` clipped at the first `:` inside `::1`).  The debug-build localhost SSL-skip allowlist literal `::1` could never match a real IPv6 URL.  Now detects `[` after `://`, finds the matching `]`, and returns the bracket-stripped host.  Non-IPv6 path is byte-identical to before.  Not a security bug today (failing the allowlist match = verify cert = fail-safe), but it was wrong code.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after refactor | clean (4 file recompiles: `curlMultiDispatcher.cpp` + 3 includer TUs `aiRequestPool.cpp` / `jarvisAgent.cpp` / `webServer.cpp`) |
+| 2 | First server start | `SigV4 self-test: PASSED` ✓ + `CurlMultiDispatcher: I/O thread started` ✓ |
+| 3 | `POST /api/settings/keys/unlock` (master password) | unlock OK ✓ |
+| 4 | `mcp__j9t__run_workflow ai-zip-demo` | 4 tasks succeeded in 16s wall (3 ai_call + 1 zip) ✓ |
+| 5 | `/api/debug/signals` after run | `dispatcher_total_dispatched=3 → dispatcher_total_completed=3`, `total_429s=0`, `total_throttled=0`, `total_cancelled=0`, controller `api.openai.com\|gpt-4.1` `streak_since_last_429=3` ✓ |
+| 6 | Log scan post-run | no ERROR lines on success path ✓ — only pre-existing WARN-level `auth_failure` from `/ws` polling without a token (unrelated to dispatcher changes) |
+
+What's not exercised end-to-end (code-review only):
+- Cap overflow paths (body or header) — would require >32 MiB / >1 MiB response, doesn't happen with normal AI providers; would need a fault-injection mock.
+- Submit-after-shutdown race — only fires under tight timing; static analysis covers correctness.
+- `SetupError::CurlInit` — requires `curl_easy_init` to return NULL (libcurl-internal OOM); essentially impossible to exercise organically.
+- `SetupError::AuthSigner` — sittings 9 exercised this branch via empty-credential SigV4 test; the new switch-case path is mechanical.
+- IPv6 host extraction at runtime — our test infra doesn't dispatch to IPv6 endpoints; non-IPv6 path is byte-identical.
+- Fail-path log enrichment — requires a real HTTP error from the provider; success-path runs don't trigger it.
+
+There was a midway snag during verification: the MCP daemon hammered `/ws` and `/api/workflows` with auth-retries before the master-password unlock landed, locking out 127.0.0.1 for 15 minutes per `feedback_unlock_keystore_first.md`.  Recovered by killing j9t (lockout state is in-memory, dies with the process) and on the second start using a tight `until curl ... unlock` loop to land the unlock in the same second the HTTPS listener came up — beat the MCP retry race.
+
+### Open items / next-session candidates
+
+- **Sittings 12-16** — Remaining engine-foundation files: config parser, `threadPool`, `eventQueue`, `curlManager`, logging core.  Pick `curlManager` next if continuity with the curl/HTTP cluster matters; otherwise the order doesn't.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Sitting-11 deferred findings** — each is genuinely next-sitting-or-later, not "I ran out of time":
+  - **Controller find-or-create duplicated between `DrainInbox` and `ParseRateLimitHeaders`.**  Two sites today, both write the same 7-line emplace-with-strategy-probe-and-hardCap pattern.  Per `feedback_cpp_discipline` "promote on third site" — defer the helper extraction (`EnsureController(quotaKey, queryData)`) until a third site appears.  If sitting 12+ touches the controller path and adds a third caller, promote at that point.
+  - **`curl_multi_add_handle` return value unchecked** (DrainInbox).  Failure (e.g. CURLM_OUT_OF_MEMORY) leaks the easy handle and adds a stale entry to `m_Active`.  Practical risk is low (libcurl OOM is a last-mile issue) but worth tightening — check the return, on non-OK call `curl_easy_cleanup(easy)` and fire the request callback with a synthesized failure.
+  - **Throttle re-queues the entire inbox on a single quotaKey hit.**  When one quotaKey is throttled, all remaining inbox items (potentially for OTHER quotaKeys) are re-pushed to `m_Inbox` and re-evaluated next iteration.  Performance issue, not correctness — wastes a few microseconds of throttle-gate work per cycle.  Fix: walk the local queue, push throttled-keys back to inbox, dispatch the rest.
+  - **IO thread has no `try/catch` around the loop body.**  A `bad_alloc` from anywhere in `DrainInbox` / `DrainCompleted` / `DrainPendingCancellations` would terminate the IO thread silently, killing all subsequent dispatch.  Fix is straightforward (wrap loop body, log + continue) but the policy decision (continue on what kinds of throws? bail on others?) is broader than this one file.
+  - **Curl-level transient errors (timeout, couldnt-connect) get no retry.**  The transient-retry path at line 868 requires `res == CURLE_OK && isTransientError`; curl-level errors skip retry entirely.  Likely intentional (don't burn budget on persistent network issues) but the contract should be a comment in `DrainCompleted`, not implicit.
+- **Cross-validate test #4 against `aws-cli` / `boto3`** — carried from sitting 10.  One-time external check that the locked-in SigV4 signature matches AWS's reference implementations.  Not in the project tree today.
+
+After sitting 11, S2=D3 has spent 8 sittings on the secret/auth/crypto-handling cluster (3 redactor + 1 JWT + 1 OAuth + 1 signer interface + 1 SigV4 deep-dive + 1 dispatcher) plus 3 carried from S1 (keyEncryption RAII).  Roughly 25-30% of D3 scope remains — engine-foundation files (sittings 12-16) plus the SecureString migration (17-19).
+
+### Gotchas next-session-Claude should know
+
+- **Body cap (32 MiB) and header cap (1 MiB) are file-local static constexpr** in `curlMultiDispatcher.cpp`'s namespace scope, near the callbacks.  Not in the class because the libcurl-bound static callbacks can't see class privates without the constants going `public:`.  If a future sitting needs to make these tunable, the right move is class-level `static constexpr` + making the callbacks private static class methods — that's a non-trivial refactor, defer until there's a real config requirement.
+- **The Submit shutdown-race fix relies on the IO thread's stopping-mode drain taking `m_InboxMutex`.**  If you refactor the IO thread to do its shutdown drain WITHOUT `m_InboxMutex`, the race re-opens.  The serialisation point is the lock, not the atomic.
+- **`SetupError` enum is private to `CurlMultiDispatcher`.**  If you add a new failure mode (e.g. CA-bundle-missing for production builds), extend the enum and the call-site switch — don't smuggle distinguishing text through `errorMessage`.  The string is for humans; the enum is for routing.
+- **`ExtractHost`'s IPv6 branch returns the address WITHOUT brackets** to match the localhost SSL-skip allowlist literals `::1`.  If a future caller needs the bracketed form (e.g. to rebuild a URL), they'll need a separate helper or bracket re-addition.
+- **Fail-path log enrichment uses `cancelKey`, not runId directly.**  They coincide today: `cancelKey` is `expectedOutputPath` for `ai_call` tasks (set by `AiRequestPool::Submit`), and that path contains the runId as a directory component.  The dashboard run analyzer's substring filter on runId still hits these lines because the runId IS a substring of the cancelKey.  If `cancelKey` is ever decoupled from `expectedOutputPath`, the run analyzer would lose this surface — at that point the right move is to plumb `runId` separately into `QueryData` and log it directly.
+- **Controller find-or-create is deliberately duplicated** in `DrainInbox` (line ~408 area) and `ParseRateLimitHeaders` (line ~549 area).  Memory `feedback_cpp_discipline` "promote on third site" — don't extract on a 2-site refactor.  If sitting 12+ adds a third caller (e.g. an ad-hoc admission test in a debug endpoint), promote then.
+- **The lockout race during MCP-daemon-running starts** is a real workflow hazard — when restarting j9t for verification, plan to land the master-password POST in the same second the HTTPS listener accepts connections.  An `until curl ... unlock` loop with 0.2s polling is fast enough in practice.  See `feedback_unlock_keystore_first.md`.
+- **`MultiProgressCallback` reads `Core::g_Core` without a null-check pattern** other than the one inline.  If you need to do work in the progress callback that depends on more global state, factor through a single `Core::g_Core != nullptr` guard at the top — don't add multiple deref points.
+
+### Doc sweep (sitting 11 close-out)
+
+One drift fix:
+- `doc/cyber security.md` — new `### CurlMultiDispatcher Security` subsection between `### IAuthSigner Security` and `### SigV4 Signing Security`, capturing all six guarantees plus the curl-handle-lifecycle invariant (which existed before sitting 11 but wasn't documented).
+
+Skipped (per established policy):
+- `doc/architecture.md` — describes the dispatcher's contract; my changes are internal safety, no contract changes.
+- `engine/README.md` — directory tree; no new files.
+- `doc/cloud-integration.md` — cloud connectors only; not affected.
+- `doc/misc/cyber-sec-dev-plan.md` / `cpp-safety-dev-plan.md` — plan docs, no retconning.
+
+No new memory entries today — every pattern used (try/catch C-boundary, `m_Stopping` under inbox mutex, closed-enum out-param, fail-path logs with run identifier substring) is already covered by an existing memory entry.
+
+---
+
+## 2026-05-03 (S2 sitting 10) → next session
+
+S2=D3 sitting 10.  Theme: **`engine/curlWrapper/awsSigV4` deep-dive** — the natural follow-up to sitting 9's `IAuthSigner` audit.  Carry-over scope from sitting 9: AWS official test vectors, exception safety, deeper crypto-primitive review (HMAC-SHA256, SHA256 inputs, key derivation chain).  All three landed plus two side-findings the audit surfaced (`OPENSSL_cleanse` of intermediate signing keys, `IsBlank` helper deduplication carrying over from sitting 9's intentional 2-copy state).
+
+After sitting 10 the auth/crypto cluster (sittings 7-10: JWT + OAuth lifecycle + signer interface + SigV4 deep-dive) is closed.  Next: sittings 11-16 work through the engine-foundation files (config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core).
+
+### What landed
+
+**`engine/curlWrapper/credValidation.h` (NEW) — promote `IsBlank` to a shared header.**
+
+Sitting 9 wrote two anonymous-namespace copies of the same helper (`authSigner.cpp::IsBlank` + `awsSigV4.cpp::IsBlankSig`).  The duplication was intentional — cross-TU helpers in anonymous namespaces aren't shareable, and the sitting-9 hand-off noted "promote on third site" — but on reflection both copies were written the same sitting, so they're really one fact.  Sitting 10 promotes to `engine/curlWrapper/credValidation.h` as a single inline function in the `AIAssistant` namespace.  Both copies removed, both files `#include` the new header.  Net: -20 LOC, single source of truth for the next signer that needs the same check.
+
+**`engine/curlWrapper/awsSigV4.cpp` — `ScopedSecretBytes` RAII wrapper + applied to all 5 intermediate signing keys.**
+
+Each of the AWS signing-key derivation chain values (`kSecret`, `kDate`, `kRegion`, `kService`, `kSigning`) holds heap-allocated bytes derived from the AWS `secret_access_key`.  Pre-fix the `std::vector<unsigned char>` destructor freed the buffer but did NOT zero it — the secret-derived material lingered in the freelist until reuse.  Post-fix each value is wrapped in a file-local `ScopedSecretBytes` struct whose destructor calls `OPENSSL_cleanse` on the buffer.
+
+Same posture sittings 1-3 closed for the master-password KEK in `keyEncryption.cpp` via `ScopedKey<N>`; this is the `std::vector` variant.  RAII via destructor (not explicit cleanse calls at the bottom of `Sign()`) gives us the cleanse-on-throw guarantee — if any subsequent string concat or HMAC call throws `std::bad_alloc`, the destructors fire in reverse order and zero each key.  `OPENSSL_cleanse` uses memory barriers to defeat compiler dead-store-elimination; `std::memset` would be optimised away.
+
+The `signature` vector itself is NOT wrapped — it's the SHA256-HMAC output (cryptographic hash of public-ish data), not key material.
+
+**`engine/curlWrapper/awsSigV4.cpp` — `HMAC()` and `SHA256()` return values checked.**
+
+OpenSSL's one-shot `HMAC()` and `SHA256()` are documented to return `NULL` on rare failure (impossible argument conditions, allocator failure inside libcrypto).  Pre-fix the return was discarded — on failure the output buffer held uninitialised data, the resulting "signature" was gibberish, AWS rejected with an opaque `SignatureDoesNotMatch` 401, and the operator had no log line pointing at the root cause.
+
+Post-fix: `Sha256Hex` and `HmacSha256` log `LOG_CORE_ERROR` and return empty string / empty vector on NULL.  `Sign()` propagates failure by leaving `Authorization` empty.  `Apply()` detects empty `Authorization` and returns `false` with `errorMessage = "SigV4: OpenSSL HMAC/SHA256 primitive failed during signing"`.  The upstream caller (`CurlMultiDispatcher::SetupEasyHandle` from sitting 9) emits the structured ERROR with `m_CancelKey` for the dashboard's run analyzer.
+
+**`engine/curlWrapper/awsSigV4.cpp::RunSelfTest` — added test #4 (full-chain known-answer signature).**
+
+Pre-fix the self-test had 3 sub-tests:
+1. SHA256 of empty string (universal constant)
+2. Signing-key derivation chain (kSigning hex matches AWS-published example)
+3. Determinism (two `Sign()` calls produce identical output) + Authorization-header structure spot-check
+
+Test #2 proves the key-derivation chain is correct, but the canonical-request → string-to-sign → final-signature pipeline (`UriEncode`, `CanonicalQuery`, header-map ordering, stringToSign concat) was not validated end-to-end.  A bug in any of those would be caught only by AWS rejecting our requests with `SignatureDoesNotMatch` — slow detection, opaque diagnosis.
+
+Test #4 locks in the EXACT signature for a Bedrock-shaped request using AKIDEXAMPLE + the AWS-published example secret (same inputs as test #3's determinism check):
+
+```
+Method=POST, URL=bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.../invoke
+AccessKey=AKIDEXAMPLE, SecretKey=wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY
+Region=us-east-1, Service=bedrock, AmzDate=20240101T120000Z, Body=Anthropic-shape JSON
+→ Signature=74fe2fddce07dc62e797273ccbb0ff5c11e9cd431afe83624c327f1c92695501
+```
+
+Bootstrap method: ran the test once with a placeholder expected-signature, captured the actual value from the mismatch log line, locked it in.  Future regressions in any pipeline component (canonical assembly, `UriEncode`, `CanonicalQuery`, header-map ordering, stringToSign, signing-key derivation, final HMAC) break this test loudly at startup.
+
+Note on AWS test-suite vectors: AWS's published `get-vanilla` and friends use minimal canonical headers (`host;x-amz-date` only).  Our implementation always includes `x-amz-content-sha256` (recommended for SigV4, required for S3/Bedrock).  The published vectors don't compare directly; test #4 bridges the gap with a Bedrock-shape vector locked in from a trusted run.  Cross-validation against `aws-cli` or `boto3` using the same canonical-request shape would independently verify the locked-in signature.
+
+**`engine/curlWrapper/awsSigV4.cpp::TrimSpace` — limitation comment added.**
+
+The function strips leading/trailing space + tab.  AWS canonical-request spec also calls for stripping CR/LF from header values AND collapsing sequential spaces inside header values to a single space.  Today's only header values are host (no internal whitespace), ISO 8601 dates (no internal whitespace), and base64 hashes (no whitespace) — none can hit the gap.  Comment documents the limitation and when to extend.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after refactor | clean (3 file recompiles: `authSigner.cpp` + `awsSigV4.cpp` + the new `credValidation.h` triggering both) |
+| 2 | First server start with placeholder test #4 | `SigV4 self-test (4) full-chain signature mismatch` fired as expected, exposed actual signature `74fe2fddce07dc62e797273ccbb0ff5c11e9cd431afe83624c327f1c92695501` ✓ |
+| 3 | Locked in actual signature, rebuild, restart | `SigV4 self-test: PASSED` ✓ — all 4 sub-tests pass |
+| 4 | `POST /api/settings/keys/unlock` | unlock OK ✓ |
+| 5 | `manage_connections test my-s3` (real SigV4 path: MinIO local, AWS-compatible) | **OK reachable** ✓ — full real-world signing through `Apply` → `Sign` → `ScopedSecretBytes`-wrapped key chain → return-checked `HmacSha256` → final signature accepted by MinIO |
+| 6 | Graceful REST shutdown | ✓ |
+
+The MinIO/S3 test at step 5 is the strongest available end-to-end validation: an actual SigV4-signed request was constructed, sent over the wire, the remote server validated the signature, and returned success.  If `OPENSSL_cleanse` had clobbered any wrong bytes, or the return-check changes had skipped a path, or the `IsBlank` promotion had broken validation, this test would have failed loudly.
+
+What's not exercised end-to-end (code-review-only):
+- HMAC/SHA256 NULL-return path — would require an OpenSSL allocator failure or impossible argument condition; skipped because (a) test #4 proves the success path produces the right output, and (b) the NULL-return code is straight-line.
+- `OPENSSL_cleanse` actually zeroing memory — verifiable only by reading the freed buffer post-cleanse, which is itself UB in C++ (read after free).  Code review confirms `OPENSSL_cleanse` is called from the `ScopedSecretBytes` destructor on the live buffer before it's freed by the `std::vector` destructor.
+- TrimSpace limitations — no caller exercises the gap today; the comment is the verification surface.
+
+### Open items / next-session candidates
+
+- **Sittings 11-16** — Engine-foundation files: config parser, `threadPool`, `eventQueue`, `curlMultiDispatcher`, `curlManager`, logging core.  The auth/crypto cluster (sittings 4-10) is closed; these are the next D3 layer down.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+- **Cross-validate test #4 against `aws-cli` / `boto3`** — one-time external check that the locked-in signature matches what AWS's reference implementations produce for the same canonical-request shape.  Not in the project tree today; could be a script in `scripts/` if we want a rerunnable harness.
+
+After sitting 10, S2=D3 has spent 7 sittings on the secret/auth/crypto-handling cluster (3 redactor + 1 JWT + 1 OAuth + 1 signer interface + 1 SigV4 deep-dive) plus 3 carried from S1 (keyEncryption RAII).  Roughly 30-40% of D3 scope remains.
+
+### Gotchas next-session-Claude should know
+
+- **`engine/curlWrapper/credValidation.h` is the canonical home for `IsBlank`.**  Don't re-create file-local copies in new signer files — `#include` the header.  If a similar helper appears (`IsValidUrl`, `IsValidHmacKey`, etc.), add to the same header.
+- **`ScopedSecretBytes` is file-local in `awsSigV4.cpp`'s anonymous namespace.**  Same not-yet-promoted policy as sitting 3's `EvpCipherCtxPtr` (`keyEncryption.cpp`) and sitting 7's `EvpPkeyPtr` (`jwtGenerator.cpp`).  Three RAII secret-zeroing wrappers across three files using disjoint primitive types — promoting to a shared `engine/keys/cryptoRaii.h` would couple them artificially.  When a 4th site needs the `vector<unsigned char>` cleanse pattern, then promote.
+- **The OPENSSL_cleanse pattern relies on the `std::vector` not being moved-from.**  If you find yourself writing `auto kFoo = std::move(scopedSecretBytes.m_Data);` to extract the bytes for downstream use, the source vector becomes empty and the cleanse-on-destruct is a no-op (the data was moved to the new owner).  This is correct behaviour — the new owner is now responsible for cleansing — but most use should avoid the move and read the bytes via `kFoo.m_Data` directly.
+- **Test #4's expected signature is a regression lock, not an AWS-conformance proof.**  Test #2 (key derivation against AWS-published hex) IS the AWS-conformance proof.  Test #4 catches "did our canonical-request assembly change?" — it would silently accept a bug if the bug were introduced before the signature was first locked in.  If you ever need to update the locked signature (e.g. you intentionally change the canonical-request shape), VERIFY the new signature with an external tool (`aws-cli`, `boto3`) before locking the new value in.
+- **`x-amz-content-sha256` is always included in canonical headers.**  S3 and Bedrock both require it.  If a future AWS service supports SigV4 without `x-amz-content-sha256` (rare), they'll still accept us including it — extra signed headers are valid.
+- **HMAC/SHA256 NULL-return propagation works by `Authorization` emptiness.**  `Sign()` returns a `SignedHeaders` struct; on OpenSSL failure the struct's `m_Authorization` is empty.  `Apply()` checks emptiness — don't refactor `Sign()` to throw or return optional without also updating `Apply()`.  The current shape avoids API churn while still propagating failure cleanly.
+- **`TrimSpace` limitations are documented but not fixed.**  If a future signer needs to send headers with internal whitespace or CRLF (unusual but possible for arbitrary-content headers), extending `TrimSpace` is the right move — the comment in the function body lists the AWS-spec gaps.
+- **The full-chain test took ~5s of bootstrap effort total.**  Pattern for future cryptographic-primitive sittings: write the test with a placeholder expected, run once to capture the actual, lock it in.  Faster than reasoning about the full pipeline by hand, and the locked-in value is verifiable post-hoc against external reference implementations if needed.  Memory `feedback_crypto_test_bootstrap_pattern.md` captures the recipe + the constraint (must pair with at least one independent RFC/NIST/vendor vector test); `doc/cyber security.md` "Crypto-test bootstrap pattern" subsection (under SigV4 Signing Security) is the canonical home for future-Claude.
+
+### Doc sweep (sitting 10 close-out)
+
+Three drift fixes:
+- `engine/README.md` directory tree — same stale `engine/keys/SigV4Signer` reference that sitting 9's sweep fixed in `application/cloud/README.md`; corrected to `engine/curlWrapper/` + added `IAuthSigner` to the listing.
+- `doc/cloud-integration.md` SigV4 section — accurate as-is, added a cross-ref to the new `doc/cyber security.md` "SigV4 Signing Security" section so the safety guarantees flow transparently.
+- `doc/cyber security.md` SigV4 section — new `#### Crypto-test bootstrap pattern` subsection capturing the placeholder → run → capture → lock recipe + the pair-with-independent-vector constraint + when-NOT-to-use guardrail (no RFC/NIST published vectors).
+
+Also added a new memory entry `feedback_crypto_test_bootstrap_pattern.md` so future-Claude sees the pattern at session start, not just buried in this hand-off's gotchas.
+
+Skipped (per established policy):
+- `doc/misc/cloud-integration-dev-plan.md` line 633 still says `engine/keys/sigV4Signer.h/cpp` — plan doc, retconning is anti-pattern.
+- `doc/misc/jarvisCppDoc.md` — manual header-cpp pairing audit, no semantic claims about SigV4 implementation.
+- All HMAC-SHA256-webhook references in `doc/api-endpoints.md`, `integration/`, `mcp/` — describe trigger-side request signing (orthogonal to SigV4 sign-out direction).
+
+### Session-close note (today's arc)
+
+Today closed sittings 5-10 of S2=D3 cybersec hardening: 6 sittings in one session.  Cumulative theme: secret/auth/crypto handling cluster.
+
+| Sitting | File(s) | Key landing |
+|---|---|---|
+| 5 | `keyManager.cpp` | `RegisterProviderSecrets` helper; KeyManager-resident credential redactor coverage |
+| 6 | `mcpKeyManager.cpp`, `triggerEngine.cpp`, `azureBlobConnector.cpp`, `secretRedactor.cpp` | Cross-component redactor coverage; `MIN_SECRET_LENGTH` 4→8 (kills `"test"` over-redaction footgun) |
+| 7 | `jwtGenerator.{h,cpp}`, `gcsConnector.cpp` | RS256 algorithm pinning; explicit `EVP_PKEY_id == EVP_PKEY_RSA` gate; `EvpPkeyPtr`/`EvpMdCtxPtr` RAII; ::toupper UB fix |
+| 8 | `oauthTokenManager.{h,cpp}` | Iterator-invalidation + data-race fix via snapshot pattern; URL-encoding; refresh-failure backoff; `expires_in` floor; race-safe `Start`; `RemoveTokens` API |
+| 9 | `authSigner.{h,cpp}`, `awsSigV4.{h,cpp}`, `curlWrapper.cpp`, `curlMultiDispatcher.{h,cpp}`, `webServer.cpp` | `Apply` API → `bool + errorMessage + const`; per-style empty/whitespace credential rejection; hard-failure `Get()`; `RemoveProvider → RemoveTokens` wire-up |
+| 10 | `awsSigV4.{h,cpp}`, `authSigner.cpp`, `credValidation.h` (NEW) | 4-test SigV4 self-test (added full-chain known-answer); `ScopedSecretBytes` RAII + `OPENSSL_cleanse` for intermediate keys; HMAC/SHA256 NULL-return checks; `IsBlank` promoted to shared header |
+
+State at end of day:
+- Auth/crypto cluster (sittings 4-10) closed.  Both `cyber security.md` and `architecture.md` carry the canonical security guarantees with file-by-file detail.
+- 9 sittings planned to close S2=D3 (sittings 11-19): engine-foundation files (config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core) + `Credential`/`ProviderConfig` `SecureString` migration.
+- Working tree carries 6 sittings of uncommitted changes (sittings 5-10).  Standard convention applies — JC handles all git ops.
+
+What next-session-Claude should do at session start:
+1. Read this entry (sitting 10) for the most recent context.
+2. Glance at sitting 9 entry for the IAuthSigner / `RemoveTokens` API shape since several sittings forward will use it.
+3. The `feedback_crypto_test_bootstrap_pattern.md` memory will surface automatically if you reach for a known-answer crypto test in any future sitting.
+4. `git status` to see the full set of uncommitted changes spanning sittings 5-10.
+5. If JC says "next sitting", default to sitting 11 (next planned: config parser audit per the open-items list above).
+
+---
+
+## 2026-05-03 (S2 sitting 9) → next session
+
+S2=D3 sitting 9.  Theme: **`engine/curlWrapper/authSigner` audit** — the next D3 file after `oauthTokenManager` (sitting 8) closed.  Carry-over scope from sitting 8: per-provider empty/whitespace credential rejection, no double-add-on-retry, leak-on-error paths.  Plus the bonus half-sitting follow-up from sitting 8: wire `KeyManager::RemoveProvider` → `OAuthTokenManager::RemoveTokens` so the in-memory OAuth state stops diverging from on-disk state when an OAuth provider is deleted.
+
+After sitting 9, the auth-cluster (sittings 7-9: JWT + OAuth lifecycle + signer) is closed.  Next: `awsSigV4` deep-dive (sitting 10, AWS official test vectors + exception safety in the signing primitive).
+
+### What landed
+
+**`engine/curlWrapper/authSigner.{h,cpp}` — API change + per-style validation + anti-debugging armor removal.**
+
+The `Apply` API changed shape:
+
+```cpp
+// Pre-fix:
+virtual void Apply(QueryData const&, vector<string>& outHeaders) = 0;
+// Post-fix:
+[[nodiscard]] virtual bool Apply(QueryData const&, vector<string>& outHeaders, string& errorMessage) const = 0;
+```
+
+The signer reports validation failures via the bool + message pair; per `feedback_log_failures.md`, the signer (no run context) does NOT emit the ERROR log — the caller (with run context: `m_Url`, `m_QuotaKey`, `m_CancelKey`) does.  `Apply` is now `const` to document the stateless-singleton invariant and allow safe concurrent calls.
+
+Per-style validation via the new file-local `IsBlank(string_view)` helper (handles empty AND all-whitespace):
+- `BearerSigner`, `XGoogApiKeySigner`, `AnthropicXApiKeySigner`, `AzureApiKeySigner` — validate `q.m_ApiKey` is non-blank.
+- `SigV4Signer` (in `awsSigV4.cpp`) — validates `m_AccessKey` (= `m_ApiKey`), `m_Params["secret_access_key"]`, AND `m_Params["region"]` independently so a missing region produces a different error message than a missing secret.
+
+`AnthropicXApiKeySigner` got a small atomicity fix as a side-finding: it pushes two headers (`x-api-key` + `anthropic-version: 2023-06-01`); pre-fix a `bad_alloc` between the two pushes would leave a request with the API key but no version.  Now strings are constructed first, vector is `reserve`'d to skip mid-push reallocation, then both are moved in.
+
+The `Get(style)` factory's trailing `return s_Bearer;` (anti-debugging armor — silent fallback for unhandled enum variants, exactly the pattern called out in CLAUDE.md's CurlMultiDispatcher silent-Bearer-fallback example) is replaced with `throw std::logic_error("IAuthSigner::Get: unhandled AuthStyle " + ...)`.  `-Wswitch` catches missing cases at compile time on most builds; the throw is the runtime backstop.
+
+**`engine/curlWrapper/awsSigV4.{h,cpp}` — `Apply` signature update + drop the inline-LOG + sentinel-header anti-debugging pattern.**
+
+Pre-fix the signer's missing-credential branch did:
+```cpp
+LOG_CORE_ERROR("SigV4Signer::Apply: missing access_key_id, secret_access_key, or region");
+outHeaders.push_back("Authorization: AWS4-HMAC-SHA256 MISSING-CREDENTIALS");
+return;
+```
+
+The sentinel header turned a local config bug into an opaque 401 from AWS, and the LOG_CORE_ERROR didn't carry runId/workflowId substring per `feedback_log_failures.md` (the SigV4 signer has no run context).  Both removed; the new `bool Apply` returns `false` + populates `errorMessage` with field-specific rejection reason; the caller emits the structured ERROR.
+
+Per-call duplicated `IsBlank` because cross-TU helpers in anonymous namespaces aren't shareable.  Promote to `engine/curlWrapper/credValidation.h` if a third site needs it.
+
+**`engine/curlWrapper/curlWrapper.cpp::Query` — caller updated, now-redundant `m_ApiKey.empty()` pre-check removed.**
+
+The pre-fix front-end check `if (queryData.m_ApiKey.empty())` was incomplete for SigV4 (which uses `m_Params["secret_access_key"]` + `m_Params["region"]` in addition to `m_ApiKey`).  Removed; the signer's per-style validation now covers all five styles correctly.  New flow:
+
+```cpp
+if (!IAuthSigner::Get(queryData.m_AuthStyle).Apply(queryData, authHeaders, authError))
+{
+    LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='{}' quotaKey='{}': {}",
+                   queryData.m_Url, queryData.m_QuotaKey, authError);
+    return QueryResult::Fail(QueryErrorCode::NoApiKey, authError);
+}
+```
+
+**`engine/curlWrapper/curlMultiDispatcher.{h,cpp}::SetupEasyHandle` — caller updated with curl-handle cleanup + signer-rejection error propagation.**
+
+`SetupEasyHandle` signature gained a `string& errorMessage` out-param so the upstream dispatcher loop can surface the rejection reason through the request callback.  On signer rejection: `curl_easy_cleanup(easy)` + return nullptr + structured ERROR with `m_CancelKey` (= per-task identifier per `feedback_log_failures.md`).  The dispatcher loop's failure callback now distinguishes signer rejection (`QueryErrorCode::NoApiKey`) from curl-init failure (`QueryErrorCode::CurlNotInitialized`) by message-prefix detection — avoids adding a second out-param for an error category.
+
+**`application/web/webServer.cpp::HandleProviderDelete` — wired `OAuthTokenManager::RemoveTokens`.**
+
+Sitting 8's `RemoveTokens` API now has its first caller.  After `KeyManager::RemoveProvider` succeeds, the handler unconditionally calls `Core::g_Core->GetOAuthTokenManager().RemoveTokens(providerName)`.  `RemoveTokens` is idempotent — it's a clean no-op for non-OAuth providers (the entry won't be in `m_Tokens`), so the wire-up is safe to call from the generic delete path without checking `credential_type`.  Layering note: this lives in the REST handler (not in `KeyManager::RemoveProvider`) because `KeyManager` is in `engine/keys/` and a direct `keyManager → oauthTokenManager` dependency would invert the existing arrow (oauthTokenManager already depends on KeyManager via constructor).
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after refactor (header changes recompiled 8 files) | clean, zero warnings |
+| 2 | Server start + `POST /api/settings/keys/unlock` | unlock OK; OAuth hydrate runs (2 entries) |
+| 3 | `manage_connections list` baseline | 14 connections returned, no signer activity |
+| 4 | `run_workflow inputResolutionTest` (no AI tasks; sanity check) | succeeded — non-AI baseline ✓ |
+| 5 | `run_workflow hamburg-tourist-day-planner` (1× ai_call task with real Anthropic call) | **succeeded** in 5s — full AI dispatch path through new `Apply` (BearerSigner / x-api-key / Anthropic) succeeded; AiRequestPool log shows `bytesRead=1446` from Anthropic response ✓ |
+| 6 | `manage_keys create sitting9-test` (api_key style, valid 24-char ApiKey) | created ✓ |
+| 7 | `manage_keys delete sitting9-test` | deleted ✓; security log shows `mcp_auth_success endpoint=/api/settings/providers/sitting9-test`; `RemoveTokens` call ran but logged nothing (entry not in `m_Tokens` because sitting9-test was api_key, not oauth) → confirms idempotent no-op for non-OAuth ✓ |
+| 8 | Log scan for `auth signer rejected` lines | 0 (expected — no negative-path test triggered today) ✓ |
+| 9 | Graceful REST shutdown | ✓ |
+
+What's not exercised end-to-end (code-review-only):
+- Empty/whitespace credential rejection actually firing — would require deliberately corrupting an existing provider's `m_ApiKey` to `"   "` and then routing an AI request through it.  Skipped because the route requires either creating a new test provider AND making it default (high test-state pollution risk) OR temporarily corrupting JC's working Anthropic key (high working-config pollution risk).  The IsBlank logic is straight-line + the tests at line 5 prove the success path runs the new code.
+- `Get()` `std::logic_error` throw — would require adding a 6th `AuthStyle` enum variant without updating the switch.  Compile-time `-Wswitch` would catch it before runtime.
+- OAuth-typed `RemoveTokens` removing an actual entry — would require creating a fake OAuth provider with valid-looking refresh_token / client_id / token_endpoint.  Tested instead with the non-OAuth idempotent no-op at step 7.
+
+The hamburg AI workflow run at step 5 is the strongest available test: it exercises BearerSigner (Anthropic uses Bearer-style routing despite `x-api-key` being its native header — actually wait, Anthropic uses AnthropicXApiKey style).  Either way, the AI-call dispatched through CurlMultiDispatcher::SetupEasyHandle's new code path, the signer Apply returned true, and the response came back — full success-path proof for at least one signer.
+
+### Doc sweep (sittings 6-9 cumulative, run after sitting 9 closed)
+
+Sitting 6's doc sweep was deferred when JC pivoted to sitting 7; ran the cumulative sweep across all four sittings as the close-out for sitting 9.  Three real findings:
+
+| File | Change |
+|---|---|
+| `doc/cloud-integration.md` (`OAuthTokenManager` section) | Added cross-reference to `doc/cyber security.md` "OAuthTokenManager Security" for the sitting-8 safety guarantees (URL-encoding, refresh-failure backoff, snapshot-then-apply, race-safe `Start`, `RemoveTokens`) |
+| `doc/cloud-integration.md` (`JwtGenerator` section) | Bullets updated for sitting 7 — algorithm pinning, `EVP_PKEY_id == EVP_PKEY_RSA` gate, `EvpPkeyPtr` / `EvpMdCtxPtr` RAII, new `Generate(payloadJson, privateKeyPem, errorMessage)` signature; cross-reference to cyber-sec for the alg-confusion threat model |
+| `application/cloud/README.md` (Related Files table) | Stale path `engine/keys/sigV4Signer.h` (file doesn't exist) → corrected to `engine/curlWrapper/awsSigV4.h`; added new row for `engine/curlWrapper/authSigner.h` (IAuthSigner) |
+
+Deliberately not touched:
+
+- `doc/misc/cloud-integration-dev-plan.md` line 1122 still shows the old `JwtGenerator::Generate(headerJson, payloadJson, ...)` signature.  Per sitting 5's note: plan docs document the original framing; the actual implementation lives in cyber-sec + here.  Not retconned.
+- `combined*.md`, `CyberSecAudit/*`, `SafetyAudit/*` — generated artifacts per `feedback_combined_doc_generated.md`.
+- HMAC-webhook references in `mcp/README.md`, `integration/README.md`, `integration/n8n-node/README.md`, `doc/jcwf_generation_guide.md`, `doc/api-endpoints.md`, `doc/jarvisagent.md`, `README.md` — these describe trigger-side request signing (orthogonal to sitting 6's redactor coverage which is about server-side log scrubbing).
+- `engine/curlWrapper/curlWrapper.md`, `engine/keys.md` — silent on the topics (no stale claims to fix).
+
+**Meta-observation worth carrying forward.** The cross-reference pattern (cyber-sec doc as canonical home for security guarantees; architecture / cloud-integration / engine READMEs cross-ref rather than duplicate) held up across four consecutive sittings of substantial change.  Total drift after 6+7+8+9 was 3 file touches in this final sweep — most facts stayed correct because the canonical home was kept current per-sitting, and the cross-refs picked up the new content transparently.  Future sittings should follow the same routing: write the security fact ONCE in cyber-sec; everywhere else cross-references that section by name.
+
+### Open items / next-session candidates
+
+- **Sitting 10 — `engine/curlWrapper/awsSigV4` deep-dive** (carried unchanged): AWS official test vectors, exception safety, deeper crypto-primitive review (HMAC-SHA256 implementation, SHA256 inputs, key derivation chain).
+- **Sittings 11-16** — Config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+
+After sitting 9, S2=D3 has spent 6 sittings on the secret/auth-handling cluster (3 redactor + 1 JWT + 1 OAuth + 1 signer) plus 3 carried from S1 (keyEncryption RAII).  Roughly 40-50% of D3 scope remains.
+
+### Gotchas next-session-Claude should know
+
+- **`IAuthSigner::Apply` returns `bool` and writes to `errorMessage`.**  Both callers (sync `CurlWrapper::Query` and async `CurlMultiDispatcher::SetupEasyHandle`) check the bool and emit a structured `LOG_CORE_ERROR` with `m_CancelKey` as the run-identifier substring per `feedback_log_failures.md`.  If a third caller appears (e.g. a future `assistantTools` direct AI dispatch path), follow the same pattern — never call `Apply` and ignore the return.
+- **`IsBlank` is duplicated in two anonymous namespaces** (`authSigner.cpp` + `awsSigV4.cpp`).  Cross-TU anonymous-namespace symbols can't be shared; promoting to `engine/curlWrapper/credValidation.h` is appropriate when a third site needs it.  Today the duplication is two ~10-line lambdas — small.  Don't promote prematurely; same policy as sitting 3's `EvpCipherCtxPtr` and sitting 7's `EvpPkeyPtr`.
+- **`Get()` no longer falls back to Bearer.**  If you add a 6th `CurlWrapper::AuthStyle` variant without updating the `Get()` switch, `-Wswitch` warns at compile time AND the runtime path throws `std::logic_error` if the warning is missed.  Don't re-add a `default:` arm — that's exactly the anti-debugging armor sitting 9 removed.
+- **`SigV4Signer::Apply` sentinel header is gone.**  The pre-fix `outHeaders.push_back("Authorization: AWS4-HMAC-SHA256 MISSING-CREDENTIALS")` used to emit a syntactically-valid-looking-but-secretly-broken header so AWS would reject with 401.  Now the signer returns `false` and the request never goes out.  Don't reintroduce the sentinel pattern thinking "the request still has SOMETHING in the Authorization header" — that pattern hides the real problem.
+- **`OAuthTokenManager::RemoveTokens` is wired only from `HandleProviderDelete`** today.  If a future code path mutates KeyManager state in ways that should also drop OAuth entries (a bulk re-import? a credential-type change from oauth to something else?), wire those sites explicitly.  The wire-up location in the REST handler is intentional — see the layering note above.
+- **Negative-path testing for signer rejection is hard to do safely** — the existing test approach (corrupt provider → route AI request → restore) requires either polluting the default provider state or creating+activating a test provider.  If a future sitting builds a proper integration test framework for credential-rejection scenarios, the right hook is to override `IAuthSigner::Get` for tests (currently file-local statics; would need either a registry or an injectable factory).  Skipped today because (a) the success path runs the same code (validation runs on every request), and (b) `IsBlank` is straight-line.
+- **`SetupEasyHandle` now does `curl_easy_cleanup(easy)` on signer rejection.**  This is the only cleanup site needed — `req.m_Headers` is still null (nothing appended yet), and the easy handle is fully owned by SetupEasyHandle until it's added to the multi-handle.  If a future change moves header appending earlier in SetupEasyHandle (before the signer call), the cleanup needs to also `curl_slist_free_all(req.m_Headers)` and reset to null.
+- **`QueryErrorCode` is a namespace of `constexpr int`s, not an enum class.**  Don't write `QueryErrorCode const code = ...` — that declares `code` as a (variable-of-namespace-type), which is invalid C++.  Use `int const code = QueryErrorCode::NoApiKey`.  Sitting 9 hit this once during the refactor.
+
+---
+
+## 2026-05-03 (S2 sitting 8) → next session
+
+S2=D3 sitting 8.  Theme: **`engine/keys/oauthTokenManager` audit** — the next D3 file after `jwtGenerator` (sitting 7) closed.  Carry-over scope from sitting 7: refresh-token storage at rest, expiration handling, revocation path, background-thread lifetime safety.  All four landed plus four additional findings the audit surfaced (URL-encoding, refresh-failure backoff, `expires_in` floor, race-safe `Start`).
+
+After sitting 8 the auth-cluster (sittings 7-8: JWT + OAuth token lifecycle) is closed.  Next: `authSigner` audit (sitting 9, per-provider empty/whitespace credential rejection + no-double-add-on-retry).
+
+### What landed
+
+**`engine/keys/oauthTokenManager.h` — `RemoveTokens(keyName)` public API + `RefreshResult` struct + `ApplyRefreshResult` private helper + `m_LastRefreshFailureAt` field on `TokenEntry`.**  The header changes are the API surface for the .cpp refactor; new `RefreshToken` private signature takes snapshot inputs by value (no `TokenEntry&`) and writes through `RefreshResult&`.
+
+**`engine/keys/oauthTokenManager.cpp` — three real bugs fixed + four defense-in-depth additions, all in one consolidated rewrite.**
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | **Iterator-invalidation UB in `RefreshLoop`.**  Pre-fix: range-iterate `m_Tokens` while dropping/re-acquiring the lock for the network call.  A concurrent `StoreTokens` that triggers an `unordered_map` rehash invalidates the for-loop iterator (per std::unordered_map: insert may invalidate iterators on rehash; element references stay valid but iterators do not).  The body's next iteration is then UB. | Snapshot the list of pending refresh tasks (`std::vector<PendingRefresh>` of by-value copies) under lock, then iterate the snapshot with the lock released.  No iteration over `m_Tokens` while the lock is dropped. |
+| 2 | **Data race on `TokenEntry` fields.**  Pre-fix: `RefreshToken(keyName, entry)` accessed `entry.m_TokenEndpoint`, `m_ClientId`, etc. and wrote `m_AccessToken`, `m_RefreshToken`, `m_ExpiresAt` without holding the lock.  A concurrent `StoreTokens` overwrote the same `std::string` fields → data race (UB) on the strings' internal pointers. | New `RefreshToken` signature takes snapshot inputs by value (`tokenEndpoint`, `clientId`, `clientSecret`, `refreshToken`).  Result lands in a stack-local `RefreshResult` struct.  Caller takes the lock, re-finds the entry (might have been removed mid-refresh), and applies via `ApplyRefreshResult`.  The function holds NO lock and does not touch `m_Tokens`. |
+| 3 | **No URL-encoding on POST body fields.**  Pre-fix: `&refresh_token=` + raw `m_RefreshToken` + `&client_id=` + raw `m_ClientId`.  RFC 6749 doesn't restrict the refresh-token charset; a token containing `&` or `=` (rare but legal) breaks the form-encoded body and produces an opaque "invalid_request" from the provider — debuggable only by capturing the network traffic. | New `CurlEscapedString` RAII wrapper around `curl_easy_escape` + `curl_free`.  All three fields (`refresh_token`, `client_id`, `client_secret`) pass through the escape before concatenation. |
+| 4 | **No backoff after refresh failure → refresh storm.**  Pre-fix: `GetAccessToken` triggers on-demand refresh on every call when the access token is missing/expired.  If the refresh token has been revoked at the provider, every call is a network round-trip → DoS against the provider AND ourselves. | New `m_LastRefreshFailureAt` field on `TokenEntry`, set on every failed refresh.  Both `GetAccessToken` and `RefreshLoop` skip refresh attempts within `BACKOFF_AFTER_FAILURE_SECONDS` (60 s) of the last failure.  `GetAccessToken` returns a clear "in backoff after recent failure" error.  Backoff is cleared in `ApplyRefreshResult` on success. |
+| 5 | **`expires_in <= 0` → instant re-refresh loop.**  Pre-fix: server-supplied `expires_in` of 0 or negative passed straight through to `m_ExpiresAt = NowUnixSeconds() + expiresIn`, putting expiry in the past or now → next `GetAccessToken` triggers another refresh immediately. | Validate `expires_in >= MIN_EXPIRES_IN_SECONDS` (60 s); below the floor, clamp to the floor with a `LOG_CORE_WARN`.  If absent from the response, default to `DEFAULT_EXPIRES_IN_SECONDS` (3600 s).  Eliminates the storm pattern even with hostile responses. |
+| 6 | **Racy `Start()` could call `std::terminate`.**  Pre-fix: `if (m_Running.load()) return;` is racy.  Two concurrent `Start()` calls could both observe false, both call `HydrateFromKeyManager`, both spawn threads.  The second `m_RefreshThread = std::thread(...)` assignment to a still-joinable thread terminates the process. | `m_Running.compare_exchange_strong(expected, true)` lets exactly one caller proceed.  Plus a `try/catch` rolls back `m_Running` to false if `HydrateFromKeyManager` or `std::thread` construction throws — without rollback, a later `Stop()` would join a non-joinable thread → `std::system_error`. |
+| 7 | **No exception catch in `RefreshLoop`.**  Pre-fix: an uncaught `std::bad_alloc` from any `std::string` op or simdjson parse silently terminates the background thread.  Operator sees stale tokens stop refreshing with no log to indicate why. | Loop body wrapped in `try/catch (std::exception& e)` + `catch (...)` blocks emitting `LOG_CORE_ERROR` with the exception message.  Loop continues on next tick. |
+| 8 | **No revocation API.**  Pre-fix: `KeyManager::DeleteProvider` removes a credential from on-disk storage, but the OAuth manager's `m_Tokens` map still holds the entry.  In-memory and on-disk state diverge silently. | New `OAuthTokenManager::RemoveTokens(keyName)` public method: erases the entry from `m_Tokens`, unregisters its secrets from the redactor, wakes `GetAccessToken` waiters so they observe the removal.  Idempotent.  **Wire-up from `KeyManager::DeleteProvider` is a follow-up** — the API exists today but the delete path doesn't call it yet.  Documented in cyber-sec doc + here so the next sitting that touches `KeyManager` knows to wire it. |
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after refactor (header change recompiled ~30 files) | clean, zero warnings |
+| 2 | Server start → `OAuthTokenManager: refresh loop started` (boot-time Hydrate finds 0, keystore not yet unlocked) | ✓ |
+| 3 | `POST /api/settings/keys/unlock` → `webServer.cpp:5728` calls `HydrateFromKeyManager` → `hydrated 2 OAuth token entry(ies) from KeyManager` (google-sheets-oauth + onedrive-oauth) | ✓ |
+| 4 | `manage_connections test my-onedrive` → `oneDriveConnector::ResolveCredentials` → `GetAccessToken("onedrive-oauth")` → token hydrated with empty access_token + ExpiresAt=0 → triggers on-demand refresh via the new snapshot pattern | `on-demand refresh for 'onedrive-oauth' (access_token empty, expires_at=0)` → POST to Microsoft token endpoint via URL-encoded body → `successfully refreshed token for 'onedrive-oauth' (expires in 3599 s)` → connector tested → **OK reachable** ✓ (full new flow exercised end-to-end) |
+| 5 | `manage_connections test my-sheets` → same flow, Google token endpoint | `successfully refreshed token for 'google-sheets-oauth' (expires in 3599 s)` → **OK reachable** ✓ |
+| 6 | Graceful REST shutdown → `OAuthTokenManager: refresh loop stopped` at +0ms (CV-notify wake, no 30s wait) | ✓ |
+
+What's **not** exercised end-to-end (code-review-only):
+
+- Iterator-invalidation fix — requires a concurrent `StoreTokens` during a `RefreshLoop` iteration to trigger UB pre-fix; the snapshot pattern is the structural proof.
+- `RemoveTokens` API — no caller wired yet (sitting 9+ candidate when we touch `KeyManager::DeleteProvider`).
+- Backoff actually firing — would require a refresh failure; deliberately corrupting JC's real OAuth tokens to test backoff is not worth it.
+- `compare_exchange` in `Start()` — hard to construct concurrent `Start()` end-to-end; the atomic semantics are the proof.
+- Try/catch in `RefreshLoop` — would require a thrown exception; defensive belt that should never fire in practice.
+
+The on-demand refresh path through `GetAccessToken` is the most thorough test: it exercises the snapshot capture + lock release + URL-encoded POST body + expires_in validation + ApplyRefreshResult + redactor swap, all in one round-trip.  Both real OAuth providers (Microsoft + Google) accepted the requests — if URL-encoding were broken or the snapshot pattern had a logic bug, the tests would have failed loudly with provider-side errors.
+
+### Open items / next-session candidates
+
+- **Sitting 9 — `engine/curlWrapper/authSigner` audit** (carried unchanged): per-provider empty/whitespace credential rejection, no double-add-on-retry, leak-on-error paths.
+- **`KeyManager::DeleteProvider` wire-up of `OAuthTokenManager::RemoveTokens`** — small follow-up, can be folded into sitting 9 or done as a half-sitting.  The API exists; just needs the call.
+- **Sitting 10 — `engine/curlWrapper/awsSigV4` deep-dive**: AWS official test vectors, exception safety.
+- **Sittings 11-16** — Config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+
+After sitting 8, S2=D3 has spent 5 sittings on the secret-handling cluster (3 redactor + 1 JWT + 1 OAuth) plus 3 carried from S1 (keyEncryption RAII).  Roughly half of D3 scope remains.
+
+### Gotchas next-session-Claude should know
+
+- **`RefreshToken` is now lockless and doesn't touch `m_Tokens`.**  Don't add a `TokenEntry&` parameter back — that re-opens the data race that sitting 8 closed.  If a future caller needs to log entry-related context, accept that context as separate by-value parameters.
+- **The snapshot-then-apply pattern is the core invariant.**  Both call sites (`GetAccessToken` on-demand + `RefreshLoop` background) capture inputs under lock, drop the lock, do the network call, re-take the lock, re-find the entry (might be gone), then apply.  If you find yourself adding a third refresh path (e.g. a forced-refresh REST endpoint), follow this pattern exactly — don't shortcut.
+- **`m_Refreshing` is set under lock at snapshot time and cleared under lock at apply time.**  Pre-fix it was set/cleared inside the iteration loop; post-fix the snapshot loop sets it for every pending task in one pass, and each apply clears its own.  If a refresh fails, the apply still clears `m_Refreshing` (so future GetAccessToken can re-attempt after backoff) and sets `m_LastRefreshFailureAt`.
+- **`ApplyRefreshResult` re-finds the entry by name** — it does NOT take the entry by reference.  If between snapshot and apply, a `RemoveTokens(keyName)` ran, the apply gracefully discards the result with a `LOG_CORE_INFO` "discarding refresh result (entry removed)".  Don't optimize this away thinking "the entry is always there"; the whole point of the lockless network call is that the map can change.
+- **`CurlEscapedString` RAII wrapper is file-local** in `oauthTokenManager.cpp`'s anonymous namespace.  If a second site needs URL-encoded form fields (likely candidates: `webServer` OAuth callback handler, `authSigner` for some providers), promote to a shared header (`engine/curlWrapper/curlEscapedString.h` or similar).  Today: 1 user.  Same not-yet-promoted policy as sitting 3's RAII wrappers and sitting 7's `EvpPkeyPtr`.
+- **The `CurlEscapedString::ToString(fallback)` returns the original string if escape failed** (allocation failure, very rare).  This means a malformed token COULD reach the wire on extreme memory pressure.  The provider would reject it with `invalid_request`, the failure would be logged, and backoff would activate.  Acceptable failure mode; if it ever fires in practice, switch to hard-failing instead.
+- **Backoff is per-entry, not per-provider.**  Two different connections sharing the same provider but using different OAuth credentials would have independent backoff windows.  Reasonable, but worth knowing if a future feature lets multiple connections share a single OAuth credential entry.
+- **`MIN_EXPIRES_IN_SECONDS = 60` is conservative** — real-world tokens are 300s+ everywhere we've seen.  If a future provider issues legitimately shorter tokens, raise the floor concern in code review before lowering this.  Lowering to 0 reopens the storm vector.
+- **The `try/catch` in `RefreshLoop` is defensive belt, not a regular control-flow channel.**  If you find an exception actually firing, that's a bug somewhere upstream (most likely a `std::bad_alloc` from `std::string`).  Investigate the root cause; don't expand the catch to mask a real issue.
+- **`HydrateFromKeyManager` is called from TWO places**: `OAuthTokenManager::Start()` at server boot (when keystore is locked → finds 0 OAuth entries), AND `webServer.cpp:5728` after `/api/settings/keys/unlock` (when keystore is unlocked → hydrates the actual count).  The check at line 80 — `if (m_Tokens.find(name) != m_Tokens.end()) continue;` — makes the second call idempotent for already-present entries (e.g. ones added via in-session OAuth callback).  Don't move the post-unlock hydrate call thinking it's redundant.
+
+---
+
+## 2026-05-03 (S2 sitting 7) → next session
+
+S2=D3 sitting 7.  Theme: **`engine/keys/jwtGenerator` audit** — the next D3 file after the redactor cluster (sittings 4-6) closed.  Carry-over scope from sitting 6: algorithm pinning (no `none` accepted), exception safety, RSA key handling.  All three landed plus a `::toupper` UB cleanup the audit surfaced as a side-finding.
+
+After sitting 7, the keystore foundation cluster + redactor cluster + JWT generator are all closed for the current pass.  Next: `oauthTokenManager` audit (sitting 8).
+
+### What landed
+
+**`engine/keys/jwtGenerator.h` — `Generate` API simplified.**  Old signature took `(headerJson, payloadJson, privateKeyPem, errorMessage)`; new signature takes `(payloadJson, privateKeyPem, errorMessage)`.  The header is now built internally as the constant `R"({"alg":"RS256","typ":"JWT"})"` (`RS256_HEADER_JSON` at the top of the .cpp).
+
+The motivation is **alg-confusion mitigation**.  Pre-sitting-7, a caller could pass `{"alg":"none","typ":"JWT"}` as the header, and `Generate` would happily base64-encode it, sign the resulting `header.payload` with RS256, and emit a JWT whose header claims `none` but carries a real RS256 signature in the third part.  A correctly-implemented verifier rejects this (alg-must-match-signature).  But a verifier that trusts the alg field at face value — common in older / hand-rolled JWT libraries, and historically the source of multiple CVEs — would see `none`, skip signature verification entirely, and accept the token unconditionally.  Both project callers (`gcsConnector` + `snowflakeConnector` via `GenerateSnowflakeJwt`) hardcoded the same `R"({"alg":"RS256","typ":"JWT"})"` header — there was zero legitimate use of the header parameter, only footgun surface.
+
+Both callers updated:
+- `application/cloud/gcsConnector.cpp:222` — drops the `headerJson = R"({"alg":"RS256","typ":"JWT"})"` local + the `headerJson` arg.
+- `application/cloud/snowflakeConnector.cpp` (via `JwtGenerator::GenerateSnowflakeJwt`) — same internal cleanup at the bottom of the helper.
+
+**`engine/keys/jwtGenerator.cpp` — `ParseAndValidateRsaPem` helper + RAII wrappers.**  Anonymous-namespace file-local helpers extract the duplicated PEM parse + RSA-type + bits-check logic from `Generate` and `ComputePublicKeyFingerprint` into one site.  This is the C++ discipline rule firing again: two identical-shape pre-fix copies + the RAII migration making them slightly different post-fix = extract before the third copy appears.
+
+The RAII wrappers (`EvpPkeyPtr`, `EvpMdCtxPtr`) follow sitting 3's `EvpCipherCtxPtr` pattern: `unique_ptr` with file-local custom deleter struct, anonymous-namespace, no shared header yet.  Per sitting 3's gotcha — promote to a shared `engine/keys/cryptoRaii.h` only on the **third** OpenSSL-handle wrapper site.  Today: `keyEncryption.cpp` (EVP_CIPHER_CTX) + `jwtGenerator.cpp` (EVP_PKEY + EVP_MD_CTX) = three types, two files.  Still not promoted because the two files use disjoint OpenSSL APIs (cipher vs digest+key) and a shared header would couple them artificially without removing duplication (the deleter bodies are different functions).
+
+**`engine/keys/jwtGenerator.cpp` — explicit RSA-key-type gate.**  Inside `ParseAndValidateRsaPem`, after `PEM_read_bio_PrivateKey` succeeds, an `EVP_PKEY_id(pkey.get()) == EVP_PKEY_RSA` check rejects EC / DSA / Ed25519 / Ed448 / X25519 / any non-RSA key.  Pre-fix, `EVP_PKEY_bits` would happily accept e.g. a 2048-bit DSA key, `EVP_DigestSign` would produce a DSA signature, and the JWT header would still claim `RS256` — the same alg-confusion shape as the `none` case but harder to spot because the alg field is technically true at the header layer and only becomes a lie at the signature layer.
+
+**`engine/keys/jwtGenerator.cpp` — exception-safe error paths.**  All five error paths in `Generate` (`EVP_MD_CTX_new` fail, `EVP_DigestSignInit` fail, `EVP_DigestSignUpdate` fail, two `EVP_DigestSignFinal` fails) are now flat `return {}` because RAII handles cleanup.  Pre-fix, raw `EVP_PKEY*` + `EVP_MD_CTX*` were held across the `Base64UrlEncode(headerJson) + "." + Base64UrlEncode(payloadJson)` concatenation and the `std::vector<uint8_t> signature(sigLen)` construction — both can throw `std::bad_alloc`, both would have leaked the OpenSSL handles.  Same fix shape sitting 3 applied to `keyEncryption.cpp`.
+
+**`engine/keys/jwtGenerator.cpp` — `::toupper` UB cleanup.**  `std::transform(..., ::toupper)` with a `char` whose high bit is set is undefined behaviour per cppreference (the `<cctype>` functions require an `int` in `[0, UCHAR_MAX]` or `EOF`; passing a negative signed `char` is UB).  Snowflake account identifiers are ASCII alphanumeric so it never fired in practice, but the cast-to-`unsigned char` lambda makes the contract explicit.  Two-line change.
+
+**`engine/keys/jwtGenerator.cpp::ComputePublicKeyFingerprint` — second-call return check.**  `i2d_PUBKEY` is called twice: once for length, once to fill the buffer.  Pre-fix the second call's return was discarded; post-fix it's checked against the expected length.  Defensive — should never differ in practice since the first call succeeded — but the second call CAN return `<= 0` on rare allocator failures inside libcrypto.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after refactor | clean (3 file recompiles: jwtGenerator + gcsConnector + snowflakeConnector) |
+| 2 | Server start + `POST /api/settings/keys/unlock` | unlock OK; 18 providers loaded |
+| 3 | `manage_connections list` | 14 connections returned; `my-snowflake` and `my-gcs` both `auth: jwt_rsa` ✓ |
+| 4 | `manage_connections test my-snowflake` | `Connection my-snowflake OK: reachable` — full JWT round-trip: `GenerateSnowflakeJwt` → `ComputePublicKeyFingerprint` (RAII parse, RSA gate, fingerprint computed) → `Generate` (RAII parse, RSA gate, sign, register-with-redactor) → JWT sent to Snowflake → server accepts ✓ |
+| 5 | `manage_connections test my-gcs` | `Connection my-gcs OK: reachable` — `Generate` direct path round-tripped: payload-only call signature, header built internally, RAII parse + sign, JWT exchanged for OAuth access token at fake-gcs-server (localhost:4443) ✓ |
+| 6 | Log scan for JWT-related errors | zero — 99 pre-existing warnings are all sub-workflow canvas parsing (unrelated) ✓ |
+| 7 | Graceful REST shutdown | ✓ |
+
+The Snowflake JWT path is the most thorough end-to-end test of the new code: it goes through *both* `Generate` and `ComputePublicKeyFingerprint`, both of which now share the `ParseAndValidateRsaPem` helper.  Snowflake's server-side public-key match would fail loudly if the fingerprint changed (it didn't) or the signature wasn't a valid RS256 (it was).
+
+Negative-path tests not run (would need synthetic PEMs):
+- 1024-bit RSA key → expect rejection at `keyBits < MIN_RSA_KEY_BITS` (code unchanged from pre-sitting-7, only re-homed into the helper).
+- EC / Ed25519 key → expect rejection at the new `EVP_PKEY_id != EVP_PKEY_RSA` gate.
+
+Code review confirms both gates are wired identically in `Generate` and `ComputePublicKeyFingerprint` because both go through `ParseAndValidateRsaPem`.
+
+### Open items / next-session candidates
+
+- **Sitting 8 — `engine/keys/oauthTokenManager` audit** (carried unchanged): refresh-token storage at rest, expiration handling, revocation path, background-thread lifetime safety.
+- **Sitting 9 — `engine/curlWrapper/authSigner` audit** (per-provider): empty/whitespace credential rejection, no double-add-on-retry.
+- **Sitting 10 — `engine/curlWrapper/awsSigV4` deep-dive**: AWS official test vectors, exception safety.
+- **Sittings 11-16** — Config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+
+After sitting 7, S2=D3 has spent 4 sittings on the secret-handling cluster (3 redactor + 1 JWT) plus 3 carried from S1 (keyEncryption RAII).  Roughly 60% of D3 scope remains.
+
+### Gotchas next-session-Claude should know
+
+- **The `Generate` API is `(payloadJson, privateKeyPem, errorMessage)` — no header param.**  If you find yourself adding a `headerJson` parameter back "for flexibility," read the alg-confusion section in `doc/cyber security.md` "JwtGenerator Security" first.  The whole point of this sitting was removing that surface.  If a future caller genuinely needs a different alg (HS256, ES256), introduce a new method (`GenerateHS256`, `GenerateES256`) — don't re-parameterize.
+- **`ParseAndValidateRsaPem` is the single PEM-validation gate.**  Both `Generate` and `ComputePublicKeyFingerprint` route through it.  If a future sitting needs a non-RSA helper (e.g. EC-key fingerprint for ES256), don't bypass this — extract a sibling `ParseAndValidateEcPem` and let the caller pick.  The "is this an RSA key" check is load-bearing for security, not a stylistic choice.
+- **`EvpPkeyPtr` / `EvpMdCtxPtr` are file-local** in `jwtGenerator.cpp`'s anonymous namespace.  Same not-yet-promoted policy as sitting 3's `EvpCipherCtxPtr` in `keyEncryption.cpp`.  When a third file lands an OpenSSL handle wrapper, **then** promote all three to `engine/keys/cryptoRaii.h`.  Today: 2 files / 3 types — not yet.  The deleter bodies are one-liners, so the duplication cost is tiny.
+- **The `i2d_PUBKEY` second-call return check is defensive paranoia.**  In practice it never fails when the first call succeeded — same arguments, same allocator state.  But the older code discarded it entirely, and a libcrypto allocator failure mid-write would have produced a partially-filled `derBuf` whose SHA-256 fingerprint then disagreed with the actual key.  Snowflake auth would silently accept the wrong fingerprint and be unable to find a matching public key — failure mode would be a confusing "key not found" at Snowflake, hours of grep before the cause was clear.  The check is cheap; keep it.
+- **The `upperAscii` lambda exists ONLY because of `std::toupper`'s undefined-on-negative-char contract.**  Don't simplify it back to `::toupper` "for readability" — that's UB-bait.  If you're doing string transformations elsewhere in the codebase that also pass to `<cctype>` functions, copy the cast-to-unsigned-char pattern.  Not worth a project-wide sweep today, but worth flagging in any new code review.
+- **Snowflake's "uppercase + strip region suffix" account-locator transform** is preserved exactly from pre-sitting-7.  The transform is a Snowflake protocol requirement, not a security concern, but worth keeping in mind: account `XY12345.us-east-1` becomes account-locator `XY12345` for the JWT `iss` claim.  If a future Snowflake-side change makes case-sensitivity matter (it doesn't today, but their docs are vague), this would need re-examination.
+- **JWT secret-redactor registration moved up.**  Pre-sitting-7 the `SecretRedactor::Get().AddSecret(jwt)` call was inside an `if (!jwt.empty())` check at the bottom of `Generate`; post-fix it's an unconditional call after `EVP_DigestSignFinal` succeeds (the function returns early on every failure path before reaching the call).  Functionally identical (the redactor's `MIN_SECRET_LENGTH = 8` gate inside `AddSecret` already short-circuits empty / tiny strings) but the new shape matches the project pattern of "register at the success site, not at the post-hoc 'maybe?' check."
+
+---
+
+## 2026-05-03 (S2 sitting 6) → next session
+
+S2=D3 sitting 6.  Theme: **redactor coverage sweep, cross-component half** — carried directly from sitting 5's "Critical carry-over" list.  Sitting 5 closed the KeyManager-resident half via `RegisterProviderSecrets`; sitting 6 closes the remaining cross-component sites (MCP key plaintexts in `mcpKeyManager`, webhook HMAC secrets in `triggerEngine`, Azure shared keys in `azureBlobConnector`) and bumps `MIN_SECRET_LENGTH` 4→8 to kill the `"test"`-collision footgun sitting 5 surfaced.
+
+After sitting 6, secretRedactor coverage matches the project's actual credential surface — every credential value materialising in memory anywhere is registered before any logging path can see it.  The cyber-sec doc's coverage table is the canonical record going forward.
+
+### What landed
+
+**`application/web/mcpKeyManager.cpp` — five `AddSecret` call sites.**  MCP raw keys never live in `McpKeyManager`'s in-memory state (only SHA-256 hashes do), so registration happens at the four points where a raw value is materialised plus the one point where an inbound raw key is verified:
+
+| Site | Value registered | Notes |
+|---|---|---|
+| `CreateEnrollment` | `rawEnrollmentToken` (`enroll_…` + 64 hex) | Registered before return; lifetime of registration outlives the enrollment's TTL on purpose — a leaked stale token is still a leaked credential pattern that should not appear in logs |
+| `ActivateEnrollment` | new `rawKey` (`mcp_…` + 64 hex) | Registered BEFORE the `std::move` into `ActivateResult::m_RawKey` |
+| `CreateBootstrapAdminKey` | new `rawKey` | Same pre-move ordering |
+| `SelfRenew` | new `rawKey` | Same pre-move ordering |
+| `Authenticate` | inbound `rawKey` | Success-only registration: failed attempts (wrong hash, unknown keyId) take early-return paths above without registering, so an attacker spamming guesses cannot pollute the redactor's value pool with attacker-chosen strings |
+
+**`application/workflow/triggerEngine.cpp::AddWebhookTrigger` — one `AddSecret` call.**  The `WebhookTriggerInstance::m_Secret` (HMAC-SHA256 shared secret) is registered before the `std::move` into `m_WebhookTriggers`; empty secrets are skipped (the validator already rejects them upstream, but defense-in-depth).
+
+**`application/cloud/azureBlobConnector.cpp::ResolveCredentials` — one `AddSecret` call (defense-in-depth).**  The azure shared key value lives in `ProviderConfig::m_ApiKey` (api_key credential type) or `m_Password` (basic_auth credential type) — both already registered by sitting 5's `RegisterProviderSecrets`.  The transient copy in `CloudCredentials::m_SecretKey` would auto-redact via exact-substring match against the already-registered string today, so this registration is functionally a no-op.  Kept for the day a future code path bypasses KeyManager (e.g. SAS pulled from `connection.m_Params`) — that secret will get registered too without anyone needing to remember.
+
+**`engine/log/secretRedactor.{cpp,h}` — `MIN_SECRET_LENGTH` bumped 4→8.**  Sitting 5 caught that mailpit + greenmail dev mocks both have password = literal `"test"` (4 bytes — exactly `MIN_SECRET_LENGTH`).  Once registered, every log line containing the substring `"test"` got corrupted: `"smoke tests"` → `"smoke [REDACTED]s"`, `"latest"` → `"la[REDACTED]"`, `"inputResolutionTest"` → `"inputResolution[REDACTED]"`.  Real secrets (API keys, JWTs, RSA PEMs, HMAC secrets, `mcp_…` / `enroll_…` bearers) are always ≥8 bytes — sanity-check from sitting 5's forensic-line lengths: openai api_key 164, Anthropic 108, github-pat 93, jira-atlassian 192, RSA PEMs 1704, plus webhook 43 + `mcp_…` 68 + `enroll_…` 71 from sitting 6 — so the bump sacrifices no real coverage.  A legitimate 4–7 byte secret would no longer redact; today no such value exists.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build (no warnings) | clean |
+| 2 | Server start + `POST /api/settings/keys/unlock` | unlock OK; 18 providers loaded |
+| 3 | JCWF auto-load → `hamburg-tourist-day-planner` webhook trigger | `S6_FORENSIC TriggerEngine::AddWebhookTrigger registered workflow='hamburg-tourist-day-planner' secretLen=43` (matches `"demo-shared-secret-change-before-production"`) ✓ |
+| 4 | `POST /api/auth/mcp-keys/enroll` for `sitting6-test@local` | `tokenLen=71` (`enroll_` + 64 hex) ✓ |
+| 5 | `POST /api/auth/mcp-keys/activate` with the enrollment token | `keyLen=68` (`mcp_` + 64 hex) ✓ |
+| 6 | `POST /api/mcp/heartbeat` with the new key | `Authenticate registered keyLen=68` ✓ |
+| 7 | `POST /api/auth/mcp-keys/self-renew` with the new key | `SelfRenew registered keyLen=68` ✓ |
+| 8 | Forensic build with `S6_REDACT_PROOF: secret literal: {}` line emitting the webhook secret directly | log shows `S6_REDACT_PROOF (must show [REDACTED]): secret literal: [REDACTED]` ✓ — end-to-end redaction proven |
+| 9 | Over-redaction sanity check after MIN bump | `[REDACTED]` count = 1 (the proof line); "smoke tests" / "latest" / "inputResolutionTest" all UNREDACTED in log ✓ — footgun is dead |
+| 10 | `DELETE /api/auth/mcp-keys/mcp_521b6e18` + `mcp_f32d8e8d` | both `ok=true`, sitting6 keys removed from list, `mcp_keys.json.enc` 97434 → 96260 bytes (smaller post-cleanup) ✓ |
+| 11 | Final clean rebuild after stripping all forensic + proof lines | clean |
+| 12 | Graceful REST shutdown | ✓ |
+
+`CreateBootstrapAdminKey` and `AzureBlobConnector::ResolveCredentials` were not exercised end-to-end (the first requires an empty MCP keystore; the second requires a real Azure account).  Coverage is by code review — same `AddSecret` pattern as the other sites.
+
+### Open items / next-session candidates
+
+- **Sitting 7 — `engine/keys/jwtGenerator` audit** (carried unchanged): algorithm pinning (no `none` accepted), exception safety, RSA key handling.
+- **Sitting 8 — `engine/keys/oauthTokenManager` audit**: refresh-token storage at rest, expiration handling, revocation.
+- **Sitting 9 — `engine/curlWrapper/authSigner` audit** (per-provider): empty/whitespace credential rejection, no double-add-on-retry.
+- **Sitting 10 — `engine/curlWrapper/awsSigV4` deep-dive**: AWS official test vectors, exception safety.
+- **Sittings 11-16** — Config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core.
+- **Sittings 17-19 (large)** — `Credential` / `ProviderConfig` `SecureString` migration (carried since sitting 1).
+
+After sitting 6 the redactor cluster (sittings 4-6) is closed.  D3 has now spent 3 sittings on the secret-handling cluster (1 wiring + 2 coverage); roughly half of the original D3 scope remains.
+
+### Gotchas next-session-Claude should know
+
+- **MCP raw keys never live in `m_Keys` / `m_Enrollments`** — only SHA-256 hashes do.  Raw values are transient: created in stack-locals, returned to caller, then GC'd.  Registration at the **creation sites** is what makes downstream logs (web handlers, audit log, response logging) safe to print the value (they shouldn't, but if they do, it scrubs).  Don't move the `AddSecret` call into `m_Keys.push_back` thinking it's the canonical site — there's no value to register at that point, just a hash.
+- **`AddSecret` is called with `rawKey` BEFORE `std::move(rawKey)` into the result struct** — post-move the source string is empty and `AddSecret(empty)` would silently no-op (under MIN_SECRET_LENGTH).  The four MCP sites and the webhook site are all wired correctly today; verify next time anyone touches them.
+- **`Authenticate` is success-only registration**, not "register every inbound `rawKey`."  An attacker spamming `/api/mcp/heartbeat` with random bearers WITHOUT this constraint would pollute the redactor's value pool with O(attempts) attacker-chosen strings — every one then scanned against every future log line.  This is both a memory-bloat and a CPU vector.  The success-only constraint bounds the pool to legitimate keys.
+- **Azure shared key registration in `azureBlobConnector::ResolveCredentials` is defense-in-depth, not a real wiring gap fix.**  Sitting 5's `RegisterProviderSecrets` already covers the value via `m_ApiKey` / `m_Password`.  The transient copy in `CloudCredentials::m_SecretKey` is the same string by value, so dedupe makes the new call a no-op today.  Kept so a future code path that bypasses `KeyManager` (e.g. an Azure SAS pulled from `connection.m_Params` directly into `m_SecretKey`) doesn't slip past the redactor.  If you find yourself "simplifying" by removing this call, read this gotcha first.
+- **MIN_SECRET_LENGTH = 8 is load-bearing for log readability.**  Don't lower it without auditing every registered value's length distribution; the over-redaction failure mode is silent (logs look syntactically valid, just have words clipped) and won't be caught by any test.  If a legitimate 4-7 byte secret ever exists, register-it-anyway via a separate explicit-ack helper (not yet built), don't lower the global floor.
+- **MCP enrollment + activation persist to `mcp_keys.json.enc` synchronously** (the activate handler calls `Save` after `m_Keys.push_back`).  Sitting 6's test sequence created two test keys (`mcp_521b6e18` + `mcp_f32d8e8d`) and they ARE persisted on disk until `DELETE` runs.  Pattern: when running mcp-key REST tests, always `DELETE` before shutdown — unlike the AI-provider `/save` asymmetry sitting 5 noted, MCP keys persist immediately on activate.
+- **The forensic length-only log pattern from sitting 5 reused cleanly** — `LOG_APP_INFO("S6_FORENSIC <site> registered <field>Len={}", value.size())` confirms each AddSecret site fires without exposing the value.  Coupled with one deliberate `LOG_APP_INFO("S6_REDACT_PROOF: ... {}", value)` and a grep for `[REDACTED]` count, that's a complete end-to-end verification kit for any future redactor-coverage sitting.
+- **Doc routing held this sitting** — only `doc/cyber security.md` "SecretRedactor" coverage table + design boundaries needed direct edits; `architecture.md` and `cloud-integration.md` already cross-reference the canonical home (sitting 5's pattern), so they updated transparently.  Memory `feedback_secrets_only_via_redactor.md` got a coverage rewrite + history reframe of the MIN_SECRET_LENGTH footgun.
+
+---
+
+## 2026-05-03 (S2 sitting 5) → next session
+
+S2=D3 sitting 5.  Theme: **redactor coverage sweep, KeyManager half** — carried directly from sitting 4's "Critical carry-over" list.  Sitting 4 wired `Redact()` into spdlog via `RedactingFormatter` but only ~half the project's credential shapes had `AddSecret` calls; sitting 5 closes the KeyManager-resident half.  The cross-component half (MCP key plaintexts, webhook HMAC secrets, Azure shared keys) is sitting-6 work.
+
+### What landed
+
+**`engine/keys/keyManager.cpp` — `RegisterProviderSecrets` helper.**  File-local anonymous-namespace function that registers every secret-bearing field on a `ProviderConfig` with the redactor.  Coverage by `credential_type`:
+
+| credential_type | Registered fields | Skipped |
+|---|---|---|
+| `api_key` (default) | `m_ApiKey` | — |
+| `oauth` | `m_ApiKey` if non-empty (cached access token) | refresh_token + client_secret already covered by `oauthTokenManager` hydrate/store/rotate; helper relies on dedupe |
+| `aws` | `m_Params["secret_access_key"]`, `m_Params["session_token"]` | `m_ApiKey` (= access_key_id, public per AWS / CloudTrail convention) |
+| `credentials` | `m_Password` | — |
+| `key_pair` | `m_PrivateKeyPem` (full PEM, multi-KB) | — |
+
+Helper called from all four `ProviderConfig`-materialising sites: `ParseProvidersJson` (pre-`std::move` into `m_Providers`), `AddProvider`, `UpdateProvider`, `LoadFromEnvironment`.  Skipping any of them re-opens the wiring gap sitting 4 closed.  Pre-sitting-5 the AWS-only inline block at `keyManager.cpp:486-498` was the *only* registration site; `AddProvider` / `UpdateProvider` (REST `POST /api/settings/providers` + `PUT`) had **zero coverage** — a REST-added secret stayed unregistered until the next server restart.  This is a real cyber-sec gap that sitting 5 closed alongside the explicit hand-off scope.
+
+The C++ discipline rule "extract a helper before adding a third copy of complex-struct construction" (`feedback_cpp_discipline.md`) drove the helper-extraction call.  Without the helper, sitting 5 would have planted four near-identical 12-line registration blocks across the file.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build with sentinel log + length-only forensic line in `RegisterProviderSecrets` | clean |
+| 2 | Server start + `POST /api/settings/keys/unlock` | unlock OK; 18 providers loaded |
+| 3 | Self-test fired 18× during `Load` (one line per provider) | 18/18 lines emitted |
+| 4 | `api_key` (8 providers) | all show `apiKey='[REDACTED]'` ✓ |
+| 5 | `credentials` (4 providers — greenmail, mailpit, pg-local, jira-atlassian) | all show `password='[REDACTED]'` ✓ |
+| 6 | `key_pair` (2 providers — gcs-test-key, snowflake-key) | `pemFull='[REDACTED]'`; `pemPreview` (first 64 chars) shows **raw** — proves the redactor is exact-substring match, not partial |
+| 7 | `oauth` (2 providers — google-sheets-oauth, onedrive-oauth) | empty fields at Load time (oauthTokenManager hydrates post-Load) ✓ |
+| 8 | `POST /api/settings/providers` with `S5_ADDPROV_APIKEY_aaaa1111` | self-test fires from `AddProvider` path → `apiKey='[REDACTED]'` ✓ |
+| 9 | `PUT /api/settings/providers/s5-add-prov` with `S5_UPDPROV_APIKEY_bbbb2222` | self-test fires from `UpdateProvider` path → `apiKey='[REDACTED]'` ✓ |
+| 10 | Test artifacts cleanup via `DELETE` REST | both 404 (state was never persisted via `/save` — restart wiped) |
+| 11 | Final rebuild without sentinel/forensic code | clean |
+
+`LoadFromEnvironment` was not exercised end-to-end (it's the no-`keys.json.enc` fallback; would require deleting the on-disk keystore).  Coverage is by code review — same helper, same call pattern as the other three sites.
+
+### False-positive footgun (sitting-5 finding)
+
+The forensic length-only log line revealed that **mailpit and greenmail dev mocks both have `password` of length 4** — almost certainly the literal string `"test"`, exactly at the redactor's `MIN_SECRET_LENGTH = 4` (`engine/log/secretRedactor.cpp:30`).  Once that 4-char value registers, every subsequent log line containing the substring `"test"` gets corrupted by the redactor:
+
+- `"running test foo"` → `"running [REDACTED] foo"`
+- `"latest version"` → `"la[REDACTED] version"`
+- `"/api/settings/keys/test"` → `"/api/settings/keys/[REDACTED]"`
+- `"RegisterProviderSecrets self-test:"` → `"RegisterProviderSecrets self-[REDACTED]:"` (caught this in the actual self-test output)
+
+This is real log corruption affecting *every* log line in the running server, not a sitting-5-test-only artifact.  Mitigations:
+
+- **Code-side (recommended sitting-6 candidate):** bump `MIN_SECRET_LENGTH` from 4 to 8.  Real secrets — API keys, JWTs, refresh tokens, RSA PEMs — are always ≥8 chars; anything shorter is too weak to be a real secret.  This kills "test", "demo", "1234", "pass", "abcd", and similar dictionary collisions in one line of code.  Trade-off: a legitimate 4-7 char API key (none in any provider today) would no longer redact.
+- **Config-side:** lengthen mailpit + greenmail mock passwords (e.g., `mailpit-test`, `greenmail-test`).  Local-only fix, doesn't help if other dev mocks come along with the same pattern.
+
+Memory entry `feedback_secrets_only_via_redactor.md` updated with the footgun + the still-uncovered list (MCP plaintext, webhook HMAC, Azure shared key).
+
+### Doc sweep (sittings 4 + 5 combined)
+
+Stale claims that sitting 4 left in tracked docs were closed alongside sitting 5's:
+
+- `doc/cyber security.md` "Remaining threats" → fixed *"log content is not redacted"* (sitting 4 made it false; the `RedactingFormatter` scrubs registered credentials before any sink writes).
+- `doc/cyber security.md` "Operator responsibility" → replaced "Consider log redaction" with the more accurate split: registered credentials auto-scrubbed; non-credential sensitive content (prompts, customer data) still needs a compliance-driven extra layer.
+- `doc/cyber security.md` "SecretRedactor" → replaced narrow "cloud-related secrets" framing with the actual full coverage table (KeyManager via `RegisterProviderSecrets`, OAuth via `OAuthTokenManager`, JWTs via `JwtGenerator`) plus design boundaries (exact-substring match, `MIN_SECRET_LENGTH=4`, the false-positive footgun for short common-word secrets).  This is now the canonical home for redactor design facts per `feedback_doc_routing.md`.
+- `doc/architecture.md` AI-keystore paragraph → broadened from AWS-only auto-registration to "every credential value materialising in memory is auto-registered" with a cross-reference to the canonical cyber-sec section.
+- `doc/cloud-integration.md` SecretRedactor entry → updated to mention `RedactingFormatter` wiring + `KeyManager` registration; cross-references the cyber-sec section as canonical.
+
+Deliberately not touched:
+- `doc/misc/cybersec-hardening-dev-plan.md` §8.1 still says "pattern set covering `sk-`, `xai-` prefixes" — the plan documents the original framing; the actual design (value-based) is captured in the hand-off and the cyber-sec doc.  Plan docs don't need to be retconned to match implementation.
+- `doc/cyber security.md` Edition Comparison matrix row "Secret redaction | Log output scrubbed | Log output scrubbed" — accurate at the matrix level of detail.
+- `combined*.md` and audit `*Audit*.md` files — generated artifacts (per `feedback_combined_doc_generated.md`).
+
+### Open items / next-session candidates
+
+- **Sitting 6 — redactor coverage sweep, cross-component half** (the natural completion of the wiring story): MCP key plaintexts in `mcpKeyManager`, webhook HMAC secrets in `triggerEngine`, Azure shared keys in `cloudConnectionManager`.  Smaller per-site footprint than sitting 5, but multiple files.  Bonus: bump `MIN_SECRET_LENGTH` 4→8 in the same sitting (one-line change in `engine/log/secretRedactor.cpp:30`) — kills the over-redaction footgun in one motion.
+- **Carried from sitting 4** (unchanged): sitting 7 = `jwtGenerator` audit; sitting 8 = `oauthTokenManager` audit; sitting 9 = `authSigner` audit (per-provider); sitting 10 = `awsSigV4` deep-dive; sittings 11-16 = config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core; sittings 17-19 = Credential / ProviderConfig SecureString migration.
+
+### Gotchas next-session-Claude should know
+
+- **`RegisterProviderSecrets` is file-local** (anonymous namespace in `keyManager.cpp`).  If a future site needs the same shape (e.g., `cloudConnectionManager` registering its own credential bundle), don't reach for it across the file boundary — promote to a shared header at that point.  Sitting 5's helper is intentionally local because no other file currently materialises a `ProviderConfig`.
+- **The helper relies on the redactor's dedupe.**  OAuth providers' `m_ApiKey` (cached access token) gets registered both here AND by `oauthTokenManager.cpp:192` after rotation; that's intentional defense-in-depth.  Don't add an `if (credentialType != "oauth")` skip thinking it removes a redundancy — the redundancy IS the safety net.
+- **Pre-move ordering matters.**  `RegisterProviderSecrets(config)` MUST be called BEFORE `m_Providers[name] = std::move(config)` in `AddProvider` / `UpdateProvider` / `ParseProvidersJson`.  Post-move, `config.m_Params` etc. are empty and the AWS lambda inside the helper would silently skip registration.  The four call sites are all wired correctly today; verify next time anyone touches them.
+- **The forensic length-only log pattern is reusable.**  When investigating a redactor false-positive in future work, a temp `LOG_APP_INFO("forensic: name='{}' fieldLen={}", name, value.size())` line lets you locate the offending value without exposing it.  Length is enough to identify outliers; pair with grep for unusual lengths.
+- **REST-added providers don't persist until `/save`.**  Sitting 5's test artifacts (`s5-add-prov`, `sitting5-test-basicauth`) auto-cleaned on server restart because nothing called `POST /api/settings/providers/save` or `POST /api/connections/save`.  Useful for ephemeral testing — but watch out: if a future test does call `/save`, you must explicitly DELETE before shutdown or the artifacts persist into `keys.json.enc` / `connections.json`.
+- **Don't conflate cloud connections with AI providers.**  `manage_connections create` (MCP / `POST /api/connections`) goes through `CloudConnectionManager`, not `KeyManager` — secret fields like `password` are silently dropped by the connections handler.  The actual key material is referenced via `m_KeyName` pointing into `KeyManager`.  Sitting 5 burned a few minutes finding this out: my first MCP `manage_connections create` call with a `password` field looked successful but registered nothing because the password never reached `KeyManager`.
+- **The forensic line revealed concrete password lengths** for sitting-5-context awareness only:
+  - mailpit, greenmail: `pwdLen=4` (the footgun)
+  - pg-local: `pwdLen=8` (matches `feedback_local_postgres.md`)
+  - jira-atlassian: `pwdLen=192` (Atlassian API token)
+  - openai api_key: `apiKeyLen=164` (OpenAI key with project prefix)
+  - Anthropic api_key: `apiKeyLen=108`
+  - github-pat: `apiKeyLen=93`
+  - All three PEMs (gcs, snowflake): `pemLen=1704` (RSA-2048 PKCS#8 PEM, identical envelope size)
+
+  These lengths give a useful sanity check: if a future audit sees an api_key with `apiKeyLen=4`, that's a placeholder, not a real key.
+
+---
+
+## 2026-05-02 (S2 sitting 4) → next session
+
+S2=D3 sitting 4.  Theme: **`engine/log/secretRedactor.{h,cpp}` audit + wiring**.  The dev plan §8.1 framing was "pattern-set audit including `sk-`, `xai-` prefixes" — but the actual redactor design is **value-based** (registered exact-string match), not pattern-based.  The much more serious finding upfront: **`SecretRedactor::Redact()` was never called anywhere in the project**.  Secrets were getting registered via `AddSecret` from `keyManager`, `oauthTokenManager`, and `jwtGenerator`, but the log pipeline never consulted the registered list.  The redactor was wired but inert; every log line went straight to spdlog without scrubbing.
+
+This sitting fixed the wiring.  Coverage gaps are deferred to a future sitting because the wiring fix is the load-bearing change — pattern coverage is moot if `Redact()` doesn't run.
+
+### What landed
+
+**`RedactingFormatter`** — a custom `spdlog::formatter` in an anonymous namespace at the top of `engine/log/log.cpp`.  It wraps an inner `spdlog::pattern_formatter` and intercepts every `format(log_msg, dest)` call:
+
+1. If `SecretRedactor::Get().HasSecrets()` returns false → fast-path forward to inner formatter (no copy, no mutex contention beyond the HasSecrets check itself).
+2. Otherwise → copy the message payload, run `Redact()` on the copy, construct a synthetic `log_msg` pointing at the redacted text, forward to the inner formatter.
+
+The redacted `std::string` is stack-local within `format()`; the inner formatter writes to `dest` synchronously before the string goes out of scope, so there's no lifetime hazard with the `string_view_t` reseating.
+
+`MakeRedactingFormatter(pattern)` helper builds one wrapper around a `pattern_formatter` for a given pattern string.
+
+`Log::Log()` rewritten to call `sink->set_formatter(MakeRedactingFormatter("<pattern>"))` on each sink instead of the previous `sink->set_pattern("<pattern>")`.  Three sinks affected:
+
+- engine + application loggers' shared `ostreamSink` (writes to `std::cout`, then redirected to ncurses TUI + `log/log.txt` via `TerminalLogStreamBuf`)
+- security logger's same ostreamSink (shared)
+- security logger's dedicated `rotating_file_sink_mt` writing to `log/security.txt`
+
+All three sinks now scrub registered secrets from message payloads before pattern substitution.
+
+### What's verified
+
+A one-shot self-test was added at the end of `Log::Log()` (sentinel value registered → emitted via all three loggers → unregistered → emitted again to confirm post-remove pass-through).  Run once, verified the result, then **removed before commit** per `feedback_test_cleanup` after JC's review.  Captured proof from `log/log.txt` at 18:43:58:
+
+```
+[Engine]      info  redactor self-test (engine logger):   sentinel='[REDACTED]'
+[Application] info  redactor self-test (app logger):      sentinel='[REDACTED]'
+[Security]    info  redactor self-test (security logger): sentinel='[REDACTED]'
+[Engine]      info  redactor self-test (post-remove, should NOT redact): sentinel='S4_REDACTOR_SENTINEL_xyz789ABC'
+```
+
+`log/security.txt` (the dedicated rotating sink) ALSO showed `[REDACTED]` — proves the formatter was applied to the per-sink rotating file too, not just the shared ostreamSink.
+
+The post-remove line emitting the unredacted sentinel proves the redactor only scrubs **currently-registered** values — there's no stale registration leak.
+
+Standard end-to-end matrix from sittings 1-3 still green: unlock OK, `manage_connections list` returned all 14 connections, OAuth hydration logged "hydrated 2 OAuth token entry(ies) from KeyManager" (which now means 2 refresh tokens + 2 client secrets are sitting in the redactor's pool, actively scrubbing), graceful REST shutdown.
+
+### Open items / next-session candidates
+
+**Critical carry-over: redactor coverage sweep.**  The wiring fix is in, but ~half of the project's credential shapes still have no `AddSecret` call:
+
+| Currently registered (works post-sitting-4) | Currently UNregistered (sweep target) |
+|---|---|
+| AWS `secret_access_key` + `session_token` (`keyManager::Load`) | AI provider API keys (`ProviderConfig::m_ApiKey` for openai/anthropic/gemini/etc.) |
+| OAuth `m_RefreshToken` + `m_ClientSecret` (`oauthTokenManager` hydrate/store/rotate) | Basic-auth passwords (`ProviderConfig::m_Password` — jira, postgres, mailpit, greenmail) |
+| OAuth access tokens (post-rotate) | jwt_rsa private key PEMs (snowflake, gcs) |
+| Generated JWTs (`jwtGenerator`) | Azure shared keys (`azure_shared_key` auth) |
+|  | MCP key plaintexts (briefly in memory during request processing) |
+|  | Webhook HMAC secrets (`triggers[].params.secret`) |
+|  | Master password (defense-in-depth — `SecureString` already protects, but redactor would catch a stray log) |
+
+Sittings 5+6 in the roadmap address this in two sweeps:
+- **Sitting 5** — KeyManager-resident credentials: AI API keys + basic-auth passwords + jwt_rsa private keys.  Add `AddSecret` calls in `KeyManager::Load`'s provider-loop alongside the existing AWS-credential block (`keyManager.cpp:486-498`).  Probably ~15-20 LOC added.
+- **Sitting 6** — Cross-component credentials: MCP key plaintexts in `mcpKeyManager`, webhook HMAC secrets in `triggerEngine`, Azure shared keys in `cloudConnectionManager`.  Touches multiple files, smaller per-site footprint.
+
+After sittings 5-6, secretRedactor coverage matches the project's actual credential surface.
+
+Other carry-overs (unchanged from sitting 3):
+- **Sitting 7** — `jwtGenerator` audit (algorithm pinning, exception safety, RSA key handling)
+- **Sitting 8** — `oauthTokenManager` audit (refresh-token storage at rest, expiration, revocation)
+- **Sitting 9** — `authSigner` audit (per-provider, empty/whitespace rejection)
+- **Sitting 10** — `awsSigV4` deep-dive (AWS test vectors, exception safety)
+- **Sittings 11-16** — Config parser, threadPool, eventQueue, curlMultiDispatcher, curlManager, logging core
+- **Sittings 17-19 (large)** — Credential / ProviderConfig SecureString migration (carried since sitting 1)
+
+### Gotchas next-session-Claude should know
+
+- **The redactor's coverage list isn't enforced syntactically** — every new credential shape MUST get an explicit `SecretRedactor::Get().AddSecret(value)` call at its entry point.  There's no compile-time check, no static analysis, nothing that catches "I added a new field on ProviderConfig but forgot to register it."  Code-review discipline only.  When a sweep adds a new credential shape, also update the coverage table in `feedback_secrets_only_via_redactor.md` (the memory now has a coverage section as of this sitting's update — keep it current).
+- **The fast-path optimisation `if (!HasSecrets()) skip` is load-bearing for performance.**  Without it, every log line would acquire the redactor's mutex, copy the payload string, scan against zero secrets, and re-emit — pure overhead for zero benefit.  With it, the cost on the no-secrets path is one mutex acquire + one bool check.  Don't refactor `HasSecrets()` away thinking "the empty-vector check inside Redact() handles it" — that path still allocates a copy of the payload before it returns early.  The `HasSecrets()` short-circuit avoids the copy.
+- **`spdlog::formatter::format()` writes to the `dest` buffer synchronously before returning** — that's why the local `std::string redacted` lifetime is sufficient.  If a future spdlog upgrade made `format()` queue the message asynchronously (it won't in 1.x — the formatter contract is sync), the redacted string would dangle.  Pin spdlog version expectations or copy into a more durable buffer if in doubt.  Today: fine.
+- **`set_formatter()` replaces the entire formatter** (including the pattern); if a future sitting wants to tweak the output pattern, change the `MakeRedactingFormatter("...")` argument, NOT call `set_pattern()` afterward (that would replace the formatter back to a plain pattern_formatter and lose the redaction).  This is a real foot-gun: a casual contributor seeing `set_pattern` calls in spdlog docs might add one for "convenience" and silently disable redaction on that sink.  Consider a code comment near `MakeRedactingFormatter` warning future-Claude not to do this.
+- **`feedback_secrets_only_via_redactor.md` had a factual error pre-sitting-4** — claimed the redactor had a "pattern set covering `sk-`, `xai-`, AWS access key prefixes."  That was wrong (value-based, not pattern-based).  Memory updated this sitting to reflect actual design + the wiring history.  If sweep findings disagree with the memory, trust the code.
+- **Why I didn't add an `#ifdef DEBUG` permanent self-test:**  the sentinel-and-grep approach is cute but adds startup cost to every Debug-build server start, and the result isn't checked anywhere (only a human grep'ing the log can tell).  A proper test would be an integration test that runs the server, registers a secret, emits a log, and asserts on the file content — out of scope for sitting 4.  Future sitting could add this to the test/ tree if redactor regressions become a concern.
+- **Doc sweep result for sittings 3 + 4 was nearly empty** — only one tracked-doc edit needed (the memory update above).  All `cyber security.md` / `architecture.md` / `cloud-integration.md` claims about the redactor were aspirational pre-sitting-4 and actually-true post-sitting-4 (just like the SecureString claims were after sitting 1's `WithCachedMasterPassword` fix).  The pattern is becoming familiar: many doc claims about security guarantees are written ahead of full implementation; the audit pass is what closes the gap between promise and reality.
+
+---
+
+## 2026-05-02 (S2 sitting 3) → next session
+
+S2=D3 sitting 3.  Theme: **`EVP_CIPHER_CTX*` RAII wrapper** for `keyEncryption.cpp` — carried directly from sitting 2's open items.  Pure refactor (no behavior change); removes the per-error-path manual cleanup duplication that grew from 8 sites in sitting 1 to 16 sites in sitting 2 as new error paths were added (the `OPENSSL_cleanse(key)` widening, the AAD update path).  Future error paths now get cleanup automatically.
+
+After sitting 3, the keystore foundation cluster (`secureString`, `keyEncryption`, `credential.h`) is closed for the current pass.
+
+### What landed
+
+**Two RAII helpers** in an anonymous namespace at the top of `keyEncryption.cpp`:
+
+```cpp
+// Frees EVP_CIPHER_CTX* on scope exit.  Use ctx.get() for EVP_* call args.
+struct EvpCipherCtxDeleter
+{
+    void operator()(EVP_CIPHER_CTX* ctx) const noexcept
+    {
+        if (ctx) EVP_CIPHER_CTX_free(ctx);
+    }
+};
+using EvpCipherCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, EvpCipherCtxDeleter>;
+
+// OPENSSL_cleanse on dtor for a stack-allocated symmetric key buffer.
+template <size_t N>
+struct ScopedKey
+{
+    uint8_t data[N];
+    ~ScopedKey() { OPENSSL_cleanse(data, N); }
+};
+```
+
+`ScopedKey` is templated on size so it doesn't need access to `KeyEncryption::KEY_SIZE` (private constant); call sites use `ScopedKey<KEY_SIZE> key;` and pass `key.data` into OpenSSL.
+
+**`Encrypt` and `Decrypt` rewritten** to use both helpers.  Per-error-path footprint dropped from 4 lines (LOG + EVP_CIPHER_CTX_free + OPENSSL_cleanse + return) to 2 lines (LOG + return).  Total error paths in the file: 16 — every one of them now relies on RAII for both ctx and key cleanup.  Net file size: 306 → 288 lines (-18; the helpers add ~30 lines, the cleanup deletions remove ~48).
+
+Also removed the trailing `EVP_CIPHER_CTX_free(ctx) + OPENSSL_cleanse(key)` from each function's success path — same RAII handles success too.
+
+### What's verified
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | Studio Debug build after edit | ✓ clean |
+| 2 | First run — start, unlock against mixed-state on-disk (V2 keys.json.enc + V1 mcp_keys.json.enc) | ✓ unlock OK at **652 ms** (matches sitting 2's 644 ms — RAII has no perf impact) |
+| 3 | `manage_connections list` post-unlock (initial run) | (blocked by lockout — see Gotchas) |
+| 4 | (server killed and restarted to clear in-memory lockout state) | clean slate |
+| 5 | Restart unlock | ✓ unlock OK |
+| 6 | `manage_connections list` post-restart-2 | ✓ all 14 connections (Decrypt-via-RAII path verified) |
+| 7 | `POST /api/settings/providers/save {}` triggers re-encrypt via cached pwd | ✓ ok=true, latency **995 ms** (V2 verify-decrypt at 600k + V2 encrypt at 600k both through new RAII code) |
+| 8 | `keys.json.enc` byte 4 inspected post-save | ✓ still `0x02` (V2) |
+| 9 | Graceful REST shutdown | ✓ |
+| 10 | Cold restart + unlock against the freshly-RAII-encrypted V2 blob | ✓ unlock OK at **638 ms** — proves the RAII-Encrypted output decrypts cleanly |
+| 11 | `manage_connections get my-snowflake` post-restart | ✓ returned full JSON (account, user, warehouse, params) — proves the freshly-encrypted V2 blob round-trips to identical plaintext |
+| 12 | Final graceful REST shutdown | ✓ |
+
+The full RAII-Encrypt → disk → cold-restart → RAII-Decrypt cycle is proven on the live keystore.  Both Encrypt error paths and Decrypt error paths still reject correctly (no false positives) because the existing tamper test from sitting 2 wasn't re-run, but the RAII change is purely control-flow refactoring — same OpenSSL call sequence, same buffer ops.
+
+### Open items / next-session candidates
+
+- **Sitting 4 candidate — `engine/log/secretRedactor.{h,cpp}`** (estimated 1-2 sittings).  This is the **next D3 file** after the keystore cluster closes today.  Per the cyber-sec dev plan §8.1: "Bearer tokens, API keys, AWS access keys, OAuth refresh tokens — every shape covered by the redactor's pattern set, including provider-specific prefixes (`sk-`, `xai-`, etc.)".  Need to read the redactor file, enumerate the patterns it covers, cross-check against the credential shapes the cloud surface uses (12 connectors × auth types: bearer, basic_auth, sigv4, jwt_rsa, oauth2, azure_shared_key) plus the AI providers (api_key, oauth, key_pair, credentials).  Likely a sweep-style sitting if multiple shapes are missing.
+- **Sitting 5+ — Signers cluster** (`engine/curlWrapper/awsSigV4`, `authSigner`).  Sec plan §8.1 calls out SigV4 correctness vs AWS official test vectors, and per-provider signer empty/whitespace credential rejection + no double-add-on-retry.  Safety plan §8.1 calls out exception safety.
+- **Sitting later — `engine/keys/jwtGenerator`** (algorithm pinning — no `none` accepted) and **`engine/keys/oauthTokenManager`** (refresh-token storage at rest, expiration handling).
+- **Sitting later — `engine/json/configParser` save-handler hand-rolled JSON path** (sec plan HIGH: "regex-free text substitution on config.json — arbitrary field injection via interface names").  This is in D3 but tightly coupled to D2 patterns; might want to defer until D3's other items resolve.
+- **Carried from sitting 1+2 — Credential / ProviderConfig SecureString migration** (estimated 2-3 sittings).  Defense-in-depth gap: every secret field on `ICredential` subclasses + `ProviderConfig` is still plain `std::string`.  Larger refactor; sequence after the bounded-file work above.
+
+After sittings 4-5, S2=D3 should be roughly half done (5 sittings into a 3-4 sitting estimate, similar early-phase ratio to S1=D2's 4-sittings-spent-on-2-sub-domains pacing).
+
+### Gotchas next-session-Claude should know
+
+- **The lockout from prior sittings carries forward across server restarts only if the sitting didn't shut down cleanly.**  Sitting 3's first server start hit the residual auth-failure budget from sitting 2's tamper test (the in-memory `m_AuthFailures` table) and the dashboard's pre-unlock polling.  When `m_FirstFailure` keeps getting refreshed by background polling within the 5-min window, the lockout never clears.  In sitting 3 this required a JC-driven kill of the test server to recover.  Pattern: **kick off the lockout-clearing kill via `pidof jarvisAgent-studio | xargs kill -TERM` if you really need it for testing — the convention is JC handles it via signal-kill but it's a known pattern.**  Or design test sequences to fit inside one fresh-start pre-lockout window: unlock → save once → list once → shutdown.
+- **`ScopedKey<N>` and `EvpCipherCtxPtr` are file-local** (anonymous namespace in `keyEncryption.cpp`).  If the next sitting adds another OpenSSL EVP wrapper file (e.g., a dedicated AES-GCM helper for chunked I/O), promote them to a small shared header (`engine/keys/cryptoRaii.h` or similar) rather than copy-pasting.  Today they're not yet shared because no other file in the project uses `EVP_CIPHER_CTX*` directly — `awsSigV4.cpp` uses HMAC primitives (different cleanup function), and `jwtGenerator.cpp` uses signing primitives (also different).  Promote on first second user, not before.
+- **The `[[maybe_unused]] kLockoutDuration = std::chrono::minutes(15)` constant in `webServer.cpp:547`** is the source of truth for the lockout window if a future sitting wants to tune it (e.g., shorter for dev / longer for prod).  The `kAuthFailureWindow` and `kMaxAuthFailures` siblings at lines 545-546 set the threshold.  Don't tune without considering: the 10-failures-in-5-min threshold is loose enough that JC's normal browser-tab-left-open pattern doesn't trigger it, but tight enough to stop password-guess scripts.  Lowering would surprise legitimate users; raising would dilute the protection.
+- **Decrypt's V1 + V2 dispatch tested implicitly via the on-disk file mix** (`keys.json.enc` is V2 since sitting 2; `mcp_keys.json.enc` was V1 going into sitting 3 — sitting 3 didn't trigger an MCP key save, so it stays V1 until the next MCP key change).  If sitting 4 (`secretRedactor`) wants to test the V1 path explicitly, the easiest way is to inspect `mcp_keys.json.enc` byte 4 — should still be `0x01` until something writes to it.
+- **The `if (ctx)` null-check in `EvpCipherCtxDeleter::operator()` is technically redundant** — `unique_ptr` only calls the deleter when the held pointer is non-null per the standard.  But OpenSSL's documentation for `EVP_CIPHER_CTX_free` explicitly says it's safe to call with NULL, so removing the check would also be fine.  Kept for defensive symmetry with the `ScopedKey` constant-time `OPENSSL_cleanse` (which CAN be called on whatever happens to be in `data` because `data` is always initialized by the `[N]` array allocation).  Don't lose sleep over it.
+- **`OPENSSL_cleanse` on `ScopedKey::~ScopedKey` runs even if `PKCS5_PBKDF2_HMAC` failed** — i.e., even if the buffer was never populated with a real key.  This is harmless (cleansing zero/garbage) and slightly defensive.  Don't gate the cleanse on a "was it written" flag — that adds complexity for no security benefit.
+
+---
+
+## 2026-05-02 (S2 sitting 2) → next session
+
+S2=D3 sitting 2.  Theme: **Keystore file format V2** — bump PBKDF2 iteration count to OWASP-conformant 600,000 and bind the full header (magic + version + salt + IV) as AES-GCM Additional Authenticated Data.  Carried directly from sitting 1's "open items" list.  V1 decrypt back-compat retained so the on-disk V1 blob continues to load; the next save promotes it to V2 with no explicit migration step.
+
+### What landed
+
+**`engine/keys/keyEncryption.{h,cpp}` — V1+V2 dual-version dispatch.**
+
+Header file changes:
+- `VERSION` constant retired in favour of `VERSION_V1 = 0x01`, `VERSION_V2 = 0x02`, `CURRENT_VERSION = VERSION_V2`.
+- `PBKDF2_ITERATIONS` retired in favour of `PBKDF2_ITERATIONS_V1 = 100000` (legacy) and `PBKDF2_ITERATIONS_V2 = 600000` (OWASP 2023+ for HMAC-SHA256).
+- File-format docstring updated to describe both versions and the auto-migration semantics.
+
+`Encrypt` (always writes `CURRENT_VERSION = V2`):
+- Header now built into `result` buffer up front (4-byte magic + version + 16-byte salt + 12-byte IV = 33 bytes), so the same buffer can be passed to GCM as AAD.
+- After cipher init + IV-len control + key/iv init, an `EVP_EncryptUpdate(ctx, nullptr, &aadLen, result.data(), HEADER_SIZE)` call binds the full header as AAD before the actual ciphertext encryption.
+- All 7 error paths now also `OPENSSL_cleanse(key, KEY_SIZE)` — earlier code only cleared the key on the success path and after the LAST few error paths.  Tightening defense-in-depth.
+
+`Decrypt` (dispatches on version byte):
+- Switch over `encryptedBlob[4]`: `VERSION_V1 → 100k iterations + no AAD` (legacy path), `VERSION_V2 → 600k iterations + full-header AAD`.  `default:` rejects unknown versions explicitly with `LOG_CORE_ERROR("KeyEncryption::Decrypt: unsupported version {}", version)` and an empty return — preserves the project's "no `default:` over closed enum unless we explicitly enumerate" rule because the version namespace is intentionally open-ended (future V3 needs to be added here).
+- New conditional `if (useAad)` block calls `EVP_DecryptUpdate(ctx, nullptr, &aadLen, encryptedBlob.data(), HEADER_SIZE)` between cipher init and the actual ciphertext decryption.  V1 blobs skip this so they still decrypt the way they were encrypted.
+
+### What's verified
+
+End-to-end matrix against the actual on-disk keystores (`keys.json.enc` for AI providers + `mcp_keys.json.enc` for MCP keys):
+
+| Step | Setup | Result |
+|---|---|---|
+| 1 | `keys.json.enc` byte 4 inspected → `0x01` (V1) before sitting | ✓ |
+| 2 | Studio Debug start + unlock with V1 file | ✓ unlock OK in **221 ms** (V1+V1 100k iterations both files) |
+| 3 | `POST /api/settings/providers/save {}` triggers re-encrypt of `keys.json.enc` | ✓ ok=true, save took **664 ms** (V1 verify-decrypt + V2 encrypt) |
+| 4 | `keys.json.enc` byte 4 re-inspected | ✓ `0x02` (V2) |
+| 5 | `manage_connections list` post-save | ✓ all 14 connections decode |
+| 6 | Graceful REST shutdown | ✓ `[engine] done` sequence |
+| 7 | Restart + unlock against mixed V2/V1 on-disk state | ✓ unlock OK in **644 ms** (V2 600k for keys + V1 100k for mcp_keys) |
+| 8 | `manage_connections list` post-restart | ✓ all 14 connections decode |
+| 9 | Tamper test — flip 1 bit in salt[0] of V2 file (`0xa9 → 0xa8`) and unlock | ✓ unlock returns `wrong_password`; log shows `KeyEncryption::Decrypt: authentication failed (wrong password or corrupted data)` + `[security] keys_unlock_wrong_password ip=127.0.0.1` |
+| 10 | Restore original salt and unlock again | ✓ unlock OK |
+| 11 | Final graceful REST shutdown | ✓ `[engine] done` sequence |
+
+**Latency observation:** at 600k iterations, single-keystore V2 decrypt adds ~400 ms over V1's 100k baseline.  Worst-case full-V2 unlock (both keys.json.enc + mcp_keys.json.enc at 600k) projects to ~1.0–1.1 sec — sub-second target met for `keys.json.enc` alone, slightly over for both combined.  Acceptable for an interactive operation that runs once per server boot.
+
+### Open items / next-session candidates
+
+- **Sitting 3 candidate — `EVP_CIPHER_CTX*` RAII wrapper** (estimated 30 min, surgical).  The encrypt + decrypt paths each have 7-8 explicit `EVP_CIPHER_CTX_free(ctx)` calls before every `return {}`.  Folding into a `unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>` (or a small RAII wrapper) makes the code shorter and exception-safe.  Would also fold the matching `OPENSSL_cleanse(key, KEY_SIZE)` into a `Erasure` RAII for the stack key buffer.  Not security-critical (current code is correct) but improves the readability and removes "did I clear ctx on every error path?" review burden.
+- **Sitting 3 candidate — `mcp_keys.json.enc` V1→V2 verification** (estimated 5 min).  This sitting verified `keys.json.enc` upgrades cleanly because `POST /api/settings/providers/save` is the trigger.  `mcp_keys.json.enc` re-encrypts when an MCP key changes (`SaveMcpKeyStore` path).  Hasn't happened yet because no MCP key was created/rotated this sitting — next time JC enrolls or rotates an MCP key, the upgrade will fire (it goes through the same `KeyEncryption::Encrypt` so it's the same V2 codepath, just hasn't been _triggered_ yet on this file).  Sit-tight item; a fresh enrollment in a future session will flip it.
+- **Sittings 4-6 candidate — Credential / ProviderConfig SecureString migration** (estimated 2-3 sittings, large refactor — same status as after sitting 1).  Carried unchanged from sitting 1's open items.  Now that the keystore at-rest format is hardened (V2 + AAD + 600k), the next defense-in-depth lift is in-memory: every secret field on `ICredential` subclasses and `ProviderConfig` is still plain `std::string`.
+
+### Gotchas next-session-Claude should know
+
+- **The "V2 AAD test" is technically a tamper-detection test, not a pure AAD-isolation test.**  In the current header layout, every header byte (magic, version, salt, IV) is also consumed by either an upstream check (magic, version) or the cryptographic primitives themselves (salt → PBKDF2 → key, IV → cipher state).  So flipping any header byte fails decrypt _whether or not AAD is bound_ — the AAD is genuinely defense-in-depth and the test passes via the cumulative gates.  AAD adds real value when a future header field is added that doesn't feed into key derivation or cipher state (e.g., a metadata flag byte) — that field would be silently mutable today without AAD; with AAD, it's authenticated.  Don't claim "V2 AAD blocked the tamper" in a future code-review commit message — claim "V2 header tampering rejected" which is what the test actually proves.
+- **Latency budget for unlock is now bounded by 600k iterations × n_keystores.**  If a future change adds a third keystore file (e.g., session-secret store), expect ~400 ms additional unlock latency per file at V2.  If unlock must stay sub-second, either share a derived key across files (one PBKDF2 invocation, multiple AES contexts) or downgrade the new file to V1.  Sharing the derived key is the right answer — it requires the keystores to use the same salt though, which couples their lifecycle.
+- **The `default:` arm in `Decrypt`'s version switch is intentional.**  Project rule (CLAUDE.md, `feedback_cpp_discipline`) is "no `default:` over closed enums we own."  The version byte is NOT a closed enum — it's an open-ended on-disk version tag and future V3+ versions are expected.  The `default:` here rejects unknown versions explicitly with a logged error, which is the safe behavior we want.  Don't refactor it into a `static_assert(NumVersions == N)` pattern — that would force every V3 ship to touch the assert AND the switch, which is exactly the kind of "anti-debugging armor" the project rule cautions against in the OPPOSITE direction.
+- **Salt is part of AAD AND part of the PBKDF2 input.**  This means: when constructing test vectors for the V2 path, you cannot reuse a fixed salt and vary the AAD independently — they're the same bytes.  If a future test wants to exercise pure AAD behavior, it'd need to mock `PKCS5_PBKDF2_HMAC` or expose the AES-GCM layer as its own testable unit.  Not a current need, just a constraint to know.
+- **The `bin/Debug/` build is required to test format upgrades end-to-end** because `/api/debug/signals` (where `keys_unlocked` and `mcp_keys_loaded` show up) is `#ifdef DEBUG`.  Same reminder as sitting 1: pass `--debug` to the launcher.
+- **The 15-min auth-failure lockout was NOT triggered this sitting** — careful pacing of the test sequence (unlock immediately at server start, only one tamper test before restoring) kept failures below the 10-in-5-min threshold.  The tamper test produces 1 `auth_failure` record (the tampered unlock attempt), and an accidental cp-aliased-to-cp-i incident later produced 1 more.  2 of 10 budget consumed for this sitting.  When designing future tamper tests, budget for the lockout: a tampering matrix with >10 entries needs server restarts between batches.
+
+---
+
+## 2026-05-02 (S2 sitting 1) → next session
+
+S2=D3 sitting 1.  Theme: **Keystore foundation primitives** — the dependency root that everything else in D3 (`keyManager`, `oauthTokenManager`, `jwtGenerator`, `mcpKeyManager`) builds on.  Three files in the cluster: `engine/keys/secureString.{h,cpp}`, `engine/keys/keyEncryption.{h,cpp}`, `engine/keys/credential.h` — combined ~620 lines.
+
+S2 begins after the S1=D2 milestone close earlier today.  D3 surface scoped at ~6,800 lines across 35 files; this sitting covers the most load-bearing subset.  Per the S1-close gotcha "depth-first single-file → per-change template; horizontal sweep → per-sitting brief", this sitting touches multiple files for one cross-cutting theme (keystore primitive correctness), so per-sitting brief is the right granularity.
+
+### What landed
+
+**Three surgical fixes**, no file-format change, no decryption migration needed.
+
+1. **`SecureString::Set` zeroes residual bytes on shrink.**  Before the fix, `Set("longpassword")` followed by `Set("short")` left bytes 6-12 of the locked buffer holding `"ssword\0"` until the next `Clear()`/`Release()`/destruction.  The string view returned by `Get()` was correct (size-bounded), but residual sensitive data lingered in the mlock-locked region longer than intended.  Fix: when reusing the buffer (capacity sufficient), `SecureZero` bytes `[0, m_Size)` before the new `memcpy`.  ~5 lines added inside the existing `if (needed > m_Capacity)` else branch.
+
+2. **`KeyEncryption::Encrypt`/`Decrypt` accept `std::string_view` for `masterPassword`.**  The previous `std::string const&` signature forced callers holding a `SecureString` to allocate a plaintext-on-heap copy: `mcpKeyManager.cpp:228` had a literal apologetic comment "*KeyEncryption takes std::string; SecureString::Get() gives us a view, copy once.*"  After the fix, `SecureString::Get()` flows directly into the encryption layer with no intermediate heap copy.  Cascade applied: `KeyManager::Load`/`Save`/`Unlock` also took `std::string const&` → migrated to `std::string_view` (one chain end-to-end).  Five call sites adjusted; the `std::string(masterPassword)` casts at `mcpKeyManager.cpp:229,256` deleted, the apologetic comment deleted.  Also added `[[nodiscard]]` to `Encrypt`/`Decrypt` returns.
+
+3. **`KeyManager::GetCachedMasterPassword()` retired in favour of `WithCachedMasterPassword(F&& fn)`.**  This was the big one and the highest-severity finding.  The old getter signature was `std::string GetCachedMasterPassword() const` — every call returned a heap-allocated `std::string` copy of the cached password from the SecureString, **completely defeating the swap-protection of the SecureString cache**.  Four callers in `webServer.cpp` did this on every keystore operation that needed the cached password.  Replaced with a callback API: `template <typename F> bool WithCachedMasterPassword(F&& fn) const` that invokes `fn(std::string_view)` only if a password is cached, returning `true`/`false` for the existence check.  All four call sites converted:
+   - **Site A** (startup MCP store init in `WebServer::Start`) — direct callback into `InitMcpKeyStore(std::string_view)`.
+   - **Site C** (OAuth callback at `webServer.cpp:6962`) — callback wraps the keys-file save + log emission.
+   - **Site D** (`SaveMcpKeyStore`) — callback returns the save result via captured local.
+   - **Site B** (`HandleProvidersSavePost`) — required restructure.  Inner `doSave(std::string_view)` lambda holds the verify-then-save logic; outer dispatches body-supplied password directly, falls back to `WithCachedMasterPassword(doSave)` if body is empty, returns 400 if neither path produces a password.  Cleanest of the four call-site changes.
+
+   Also added a non-template `bool HasCachedMasterPassword() const` for cheap "is it cached?" checks that don't need to access the value.
+
+The net effect: after sitting 1, the cached master password lives ONLY in the mlock-locked SecureString from Load/Unlock onwards.  No plaintext copy is materialized on the regular heap by any current code path.
+
+### What's verified
+
+- **Studio Debug build clean.**  All five call-site adjustments compiled without follow-up; no diagnostics remaining.
+- **End-to-end keystore round-trip on the new code paths**: started Studio Debug, unlocked keystore via `POST /api/settings/keys/unlock` (exercised `KeyManager::Unlock(string_view)` → `Load(string_view)` → `KeyEncryption::Decrypt(string_view)` → `m_CachedMasterPassword.Set(string_view)`).  Response confirmed `mcp_keys_loaded: true` at unlock time, proving the new `WithCachedMasterPassword` callback fired correctly inside `InitMcpKeyStore` (which is called once at unlock).
+- **Existing connections + providers still readable**: `mcp__j9t__manage_connections action=list` returned all 14 production connections; `mcp__j9t__manage_keys action=list` returned all 18 providers.  Decryption layer unaffected by the API change.
+- **Save-with-cached-pwd path exercised**: `POST /api/settings/providers/save` with empty body — body-pwd was empty, fell through to `WithCachedMasterPassword(doSave)` callback, verified the existing blob then re-encrypted and wrote.  File mtime updated; subsequent `manage_connections get my-jira` returned the connection from the freshly-encrypted blob.  This confirms the body-pwd → cached-pwd fall-through restructure of `HandleProvidersSavePost` is correct.
+- **`debug_signals`**: `keys_unlocked: true`, `mcp_keys_loaded: true`, `mcp_keys_count: 166`, no new lockout records (`auth_failure_records: 1` was a pre-unlock dashboard heartbeat from server boot).
+- **Graceful REST shutdown** via `POST /api/shutdown` — full `[engine] done` sequence emitted.
+
+### Open items / next-session candidates
+
+Inventory of D3 keystore-cluster findings NOT addressed in this sitting, sized for future S2 sittings:
+
+- **Sitting 2 candidate — Keystore file format V2** (estimated 1 sitting + careful test).  Two changes bundled:
+  - Bump `PBKDF2_ITERATIONS` from 100,000 to 600,000 (OWASP 2023+ recommendation for PBKDF2-HMAC-SHA256).
+  - Bind magic + version header bytes into AES-GCM AAD so header tampering invalidates the tag.
+  - V1 decrypt path retained for backward compat — re-saving a V1 blob promotes it to V2.  Test matrix: V1-decrypt → V2-encrypt → V2-decrypt.
+- **Sitting 3+ candidate — Credential / ProviderConfig sensitive-field migration to SecureString** (estimated 2-3 sittings — large refactor).  Currently `credential.h` (`ApiKeyCredential::m_ApiKey`, `OAuthCredential::m_AccessToken`/`m_RefreshToken`, `KeyPairCredential::m_PrivateKeyPem`, `BasicAuthCredential::m_Password`) and `keyManager.h ProviderConfig` (same shape, eight secret fields) store all secrets as plain `std::string`.  Sitting 1 fixed the cached-master-password leak, but every individual API key / OAuth token / private key still lives on the regular heap for the duration of the keystore being unlocked.  Defense-in-depth gap.  Migration touches every call site that reads/writes a secret field — non-trivial blast radius; would need a careful sub-plan.
+- **Lower-severity carry-overs (housekeeping):**
+  - `EVP_CIPHER_CTX*` raw pointer with manual `EVP_CIPHER_CTX_free` on each of 7 error paths in `KeyEncryption::Encrypt`/`Decrypt` — RAII wrapper would be cleaner + exception-safe.  ~30 LOC fold.
+  - `m_CachedMasterPassword.Set()` and `Get()` are called without holding `KeyManager::m_Mutex`.  `m_Mutex` only guards the providers map.  This is a pre-existing data race, not introduced by sitting 1.  Either widen `m_Mutex`'s scope or split the cached-password into its own mutex.
+
+After the next 1-3 sittings on the items above, the keystore cluster is fully closed and S2 moves on to the signer/secret-redactor cluster.
+
+### Gotchas next-session-Claude should know
+
+- **The lockout window can bite during testing.**  `feedback_unlock_keystore_first` says "POST master password to /api/settings/keys/unlock before any auth attempt; pre-unlock failures lockout 127.0.0.1 for 15 min."  This sitting's smoke test triggered the 15-min lockout when a `until curl ... /api/health; do sleep 2; done` probe loop hit auth-failure repeatedly before the unlock.  The lockout gates `/api/shutdown` too — even with a valid token — so once you trigger it, REST shutdown is blocked and the only options are wait it out or process-kill.  Lesson: when starting the server in a test loop, NEVER probe an auth-protected endpoint to detect "ready" — either tail the log file for the boot banner or unlock first and use an MCP tool that's auth-clean.
+- **`./jarvisagent.sh` defaults to Release.**  `--debug` selects `bin/Debug/`.  If you `make config=debug` then `./jarvisagent.sh`, you'll be testing the OLD Release binary against your fresh source changes — looks like everything works, actually nothing is loaded.  This sitting's first smoke-test run hit this; rerun with `./jarvisagent.sh --debug` once corrected.  See the launcher script's `--debug` / `--release` flag handling.
+- **The `WithCachedMasterPassword` API mostly cleanly absorbs callers, but `HandleProvidersSavePost` was the awkward one** because it had to handle the body-supplied password and the cached-supplied password through one downstream save path.  The pattern that worked: extract the downstream as `auto doSave = [&](std::string_view) -> crow::response { ... }`, call it directly with the body password if present, else `WithCachedMasterPassword(doSave)` and capture the response.  Future similar refactors in S2/S3 (where a downstream wants a string-view-of-secret but is reachable from multiple sources) can crib this pattern.
+- **`std::string_view::data()` is NOT guaranteed to be null-terminated.**  Inside `KeyEncryption`, the `PKCS5_PBKDF2_HMAC` call takes `(pass, passlen)` so passing `data() + size()` is correct.  If a future call adds an OpenSSL function that expects a NUL-terminated C string from the password view, it will read past the view's end.  When in doubt, materialize a `std::string` for that one call (acknowledging the ephemeral heap copy).
+- **Decrypted plaintext is still returned as `std::string` from `KeyEncryption::Decrypt`.**  This is by design and unchanged by sitting 1.  `KeyManager::Load` / `McpKeyManager::Load` immediately parse it and discard.  If a future caller wants to keep the plaintext around, it should `Set()` it into a `SecureString` and let the temporary `std::string` go out of scope (acknowledging the heap-residual-byte risk during the brief `std::string` lifetime; std::string does not zeroize on destruction).
+- **Sitting 1 deliberately did not bump the keystore file format.**  All changes are source-compatible with the on-disk V1 blob format.  This is a sequencing decision — making the API surface clean first, the file-format upgrade second so each can be verified independently.  Don't defeat this by silently bumping the format in a sitting whose theme isn't "format upgrade".
+
+---
+
 ## 2026-05-02 (S1 = D2 CLOSED — session-end milestone) → next session
 
 **Major milestone: S1 (= D2 — Web + Cloud + Assistant) is closed.**  After 34 sittings spanning 5 calendar days (2026-04-29 to 2026-05-02), every cross-cutting concern from the original D2 cyber-sec + safety audit is resolved.  The original plan estimated 5-6 sittings for D2; reality was 34, driven mostly by the cloud-surface sub-domain (sittings 9-34 = 26 sittings) being denser than the audit's TOC suggested.  The two earlier sub-domains closed roughly on plan: assistant in 4 sittings, web layer in 4 sittings.

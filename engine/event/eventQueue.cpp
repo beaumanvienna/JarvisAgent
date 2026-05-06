@@ -30,35 +30,22 @@ namespace AIAssistant
         m_Queue.push(std::move(event));
     }
 
-    EventQueue::EventPtr EventQueue::Pop()
-    {
-        std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
-        if (m_Queue.empty())
-        {
-            return nullptr;
-        }
-        EventQueue::EventPtr event = std::move(m_Queue.front());
-        m_Queue.pop();
-        return event;
-    }
-
-    // Pop all events (main thread should call this periodically)
     std::vector<EventQueue::EventPtr> EventQueue::PopAll()
     {
-        std::vector<EventQueue::EventPtr> eventVector;
-        std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
-        while (!m_Queue.empty())
+        std::queue<EventPtr> drained;
         {
-            eventVector.push_back(std::move(m_Queue.front()));
-            m_Queue.pop();
+            std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
+            std::swap(drained, m_Queue);
+        }
+
+        std::vector<EventPtr> eventVector;
+        eventVector.reserve(drained.size());
+        while (!drained.empty())
+        {
+            eventVector.push_back(std::move(drained.front()));
+            drained.pop();
         }
         return eventVector;
-    }
-
-    size_t EventQueue::Size()
-    {
-        std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
-        return m_Queue.size();
     }
 
 } // namespace AIAssistant

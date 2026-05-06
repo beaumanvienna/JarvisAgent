@@ -32,6 +32,7 @@
 #include <unordered_map>
 
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
 
 #if __has_include(<openssl/sha.h>)
@@ -93,9 +94,9 @@ namespace AIAssistant
         // Build JSON manually (the structure is small and fixed)
         std::ostringstream json;
         json << "{\n";
-        json << "  \"filter_id\": \"" << JsonEscape(manifest.m_FilterId) << "\",\n";
-        json << "  \"evaluated_at\": \"" << JsonEscape(manifest.m_EvaluatedAt) << "\",\n";
-        json << "  \"query_hash\": \"" << JsonEscape(manifest.m_QueryHash) << "\",\n";
+        json << "  \"filter_id\": \"" << JsonHelper::EscapeJsonString(manifest.m_FilterId) << "\",\n";
+        json << "  \"evaluated_at\": \"" << JsonHelper::EscapeJsonString(manifest.m_EvaluatedAt) << "\",\n";
+        json << "  \"query_hash\": \"" << JsonHelper::EscapeJsonString(manifest.m_QueryHash) << "\",\n";
         json << "  \"item_count\": " << manifest.m_ItemCount << ",\n";
         json << "  \"items\": [\n";
 
@@ -104,9 +105,9 @@ namespace AIAssistant
             auto const& entry = manifest.m_Items[i];
             json << "    {\n";
             json << "      \"index\": " << entry.m_Index << ",\n";
-            json << "      \"key\": \"" << JsonEscape(entry.m_Key) << "\",\n";
-            json << "      \"source_path\": \"" << JsonEscape(entry.m_SourcePath) << "\",\n";
-            json << "      \"source_mtime\": \"" << JsonEscape(entry.m_SourceMtime) << "\"\n";
+            json << "      \"key\": \"" << JsonHelper::EscapeJsonString(entry.m_Key) << "\",\n";
+            json << "      \"source_path\": \"" << JsonHelper::EscapeJsonString(entry.m_SourcePath) << "\",\n";
+            json << "      \"source_mtime\": \"" << JsonHelper::EscapeJsonString(entry.m_SourceMtime) << "\"\n";
             json << "    }";
             if (i + 1 < manifest.m_Items.size())
             {
@@ -410,43 +411,6 @@ namespace AIAssistant
         std::ostringstream oss;
         oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
         return oss.str();
-    }
-
-    // -----------------------------------------------------------------
-    // JsonEscape
-    // -----------------------------------------------------------------
-
-    std::string FilterManifestManager::JsonEscape(std::string const& s)
-    {
-        std::string result;
-        result.reserve(s.size() + 8);
-
-        for (char c : s)
-        {
-            switch (c)
-            {
-                case '"':
-                    result += "\\\"";
-                    break;
-                case '\\':
-                    result += "\\\\";
-                    break;
-                case '\n':
-                    result += "\\n";
-                    break;
-                case '\r':
-                    result += "\\r";
-                    break;
-                case '\t':
-                    result += "\\t";
-                    break;
-                default:
-                    result += c;
-                    break;
-            }
-        }
-
-        return result;
     }
 
 } // namespace AIAssistant

@@ -93,7 +93,8 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 | `engine/keys/keyManager.h` | Credential storage and retrieval |
 | `engine/keys/oauthTokenManager.h` | OAuth2 token lifecycle and background refresh |
 | `engine/keys/jwtGenerator.h` | RSA RS256 JWT creation (Snowflake, service accounts) |
-| `engine/keys/sigV4Signer.h` | AWS SigV4 signing (also in this directory) |
+| `engine/curlWrapper/awsSigV4.h` | AWS SigV4 signing (used by `s3Connector`, `azureBlobConnector` for AWS-compatible flows) |
+| `engine/curlWrapper/authSigner.h` | `IAuthSigner` polymorphic auth-header production (Bearer / x-api-key / Azure / SigV4 / Anthropic) |
 | `engine/log/secretRedactor.h` | Scrubs secrets from log output |
 | `engine/core.h` | Owns `CloudConnectionManager`, `CloudConnectorRegistry`, `CloudCircuitBreaker`, `OAuthTokenManager` |
 | `application/web/webServer.cpp` | REST API endpoints for connections CRUD, OAuth flow, health status |

@@ -190,7 +190,9 @@ The following fields are recognized:
 - **`"workflows folder"`** — (string) Relative or absolute path to the directory containing `.jcwf` workflow definition files. Defaults to `workflows/`.
 - **`"port"`** — (number) Web server listen port. `0` = auto-select (8080 for HTTP, 8443 for HTTPS). Valid range: 1–65535. Default: `0`.
 - **`"max threads"`** — (number) Worker-thread pool size. Default: 16. Valid range: 1–256.
-- **`"max inflight ai calls"`** — (number) Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from thread pool size since requests are multiplexed on a single I/O thread. Default: 100. Valid range: 1–1000.
+- **`"max inflight ai calls"`** — (number) Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from thread pool size since requests are multiplexed on a single I/O thread. Default: 1000. Valid range: 1–10000.
+- **`"max_ai_calls_per_jcwf"`** — (number) Per-run cap on the total AI calls a single JCWF run can dispatch. `0` = unlimited. Default: 0. Tasks exceeding the cap fail fast (`AI call cap exceeded`). Set to a finite value (e.g. 1000) for adhoc / multi-tenant deployments to bound a single workflow's AI-budget consumption.
+- **`"max_per_item_fan_out"`** — (number) Cap on the children spawned by a single per-item filter evaluation. `0` = unlimited. Default: 10000. Guards against DoS via a malicious or accidental filter that returns millions of items (each becomes a task child + downstream dispatch). When exceeded, the parent task fails with an ERROR-logged `runId`/`workflowId`/`taskId`.
 - **`"python engines"`** — (number) Number of Python sub-interpreters (each with its own GIL) for parallel Python task execution. Requires Python 3.12+. Default: 4. Valid range: 1–16.
 - **`"engine sleep time in run loop in ms"`** — (number) Main loop sleep duration in milliseconds. Controls CPU usage vs. responsiveness. Default: 10. Valid range: 1–256.
 - **`"max file size in kB"`** — (number) Maximum input file size in kilobytes. Files larger than this are chunked before being sent to the AI. Default: 20. Valid range: 1–256.
@@ -441,7 +443,7 @@ Scripts under `scripts/` are the only way for adhoc workflows to execute shell /
 3. Make it executable: `chmod +x scripts/my-script.sh` (shell only).
 4. In the dashboard, open **Settings → Scripts** and click **Refresh** to trigger an on-demand rescan. No j9t restart required. The MCP `list_scripts` tool and `GET /api/scripts` endpoint will now surface the new script with its metadata; agents submitting adhoc JCWFs can reference it.
 
-Scripts without the `@jarvis-script` marker still appear in the catalog but are flagged — useful for flagging internal helper modules (e.g. `scripts/helpers/*.py`) that agents shouldn't reference directly as task entries.
+The `@jarvis-script` marker is what registers a file. Files in `scripts/` without the marker are not catalogued and cannot be referenced by workflow tasks — for **Python** tasks specifically, the runtime allowlist in `PythonEngine` rejects unregistered modules at import time, so an internal helper that lacks the marker is invisible both to the catalog and to the import path. To keep helper modules importable by registered scripts but hidden from agents, place them in a sub-package (`scripts/helpers/`) and import them only from registered scripts above — `scripts/helpers/*.py` reached via relative import inside a registered `scripts/foo.py` works without needing its own marker.
 
 ### I'm an admin — how do agents use adhoc workflows?
 

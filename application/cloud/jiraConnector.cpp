@@ -27,6 +27,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/cloudTaskExecutor.h"
@@ -58,29 +59,31 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
 
-        // Support both BasicAuth (Jira Cloud: email + API token) and Bearer (Jira DC: PAT)
-        if (!provider->m_Username.empty() && !provider->m_Password.empty())
+        // Jira Cloud uses email + API token (BasicAuthCredential); Jira Data Center uses
+        // a Personal Access Token (ApiKeyCredential).  Both shapes are valid here — try
+        // the type-specific casts in order, fail closed if neither matches.
+        if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
         {
             credentials.m_AuthType = CloudAuthType::BasicAuth;
-            credentials.m_Username = provider->m_Username;
-            credentials.m_Password = provider->m_Password;
+            credentials.m_Username = basic->m_Username;
+            credentials.m_Password = std::string(basic->m_Password.Get());
         }
-        else if (!provider->m_ApiKey.empty())
+        else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
         {
             credentials.m_AuthType = CloudAuthType::BearerToken;
-            credentials.m_Token = provider->m_ApiKey;
+            credentials.m_Token = std::string(api->m_ApiKey.Get());
         }
         else
         {
             errorMessage = "Credential '" + connection.m_KeyName +
-                           "' has no credentials — Jira requires email+API token or a PAT";
+                           "' must be BasicAuthCredential (Jira Cloud) or ApiKeyCredential (Jira Data Center)";
             return false;
         }
 

@@ -36,12 +36,23 @@ namespace AIAssistant
     //
     // Output is a list of complete header strings ("Name: value"); each caller
     // appends them to its own curl slist representation.
+    //
+    // Apply returns false on validation failure (empty / whitespace credentials,
+    // missing required SigV4 params, etc.) and populates errorMessage with a
+    // short human-readable description.  On false, outHeaders is unchanged so
+    // the caller cannot accidentally send a half-signed request.
+    //
+    // The signer subsystem has no run context (no runId / workflowId), so it
+    // does NOT emit the failure log — the caller (which has run context) is
+    // responsible for the structured ERROR line.  See feedback_log_failures.md.
     class IAuthSigner
     {
     public:
         virtual ~IAuthSigner() = default;
-        virtual void Apply(CurlWrapper::QueryData const& queryData, std::vector<std::string>& outHeaders) = 0;
+        [[nodiscard]] virtual bool Apply(CurlWrapper::QueryData const& queryData,
+                                         std::vector<std::string>& outHeaders,
+                                         std::string& errorMessage) const = 0;
 
-        static IAuthSigner& Get(CurlWrapper::AuthStyle style);
+        static IAuthSigner const& Get(CurlWrapper::AuthStyle style);
     };
 } // namespace AIAssistant

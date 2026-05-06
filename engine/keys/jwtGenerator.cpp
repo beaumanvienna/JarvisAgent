@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <memory>
 #include <sstream>
 
 #include <openssl/bio.h>
@@ -37,6 +39,77 @@ namespace AIAssistant
 {
     static constexpr int MIN_RSA_KEY_BITS = 2048;
     static constexpr int SNOWFLAKE_JWT_EXPIRY_SECONDS = 3600; // 1 hour
+
+    // RSA RS256 JWT header is fixed — never accept a caller-supplied header that
+    // could lie about the algorithm and induce alg-confusion at a misconfigured verifier.
+    static constexpr char const* RS256_HEADER_JSON = R"({"alg":"RS256","typ":"JWT"})";
+
+    namespace
+    {
+        // RAII for OpenSSL EVP_PKEY*.  Holding a raw pointer across allocating string
+        // operations (Base64UrlEncode return, signingInput concat, std::vector<uint8_t>
+        // construction) leaks the key on std::bad_alloc.  Same pattern as ScopedKey /
+        // EvpCipherCtxPtr in keyEncryption.cpp; file-local because no third user yet.
+        struct EvpPkeyDeleter
+        {
+            void operator()(EVP_PKEY* key) const noexcept
+            {
+                if (key) EVP_PKEY_free(key);
+            }
+        };
+        using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
+
+        struct EvpMdCtxDeleter
+        {
+            void operator()(EVP_MD_CTX* ctx) const noexcept
+            {
+                if (ctx) EVP_MD_CTX_free(ctx);
+            }
+        };
+        using EvpMdCtxPtr = std::unique_ptr<EVP_MD_CTX, EvpMdCtxDeleter>;
+
+        // Parse a PEM private key and validate it as an RSA key of sufficient size.
+        // Returns null and populates errorMessage on any failure.
+        EvpPkeyPtr ParseAndValidateRsaPem(std::string const& privateKeyPem, std::string& errorMessage)
+        {
+            BIO* bio = BIO_new_mem_buf(privateKeyPem.data(), static_cast<int>(privateKeyPem.size()));
+            if (!bio)
+            {
+                errorMessage = "Failed to create BIO for private key";
+                return {};
+            }
+            EvpPkeyPtr pkey(PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr));
+            BIO_free(bio);
+
+            if (!pkey)
+            {
+                errorMessage = "Failed to parse private key PEM";
+                return {};
+            }
+
+            // Reject EC / DSA / Ed25519 / Ed448 / X25519 etc.  EVP_DigestSign with a
+            // non-RSA key would produce a signature of the wrong shape while the JWT
+            // header still claims RS256 — a verifier that trusts the header would
+            // accept a signature it didn't actually validate against the right scheme.
+            int const keyId = EVP_PKEY_id(pkey.get());
+            if (keyId != EVP_PKEY_RSA)
+            {
+                errorMessage = "Private key is not RSA (EVP_PKEY_id=" + std::to_string(keyId) +
+                               "); RS256 requires an RSA key";
+                return {};
+            }
+
+            int const keyBits = EVP_PKEY_bits(pkey.get());
+            if (keyBits < MIN_RSA_KEY_BITS)
+            {
+                errorMessage = "RSA key too small (" + std::to_string(keyBits) + " bits, minimum " +
+                               std::to_string(MIN_RSA_KEY_BITS) + ")";
+                return {};
+            }
+
+            return pkey;
+        }
+    } // namespace
 
     std::string JwtGenerator::Base64UrlEncode(std::vector<uint8_t> const& data)
     {
@@ -74,125 +147,79 @@ namespace AIAssistant
         return Base64UrlEncode(std::vector<uint8_t>(data.begin(), data.end()));
     }
 
-    std::string JwtGenerator::Generate(std::string const& headerJson, std::string const& payloadJson,
-                                        std::string const& privateKeyPem, std::string& errorMessage)
+    std::string JwtGenerator::Generate(std::string const& payloadJson, std::string const& privateKeyPem,
+                                        std::string& errorMessage)
     {
-        // Load RSA private key from PEM
-        BIO* bio = BIO_new_mem_buf(privateKeyPem.data(), static_cast<int>(privateKeyPem.size()));
-        if (!bio)
-        {
-            errorMessage = "Failed to create BIO for private key";
-            return {};
-        }
+        EvpPkeyPtr pkey = ParseAndValidateRsaPem(privateKeyPem, errorMessage);
+        if (!pkey) return {};
 
-        EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-        BIO_free(bio);
+        // Build the signing input: base64url(RS256_header).base64url(payload).
+        // Header is fixed internally — no caller-supplied header that could lie about alg.
+        std::string const signingInput = Base64UrlEncode(std::string(RS256_HEADER_JSON)) + "." +
+                                         Base64UrlEncode(payloadJson);
 
-        if (!pkey)
-        {
-            errorMessage = "Failed to parse RSA private key PEM";
-            return {};
-        }
-
-        // Enforce minimum key size
-        int keyBits = EVP_PKEY_bits(pkey);
-        if (keyBits < MIN_RSA_KEY_BITS)
-        {
-            errorMessage = "RSA key too small (" + std::to_string(keyBits) + " bits, minimum " +
-                           std::to_string(MIN_RSA_KEY_BITS) + ")";
-            EVP_PKEY_free(pkey);
-            return {};
-        }
-
-        // Build the signing input: base64url(header).base64url(payload)
-        std::string signingInput = Base64UrlEncode(headerJson) + "." + Base64UrlEncode(payloadJson);
-
-        // Sign with RS256 (RSA + SHA-256)
-        EVP_MD_CTX* mdCtx = EVP_MD_CTX_new();
+        EvpMdCtxPtr mdCtx(EVP_MD_CTX_new());
         if (!mdCtx)
         {
             errorMessage = "Failed to create EVP_MD_CTX";
-            EVP_PKEY_free(pkey);
             return {};
         }
 
-        std::string jwt;
-
-        if (EVP_DigestSignInit(mdCtx, nullptr, EVP_sha256(), nullptr, pkey) != 1)
+        if (EVP_DigestSignInit(mdCtx.get(), nullptr, EVP_sha256(), nullptr, pkey.get()) != 1)
         {
             errorMessage = "EVP_DigestSignInit failed";
+            return {};
         }
-        else if (EVP_DigestSignUpdate(mdCtx, signingInput.data(), signingInput.size()) != 1)
+        if (EVP_DigestSignUpdate(mdCtx.get(), signingInput.data(), signingInput.size()) != 1)
         {
             errorMessage = "EVP_DigestSignUpdate failed";
+            return {};
         }
-        else
+
+        size_t sigLen = 0;
+        if (EVP_DigestSignFinal(mdCtx.get(), nullptr, &sigLen) != 1)
         {
-            // Get signature length
-            size_t sigLen = 0;
-            if (EVP_DigestSignFinal(mdCtx, nullptr, &sigLen) != 1)
-            {
-                errorMessage = "EVP_DigestSignFinal (length query) failed";
-            }
-            else
-            {
-                std::vector<uint8_t> signature(sigLen);
-                if (EVP_DigestSignFinal(mdCtx, signature.data(), &sigLen) != 1)
-                {
-                    errorMessage = "EVP_DigestSignFinal (sign) failed";
-                }
-                else
-                {
-                    signature.resize(sigLen);
-                    jwt = signingInput + "." + Base64UrlEncode(signature);
-                }
-            }
+            errorMessage = "EVP_DigestSignFinal (length query) failed";
+            return {};
         }
 
-        EVP_MD_CTX_free(mdCtx);
-
-        // Clear private key material
-        EVP_PKEY_free(pkey);
-
-        if (!jwt.empty())
+        std::vector<uint8_t> signature(sigLen);
+        if (EVP_DigestSignFinal(mdCtx.get(), signature.data(), &sigLen) != 1)
         {
-            SecretRedactor::Get().AddSecret(jwt);
+            errorMessage = "EVP_DigestSignFinal (sign) failed";
+            return {};
         }
+        signature.resize(sigLen);
 
+        std::string jwt = signingInput + "." + Base64UrlEncode(signature);
+        SecretRedactor::Get().AddSecret(jwt);
         return jwt;
     }
 
     std::string JwtGenerator::ComputePublicKeyFingerprint(std::string const& privateKeyPem, std::string& errorMessage)
     {
-        // Load private key
-        BIO* bio = BIO_new_mem_buf(privateKeyPem.data(), static_cast<int>(privateKeyPem.size()));
-        if (!bio)
-        {
-            errorMessage = "Failed to create BIO for fingerprint";
-            return {};
-        }
+        // Reuse the same parse + RSA-validation gate as Generate — Snowflake's
+        // fingerprint is over the RSA public key, so an EC/DSA key here is a setup
+        // bug we want to catch before computing a meaningless fingerprint.
+        EvpPkeyPtr pkey = ParseAndValidateRsaPem(privateKeyPem, errorMessage);
+        if (!pkey) return {};
 
-        EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
-        BIO_free(bio);
-        if (!pkey)
-        {
-            errorMessage = "Failed to parse private key for fingerprint";
-            return {};
-        }
-
-        // Extract DER-encoded public key
-        int derLen = i2d_PUBKEY(pkey, nullptr);
+        int const derLen = i2d_PUBKEY(pkey.get(), nullptr);
         if (derLen <= 0)
         {
             errorMessage = "Failed to get public key DER length";
-            EVP_PKEY_free(pkey);
             return {};
         }
 
-        std::vector<uint8_t> derBuf(derLen);
+        std::vector<uint8_t> derBuf(static_cast<size_t>(derLen));
         uint8_t* derPtr = derBuf.data();
-        i2d_PUBKEY(pkey, &derPtr);
-        EVP_PKEY_free(pkey);
+        int const written = i2d_PUBKEY(pkey.get(), &derPtr);
+        if (written != derLen)
+        {
+            errorMessage = "i2d_PUBKEY second-call wrote " + std::to_string(written) + " bytes, expected " +
+                           std::to_string(derLen);
+            return {};
+        }
 
         // SHA-256 hash of the DER-encoded public key
         std::vector<uint8_t> hash(SHA256_DIGEST_LENGTH);
@@ -226,11 +253,19 @@ namespace AIAssistant
             return {};
         }
 
-        // Uppercase account and user per Snowflake convention
+        // Uppercase account and user per Snowflake convention.
+        // Cast to unsigned char before std::toupper — passing a negative signed char
+        // is undefined behaviour (cppreference / std::toupper).  Snowflake account
+        // identifiers are alphanumeric ASCII so it never fires today, but the cast
+        // makes the contract explicit.
+        auto upperAscii = [](char c) -> char
+        {
+            return static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        };
         std::string upperAccount = account;
         std::string upperUser = user;
-        std::transform(upperAccount.begin(), upperAccount.end(), upperAccount.begin(), ::toupper);
-        std::transform(upperUser.begin(), upperUser.end(), upperUser.begin(), ::toupper);
+        std::transform(upperAccount.begin(), upperAccount.end(), upperAccount.begin(), upperAscii);
+        std::transform(upperUser.begin(), upperUser.end(), upperUser.begin(), upperAscii);
 
         // Strip region suffix if present (e.g., "XY12345.us-east-1" → "XY12345")
         auto dotPos = upperAccount.find('.');
@@ -243,10 +278,7 @@ namespace AIAssistant
 
         std::string qualifiedUser = accountLocator + "." + upperUser;
 
-        // Build header
-        std::string header = R"({"alg":"RS256","typ":"JWT"})";
-
-        // Build payload
+        // Build payload — header is built internally by Generate.
         std::ostringstream payload;
         payload << "{";
         payload << "\"iss\":\"" << qualifiedUser << "." << fingerprint << "\",";
@@ -255,6 +287,6 @@ namespace AIAssistant
         payload << "\"exp\":" << expiry;
         payload << "}";
 
-        return Generate(header, payload.str(), privateKeyPem, errorMessage);
+        return Generate(payload.str(), privateKeyPem, errorMessage);
     }
 } // namespace AIAssistant

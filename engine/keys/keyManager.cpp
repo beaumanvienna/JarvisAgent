@@ -25,13 +25,15 @@
 #include <sstream>
 
 #include "engine.h"
+#include "json/jsonHelper.h"
 #include "keys/keyEncryption.h"
 #include "keys/keyManager.h"
 #include "log/secretRedactor.h"
 
 namespace AIAssistant
 {
-    bool KeyManager::Load(std::filesystem::path const& keysFilePath, std::string const& masterPassword)
+
+    bool KeyManager::Load(std::filesystem::path const& keysFilePath, std::string_view masterPassword)
     {
         // Read encrypted file into memory
         std::ifstream file(keysFilePath, std::ios::binary);
@@ -65,16 +67,11 @@ namespace AIAssistant
 
         m_Dirty = false;
         m_CachedMasterPassword.Set(masterPassword);
-        LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Providers.size(), keysFilePath.string());
+        LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Credentials.size(), keysFilePath.string());
         return true;
     }
 
-    std::string KeyManager::GetCachedMasterPassword() const
-    {
-        return std::string(m_CachedMasterPassword.Get());
-    }
-
-    bool KeyManager::Save(std::filesystem::path const& keysFilePath, std::string const& masterPassword)
+    bool KeyManager::Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword)
     {
         std::string json;
         {
@@ -101,7 +98,7 @@ namespace AIAssistant
 
         m_Dirty = false;
         m_CachedMasterPassword.Set(masterPassword);
-        LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
+        LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Credentials.size(), keysFilePath.string());
         return true;
     }
 
@@ -132,7 +129,7 @@ namespace AIAssistant
         }
 
         m_Dirty = false;
-        LOG_CORE_INFO("KeyManager::LoadPlaintext: loaded {} provider(s) from '{}'", m_Providers.size(),
+        LOG_CORE_INFO("KeyManager::LoadPlaintext: loaded {} provider(s) from '{}'", m_Credentials.size(),
                       keysFilePath.string());
         return true;
     }
@@ -156,7 +153,8 @@ namespace AIAssistant
         file.close();
 
         m_Dirty = false;
-        LOG_CORE_INFO("KeyManager::SavePlaintext: saved {} provider(s) to '{}'", m_Providers.size(), keysFilePath.string());
+        LOG_CORE_INFO("KeyManager::SavePlaintext: saved {} provider(s) to '{}'", m_Credentials.size(),
+                      keysFilePath.string());
         return true;
     }
 
@@ -170,24 +168,26 @@ namespace AIAssistant
         }
 
         std::unique_lock lock(m_Mutex);
-        m_Providers.clear();
+        m_Credentials.clear();
 
-        ProviderConfig config;
-        config.m_DisplayName = "OpenAI (from environment)";
-        config.m_Endpoint = endpoint;
-        config.m_ApiKey = std::string(apiKeyEnv);
-        config.m_DefaultModel = model;
-        config.m_ApiType = apiType;
+        auto cred = std::make_unique<ApiKeyCredential>();
+        cred->m_Name         = "openai";
+        cred->m_DisplayName  = "OpenAI (from environment)";
+        cred->m_Endpoint     = endpoint;
+        cred->m_DefaultModel = model;
+        cred->m_ApiType      = apiType;
+        cred->m_ApiKey.Set(std::string_view(apiKeyEnv, std::strlen(apiKeyEnv)));
+        cred->RegisterSecrets();
 
-        m_Providers["openai"] = std::move(config);
-        m_DefaultProviderName = "openai";
+        m_Credentials["openai"] = std::move(cred);
+        m_DefaultProviderName   = "openai";
 
         m_Dirty = false;
         LOG_CORE_INFO("KeyManager::LoadFromEnvironment: created 'openai' provider from OPENAI_API_KEY env var");
         return true;
     }
 
-    bool KeyManager::Unlock(std::string const& masterPassword)
+    bool KeyManager::Unlock(std::string_view masterPassword)
     {
         if (m_KeysFilePath.empty())
         {
@@ -213,30 +213,30 @@ namespace AIAssistant
         return false;
     }
 
-    KeyManager::ProviderConfig const* KeyManager::GetProvider(std::string const& name) const
+    ICredential const* KeyManager::GetCredential(std::string const& name) const
     {
         std::shared_lock lock(m_Mutex);
-        auto const it = m_Providers.find(name);
-        if (it == m_Providers.end())
+        auto const it = m_Credentials.find(name);
+        if (it == m_Credentials.end())
         {
             return nullptr;
         }
-        return &it->second;
+        return it->second.get();
     }
 
-    KeyManager::ProviderConfig const* KeyManager::GetDefaultProvider() const
+    ICredential const* KeyManager::GetDefaultCredential() const
     {
         std::shared_lock lock(m_Mutex);
         if (m_DefaultProviderName.empty())
         {
             return nullptr;
         }
-        auto const it = m_Providers.find(m_DefaultProviderName);
-        if (it == m_Providers.end())
+        auto const it = m_Credentials.find(m_DefaultProviderName);
+        if (it == m_Credentials.end())
         {
             return nullptr;
         }
-        return &it->second;
+        return it->second.get();
     }
 
     std::string KeyManager::GetDefaultProviderName() const
@@ -249,8 +249,8 @@ namespace AIAssistant
     {
         std::shared_lock lock(m_Mutex);
         std::vector<std::string> names;
-        names.reserve(m_Providers.size());
-        for (auto const& [name, config] : m_Providers)
+        names.reserve(m_Credentials.size());
+        for (auto const& [name, cred] : m_Credentials)
         {
             names.push_back(name);
         }
@@ -260,38 +260,54 @@ namespace AIAssistant
     bool KeyManager::HasProviders() const
     {
         std::shared_lock lock(m_Mutex);
-        return !m_Providers.empty();
+        return !m_Credentials.empty();
     }
 
-    bool KeyManager::AddProvider(std::string const& name, ProviderConfig config)
+    bool KeyManager::AddCredential(std::string const& name, std::unique_ptr<ICredential> cred)
     {
-        std::unique_lock lock(m_Mutex);
-        if (m_Providers.count(name))
+        if (!cred)
         {
-            LOG_CORE_WARN("KeyManager::AddProvider: provider '{}' already exists", name);
+            LOG_CORE_ERROR("KeyManager::AddCredential: '{}' rejected — null credential", name);
             return false;
         }
-        m_Providers[name] = std::move(config);
+        std::unique_lock lock(m_Mutex);
+        if (m_Credentials.count(name))
+        {
+            LOG_CORE_WARN("KeyManager::AddCredential: provider '{}' already exists", name);
+            return false;
+        }
+
+        cred->m_Name = name;
+        cred->RegisterSecrets();
+
+        m_Credentials[name] = std::move(cred);
         m_Dirty = true;
 
-        // If this is the first provider, make it the default
-        if (m_Providers.size() == 1)
+        if (m_Credentials.size() == 1)
         {
             m_DefaultProviderName = name;
         }
         return true;
     }
 
-    bool KeyManager::UpdateProvider(std::string const& name, ProviderConfig config)
+    bool KeyManager::UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred)
     {
-        std::unique_lock lock(m_Mutex);
-        auto it = m_Providers.find(name);
-        if (it == m_Providers.end())
+        if (!cred)
         {
-            LOG_CORE_WARN("KeyManager::UpdateProvider: provider '{}' not found", name);
+            LOG_CORE_ERROR("KeyManager::UpdateCredential: '{}' rejected — null credential", name);
             return false;
         }
-        it->second = std::move(config);
+        std::unique_lock lock(m_Mutex);
+        if (!m_Credentials.count(name))
+        {
+            LOG_CORE_WARN("KeyManager::UpdateCredential: provider '{}' not found", name);
+            return false;
+        }
+
+        cred->m_Name = name;
+        cred->RegisterSecrets();
+
+        m_Credentials[name] = std::move(cred);
         m_Dirty = true;
         return true;
     }
@@ -299,21 +315,21 @@ namespace AIAssistant
     bool KeyManager::RemoveProvider(std::string const& name)
     {
         std::unique_lock lock(m_Mutex);
-        auto it = m_Providers.find(name);
-        if (it == m_Providers.end())
+        auto it = m_Credentials.find(name);
+        if (it == m_Credentials.end())
         {
             LOG_CORE_WARN("KeyManager::RemoveProvider: provider '{}' not found", name);
             return false;
         }
-        m_Providers.erase(it);
+        m_Credentials.erase(it);
         m_Dirty = true;
 
         // If we removed the default, pick a new one (or clear it)
         if (m_DefaultProviderName == name)
         {
-            if (!m_Providers.empty())
+            if (!m_Credentials.empty())
             {
-                m_DefaultProviderName = m_Providers.begin()->first;
+                m_DefaultProviderName = m_Credentials.begin()->first;
             }
             else
             {
@@ -326,7 +342,7 @@ namespace AIAssistant
     void KeyManager::SetDefaultProvider(std::string const& name)
     {
         std::unique_lock lock(m_Mutex);
-        if (m_Providers.count(name) || name.empty())
+        if (m_Credentials.count(name) || name.empty())
         {
             m_DefaultProviderName = name;
         }
@@ -339,17 +355,16 @@ namespace AIAssistant
     bool KeyManager::ParseProvidersJson(std::string const& json)
     {
         std::unique_lock lock(m_Mutex);
-        m_Providers.clear();
+        m_Credentials.clear();
         m_DefaultProviderName.clear();
 
         simdjson::ondemand::parser parser;
         simdjson::padded_string paddedJson(json);
         simdjson::ondemand::document doc;
 
-        auto error = parser.iterate(paddedJson).get(doc);
-        if (error)
+        if (auto err = parser.iterate(paddedJson).get(doc); err != simdjson::SUCCESS)
         {
-            LOG_CORE_ERROR("KeyManager::ParseProvidersJson: JSON parse error: {}", simdjson::error_message(error));
+            LOG_CORE_ERROR("KeyManager::ParseProvidersJson: JSON parse error: {}", simdjson::error_message(err));
             return false;
         }
 
@@ -393,122 +408,25 @@ namespace AIAssistant
                 continue;
             }
 
-            ProviderConfig config;
+            // Dispatch through CredentialFactory — returns nullptr on unknown credential_type
+            // (factory already logs in that path).
+            std::unique_ptr<ICredential> cred = CredentialFactory::CreateFromJson(providerObj);
+            if (!cred)
+            {
+                LOG_CORE_WARN("KeyManager::ParseProvidersJson: skipping provider '{}' (factory returned null)",
+                              providerName);
+                continue;
+            }
+            cred->m_Name = std::string(providerName);
+            cred->RegisterSecrets();
 
-            std::string_view sv;
-            if (providerObj["display_name"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_DisplayName = std::string(sv);
-            }
-            if (providerObj["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Endpoint = std::string(sv);
-            }
-            if (providerObj["api_key"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiKey = std::string(sv);
-            }
-            if (providerObj["default_model"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_DefaultModel = std::string(sv);
-            }
-            if (providerObj["api_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiType = std::string(sv);
-            }
-
-            // Credential type — backward compatible: absent means "api_key"
-            if (providerObj["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_CredentialType = std::string(sv);
-            }
-
-            // OAuth fields
-            if (providerObj["refresh_token"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_RefreshToken = std::string(sv);
-            }
-            {
-                int64_t expiresAt = 0;
-                if (providerObj["expires_at"].get_int64().get(expiresAt) == simdjson::SUCCESS)
-                {
-                    config.m_ExpiresAt = expiresAt;
-                }
-            }
-            if (providerObj["scopes"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Scopes = std::string(sv);
-            }
-            if (providerObj["token_endpoint"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_TokenEndpoint = std::string(sv);
-            }
-            if (providerObj["client_id"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ClientId = std::string(sv);
-            }
-            if (providerObj["client_secret"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ClientSecret = std::string(sv);
-            }
-
-            // Key pair fields
-            if (providerObj["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_PrivateKeyPem = std::string(sv);
-            }
-
-            // Basic auth fields
-            if (providerObj["username"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Username = std::string(sv);
-            }
-            if (providerObj["password"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Password = std::string(sv);
-            }
-
-            // Per-provider params object (optional)
-            {
-                simdjson::ondemand::object paramsObj;
-                if (providerObj["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
-                {
-                    for (auto paramField : paramsObj)
-                    {
-                        std::string_view paramKey = paramField.unescaped_key();
-                        std::string_view paramVal;
-                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
-                        {
-                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
-                        }
-                    }
-                }
-            }
-
-            // For AWS (credential_type="aws"), the dual-secret material lives in m_Params and
-            // must be redacted from logs. The access_key_id (m_ApiKey) is treated as public per
-            // AWS conventions (CloudTrail logs it), but the secret + session_token never leak.
-            if (config.m_CredentialType == "aws")
-            {
-                auto registerIfPresent = [&](char const* key)
-                {
-                    auto it = config.m_Params.find(key);
-                    if (it != config.m_Params.end() && !it->second.empty())
-                    {
-                        SecretRedactor::Get().AddSecret(it->second);
-                    }
-                };
-                registerIfPresent("secret_access_key");
-                registerIfPresent("session_token");
-            }
-
-            m_Providers[std::string(providerName)] = std::move(config);
+            m_Credentials[std::string(providerName)] = std::move(cred);
         }
 
         // If default_provider was not set but we have providers, use the first one
-        if (m_DefaultProviderName.empty() && !m_Providers.empty())
+        if (m_DefaultProviderName.empty() && !m_Credentials.empty())
         {
-            m_DefaultProviderName = m_Providers.begin()->first;
+            m_DefaultProviderName = m_Credentials.begin()->first;
         }
 
         return true;
@@ -516,91 +434,21 @@ namespace AIAssistant
 
     std::string KeyManager::SerializeToJson() const
     {
-        // Hand-build JSON to avoid extra dependencies.
-        // The JSON helper's SanitizeForJson could be used, but keys/values here
-        // are controlled strings that don't need escaping beyond basic safety.
+        // Iterate `m_Credentials` (the source of truth, with SecureString-protected
+        // secret fields) and route each entry through `CredentialFactory::SerializeToJson`.
         std::ostringstream oss;
         oss << "{\n";
         oss << "    \"version\": 1,\n";
-        oss << "    \"default_provider\": \"" << m_DefaultProviderName << "\",\n";
+        oss << "    \"default_provider\": \"" << JsonHelper::EscapeJsonString(m_DefaultProviderName) << "\",\n";
         oss << "    \"providers\": {\n";
 
         size_t i = 0;
-        for (auto const& [name, config] : m_Providers)
+        for (auto const& [name, cred] : m_Credentials)
         {
-            oss << "        \"" << name << "\": {\n";
-            oss << "            \"display_name\": \"" << config.m_DisplayName << "\",\n";
-            oss << "            \"endpoint\": \"" << config.m_Endpoint << "\",\n";
-            oss << "            \"api_key\": \"" << config.m_ApiKey << "\",\n";
-            oss << "            \"default_model\": \"" << config.m_DefaultModel << "\",\n";
-            oss << "            \"api_type\": \"" << config.m_ApiType << "\",\n";
-            oss << "            \"credential_type\": \"" << config.m_CredentialType << "\"";
-
-            if (config.m_CredentialType == "oauth")
-            {
-                oss << ",\n";
-                oss << "            \"refresh_token\": \"" << config.m_RefreshToken << "\",\n";
-                oss << "            \"expires_at\": " << config.m_ExpiresAt << ",\n";
-                oss << "            \"scopes\": \"" << config.m_Scopes << "\",\n";
-                oss << "            \"token_endpoint\": \"" << config.m_TokenEndpoint << "\",\n";
-                oss << "            \"client_id\": \"" << config.m_ClientId << "\",\n";
-                oss << "            \"client_secret\": \"" << config.m_ClientSecret << "\"";
-            }
-            else if (config.m_CredentialType == "key_pair")
-            {
-                oss << ",\n";
-                // PEM keys contain newlines — escape them for JSON
-                std::string escapedPem;
-                for (char c : config.m_PrivateKeyPem)
-                {
-                    if (c == '\n') escapedPem += "\\n";
-                    else if (c == '\r') escapedPem += "\\r";
-                    else if (c == '"') escapedPem += "\\\"";
-                    else if (c == '\\') escapedPem += "\\\\";
-                    else escapedPem += c;
-                }
-                oss << "            \"private_key_pem\": \"" << escapedPem << "\"";
-            }
-            else if (config.m_CredentialType == "credentials")
-            {
-                oss << ",\n";
-                oss << "            \"username\": \"" << config.m_Username << "\",\n";
-                oss << "            \"password\": \"" << config.m_Password << "\"";
-            }
-
-            if (!config.m_Params.empty())
-            {
-                auto escape = [](std::string const& s)
-                {
-                    std::string out;
-                    out.reserve(s.size());
-                    for (char c : s)
-                    {
-                        if (c == '"') out += "\\\"";
-                        else if (c == '\\') out += "\\\\";
-                        else if (c == '\n') out += "\\n";
-                        else if (c == '\r') out += "\\r";
-                        else if (c == '\t') out += "\\t";
-                        else out += c;
-                    }
-                    return out;
-                };
-
-                oss << ",\n";
-                oss << "            \"params\": {";
-                size_t pi = 0;
-                for (auto const& [pk, pv] : config.m_Params)
-                {
-                    oss << (pi == 0 ? "\n" : ",\n");
-                    oss << "                \"" << escape(pk) << "\": \"" << escape(pv) << "\"";
-                    ++pi;
-                }
-                oss << "\n            }";
-            }
-
-            oss << "\n";
+            oss << "        \"" << JsonHelper::EscapeJsonString(name) << "\": {\n";
+            oss << CredentialFactory::SerializeToJson(*cred);
             oss << "        }";
-            if (++i < m_Providers.size())
+            if (++i < m_Credentials.size())
             {
                 oss << ",";
             }

@@ -26,6 +26,7 @@
 #include "jarvisAgent.h"
 #include "json/jsonHelper.h"
 #include "python/pythonEnginePool.h"
+#include "simdjson/simdjson.h"
 #include "web/aiJcwfService.h"
 #include "workflow/workflowRegistry.h"
 #include "workflow/workflowRuntimeManager.h"
@@ -93,6 +94,69 @@ namespace
         }
         out.push_back('\'');
         return out;
+    }
+
+    // Base64 encode (RFC 4648, standard alphabet, no line breaks).  Used to build
+    // PowerShell's `-EncodedCommand` payload, which expects UTF-16LE bytes encoded
+    // as base64.  Inputs are bounded by the run_shell command size (16 KB tool-arg
+    // ceiling), so the simple table-driven encoder is the right tool — adding an
+    // OpenSSL or wincrypt dependency for one call site is over-engineered.
+    std::string Base64EncodeBytes(std::string const& bytes)
+    {
+        static char const alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve(((bytes.size() + 2) / 3) * 4);
+        size_t i = 0;
+        for (; i + 3 <= bytes.size(); i += 3)
+        {
+            uint32_t const triple = (static_cast<uint8_t>(bytes[i])     << 16) |
+                                    (static_cast<uint8_t>(bytes[i + 1]) << 8)  |
+                                     static_cast<uint8_t>(bytes[i + 2]);
+            out += alphabet[(triple >> 18) & 0x3F];
+            out += alphabet[(triple >> 12) & 0x3F];
+            out += alphabet[(triple >> 6)  & 0x3F];
+            out += alphabet[ triple        & 0x3F];
+        }
+        if (i < bytes.size())
+        {
+            uint32_t triple = static_cast<uint8_t>(bytes[i]) << 16;
+            if (i + 1 < bytes.size())
+                triple |= static_cast<uint8_t>(bytes[i + 1]) << 8;
+            out += alphabet[(triple >> 18) & 0x3F];
+            out += alphabet[(triple >> 12) & 0x3F];
+            out += (i + 1 < bytes.size()) ? alphabet[(triple >> 6) & 0x3F] : '=';
+            out += '=';
+        }
+        return out;
+    }
+
+    // Encode a UTF-8 PowerShell command for the `-EncodedCommand` switch:
+    //   1. UTF-8  → UTF-16LE  (PowerShell's required input encoding for -EncodedCommand)
+    //   2. UTF-16LE bytes → base64
+    // The resulting argv token is opaque to PowerShell's quoting layer — the command
+    // body never re-enters the shell parser, eliminating the in-string `"`-escape
+    // injection class that the legacy `-Command "..."` path was vulnerable to.
+    // Returns empty string on UTF-8 conversion failure (caller treats as parse error).
+    std::string EncodePowerShellCommand(std::string const& utf8Command)
+    {
+        if (utf8Command.empty())
+            return {};
+        int const wcharCount = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                   utf8Command.data(),
+                                                   static_cast<int>(utf8Command.size()),
+                                                   nullptr, 0);
+        if (wcharCount <= 0)
+            return {};
+        std::vector<wchar_t> wbuf(static_cast<size_t>(wcharCount));
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                utf8Command.data(), static_cast<int>(utf8Command.size()),
+                                wbuf.data(), wcharCount) != wcharCount)
+            return {};
+        // wchar_t on Windows is 2-byte UTF-16LE — take the raw byte view directly.
+        std::string const utf16Bytes(reinterpret_cast<char const*>(wbuf.data()),
+                                     wbuf.size() * sizeof(wchar_t));
+        return Base64EncodeBytes(utf16Bytes);
     }
 #endif
 
@@ -269,7 +333,6 @@ namespace
     }
 #endif // !_WIN32
 
-    // (JsonEscape removed — converged into JsonHelper::EscapeJsonString)
 } // namespace
 
 namespace AIAssistant
@@ -630,160 +693,146 @@ namespace AIAssistant
     }
 
     // -----------------------------------------------------------------
-    // Simple JSON parser for tool call objects
+    // simdjson-backed parser for tool call objects
     // -----------------------------------------------------------------
 
     namespace
     {
-        // Skip whitespace.
-        void SkipWs(std::string const& s, size_t& i)
+        // Stringify a single tool-arg value into the form callers expect:
+        //   string  → unescaped UTF-8 bytes
+        //   integer → decimal (preserves the integer representation that downstream
+        //             std::stoi callers in run_shell / read_file etc. depend on)
+        //   double  → std::to_string(double)
+        //   boolean → "true" / "false"
+        //   null    → "null"
+        //   object/array → raw JSON serialisation (rare — tool args are scalars by
+        //             convention; this branch keeps the parser robust if a future
+        //             tool definition ever needs a structured arg).
+        bool StringifyToolArgValue(simdjson::ondemand::value& val, std::string& out)
         {
-            while (i < s.size() && (s[i] == ' ' || s[i] == '\n' || s[i] == '\r' || s[i] == '\t'))
-                ++i;
-        }
-
-        // Parse a JSON string value (expects opening quote at s[i]).
-        bool ParseJsonString(std::string const& s, size_t& i, std::string& out)
-        {
-            if (i >= s.size() || s[i] != '"')
+            using namespace simdjson;
+            ondemand::json_type t;
+            if (val.type().get(t) != SUCCESS)
                 return false;
-            ++i; // skip opening quote
-            out.clear();
-            while (i < s.size())
+            switch (t)
             {
-                if (s[i] == '\\' && i + 1 < s.size())
+                case ondemand::json_type::string:
                 {
-                    char c = s[i + 1];
-                    if (c == '"')
-                        out += '"';
-                    else if (c == '\\')
-                        out += '\\';
-                    else if (c == 'n')
-                        out += '\n';
-                    else if (c == 't')
-                        out += '\t';
-                    else if (c == 'r')
-                        out += '\r';
-                    else
-                    {
-                        out += '\\';
-                        out += c;
-                    }
-                    i += 2;
-                }
-                else if (s[i] == '"')
-                {
-                    ++i; // skip closing quote
+                    std::string_view sv;
+                    if (val.get_string().get(sv) != SUCCESS)
+                        return false;
+                    out.assign(sv.data(), sv.size());
                     return true;
                 }
-                else
+                case ondemand::json_type::number:
                 {
-                    out += s[i];
-                    ++i;
+                    ondemand::number num;
+                    if (val.get_number().get(num) != SUCCESS)
+                        return false;
+                    if (num.is_int64())
+                        out = std::to_string(num.get_int64());
+                    else if (num.is_uint64())
+                        out = std::to_string(num.get_uint64());
+                    else
+                        out = std::to_string(num.get_double());
+                    return true;
                 }
+                case ondemand::json_type::boolean:
+                {
+                    bool b;
+                    if (val.get_bool().get(b) != SUCCESS)
+                        return false;
+                    out = b ? "true" : "false";
+                    return true;
+                }
+                case ondemand::json_type::null:
+                {
+                    out = "null";
+                    return true;
+                }
+                case ondemand::json_type::array:
+                case ondemand::json_type::object:
+                {
+                    std::string_view raw;
+                    if (val.raw_json().get(raw) != SUCCESS)
+                        return false;
+                    out.assign(raw.data(), raw.size());
+                    while (!out.empty() && (out.back() == ' ' || out.back() == '\n' ||
+                                            out.back() == '\r' || out.back() == '\t'))
+                        out.pop_back();
+                    return true;
+                }
+                default:
+                    // simdjson surfaces json_type::unknown for a value at EOF or in
+                    // an iterator-error state; treat as a parse failure.
+                    return false;
             }
-            return false; // unterminated string
-        }
-
-        // Parse a JSON value as string (handles numbers, booleans, etc. by converting to string).
-        bool ParseJsonValue(std::string const& s, size_t& i, std::string& out)
-        {
-            SkipWs(s, i);
-            if (i >= s.size())
-                return false;
-
-            if (s[i] == '"')
-                return ParseJsonString(s, i, out);
-
-            // Number, boolean, null — read until delimiter.
-            size_t start = i;
-            while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']' && s[i] != ' ' && s[i] != '\n')
-                ++i;
-            out = s.substr(start, i - start);
-            return !out.empty();
         }
 
         bool ParseToolCallJson(std::string const& json, ToolCall& out)
         {
-            size_t i = 0;
-            SkipWs(json, i);
-            if (i >= json.size() || json[i] != '{')
+            using namespace simdjson;
+            if (json.empty())
                 return false;
-            ++i; // skip {
 
-            while (i < json.size())
+            try
             {
-                SkipWs(json, i);
-                if (i < json.size() && json[i] == '}')
-                    break;
-
-                // Parse key.
-                std::string key;
-                if (!ParseJsonString(json, i, key))
+                ondemand::parser parser;
+                padded_string padded(json);
+                ondemand::document doc;
+                if (parser.iterate(padded).get(doc) != SUCCESS)
                     return false;
 
-                SkipWs(json, i);
-                if (i >= json.size() || json[i] != ':')
+                ondemand::object root;
+                if (doc.get_object().get(root) != SUCCESS)
                     return false;
-                ++i; // skip :
-                SkipWs(json, i);
 
-                if (key == "name")
+                for (auto field : root)
                 {
-                    if (!ParseJsonString(json, i, out.name))
-                        return false;
-                }
-                else if (key == "args")
-                {
-                    // Parse args object.
-                    if (i >= json.size() || json[i] != '{')
-                        return false;
-                    ++i; // skip {
+                    std::string_view keyView;
+                    if (field.unescaped_key().get(keyView) != SUCCESS)
+                        continue;
 
-                    while (i < json.size())
+                    if (keyView == "name")
                     {
-                        SkipWs(json, i);
-                        if (i < json.size() && json[i] == '}')
-                        {
-                            ++i;
-                            break;
-                        }
-
-                        std::string argKey;
-                        if (!ParseJsonString(json, i, argKey))
+                        std::string_view nameView;
+                        if (field.value().get_string().get(nameView) != SUCCESS)
                             return false;
-
-                        SkipWs(json, i);
-                        if (i >= json.size() || json[i] != ':')
-                            return false;
-                        ++i;
-                        SkipWs(json, i);
-
-                        std::string argVal;
-                        if (!ParseJsonValue(json, i, argVal))
-                            return false;
-
-                        out.args[argKey] = argVal;
-
-                        SkipWs(json, i);
-                        if (i < json.size() && json[i] == ',')
-                            ++i;
+                        out.name.assign(nameView.data(), nameView.size());
                     }
-                }
-                else
-                {
-                    // Skip unknown value.
-                    std::string dummy;
-                    if (!ParseJsonValue(json, i, dummy))
-                        return false;
+                    else if (keyView == "args")
+                    {
+                        ondemand::object argsObj;
+                        if (field.value().get_object().get(argsObj) != SUCCESS)
+                            return false;
+
+                        for (auto argField : argsObj)
+                        {
+                            std::string_view argKeyView;
+                            if (argField.unescaped_key().get(argKeyView) != SUCCESS)
+                                continue;
+
+                            ondemand::value argVal;
+                            if (argField.value().get(argVal) != SUCCESS)
+                                continue;
+
+                            std::string serialised;
+                            if (!StringifyToolArgValue(argVal, serialised))
+                                continue;
+
+                            out.args.emplace(std::string(argKeyView), std::move(serialised));
+                        }
+                    }
+                    // Unknown keys: ignored.  field.value() is implicitly consumed
+                    // by simdjson when the iterator advances on the next loop.
                 }
 
-                SkipWs(json, i);
-                if (i < json.size() && json[i] == ',')
-                    ++i;
+                return !out.name.empty();
             }
-
-            return !out.name.empty();
+            catch (simdjson_error const&)
+            {
+                return false;
+            }
         }
     } // namespace
 
@@ -1887,9 +1936,10 @@ namespace AIAssistant
     //   - cwd applied via CreateProcessA's lpCurrentDirectory, never composed
     //     into the shell command (no "Set-Location <cwd>;" / "cd <cwd> &&"
     //     prefix that could become a CWD-injection vector).
-    //
-    // PowerShell mode still concatenates `command` into a `-Command "..."`
-    // argument; an -EncodedCommand / script-file pattern is the next step.
+    //   - PowerShell mode encodes the command via -EncodedCommand (UTF-16LE +
+    //     base64).  The command body is a single argv token that PowerShell's
+    //     parser does not re-process, eliminating the in-string `"`-escape
+    //     injection class the legacy -Command path was vulnerable to.
     ToolResult ToolRegistry::ExecRunShell(std::unordered_map<std::string, std::string> const& args)
     {
         auto cmdIt = args.find("command");
@@ -1915,11 +1965,15 @@ namespace AIAssistant
         std::string shellCmd;
         if (ShellTaskExecutor::GetWindowsShell() == WindowsShell::PowerShell)
         {
-            // PowerShell inline command.  cwd is set via lpCurrentDirectory below; no
-            // Set-Location prefix.  stderr merged into stdout.
+            // PowerShell -EncodedCommand: UTF-8 → UTF-16LE → base64.  The command
+            // body is opaque to PowerShell's quoting layer; cwd is set via
+            // lpCurrentDirectory below.  stderr merged into stdout.
             std::string const psCommand = command + " 2>&1";
+            std::string const encoded = EncodePowerShellCommand(psCommand);
+            if (encoded.empty())
+                return {"run_shell", false, "Command contains invalid UTF-8"};
             shellCmd = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
-                       "-Command \"" + psCommand + "\"";
+                       "-EncodedCommand " + encoded;
         }
         else
         {

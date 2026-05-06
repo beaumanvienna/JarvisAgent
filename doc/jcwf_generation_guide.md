@@ -297,7 +297,7 @@ Office-format `cntx_files` (`.pdf`, `.docx`, `.xlsx`, `.pptx`, `.odt`) are auto-
 }
 ```
 
-- `params.module`: Python import path. New scripts MUST be placed in `scripts/` (e.g. `"scripts.parseLog"`). The `scripts/` directory is on sys.path.
+- `params.module`: Python import path. New scripts MUST be placed in `scripts/` (e.g. `"scripts.parseLog"`). The runtime allowlists imports against `ScriptRegistry`, which is populated from `scripts/*.py` files carrying a `# @jarvis-script` header; modules outside that registry (system modules like `os` / `subprocess`, or unregistered scripts) are rejected before `PyImport_ImportModule` fires. Make sure every new script starts with the `@jarvis-script` header block — see existing scripts under `scripts/` for the template.
 - `params.function`: Callable name in the module. **The function MUST exist** in the script with this exact name.
 
 #### Calling Convention (IMPORTANT)
@@ -546,7 +546,7 @@ A workflow run fails **only** if it has at least one Failed task whose failure i
 
 - If `triggers` is omitted: implicit auto-trigger (starts on registration).
 - `manual_start: true` (default) allows manual start regardless of triggers.
-- **Webhook triggers** expose the workflow at `POST /api/webhook/<workflowId>`. `params.secret` is **required** — the validator rejects webhook triggers with an empty or missing secret, and the runtime rejects any incoming request whose `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the raw body) does not verify against the configured secret. The request body may include `runId`, `callbackUrl`, and a `context` object (key-value pairs injected into run context). If `callbackUrl` is provided, JarvisAgent POSTs a completion payload (`workflowId`, `runId`, `state`, `ok`, `completedAt`, per-task `tasks`) to that URL when the run finishes (fire-and-forget, 15 s timeout).
+- **Webhook triggers** expose the workflow at `POST /api/webhook/<workflowId>`. `params.secret` is **required** — the validator rejects webhook triggers with an empty or missing secret, and the runtime rejects any incoming request whose `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the raw body) does not verify against the configured secret. The request body may include `runId`, `callbackUrl`, and a `context` object (key-value pairs injected into run context). If `callbackUrl` is provided, JarvisAgent POSTs a completion payload (`workflowId`, `runId`, `state`, `ok`, `completedAt`, per-task `tasks`) to that URL when the run finishes (fire-and-forget, 15 s timeout). `callbackUrl` MUST be `https://` and resolve to a public IP — loopback / private / cloud-metadata addresses are refused at completion time (SSRF gate). To omit task output content from the payload (recommended for runs handling PII or secrets), set `"callback_include_outputs": "false"` in the request's `context` object — state + per-task state + error messages are still delivered.
 
 ---
 

@@ -41,6 +41,7 @@
 #include "json/replyParser.h"
 #include "json/requestBuilder.h"
 #include "json/schemaValidator.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "session/fileWriter.h"
 #include "workflow/aiCallEvents.h"
@@ -864,21 +865,64 @@ namespace AIAssistant
             {
                 return {};
             }
-            auto const* provider = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
-                                                          : Core::g_Core->GetKeyManager().GetProvider(api.m_KeyName);
-            return (provider != nullptr) ? provider->m_ApiKey : std::string{};
+            auto const* cred = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
+                                                     : Core::g_Core->GetKeyManager().GetCredential(api.m_KeyName);
+            if (cred == nullptr)
+            {
+                return {};
+            }
+            // ApiKeyCredential — bearer secret (OpenAI, Anthropic, Gemini, Azure, Test).
+            if (auto const* apiKey = dynamic_cast<ApiKeyCredential const*>(cred))
+            {
+                return std::string(apiKey->m_ApiKey.Get());
+            }
+            // OAuthCredential — cached access token (rotated by OAuthTokenManager).
+            if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
+            {
+                return std::string(oauth->m_AccessToken.Get());
+            }
+            // AwsCredential — access_key_id is public per AWS conventions and is what the
+            // SigV4 signer logs as the credential identifier.  The actual secret material
+            // (secret_access_key + session_token) flows via ResolveProviderParams below.
+            if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
+            {
+                return aws->m_AccessKeyId;
+            }
+            return {};
         }
 
-        // SigV4 (AWS) needs region + secret_access_key beyond the api_key. They live in
-        // ProviderConfig::m_Params and need to be forwarded to QueryData::m_Params so the
-        // signer can reach them. Returns empty map when the provider has none.
+        // SigV4 (AWS) needs region + secret_access_key beyond the api_key.  Today's signer
+        // reads them from QueryData::m_Params so this helper rebuilds the legacy m_Params
+        // shape: starts with the credential's non-secret m_Params and reinjects the AWS
+        // SecureString fields.  When the SigV4 signer is migrated to read from AwsCredential
+        // directly (post-sitting-20), this reinjection becomes dead code.
         std::unordered_map<std::string, std::string> ResolveProviderParams(
             ConfigParser::EngineConfig::ApiInterface const& api)
         {
             if (Core::g_Core == nullptr) { return {}; }
-            auto const* provider = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultProvider()
-                                                          : Core::g_Core->GetKeyManager().GetProvider(api.m_KeyName);
-            return (provider != nullptr) ? provider->m_Params : std::unordered_map<std::string, std::string>{};
+            auto const* cred = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
+                                                     : Core::g_Core->GetKeyManager().GetCredential(api.m_KeyName);
+            if (cred == nullptr)
+            {
+                return {};
+            }
+            std::unordered_map<std::string, std::string> params = cred->m_Params;
+            if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
+            {
+                if (!aws->m_SecretAccessKey.IsEmpty())
+                {
+                    params["secret_access_key"] = std::string(aws->m_SecretAccessKey.Get());
+                }
+                if (!aws->m_SessionToken.IsEmpty())
+                {
+                    params["session_token"] = std::string(aws->m_SessionToken.Get());
+                }
+                if (!aws->m_Region.empty())
+                {
+                    params["region"] = aws->m_Region;
+                }
+            }
+            return params;
         }
 
         std::string ConcatMessagesForCheck(std::vector<Message> const& messages)

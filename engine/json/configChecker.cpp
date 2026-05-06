@@ -23,8 +23,6 @@
 #include "json/configChecker.h"
 #include "auxiliary/file.h"
 
-#include <cstdio>
-
 namespace AIAssistant
 {
     bool ConfigChecker::Check(ConfigParser::EngineConfig& engineConfig)
@@ -34,16 +32,12 @@ namespace AIAssistant
         // check functions
         auto checkQueueFolderFilepath = [](std::string const& queueFolderFilepath) -> bool
         {
-            bool isDir = EngineCore::IsDirectory(queueFolderFilepath);
-            CORE_ASSERT(isDir, "queueFolderFilepath is not a directory");
-            return isDir;
+            return EngineCore::IsDirectory(queueFolderFilepath);
         };
 
         auto checkWorkflowsFolder = [](std::string const& workflowsFolder) -> bool
         {
-            bool isDir = EngineCore::IsDirectory(workflowsFolder);
-            CORE_ASSERT(isDir, "workflowsFolder is not a directory");
-            return isDir;
+            return EngineCore::IsDirectory(workflowsFolder);
         };
 
         auto checkApiInterface = [](std::vector<ConfigParser::EngineConfig::ApiInterface> const& apiInterfaces,
@@ -51,30 +45,24 @@ namespace AIAssistant
         {
             if (apiInterfaces.empty())
             {
-                CORE_ASSERT(false, "no APIs provided");
                 return false;
             }
 
-            if (apiInterfaces.size() < apiIndex)
+            if (apiIndex >= apiInterfaces.size())
             {
-                CORE_ASSERT(false, "invalid API index");
                 return false;
             }
 
             auto checkUrl = [](std::string const& url) -> bool
             {
-                std::string https("https://");
-                bool notEmpty = url.size() > https.size();
-                bool hasHttps = url.find(https) != std::string::npos;
-                CORE_ASSERT(notEmpty && hasHttps, "provided url invalid");
-                return notEmpty && hasHttps;
+                // Prefix check, not substring — guards against URLs like
+                // "http://evil.com/?x=https://fake" passing the gate.
+                return url.starts_with("https://") && url.size() > sizeof("https://") - 1;
             };
 
             auto checkModel = [](std::string const& model) -> bool
             {
-                bool notEmpty = !model.empty();
-                CORE_ASSERT(notEmpty, "no model provided");
-                return notEmpty;
+                return !model.empty();
             };
 
             bool hasUrl = checkUrl(apiInterfaces[apiIndex].m_Url);
@@ -99,20 +87,20 @@ namespace AIAssistant
         {
             if (!ok1)
             {
-                LOG_CORE_ERROR("config error: queue folder filepath is not a directory '{}'", queueFolderFilepath);
-                fprintf(stderr, "Error: queue folder does not exist: '%s'\n", queueFolderFilepath.c_str());
+                LOG_CORE_ERROR("config error: queue folder is not a directory '{}' — see log/log.txt for details",
+                               queueFolderFilepath);
             }
             if (!ok2)
             {
-                LOG_CORE_ERROR("config error: workflows folder filepath is not a directory '{}'", workflowsFolder);
-                fprintf(stderr, "Error: workflows folder does not exist: '%s'\n", workflowsFolder.c_str());
+                LOG_CORE_ERROR("config error: workflows folder is not a directory '{}' — see log/log.txt for details",
+                               workflowsFolder);
             }
             if (!ok3)
             {
-                LOG_CORE_ERROR("config error: API interface '{}'", engineConfig.m_ApiIndex);
-                fprintf(stderr, "Error: invalid API interface configuration (index %zu)\n", engineConfig.m_ApiIndex);
+                LOG_CORE_ERROR("config error: invalid API interface configuration (index {}, count {}) — see log/log.txt "
+                               "for details",
+                               engineConfig.m_ApiIndex, engineConfig.m_ApiInterfaces.size());
             }
-            fprintf(stderr, "See log/log.txt for details.\n");
         }
         else
         {

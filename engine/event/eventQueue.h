@@ -30,21 +30,28 @@
 namespace AIAssistant
 {
 
-    // Thread-safe queue of events for main-thread consumption
+    // Thread-safe queue of events for main-thread consumption.
+    //
+    // Producers (any thread): keyboardInput, fileWatcher, aiRequestPool, pythonEngine, webServer,
+    // and Core::CheckSignalFlags push events via Push().  Consumer (main thread only): Core::Run
+    // drains the queue once per loop iteration via PopAll().  Push is fully thread-safe; PopAll
+    // assumes a single consumer (the main loop).
     class EventQueue
     {
     public:
         using EventPtr = std::shared_ptr<AIAssistant::Event>;
 
+        // Append an event to the back of the queue.  Takes ownership.  Safe to call from any thread.
         void Push(EventPtr event);
-        EventPtr Pop();
 
-        // Pop all events (main thread should call this periodically)
+        // Drain every queued event into a vector and return it; queue is empty afterwards.
+        // Holds the mutex only long enough to swap out the underlying queue (O(1)) — vector
+        // construction and event destruction happen outside the lock so producers aren't blocked
+        // by main-thread housekeeping.
         std::vector<EventPtr> PopAll();
-        size_t Size();
 
     private:
-        std::mutex m_QueueAccessMutex;
+        mutable std::mutex m_QueueAccessMutex;
         std::queue<EventPtr> m_Queue;
     };
 

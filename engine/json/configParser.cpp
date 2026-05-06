@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 
 #include "simdjson/simdjson.h"
@@ -94,6 +95,54 @@ namespace AIAssistant
             }
             return kUnknownModelFallbackTokens;
         }
+
+        // String ↔ InterfaceType mapping.  Single source of truth so the parser
+        // (string → enum) and the auto-name generator (enum → string) can't
+        // drift when a new provider lands.
+        struct InterfaceTypeMapping
+        {
+            std::string_view m_Name;
+            ConfigParser::EngineConfig::InterfaceType m_Type;
+        };
+
+        constexpr std::array<InterfaceTypeMapping, 7> kInterfaceTypeMappings = {{
+            {"API1", ConfigParser::EngineConfig::InterfaceType::API1},
+            {"API2", ConfigParser::EngineConfig::InterfaceType::API2},
+            {"API3", ConfigParser::EngineConfig::InterfaceType::API3},
+            {"API4", ConfigParser::EngineConfig::InterfaceType::API4},
+            {"Test", ConfigParser::EngineConfig::InterfaceType::Test},
+            {"API5", ConfigParser::EngineConfig::InterfaceType::API5},
+            {"API6", ConfigParser::EngineConfig::InterfaceType::API6},
+        }};
+
+        ConfigParser::EngineConfig::InterfaceType ParseInterfaceType(std::string_view name)
+        {
+            for (auto const& mapping : kInterfaceTypeMappings)
+            {
+                if (mapping.m_Name == name) return mapping.m_Type;
+            }
+            return ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
+        }
+
+        std::string_view InterfaceTypeName(ConfigParser::EngineConfig::InterfaceType type)
+        {
+            static_assert(static_cast<int>(ConfigParser::EngineConfig::InterfaceType::NumAPIs) == 7,
+                          "InterfaceType count changed; update kInterfaceTypeMappings and this switch");
+            switch (type)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API1: return "API1";
+                case ConfigParser::EngineConfig::InterfaceType::API2: return "API2";
+                case ConfigParser::EngineConfig::InterfaceType::API3: return "API3";
+                case ConfigParser::EngineConfig::InterfaceType::API4: return "API4";
+                case ConfigParser::EngineConfig::InterfaceType::Test: return "Test";
+                case ConfigParser::EngineConfig::InterfaceType::API5: return "API5";
+                case ConfigParser::EngineConfig::InterfaceType::API6: return "API6";
+                case ConfigParser::EngineConfig::InterfaceType::NumAPIs:
+                case ConfigParser::EngineConfig::InterfaceType::InvalidAPI:
+                    break;
+            }
+            return "";
+        }
     } // namespace
 
     uint64_t ConfigParser::EngineConfig::ResolveMaxContextTokensFromModel(std::string const& modelName)
@@ -123,20 +172,32 @@ namespace AIAssistant
         }
         using namespace simdjson;
         ondemand::parser parser;
-        padded_string json = padded_string::load(m_ConfigFilepathAndFilename);
+        padded_string json;
+        if (auto err = padded_string::load(m_ConfigFilepathAndFilename).get(json); err != simdjson::SUCCESS)
+        {
+            LOG_CORE_ERROR("ConfigParser::Parse: failed to load '{}': {}", m_ConfigFilepathAndFilename,
+                           error_message(err));
+            m_State = ConfigParser::State::FileNotFound;
+            return m_State;
+        }
 
         ondemand::document doc;
-        auto error = parser.iterate(json).get(doc);
-
-        if (error)
+        if (auto err = parser.iterate(json).get(doc); err != simdjson::SUCCESS)
         {
-            LOG_CORE_ERROR("ConfigParser::Parse: An error occurred during parsing: {}", error_message(error));
+            LOG_CORE_ERROR("ConfigParser::Parse: parse failure for '{}': {}", m_ConfigFilepathAndFilename,
+                           error_message(err));
             m_State = ConfigParser::State::ParseFailure;
             return m_State;
         }
 
-        ondemand::document sceneDocument = parser.iterate(json);
-        ondemand::object jsonObjects = sceneDocument.get_object();
+        ondemand::object jsonObjects;
+        if (auto err = doc.get_object().get(jsonObjects); err != simdjson::SUCCESS)
+        {
+            LOG_CORE_ERROR("ConfigParser::Parse: top-level value of '{}' is not a JSON object: {}",
+                           m_ConfigFilepathAndFilename, error_message(err));
+            m_State = ConfigParser::State::FileFormatFailure;
+            return m_State;
+        }
 
         FieldOccurances fieldOccurances{};
         for (auto jsonObject : jsonObjects)
@@ -145,86 +206,149 @@ namespace AIAssistant
 
             if (jsonObjectKey == "file format identifier")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
                 ++fieldOccurances[ConfigFields::Format];
             }
             else if (jsonObjectKey == "description")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view description = jsonObject.value().get_string();
+                std::string_view description;
+                if (jsonObject.value().get_string().get(description) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("description: {}", description);
                 ++fieldOccurances[ConfigFields::Description];
             }
             else if (jsonObjectKey == "author")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view author = jsonObject.value().get_string();
+                std::string_view author;
+                if (jsonObject.value().get_string().get(author) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("author: {}", author);
                 ++fieldOccurances[ConfigFields::Author];
             }
             else if (jsonObjectKey == "queue folder")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view queueFolderFilepath = jsonObject.value().get_string();
+                std::string_view queueFolderFilepath;
+                if (jsonObject.value().get_string().get(queueFolderFilepath) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("queue folder: {}", queueFolderFilepath);
                 engineConfig.m_QueueFolderFilepath = queueFolderFilepath;
                 ++fieldOccurances[ConfigFields::QueueFolder];
             }
             else if (jsonObjectKey == "workflows folder")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view workflowsFolder = jsonObject.value().get_string();
+                std::string_view workflowsFolder;
+                if (jsonObject.value().get_string().get(workflowsFolder) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("workflows folder: {}", workflowsFolder);
                 engineConfig.m_WorkflowsFolderFilepath = workflowsFolder;
                 ++fieldOccurances[ConfigFields::WorkflowsFolder];
             }
             else if (jsonObjectKey == "max threads")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto maxThreads = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t maxThreads = 0;
+                if (jsonObject.value().get_int64().get(maxThreads) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("max threads: {}", maxThreads);
+                if (maxThreads < 0)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
+                                   jsonObjectKey, maxThreads);
+                    continue;
+                }
                 engineConfig.m_MaxThreads = static_cast<uint32_t>(maxThreads);
                 ++fieldOccurances[ConfigFields::MaxThreads];
             }
             else if (jsonObjectKey == "engine sleep time in run loop in ms")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto sleepTime = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t sleepTime = 0;
+                if (jsonObject.value().get_int64().get(sleepTime) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("engine sleep time in run loop in ms: {}", sleepTime);
                 engineConfig.m_SleepDuration = std::chrono::milliseconds(sleepTime);
                 ++fieldOccurances[ConfigFields::SleepTime];
             }
             else if (jsonObjectKey == "max file size in kB")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto maxFileSizekB = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t maxFileSizekB = 0;
+                if (jsonObject.value().get_int64().get(maxFileSizekB) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("max file size in kB: {}", maxFileSizekB);
-                engineConfig.m_MaxFileSizekB = maxFileSizekB;
+                if (maxFileSizekB < 0)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
+                                   jsonObjectKey, maxFileSizekB);
+                    continue;
+                }
+                engineConfig.m_MaxFileSizekB = static_cast<size_t>(maxFileSizekB);
                 ++fieldOccurances[ConfigFields::MaxFileSizekB];
             }
             else if (jsonObjectKey == "verbose")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
-                engineConfig.m_Verbose = jsonObject.value().get_bool();
-                LOG_CORE_INFO("verbose: {}", engineConfig.m_Verbose);
+                bool verbose = false;
+                if (jsonObject.value().get_bool().get(verbose) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a boolean", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_Verbose = verbose;
+                LOG_CORE_INFO("verbose: {}", verbose);
                 ++fieldOccurances[ConfigFields::Verbose];
             }
             else if (jsonObjectKey == "API interfaces")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::array), "type must be array");
-                ParseInterfaces(jsonObject.value(), engineConfig, fieldOccurances);
+                ondemand::array array;
+                if (jsonObject.value().get_array().get(array) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be an array", jsonObjectKey);
+                    continue;
+                }
+                ParseInterfaces(array, engineConfig, fieldOccurances);
             }
             else if (jsonObjectKey == "API index")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
-                engineConfig.m_ApiIndex = jsonObject.value().get_int64();
+                int64_t apiIndex = 0;
+                if (jsonObject.value().get_int64().get(apiIndex) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
+                if (apiIndex < 0)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring", jsonObjectKey, apiIndex);
+                    continue;
+                }
+                engineConfig.m_ApiIndex = static_cast<size_t>(apiIndex);
                 LOG_CORE_INFO("API index: {}", engineConfig.m_ApiIndex);
                 ++fieldOccurances[ConfigFields::ApiIndex];
             }
             else if (jsonObjectKey == "jcwf batch size")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto batchSize = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t batchSize = 0;
+                if (jsonObject.value().get_int64().get(batchSize) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("jcwf batch size: {}", batchSize);
                 if (batchSize > 0)
                 {
@@ -234,95 +358,174 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "jcwf AI interface")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto ifaceIndex = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t ifaceIndex = 0;
+                if (jsonObject.value().get_int64().get(ifaceIndex) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("jcwf AI interface: {}", ifaceIndex);
                 engineConfig.m_JcwfAiInterfaceIndex = static_cast<int>(ifaceIndex);
                 ++fieldOccurances[ConfigFields::JcwfAiInterface];
             }
             else if (jsonObjectKey == "keys_file")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view keysFile = jsonObject.value().get_string();
+                std::string_view keysFile;
+                if (jsonObject.value().get_string().get(keysFile) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("keys_file: {}", keysFile);
                 engineConfig.m_KeysFilePath = keysFile;
                 ++fieldOccurances[ConfigFields::KeysFile];
             }
             else if (jsonObjectKey == "use_bash")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::boolean), "type must be boolean");
-                engineConfig.m_UseBashOnWindows = jsonObject.value().get_bool();
+                bool useBash = false;
+                if (jsonObject.value().get_bool().get(useBash) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a boolean", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_UseBashOnWindows = useBash;
 #if defined(_WIN32)
-                LOG_CORE_INFO("use_bash: {}", engineConfig.m_UseBashOnWindows);
+                LOG_CORE_INFO("use_bash: {}", useBash);
 #else
-                LOG_CORE_INFO("use_bash: {} (Windows-only, ignored on this platform)", engineConfig.m_UseBashOnWindows);
+                LOG_CORE_INFO("use_bash: {} (Windows-only, ignored on this platform)", useBash);
 #endif
                 ++fieldOccurances[ConfigFields::UseBashOnWindows];
             }
             else if (jsonObjectKey == "TlsCert")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                engineConfig.m_TlsCert = std::string(jsonObject.value().get_string().value());
+                std::string_view tlsCert;
+                if (jsonObject.value().get_string().get(tlsCert) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_TlsCert = std::string(tlsCert);
                 LOG_CORE_INFO("TlsCert: {}", engineConfig.m_TlsCert);
                 ++fieldOccurances[ConfigFields::TlsCert];
             }
             else if (jsonObjectKey == "TlsKey")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                engineConfig.m_TlsKey = std::string(jsonObject.value().get_string().value());
+                std::string_view tlsKey;
+                if (jsonObject.value().get_string().get(tlsKey) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_TlsKey = std::string(tlsKey);
                 LOG_CORE_INFO("TlsKey: {}", engineConfig.m_TlsKey);
                 ++fieldOccurances[ConfigFields::TlsKey];
             }
             else if (jsonObjectKey == "TrustedProxyHeader")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                engineConfig.m_TrustedProxyHeader = std::string(jsonObject.value().get_string().value());
+                std::string_view header;
+                if (jsonObject.value().get_string().get(header) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_TrustedProxyHeader = std::string(header);
                 LOG_CORE_INFO("TrustedProxyHeader: {}", engineConfig.m_TrustedProxyHeader);
                 ++fieldOccurances[ConfigFields::TrustedProxyHeader];
             }
             else if (jsonObjectKey == "TrustedRoleHeader")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                engineConfig.m_TrustedRoleHeader = std::string(jsonObject.value().get_string().value());
+                std::string_view header;
+                if (jsonObject.value().get_string().get(header) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_TrustedRoleHeader = std::string(header);
                 LOG_CORE_INFO("TrustedRoleHeader: {}", engineConfig.m_TrustedRoleHeader);
                 ++fieldOccurances[ConfigFields::TrustedRoleHeader];
             }
             else if (jsonObjectKey == "MaxRequestBodyMB")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                engineConfig.m_MaxRequestBodyMB = static_cast<size_t>(jsonObject.value().get_uint64().value());
+                uint64_t maxBody = 0;
+                if (jsonObject.value().get_uint64().get(maxBody) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a non-negative number", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_MaxRequestBodyMB = static_cast<size_t>(maxBody);
                 LOG_CORE_INFO("MaxRequestBodyMB: {}", engineConfig.m_MaxRequestBodyMB);
                 ++fieldOccurances[ConfigFields::MaxRequestBodyMB];
             }
             else if (jsonObjectKey == "max inflight ai calls")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto maxInflight = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t maxInflight = 0;
+                if (jsonObject.value().get_int64().get(maxInflight) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("max inflight ai calls: {}", maxInflight);
+                if (maxInflight < 0)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
+                                   jsonObjectKey, maxInflight);
+                    continue;
+                }
                 engineConfig.m_MaxInflightAiCalls = static_cast<size_t>(maxInflight);
                 ++fieldOccurances[ConfigFields::MaxInflightAiCalls];
             }
             else if (jsonObjectKey == "max_ai_calls_per_jcwf")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto cap = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t cap = 0;
+                if (jsonObject.value().get_int64().get(cap) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 if (cap < 0) cap = 0;
                 LOG_CORE_INFO("max_ai_calls_per_jcwf: {}", cap);
                 engineConfig.m_MaxAiCallsPerJcwf = static_cast<size_t>(cap);
                 ++fieldOccurances[ConfigFields::MaxAiCallsPerJcwf];
             }
+            else if (jsonObjectKey == "max_per_item_fan_out")
+            {
+                int64_t cap = 0;
+                if (jsonObject.value().get_int64().get(cap) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
+                if (cap < 0) cap = 0;
+                LOG_CORE_INFO("max_per_item_fan_out: {}", cap);
+                engineConfig.m_MaxPerItemFanOut = static_cast<size_t>(cap);
+                ++fieldOccurances[ConfigFields::MaxPerItemFanOut];
+            }
             else if (jsonObjectKey == "python engines")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto count = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t count = 0;
+                if (jsonObject.value().get_int64().get(count) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 LOG_CORE_INFO("python engines: {}", count);
+                if (count < 0)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' is negative ({}), ignoring; configChecker will assign default",
+                                   jsonObjectKey, count);
+                    continue;
+                }
                 engineConfig.m_PythonEngines = static_cast<size_t>(count);
                 ++fieldOccurances[ConfigFields::PythonEngines];
             }
             else if (jsonObjectKey == "port")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto port = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t port = 0;
+                if (jsonObject.value().get_int64().get(port) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 if (port < 0 || port > 65535)
                 {
                     LOG_CORE_WARN("port {} out of range [0, 65535], defaulting to 0 (auto)", port);
@@ -334,15 +537,24 @@ namespace AIAssistant
             }
             else if (jsonObjectKey == "mcp_keys_file")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                engineConfig.m_McpKeysFilePath = std::string(jsonObject.value().get_string().value());
+                std::string_view mcpKeysFile;
+                if (jsonObject.value().get_string().get(mcpKeysFile) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a string", jsonObjectKey);
+                    continue;
+                }
+                engineConfig.m_McpKeysFilePath = std::string(mcpKeysFile);
                 LOG_CORE_INFO("mcp_keys_file: {}", engineConfig.m_McpKeysFilePath);
                 ++fieldOccurances[ConfigFields::McpKeysFile];
             }
             else if (jsonObjectKey == "session_timeout_hours")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be number");
-                auto hours = static_cast<int64_t>(jsonObject.value().get_int64());
+                int64_t hours = 0;
+                if (jsonObject.value().get_int64().get(hours) != simdjson::SUCCESS)
+                {
+                    LOG_CORE_ERROR("ConfigParser: '{}' must be a number", jsonObjectKey);
+                    continue;
+                }
                 if (hours < 1 || hours > 168)
                 {
                     LOG_CORE_WARN("session_timeout_hours {} out of range [1, 168], defaulting to 8", hours);
@@ -468,40 +680,60 @@ namespace AIAssistant
 
                 if (jsonObjectKey == "name")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view name = field.value().get_string();
+                    std::string_view name;
+                    if (field.value().get_string().get(name) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("name: {}", name);
                     apiInterface.m_Name = name;
                     ++fieldOccurances[ConfigFields::InterfaceName];
                 }
                 else if (jsonObjectKey == "description")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view description = field.value().get_string();
+                    std::string_view description;
+                    if (field.value().get_string().get(description) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("description: {}", description);
                     apiInterface.m_Description = description;
                     ++fieldOccurances[ConfigFields::InterfaceDescription];
                 }
                 else if (jsonObjectKey == "key_name")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view keyName = field.value().get_string();
+                    std::string_view keyName;
+                    if (field.value().get_string().get(keyName) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("key_name: {}", keyName);
                     apiInterface.m_KeyName = keyName;
                     ++fieldOccurances[ConfigFields::InterfaceKeyName];
                 }
                 else if (jsonObjectKey == "url")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view url = field.value().get_string();
+                    std::string_view url;
+                    if (field.value().get_string().get(url) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("url: {}", url);
                     apiInterface.m_Url = url;
                     ++fieldOccurances[ConfigFields::Url];
                 }
                 else if (jsonObjectKey == "model")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view model = field.value().get_string();
+                    std::string_view model;
+                    if (field.value().get_string().get(model) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("model: {}", model);
                     apiInterface.m_Model = model;
                     ++fieldOccurances[ConfigFields::Model];
@@ -602,40 +834,19 @@ namespace AIAssistant
                 }
                 else if (jsonObjectKey == "API")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view api = field.value().get_string();
+                    std::string_view api;
+                    if (field.value().get_string().get(api) != simdjson::SUCCESS)
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface '{}' must be a string", jsonObjectKey);
+                        continue;
+                    }
                     LOG_CORE_INFO("API: {}", api);
-                    if (api == "API1")
+                    apiInterface.m_InterfaceType = ParseInterfaceType(api);
+                    if (apiInterface.m_InterfaceType == EngineConfig::InterfaceType::InvalidAPI)
                     {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API1;
-                    }
-                    else if (api == "API2")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API2;
-                    }
-                    else if (api == "API3")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API3;
-                    }
-                    else if (api == "API4")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API4;
-                    }
-                    else if (api == "Test")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::Test;
-                    }
-                    else if (api == "API5")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API5;
-                    }
-                    else if (api == "API6")
-                    {
-                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::API6;
-                    }
-                    else
-                    {
-                        CORE_HARD_STOP("invalid API in config.json");
+                        LOG_CORE_ERROR("ConfigParser: unknown API '{}' in interface (expected API1-API6 or Test); "
+                                       "interface will be marked InvalidAPI and skipped by configChecker",
+                                       api);
                     }
                     ++fieldOccurances[ConfigFields::InterfaceType];
                 }
@@ -644,35 +855,9 @@ namespace AIAssistant
             // Auto-generate name from URL domain + model + API type if not provided
             if (apiInterface.m_Name.empty())
             {
-                std::string apiTypeStr;
-                switch (apiInterface.m_InterfaceType)
-                {
-                    case EngineConfig::InterfaceType::API1:
-                        apiTypeStr = "API1";
-                        break;
-                    case EngineConfig::InterfaceType::API2:
-                        apiTypeStr = "API2";
-                        break;
-                    case EngineConfig::InterfaceType::API3:
-                        apiTypeStr = "API3";
-                        break;
-                    case EngineConfig::InterfaceType::API4:
-                        apiTypeStr = "API4";
-                        break;
-                    case EngineConfig::InterfaceType::Test:
-                        apiTypeStr = "Test";
-                        break;
-                    case EngineConfig::InterfaceType::API5:
-                        apiTypeStr = "API5";
-                        break;
-                    case EngineConfig::InterfaceType::API6:
-                        apiTypeStr = "API6";
-                        break;
-                    default:
-                        break;
-                }
+                std::string_view const apiTypeStr = InterfaceTypeName(apiInterface.m_InterfaceType);
                 apiInterface.m_Name =
-                    EngineConfig::GenerateInterfaceName(apiInterface.m_Url, apiInterface.m_Model, apiTypeStr);
+                    EngineConfig::GenerateInterfaceName(apiInterface.m_Url, apiInterface.m_Model, std::string(apiTypeStr));
                 LOG_CORE_INFO("auto-generated interface name: {}", apiInterface.m_Name);
             }
 

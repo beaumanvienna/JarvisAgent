@@ -43,27 +43,28 @@ This document describes:
 
 ### 4. Main loop (`Core::Run`)
 Executed until `Application::IsFinished()` returns true:
-1. Call application update callback:
-   ```cpp
-   app->OnUpdate();
-   ```
-2. Drain and dispatch events from `EventQueue`:
-   - Pop all events.
+1. Poll the SIGINT atomic via `CheckSignalFlags()` — pushes an `EngineEventShutdown` if a Ctrl+C arrived since the last iteration.
+2. Drain and dispatch events from `EventQueue` (done **before** `OnUpdate` so quit/SIGINT is processed promptly):
+   - `m_EventQueue.PopAll()` swaps the underlying queue out under the mutex (O(1)) and drains to a local vector outside the lock — producer threads aren't blocked by main-thread housekeeping.
    - Dispatch engine‑handled events (`AppErrorEvent`).
    - Forward unhandled events to the application:
      ```cpp
      app->OnEvent(eventPtr);
      ```
-3. Render terminal UI:
+3. Call application update callback:
+   ```cpp
+   app->OnUpdate();
+   ```
+4. Render terminal UI:
    ```
    m_TerminalManager->Render();
    ```
-4. Sleep for configured duration to prevent CPU overuse.
+5. Sleep for configured duration to prevent CPU overuse.
 
 ### 5. Shutdown (`Core::Shutdown`)
 - Stop OAuth token refresh loop (`OAuthTokenManager::Stop()`).
 - Stop keyboard input.
-- Shutdown thread pool.
+- **Two-phase thread pool shutdown** — `m_ThreadPool.RequestStop()` flips the stop flag (curl progress callbacks observe it and abort in-flight transfers; `SubmitTask` short-circuits new submissions); the dispatcher and other long-running async work is given a chance to wind down; then `m_ThreadPool.Shutdown()` takes `m_Mutex` (atomic with concurrent SubmitTask), drains queued tasks via `m_Pool.wait()`, and is idempotent on repeat calls (guarded by a separate `m_ShutdownDrained` atomic so it doesn't conflate with the earlier RequestStop's flag flip).  See `engine/auxiliary/auxiliary.md` Section 2 for the full lifecycle gate semantics.
 - Run `CurlWrapper::GlobalCleanup()`.
 - Shutdown terminal manager.
 - Flush and restore `std::cout` / `std::cerr`.
@@ -187,9 +188,9 @@ engine/
   event/                         — EventQueue, EventDispatcher, event types
   log/                           — Log, TerminalManager, TerminalLogStreamBuf, SecretRedactor
   json/                          — ConfigParser, ConfigChecker
-  keys/                          — KeyManager, KeyEncryption, OAuthTokenManager, JwtGenerator, SigV4Signer
-  auxiliary/                     — ThreadPool
+  keys/                          — KeyManager, KeyEncryption, OAuthTokenManager, JwtGenerator
+  auxiliary/                     — ThreadPool (two-phase shutdown gate: RequestStop → Shutdown), file utilities
   input/                         — KeyboardInput
-  curlWrapper/                   — CurlWrapper, CurlMultiDispatcher
+  curlWrapper/                   — CurlWrapper (sync) + CurlMultiDispatcher (async HTTP/2), IAuthSigner family (Bearer / x-goog-api-key / x-api-key / api-key / SigV4), SigV4Signer (awsSigV4), credValidation, RateLimitController + RateLimitStrategy (per-(host, modelFamily) AIMD)
 ```
 

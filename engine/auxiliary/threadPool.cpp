@@ -21,47 +21,60 @@
 
 #include "auxiliary/threadPool.h"
 #include "engine.h"
-#include <sstream>
 
 namespace AIAssistant
 {
     ThreadPool::ThreadPool() {}
 
-    void ThreadPool::Wait()
-    {
-        LOG_CORE_INFO("[shutdown] ThreadPool::Wait() - {} threads, {} tasks queued", m_Pool.get_thread_count(),
-                      m_Pool.get_tasks_queued());
-
-        auto const ids = m_Pool.get_thread_ids();
-        for (size_t i = 0; i < ids.size(); ++i)
-        {
-            std::ostringstream oss;
-            oss << ids[i];
-            LOG_CORE_INFO("[shutdown] ThreadPool thread [{}]: id={}", i, oss.str());
-        }
-
-        m_Pool.wait();
-
-        LOG_CORE_INFO("[shutdown] ThreadPool::Wait() returned");
-    }
-
     void ThreadPool::RequestStop()
     {
-        m_Stopped = true;
+        m_Stopped.store(true);
         LOG_CORE_INFO("[shutdown] ThreadPool::RequestStop() - stop flag set, curl callbacks will abort");
     }
 
     void ThreadPool::Shutdown()
     {
-        m_Stopped = true;
+        // Take m_Mutex around the m_Stopped flip so any concurrent SubmitTask
+        // either commits BEFORE Shutdown observes the stop (and the task runs
+        // as part of the drain below) or sees m_Stopped=true and short-
+        // circuits.  Idempotency is guarded by m_ShutdownDrained — NOT by
+        // m_Stopped — so a prior RequestStop (which also sets m_Stopped) does
+        // not cause Shutdown to skip the drain.
+        {
+            std::lock_guard<std::mutex> guard(m_Mutex);
+            if (m_ShutdownDrained.load())
+            {
+                return;
+            }
+            m_Stopped.store(true);
+        }
         LOG_CORE_INFO("[shutdown] ThreadPool::Shutdown() - refusing new tasks, waiting for {} queued",
                       m_Pool.get_tasks_queued());
         m_Pool.wait();
+        m_ShutdownDrained.store(true);
         LOG_CORE_INFO("[shutdown] ThreadPool::Shutdown() complete");
     }
 
-    void ThreadPool::Reset(size_t const numThreads) { m_Pool.reset(numThreads); }
+    void ThreadPool::Reset(size_t const numThreads)
+    {
+        // Reject post-Shutdown calls: the wrapper would otherwise hold
+        // m_Stopped=true while m_Pool spawns fresh worker threads, leaving
+        // SubmitTask short-circuiting on every call (perpetually-stopped
+        // pool + live workers = wasted threads + silently-dropped tasks).
+        // Treat as a programming error — log + skip rather than restart.
+        if (m_Stopped.load())
+        {
+            LOG_CORE_WARN("[ThreadPool] Reset({}) called after Shutdown — ignored", numThreads);
+            return;
+        }
+        m_Pool.reset(numThreads);
+    }
 
     [[nodiscard]] size_t ThreadPool::Size() const { return m_Pool.get_thread_count(); }
+
+    void ThreadPool::LogPostShutdownSubmit() const
+    {
+        LOG_CORE_WARN("[ThreadPool] SubmitTask called after Shutdown - returning default-valued future");
+    }
 
 } // namespace AIAssistant

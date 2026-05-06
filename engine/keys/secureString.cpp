@@ -128,6 +128,13 @@ namespace AIAssistant
                               m_Capacity);
             }
         }
+        else if (m_Size > 0)
+        {
+            // Reusing the buffer: wipe the previous contents so a shorter new value
+            // does not leave residual bytes from the old (longer) value sitting in
+            // the locked region until the next Clear()/Release().
+            SecureZero(m_Buffer, m_Size);
+        }
         std::memcpy(m_Buffer, value.data(), value.size());
         m_Buffer[value.size()] = '\0';
         m_Size = value.size();

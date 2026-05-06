@@ -127,12 +127,11 @@ namespace AIAssistant
     bool AiTranscript::AppendRequest(std::filesystem::path const& transcriptPath, AiInvocation const& envelope,
                                       std::string const& resolvedModel)
     {
-        JsonHelper jsonHelper;
         std::string json = "{";
         json += "\"kind\":\"request\"";
         json += ",\"timestamp\":\"" + NowIso8601() + "\"";
-        json += ",\"interface\":\"" + jsonHelper.SanitizeForJson(envelope.m_InterfaceName) + "\"";
-        json += ",\"model\":\"" + jsonHelper.SanitizeForJson(resolvedModel) + "\"";
+        json += ",\"interface\":\"" + JsonHelper::EscapeJsonString(envelope.m_InterfaceName) + "\"";
+        json += ",\"model\":\"" + JsonHelper::EscapeJsonString(resolvedModel) + "\"";
         json += ",\"settings\":{";
         json += "\"temperature\":" + std::to_string(envelope.m_Settings.m_Temperature);
         if (envelope.m_Settings.m_Seed.has_value())
@@ -150,7 +149,7 @@ namespace AIAssistant
             if (index > 0) json += ",";
             auto const& message = envelope.m_Messages[index];
             json += "{\"role\":\"" + MessageRoleToString(message.m_Role) + "\"";
-            json += ",\"content\":\"" + jsonHelper.SanitizeForJson(message.m_Content) + "\"}";
+            json += ",\"content\":\"" + JsonHelper::EscapeJsonString(message.m_Content) + "\"}";
         }
         json += "]";
         if (envelope.m_ChunkIndex.has_value() && envelope.m_ChunkCount.has_value())
@@ -164,14 +163,13 @@ namespace AIAssistant
 
     bool AiTranscript::AppendResponse(std::filesystem::path const& transcriptPath, AiReply const& reply)
     {
-        JsonHelper jsonHelper;
         std::string json = "{";
         json += "\"kind\":\"response\"";
         json += ",\"timestamp\":\"" + NowIso8601() + "\"";
         switch (reply.m_Kind)
         {
             case AiReply::Kind::Text:
-                json += ",\"text\":\"" + jsonHelper.SanitizeForJson(reply.m_Text) + "\"";
+                json += ",\"text\":\"" + JsonHelper::EscapeJsonString(reply.m_Text) + "\"";
                 break;
             case AiReply::Kind::Structured:
                 json += ",\"structured\":" + (reply.m_StructuredJson.empty() ? std::string("null") : reply.m_StructuredJson);
@@ -179,7 +177,7 @@ namespace AIAssistant
             case AiReply::Kind::Error:
             default:
                 json += ",\"error\":{";
-                json += "\"kind\":\"" + jsonHelper.SanitizeForJson([&]()
+                json += "\"kind\":\"" + JsonHelper::EscapeJsonString([&]()
                 {
                     switch (reply.m_Error.m_Kind)
                     {
@@ -194,7 +192,7 @@ namespace AIAssistant
                     }
                 }()) + "\"";
                 json += ",\"http_status\":" + std::to_string(reply.m_Error.m_HttpStatus);
-                json += ",\"message\":\"" + jsonHelper.SanitizeForJson(reply.m_Error.m_Message) + "\"}";
+                json += ",\"message\":\"" + JsonHelper::EscapeJsonString(reply.m_Error.m_Message) + "\"}";
                 break;
         }
         json += ",\"usage\":{";
@@ -204,11 +202,11 @@ namespace AIAssistant
         json += "}";
         if (!reply.m_FinishReason.empty())
         {
-            json += ",\"finish_reason\":\"" + jsonHelper.SanitizeForJson(reply.m_FinishReason) + "\"";
+            json += ",\"finish_reason\":\"" + JsonHelper::EscapeJsonString(reply.m_FinishReason) + "\"";
         }
         if (!reply.m_SystemFingerprint.empty())
         {
-            json += ",\"system_fingerprint\":\"" + jsonHelper.SanitizeForJson(reply.m_SystemFingerprint) + "\"";
+            json += ",\"system_fingerprint\":\"" + JsonHelper::EscapeJsonString(reply.m_SystemFingerprint) + "\"";
         }
         json += "}";
         return AppendEntry(transcriptPath, json);

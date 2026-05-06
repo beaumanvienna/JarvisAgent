@@ -12,58 +12,9 @@ All code lives under `engine/json`.
 
 ## 1. config.json
 
-JarvisAgent reads configuration from `config.json` at startup (example below). Fields not recognized by the parser are *best-effort stringified and logged* (top-level only), then ignored.
+JarvisAgent reads configuration from `config.json` at startup.  Fields not recognised by the parser are best-effort stringified and logged (top-level only), then ignored.
 
-```jsonc
-{
-    "file format identifier": 1.2,
-    "description": "jarvisAgent configuration file",
-    "author": "Copyright (c) 2025 JC Technolabs",
-
-    "queue folder": "../queue",
-    "workflows folder": "../workflows",
-    "max threads": 20,
-    "engine sleep time in run loop in ms": 16,
-    "verbose": false,
-
-    "API interfaces": [
-        {
-            "name": "api.openai.com/gpt-4.1/API1",
-            "description": "High-accuracy model with strong reasoning.",
-            "url": "https://api.openai.com/v1/chat/completions",
-            "model": "gpt-4.1",
-            "API": "API1",
-            "key_name": "openai"
-        }
-    ],
-
-    "API index": 0,
-    "max file size in kB": 24,
-    "keys_file": "keys.json.enc",
-    "use_bash": false
-}
-```
-
-### 1.1 Top-level keys and meaning
-
-| JSON key | Type | Meaning | Notes |
-|---|---:|---|---|
-| `file format identifier` | number | Format marker/version for the config file. | Parsed only for type checking; **not stored** in `EngineConfig`. |
-| `description` | string | Human-readable description. | Logged; not stored. |
-| `author` | string | Human-readable author/copyright string. | Logged; not stored. |
-| `queue folder` | string | Path to the queue folder directory. | Stored as `EngineConfig::m_QueueFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
-| `workflows folder` | string | Path to the workflows folder directory. | Stored as `EngineConfig::m_WorkflowsFolderFilepath`. Must be an existing directory (checked by `ConfigChecker`). |
-| `port` | number | Web server listen port. `0` = auto (8080 for HTTP, 8443 for HTTPS). | Stored as `EngineConfig::m_Port`. Valid range `[1, 65535]`, defaults to `0` (auto). |
-| `max threads` | number | Worker-thread pool size. | Stored as `EngineConfig::m_MaxThreads`. `ConfigChecker` clamps via defaults if out of range. |
-| `max inflight ai calls` | number | Maximum concurrent AI requests dispatched via HTTP/2. Decoupled from thread pool size since requests are multiplexed on a single I/O thread. | Stored as `EngineConfig::m_MaxInflightAiCalls`. `ConfigChecker` clamps to `[1, 1000]`, defaults to `100`. |
-| `python engines` | number | Number of Python sub-interpreters (each with its own GIL) for parallel Python task execution. Requires Python 3.12+. | Stored as `EngineConfig::m_PythonEngines`. `ConfigChecker` clamps to `[1, 16]`, defaults to `4`. |
-| `engine sleep time in run loop in ms` | number | Sleep interval in the main run loop. | Stored as `EngineConfig::m_SleepDuration` (ms). Defaults applied if out of range. |
-| `verbose` | boolean | Enables verbose logging. | Stored as `EngineConfig::m_Verbose`. |
-| `API interfaces` | array | List of API endpoints/models. | Parsed by `ConfigParser::ParseInterfaces()`. |
-| `API index` | number | Selects active interface in `API interfaces`. | Stored as `EngineConfig::m_ApiIndex`. Must point to an existing entry (see `ConfigChecker`). |
-| `max file size in kB` | number | Maximum allowed file size for queue items. | Stored as `EngineConfig::m_MaxFileSizekB`. Defaults applied if out of range. |
-| `keys_file` | string | Path to the encrypted keys file. | Stored as `EngineConfig::m_KeysFilePath`. Defaults to `"keys.json.enc"` if not specified. |
-| `use_bash` | boolean | Windows only: prefer bash (MSYS2/Git Bash) over PowerShell for shell tasks. | Stored as `EngineConfig::m_UseBashOnWindows`. Defaults to `false` (PowerShell is the default on Windows). Parsed on all platforms but only meaningful on Windows; on Linux/macOS the startup log appends `(Windows-only, ignored on this platform)`. |
+For the full field-by-field reference (every key, default value, valid range, semantic) see **`doc/jarvisagent.md` "Configuration"** — that's the canonical home.  This document covers the C++ parser internals (state machine, type-check semantics, helpers, validation pipeline) only.
 
 ---
 
@@ -77,74 +28,30 @@ JarvisAgent reads configuration from `config.json` at startup (example below). F
 
 ### 2.1 EngineConfig
 
+The full struct + nested `ApiInterface` / `RateLimit` / `RequestBudget` definitions live in `engine/json/configParser.h` and grow as new providers / knobs land — see the header for the canonical shape.  The closed-set enum that the parser dispatches on:
+
 ```cpp
-struct EngineConfig
+enum InterfaceType
 {
-    enum InterfaceType
-    {
-        API1 = 0,
-        API2,
-        API3,
-        NumAPIs,
-        InvalidAPI
-    };
-
-    struct ApiInterface
-    {
-        std::string m_Name;
-        std::string m_Description;
-        std::string m_Url;
-        std::string m_Model;
-        std::string m_KeyName;
-        InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
-    };
-
-    // Generate a unique interface name from URL domain + model + API type
-    static std::string GenerateInterfaceName(std::string const& url,
-                                             std::string const& model,
-                                             std::string const& apiType);
-
-    size_t m_MaxThreads{0};
-    size_t m_MaxInflightAiCalls{100};
-    size_t m_PythonEngines{4};
-    std::chrono::milliseconds m_SleepDuration{0};
-    std::string m_QueueFolderFilepath;
-    std::string m_WorkflowsFolderFilepath;
-    bool m_Verbose{false};
-    size_t m_ApiIndex{0};
-    std::vector<ApiInterface> m_ApiInterfaces;
-    size_t m_MaxFileSizekB{20};
-    std::string m_KeysFilePath{"keys.json.enc"};
-    bool m_UseBashOnWindows{false};
-    bool m_ConfigValid{false};
-
-    bool IsValid() const { return m_ConfigValid; }
+    API1 = 0,    // OpenAI-compatible chat completions
+    API2,        // OpenAI Responses API
+    API3,        // Google Gemini native
+    API4,        // Anthropic Messages
+    Test,        // No-network fixture backend (integration tests)
+    API5,        // AWS Bedrock (SigV4)
+    API6,        // Azure OpenAI
+    NumAPIs,     // sentinel — count of valid variants
+    InvalidAPI   // sentinel — set by the parser on unknown "API" string
 };
 ```
 
-**Stored fields populated from JSON:**
+The string ↔ enum mapping is centralised in the file-local `kInterfaceTypeMappings` table (Section 2.5).  Adding a new variant without extending the table OR the enum→string `InterfaceTypeName()` switch fails to compile (table size is asserted; switch is exhaustive).
 
-- `m_QueueFolderFilepath` from `"queue folder"`
-- `m_WorkflowsFolderFilepath` from `"workflows folder"`
-- `m_MaxThreads` from `"max threads"`
-- `m_MaxInflightAiCalls` from `"max inflight ai calls"`
-- `m_PythonEngines` from `"python engines"`
-- `m_SleepDuration` from `"engine sleep time in run loop in ms"`
-- `m_Verbose` from `"verbose"`
-- `m_ApiInterfaces` from `"API interfaces"` (via `ParseInterfaces`)
-- `m_ApiIndex` from `"API index"`
-- `m_MaxFileSizekB` from `"max file size in kB"`
-- `m_KeysFilePath` from `"keys_file"` (defaults to `"keys.json.enc"`)
-- `m_UseBashOnWindows` from `"use_bash"` (defaults to `false`)
+**Logged-only (not stored):** `"description"`, `"author"`.
 
-**Logged-only (not stored):**
+**Type-checked but not stored:** `"file format identifier"` (must be a JSON number; presence is recorded for the format-info summary, value is not retained).
 
-- `"description"`
-- `"author"`
-
-**Type-checked but not stored:**
-
-- `"file format identifier"` (must be a JSON number)
+For the field-by-field config.json reference (every `"queue folder"` / `"max threads"` / `"port"` / `"API interfaces"[]` key, with defaults and ranges) see `doc/jarvisagent.md` "Configuration".  The mapping from JSON key → `EngineConfig` member is mechanical 1:1 in `Parse()`.
 
 ### 2.2 Parser State
 
@@ -177,21 +84,16 @@ bool ConfigParsed() const;
 1. Resets `m_State` and resets `engineConfig = {}`.
 2. Checks that the config path exists and is not a directory.
    - On failure: `FileNotFound`.
-3. Parses JSON via `simdjson::ondemand`.
-   - On parse error: `ParseFailure`.
-4. Iterates over top-level fields:
-   - Validates expected types with `CORE_ASSERT`.
-   - Populates `EngineConfig` where applicable.
-   - Logs `description`, `author`, and other informational fields.
-   - Unknown top-level fields:
-     - Attempts best-effort stringification and logs `"key: value"` for simple types.
-     - Logs `"[complex type]"` for arrays/objects.
+3. Loads + parses JSON via `simdjson::ondemand` with explicit error checks at every step (file load, document iterate, top-level object access).  Each failure mode emits a distinct `LOG_CORE_ERROR` and returns the matching `State`: `FileNotFound` for load errors, `ParseFailure` for malformed JSON, `FileFormatFailure` if the top-level value is not an object.
+4. Iterates over top-level fields.  Each field uses simdjson's `.get<T>().get(target)` extractor; on type mismatch the parser emits `LOG_CORE_ERROR("ConfigParser: '{}' must be a {string|number|boolean|array}", fieldName)` and **continues** to the next field — a single malformed field does not abort the whole config load, so partially-valid configs still populate as much as they can.  Numeric fields cast to `size_t` / `uint32_t` defensively reject negative values with the same log + continue pattern, since negatives would otherwise wrap to huge unsigned values that `ConfigChecker` would only detect symptomatically via its out-of-range clamps.  Logging behaviour:
+   - `description`, `author`, and other informational fields are logged.
+   - Unknown top-level fields: best-effort stringified and logged as `"key: value"` (or `"[complex type]"` for arrays/objects).
 5. Sets state:
    - `ConfigOk` if **both**:
      - `"queue folder"` appeared at least once, **and**
      - at least one `"url"` field appeared within `"API interfaces"`.
    - Otherwise: `FileFormatFailure`.
-6. Logs a “format info” summary of field occurrences.
+6. Logs a "format info" summary of field occurrences.
 
 **Important:** `ConfigOk` indicates successful parsing and minimal required presence checks. It does **not** guarantee semantic correctness (directory existence, valid API selection, etc.). Semantic validation is done by `ConfigChecker` (Section 3).
 
@@ -204,16 +106,9 @@ void ParseInterfaces(simdjson::ondemand::array jsonArray,
 ```
 
 - Iterates the `"API interfaces"` array.
-- For each element:
-  - `"name"` (string) → `ApiInterface::m_Name`. If not provided, auto-generated from URL domain + model + API type via `GenerateInterfaceName()` (e.g. `api.openai.com/gpt-4.1/API1`).
-  - `"description"` (string) → `ApiInterface::m_Description`. Optional human-readable hint.
-  - `"url"` (string) → `ApiInterface::m_Url`
-  - `"model"` (string) → `ApiInterface::m_Model`
-  - `"API"` (string) → maps `"API1"` / `"API2"` / `"API3"` to `InterfaceType::API1` / `API2` / `API3`, otherwise `CORE_HARD_STOP`.
-    - `API1` — OpenAI-compatible chat completions (`/v1/chat/completions`): OpenAI, Google Gemini via OpenAI-compat endpoint, Anthropic, Ollama, and any compatible provider.
-    - `API2` — OpenAI Responses API (GPT-5 and later models).
-    - `API3` — Google Gemini native API (`x-goog-api-key` header, `/models/{model}:generateContent` URL scheme).
-  - `"key_name"` (string) → `ApiInterface::m_KeyName`. Optional reference to an API key by name (as stored in the encrypted keys file). If empty, the default (first available) key is used at runtime.
+- For each element (full per-field semantics + provider list — including all seven valid `"API"` values, `rate_limit` schema, `max_context_tokens`, `default_output_tokens`, `key_name` — live in `doc/jarvisagent.md` "API interfaces").  Highlights specific to the parser:
+  - `"name"` is auto-generated from URL domain + model + API type via `GenerateInterfaceName()` (e.g. `api.openai.com/gpt-4.1/API1`) when omitted.  The enum→string side of the mapping uses the `InterfaceTypeName()` helper, which exhaustively switches every `InterfaceType` variant + `static_assert`s on `NumAPIs == 7` so a future provider addition fails to compile until the helper is extended.
+  - `"API"` parsing routes through the `ParseInterfaceType()` helper backed by the file-local `kInterfaceTypeMappings` table — single source of truth for both directions of the mapping (`"API1"` ↔ `InterfaceType::API1`, `"Test"` ↔ `InterfaceType::Test`, …).  An unknown value (e.g. `"API7"`) produces a `LOG_CORE_ERROR` and assigns `InterfaceType::InvalidAPI` to the interface; `ConfigChecker` then rejects it from the active-index slot but other interfaces still load.  No hard-stop.
 - Appends each `ApiInterface` to `engineConfig.m_ApiInterfaces`.
 
 ---
@@ -253,21 +148,20 @@ private:
 
 2. Validates API selection:
    - `m_ApiInterfaces` must not be empty.
-   - The selected index must be valid.
-     - **Practical requirement:** `engineConfig.m_ApiIndex < engineConfig.m_ApiInterfaces.size()`.
+   - `engineConfig.m_ApiIndex` must be a valid in-bounds index — strictly `m_ApiIndex < m_ApiInterfaces.size()`.
    - For the selected interface:
-     - URL must be non-empty and contain `"https://"`
-     - Model must be non-empty
-     - Interface type must not be `InvalidAPI`
+     - URL must `starts_with("https://")` (prefix, not substring — a URL like `http://x/?next=https://y` is rejected).
+     - Model must be non-empty.
+     - Interface type must not be `InvalidAPI`.
 
 3. If validation fails:
-   - Logs error(s) for the failing component(s).
+   - Logs `LOG_CORE_ERROR` for the failing component(s) (folder path / API index + count). Operator-visible details land in `log/log.txt`.
    - Sets `engineConfig.m_ConfigValid = false`.
 
 4. If validation succeeds:
    - Applies defaults for out-of-range values:
      - `m_MaxThreads`: if `<= 0` or `> 256` → set to `16`.
-     - `m_MaxInflightAiCalls`: if `== 0` or `> 1000` → set to `100`.
+     - `m_MaxInflightAiCalls`: if `== 0` or `> 10000` → set to `1000`.
      - `m_PythonEngines`: if `== 0` or `> 16` → set to `4`.
      - `m_SleepDuration`: if `<= 0ms` or `> 256ms` → set to `10ms`.
      - `m_MaxFileSizekB`: if `<= 0` or `> 256` → set to `20`.

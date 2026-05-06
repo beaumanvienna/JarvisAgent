@@ -82,38 +82,45 @@ Includes a `TaskCancellationToken` for cooperative cancellation (no-op in Phase 
 
 ### ICredential
 
-Abstract base for all credential types stored in `KeyManager`. Replaces the flat `ProviderConfig.m_ApiKey` with type-safe polymorphism.
+Abstract base for all credential types stored in `KeyManager`. Type-safe polymorphism with `SecureString`-backed secret fields (mlock'd, zero-on-destruct).  Consumers `dynamic_cast` to the expected concrete subtype with fail-closed null-check on type mismatch (per `feedback_allowlist_not_blocklist`).
 
-| Subclass | `GetType()` | Fields | Use case |
-|----------|-------------|--------|----------|
-| `ApiKeyCredential` | `"api_key"` | `m_ApiKey` | API keys, PATs (OpenAI, Polarion, Slack) |
-| `OAuthCredential` | `"oauth"` | `m_AccessToken`, `m_RefreshToken`, `m_ExpiresAt`, `m_Scopes` | OneDrive, Google, OAuth2 services |
-| `KeyPairCredential` | `"key_pair"` | `m_PrivateKeyPem` | Snowflake JWT auth, service accounts |
-| `BasicAuthCredential` | `"credentials"` | `m_Username`, `m_Password` | PostgreSQL, SMTP, IMAP |
+| Subclass | `GetType()` | Secret fields (`SecureString`) | Non-secret fields | Use case |
+|----------|-------------|-------------------------------|-------------------|----------|
+| `ApiKeyCredential`     | `"api_key"`     | `m_ApiKey` | — | Bearer / x-api-key / x-goog-api-key / api-key — OpenAI, Anthropic, Gemini, Azure, GitHub PAT, Slack bot, Polarion |
+| `OAuthCredential`      | `"oauth"`       | `m_AccessToken`, `m_RefreshToken`, `m_ClientSecret` | `m_ExpiresAt`, `m_Scopes`, `m_TokenEndpoint`, `m_ClientId` | OneDrive, Google Sheets, OAuth2 services |
+| `KeyPairCredential`    | `"key_pair"`    | `m_PrivateKeyPem` | — | Snowflake JWT auth, GCS service accounts |
+| `BasicAuthCredential`  | `"credentials"` | `m_Password` | `m_Username` (logged for audit) | PostgreSQL, SMTP, IMAP |
+| `AwsCredential`        | `"aws"`         | `m_SecretAccessKey`, `m_SessionToken` | `m_AccessKeyId` (public per AWS conventions; CloudTrail logs it), `m_Region` | AWS Bedrock, S3 (SigV4) |
 
-**File:** `engine/keys/credential.h`
+Common metadata fields on `ICredential` base: `m_Name`, `m_DisplayName`, `m_Endpoint`, `m_DefaultModel`, `m_ApiType`, `m_Params` (string map for non-secret per-provider extras like Azure resource/deployment).  `m_Params` is intentionally public for extensibility; secrets must NOT be stored there — use the typed `SecureString` fields on the concrete subclass.
 
-### KeyManager Extension
+**File:** `engine/keys/credential.{h,cpp}`
 
-`ProviderConfig` now carries a `m_CredentialType` field (default `"api_key"`) plus type-specific fields. Serialization is backward-compatible: existing keys without a `credential_type` field load as `api_key`.
+### KeyManager API
+
+`KeyManager` owns the credential registry as `unordered_map<string, unique_ptr<ICredential>>`.  Read access via `GetCredential(name)` / `GetDefaultCredential()` (returns `ICredential const*`); write access via `AddCredential(name, unique_ptr<ICredential>)` / `UpdateCredential(name, unique_ptr<ICredential>)` / `RemoveProvider(name)` (legacy method-name kept for the remove path).  REST handlers build typed credentials via `CredentialFactory::CreateFromJson` (CREATE) or `CredentialFactory::CloneAndPatch` (UPDATE — partial-patch semantics, ignores `credential_type` field; DELETE + CREATE for type changes).  Serialization is backward-compatible: existing keys without a `credential_type` field load as `"api_key"`.
 
 ### OAuthTokenManager
 
-Manages OAuth 2.0 token lifecycle: stores access/refresh tokens, tracks expiry, runs a background refresh loop (checks every 30s, refreshes tokens expiring within 5 minutes). Thread-safe. Registers tokens with `SecretRedactor` on acquisition.
+Manages OAuth 2.0 token lifecycle: stores access/refresh tokens, tracks expiry, runs a background refresh loop (checks every 30s, refreshes tokens expiring within 5 minutes). Thread-safe. Registers tokens with `SecretRedactor` on acquisition.  See `doc/cyber security.md` "OAuthTokenManager Security" for the full safety guarantees (URL-encoding, refresh-failure backoff, snapshot-then-apply pattern, race-safe `Start`, `RemoveTokens` API).
 
 **Persistence across restarts.** On `Start()`, the manager calls `HydrateFromKeyManager()` which walks all providers with `credential_type == "oauth"` and a non-empty `refresh_token` and seeds in-memory entries with the stored `refresh_token`, `token_endpoint`, `client_id`, and `client_secret`. The access_token itself is not persisted (short-lived). The hydrated entry has `m_ExpiresAt = 0`, so the first `GetAccessToken` call after startup performs an **on-demand synchronous refresh** using the stored refresh_token + client credentials, yielding a fresh access_token. This lets j9t restart without triggering a new user consent dialog.
 
-On successful consent in the OAuth callback, `webServer.cpp` stores the tokens in `OAuthTokenManager` **and** writes `refresh_token` + `expires_at` + `scopes` + `token_endpoint` + `client_id` + `client_secret` into the `KeyManager::ProviderConfig`, then calls `KeyManager::Save()` to encrypt the updated registry into `keys.json.enc`. The master password is cached in `KeyManager` after a successful `Load` / `Unlock` / `Save` so the callback can re-encrypt without re-prompting. If the admin hasn't unlocked the key store yet this session, the OAuth tokens are held in memory only and the callback logs a warning — persistence resumes on the next `POST /api/settings/keys/unlock`.
+On successful consent in the OAuth callback, `webServer.cpp` stores the tokens in `OAuthTokenManager` **and** builds an `OAuthCredential` (preserving common metadata from any existing entry of any subtype, then writing `refresh_token` + `expires_at` + `scopes` + `token_endpoint` + `client_id` + `client_secret` into the typed fields), then calls `KeyManager::AddCredential` / `UpdateCredential` followed by `KeyManager::Save()` to encrypt the updated registry into `keys.json.enc`. The master password is cached in `KeyManager` after a successful `Load` / `Unlock` / `Save` so the callback can re-encrypt without re-prompting. If the admin hasn't unlocked the key store yet this session, the OAuth tokens are held in memory only and the callback logs a warning — persistence resumes on the next `POST /api/settings/keys/unlock`.
 
 **Files:** `engine/keys/oauthTokenManager.h/cpp`, `engine/keys/keyManager.h/cpp`
 
 ### JwtGenerator
 
 RSA RS256 JWT creation via OpenSSL `EVP_DigestSign`. Features:
-- Minimum 2048-bit RSA key enforcement
+- Algorithm pinned to RS256 — header `{"alg":"RS256","typ":"JWT"}` is built internally by `Generate(payloadJson, privateKeyPem, errorMessage)`; callers cannot pass a header that lies about the algorithm
+- Minimum 2048-bit RSA key enforcement, plus explicit `EVP_PKEY_id == EVP_PKEY_RSA` rejection of EC / DSA / Ed25519 keys
+- Exception-safe via file-local `EvpPkeyPtr` / `EvpMdCtxPtr` RAII wrappers
 - Base64URL encoding
 - Snowflake convenience method with public key fingerprint computation
 - Auto-registers generated JWTs with `SecretRedactor`
+
+See `doc/cyber security.md` "JwtGenerator Security" for the alg-confusion threat model and design rationale.
 
 **Files:** `engine/keys/jwtGenerator.h/cpp`
 
@@ -133,7 +140,7 @@ Centralized retry with exponential backoff + jitter. All cloud connectors and ta
 
 ### SecretRedactor
 
-Thread-safe singleton that scrubs registered secret values from log output. Secrets shorter than 4 characters are ignored to prevent false positives. Integrated into the logging pipeline — `OAuthTokenManager`, `JwtGenerator`, and connectors register their secrets on acquisition.
+Thread-safe singleton that scrubs registered secret values from log output before any spdlog sink writes them.  Wired in via a `RedactingFormatter` wrapping each sink's `pattern_formatter` — `log/log.txt`, the rotating `log/security.txt`, and the ncurses TUI all receive redacted text.  Cloud integration registers secrets at acquisition: `KeyManager` (per-credential-subtype virtual `RegisterSecrets()` invoked on every load / add / update), `OAuthTokenManager` (refresh / access / client secret tokens with the wiring-sandwich pattern on rotation), and `JwtGenerator` (signed JWTs).  See `doc/cyber security.md` "SecretRedactor" for the full coverage table and design boundaries.
 
 **Files:** `engine/log/secretRedactor.h/cpp`
 
@@ -399,7 +406,7 @@ Inline `base_url`/`project_id`/`key_name` still works for backward compatibility
 
 ### SigV4 Request Signing
 
-`SigV4Signer` implements AWS Signature Version 4 using OpenSSL HMAC-SHA256. It produces the `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256`, and `Host` headers required for S3 authentication.
+`SigV4Signer` implements AWS Signature Version 4 using OpenSSL HMAC-SHA256. It produces the `Authorization`, `X-Amz-Date`, `X-Amz-Content-Sha256`, and `Host` headers required for S3 authentication.  See `doc/cyber security.md` "SigV4 Signing Security" for the full safety guarantees (4-test debug-build self-test, `OPENSSL_cleanse` of intermediate signing keys, OpenSSL primitive return-checks, file-local `IAuthSigner::Get` non-fallback).
 
 Key methods:
 - `Sign()` — signs an HTTP request, returns headers to add

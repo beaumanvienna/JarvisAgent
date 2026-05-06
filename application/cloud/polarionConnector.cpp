@@ -26,6 +26,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "cloud/cloudTaskExecutor.h"
 #include "cloud/connectorHttp.h"
@@ -104,21 +105,27 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-
-        if (provider->m_ApiKey.empty())
+        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
+        if (!api)
+        {
+            errorMessage = "Credential '" + connection.m_KeyName +
+                           "' must be ApiKeyCredential — Polarion requires a Personal Access Token";
+            return false;
+        }
+        if (api->m_ApiKey.IsEmpty())
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' has no API key (PAT)";
             return false;
         }
 
         credentials.m_AuthType = CloudAuthType::BearerToken;
-        credentials.m_Token = provider->m_ApiKey;
+        credentials.m_Token = std::string(api->m_ApiKey.Get());
         return true;
     }
 } // namespace AIAssistant

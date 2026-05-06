@@ -162,47 +162,67 @@ Uses vendored OpenSSL (already in `vendor/openssl`). No new dependencies.
 
 ```
 engine/keys/keyManager.h
+engine/keys/credential.h        — typed ICredential hierarchy (5 subtypes + factory)
 ```
+
+`KeyManager` stores a registry of typed `ICredential` pointers.  The hierarchy lives in
+`credential.h`: `ApiKeyCredential` (Bearer / x-api-key / api-key / x-goog-api-key),
+`OAuthCredential` (refresh-token-rotated), `KeyPairCredential` (RSA PEM for JWT signing),
+`BasicAuthCredential` (username + password), and `AwsCredential` (access_key_id +
+secret_access_key + session_token + region).  Every secret-bearing field is a
+`SecureString` so the plaintext value lives in mlock'd, zero-on-destruct memory rather
+than a copy-prone `std::string`.
 
 ```cpp
 class KeyManager
 {
 public:
-    struct ProviderConfig
-    {
-        std::string m_DisplayName;
-        std::string m_Endpoint;
-        std::string m_ApiKey;
-        std::string m_DefaultModel;
-        std::string m_ApiType;      // "API1" or "API2"
-    };
+    // Lifecycle: load/save the encrypted store with a master password.
+    bool Load(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
+    bool Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
 
-    // Startup: load from encrypted file (or fall back to env var)
-    bool Load(std::filesystem::path const& keysFilePath, std::string const& masterPassword);
+    // Backward compatibility: populate from OPENAI_API_KEY env var (creates an ApiKeyCredential).
+    bool LoadFromEnvironment(std::string const& endpoint, std::string const& model, std::string const& apiType);
 
-    // Save current state to encrypted file
-    bool Save(std::filesystem::path const& keysFilePath, std::string const& masterPassword);
+    // Runtime unlock: decrypt the stored keys file path with a freshly-supplied password.
+    bool Unlock(std::string_view masterPassword);
 
-    // Provider registry access
-    ProviderConfig const* GetProvider(std::string const& name) const;
-    ProviderConfig const* GetDefaultProvider() const;
+    // Read access (thread-safe, shared lock).  Callers `dynamic_cast` to the expected
+    // concrete subtype with fail-closed null-check on type mismatch.
+    ICredential const* GetCredential(std::string const& name) const;
+    ICredential const* GetDefaultCredential() const;
     std::vector<std::string> GetProviderNames() const;
+    bool HasProviders() const;
 
-    // CRUD (used by API endpoints)
-    bool AddProvider(std::string const& name, ProviderConfig config);
-    bool UpdateProvider(std::string const& name, ProviderConfig config);
+    // Write access (thread-safe, unique lock).  Take ownership of a pre-built credential.
+    // REST handlers build via `CredentialFactory::CreateFromJson` (CREATE) or
+    // `CredentialFactory::CloneAndPatch` (UPDATE).
+    bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
+    bool UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred);
     bool RemoveProvider(std::string const& name);
     void SetDefaultProvider(std::string const& name);
 
-    // Backward compatibility: populate from env var
-    bool LoadFromEnvironment();
-
 private:
     std::string m_DefaultProviderName;
-    std::unordered_map<std::string, ProviderConfig> m_Providers;
-    mutable std::shared_mutex m_Mutex;    // readers-writer lock
+    std::unordered_map<std::string, std::unique_ptr<ICredential>> m_Credentials;
+    mutable std::shared_mutex m_Mutex;
 };
 ```
+
+Consumer pattern (every cloud connector + every credential consumer):
+
+```cpp
+auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+if (!cred) { /* not found */ }
+auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
+if (!api) { /* wrong type — fail closed, don't fall through to other types */ }
+auto const bearerToken = std::string(api->m_ApiKey.Get());  // request-scoped plaintext
+// use bearerToken in Authorization header for the duration of this HTTP request
+```
+
+The `dynamic_cast` cascade is allowlist-style: connectors that legitimately accept multiple
+shapes (e.g. Jira Cloud's BasicAuth vs Jira DC's PAT, S3's three conventions) explicitly
+check each valid type and fail closed if none match.  No "default-to-ApiKey" fallback.
 
 ### 6.1 Startup sequence
 

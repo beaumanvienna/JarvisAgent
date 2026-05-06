@@ -115,36 +115,37 @@ If the type matches, the lambda is executed and the event is marked handled.
 
 ## EventQueue (Thread‑Safe)
 
+The queue carries `std::shared_ptr<Event>` so the type-erased base lives in `std::queue` and per-event payload destruction is reference-counted (the main loop may forward a copy to `app->OnEvent` while the original sits in the local drained vector).
+
 Engine threads push events:
 
 ```cpp
 m_EventQueue.Push(std::shared_ptr<Event>(...));
 ```
 
-Main loop pops them:
+Main loop drains:
 
 ```cpp
 auto events = m_EventQueue.PopAll();
 ```
 
-Implementation uses:
-- `std::mutex`
-- `std::queue`
-- Move semantics for shared_ptr events.
+`Push` is safe to call from any thread.  `PopAll` assumes a single consumer (the main loop) and minimises its critical section by `std::swap`'ing the underlying `std::queue` into a local under the mutex (O(1)) — vector construction and event destruction then happen outside the lock so producers (file watcher, AI dispatch workers, web server, etc.) aren't blocked by main-thread housekeeping.
 
 ---
 
 ## Engine → Application flow
 
-Inside `Core::Run()`:
+Inside `Core::Run()` (every loop iteration, in this order):
 
-1. `app->OnUpdate()` executes.
-2. All pending events are popped.
-3. Engine handles engine‑level events (shutdown, errors).
+1. `CheckSignalFlags()` polls the SIGINT atomic and pushes an `EngineEventShutdown` if a Ctrl+C arrived.
+2. All pending events are popped via `m_EventQueue.PopAll()` — done **before** `OnUpdate` so quit/SIGINT is processed promptly.
+3. Engine handles engine‑level events (e.g. `AppErrorEvent`).
 4. Unhandled events are forwarded to:
    ```cpp
    app->OnEvent(eventPtr);
    ```
+5. `app->OnUpdate()` executes.
+6. Terminal manager renders (if present), then the loop sleeps briefly.
 
 ---
 

@@ -21,16 +21,73 @@
 
 #include <filesystem>
 #include <iostream>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "log/log.h"
+#include "log/secretRedactor.h"
 
+#include <spdlog/formatter.h>
+#include <spdlog/pattern_formatter.h>
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Wraps an inner spdlog formatter and scrubs registered secrets from
+        // every message payload before the inner formatter sees it.  Without
+        // this wrapper, SecretRedactor::AddSecret() registrations are inert —
+        // the redactor's Redact() method is otherwise never called.
+        //
+        // Hot-path optimisation: if no secrets are registered, skip the copy
+        // and forward straight to the inner formatter.  Mutex inside Redact()
+        // serialises but spdlog already serialises per-sink, so this adds
+        // bounded contention only when secrets are actually present.
+        class RedactingFormatter : public spdlog::formatter
+        {
+        public:
+            explicit RedactingFormatter(std::unique_ptr<spdlog::formatter> inner) : m_Inner(std::move(inner)) {}
+
+            void format(spdlog::details::log_msg const& msg, spdlog::memory_buf_t& dest) override
+            {
+                auto& redactor = SecretRedactor::Get();
+                if (!redactor.HasSecrets())
+                {
+                    m_Inner->format(msg, dest);
+                    return;
+                }
+
+                // Redact the payload, then forward a copy of the log_msg
+                // pointing at the redacted text.  The redacted std::string
+                // lives until the end of this call; the inner formatter
+                // writes to dest synchronously, so no lifetime issue.
+                std::string const redacted = redactor.Redact(
+                    std::string(msg.payload.data(), msg.payload.size()));
+                spdlog::details::log_msg redactedMsg = msg;
+                redactedMsg.payload = spdlog::string_view_t(redacted.data(), redacted.size());
+                m_Inner->format(redactedMsg, dest);
+            }
+
+            std::unique_ptr<spdlog::formatter> clone() const override
+            {
+                return std::make_unique<RedactingFormatter>(m_Inner->clone());
+            }
+
+        private:
+            std::unique_ptr<spdlog::formatter> m_Inner;
+        };
+
+        std::unique_ptr<spdlog::formatter> MakeRedactingFormatter(std::string pattern)
+        {
+            auto inner = std::make_unique<spdlog::pattern_formatter>(std::move(pattern));
+            return std::make_unique<RedactingFormatter>(std::move(inner));
+        }
+    } // namespace
+
     Log::Log()
     {
         std::vector<spdlog::sink_ptr> logSink;
@@ -43,8 +100,11 @@ namespace AIAssistant
         // ------------------------------------------------------------
         auto ostreamSink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::cout, /*force_flush=*/true);
 
-        // Optional: adjust the pattern (remove color codes, because ncurses hates them)
-        ostreamSink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] %v");
+        // Use a redacting formatter (wraps the pattern formatter) so registered
+        // secrets are scrubbed from message bodies before pattern substitution.
+        // Pattern: "[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] %v"
+        // (no color codes — ncurses hates them.)
+        ostreamSink->set_formatter(MakeRedactingFormatter("[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] %v"));
 
         logSink.emplace_back(ostreamSink);
 
@@ -81,7 +141,8 @@ namespace AIAssistant
         securitySinks.emplace_back(ostreamSink);
         securitySinks.emplace_back(
             std::make_shared<spdlog::sinks::rotating_file_sink_mt>("log/security.txt", 10 * 1024 * 1024, 5));
-        securitySinks.back()->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [Security] [%l] %v");
+        securitySinks.back()->set_formatter(
+            MakeRedactingFormatter("[%Y-%m-%d %H:%M:%S.%e] [Security] [%l] %v"));
 
         m_SecurityLogger = std::make_shared<spdlog::logger>("Security", begin(securitySinks), end(securitySinks));
         if (m_SecurityLogger)

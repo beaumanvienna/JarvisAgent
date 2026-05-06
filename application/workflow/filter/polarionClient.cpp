@@ -35,6 +35,7 @@
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/connectorHttp.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
 
@@ -57,22 +58,28 @@ namespace AIAssistant
             return {};
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(source.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(source.m_KeyName);
+        if (!cred)
         {
             errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName + "' not found in KeyManager";
             return {};
         }
-
-        // Polarion PAT: api_key stores the Bearer token (Personal Access Token)
-        std::string const& bearerToken = provider->m_ApiKey;
-
-        if (bearerToken.empty())
+        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
+        if (!api)
+        {
+            errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName +
+                           "' must be ApiKeyCredential — Polarion requires a PAT";
+            return {};
+        }
+        if (api->m_ApiKey.IsEmpty())
         {
             errorMessage =
                 "filter '" + filter.m_Id + "': credential '" + source.m_KeyName + "' is missing api_key (Bearer token)";
             return {};
         }
+        // Polarion PAT: api_key stores the Bearer token (Personal Access Token).  Materialise
+        // SecureString into request-scoped std::string for the HTTPS calls below.
+        std::string const bearerToken(api->m_ApiKey.Get());
 
         uint32_t const pageSize = (source.m_PageSize > 0) ? source.m_PageSize : DEFAULT_PAGE_SIZE;
         size_t const maxItems = filter.m_MaxItems;

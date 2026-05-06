@@ -118,6 +118,12 @@ namespace AIAssistant
             size_t m_MaxThreads{0};
             size_t m_MaxInflightAiCalls{1000};
             size_t m_MaxAiCallsPerJcwf{0};  // 0 = no cap; per-run safety limit
+            // Maximum number of children spawned by a single per_item filter
+            // evaluation.  Guards against DoS via a malicious or accidental
+            // filter that returns thousands/millions of items (each becomes a
+            // task child + downstream dispatch).  0 = no cap; default 10000 is
+            // applied by configChecker if the field is absent.
+            size_t m_MaxPerItemFanOut{10000};
             size_t m_PythonEngines{4};
             std::chrono::milliseconds m_SleepDuration{0};
             std::string m_QueueFolderFilepath;
@@ -182,6 +188,7 @@ namespace AIAssistant
             MaxRequestBodyMB,
             MaxInflightAiCalls,
             MaxAiCallsPerJcwf,
+            MaxPerItemFanOut,
             PythonEngines,
             Port,
             McpKeysFile,
@@ -220,6 +227,7 @@ namespace AIAssistant
                 "MaxRequestBodyMB",     //
                 "MaxInflightAiCalls",   //
                 "MaxAiCallsPerJcwf",    //
+                "MaxPerItemFanOut",     //
                 "PythonEngines",        //
                 "Port",                 //
                 "McpKeysFile",          //

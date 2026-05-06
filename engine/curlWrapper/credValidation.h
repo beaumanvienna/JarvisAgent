@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -20,21 +20,29 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include "engine.h"
+
+#include <cctype>
+#include <string_view>
 
 namespace AIAssistant
 {
-    class JsonHelper
+    // Shared by IAuthSigner implementations (authSigner.cpp, awsSigV4.cpp) for
+    // pre-flight credential validation.  Catches the accidental empty-string AND
+    // all-whitespace credential cases — both would otherwise produce a syntactically
+    // valid request that bounces off the upstream provider as an opaque 401 with
+    // no local diagnostic.
+    //
+    // Cast-to-unsigned-char before std::isspace avoids the cppreference UB for
+    // negative chars (std::isspace requires int in [0, UCHAR_MAX] or EOF).
+    inline bool IsBlank(std::string_view s)
     {
-    public:
-        JsonHelper() = default;
-        ~JsonHelper() = default;
-
-        // RFC 8259 §7-compliant escape of a string for embedding inside JSON string literals.
-        // Escapes the mandatory pair "\\" and the structural double quote, the three
-        // shorthand whitespace controls (\n, \r, \t), and emits \u00XX for every other
-        // byte in 0x00-0x1F.  Bytes >= 0x20 (including UTF-8 continuation bytes) are
-        // passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
-        static std::string EscapeJsonString(std::string_view input);
-    };
+        for (char c : s)
+        {
+            if (!std::isspace(static_cast<unsigned char>(c)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 } // namespace AIAssistant

@@ -533,7 +533,7 @@ filter's `key_name` field references the provider by logical name.
 At runtime, `PolarionClient` resolves the key via:
 
 ```
-source.m_KeyName → KeyManager::GetProvider(name) → provider->m_ApiKey
+source.m_KeyName → KeyManager::GetCredential(name) → dynamic_cast<ApiKeyCredential>(cred)->m_ApiKey.Get()
 ```
 
 **Adding the Polarion PAT:**

@@ -22,13 +22,42 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <cstring>
+#include <memory>
 
 #include "engine.h"
 #include "keys/keyEncryption.h"
 
 namespace AIAssistant
 {
-    std::vector<uint8_t> KeyEncryption::Encrypt(std::string const& plaintext, std::string const& masterPassword)
+    namespace
+    {
+        // RAII wrapper for OpenSSL's EVP_CIPHER_CTX*.  Frees on scope exit so
+        // every error path is just `return {};` — no need to remember a manual
+        // EVP_CIPHER_CTX_free at every fail site.  Use ctx.get() to pass to
+        // EVP_* functions.
+        struct EvpCipherCtxDeleter
+        {
+            void operator()(EVP_CIPHER_CTX* ctx) const noexcept
+            {
+                if (ctx) EVP_CIPHER_CTX_free(ctx);
+            }
+        };
+        using EvpCipherCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, EvpCipherCtxDeleter>;
+
+        // RAII wrapper for a stack-allocated symmetric key buffer.  Calls
+        // OPENSSL_cleanse on destruction so the derived key never lingers in
+        // the stack frame after the function returns — defends against
+        // information disclosure via core dumps and freed-stack reuse.
+        // Pass `key.data` to OpenSSL primitives.
+        template <size_t N>
+        struct ScopedKey
+        {
+            uint8_t data[N];
+            ~ScopedKey() { OPENSSL_cleanse(data, N); }
+        };
+    } // namespace
+
+    std::vector<uint8_t> KeyEncryption::Encrypt(std::string const& plaintext, std::string_view masterPassword)
     {
         // Generate random salt and IV
         uint8_t salt[SALT_SIZE];
@@ -39,96 +68,100 @@ namespace AIAssistant
             return {};
         }
 
-        // Derive 256-bit key from master password via PBKDF2-HMAC-SHA256
-        uint8_t key[KEY_SIZE];
-        if (PKCS5_PBKDF2_HMAC(masterPassword.c_str(), static_cast<int>(masterPassword.size()),
-                               salt, SALT_SIZE, PBKDF2_ITERATIONS, EVP_sha256(), KEY_SIZE, key) != 1)
+        // Derive 256-bit key from master password via PBKDF2-HMAC-SHA256.
+        // V2 uses 600,000 iterations per OWASP 2023+ guidance for HMAC-SHA256.
+        // ScopedKey cleanses on scope exit; no manual cleanup needed at returns.
+        ScopedKey<KEY_SIZE> key;
+        if (PKCS5_PBKDF2_HMAC(masterPassword.data(), static_cast<int>(masterPassword.size()),
+                               salt, SALT_SIZE, PBKDF2_ITERATIONS_V2, EVP_sha256(), KEY_SIZE, key.data) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: PBKDF2 key derivation failed");
             return {};
         }
 
-        // Encrypt with AES-256-GCM
-        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        // Build the full output buffer up front, header first, so we can pass the
+        // header bytes to GCM as Additional Authenticated Data (AAD) before the
+        // ciphertext.  AAD binding ensures any tampering with magic/version/salt/IV
+        // invalidates the GCM tag at decrypt time.
+        //
+        // Ordering invariant: the header MUST be fully written before the AAD
+        // EVP_EncryptUpdate call below, and the symmetric AAD update on the
+        // Decrypt side reads the same first HEADER_SIZE bytes from the input
+        // blob.  Reorder these and AAD will bind whatever uninitialized bytes
+        // happen to be there, silently breaking authentication.
+        size_t const plaintextSize = plaintext.size();
+        std::vector<uint8_t> result(HEADER_SIZE + plaintextSize + TAG_SIZE);
+        std::memcpy(result.data(), MAGIC, 4);
+        result[4] = CURRENT_VERSION;
+        std::memcpy(result.data() + 5, salt, SALT_SIZE);
+        std::memcpy(result.data() + 5 + SALT_SIZE, iv, IV_SIZE);
+
+        // Encrypt with AES-256-GCM.  EvpCipherCtxPtr frees on scope exit.
+        EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
         if (!ctx)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_CIPHER_CTX_new failed");
             return {};
         }
 
-        std::vector<uint8_t> result;
-
-        if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+        if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_EncryptInit_ex (cipher) failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
-        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_SIZE, nullptr) != 1)
+        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, IV_SIZE, nullptr) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_CIPHER_CTX_ctrl (IV len) failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
-        if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, iv) != 1)
+        if (EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data, iv) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_EncryptInit_ex (key/iv) failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
-        // Allocate output: header + ciphertext (same size as plaintext) + tag
-        size_t const plaintextSize = plaintext.size();
-        result.resize(HEADER_SIZE + plaintextSize + TAG_SIZE);
-
-        // Write header
-        std::memcpy(result.data(), MAGIC, 4);
-        result[4] = VERSION;
-        std::memcpy(result.data() + 5, salt, SALT_SIZE);
-        std::memcpy(result.data() + 5 + SALT_SIZE, iv, IV_SIZE);
+        // Bind the full header (magic + version + salt + IV) as AAD.  The OpenSSL
+        // convention for AAD is a call to EVP_EncryptUpdate with `out=nullptr`.
+        int aadLen = 0;
+        if (EVP_EncryptUpdate(ctx.get(), nullptr, &aadLen, result.data(), HEADER_SIZE) != 1)
+        {
+            LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_EncryptUpdate (AAD) failed");
+            return {};
+        }
 
         // Encrypt
         int outLen = 0;
-        if (EVP_EncryptUpdate(ctx, result.data() + HEADER_SIZE, &outLen,
+        if (EVP_EncryptUpdate(ctx.get(), result.data() + HEADER_SIZE, &outLen,
                               reinterpret_cast<uint8_t const*>(plaintext.data()),
                               static_cast<int>(plaintextSize)) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_EncryptUpdate failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
         int finalLen = 0;
-        if (EVP_EncryptFinal_ex(ctx, result.data() + HEADER_SIZE + outLen, &finalLen) != 1)
+        if (EVP_EncryptFinal_ex(ctx.get(), result.data() + HEADER_SIZE + outLen, &finalLen) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_EncryptFinal_ex failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
         // Get GCM tag
-        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_SIZE,
+        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, TAG_SIZE,
                                 result.data() + HEADER_SIZE + outLen + finalLen) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Encrypt: EVP_CIPHER_CTX_ctrl (get tag) failed");
-            EVP_CIPHER_CTX_free(ctx);
             return {};
         }
 
         // Resize to actual size (should match, but be safe)
         result.resize(HEADER_SIZE + outLen + finalLen + TAG_SIZE);
-
-        EVP_CIPHER_CTX_free(ctx);
-
-        // Clear key material from stack
-        OPENSSL_cleanse(key, KEY_SIZE);
-
         return result;
     }
 
-    std::string KeyEncryption::Decrypt(std::vector<uint8_t> const& encryptedBlob, std::string const& masterPassword)
+    std::string KeyEncryption::Decrypt(std::vector<uint8_t> const& encryptedBlob, std::string_view masterPassword)
     {
         // Minimum size: header + tag (no ciphertext = empty plaintext)
         if (encryptedBlob.size() < static_cast<size_t>(HEADER_SIZE + TAG_SIZE))
@@ -144,11 +177,26 @@ namespace AIAssistant
             return {};
         }
 
-        // Validate version
-        if (encryptedBlob[4] != VERSION)
+        // Dispatch on version byte to pick the right PBKDF2 cost and AAD posture.
+        // V1 (legacy): 100k iterations, no AAD.  V2 (current): 600k iterations,
+        // header bound as AAD.  Reject anything else — better to fail than to
+        // silently accept a downgraded blob.
+        uint8_t const version = encryptedBlob[4];
+        int iterations = 0;
+        bool useAad = false;
+        switch (version)
         {
-            LOG_CORE_ERROR("KeyEncryption::Decrypt: unsupported version {}", encryptedBlob[4]);
-            return {};
+            case VERSION_V1:
+                iterations = PBKDF2_ITERATIONS_V1;
+                useAad = false;
+                break;
+            case VERSION_V2:
+                iterations = PBKDF2_ITERATIONS_V2;
+                useAad = true;
+                break;
+            default:
+                LOG_CORE_ERROR("KeyEncryption::Decrypt: unsupported version {}", version);
+                return {};
         }
 
         // Extract salt, IV, ciphertext, tag
@@ -158,46 +206,52 @@ namespace AIAssistant
         size_t const ciphertextSize = encryptedBlob.size() - HEADER_SIZE - TAG_SIZE;
         uint8_t const* tag = encryptedBlob.data() + HEADER_SIZE + ciphertextSize;
 
-        // Derive key from master password
-        uint8_t key[KEY_SIZE];
-        if (PKCS5_PBKDF2_HMAC(masterPassword.c_str(), static_cast<int>(masterPassword.size()),
-                               salt, SALT_SIZE, PBKDF2_ITERATIONS, EVP_sha256(), KEY_SIZE, key) != 1)
+        // Derive key from master password.  ScopedKey cleanses on scope exit.
+        ScopedKey<KEY_SIZE> key;
+        if (PKCS5_PBKDF2_HMAC(masterPassword.data(), static_cast<int>(masterPassword.size()),
+                               salt, SALT_SIZE, iterations, EVP_sha256(), KEY_SIZE, key.data) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: PBKDF2 key derivation failed");
             return {};
         }
 
-        // Decrypt with AES-256-GCM
-        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        // Decrypt with AES-256-GCM.  EvpCipherCtxPtr frees on scope exit.
+        EvpCipherCtxPtr ctx(EVP_CIPHER_CTX_new());
         if (!ctx)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_CIPHER_CTX_new failed");
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
+        if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_DecryptInit_ex (cipher) failed");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
-        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_SIZE, nullptr) != 1)
+        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, IV_SIZE, nullptr) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_CIPHER_CTX_ctrl (IV len) failed");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
-        if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, iv) != 1)
+        if (EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data, iv) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_DecryptInit_ex (key/iv) failed");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
+        }
+
+        // V2 binds the full header as AAD so any tampering with magic/version/
+        // salt/IV invalidates the GCM tag.  V1 blobs were encrypted without AAD
+        // and must be decrypted the same way (skipping this step).
+        if (useAad)
+        {
+            int aadLen = 0;
+            if (EVP_DecryptUpdate(ctx.get(), nullptr, &aadLen, encryptedBlob.data(), HEADER_SIZE) != 1)
+            {
+                LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_DecryptUpdate (AAD) failed");
+                return {};
+            }
         }
 
         // Decrypt ciphertext
@@ -205,40 +259,30 @@ namespace AIAssistant
         plaintext.resize(ciphertextSize);
 
         int outLen = 0;
-        if (EVP_DecryptUpdate(ctx, reinterpret_cast<uint8_t*>(plaintext.data()), &outLen,
+        if (EVP_DecryptUpdate(ctx.get(), reinterpret_cast<uint8_t*>(plaintext.data()), &outLen,
                               ciphertext, static_cast<int>(ciphertextSize)) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_DecryptUpdate failed");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
         // Set expected GCM tag (const_cast is safe — OpenSSL only reads the tag during verify)
-        if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_SIZE,
+        if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, TAG_SIZE,
                                 const_cast<uint8_t*>(tag)) != 1)
         {
             LOG_CORE_ERROR("KeyEncryption::Decrypt: EVP_CIPHER_CTX_ctrl (set tag) failed");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
         int finalLen = 0;
-        if (EVP_DecryptFinal_ex(ctx, reinterpret_cast<uint8_t*>(plaintext.data()) + outLen, &finalLen) != 1)
+        if (EVP_DecryptFinal_ex(ctx.get(), reinterpret_cast<uint8_t*>(plaintext.data()) + outLen, &finalLen) != 1)
         {
             // Authentication failed — wrong password or corrupted data
             LOG_CORE_ERROR("KeyEncryption::Decrypt: authentication failed (wrong password or corrupted data)");
-            EVP_CIPHER_CTX_free(ctx);
-            OPENSSL_cleanse(key, KEY_SIZE);
             return {};
         }
 
         plaintext.resize(outLen + finalLen);
-
-        EVP_CIPHER_CTX_free(ctx);
-        OPENSSL_cleanse(key, KEY_SIZE);
-
         return plaintext;
     }
 } // namespace AIAssistant

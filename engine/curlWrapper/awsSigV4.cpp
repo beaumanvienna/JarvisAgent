@@ -21,8 +21,10 @@
 
 #include "curlWrapper/awsSigV4.h"
 
+#include "curlWrapper/credValidation.h"
 #include "engine.h"
 
+#include <openssl/crypto.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
@@ -40,6 +42,37 @@ namespace AIAssistant
     {
         constexpr char kAlgorithm[] = "AWS4-HMAC-SHA256";
 
+        // RAII wrapper that zeros its buffer via OPENSSL_cleanse on scope exit.
+        // Wraps the intermediate signing-key material derived from the AWS
+        // secret_access_key (kSecret, kDate, kRegion, kService, kSigning) so the
+        // secret-derived bytes don't linger on the heap after Sign() returns.
+        // Same posture sittings 1-3 closed for the master-password KEK in
+        // keyEncryption.cpp via ScopedKey<N>; this is the std::vector variant.
+        //
+        // OPENSSL_cleanse uses memory barriers to prevent the compiler from
+        // dead-store-eliminating the zero — std::memset would be optimised away.
+        struct ScopedSecretBytes
+        {
+            std::vector<unsigned char> m_Data;
+
+            ScopedSecretBytes() = default;
+            explicit ScopedSecretBytes(std::vector<unsigned char>&& v) : m_Data(std::move(v)) {}
+
+            ScopedSecretBytes(ScopedSecretBytes&&) noexcept = default;
+            ScopedSecretBytes& operator=(ScopedSecretBytes&&) noexcept = default;
+
+            ScopedSecretBytes(ScopedSecretBytes const&) = delete;
+            ScopedSecretBytes& operator=(ScopedSecretBytes const&) = delete;
+
+            ~ScopedSecretBytes()
+            {
+                if (!m_Data.empty())
+                {
+                    OPENSSL_cleanse(m_Data.data(), m_Data.size());
+                }
+            }
+        };
+
         std::string ToHex(unsigned char const* data, size_t len)
         {
             static char const* hex = "0123456789abcdef";
@@ -52,19 +85,35 @@ namespace AIAssistant
             return out;
         }
 
+        // Returns the hex digest, or empty string on OpenSSL failure (rare —
+        // SHA256 only returns NULL on impossible argument conditions).  Caller
+        // detects failure by checking output length / emptiness.
         std::string Sha256Hex(std::string const& data)
         {
             unsigned char hash[SHA256_DIGEST_LENGTH];
-            SHA256(reinterpret_cast<unsigned char const*>(data.data()), data.size(), hash);
+            unsigned char const* result = SHA256(reinterpret_cast<unsigned char const*>(data.data()), data.size(), hash);
+            if (result == nullptr)
+            {
+                LOG_CORE_ERROR("SigV4: SHA256() returned NULL — output would be uninitialised, returning empty");
+                return {};
+            }
             return ToHex(hash, SHA256_DIGEST_LENGTH);
         }
 
+        // Returns the MAC bytes, or empty vector on OpenSSL failure.  Caller
+        // detects failure via .empty() and propagates up to Sign().
         std::vector<unsigned char> HmacSha256(std::vector<unsigned char> const& key, std::string const& data)
         {
             std::vector<unsigned char> out(SHA256_DIGEST_LENGTH);
             unsigned int len = 0;
-            HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
-                 reinterpret_cast<unsigned char const*>(data.data()), data.size(), out.data(), &len);
+            unsigned char const* result =
+                HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
+                     reinterpret_cast<unsigned char const*>(data.data()), data.size(), out.data(), &len);
+            if (result == nullptr)
+            {
+                LOG_CORE_ERROR("SigV4: HMAC() returned NULL — output would be uninitialised, returning empty");
+                return {};
+            }
             out.resize(len);
             return out;
         }
@@ -168,6 +217,12 @@ namespace AIAssistant
             return out;
         }
 
+        // Limited to leading/trailing space + tab.  AWS canonical-request spec also
+        // requires (a) stripping CR/LF from header values and (b) collapsing runs of
+        // sequential spaces inside header values to a single space.  Today's call
+        // sites pass only host (no internal whitespace), ISO dates, and base64 hashes
+        // — none can hit those gaps.  Extend if a future header value can carry CRLF
+        // or multi-space sequences (multi-line headers, free-text headers).
         std::string TrimSpace(std::string const& s)
         {
             auto b = s.find_first_not_of(" \t");
@@ -201,6 +256,11 @@ namespace AIAssistant
         std::string const dateStamp = out.m_AmzDate.substr(0, 8); // YYYYMMDD
 
         out.m_ContentSha256 = Sha256Hex(in.m_Body);
+        if (out.m_ContentSha256.empty())
+        {
+            // SHA256 failure — leave Authorization empty so Apply() detects and rejects.
+            return out;
+        }
         out.m_SecurityToken = in.m_SessionToken;
 
         // Canonical headers: lowercase name + ':' + trimmed value + '\n', sorted by name.
@@ -232,20 +292,38 @@ namespace AIAssistant
 
         std::string const credentialScope = dateStamp + "/" + in.m_Region + "/" + in.m_Service + "/aws4_request";
 
+        std::string const canonicalRequestHash = Sha256Hex(canonicalRequest);
+        if (canonicalRequestHash.empty())
+        {
+            return out;
+        }
+
         std::string const stringToSign =
             std::string(kAlgorithm) + "\n" +
             out.m_AmzDate + "\n" +
             credentialScope + "\n" +
-            Sha256Hex(canonicalRequest);
+            canonicalRequestHash;
 
-        // Derive signing key.
-        auto kSecret = StringToBytes("AWS4" + in.m_SecretKey);
-        auto kDate = HmacSha256(kSecret, dateStamp);
-        auto kRegion = HmacSha256(kDate, in.m_Region);
-        auto kService = HmacSha256(kRegion, in.m_Service);
-        auto kSigning = HmacSha256(kService, "aws4_request");
+        // Derive signing key.  Each intermediate is wrapped in ScopedSecretBytes so
+        // OPENSSL_cleanse zeros the heap buffer on scope exit (including on throw
+        // from any subsequent string concat or HMAC call).  The chain is:
+        //   kSecret  = "AWS4" + secret_access_key
+        //   kDate    = HMAC(kSecret,  YYYYMMDD)
+        //   kRegion  = HMAC(kDate,    region)
+        //   kService = HMAC(kRegion,  service)
+        //   kSigning = HMAC(kService, "aws4_request")
+        ScopedSecretBytes const kSecret{StringToBytes("AWS4" + in.m_SecretKey)};
+        ScopedSecretBytes const kDate{HmacSha256(kSecret.m_Data, dateStamp)};
+        if (kDate.m_Data.empty()) return out;
+        ScopedSecretBytes const kRegion{HmacSha256(kDate.m_Data, in.m_Region)};
+        if (kRegion.m_Data.empty()) return out;
+        ScopedSecretBytes const kService{HmacSha256(kRegion.m_Data, in.m_Service)};
+        if (kService.m_Data.empty()) return out;
+        ScopedSecretBytes const kSigning{HmacSha256(kService.m_Data, "aws4_request")};
+        if (kSigning.m_Data.empty()) return out;
 
-        auto signature = HmacSha256(kSigning, stringToSign);
+        auto signature = HmacSha256(kSigning.m_Data, stringToSign);
+        if (signature.empty()) return out;
         std::string const signatureHex = ToHex(signature.data(), signature.size());
 
         std::ostringstream auth;
@@ -314,6 +392,27 @@ namespace AIAssistant
                 LOG_CORE_ERROR("SigV4 self-test (3) authorization-header structure mismatch: '{}'", a.m_Authorization);
                 ok = false;
             }
+
+            // (4) Full-chain known-answer test: locks in the EXACT signature for the
+            // determinism inputs above so any regression in canonical-request assembly,
+            // UriEncode, CanonicalQuery, or stringToSign concatenation is caught.
+            // The expected signature was captured from a trusted run after sitting 10's
+            // OPENSSL_cleanse + RAII changes landed; the inputs use the AWS-published
+            // example secret (wJalrXUtn...EXAMPLEKEY) and AKIDEXAMPLE access key, so a
+            // future cross-check against an independent SigV4 implementation (aws-cli,
+            // boto3) using the same canonical-request shape would validate against this
+            // value.  Test #2 already proves the key-derivation chain matches AWS's
+            // reference; this test proves the canonical-request → string-to-sign →
+            // final-signature pipeline is stable.
+            constexpr char const* kExpectedSignature =
+                "74fe2fddce07dc62e797273ccbb0ff5c11e9cd431afe83624c327f1c92695501";
+            std::string const expectedAuth = authPrefix + kExpectedSignature;
+            if (a.m_Authorization != expectedAuth)
+            {
+                LOG_CORE_ERROR("SigV4 self-test (4) full-chain signature mismatch:\n  got:      '{}'\n  expected: '{}'",
+                               a.m_Authorization, expectedAuth);
+                ok = false;
+            }
         }
 
         if (ok)
@@ -327,7 +426,8 @@ namespace AIAssistant
         return ok;
     }
 
-    void SigV4Signer::Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& outHeaders)
+    bool SigV4Signer::Apply(CurlWrapper::QueryData const& q, std::vector<std::string>& outHeaders,
+                            std::string& errorMessage) const
     {
         Inputs in;
         in.m_Method = "POST";
@@ -348,14 +448,36 @@ namespace AIAssistant
         in.m_Service = getParam("service");
         if (in.m_Service.empty()) in.m_Service = "bedrock";
 
-        if (in.m_AccessKey.empty() || in.m_SecretKey.empty() || in.m_Region.empty())
+        // Reject empty OR whitespace-only on each required field.  Pre-fix the only
+        // gate was `.empty()` and the failure was masked by an inline LOG_CORE_ERROR
+        // plus a sentinel "Authorization: AWS4-HMAC-SHA256 MISSING-CREDENTIALS"
+        // header — anti-debugging armor that turned a local config bug into an
+        // opaque 401 from AWS.
+        if (IsBlank(in.m_AccessKey))
         {
-            LOG_CORE_ERROR("SigV4Signer::Apply: missing access_key_id, secret_access_key, or region");
-            outHeaders.push_back("Authorization: AWS4-HMAC-SHA256 MISSING-CREDENTIALS");
-            return;
+            errorMessage = "SigV4: access_key_id (m_ApiKey) is empty or whitespace";
+            return false;
+        }
+        if (IsBlank(in.m_SecretKey))
+        {
+            errorMessage = "SigV4: secret_access_key is empty or whitespace";
+            return false;
+        }
+        if (IsBlank(in.m_Region))
+        {
+            errorMessage = "SigV4: region is empty or whitespace";
+            return false;
         }
 
         SignedHeaders const out = Sign(in);
+        if (out.m_Authorization.empty())
+        {
+            // Sign() bailed because an OpenSSL primitive returned NULL.  The error
+            // line was already logged inside Sha256Hex / HmacSha256; report the
+            // category up so the caller's structured ERROR carries run context.
+            errorMessage = "SigV4: OpenSSL HMAC/SHA256 primitive failed during signing";
+            return false;
+        }
         outHeaders.push_back("Host: " + out.m_Host);
         outHeaders.push_back("X-Amz-Date: " + out.m_AmzDate);
         outHeaders.push_back("X-Amz-Content-Sha256: " + out.m_ContentSha256);
@@ -364,5 +486,6 @@ namespace AIAssistant
         {
             outHeaders.push_back("X-Amz-Security-Token: " + out.m_SecurityToken);
         }
+        return true;
     }
 } // namespace AIAssistant

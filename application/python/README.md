@@ -1,221 +1,117 @@
-# PythonEngine Documentation (JarvisAgent)
+# PythonEngine + PythonEnginePool
 
 ## Overview
 
-`PythonEngine` embeds a full CPython interpreter inside JarvisAgent.  
-It loads a Python automation script, discovers lifecycle hooks, redirects Python stdout/stderr into the JarvisAgent terminal, and processes events asynchronously via a dedicated worker thread.
+`PythonEngine` embeds CPython inside JarvisAgent. The runtime spins up an N-engine **pool** of CPython sub-interpreters (PEP 684, Python 3.12+; graceful single-engine fallback on older Python) — each engine owns a dedicated worker thread and processes tasks asynchronously. Workflow `python` tasks are load-balanced across the pool by queue depth; the primary engine (index 0) additionally runs application-level lifecycle hooks (`OnStart`, `OnEvent`, `OnShutdown`).
+
+The two responsible classes:
+
+- `PythonEngine` (`pythonEngine.{h,cpp}`) — one CPython sub-interpreter, one worker thread, one task queue.
+- `PythonEnginePool` (`pythonEnginePool.{h,cpp}`) — owns the engines, runs the global `Py_Initialize`, dispatches workflow tasks via `SelectEngine()` (smallest queue depth), routes lifecycle hooks to the primary engine.
 
 ---
 
-## Functional Description
+## Responsibilities
 
-### Core Responsibilities
-
-- Initialize and manage a CPython interpreter.
-- Import a user‑provided script (e.g., `scripts/main.py`).
-- Discover optional hook functions:  
-  **OnStart**, **OnUpdate**, **OnEvent**, **OnShutdown**.
-- Redirect Python stdout/stderr via `JarvisRedirectPython()`.
-- Dispatch tasks asynchronously using a dedicated worker thread and task queue.
-- Convert C++ events into Python dictionaries.
-- Guarantee safe GIL (Global Interpreter Lock) handling.
-- Release Python references safely under the GIL (note: the current implementation does **not** call `Py_Finalize()`; the interpreter remains initialized for the process lifetime).
-
-### High‑Level Operation
-
-1. **Initialize()**
-   - Starts Python, configures stdout/stderr redirection, imports script, discovers hooks, starts worker thread.
-
-2. **Task Dispatch**
-   - Public API (`OnStart`, `OnUpdate`, `OnEvent`) enqueues tasks.
-   - Worker thread acquires GIL, calls Python functions safely.
-
-3. **Event Delivery**
-   - Events are converted into Python dictionaries:
-     ```python
-     {
-         "type": "FileAdded",
-         "path": "path/to/file"
-     }
-     ```
-
-4. **Workflow task execution (`ExecuteWorkflowTask`)**
-   - Runs **synchronously on the calling thread** (not on the worker thread).
-   - Parses task params JSON for `module` + `function`.
-   - Calls the Python function with `inputValues` as keyword arguments.
-   - Optionally provides a `context` dict (see below).
-
-5. **Shutdown**
-   - Enqueues Python `OnShutdown()` (best-effort; see `Stop()` notes below).
-   - Stops worker thread.
-   - Releases Python references under GIL.
+- Initialize and finalize CPython once per process; create / destroy sub-interpreters per engine.
+- Import a user-provided startup script (e.g. `scripts/main.py`) into the primary engine and discover optional hooks (`OnStart`, `OnUpdate`, `OnEvent`, `OnShutdown`).
+- Execute workflow `python` tasks asynchronously on whichever engine is least loaded.
+- Redirect Python `sys.stdout` / `sys.stderr` to `JarvisRedirectPython()` so all script output flows through the application logger.
+- Handle the GIL correctly: the worker thread holds its own `PyThreadState` for its sub-interpreter; the GIL is acquired/released around each task body.
 
 ---
 
-## Using PythonEngine in the Application
+## Security contracts
 
-Typical usage pattern:
+`PythonEngine` enforces three runtime gates that workflow authors must satisfy:
 
-```cpp
-PythonEngine pythonEngine;
+1. **Module allowlist.** `params.module` is validated against `ScriptRegistry::FindByModulePath` before `PyImport_ImportModule`. Only modules whose `.py` file under `scripts/` carries a `# @jarvis-script` header (and is therefore in the registry) can be imported. Standard-library modules (`os`, `subprocess`, `ctypes`) are rejected. The registry pointer is wired into the pool at `Initialize` time and propagated to every engine; a null registry causes `Initialize` to fail rather than silently disabling the gate.
+2. **`scriptDir` sys.path confinement.** `SetupSubInterpreter` resolves the configured `scriptDir` via `fs::weakly_canonical` against the project root and rejects paths that escape via `..`, absolute mismatch, or symlinks pointing out of tree. Setup fails (returns `false`) on rejection.
+3. **`taskWorkingDirectory` confinement.** Each task's working directory is canonicalised against the project root before being inserted into the Python `context["_task_working_directory"]` slot. An attacker-influenced or buggy upstream value that escapes the project root fails the task with a structured error before any user Python runs.
 
-pythonEngine.Initialize("scripts/main.py");
-pythonEngine.OnStart();
-
-// When filesystem or system events occur:
-pythonEngine.OnEvent(eventPtr);
-
-// Shutdown:
-pythonEngine.Stop();
-```
-
-Python side (`main.py`):
-
-```python
-def OnStart():
-    print("Python initialized.")
-
-def OnEvent(event):
-    print("Received:", event)
-```
+See `doc/cyber security.md` and `doc/architecture.md` "Key Design Decisions" for the threat model and rationale.
 
 ---
 
-## Member Function Requirements
+## Lifetime invariants
 
-Below are the key member functions and the software requirements each one fulfills.
-
----
-
-### **bool Initialize(std::string const& scriptPath)**  
-**Implements:**
-- Start CPython (`Py_Initialize`). Returns `true` on success (or if already running), `false` on failure.
-- Redirect Python stdout/stderr to the JarvisAgent logger (implemented via `ctypes.CDLL(None)` calling `JarvisRedirectPython`).
-- Extract script directory + module name.
-- Add script folder to `sys.path`.
-- Import module using CPython API.
-- Retrieve `OnStart`, `OnUpdate`, `OnEvent`, `OnShutdown` if defined.
-- Launch worker thread.
-- Release GIL so the worker thread can reacquire it.
+- **`m_InterpreterState`** — set once by `PythonEnginePool::Initialize` (via `SetInterpreterState`) and read by the worker thread under the GIL. The pointed-to `PyInterpreterState` has process lifetime: sub-interpreters are torn down only by `Py_Finalize` at process exit, and the pool intentionally keeps the main-thread state alive (see the `Initialize` comment). The worker thread's `PyThreadState_New(m_InterpreterState)` therefore always operates on a live interpreter. An assertion immediately before `PyThreadState_New` makes this contract explicit; a misordered call site (e.g. `StartWorkerThread` before `SetInterpreterState`) trips it loudly in Debug.
+- **`m_ScriptRegistry`** — borrowed pointer owned by `JarvisAgent`. The pool is destroyed before the registry, so the pointer is valid for the engine's whole lifetime.
+- **`WorkflowTaskRequest::m_InputValues` / `m_ContextValues`** — owned-by-value copies of the caller's maps. The previous design held raw `const*` to caller stack frames; the new owned form is safe even if a future call site switches to fire-and-forget (see `feedback_capture_by_value_async` in the project memory).
 
 ---
 
-### **Stop()**  
-**Implements:**
-- Enqueue Python `OnShutdown` **(best-effort)**.
-- Signal worker to stop and join worker thread.
-- Acquire GIL and safely `DECREF` Python objects.
-- Mark engine as not running.
-- Note: does **not** call `Py_Finalize()`.
+## Concurrency contracts
+
+### `PythonEngine` (per-engine state)
+
+- **`m_Running`** (`std::atomic<bool>`, acquire/release) — set by `StartWorkerThread`, cleared by `WaitStop`, read by every public API early-return guard (`IsRunning`, `OnStart`, `OnUpdate`, `OnEvent`, `SignalStop`, `ExecuteWorkflowTask`). Atomic so cross-thread reads see the right value without depending on `m_QueueMutex`.
+- **`m_StopRequested`** (`std::atomic<bool>`, acquire/release) — guarded by `m_QueueMutex` on every existing site; the atomic semantics are explicit in case a future caller needs to read without the lock.
+- **`m_TasksCompleted`** (`std::atomic<size_t>`, relaxed) — monitoring counter only, no synchronization role.
+- **`m_TaskQueue`** + **`m_QueueCondition`** — guarded by `m_QueueMutex`. Worker waits on the condition variable; producers `notify_one()` after pushing.
+- **`WorkflowTaskRequest::m_PromiseSatisfied`** (`std::atomic<bool>`, acq/rel) — guards against a double `set_value` race between the worker-loop main path and the shutdown drain. First writer wins via CAS; subsequent attempts no-op cleanly. Without this guard, a shutdown-mid-task interleave would throw `std::future_error: broken_promise`.
+
+### `PythonEnginePool` (collection-level state)
+
+- **`m_Running`** (`std::atomic<bool>`, acquire/release) — release-stored at the END of `Initialize` (so any reader that observes `true` also sees the fully-populated `m_Engines`), released-stored to false at the START of `SignalStop` (so concurrent readers can bail before tear-down begins). All public methods load it first; `ExecuteWorkflowTask` / hooks short-circuit on false.
+- **`m_Mutex`** — guards `m_Engines` mutation only. Held by `Initialize` for each `push_back`, by `SignalStop`/`WaitStop` for the iteration + clear, by `GetEngineCount` / `GetTasksCompleted` for the read. After `Initialize` returns true and before `SignalStop` is invoked, `m_Engines` is stable; `SelectEngine` reads it lock-free on the hot path so dispatch is not serialized across worker threads. The atomic+mutex split matches the pool's lifecycle: heavy/rare init+shutdown under the lock, frequent steady-state dispatch lock-free with explicit ordering.
+- **Non-copyable + non-movable** — `=delete` on copy/move ctor + assignment. The engines own raw Python interpreter state that must not migrate.
 
 ---
 
-### **OnStart()**  
-**Implements:**
-- Enqueue a Python task of type `OnStart`.
+## Public API
 
-### **OnUpdate()**  
-**Implements:**
-- Enqueue a Python task of type `OnUpdate`  
-  (no longer used in JarvisAgent, but still supported).
+### `PythonEnginePool::Initialize(scriptPath, engineCount, scriptRegistry)`
+Bootstraps CPython once, creates `engineCount` sub-interpreters via `Py_NewInterpreterFromConfig` (3.12+) or `Py_NewInterpreter` (legacy), wires `scriptRegistry` into every engine, calls `SetupSubInterpreter` on each. Returns `false` if any required argument is missing (`scriptRegistry == nullptr` is rejected up front), if `Py_Initialize` fails, if the resolved scriptDir does not pass `ConfineUnderProjectRoot` (defense-in-depth at the pool boundary; the per-engine `SetupSubInterpreter` also gates), or if no sub-interpreter sets up cleanly. `SetInterpreterState` is invoked **only after** `SetupSubInterpreter` returns true — a failed engine never has its state pointer wired in. Marked `[[nodiscard]]`.
 
-### **OnEvent(std::shared_ptr<Event>)**  
-**Implements:**
-- Package any C++ event into Python dictionary.
-- Enqueue a Python `OnEvent` task.
+### `PythonEnginePool::ExecuteWorkflowTask(taskDefinition, taskWorkingDirectory, workflowId, runId, inputValues, contextValues, ...outputs...)`
+Selects the least-loaded engine and forwards the call. Builds a `WorkflowTaskRequest`, copies the caller's maps into it, enqueues it on the chosen engine's task queue, blocks on the request's promise, and returns the result.
 
----
+### `PythonEnginePool::OnStart` / `OnUpdate` / `OnEvent`
+Routed to the primary engine (index 0) only. Enqueue an `OnStart` / `OnUpdate` / `OnEvent` task on that engine's queue.
 
-### **ExecuteWorkflowTask(TaskDef const& taskDefinition, ...)**
-**Implements:**
-- Runs a workflow task **synchronously on the calling thread** under the GIL.
-- Parses `taskDefinition.m_ParamsJson` (JSON) for string fields `module` and `function`.
-- Imports the module, resolves the callable, and invokes it with `inputValues` as keyword arguments.
-- If the task declares an input named `context`, a `context` dict is provided as a keyword argument.
-- If `context` is not declared but the first call fails with an error that looks like a missing `context`, the call is retried once with `context` attached.
-- The `context` dict contains the provided `contextValues` plus reserved keys:
-  - `_task_id`
-  - `_task_working_directory`
-- Treats a return value of `None` as success with no outputs.
-- If a dict is returned, outputs are extracted as UTF-8 strings into `outputValuesOut`.
+### `PythonEnginePool::Stop()` / `SignalStop()` / `WaitStop()`
+Three-phase shutdown: signal → wait → finalize. `Stop()` is the convenience wrapper. Each engine drains its queue (any remaining `WorkflowTask` requests get a `"PythonEngine shutting down"` error and are completed via the promise guard) before the worker thread joins.
 
 ---
 
-### **WorkerLoop()**  
-**Implements:**
-- Wait for tasks using condition variable.
-- Reacquire GIL with `PyGILState_Ensure()`.
-- Call appropriate Python hook.
-- Handle Python exceptions via `PyErr_Print`.
-- Exit cleanly on stop.
+## Hook discovery (primary engine only)
+
+`SetupSubInterpreter(scriptDir, moduleName, loadHooks=true)` on engine 0:
+
+1. Validates `scriptDir` (path-confinement gate).
+2. Adds the canonical `scriptDir` and its parent to `sys.path` so both bare imports (`combineDocumentation`) and dotted-package imports (`scripts.combineDocumentation`) work.
+3. Imports `moduleName` (`scripts.main` by default).
+4. Looks up `OnStart`, `OnUpdate`, `OnEvent`, `OnShutdown` in the module's globals; missing hooks are logged at INFO and skipped.
+
+Engines 1..N skip step 3-4 (`loadHooks=false`) — they exist purely to handle workflow `python` tasks.
 
 ---
 
-### **EnqueueTask(PythonTask const& task)**  
-**Implements:**
-- Thread‑safe push into queue.
-- Wake worker thread.
+## Failure-path discipline
+
+Every `fail()` path inside `ExecuteWorkflowTaskOnWorker` emits `LOG_APP_ERROR` with `runId` / `workflowId` / `taskId` literals so the dashboard's Run Analyzer can attribute the failure (per `CLAUDE.md`'s fail-path discipline). Public-API early returns in `ExecuteWorkflowTask` (`!m_Running`, missing params) also log at ERROR. Python exception messages from `consumePythonException` are passed through `SanitizeUtf8` + truncated to 4 KiB before they enter `m_ErrorMessage` or any log line — defends downstream consumers (dashboard JSON, ncurses TUI) against malformed bytes from misconfigured locales or attacker-influenced traceback content.
 
 ---
 
-### **CallHook(PyObject*, char const*)**  
-**Implements:**
-- Call zero‑argument Python function.
-- Log and print exceptions.
+## Calling convention for Python tasks
+
+The runtime calls `module.function(**kwargs, context=dict)` programmatically. Scripts are NOT invoked via CLI — do not use `sys.argv`, `argparse`, or `if __name__ == "__main__":` as the entry point.
+
+`kwargs` carries the resolved task inputs (workflow DAG outputs flow through here). `context` is always attached and contains:
+
+- `context["_task_id"]` — task identifier from the JCWF
+- `context["_task_working_directory"]` — canonicalised absolute path to the task's working directory (post-confinement)
+- Plus any caller-supplied entries (typical: `_workflow_id`, `_run_id`, `_workflow_base_directory`, `_file_input_<N>`)
+
+Return `None` for no outputs, or a `dict[str, str]` to expose values as output slots (the runtime extracts every key+value as UTF-8 strings).
+
+See `doc/JC_Workflow_Specification.md` §3.3 / §11 for the JCWF-side contract and the `@jarvis-script` header format that registers a script.
 
 ---
 
-### **CallHookWithEvent(PyObject*, char const*, Event const&)**  
-**Implements:**
-- Build Python dict for event.
-- Call Python function with argument.
-- Handle errors gracefully.
+## Output redirection
 
----
+All Python `print()` / `sys.stderr.write()` lands in `JarvisRedirectPython(message)` (a C entry point that forwards into the JarvisAgent log). Per-task `_jarvis_cap_stdout` / `_jarvis_cap_stderr` `StringIO` tees additionally capture each task's output for the dashboard's per-task captured-output panel and the on-disk `stdout.txt` / `stderr.txt` files in the task working directory.
 
-### **BuildEventDict(Event const&)**  
-**Implements:**
-- Create a new Python dictionary.
-- Insert `"type"` for all events.
-- Insert `"path"` if it is a filesystem event.
-
----
-
-### **Reset()**  
-**Implements:**
-- Release Python references.
-- Clear script/module state.
-- Mark engine as non‑running.
-
----
-
-## Additional Notes
-
-### Threading + GIL Safety
-- The worker thread runs Python lifecycle hooks (`OnStart`, `OnUpdate`, `OnEvent`, `OnShutdown`).
-- Workflow tasks (`ExecuteWorkflowTask`) run Python code **on the calling thread** (synchronously) under the GIL.
-- C++ threads may enqueue tasks at any time.
-- GIL is handled automatically using `PyGILState_Ensure()` / `PyGILState_Release()`.
-
-### Error Handling
-- Any Python exception prints to stdout, which is redirected to JarvisAgent logs.
-- Missing hooks are explicitly logged but not treated as errors.
-- The C entry point `JarvisPyStatus(...)` can be called from Python code to emit a `PythonCrashedEvent` into the engine event queue.
-
-### Output Redirection
-All Python `print()` output is captured and routed to:
-
-```
-extern "C" void JarvisRedirectPython(char const* message)
-```
-
-This keeps logs unified inside JarvisAgent.
-
----
-
-## Summary
-
-`PythonEngine` is a fully asynchronous, robust CPython integration layer enabling JarvisAgent to run automation scripts safely and efficiently. It handles interpreter initialization, script loading, event delivery, logging, and lifecycle management—all without blocking the rest of the application.
-
-It is the core mechanism that allows Python scripts to control JarvisAgent’s automation workflows.
-
+`JarvisPyStatus(message)` is a separate C entry point that pushes a `PythonCrashedEvent` into the engine event queue — used by Python code that hits an unrecoverable error and wants to signal the engine.

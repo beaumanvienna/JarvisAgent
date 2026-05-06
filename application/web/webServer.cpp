@@ -68,6 +68,7 @@
 #include "workflow/workflowTypes.h"
 
 #include "event/events.h"
+#include "keys/credential.h"
 #include "keys/keyEncryption.h"
 #include "cloud/cloudConnector.h"
 #include "cloud/cloudConnectorRegistry.h"
@@ -4007,12 +4008,9 @@ namespace AIAssistant
         // cached yet, the store is lazily initialised on HandleKeysUnlockPost().
         {
             auto& keyManager = Core::g_Core->GetKeyManager();
-            std::string const cachedPwd = keyManager.GetCachedMasterPassword();
-            if (!cachedPwd.empty())
-            {
-                InitMcpKeyStore(cachedPwd);
-            }
-            else
+            bool const initialised = keyManager.WithCachedMasterPassword(
+                [this](std::string_view cachedPwd) { InitMcpKeyStore(cachedPwd); });
+            if (!initialised)
             {
                 LOG_CORE_INFO("MCP key store deferred — awaiting master password via /api/settings/keys/unlock");
             }
@@ -5788,41 +5786,64 @@ namespace AIAssistant
 
         for (std::string const& name : names)
         {
-            auto const* provider = keyManager.GetProvider(name);
-            if (!provider)
+            auto const* cred = keyManager.GetCredential(name);
+            if (!cred)
             {
                 continue;
             }
 
             crow::json::wvalue entry;
             entry["name"] = name;
-            entry["display_name"] = provider->m_DisplayName;
-            entry["endpoint"] = provider->m_Endpoint;
-            entry["default_model"] = provider->m_DefaultModel;
-            entry["api_type"] = provider->m_ApiType;
-            entry["has_key"] = !provider->m_ApiKey.empty();
-            entry["credential_type"] = provider->m_CredentialType;
+            entry["display_name"]    = cred->m_DisplayName;
+            entry["endpoint"]        = cred->m_Endpoint;
+            entry["default_model"]   = cred->m_DefaultModel;
+            entry["api_type"]        = cred->m_ApiType;
+            entry["credential_type"] = std::string(cred->GetType());
 
-            // Type-specific metadata (secrets NOT returned)
-            if (provider->m_CredentialType == "oauth")
+            // Per-type secret-presence indicators (the secret values themselves NEVER cross
+            // the network — only "set / not set" booleans).  Each branch handles one subtype
+            // exhaustively; an unhandled subtype emits no `has_key` indicator (UI will show
+            // "no key").  Adding a new subtype requires a new branch — visible omission.
+            if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
             {
-                entry["has_refresh_token"] = !provider->m_RefreshToken.empty();
-                entry["expires_at"] = provider->m_ExpiresAt;
-                entry["scopes"] = provider->m_Scopes;
+                entry["has_key"] = !api->m_ApiKey.IsEmpty();
             }
-            else if (provider->m_CredentialType == "credentials")
+            else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
             {
-                entry["username"] = provider->m_Username;
+                entry["has_key"]            = !oauth->m_AccessToken.IsEmpty();
+                entry["has_refresh_token"]  = !oauth->m_RefreshToken.IsEmpty();
+                entry["expires_at"]         = oauth->m_ExpiresAt;
+                entry["scopes"]             = oauth->m_Scopes;
+            }
+            else if (auto const* kp = dynamic_cast<KeyPairCredential const*>(cred))
+            {
+                entry["has_key"] = !kp->m_PrivateKeyPem.IsEmpty();
+            }
+            else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
+            {
+                entry["has_key"]  = !basic->m_Password.IsEmpty();
+                entry["username"] = basic->m_Username;
+            }
+            else if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
+            {
+                entry["has_key"]               = !aws->m_AccessKeyId.empty();
+                entry["has_secret_access_key"] = !aws->m_SecretAccessKey.IsEmpty();
+                entry["has_session_token"]    = !aws->m_SessionToken.IsEmpty();
+                if (!aws->m_Region.empty())
+                {
+                    entry["region"] = aws->m_Region;
+                }
             }
 
-            // Return non-secret params; strip known-sensitive keys. AWS secret_access_key /
-            // session_token must never leave the server. Extend the blocklist as new
-            // sensitive param keys are introduced.
-            if (!provider->m_Params.empty())
+            // Non-secret params — defense-in-depth strip for any future subtype that puts
+            // secrets in m_Params (the SecureString-typed subtypes don't, but the strip
+            // keeps the contract stable).  AWS secret_access_key / session_token must never
+            // leave the server.
+            if (!cred->m_Params.empty())
             {
                 static std::array<char const*, 2> const kSensitiveParamKeys = {"secret_access_key", "session_token"};
                 crow::json::wvalue paramsJson;
-                for (auto const& [k, v] : provider->m_Params)
+                for (auto const& [k, v] : cred->m_Params)
                 {
                     bool sensitive = false;
                     for (auto const* skey : kSensitiveParamKeys)
@@ -5831,8 +5852,6 @@ namespace AIAssistant
                     }
                     if (sensitive)
                     {
-                        // Surface a "set / not set" boolean so the UI can render an indicator
-                        // without the value crossing the network.
                         entry[std::string("has_") + k] = !v.empty();
                     }
                     else
@@ -5843,7 +5862,8 @@ namespace AIAssistant
                 entry["params"] = std::move(paramsJson);
             }
 
-            // API key and private_key_pem are intentionally NOT returned for security.
+            // Secret values (api_key, refresh_token, client_secret, private_key_pem,
+            // password, secret_access_key, session_token) are intentionally NOT returned.
             providersList.push_back(std::move(entry));
         }
 
@@ -5859,8 +5879,21 @@ namespace AIAssistant
             simdjson::padded_string json(req.body);
             auto doc = parser.iterate(json);
 
+            // Extract the top-level object FIRST — simdjson's ondemand iterator is
+            // forward-only and stateful, so reading any `doc["key"]` before this
+            // would advance the iterator past the opening `{` and break get_object().
+            simdjson::ondemand::object docObj;
+            if (doc.get_object().get(docObj) != simdjson::SUCCESS)
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_json";
+                err["message"] = "Request body must be a JSON object";
+                return MakeJsonResponse(400, err);
+            }
+
             std::string_view name;
-            if (doc["name"].get_string().get(name) != simdjson::SUCCESS || name.empty())
+            if (docObj["name"].get_string().get(name) != simdjson::SUCCESS || name.empty())
             {
                 crow::json::wvalue err;
                 err["ok"] = false;
@@ -5869,69 +5902,22 @@ namespace AIAssistant
                 return MakeJsonResponse(400, err);
             }
 
-            KeyManager::ProviderConfig config;
-
-            std::string_view sv;
-            if (doc["display_name"].get_string().get(sv) == simdjson::SUCCESS)
+            // CredentialFactory::CreateFromJson dispatches on `credential_type` (defaults
+            // to "api_key") and reads only the fields appropriate for the chosen subtype.
+            // Same code path that loads keys.json.enc — the request body shape is the
+            // same as the per-provider object in the encrypted store.
+            std::unique_ptr<ICredential> cred = CredentialFactory::CreateFromJson(docObj);
+            if (!cred)
             {
-                config.m_DisplayName = std::string(sv);
-            }
-            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Endpoint = std::string(sv);
-            }
-            if (doc["api_key"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiKey = std::string(sv);
-            }
-            if (doc["default_model"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_DefaultModel = std::string(sv);
-            }
-            if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiType = std::string(sv);
-            }
-            if (doc["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_CredentialType = std::string(sv);
-            }
-            if (doc["scopes"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Scopes = std::string(sv);
-            }
-            if (doc["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_PrivateKeyPem = std::string(sv);
-            }
-            if (doc["username"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Username = std::string(sv);
-            }
-            if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Password = std::string(sv);
-            }
-
-            // Optional per-provider params (Azure resource/deployment/api_version, AWS region/secrets, ...).
-            {
-                simdjson::ondemand::object paramsObj;
-                if (doc["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
-                {
-                    for (auto paramField : paramsObj)
-                    {
-                        std::string_view paramKey = paramField.unescaped_key();
-                        std::string_view paramVal;
-                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
-                        {
-                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
-                        }
-                    }
-                }
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_credential_type";
+                err["message"] = "Unknown or unsupported credential_type";
+                return MakeJsonResponse(400, err);
             }
 
             auto& keyManager = Core::g_Core->GetKeyManager();
-            if (!keyManager.AddProvider(std::string(name), std::move(config)))
+            if (!keyManager.AddCredential(std::string(name), std::move(cred)))
             {
                 crow::json::wvalue err;
                 err["ok"] = false;
@@ -5959,7 +5945,7 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        auto const* existing = keyManager.GetProvider(providerName);
+        auto const* existing = keyManager.GetCredential(providerName);
         if (!existing)
         {
             crow::json::wvalue err;
@@ -5975,71 +5961,31 @@ namespace AIAssistant
             simdjson::padded_string json(req.body);
             auto doc = parser.iterate(json);
 
-            // Start from existing config, overlay provided fields
-            KeyManager::ProviderConfig config = *existing;
-
-            std::string_view sv;
-            if (doc["display_name"].get_string().get(sv) == simdjson::SUCCESS)
+            simdjson::ondemand::object patchObj;
+            if (doc.get_object().get(patchObj) != simdjson::SUCCESS)
             {
-                config.m_DisplayName = std::string(sv);
-            }
-            if (doc["endpoint"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Endpoint = std::string(sv);
-            }
-            if (doc["api_key"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiKey = std::string(sv);
-            }
-            if (doc["default_model"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_DefaultModel = std::string(sv);
-            }
-            if (doc["api_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_ApiType = std::string(sv);
-            }
-            if (doc["credential_type"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_CredentialType = std::string(sv);
-            }
-            if (doc["scopes"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Scopes = std::string(sv);
-            }
-            if (doc["private_key_pem"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_PrivateKeyPem = std::string(sv);
-            }
-            if (doc["username"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Username = std::string(sv);
-            }
-            if (doc["password"].get_string().get(sv) == simdjson::SUCCESS)
-            {
-                config.m_Password = std::string(sv);
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "invalid_json";
+                err["message"] = "Request body must be a JSON object";
+                return MakeJsonResponse(400, err);
             }
 
-            // Per-provider params: replace wholesale if the field is present (UI sends the
-            // full edited map); leave existing values untouched if absent.
+            // CloneAndPatch builds a new same-subtype credential, copying all of
+            // `existing`'s fields, then overlays the optional patch keys.  Note:
+            // `credential_type` in the patch is intentionally ignored — to change
+            // a credential's type, DELETE + CREATE.
+            std::unique_ptr<ICredential> updated = CredentialFactory::CloneAndPatch(*existing, patchObj);
+            if (!updated)
             {
-                simdjson::ondemand::object paramsObj;
-                if (doc["params"].get_object().get(paramsObj) == simdjson::SUCCESS)
-                {
-                    config.m_Params.clear();
-                    for (auto paramField : paramsObj)
-                    {
-                        std::string_view paramKey = paramField.unescaped_key();
-                        std::string_view paramVal;
-                        if (paramField.value().get_string().get(paramVal) == simdjson::SUCCESS)
-                        {
-                            config.m_Params[std::string(paramKey)] = std::string(paramVal);
-                        }
-                    }
-                }
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "internal_error";
+                err["message"] = "Failed to clone existing credential for update";
+                return MakeJsonResponse(500, err);
             }
 
-            keyManager.UpdateProvider(providerName, std::move(config));
+            keyManager.UpdateCredential(providerName, std::move(updated));
 
             crow::json::wvalue responseJson;
             responseJson["ok"] = true;
@@ -6069,6 +6015,11 @@ namespace AIAssistant
             return MakeJsonResponse(404, err);
         }
 
+        // If the deleted provider had OAuth tokens cached in OAuthTokenManager, drop
+        // them so the in-memory state stays in sync with the on-disk state we just
+        // mutated.  RemoveTokens is idempotent — no-op for non-OAuth providers.
+        Core::g_Core->GetOAuthTokenManager().RemoveTokens(providerName);
+
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         return MakeJsonResponse(200, responseJson);
@@ -6078,7 +6029,7 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        if (!keyManager.GetProvider(providerName))
+        if (!keyManager.GetCredential(providerName))
         {
             crow::json::wvalue err;
             err["ok"] = false;
@@ -6101,7 +6052,7 @@ namespace AIAssistant
 
         // Master password: request body or already-cached password from a prior unlock.
         // There is no env-var fallback — see doc/cyber security.md §"Master password after restart".
-        std::string masterPassword;
+        std::string bodyPassword;
         {
             simdjson::ondemand::parser parser;
             try
@@ -6112,7 +6063,7 @@ namespace AIAssistant
                 std::string_view sv;
                 if (doc["master_password"].get_string().get(sv) == simdjson::SUCCESS)
                 {
-                    masterPassword = std::string(sv);
+                    bodyPassword = std::string(sv);
                 }
             }
             catch (...)
@@ -6121,63 +6072,71 @@ namespace AIAssistant
             }
         }
 
-        if (masterPassword.empty())
-        {
-            masterPassword = keyManager.GetCachedMasterPassword();
-        }
-
-        if (masterPassword.empty())
-        {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "no_password";
-            err["message"] = "Master password required. Include it in the request body, or unlock the key "
-                              "store first via POST /api/settings/keys/unlock.";
-            return MakeJsonResponse(400, err);
-        }
-
         std::filesystem::path const keysFilePath =
             Core::g_Core->GetLaunchCWDAbsolute() / Core::g_Core->GetConfig().m_KeysFilePath;
 
-        // If an encrypted file already exists, verify the password matches before overwriting
-        if (std::filesystem::exists(keysFilePath))
+        auto doSave = [&](std::string_view password) -> crow::response
         {
-            std::ifstream verifyFile(keysFilePath, std::ios::binary);
-            if (verifyFile)
+            // If an encrypted file already exists, verify the password matches before overwriting
+            if (std::filesystem::exists(keysFilePath))
             {
-                std::vector<uint8_t> existingBlob((std::istreambuf_iterator<char>(verifyFile)),
-                                                  std::istreambuf_iterator<char>());
-                verifyFile.close();
-
-                if (!existingBlob.empty())
+                std::ifstream verifyFile(keysFilePath, std::ios::binary);
+                if (verifyFile)
                 {
-                    std::string decrypted = KeyEncryption::Decrypt(existingBlob, masterPassword);
-                    if (decrypted.empty())
+                    std::vector<uint8_t> existingBlob((std::istreambuf_iterator<char>(verifyFile)),
+                                                      std::istreambuf_iterator<char>());
+                    verifyFile.close();
+
+                    if (!existingBlob.empty())
                     {
-                        crow::json::wvalue err;
-                        err["ok"] = false;
-                        err["error"] = "wrong_password";
-                        err["message"] =
-                            "Incorrect master password. The password must match the one used to create the keys file.";
-                        return MakeJsonResponse(403, err);
+                        std::string decrypted = KeyEncryption::Decrypt(existingBlob, password);
+                        if (decrypted.empty())
+                        {
+                            crow::json::wvalue err;
+                            err["ok"] = false;
+                            err["error"] = "wrong_password";
+                            err["message"] = "Incorrect master password. The password must match the one used to "
+                                              "create the keys file.";
+                            return MakeJsonResponse(403, err);
+                        }
                     }
                 }
             }
-        }
 
-        if (!keyManager.Save(keysFilePath, masterPassword))
+            if (!keyManager.Save(keysFilePath, password))
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "save_failed";
+                err["message"] = "Failed to save encrypted keys file to '" + keysFilePath.string() + "'";
+                return MakeJsonResponse(500, err);
+            }
+
+            crow::json::wvalue responseJson;
+            responseJson["ok"] = true;
+            responseJson["path"] = keysFilePath.string();
+            return MakeJsonResponse(200, responseJson);
+        };
+
+        if (!bodyPassword.empty())
         {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "save_failed";
-            err["message"] = "Failed to save encrypted keys file to '" + keysFilePath.string() + "'";
-            return MakeJsonResponse(500, err);
+            return doSave(bodyPassword);
         }
 
-        crow::json::wvalue responseJson;
-        responseJson["ok"] = true;
-        responseJson["path"] = keysFilePath.string();
-        return MakeJsonResponse(200, responseJson);
+        crow::response cachedResp;
+        bool const hadCached = keyManager.WithCachedMasterPassword(
+            [&](std::string_view cached) { cachedResp = doSave(cached); });
+        if (hadCached)
+        {
+            return cachedResp;
+        }
+
+        crow::json::wvalue err;
+        err["ok"] = false;
+        err["error"] = "no_password";
+        err["message"] = "Master password required. Include it in the request body, or unlock the key "
+                          "store first via POST /api/settings/keys/unlock.";
+        return MakeJsonResponse(400, err);
     }
 
     // ================================================================
@@ -6924,62 +6883,77 @@ namespace AIAssistant
         // fresh access_token.
         {
             auto& keyManager = Core::g_Core->GetKeyManager();
-            auto const* existing = keyManager.GetProvider(connection->m_KeyName);
+            auto const* existing = keyManager.GetCredential(connection->m_KeyName);
 
-            // Auto-create a placeholder provider if one doesn't already exist for this
-            // connection's key_name. Without this, the OAuth callback would have to bail
-            // out and tokens would remain in OAuthTokenManager memory only — lost on the
-            // next j9t restart. Matches the natural UX where a user creates an OAuth
-            // connection in the editor and immediately clicks "Authorize" without having
-            // to manually create a same-named entry in the providers/keys view first.
-            KeyManager::ProviderConfig updated = existing ? *existing : KeyManager::ProviderConfig{};
-            if (!existing)
+            // Build a fresh OAuthCredential.  When an existing credential is present we
+            // preserve its non-OAuth metadata (display_name, endpoint, default_model,
+            // api_type, params) — useful when the user edited those before authorising.
+            // The OAuth-specific fields are always rewritten to the freshly-issued values.
+            //
+            // Auto-create a placeholder if no existing entry: without this, the OAuth
+            // callback would bail and tokens would remain in OAuthTokenManager memory
+            // only — lost on the next j9t restart.  Matches the UX where a user creates
+            // an OAuth connection in the editor and immediately clicks "Authorize"
+            // without having to pre-create a same-named entry in the providers view.
+            auto cred = std::make_unique<OAuthCredential>();
+            if (existing)
             {
-                updated.m_DisplayName = connection->m_KeyName;
+                cred->m_DisplayName  = existing->m_DisplayName;
+                cred->m_Endpoint     = existing->m_Endpoint;
+                cred->m_DefaultModel = existing->m_DefaultModel;
+                cred->m_ApiType      = existing->m_ApiType;
+                cred->m_Params       = existing->m_Params;
+            }
+            else
+            {
+                cred->m_DisplayName = connection->m_KeyName;
                 LOG_CORE_INFO("OAuth callback: auto-creating KeyManager provider '{}' for connection '{}'",
                               connection->m_KeyName, connectionName);
             }
 
-            updated.m_CredentialType = "oauth";
-            updated.m_RefreshToken = std::string(refreshToken);
-            updated.m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
-            updated.m_Scopes = connection->m_Params.count("scopes")
-                                   ? connection->m_Params.at("scopes")
-                                   : providerInfo.m_DefaultScopes;
-            updated.m_TokenEndpoint = tokenUrl;
-            updated.m_ClientId = clientId;
-            updated.m_ClientSecret = clientSecretForRefresh;
+            // Access token is short-lived — OAuthTokenManager hydrates a fresh one on the
+            // next request from the persisted refresh token, so we don't write it here.
+            cred->m_RefreshToken.Set(refreshToken);
+            if (!clientSecretForRefresh.empty())
+            {
+                cred->m_ClientSecret.Set(clientSecretForRefresh);
+            }
+            cred->m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
+            cred->m_Scopes = connection->m_Params.count("scopes")
+                                 ? connection->m_Params.at("scopes")
+                                 : providerInfo.m_DefaultScopes;
+            cred->m_TokenEndpoint = tokenUrl;
+            cred->m_ClientId      = clientId;
 
             if (existing)
             {
-                keyManager.UpdateProvider(connection->m_KeyName, std::move(updated));
+                keyManager.UpdateCredential(connection->m_KeyName, std::move(cred));
             }
             else
             {
-                keyManager.AddProvider(connection->m_KeyName, std::move(updated));
+                keyManager.AddCredential(connection->m_KeyName, std::move(cred));
             }
 
             // Persist OAuth tokens if the key store has been unlocked this session.
             // If the admin never unlocked (/api/settings/keys/unlock), the tokens stay
             // in memory only and the user gets a warning below. No env-var fallback.
-            std::string cachedPassword = keyManager.GetCachedMasterPassword();
-
             auto const& keysPath = keyManager.GetKeysFilePath();
-            if (!cachedPassword.empty() && !keysPath.empty())
-            {
-                if (keyManager.Save(keysPath, cachedPassword))
+            bool const persisted = !keysPath.empty() && keyManager.WithCachedMasterPassword(
+                [&](std::string_view cachedPassword)
                 {
-                    LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
+                    if (keyManager.Save(keysPath, cachedPassword))
+                    {
+                        LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
+                                          connection->m_KeyName);
+                    }
+                    else
+                    {
+                        LOG_CORE_WARN("OAuth callback: failed to persist tokens for '{}' — refresh_token "
+                                      "will be lost on restart",
                                       connection->m_KeyName);
-                }
-                else
-                {
-                    LOG_CORE_WARN("OAuth callback: failed to persist tokens for '{}' — refresh_token "
-                                  "will be lost on restart",
-                                  connection->m_KeyName);
-                }
-            }
-            else
+                    }
+                });
+            if (!persisted)
             {
                 LOG_CORE_WARN("OAuth callback: no cached master password or keys file path — refresh_token "
                               "for '{}' held in memory only and will be lost on restart",
@@ -7056,13 +7030,15 @@ namespace AIAssistant
             return false;
         }
         auto& keyManager = Core::g_Core->GetKeyManager();
-        std::string const pwd = keyManager.GetCachedMasterPassword();
-        if (pwd.empty())
+        bool saved = false;
+        bool const hadPassword = keyManager.WithCachedMasterPassword(
+            [this, &saved](std::string_view pwd) { saved = m_McpKeyManager.Save(m_McpKeysFilePath, pwd); });
+        if (!hadPassword)
         {
             LOG_CORE_WARN("SaveMcpKeyStore: master password not cached — cannot persist");
             return false;
         }
-        return m_McpKeyManager.Save(m_McpKeysFilePath, pwd);
+        return saved;
     }
 
 

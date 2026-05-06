@@ -31,6 +31,7 @@
 #include "core.h"
 #include "engine.h"
 #include "file/fileWatcher.h"
+#include "log/secretRedactor.h"
 #include "cloud/emailConnector.h"
 
 // MSVC natively supports C++20 chrono timezone (time_zone, zoned_time, etc.).
@@ -356,6 +357,15 @@ namespace AIAssistant
     void TriggerEngine::AddWebhookTrigger(std::string const& workflowId, std::string const& triggerId,
                                           std::string const& secret, bool isEnabled)
     {
+        // Register the HMAC shared secret with the redactor BEFORE any logging
+        // path can see it (the LOG_APP_INFO below is shape-only, but defense-in-depth
+        // protects against future fail-path logs and against any code that walks
+        // m_WebhookTriggers and logs the field).
+        if (!secret.empty())
+        {
+            SecretRedactor::Get().AddSecret(secret);
+        }
+
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         WebhookTriggerInstance webhookTriggerInstance{};
         webhookTriggerInstance.m_WorkflowId = workflowId;

@@ -29,14 +29,20 @@ namespace AIAssistant
 {
     // RSA RS256 JWT creation via OpenSSL EVP_DigestSign.
     // Reusable for Snowflake, Google service accounts, and any RS256-signed JWT.
+    //
+    // Algorithm is fixed at RS256 (RSA + SHA-256, PKCS#1 v1.5 padding).  The header is
+    // built internally — callers cannot pass a header that lies about the algorithm.
+    // Private keys must be RSA (EC / DSA / Ed25519 keys are rejected) and at least 2048
+    // bits.
     class JwtGenerator
     {
     public:
-        // Generate an RS256-signed JWT from raw header and payload JSON strings.
+        // Generate an RS256-signed JWT for the given payload claims.
+        // The header `{"alg":"RS256","typ":"JWT"}` is built internally.
         // privateKeyPem must be an RSA private key in PEM format (minimum 2048 bits).
         // Returns the signed JWT string (header.payload.signature) or empty string on failure.
-        static std::string Generate(std::string const& headerJson, std::string const& payloadJson,
-                                    std::string const& privateKeyPem, std::string& errorMessage);
+        static std::string Generate(std::string const& payloadJson, std::string const& privateKeyPem,
+                                    std::string& errorMessage);
 
         // Convenience: generate a Snowflake-specific JWT.
         // Account and user are uppercased per Snowflake convention.

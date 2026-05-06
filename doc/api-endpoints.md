@@ -669,6 +669,9 @@ Graceful stop: finishes all in-flight tasks but does not dispatch any new ones. 
 Only `workflowId` is required. `runId` and `taskName` are auto-generated if omitted.
 Persists the request JSON to disk for traceability. Context fields are passed to task executors.
 
+`callbackUrl` MUST resolve to a public IP — loopback / RFC 1918 / link-local / cloud-metadata addresses are refused at completion time (SSRF gate; see `doc/JC_Workflow_Specification.md` §3.2.6 and `doc/cyber security.md`).
+To omit task output content from the callback payload (e.g. for runs handling PII or secrets), set `"callback_include_outputs": "false"` in the `context` object.
+
 **Response (202):**
 ```json
 { "ok": true, "workflowId": "myWorkflow", "runId": "...", "requestPath": "/abs/path/request.json" }

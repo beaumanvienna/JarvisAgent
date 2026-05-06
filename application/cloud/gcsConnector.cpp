@@ -32,6 +32,7 @@
 
 #include "core.h"
 #include "engine.h"
+#include "keys/credential.h"
 #include "keys/jwtGenerator.h"
 #include "keys/keyManager.h"
 #include "curlWrapper/curlWrapper.h"
@@ -181,20 +182,28 @@ namespace AIAssistant
         }
 
         // Mint a new JWT and exchange for access token
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-
-        std::string const& privateKeyPem = provider->m_PrivateKeyPem;
-        if (privateKeyPem.empty())
+        auto const* keyPair = dynamic_cast<KeyPairCredential const*>(cred);
+        if (!keyPair)
+        {
+            errorMessage = "Credential '" + connection.m_KeyName +
+                           "' must be KeyPairCredential — GCS requires a service-account key_pair credential";
+            return false;
+        }
+        if (keyPair->m_PrivateKeyPem.IsEmpty())
         {
             errorMessage = "Credential '" + connection.m_KeyName +
                            "' has no private key PEM — GCS requires a KeyPairCredential with a service account key";
             return false;
         }
+        // Materialise into a request-scoped std::string for JwtGenerator (request-bounded
+        // plaintext; the SecureString remains intact in KeyManager storage).
+        std::string const privateKeyPem(keyPair->m_PrivateKeyPem.Get());
 
         auto emailIt = connection.m_Params.find("service_account_email");
         if (emailIt == connection.m_Params.end() || emailIt->second.empty())
@@ -204,12 +213,10 @@ namespace AIAssistant
         }
         std::string const& serviceAccountEmail = emailIt->second;
 
-        // Build JWT claims for GCS
+        // Build JWT claims for GCS — header is built internally by JwtGenerator::Generate.
         auto now = std::chrono::system_clock::now();
         int64_t iat = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
         int64_t exp = iat + kTokenLifetimeSeconds;
-
-        std::string headerJson = R"({"alg":"RS256","typ":"JWT"})";
 
         std::ostringstream payloadStream;
         payloadStream << R"({"iss":")" << serviceAccountEmail
@@ -219,7 +226,7 @@ namespace AIAssistant
                       << R"(,"exp":)" << exp << "}";
         std::string payloadJson = payloadStream.str();
 
-        std::string jwt = JwtGenerator::Generate(headerJson, payloadJson, privateKeyPem, errorMessage);
+        std::string jwt = JwtGenerator::Generate(payloadJson, privateKeyPem, errorMessage);
         if (jwt.empty())
         {
             if (errorMessage.empty())

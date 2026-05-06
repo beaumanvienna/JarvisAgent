@@ -32,13 +32,27 @@
 #include <thread>
 #include <unordered_map>
 
+#include <cstring>
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+
 #include <curl/curl.h>
 
 #include "simdjson/simdjson.h"
 
 #include "core.h"
 #include "engine.h"
+#include "file/pathConfinement.h"
 #include "jarvisAgent.h"
+#include "json/jsonHelper.h"
 #include "workflow/dataflowResolver.h"
 #include "workflow/jcwfContainer.h"
 #include "workflow/taskExecutorRegistry.h"
@@ -275,6 +289,90 @@ namespace AIAssistant
             }
         }
 
+        // fnmatch-style matcher for the limited glob set used in JCWF
+        // `file_outputs` patterns.  Supports `*` (zero or more characters,
+        // anywhere — not just at start/end) and `?` (exactly one character).
+        // No bracket expressions, no path-separator semantics — patterns are
+        // applied to a single filename in a known directory, never to a
+        // multi-segment path.  Iterative two-pointer match with backtracking;
+        // O(name × pattern) worst case, no allocations.  Replaces an ad-hoc
+        // matcher that only handled `*` at the very start or very end and
+        // would silently fail on patterns like `PROB_*.json` (cyber-sec audit
+        // MEDIUM 2).  Path-confinement still gates the resulting paths via
+        // ConfineUnderProjectRoot, so a too-permissive pattern can only ever
+        // match files inside the project tree.
+        bool GlobMatchesFilename(std::string_view pattern, std::string_view name)
+        {
+            size_t pi = 0;
+            size_t ni = 0;
+            size_t starPi = std::string_view::npos;
+            size_t starNi = 0;
+
+            while (ni < name.size())
+            {
+                if (pi < pattern.size() && pattern[pi] == '*')
+                {
+                    starPi = pi++;
+                    starNi = ni;
+                }
+                else if (pi < pattern.size() &&
+                         (pattern[pi] == '?' || pattern[pi] == name[ni]))
+                {
+                    ++pi;
+                    ++ni;
+                }
+                else if (starPi != std::string_view::npos)
+                {
+                    pi = starPi + 1;
+                    ni = ++starNi;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            // Consume any trailing `*` chars in the pattern.
+            while (pi < pattern.size() && pattern[pi] == '*')
+            {
+                ++pi;
+            }
+            return pi == pattern.size();
+        }
+
+        // Allowlist for run / workflow identifiers reaching the runtime layer.
+        // Already enforced at the REST boundary (`IsValidWorkflowId` in webServer)
+        // — this is defense-in-depth at the runtime entrypoints, so a future
+        // direct caller (integration / test harness / new MCP tool) cannot
+        // smuggle path-traversal segments or shell-metachar identifiers into
+        // the on-disk paths the runtime later builds (queue/<id>, run-state
+        // tracking maps, log lines).  Per cyber-sec audit LOW 2.
+        constexpr size_t kMaxRunIdLen = 256;
+        bool IsValidRunOrWorkflowId(std::string const& id)
+        {
+            if (id.empty() || id.size() > kMaxRunIdLen)
+            {
+                return false;
+            }
+            for (char const c : id)
+            {
+                bool const ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                (c >= '0' && c <= '9') ||
+                                c == '_' || c == '-' || c == '.';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            // Refuse `..` and dot-prefixed identifiers — they survive the
+            // charset check but still pose a containment hazard if joined
+            // into a path.
+            if (id == "." || id == ".." || id.front() == '.')
+            {
+                return false;
+            }
+            return true;
+        }
+
         std::string GetIso8601NowUTC()
         {
             auto const now = std::chrono::system_clock::now();
@@ -365,6 +463,12 @@ namespace AIAssistant
 
         std::string WorkflowRunStateToString(WorkflowRunState const state)
         {
+            // Closed enum — compiler -Wswitch catches missing arms when a variant is
+            // added.  static_assert pins the count so a renumbering or new tail-variant
+            // forces this site to be revisited.  No `default:` arm — fail-loud beats a
+            // silent "unknown" fallback.
+            static_assert(static_cast<int>(WorkflowRunState::Stopped) == 7,
+                          "WorkflowRunState variant count changed — extend WorkflowRunStateToString");
             switch (state)
             {
                 case WorkflowRunState::Pending:
@@ -383,41 +487,170 @@ namespace AIAssistant
                     return "cancelled";
                 case WorkflowRunState::Stopped:
                     return "stopped";
-                default:
-                    return "unknown";
             }
+            return "unknown";
         }
 
-        // Escape a string for inclusion in a JSON value (minimal escaping).
-        std::string JsonEscape(std::string const& input)
+        // ---- SSRF defense for the completion callback URL ----
+        // The callbackUrl is workflow context, which is partially attacker-influenced
+        // (a JCWF or webhook trigger payload can seed context).  Without this gate, a
+        // malicious workflow could point the callback at internal services
+        // (cloud-metadata endpoints like 169.254.169.254, intra-VPC databases, the
+        // local control-plane) and exfiltrate task outputs to them.  Per cyber-sec
+        // audit HIGH 2 + LOW 1.
+
+        bool IsIp4InRejectedRange(uint32_t ip4HostOrder)
         {
-            std::string out;
-            out.reserve(input.size() + 16);
-            for (char const character : input)
+            // Rejected ranges (host-byte order).  All loopback / private / link-local /
+            // multicast / cloud-metadata / unspecified ranges are blocked.
+            uint8_t const a = static_cast<uint8_t>((ip4HostOrder >> 24) & 0xFF);
+            uint8_t const b = static_cast<uint8_t>((ip4HostOrder >> 16) & 0xFF);
+            if (a == 0)        return true; // 0.0.0.0/8 unspecified
+            if (a == 10)       return true; // RFC 1918
+            if (a == 127)      return true; // loopback
+            if (a == 169 && b == 254) return true; // link-local + cloud-metadata 169.254.169.254
+            if (a == 172 && (b >= 16 && b <= 31)) return true; // RFC 1918
+            if (a == 192 && b == 168) return true; // RFC 1918
+            if (a == 100 && (b >= 64 && b <= 127)) return true; // CGNAT
+            if (a >= 224)      return true; // multicast + reserved
+            return false;
+        }
+
+        bool IsIp6Rejected(in6_addr const& addr)
+        {
+            // Loopback ::1
+            static uint8_t const loopback[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+            if (std::memcmp(addr.s6_addr, loopback, 16) == 0) return true;
+            // Unspecified ::
+            static uint8_t const unspec[16] = {0};
+            if (std::memcmp(addr.s6_addr, unspec, 16) == 0) return true;
+            // Link-local fe80::/10
+            if (addr.s6_addr[0] == 0xfe && (addr.s6_addr[1] & 0xc0) == 0x80) return true;
+            // Unique-local fc00::/7
+            if ((addr.s6_addr[0] & 0xfe) == 0xfc) return true;
+            // Multicast ff00::/8
+            if (addr.s6_addr[0] == 0xff) return true;
+            // IPv4-mapped ::ffff:0:0/96 — extract the v4 and re-check
+            static uint8_t const v4mapPrefix[12] = {0,0,0,0, 0,0,0,0, 0,0,0xff,0xff};
+            if (std::memcmp(addr.s6_addr, v4mapPrefix, 12) == 0)
             {
-                switch (character)
+                uint32_t const v4 = (uint32_t(addr.s6_addr[12]) << 24) | (uint32_t(addr.s6_addr[13]) << 16) |
+                                    (uint32_t(addr.s6_addr[14]) << 8)  |  uint32_t(addr.s6_addr[15]);
+                return IsIp4InRejectedRange(v4);
+            }
+            return false;
+        }
+
+        // Returns true iff the URL is safe to use as a completion-callback target.
+        // outReason is filled with a short human-readable reason on rejection.
+        // Allowlist-style: scheme must be https, host must resolve only to public IPs.
+        bool IsCallbackUrlAllowed(std::string const& url, std::string& outReason)
+        {
+            outReason.clear();
+
+            // Require https:// prefix.  Plain http (or other schemes) leaks the
+            // payload over the wire and removes peer-cert verification's protection.
+            constexpr char const kHttpsPrefix[] = "https://";
+            constexpr size_t kHttpsPrefixLen = sizeof(kHttpsPrefix) - 1;
+            if (url.size() <= kHttpsPrefixLen ||
+                url.compare(0, kHttpsPrefixLen, kHttpsPrefix) != 0)
+            {
+                outReason = "scheme not https";
+                return false;
+            }
+
+            // Extract host (between "://" and the first '/', '?', '#', or end).
+            size_t hostStart = kHttpsPrefixLen;
+            // Skip optional userinfo "user:pass@"
+            size_t const atPos = url.find('@', hostStart);
+            size_t const pathPos = url.find_first_of("/?#", hostStart);
+            if (atPos != std::string::npos && (pathPos == std::string::npos || atPos < pathPos))
+            {
+                hostStart = atPos + 1;
+            }
+            size_t hostEnd = url.find_first_of("/?#", hostStart);
+            if (hostEnd == std::string::npos)
+            {
+                hostEnd = url.size();
+            }
+            std::string hostport = url.substr(hostStart, hostEnd - hostStart);
+            if (hostport.empty())
+            {
+                outReason = "empty host";
+                return false;
+            }
+
+            // Strip "[" "]" for bracketed IPv6 + the trailing ":port" if present.
+            std::string host;
+            if (!hostport.empty() && hostport.front() == '[')
+            {
+                size_t const closeBracket = hostport.find(']');
+                if (closeBracket == std::string::npos)
                 {
-                    case '\"':
-                        out += "\\\"";
-                        break;
-                    case '\\':
-                        out += "\\\\";
-                        break;
-                    case '\n':
-                        out += "\\n";
-                        break;
-                    case '\r':
-                        out += "\\r";
-                        break;
-                    case '\t':
-                        out += "\\t";
-                        break;
-                    default:
-                        out += character;
-                        break;
+                    outReason = "malformed bracketed host";
+                    return false;
+                }
+                host = hostport.substr(1, closeBracket - 1);
+            }
+            else
+            {
+                size_t const colonPos = hostport.find(':');
+                host = (colonPos == std::string::npos) ? hostport : hostport.substr(0, colonPos);
+            }
+
+            if (host.empty())
+            {
+                outReason = "empty host after parsing";
+                return false;
+            }
+
+            // Resolve host (IP literal OR DNS name).  Reject if ANY resolved address
+            // is in a private / loopback / link-local / multicast range — closes the
+            // DNS-rebinding-style attack where a hostname has both public and private
+            // A records, or where an attacker-controlled DNS returns a private IP.
+            struct addrinfo hints{};
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+            hints.ai_flags = AI_NUMERICSERV;
+            struct addrinfo* results = nullptr;
+            int const gai = ::getaddrinfo(host.c_str(), "443", &hints, &results);
+            if (gai != 0 || results == nullptr)
+            {
+                outReason = std::string("DNS resolution failed: ") +
+                            (gai == 0 ? "no addresses" : ::gai_strerror(gai));
+                if (results) { ::freeaddrinfo(results); }
+                return false;
+            }
+            for (struct addrinfo* it = results; it != nullptr; it = it->ai_next)
+            {
+                if (it->ai_family == AF_INET)
+                {
+                    auto const* sin = reinterpret_cast<struct sockaddr_in const*>(it->ai_addr);
+                    uint32_t const ip4 = ntohl(sin->sin_addr.s_addr);
+                    if (IsIp4InRejectedRange(ip4))
+                    {
+                        char buf[INET_ADDRSTRLEN] = {};
+                        ::inet_ntop(AF_INET, &sin->sin_addr, buf, sizeof(buf));
+                        outReason = std::string("resolves to internal IPv4 ") + buf;
+                        ::freeaddrinfo(results);
+                        return false;
+                    }
+                }
+                else if (it->ai_family == AF_INET6)
+                {
+                    auto const* sin6 = reinterpret_cast<struct sockaddr_in6 const*>(it->ai_addr);
+                    if (IsIp6Rejected(sin6->sin6_addr))
+                    {
+                        char buf[INET6_ADDRSTRLEN] = {};
+                        ::inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
+                        outReason = std::string("resolves to internal IPv6 ") + buf;
+                        ::freeaddrinfo(results);
+                        return false;
+                    }
                 }
             }
-            return out;
+            ::freeaddrinfo(results);
+            return true;
         }
 
         // Fire-and-forget POST to the callbackUrl with the run completion payload.
@@ -437,6 +670,38 @@ namespace AIAssistant
             std::string const completedAt = workflowRun.m_CompletedAtIso8601;
             bool const hasFailed = workflowRun.m_HasFailed;
 
+            // Output content is included by default for backwards compatibility.
+            // Setting `callback_include_outputs` to "false" / "0" / "no" in the run
+            // context strips per-task output values + file contents from the payload,
+            // leaving only run-level state + per-task state + error messages.  Per
+            // cyber-sec audit MEDIUM 1: callers handling sensitive data (PII,
+            // secrets, output blobs that could contain credentials) should opt out
+            // explicitly so a leaked callback URL doesn't exfiltrate the content.
+            bool includeOutputs = true;
+            if (auto const it = workflowRun.m_Context.find("callback_include_outputs");
+                it != workflowRun.m_Context.end())
+            {
+                std::string const v = it->second.m_Value;
+                if (v == "false" || v == "0" || v == "no" || v == "False" || v == "FALSE")
+                {
+                    includeOutputs = false;
+                }
+            }
+
+            // SSRF gate — refuse callbacks to internal/loopback/private endpoints.
+            // The URL field of m_Context is partially attacker-influenced, so we
+            // canonicalise + DNS-resolve it BEFORE building the payload (cheap
+            // failure path; no body is rendered if the target is rejected).
+            {
+                std::string ssrfReason;
+                if (!IsCallbackUrlAllowed(callbackUrl, ssrfReason))
+                {
+                    LOG_APP_ERROR("[callback] refused completion callback for run '{}' to '{}': {}",
+                                  runId, callbackUrl, ssrfReason);
+                    return;
+                }
+            }
+
             // Build per-task summary.
             std::string taskSummaryJson;
             {
@@ -450,6 +715,8 @@ namespace AIAssistant
                     }
                     first = false;
 
+                    static_assert(static_cast<int>(TaskInstanceStateKind::WaitingExternal) == 6,
+                                  "TaskInstanceStateKind variant count changed — extend this switch");
                     std::string taskStateStr;
                     switch (taskState.m_State)
                     {
@@ -474,19 +741,18 @@ namespace AIAssistant
                         case TaskInstanceStateKind::WaitingExternal:
                             taskStateStr = "waiting_external";
                             break;
-                        default:
-                            taskStateStr = "unknown";
-                            break;
                     }
 
-                    taskSummaryJson += "\"" + JsonEscape(taskId) + "\":{\"state\":\"" + taskStateStr + "\"";
+                    taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(taskId) + "\":{\"state\":\"" + taskStateStr + "\"";
                     if (!taskState.m_LastErrorMessage.empty())
                     {
-                        taskSummaryJson += ",\"error\":\"" + JsonEscape(taskState.m_LastErrorMessage) + "\"";
+                        taskSummaryJson += ",\"error\":\"" + JsonHelper::EscapeJsonString(taskState.m_LastErrorMessage) + "\"";
                     }
 
-                    // Include task output content for succeeded tasks.
-                    if (taskState.m_State == TaskInstanceStateKind::Succeeded && !taskState.m_OutputValues.empty())
+                    // Include task output content for succeeded tasks — only if the
+                    // run context didn't opt out via callback_include_outputs=false.
+                    if (includeOutputs && taskState.m_State == TaskInstanceStateKind::Succeeded &&
+                        !taskState.m_OutputValues.empty())
                     {
                         static constexpr size_t kMaxOutputBytes = 65536;
                         taskSummaryJson += ",\"outputs\":{";
@@ -519,7 +785,7 @@ namespace AIAssistant
                                 content = slotValue; // Fallback: use the raw value.
                             }
 
-                            taskSummaryJson += "\"" + JsonEscape(slotName) + "\":\"" + JsonEscape(content) + "\"";
+                            taskSummaryJson += "\"" + JsonHelper::EscapeJsonString(slotName) + "\":\"" + JsonHelper::EscapeJsonString(content) + "\"";
                         }
                         taskSummaryJson += "}";
                     }
@@ -531,11 +797,11 @@ namespace AIAssistant
 
             // Build the full callback payload.
             std::string payload = "{";
-            payload += "\"workflowId\":\"" + JsonEscape(workflowId) + "\",";
-            payload += "\"runId\":\"" + JsonEscape(runId) + "\",";
+            payload += "\"workflowId\":\"" + JsonHelper::EscapeJsonString(workflowId) + "\",";
+            payload += "\"runId\":\"" + JsonHelper::EscapeJsonString(runId) + "\",";
             payload += "\"state\":\"" + state + "\",";
             payload += "\"ok\":" + std::string(hasFailed ? "false" : "true") + ",";
-            payload += "\"completedAt\":\"" + JsonEscape(completedAt) + "\",";
+            payload += "\"completedAt\":\"" + JsonHelper::EscapeJsonString(completedAt) + "\",";
             payload += "\"tasks\":" + taskSummaryJson;
             payload += "}";
 
@@ -560,6 +826,19 @@ namespace AIAssistant
                     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
                     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L);
                     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+                    // TLS hardening + SSRF defense in depth.  IsCallbackUrlAllowed
+                    // already gates host range; these options ensure curl itself
+                    // cannot silently downgrade or redirect the request to a worse
+                    // destination (cyber-sec audit LOW 1).
+                    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+                    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+                    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+                    // Restrict to HTTPS — guards against an LD_PRELOAD / curl-config
+                    // that defaulted CURLOPT_PROTOCOLS to something broader.  Vendored
+                    // curl is 8.x so CURLOPT_PROTOCOLS_STR is always available.
+                    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+                    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
 
                     CURLcode const res = curl_easy_perform(curl);
                     if (res == CURLE_OK)
@@ -843,7 +1122,24 @@ namespace AIAssistant
         }
     }
 
-    WorkflowRuntimeManager::~WorkflowRuntimeManager() { Stop(); }
+    WorkflowRuntimeManager::~WorkflowRuntimeManager() noexcept
+    {
+        // Stop() acquires m_Mutex and may interact with the thread pool / AiRequestPool.
+        // A destructor that lets exceptions escape calls std::terminate; swallow + log
+        // so a teardown failure on one subsystem doesn't take down the whole process.
+        try
+        {
+            Stop();
+        }
+        catch (std::exception const& exception)
+        {
+            LOG_APP_ERROR("WorkflowRuntimeManager::~WorkflowRuntimeManager: Stop() threw: {}", exception.what());
+        }
+        catch (...)
+        {
+            LOG_APP_ERROR("WorkflowRuntimeManager::~WorkflowRuntimeManager: Stop() threw unknown exception");
+        }
+    }
 
     void WorkflowRuntimeManager::SetRegistry(WorkflowRegistry const* workflowRegistry)
     {
@@ -995,8 +1291,11 @@ namespace AIAssistant
 
     std::string WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId(std::string const& workflowId)
     {
-        if (workflowId.empty())
+        if (!IsValidRunOrWorkflowId(workflowId))
         {
+            LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId: rejected invalid workflowId "
+                          "(len={}, allowlist [A-Za-z0-9._-], no leading dot)",
+                          workflowId.size());
             return std::string();
         }
 
@@ -1039,8 +1338,18 @@ namespace AIAssistant
                                                                                  std::string const& runId,
                                                                                  ContextMap const& context)
     {
-        if (workflowId.empty())
+        if (!IsValidRunOrWorkflowId(workflowId))
         {
+            LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId: rejected invalid "
+                          "workflowId (len={})", workflowId.size());
+            return std::string();
+        }
+        // runId is optional — empty triggers GenerateRunId below — but if
+        // supplied it must satisfy the same allowlist.
+        if (!runId.empty() && !IsValidRunOrWorkflowId(runId))
+        {
+            LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId: rejected invalid runId "
+                          "(len={}) for workflow '{}'", runId.size(), workflowId);
             return std::string();
         }
 
@@ -1102,6 +1411,9 @@ namespace AIAssistant
         return true;
     }
 
+    // PRECONDITION: caller holds m_Mutex.  Calls TryApplyAiCompletion (which mutates
+    // m_ActiveRuns task states) and pool->TryPopCompletion (no callback into this
+    // manager — safe to hold the lock across).
     void WorkflowRuntimeManager::DrainAiRequestCompletions()
     {
         JarvisAgent* app = App::g_App;
@@ -1148,6 +1460,9 @@ namespace AIAssistant
         }
     }
 
+    // PRECONDITION: caller holds m_Mutex.  Mutates m_ActiveRuns entries (task states),
+    // reads m_LastRuns, and may invoke external pool->Forget() calls (no callback into
+    // this manager — safe to hold the lock across).
     bool WorkflowRuntimeManager::TryApplyAiCompletion(AiRequestCompletion const& completion)
     {
         for (auto& activeRunPtr : m_ActiveRuns)
@@ -1256,26 +1571,12 @@ namespace AIAssistant
             return true;
         }
 
-        auto lastIterator = m_LastRuns.find(completion.m_WorkflowId);
-        if (lastIterator != m_LastRuns.end())
+        // Run not in m_ActiveRuns.  If it's in m_LastRuns (already completed/cancelled),
+        // drop the completion instead of deferring forever.
+        auto const lastIterator = m_LastRuns.find(completion.m_WorkflowId);
+        if (lastIterator != m_LastRuns.end() && lastIterator->second.m_RunId == completion.m_RunId)
         {
-            if (lastIterator->second.m_RunId == completion.m_RunId)
-            {
-                return true;
-            }
-        }
-
-        // If the run is already completed (e.g. cancelled), drop the completion instead of deferring forever.
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            auto lastIt = m_LastRuns.find(completion.m_WorkflowId);
-            if (lastIt != m_LastRuns.end())
-            {
-                if (lastIt->second.m_RunId == completion.m_RunId)
-                {
-                    return true;
-                }
-            }
+            return true;
         }
 
         return false;
@@ -1303,86 +1604,103 @@ namespace AIAssistant
 
         if (!pendingToStart.empty())
         {
+            // StartPendingRuns acquires m_Mutex internally for the per-run push_back;
+            // running it BEFORE the tick lock keeps the heavy per-run setup (container
+            // extraction, BuildInitialTaskStates, controlflow init) out of the critical
+            // section.
             StartPendingRuns(std::move(pendingToStart));
             stateChanged = true;
         }
 
-        // Fingerprint of task states + the run completion flag. The "before"
-        // sample MUST happen before DrainAiRequestCompletions / PropagateSubWorkflowCompletions:
-        // those functions mutate task states (AI replies flipping WaitingExternal → Succeeded,
-        // sub-workflow completions propagating to parents). Sampling after the drain made
-        // every AI completion invisible to the change detector, so the dashboard saw only
-        // what TickActiveRun itself mutated and the task counter froze mid-run.
-        auto fingerprint = [](ActiveRun const& a) -> uint64_t
+        // External work deferred from the locked tick body.  Collected under the lock,
+        // executed after release: keeps AiRequestPool / curl / callback observers off
+        // the m_Mutex hot path, and guarantees no re-entrant lock acquisition if any of
+        // those callees ever touch this manager.
+        struct PostTickAction
         {
-            uint64_t h = a.m_Run.m_IsCompleted ? 1ull : 0ull;
-            for (auto const& [tid, ts] : a.m_Run.m_TaskStates)
-            {
-                h = h * 1315423911ull + static_cast<uint64_t>(ts.m_State);
-                h = h * 2654435761ull + static_cast<uint64_t>(ts.m_AttemptCount);
-            }
-            return h;
+            std::string m_RunIdToCancel;            // empty = no cascade
+            std::optional<WorkflowRun> m_TerminalRun; // present = fire callback + observer
         };
+        std::vector<PostTickAction> postTickActions;
+        RunTerminalObserver observerCopy;
 
-        std::unordered_map<std::string, uint64_t> fingerprintsBefore;
-        fingerprintsBefore.reserve(m_ActiveRuns.size());
-        for (auto const& runPtr : m_ActiveRuns)
         {
-            fingerprintsBefore.emplace(runPtr->m_Run.m_RunId, fingerprint(*runPtr));
-        }
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-        DrainAiRequestCompletions();
-        PropagateSubWorkflowCompletions();
+            // Snapshot the observer under the lock.  SetRunTerminalObserver takes the
+            // same lock, so swapping the observer mid-tick can't race against the call.
+            observerCopy = m_RunTerminalObserver;
 
-        for (size_t index = 0; index < m_ActiveRuns.size();)
-        {
-            ActiveRun& active = *m_ActiveRuns[index];
-
-            TickActiveRun(active);
-
-            // Compare to the pre-drain fingerprint. New runs added by StartPendingRuns
-            // earlier in this Update() won't be in the map; treat that as a state change
-            // (it is one — the run just started).
-            auto const fpIt = fingerprintsBefore.find(active.m_Run.m_RunId);
-            if (fpIt == fingerprintsBefore.end() || fingerprint(active) != fpIt->second)
-                stateChanged = true;
-
-            // Cascade-cancel any in-flight HTTP requests bound to this run if
-            // the run just transitioned to a failed/cancelled/stopped state.
-            // Idempotent via m_CancelCascadeFired so retries / completion-hold
-            // ticks don't re-fire.  Without this, after the workflow runtime
-            // gives up on a run (watchdog, downstream failure, user cancel),
-            // dispatched curl requests keep running against the AI provider
-            // burning tokens for output that gets thrown away.
-            bool const runTerminated = active.m_Run.m_HasFailed || active.m_CancelRequested ||
-                                        active.m_StopRequested;
-            if (runTerminated && !active.m_CancelCascadeFired)
+            // Fingerprint of task states + the run completion flag. The "before"
+            // sample MUST happen before DrainAiRequestCompletions / PropagateSubWorkflowCompletions:
+            // those functions mutate task states (AI replies flipping WaitingExternal → Succeeded,
+            // sub-workflow completions propagating to parents). Sampling after the drain made
+            // every AI completion invisible to the change detector, so the dashboard saw only
+            // what TickActiveRun itself mutated and the task counter froze mid-run.
+            auto fingerprint = [](ActiveRun const& a) -> uint64_t
             {
-                JarvisAgent* app = App::g_App;
-                AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
-                if (requestPool != nullptr)
+                uint64_t h = a.m_Run.m_IsCompleted ? 1ull : 0ull;
+                for (auto const& [tid, ts] : a.m_Run.m_TaskStates)
                 {
-                    requestPool->CancelRequestsForRun(active.m_Run.m_RunId);
+                    h = h * 1315423911ull + static_cast<uint64_t>(ts.m_State);
+                    h = h * 2654435761ull + static_cast<uint64_t>(ts.m_AttemptCount);
                 }
-                active.m_CancelCascadeFired = true;
+                return h;
+            };
+
+            std::unordered_map<std::string, uint64_t> fingerprintsBefore;
+            fingerprintsBefore.reserve(m_ActiveRuns.size());
+            for (auto const& runPtr : m_ActiveRuns)
+            {
+                fingerprintsBefore.emplace(runPtr->m_Run.m_RunId, fingerprint(*runPtr));
             }
 
-            if (active.m_Run.m_IsCompleted)
+            DrainAiRequestCompletions();
+            PropagateSubWorkflowCompletions();
+
+            for (size_t index = 0; index < m_ActiveRuns.size();)
             {
-                // 2-second minimum-visibility hold (plan §6): sub-second runs — common for adhoc
-                // submissions — would otherwise slip through m_ActiveRuns between snapshot
-                // broadcasts and never surface on the dashboard. Keep completed entries in the
-                // active list until at least 2 s have elapsed since the run started, then let
-                // the regular erase path run on a subsequent tick.
-                auto const elapsed = std::chrono::steady_clock::now() - active.m_StartedAtSteady;
-                if (elapsed < std::chrono::seconds(2))
+                ActiveRun& active = *m_ActiveRuns[index];
+
+                TickActiveRun(active);
+
+                // Compare to the pre-drain fingerprint. New runs added by StartPendingRuns
+                // earlier in this Update() won't be in the map; treat that as a state change
+                // (it is one — the run just started).
+                auto const fpIt = fingerprintsBefore.find(active.m_Run.m_RunId);
+                if (fpIt == fingerprintsBefore.end() || fingerprint(active) != fpIt->second)
                 {
-                    ++index;
-                    continue;
+                    stateChanged = true;
                 }
 
+                // Cascade-cancel any in-flight HTTP requests bound to this run if
+                // the run just transitioned to a failed/cancelled/stopped state.
+                // Idempotent via m_CancelCascadeFired so retries / completion-hold
+                // ticks don't re-fire.  Without this, after the workflow runtime
+                // gives up on a run (watchdog, downstream failure, user cancel),
+                // dispatched curl requests keep running against the AI provider
+                // burning tokens for output that gets thrown away.
+                bool const runTerminated =
+                    active.m_Run.m_HasFailed || active.m_CancelRequested || active.m_StopRequested;
+                if (runTerminated && !active.m_CancelCascadeFired)
                 {
-                    std::scoped_lock<std::mutex> const lock(m_Mutex);
+                    postTickActions.push_back(PostTickAction{active.m_Run.m_RunId, std::nullopt});
+                    active.m_CancelCascadeFired = true;
+                }
+
+                if (active.m_Run.m_IsCompleted)
+                {
+                    // 2-second minimum-visibility hold (plan §6): sub-second runs — common for adhoc
+                    // submissions — would otherwise slip through m_ActiveRuns between snapshot
+                    // broadcasts and never surface on the dashboard. Keep completed entries in the
+                    // active list until at least 2 s have elapsed since the run started, then let
+                    // the regular erase path run on a subsequent tick.
+                    auto const elapsed = std::chrono::steady_clock::now() - active.m_StartedAtSteady;
+                    if (elapsed < std::chrono::seconds(2))
+                    {
+                        ++index;
+                        continue;
+                    }
 
                     // Finalise the overall run state (was left at Pending/Running by TickActiveRun).
                     if (active.m_Run.m_State == WorkflowRunState::Cancelled)
@@ -1427,35 +1745,61 @@ namespace AIAssistant
                     {
                         ++m_TotalCompletedRuns;
                     }
+
+                    // Snapshot the WorkflowRun for callback + observer firing AFTER lock release.
+                    postTickActions.push_back(PostTickAction{std::string{}, active.m_Run});
+
+                    m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
+                    stateChanged = true;
+                    continue;
                 }
 
-                // Fire completion callback (async, fire-and-forget) if callbackUrl is in context.
-                FireCompletionCallback(active.m_Run);
-
-                // Fire terminal observer (AdhocWorkflowManager listens for on_completion cleanup).
-                if (m_RunTerminalObserver)
-                {
-                    try
-                    {
-                        m_RunTerminalObserver(active.m_Run.m_RunId,
-                                              active.m_Run.m_State);
-                    }
-                    catch (std::exception const& ex)
-                    {
-                        LOG_APP_ERROR("[runtime] RunTerminalObserver threw: {}", ex.what());
-                    }
-                }
-
-                m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
-                stateChanged = true;
-                continue;
+                ++index;
             }
+        }
 
-            ++index;
+        // ---- External calls outside the lock ----
+        // m_Mutex is RELEASED here; the actions below may spawn detached threads (callback),
+        // call into AiRequestPool (cancel cascade), or invoke a user-supplied observer that
+        // could itself touch this manager via the public read APIs.
+        if (!postTickActions.empty())
+        {
+            JarvisAgent* app = App::g_App;
+            AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+
+            for (auto const& action : postTickActions)
+            {
+                if (!action.m_RunIdToCancel.empty() && requestPool != nullptr)
+                {
+                    requestPool->CancelRequestsForRun(action.m_RunIdToCancel);
+                }
+
+                if (action.m_TerminalRun.has_value())
+                {
+                    FireCompletionCallback(*action.m_TerminalRun);
+
+                    if (observerCopy)
+                    {
+                        try
+                        {
+                            observerCopy(action.m_TerminalRun->m_RunId, action.m_TerminalRun->m_State);
+                        }
+                        catch (std::exception const& ex)
+                        {
+                            LOG_APP_ERROR("[runtime] RunTerminalObserver threw: {}", ex.what());
+                        }
+                        catch (...)
+                        {
+                            LOG_APP_ERROR("[runtime] RunTerminalObserver threw unknown exception");
+                        }
+                    }
+                }
+            }
         }
 
         return stateChanged;
     }
+
     void WorkflowRuntimeManager::StartPendingRuns(std::vector<PendingRun>&& pendingRuns)
     {
         WorkflowRegistry const* workflowRegistry = nullptr;
@@ -1969,12 +2313,17 @@ namespace AIAssistant
             WorkflowRun const workflowRunSnapshot = workflowRun;
             TaskInstanceState const taskStateSnapshot = taskState;
 
+            // Capture by value, not by reference.  WaitStop()'s shutdown path may clear
+            // m_ActiveRuns before all in-flight worker futures have completed; a captured
+            // reference into ActiveRun::m_Definition would then dangle.  WorkflowDefinition
+            // is heavyweight but the copy is per-dispatch (not per-tick), and the safety
+            // guarantee is mandatory per `feedback_capture_by_value_async`.
             activeRun.m_RunningTasks[taskId] =
                 pool.SubmitTask(
-                        [this, &workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
-                         taskStateSnapshot]() -> TaskExecutionResult {
-                            return ExecuteTaskOnWorker(workflowDefinition, workflowRunSnapshot, taskDefinition, taskId,
-                                                       taskStateSnapshot);
+                        [this, workflowDefinitionCopy = workflowDefinition, workflowRunSnapshot,
+                         taskDefinition, taskId, taskStateSnapshot]() -> TaskExecutionResult {
+                            return ExecuteTaskOnWorker(workflowDefinitionCopy, workflowRunSnapshot, taskDefinition,
+                                                       taskId, taskStateSnapshot);
                         })
                     .share();
 
@@ -2446,7 +2795,7 @@ namespace AIAssistant
         {
             if (providerName.empty())
             {
-                if (keyManager.GetDefaultProvider() == nullptr)
+                if (keyManager.GetDefaultCredential() == nullptr)
                 {
                     LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires system default "
                                  "provider, but no default provider is configured",
@@ -2473,7 +2822,7 @@ namespace AIAssistant
                     keyName = providerName;
                 }
 
-                if (keyManager.GetProvider(keyName) == nullptr)
+                if (keyManager.GetCredential(keyName) == nullptr)
                 {
                     LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires provider '{}' "
                                  "(key '{}') which is not configured",
@@ -2505,7 +2854,7 @@ namespace AIAssistant
 
     bool WorkflowRuntimeManager::RequestCancelRun(std::string const& runId)
     {
-        if (runId.empty())
+        if (!IsValidRunOrWorkflowId(runId))
         {
             return false;
         }
@@ -2532,7 +2881,7 @@ namespace AIAssistant
 
     bool WorkflowRuntimeManager::RequestPauseRun(std::string const& runId)
     {
-        if (runId.empty())
+        if (!IsValidRunOrWorkflowId(runId))
         {
             return false;
         }
@@ -2560,7 +2909,7 @@ namespace AIAssistant
 
     bool WorkflowRuntimeManager::RequestResumeRun(std::string const& runId)
     {
-        if (runId.empty())
+        if (!IsValidRunOrWorkflowId(runId))
         {
             return false;
         }
@@ -2588,7 +2937,7 @@ namespace AIAssistant
 
     bool WorkflowRuntimeManager::RequestStopRun(std::string const& runId)
     {
-        if (runId.empty())
+        if (!IsValidRunOrWorkflowId(runId))
         {
             return false;
         }
@@ -2672,9 +3021,12 @@ namespace AIAssistant
     {
         outErrorMessage.clear();
 
-        if (workflowId.empty())
+        if (!IsValidRunOrWorkflowId(workflowId))
         {
-            outErrorMessage = "workflow id is empty";
+            outErrorMessage = "workflow id is empty or contains characters outside [A-Za-z0-9._-] "
+                              "(or starts with '.')";
+            LOG_APP_ERROR("WorkflowRuntimeManager::CleanWorkflow: rejected invalid workflowId (len={})",
+                          workflowId.size());
             return false;
         }
 
@@ -2736,6 +3088,72 @@ namespace AIAssistant
         size_t dirsDeleted = 0;
         std::vector<std::string> errors;
 
+        // Every path that reaches an fs::remove* call below must first pass
+        // ConfineUnderProjectRoot.  An attacker-controlled file_outputs / working
+        // directory entry — or a workflowId smuggled with `..` segments — could
+        // otherwise resolve to a path outside the project tree (e.g. /etc/passwd,
+        // /home/<user>/...).  Per cyber-sec audit HIGH 1: refuse to delete
+        // anything that does not canonicalise inside the project root.  The
+        // helper also rejects symlink targets that point out of tree, closing
+        // the symlink-attack vector noted as cyber-sec audit LOW 4.
+        //
+        // The helper combines existence + type + delete in a single fs::remove*
+        // syscall — fs::remove returns false (not error) for a non-existent path,
+        // and ConfineUnderProjectRoot rejects symlink targets that point out of
+        // tree.  This eliminates the TOCTOU window between fs::exists() and
+        // fs::remove*() that the pre-fix call sites had (safety LOW 3).
+        auto deleteIfConfined = [&errors](fs::path const& path, char const* siteLabel,
+                                          bool recursive, size_t* outFilesDeleted, size_t* outDirsDeleted) -> bool
+        {
+            fs::path const confined = ConfineUnderProjectRoot(path);
+            if (confined.empty())
+            {
+                std::string const msg =
+                    std::string("[clean] refused to delete '") + path.string() +
+                    "' at " + siteLabel + ": resolves outside project root or symlink-escapes it";
+                LOG_APP_ERROR("{}", msg);
+                errors.push_back(msg);
+                return false;
+            }
+
+            std::error_code ec;
+            if (recursive)
+            {
+                auto const removed = fs::remove_all(confined, ec);
+                if (ec)
+                {
+                    errors.push_back("failed to remove directory '" + confined.string() + "': " + ec.message());
+                    return false;
+                }
+                if (removed == 0)
+                {
+                    // Non-existent — silent skip; common during a second pass after
+                    // a prior step removed the parent.  No log line, no stat bump.
+                    return true;
+                }
+                if (outDirsDeleted) { ++(*outDirsDeleted); }
+                if (outFilesDeleted) { *outFilesDeleted += (removed > 1) ? (removed - 1) : 0; }
+                LOG_APP_INFO("[clean] removed {} '{}' ({} entries)", siteLabel, confined.string(), removed);
+            }
+            else
+            {
+                bool const removedOk = fs::remove(confined, ec);
+                if (ec)
+                {
+                    errors.push_back("failed to remove '" + confined.string() + "': " + ec.message());
+                    return false;
+                }
+                if (!removedOk)
+                {
+                    // Non-existent — silent skip.
+                    return true;
+                }
+                if (outFilesDeleted) { ++(*outFilesDeleted); }
+                LOG_APP_INFO("[clean] removed {} '{}'", siteLabel, confined.string());
+            }
+            return true;
+        };
+
         // ---------------------------------------------------------------
         // 1) Delete queue/<workflowId>/ recursively
         // ---------------------------------------------------------------
@@ -2745,22 +3163,10 @@ namespace AIAssistant
                 fs::absolute(fs::path(Core::g_Core->GetConfig().m_QueueFolderFilepath)).lexically_normal();
             fs::path const queueWorkflowDir = queueRoot / workflowId;
 
-            if (fs::exists(queueWorkflowDir))
-            {
-                std::error_code ec;
-                auto const removed = fs::remove_all(queueWorkflowDir, ec);
-                if (ec)
-                {
-                    errors.push_back("failed to remove queue directory '" + queueWorkflowDir.string() +
-                                     "': " + ec.message());
-                }
-                else
-                {
-                    dirsDeleted += 1;
-                    filesDeleted += (removed > 1) ? (removed - 1) : 0;
-                    LOG_APP_INFO("[clean] removed queue directory '{}' ({} entries)", queueWorkflowDir.string(), removed);
-                }
-            }
+            // No fs::exists pre-check — deleteIfConfined silent-skips on
+            // non-existent paths (closes the TOCTOU window).
+            deleteIfConfined(queueWorkflowDir, "queue directory", /*recursive=*/true,
+                             &filesDeleted, &dirsDeleted);
         }
 
         // ---------------------------------------------------------------
@@ -2827,60 +3233,24 @@ namespace AIAssistant
                             }
 
                             std::string const filename = entry.path().filename().string();
-
-                            // Simple glob match: support only '*' as "match anything".
-                            bool matches = false;
-                            if (pattern == "*")
+                            if (GlobMatchesFilename(pattern, filename))
                             {
-                                matches = true;
-                            }
-                            else if (pattern.front() == '*')
-                            {
-                                // e.g. "*.o" — check suffix
-                                std::string const suffix = pattern.substr(1);
-                                if (filename.size() >= suffix.size() &&
-                                    filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0)
-                                {
-                                    matches = true;
-                                }
-                            }
-                            else if (pattern.back() == '*')
-                            {
-                                // e.g. "PROB_*" — check prefix
-                                std::string const prefix = pattern.substr(0, pattern.size() - 1);
-                                if (filename.size() >= prefix.size() && filename.compare(0, prefix.size(), prefix) == 0)
-                                {
-                                    matches = true;
-                                }
-                            }
-
-                            if (matches)
-                            {
-                                std::error_code removeEc;
-                                if (fs::remove(entry.path(), removeEc))
-                                {
-                                    ++filesDeleted;
-                                }
+                                deleteIfConfined(entry.path(), "glob-matched file_output",
+                                                 /*recursive=*/false, &filesDeleted, nullptr);
                             }
                         }
                     }
                 }
                 else
                 {
-                    // Literal file path.
-                    if (fs::exists(resolvedPath) && fs::is_regular_file(resolvedPath))
-                    {
-                        std::error_code ec;
-                        if (fs::remove(resolvedPath, ec))
-                        {
-                            ++filesDeleted;
-                            LOG_APP_INFO("[clean] removed file '{}'", resolvedPath.string());
-                        }
-                        else if (ec)
-                        {
-                            errors.push_back("failed to remove '" + resolvedPath.string() + "': " + ec.message());
-                        }
-                    }
+                    // Literal file path.  No fs::exists / fs::is_regular_file
+                    // pre-check — deleteIfConfined silent-skips on non-existent
+                    // paths.  fs::remove on a directory fails with an error_code
+                    // we surface to the errors vector, which is the right shape
+                    // (a literal file_output that points at a directory is a
+                    // workflow-author bug worth flagging).
+                    deleteIfConfined(resolvedPath, "literal file_output",
+                                     /*recursive=*/false, &filesDeleted, nullptr);
                 }
             }
 
@@ -2902,23 +3272,9 @@ namespace AIAssistant
 
         for (fs::path const& dirPath : workingDirsToClean)
         {
-            if (!fs::exists(dirPath))
-            {
-                continue;
-            }
-
-            std::error_code ec;
-            auto const removed = fs::remove_all(dirPath, ec);
-            if (ec)
-            {
-                errors.push_back("failed to remove working directory '" + dirPath.string() + "': " + ec.message());
-            }
-            else
-            {
-                ++dirsDeleted;
-                filesDeleted += (removed > 1) ? (removed - 1) : 0;
-                LOG_APP_INFO("[clean] removed working directory '{}' ({} entries)", dirPath.string(), removed);
-            }
+            // No fs::exists pre-check — deleteIfConfined silent-skips.
+            deleteIfConfined(dirPath, "working directory", /*recursive=*/true,
+                             &filesDeleted, &dirsDeleted);
         }
 
         // ---------------------------------------------------------------
@@ -2926,19 +3282,18 @@ namespace AIAssistant
         // ---------------------------------------------------------------
         {
             fs::path const workflowOutputDir = workflowBasePath / workflowId;
-            if (fs::exists(workflowOutputDir) && fs::is_directory(workflowOutputDir) && fs::is_empty(workflowOutputDir))
+            // Keep the is_empty gate — semantic intent is "only delete an
+            // empty leftover".  fs::remove on a non-empty directory fails
+            // with "directory not empty" which we'd then surface as an error,
+            // which is the wrong shape for the "stuff still there, leave it"
+            // case.  TOCTOU window between is_empty and fs::remove is benign:
+            // if a file appears, fs::remove returns false silently.
+            std::error_code statEc;
+            if (fs::is_directory(workflowOutputDir, statEc) && !statEc &&
+                fs::is_empty(workflowOutputDir, statEc) && !statEc)
             {
-                std::error_code ec;
-                if (fs::remove(workflowOutputDir, ec))
-                {
-                    ++dirsDeleted;
-                    LOG_APP_INFO("[clean] removed empty workflow directory '{}'", workflowOutputDir.string());
-                }
-                else if (ec)
-                {
-                    errors.push_back("failed to remove workflow directory '" + workflowOutputDir.string() +
-                                     "': " + ec.message());
-                }
+                deleteIfConfined(workflowOutputDir, "empty workflow directory",
+                                 /*recursive=*/false, nullptr, &dirsDeleted);
             }
         }
 
@@ -3171,6 +3526,29 @@ namespace AIAssistant
         WorkflowRun& workflowRun = activeRun.m_Run;
         WorkflowDefinition const& workflowDef = activeRun.m_Definition;
 
+        // Resource cap: refuse the fan-out if the filter returned more items than
+        // engineConfig.m_MaxPerItemFanOut.  An attacker-supplied filter (e.g. a
+        // CSV with millions of rows, or a Polarion query that returns the entire
+        // tracker) would otherwise spawn one task child + downstream dispatch
+        // per item — exhausting threads, memory, and the AI provider quota
+        // (cyber-sec audit MEDIUM 3).
+        if (Core::g_Core != nullptr)
+        {
+            size_t const cap = Core::g_Core->GetConfig().m_MaxPerItemFanOut;
+            if (cap > 0 && evalResult.m_Items.size() > cap)
+            {
+                std::string const msg = "per_item filter '" + taskDef.m_Filter + "' returned " +
+                                        std::to_string(evalResult.m_Items.size()) +
+                                        " items, exceeds max_per_item_fan_out=" + std::to_string(cap);
+                LOG_APP_ERROR("[per_item] task '{}' in run '{}': {}", parentTaskId, workflowRun.m_RunId, msg);
+                auto& parentState = workflowRun.m_TaskStates[parentTaskId];
+                parentState.m_State = TaskInstanceStateKind::Failed;
+                parentState.m_LastErrorMessage = msg;
+                workflowRun.m_HasFailed = true;
+                return;
+            }
+        }
+
         FilterDef const* filterDef = FindFilterDef(workflowDef, taskDef.m_Filter);
         std::string const binding = filterDef ? filterDef->m_Binding : "item";
 
@@ -3393,12 +3771,27 @@ namespace AIAssistant
     void WorkflowRuntimeManager::RegisterSubWorkflowLink(std::string const& childRunId, std::string const& parentRunId,
                                                          std::string const& parentTaskInstanceId)
     {
-        m_SubWorkflowLinks[childRunId] = SubWorkflowLink{parentRunId, parentTaskInstanceId};
+        if (!IsValidRunOrWorkflowId(childRunId) || !IsValidRunOrWorkflowId(parentRunId) ||
+            parentTaskInstanceId.empty())
+        {
+            LOG_APP_ERROR("[sub-workflow] rejected invalid link registration "
+                          "(childRunId.len={}, parentRunId.len={}, taskInstance.len={})",
+                          childRunId.size(), parentRunId.size(), parentTaskInstanceId.size());
+            return;
+        }
+
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_SubWorkflowLinks[childRunId] = SubWorkflowLink{parentRunId, parentTaskInstanceId};
+        }
 
         LOG_APP_INFO("[sub-workflow] registered link: child run '{}' → parent run '{}' task '{}'", childRunId,
                      parentRunId, parentTaskInstanceId);
     }
 
+    // PRECONDITION: caller holds m_Mutex.  Iterates m_SubWorkflowLinks + m_ActiveRuns +
+    // m_LastRuns; mutates parent ActiveRun task states + erases entries from
+    // m_SubWorkflowLinks.
     void WorkflowRuntimeManager::PropagateSubWorkflowCompletions()
     {
         if (m_SubWorkflowLinks.empty())
@@ -3432,16 +3825,13 @@ namespace AIAssistant
             // Look it up in last-runs by run ID.
             WorkflowRun childRun;
             bool found = false;
+            for (auto const& [workflowId, lastRun] : m_LastRuns)
             {
-                std::scoped_lock<std::mutex> const lock(m_Mutex);
-                for (auto const& [workflowId, lastRun] : m_LastRuns)
+                if (lastRun.m_RunId == childRunId)
                 {
-                    if (lastRun.m_RunId == childRunId)
-                    {
-                        childRun = lastRun;
-                        found = true;
-                        break;
-                    }
+                    childRun = lastRun;
+                    found = true;
+                    break;
                 }
             }
 

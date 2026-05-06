@@ -32,6 +32,7 @@
 #include "core.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
+#include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "keys/jwtGenerator.h"
 #include "curlWrapper/curlWrapper.h"
@@ -101,14 +102,20 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* provider = Core::g_Core->GetKeyManager().GetProvider(connection.m_KeyName);
-        if (!provider)
+        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
+        if (!cred)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-
-        if (provider->m_PrivateKeyPem.empty())
+        auto const* keyPair = dynamic_cast<KeyPairCredential const*>(cred);
+        if (!keyPair)
+        {
+            errorMessage = "Credential '" + connection.m_KeyName +
+                           "' must be KeyPairCredential — Snowflake requires a key_pair credential";
+            return false;
+        }
+        if (keyPair->m_PrivateKeyPem.IsEmpty())
         {
             errorMessage = "Credential '" + connection.m_KeyName +
                            "' has no RSA private key — Snowflake requires a key_pair credential";
@@ -129,9 +136,12 @@ namespace AIAssistant
             return false;
         }
 
-        // Generate a Snowflake JWT (1-hour expiry)
+        // Generate a Snowflake JWT (1-hour expiry).  PEM is materialised into a request-
+        // scoped std::string for the JwtGenerator call; the SecureString remains intact in
+        // KeyManager storage.
+        std::string const privateKeyPem(keyPair->m_PrivateKeyPem.Get());
         std::string jwt =
-            JwtGenerator::GenerateSnowflakeJwt(accountIt->second, userIt->second, provider->m_PrivateKeyPem, errorMessage);
+            JwtGenerator::GenerateSnowflakeJwt(accountIt->second, userIt->second, privateKeyPem, errorMessage);
         if (jwt.empty())
         {
             if (errorMessage.empty())

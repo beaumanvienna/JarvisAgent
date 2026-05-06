@@ -45,14 +45,33 @@ namespace AIAssistant
     // This manager must not block the main thread. It is designed to be called
     // from JarvisAgent::OnUpdate() so filesystem events can still be delivered
     // to JarvisAgent::OnEvent() (required for ai_call completion).
+    //
+    // Threading & lifetime contract:
+    //   * `m_Mutex` guards `m_ActiveRuns`, `m_PendingRuns`, `m_LastRuns`,
+    //     `m_SubWorkflowLinks`, `m_TotalCompletedRuns`, `m_TotalFailedRuns`,
+    //     `m_DeferredAiCompletions`, `m_RunTerminalObserver`,
+    //     `m_WorkflowRegistry` (the borrowed pointer itself), and `m_IsRunning`.
+    //     Update() takes this lock for the entire tick body; readers (REST handlers,
+    //     snapshot calls) take it for the read window.  External callbacks and
+    //     thread-pool submissions are deferred until after the lock is released.
+    //   * `m_WatchdogMutex` is a separate, finer-grained lock around
+    //     `m_ActiveWatchdogs` only (worker threads call Heartbeat() / Register).
+    //   * `m_WorkflowRegistry` is a NON-OWNING borrowed pointer.  The registry
+    //     is owned by `JarvisAgent` and constructed BEFORE this manager and
+    //     destroyed AFTER Stop() returns; this lifetime ordering is the basis
+    //     for treating the pointer as stable across Update() ticks.  Never
+    //     dereference the registry pointer outside `m_Mutex`-protected scope
+    //     unless the caller holds the lock.
     class WorkflowRuntimeManager final
     {
     public:
         WorkflowRuntimeManager() = default;
-        ~WorkflowRuntimeManager();
+        ~WorkflowRuntimeManager() noexcept;
 
         WorkflowRuntimeManager(WorkflowRuntimeManager const&) = delete;
         WorkflowRuntimeManager& operator=(WorkflowRuntimeManager const&) = delete;
+        WorkflowRuntimeManager(WorkflowRuntimeManager&&) = delete;
+        WorkflowRuntimeManager& operator=(WorkflowRuntimeManager&&) = delete;
 
         void Start();
         void Stop();
@@ -245,9 +264,12 @@ namespace AIAssistant
         std::queue<PendingRun> m_PendingRuns;
 
         // Held by std::unique_ptr so element addresses stay stable across push_back
-        // reallocations. Worker-thread lambdas capture `workflowDefinition` (a reference
-        // into ActiveRun::m_Definition) for the duration of task execution — relocating
-        // elements while a worker is running would dangle that reference.
+        // reallocations.  Within a single Update() tick, TickActiveRun() takes
+        // `WorkflowDefinition const&` references into ActiveRun::m_Definition for the
+        // duration of the tick; the unique_ptr indirection guarantees those refs survive
+        // a concurrent StartPendingRuns() push_back.  Worker-thread lambdas capture by
+        // value (see TickActiveRun's pool.SubmitTask site) so the worker's lifetime is
+        // decoupled from this vector's.
         std::vector<std::unique_ptr<ActiveRun>> m_ActiveRuns;
 
         std::unordered_map<std::string, WorkflowRun> m_LastRuns;

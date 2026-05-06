@@ -251,9 +251,10 @@ namespace AIAssistant
         std::string capturedStdout;
         std::string capturedStderr;
         bool const ok =
-            pythonEnginePool->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(), callArguments,
-                                                  contextValues, pythonOutputs, errorMessage, capturedStdout,
-                                                  capturedStderr);
+            pythonEnginePool->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectoryPath.string(),
+                                                  workflowRun.m_WorkflowId, workflowRun.m_RunId,
+                                                  callArguments, contextValues, pythonOutputs, errorMessage,
+                                                  capturedStdout, capturedStderr);
 
         // Sanitize at the external-byte boundary: Python's print() / sys.stderr.write() can emit
         // non-UTF-8 bytes (binary data, mojibake from misconfigured locales).  Downstream

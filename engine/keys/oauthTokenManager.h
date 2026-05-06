@@ -29,6 +29,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include "keys/secureString.h"
+
 namespace AIAssistant
 {
     class KeyManager;
@@ -68,23 +70,53 @@ namespace AIAssistant
         // Check if a credential has valid (non-expired) tokens.
         bool HasValidToken(std::string const& keyName) const;
 
+        // Drop a token entry and unregister its secrets from the redactor.  Intended
+        // to be called when a credential is deleted from KeyManager so the in-memory
+        // state stays in sync with on-disk state.  Idempotent (no-op if absent).
+        void RemoveTokens(std::string const& keyName);
+
     private:
         struct TokenEntry
         {
-            std::string m_AccessToken;
-            std::string m_RefreshToken;
-            std::string m_TokenEndpoint; // Provider's token URL for refresh
-            std::string m_ClientId;      // OAuth client ID for refresh
-            std::string m_ClientSecret;  // OAuth client secret (confidential clients only)
-            int64_t m_ExpiresAt{0};      // Unix timestamp (seconds)
-            bool m_Refreshing{false};    // True while a refresh is in flight
+            // Secret-bearing fields wrapped in SecureString so the plaintext lives in
+            // mlock'd, zero-on-destruct memory.  Non-copyable, movable.  Per-field
+            // mutations from RefreshLoop / StoreTokens / RemoveTokens follow the
+            // unregister-old → Set(new) → register-new pattern with the redactor.
+            SecureString m_AccessToken;
+            SecureString m_RefreshToken;
+            SecureString m_ClientSecret;     // OAuth client secret (confidential clients only)
+
+            std::string m_TokenEndpoint;     // Provider's token URL for refresh — non-secret
+            std::string m_ClientId;          // OAuth client ID for refresh — public per OAuth conventions
+
+            int64_t m_ExpiresAt{0};          // Unix timestamp (seconds)
+            int64_t m_LastRefreshFailureAt{0}; // Unix timestamp; 0 = no failure recorded.  Backoff window.
+            bool m_Refreshing{false};        // True while a refresh is in flight
+        };
+
+        // Result of a successful network refresh — kept on the stack outside the lock
+        // and applied back to the entry under lock by the caller.
+        struct RefreshResult
+        {
+            std::string m_NewAccessToken;
+            std::string m_NewRefreshToken; // Empty if server did not rotate the refresh token
+            int64_t m_ExpiresInSeconds{0};
         };
 
         // Background thread: refreshes tokens expiring within 5 minutes.
         void RefreshLoop();
 
-        // Refresh a single token entry. Returns true on success.
-        bool RefreshToken(std::string const& keyName, TokenEntry& entry);
+        // Perform the network refresh using snapshot inputs (taken under lock by the
+        // caller, then passed in by value so this function holds NO lock and does not
+        // touch the m_Tokens map).  Result lands in `out` on success.  Returns true
+        // on success; populates errorMessage on failure (logged by caller).
+        bool RefreshToken(std::string const& keyName, std::string const& tokenEndpoint,
+                          std::string const& clientId, std::string const& clientSecret,
+                          std::string const& refreshToken, RefreshResult& out, std::string& errorMessage);
+
+        // Apply a successful refresh result to the named entry under lock.
+        // Updates secret-redactor registrations atomically with the field updates.
+        void ApplyRefreshResult(std::string const& keyName, RefreshResult const& result);
 
         KeyManager& m_KeyManager;
 

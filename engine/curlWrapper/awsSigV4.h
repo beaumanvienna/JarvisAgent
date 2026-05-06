@@ -32,7 +32,8 @@ namespace AIAssistant
     class SigV4Signer final : public IAuthSigner
     {
     public:
-        void Apply(CurlWrapper::QueryData const& queryData, std::vector<std::string>& outHeaders) override;
+        [[nodiscard]] bool Apply(CurlWrapper::QueryData const& queryData, std::vector<std::string>& outHeaders,
+                                 std::string& errorMessage) const override;
 
         // Inputs grouped for the test seam below.
         struct Inputs

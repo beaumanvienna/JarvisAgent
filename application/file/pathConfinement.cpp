@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -19,22 +19,44 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
-#pragma once
-#include "engine.h"
+#include "file/pathConfinement.h"
 
 namespace AIAssistant
 {
-    class JsonHelper
-    {
-    public:
-        JsonHelper() = default;
-        ~JsonHelper() = default;
+    namespace fs = std::filesystem;
 
-        // RFC 8259 §7-compliant escape of a string for embedding inside JSON string literals.
-        // Escapes the mandatory pair "\\" and the structural double quote, the three
-        // shorthand whitespace controls (\n, \r, \t), and emits \u00XX for every other
-        // byte in 0x00-0x1F.  Bytes >= 0x20 (including UTF-8 continuation bytes) are
-        // passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
-        static std::string EscapeJsonString(std::string_view input);
-    };
+    fs::path ConfineUnderProjectRoot(fs::path const& path)
+    {
+        if (path.empty())
+        {
+            return {};
+        }
+
+        std::error_code ec;
+        fs::path const root = fs::weakly_canonical(fs::current_path(ec), ec);
+        if (ec || root.empty())
+        {
+            return {};
+        }
+
+        fs::path const candidate = path.is_absolute() ? path : (root / path);
+        fs::path const resolved = fs::weakly_canonical(candidate, ec);
+        if (ec || resolved.empty())
+        {
+            return {};
+        }
+
+        fs::path const rel = resolved.lexically_relative(root);
+        std::string const relStr = rel.string();
+        if (relStr.empty() || relStr == ".." || relStr.rfind("..", 0) == 0)
+        {
+            return {};
+        }
+        return resolved;
+    }
+
+    fs::path ConfineUnderProjectRoot(std::string const& path)
+    {
+        return ConfineUnderProjectRoot(fs::path(path));
+    }
 } // namespace AIAssistant

@@ -199,7 +199,7 @@ namespace AIAssistant
 
             std::string const scriptPath = "scripts/main.py";
             size_t const engineCount = Core::g_Core->GetConfig().m_PythonEngines;
-            bool pythonOk = m_PythonEnginePool->Initialize(scriptPath, engineCount);
+            bool pythonOk = m_PythonEnginePool->Initialize(scriptPath, engineCount, m_ScriptRegistry.get());
 
             if (!pythonOk)
             {

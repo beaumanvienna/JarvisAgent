@@ -1,4 +1,4 @@
-/* Copyright (c) 2025 JC Technolabs
+/* Copyright (c) 2026 JC Technolabs
 
    Permission is hereby granted, free of charge, to any person
    obtaining a copy of this software and associated documentation files
@@ -20,21 +20,27 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
-#include "engine.h"
+
+#include <filesystem>
+#include <string>
 
 namespace AIAssistant
 {
-    class JsonHelper
-    {
-    public:
-        JsonHelper() = default;
-        ~JsonHelper() = default;
+    // Resolves `path` (absolute or relative) against the project root
+    // (fs::current_path()) and verifies, via canonicalization, that it lands
+    // inside the root.  Returns the canonical absolute path on success;
+    // returns an empty path on rejection (`..` escape, absolute path that
+    // lands outside the root, symlink pointing out of tree, or any
+    // resolution error).  Fail-closed.
+    //
+    // Used as the canonical gate for any external string before it becomes
+    // a filesystem operation argument: Python sys.path entries, module
+    // resolution targets, file deletion paths in CleanWorkflow, etc.
+    // Project root is captured from fs::current_path() — j9t launches from
+    // the project root so this is the operator-trusted boundary in both
+    // Studio and Engine editions.
+    std::filesystem::path ConfineUnderProjectRoot(std::string const& path);
 
-        // RFC 8259 §7-compliant escape of a string for embedding inside JSON string literals.
-        // Escapes the mandatory pair "\\" and the structural double quote, the three
-        // shorthand whitespace controls (\n, \r, \t), and emits \u00XX for every other
-        // byte in 0x00-0x1F.  Bytes >= 0x20 (including UTF-8 continuation bytes) are
-        // passed through unchanged, so valid UTF-8 input remains valid UTF-8 output.
-        static std::string EscapeJsonString(std::string_view input);
-    };
+    // Convenience overload for callers that already hold an fs::path.
+    std::filesystem::path ConfineUnderProjectRoot(std::filesystem::path const& path);
 } // namespace AIAssistant

@@ -25,6 +25,8 @@
 
 #include <filesystem>
 
+#include "file/pathConfinement.h"
+
 // Wrap Python.h for Debug builds (see pythonEngine.cpp for rationale)
 #if defined(_WIN32) && defined(_DEBUG)
 #undef _DEBUG
@@ -44,7 +46,7 @@ namespace AIAssistant
 
     PythonEnginePool::~PythonEnginePool()
     {
-        if (m_Running)
+        if (m_Running.load(std::memory_order_acquire))
         {
             Stop();
         }
@@ -53,9 +55,10 @@ namespace AIAssistant
     // ============================================================================
     //   Initialize — create N sub-interpreters, each with its own GIL
     // ============================================================================
-    bool PythonEnginePool::Initialize(std::string const& scriptPath, size_t engineCount)
+    bool PythonEnginePool::Initialize(std::string const& scriptPath, size_t engineCount,
+                                       ScriptRegistry const* scriptRegistry)
     {
-        if (m_Running)
+        if (m_Running.load(std::memory_order_acquire))
         {
             return true;
         }
@@ -66,18 +69,41 @@ namespace AIAssistant
             return false;
         }
 
-        // Resolve script directory + module name
+        if (scriptRegistry == nullptr)
+        {
+            LOG_APP_ERROR("PythonEnginePool: scriptRegistry must be non-null — required for module allowlist gate");
+            return false;
+        }
+
+        // Resolve script directory + module name.  Confine the resolved script
+        // directory under the project root before letting any of it touch
+        // Python state — an unconfined scriptPath would let an attacker place
+        // a forged module on Python's import path.  Mirrors the gate already
+        // applied inside PythonEngine::SetupSubInterpreter (defense in depth
+        // at the pool boundary; cyber-sec audit MEDIUM).
         std::string scriptDir;
         std::string moduleName;
         try
         {
             fs::path pythonScriptPath(scriptPath);
-            scriptDir = pythonScriptPath.parent_path().string();
+            fs::path const parentConfined = ConfineUnderProjectRoot(pythonScriptPath.parent_path());
+            if (parentConfined.empty())
+            {
+                LOG_APP_ERROR("PythonEnginePool: script path '{}' parent does not resolve under project root",
+                              scriptPath);
+                return false;
+            }
+            scriptDir = parentConfined.string();
             moduleName = pythonScriptPath.stem().string();
         }
         catch (std::exception const& exception)
         {
             LOG_APP_ERROR("PythonEnginePool: invalid script path '{}': {}", scriptPath, exception.what());
+            return false;
+        }
+        catch (...)
+        {
+            LOG_APP_ERROR("PythonEnginePool: unknown exception while parsing script path '{}'", scriptPath);
             return false;
         }
 
@@ -170,20 +196,30 @@ namespace AIAssistant
 #endif
             // Sub-interpreter is active on this thread; GIL is held.
 
+            // Wire the borrowed registry pointer before any task executes —
+            // module-allowlist gate inside ExecuteWorkflowTaskOnWorker fails
+            // closed if the registry isn't set.
+            engine->SetScriptRegistry(scriptRegistry);
+
             // Set up the sub-interpreter (redirect stdout, sys.path, import hooks for primary)
             bool const isPrimary = (i == 0);
             bool setupOk = engine->SetupSubInterpreter(scriptDir, moduleName, isPrimary);
 
-            // Save the interpreter state so the worker thread can create its own thread state
-            engine->SetInterpreterState(subTS->interp);
-
             if (!setupOk)
             {
+                // Tear down the sub-interpreter without ever calling
+                // SetInterpreterState — leaving the engine with a stale handle
+                // would invite later code to act on half-initialised state.
                 LOG_APP_ERROR("PythonEnginePool: setup failed for engine {}", i);
                 Py_EndInterpreter(subTS);
                 PyEval_RestoreThread(mainTS);
                 continue;
             }
+
+            // Save the interpreter state — only after a successful setup.
+            // The engine is about to be moved into m_Engines; the state pointer
+            // is what the worker thread will use to create its own thread state.
+            engine->SetInterpreterState(subTS->interp);
 
             // Switch back to main interpreter for the next iteration.
             // With shared GIL, PyThreadState_Swap is sufficient — there is
@@ -192,10 +228,21 @@ namespace AIAssistant
             // alive — it will be cleaned up when the process exits.
             PyThreadState_Swap(mainTS);
 
-            m_Engines.push_back(std::move(engine));
+            // Per the class threading contract, m_Engines mutation goes under
+            // m_Mutex.  This is the only writer that runs concurrently with
+            // anything (the loop happens at startup; readers come later).
+            {
+                std::scoped_lock<std::mutex> const lock(m_Mutex);
+                m_Engines.push_back(std::move(engine));
+            }
         }
 
-        if (m_Engines.empty())
+        bool enginesEmpty;
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            enginesEmpty = m_Engines.empty();
+        }
+        if (enginesEmpty)
         {
             LOG_APP_ERROR("PythonEnginePool: no engines created successfully");
             PyEval_SaveThread();
@@ -205,14 +252,24 @@ namespace AIAssistant
         // Release main GIL — worker threads will each create their own thread states
         PyEval_SaveThread();
 
-        // Start all worker threads
-        for (auto& engine : m_Engines)
+        // Start all worker threads.  After this point m_Engines is read-only
+        // for the lifetime of the pool until SignalStop / WaitStop, so the
+        // iteration is safe lock-free per the threading contract.
+        size_t engineCountForLog;
         {
-            engine->StartWorkerThread();
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            for (auto& engine : m_Engines)
+            {
+                engine->StartWorkerThread();
+            }
+            engineCountForLog = m_Engines.size();
         }
 
-        m_Running = true;
-        LOG_APP_INFO("PythonEnginePool: {} engine(s) initialized successfully", m_Engines.size());
+        // Release-store ordered with the prior writes — readers that load
+        // m_Running with acquire and observe true also observe the fully
+        // populated m_Engines.
+        m_Running.store(true, std::memory_order_release);
+        LOG_APP_INFO("PythonEnginePool: {} engine(s) initialized successfully", engineCountForLog);
         return true;
     }
 
@@ -221,6 +278,14 @@ namespace AIAssistant
     // ============================================================================
     PythonEngine* PythonEnginePool::SelectEngine()
     {
+        // Lock-free read per the threading contract — only valid when called
+        // by a path that has already verified m_Running == true (so Initialize
+        // is complete and the vector is stable).  Defensive size check covers
+        // the unreachable-but-cheap "called after WaitStop" case.
+        if (m_Engines.empty())
+        {
+            return nullptr;
+        }
         if (m_Engines.size() == 1)
         {
             return m_Engines[0].get();
@@ -243,21 +308,34 @@ namespace AIAssistant
     }
 
     bool PythonEnginePool::ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
+                                               std::string const& workflowId, std::string const& runId,
                                                std::unordered_map<std::string, std::string> const& inputValues,
                                                std::unordered_map<std::string, std::string> const& contextValues,
                                                std::unordered_map<std::string, std::string>& outputValuesOut,
                                                std::string& errorMessage, std::string& capturedStdout,
                                                std::string& capturedStderr)
     {
-        if (!m_Running)
+        if (!m_Running.load(std::memory_order_acquire))
         {
             errorMessage = "PythonEnginePool: not running";
             return false;
         }
 
+        // SelectEngine reads m_Engines lock-free per the threading contract:
+        // m_Running is true => Initialize is complete => m_Engines is stable
+        // until SignalStop flips m_Running back to false.  ExecuteWorkflowTask
+        // callers are workflow worker threads that come and go BEFORE
+        // SignalStop is invoked.
         PythonEngine* engine = SelectEngine();
-        return engine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectory, inputValues, contextValues, outputValuesOut,
-                                           errorMessage, capturedStdout, capturedStderr);
+        if (engine == nullptr)
+        {
+            errorMessage = "PythonEnginePool: no engine available";
+            LOG_APP_ERROR("PythonEnginePool::ExecuteWorkflowTask: SelectEngine returned null run='{}' workflow='{}' "
+                          "task='{}'", runId, workflowId, taskDefinition.m_Id);
+            return false;
+        }
+        return engine->ExecuteWorkflowTask(taskDefinition, taskWorkingDirectory, workflowId, runId, inputValues,
+                                           contextValues, outputValuesOut, errorMessage, capturedStdout, capturedStderr);
     }
 
     // ============================================================================
@@ -265,35 +343,49 @@ namespace AIAssistant
     // ============================================================================
     void PythonEnginePool::OnStart()
     {
-        if (!m_Engines.empty())
+        if (!m_Running.load(std::memory_order_acquire) || m_Engines.empty())
         {
-            m_Engines[0]->OnStart();
+            return;
         }
+        m_Engines[0]->OnStart();
     }
 
     void PythonEnginePool::OnUpdate()
     {
-        if (!m_Engines.empty())
+        if (!m_Running.load(std::memory_order_acquire) || m_Engines.empty())
         {
-            m_Engines[0]->OnUpdate();
+            return;
         }
+        m_Engines[0]->OnUpdate();
     }
 
     void PythonEnginePool::OnEvent(std::shared_ptr<Event> eventPtr)
     {
-        if (!m_Engines.empty())
+        if (!m_Running.load(std::memory_order_acquire) || m_Engines.empty())
         {
-            m_Engines[0]->OnEvent(std::move(eventPtr));
+            return;
         }
+        m_Engines[0]->OnEvent(std::move(eventPtr));
+    }
+
+    size_t PythonEnginePool::GetEngineCount() const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        return m_Engines.size();
     }
 
     size_t PythonEnginePool::GetTasksCompleted(size_t engineIndex) const
     {
-        if (engineIndex < m_Engines.size())
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        if (engineIndex >= m_Engines.size())
         {
-            return m_Engines[engineIndex]->GetTasksCompleted();
+            // Was a silent return-zero; surfacing as ERROR keeps stats requests
+            // from masking a wiring bug between the dashboard and the pool.
+            LOG_APP_ERROR("PythonEnginePool::GetTasksCompleted: engineIndex {} out of bounds (engineCount={})",
+                          engineIndex, m_Engines.size());
+            return 0;
         }
-        return 0;
+        return m_Engines[engineIndex]->GetTasksCompleted();
     }
 
     // ============================================================================
@@ -307,6 +399,10 @@ namespace AIAssistant
 
     void PythonEnginePool::SignalStop()
     {
+        // Flip m_Running first so any in-flight reader noticing the false-load
+        // can bail before we start tearing engines down.
+        m_Running.store(false, std::memory_order_release);
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         for (auto& engine : m_Engines)
         {
             engine->SignalStop();
@@ -315,13 +411,17 @@ namespace AIAssistant
 
     void PythonEnginePool::WaitStop()
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         for (auto& engine : m_Engines)
         {
             engine->WaitStop();
         }
 
         m_Engines.clear();
-        m_Running = false;
+        // SignalStop already flipped m_Running.  Repeating the store here is a
+        // no-op when SignalStop ran first, and a defense for any caller that
+        // calls WaitStop directly.
+        m_Running.store(false, std::memory_order_release);
 
         LOG_APP_INFO("PythonEnginePool: all engines stopped");
     }

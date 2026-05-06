@@ -22,11 +22,13 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "keys/credential.h"
 #include "keys/secureString.h"
 
 namespace AIAssistant
@@ -42,47 +44,15 @@ namespace AIAssistant
             WrongPassword, // Encrypted file exists but decryption failed
         };
 
-        struct ProviderConfig
-        {
-            std::string m_DisplayName;
-            std::string m_Endpoint;
-            std::string m_ApiKey;
-            std::string m_DefaultModel;
-            std::string m_ApiType; // "API1" or "API2"
-
-            // Credential type: "api_key" (default), "oauth", "key_pair", "credentials"
-            std::string m_CredentialType{"api_key"};
-
-            // OAuth fields (credential_type == "oauth")
-            std::string m_RefreshToken;
-            int64_t m_ExpiresAt{0}; // Unix timestamp (seconds)
-            std::string m_Scopes;
-            // OAuth provider config needed to refresh the access token after a restart.
-            std::string m_TokenEndpoint; // e.g. https://oauth2.googleapis.com/token
-            std::string m_ClientId;      // OAuth application client id
-            std::string m_ClientSecret;  // OAuth application client secret (confidential clients only)
-
-            // Key pair fields (credential_type == "key_pair")
-            std::string m_PrivateKeyPem;
-
-            // Basic auth fields (credential_type == "credentials")
-            std::string m_Username;
-            std::string m_Password;
-
-            // Per-provider extra params (e.g. Azure: resource/deployment/api_version;
-            // Bedrock: region/access_key_id/secret_access_key/session_token).
-            std::unordered_map<std::string, std::string> m_Params;
-        };
-
         KeyManager() = default;
         ~KeyManager() = default;
 
         // Load providers from an encrypted file using the master password.
         // Returns true if the file was successfully decrypted and parsed.
-        bool Load(std::filesystem::path const& keysFilePath, std::string const& masterPassword);
+        bool Load(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
 
         // Save current providers to an encrypted file.
-        bool Save(std::filesystem::path const& keysFilePath, std::string const& masterPassword);
+        bool Save(std::filesystem::path const& keysFilePath, std::string_view masterPassword);
 
         // Load providers from a plaintext JSON file (development only).
         bool LoadPlaintext(std::filesystem::path const& keysFilePath);
@@ -96,7 +66,7 @@ namespace AIAssistant
 
         // Runtime unlock: attempt to decrypt the stored keys file path with a password.
         // Updates m_KeyLoadStatus on success or failure.
-        bool Unlock(std::string const& masterPassword);
+        bool Unlock(std::string_view masterPassword);
 
         // Key load status
         KeyLoadStatus GetKeyLoadStatus() const { return m_KeyLoadStatus; }
@@ -106,36 +76,67 @@ namespace AIAssistant
         void SetKeysFilePath(std::filesystem::path const& path) { m_KeysFilePath = path; }
         std::filesystem::path const& GetKeysFilePath() const { return m_KeysFilePath; }
 
-        // Cache the master password after a successful Load/Unlock so server-side
-        // operations (e.g. OAuth token callbacks) can persist encrypted updates without
-        // re-prompting the user.  Returns empty string if no password is cached.
-        std::string GetCachedMasterPassword() const;
+        // Run a callback with the cached master password as a std::string_view.
+        // Returns true if a cached password exists (callback was invoked) and
+        // false otherwise (callback was not invoked).  The view is only valid
+        // for the duration of the call; do not store it.
+        //
+        // Prefer this over a getter that returns std::string: the cached password
+        // lives in mlock()-locked SecureString memory, and copying it into a
+        // heap-allocated std::string defeats the swap-protection guarantee.
+        template <typename F>
+        bool WithCachedMasterPassword(F&& fn) const
+        {
+            std::string_view view = m_CachedMasterPassword.Get();
+            if (view.empty())
+            {
+                return false;
+            }
+            std::forward<F>(fn)(view);
+            return true;
+        }
+
+        // True if a master password is currently cached (after a successful
+        // Load/Unlock).  Use WithCachedMasterPassword() to actually use it.
+        bool HasCachedMasterPassword() const { return !m_CachedMasterPassword.IsEmpty(); }
 
         // Dirty flag: true when in-memory state differs from on-disk state
         bool IsDirty() const { return m_Dirty; }
 
-        // Provider registry access (thread-safe, read-locked)
-        ProviderConfig const* GetProvider(std::string const& name) const;
-        ProviderConfig const* GetDefaultProvider() const;
+        // ---- Provider registry access (thread-safe, read-locked) ----
+        // The typed `ICredential` hierarchy is the single source of truth; secret-bearing
+        // fields are stored in `SecureString` (mlock'd, zero-on-destruct).  Callers
+        // resolve a credential by name and `dynamic_cast` to the expected concrete subtype
+        // (`ApiKeyCredential`, `OAuthCredential`, `KeyPairCredential`, `BasicAuthCredential`,
+        // `AwsCredential`).  See `engine/keys/credential.h` for the hierarchy.
+        ICredential const* GetCredential(std::string const& name) const;
+        ICredential const* GetDefaultCredential() const;
+
         std::string GetDefaultProviderName() const;
         std::vector<std::string> GetProviderNames() const;
         bool HasProviders() const;
 
-        // CRUD (thread-safe, write-locked)
-        bool AddProvider(std::string const& name, ProviderConfig config);
-        bool UpdateProvider(std::string const& name, ProviderConfig config);
+        // CRUD (thread-safe, write-locked).  Take ownership of a pre-built `ICredential`
+        // (typically built by `CredentialFactory::CreateFromJson` from a REST request body
+        // or by `CredentialFactory::CloneAndPatch` for partial-update flows).
+        bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
+        bool UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred);
         bool RemoveProvider(std::string const& name);
         void SetDefaultProvider(std::string const& name);
 
     private:
-        // Parse a JSON string into the provider registry.
+        // Parse a JSON string into the credential registry.  Dispatches each provider
+        // entry through `CredentialFactory::CreateFromJson`.
         bool ParseProvidersJson(std::string const& json);
 
-        // Serialize the provider registry to a JSON string.
+        // Serialize the credential registry to a JSON string via `CredentialFactory::SerializeToJson`.
         std::string SerializeToJson() const;
 
         std::string m_DefaultProviderName;
-        std::unordered_map<std::string, ProviderConfig> m_Providers;
+
+        // Source of truth: typed credentials with SecureString-protected secret fields.
+        std::unordered_map<std::string, std::unique_ptr<ICredential>> m_Credentials;
+
         mutable std::shared_mutex m_Mutex;
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Curl Wrapper module provides a thread-local, RAII-safe wrapper around **libcurl**, used by JarvisAgent to send HTTP POST requests to AI provider APIs (OpenAI, Google Gemini, Anthropic, Ollama, and any compatible provider).
+The Curl Wrapper module provides a thread-local, RAII-safe wrapper around **libcurl**, used by JarvisAgent to send HTTP POST requests to AI provider APIs.  Six provider adapters are supported via the `IAuthSigner` strategy: OpenAI Chat / OpenAI Responses (`Bearer`), Google Gemini native (`x-goog-api-key`), Anthropic Messages (`x-api-key` + `anthropic-version`), Azure OpenAI deployments (`api-key`), AWS Bedrock (SigV4), and any provider compatible with one of these auth styles (e.g. Ollama via `Bearer`).
 
 It ensures:
 
@@ -56,11 +56,11 @@ static CurlWrapper& GetThreadCurl()
 
 - Initialize libcurl once globally (`curl_global_init`)
 - Create and manage a per-instance `CURL*` handle
-- Configure authentication headers (Bearer or `x-goog-api-key`) from `QueryData`
-- Configure POST body and write callback
+- Delegate authentication-header production to `IAuthSigner` (Bearer / x-goog-api-key / x-api-key / api-key / AWS SigV4) — no per-style branching in this layer
+- Configure POST body and write callback (bounded + exception-safe; see Section 7)
 - Run the request with an optional per-request timeout
-- Accumulate the response body into an internal buffer
-- Report errors through the CORE logger
+- Accumulate the response body into an internal buffer (auto-cleared at every `Query()` entry)
+- Report errors through the CORE logger with `url` + `quotaKey` substrings on fail paths
 - Delete/cleanup resources correctly
 
 ### Key Members
@@ -138,16 +138,29 @@ struct QueryResult
 
 ## 5. `QueryData`
 
-Input structure for a single AI HTTP request:
+Input structure for a single AI HTTP request.  Sync callers (assistant, jcwfService Test-connection) populate the auth-relevant fields and leave the dispatcher-routing fields at their sentinel defaults; `AiRequestPool::Submit` fills the dispatcher-routing fields when constructing requests for the async path.
 
 ```cpp
 struct QueryData
 {
+    // Auth + transport (used by both sync CurlWrapper::Query and async dispatcher)
     std::string m_Url;                          // API endpoint URL
     std::string m_Data;                         // JSON POST body
-    std::string m_ApiKey;                       // API key for this request
-    AuthStyle m_AuthStyle{AuthStyle::Bearer};   // Authentication header style
+    std::string m_ApiKey;                       // Static-header credential (Bearer / x-api-key / api-key / x-goog-api-key) OR AWS access_key_id for SigV4
+    AuthStyle m_AuthStyle{AuthStyle::Bearer};   // Authentication header style — selects the IAuthSigner
     long m_TimeoutMs{0};                        // 0 = no timeout; >0 = max transfer time in ms
+    std::unordered_map<std::string, std::string> m_Params{}; // Per-style auxiliary fields (e.g. SigV4 reads "secret_access_key", "region", "session_token")
+
+    // Dispatcher-routing fields (async path only — see Section 15)
+    int m_InterfaceType{-1};                    // ConfigParser::EngineConfig::InterfaceType encoded as int; -1 = unknown / sync caller
+    std::string m_QuotaKey;                     // "<host>|<modelFamily>" controller-map key composed by AiRequestPool::Submit
+    int64_t m_EstimatedInputTokens{-1};         // Pre-dispatch token estimate fed to the controller's bucket projection
+    std::string m_CancelKey;                    // Per-task ID used by CancelByCancelKey() to abort across inbox / retry / active set
+    int m_MaxConcurrency{-1};                   // -1 = unset / use dispatcher default; 0 = explicit zero; >0 = explicit value
+    int m_MaxRetries429{-1};
+    int m_MaxRetriesTransient{-1};
+    int m_BaseRetryMs{-1};
+
     bool IsValid() const;
 };
 ```
@@ -157,14 +170,19 @@ struct QueryData
 ```cpp
 enum class AuthStyle
 {
-    Bearer = 0,  // Authorization: Bearer <key>  (OpenAI, Anthropic, Ollama, etc.)
-    XGoogApiKey  // x-goog-api-key: <key>        (Google Gemini native — API3)
+    Bearer = 0,        // Authorization: Bearer <key>           (OpenAI Chat + Responses APIs; also Ollama, GitHub, Slack, Polarion)
+    XGoogApiKey,       // x-goog-api-key: <key>                 (Google Gemini native)
+    AnthropicXApiKey,  // x-api-key: <key> + anthropic-version  (Anthropic Messages)
+    AzureApiKey,       // api-key: <key>                        (Azure OpenAI deployment URLs)
+    AwsSigV4           // Authorization (AWS4-HMAC-SHA256) + X-Amz-Date + X-Amz-Content-Sha256  (AWS Bedrock — signs the request body)
 };
 ```
 
+`IAuthSigner::Get(style)` returns the singleton signer for each variant.  Adding a new style triggers `-Wswitch` (no `default:` arm) at every consumer; the helper throws `std::logic_error` for unknown integer values as a runtime backstop.  Per-style validation (empty / whitespace credentials, SigV4 dual-secret + region presence, etc.) lives inside each signer's `Apply()` — see `doc/cyber security.md` "IAuthSigner Security".
+
 ### Validation
 
-`IsValid()` returns `false` (and logs an error) if `m_Url` or `m_Data` is empty.
+`IsValid()` is a coarse pre-flight check: it returns `false` (and logs `LOG_CORE_ERROR`) if any of `m_Url`, `m_Data`, `m_ApiKey` is empty.  This is intentionally cheap and style-agnostic.  Style-specific validation (e.g. SigV4's `secret_access_key` and `region` non-empty) lives inside `IAuthSigner::Apply()` and runs after `IsValid()` — a request that passes `IsValid()` may still be rejected by the signer with `QueryErrorCode::NoApiKey` if a style-specific field is missing.
 
 ---
 
@@ -173,37 +191,42 @@ enum class AuthStyle
 `QueryResult CurlWrapper::Query(QueryData const& queryData)`:
 
 1. Checks `m_Initialized` — returns `QueryResult::Fail(CurlNotInitialized, …)` if not ready.
-2. Validates `queryData.IsValid()` — returns `QueryResult::Fail(InvalidQueryData, …)` on failure.
-3. Checks `queryData.m_ApiKey` is non-empty — returns `QueryResult::Fail(NoApiKey, …)` if missing.
-4. Constructs a `CurlSlist` with:
-   - `Content-Type: application/json`
-   - `Authorization: Bearer <key>` (if `AuthStyle::Bearer`) **or** `x-goog-api-key: <key>` (if `AuthStyle::XGoogApiKey`)
-5. Sets curl options:
+2. Validates `queryData.IsValid()` — returns `QueryResult::Fail(InvalidQueryData, …)` on coarse pre-flight failure (empty URL / data / API key).
+3. Clears `m_ReadBuffer` so sequential queries on the same `CurlWrapper` don't concatenate (see Section 7).
+4. Calls `IAuthSigner::Get(m_AuthStyle).Apply(queryData, headers, errorMessage)` to produce auth headers per the selected style.  On signer rejection (empty / whitespace credential, SigV4 missing `secret_access_key` / `region`, etc.) returns `QueryResult::Fail(NoApiKey, …)` and emits `LOG_CORE_ERROR("CurlWrapper::Query: auth signer rejected request url='...' quotaKey='...': ...")`.
+5. Builds a `CurlSlist` with the signer-produced auth headers + `Content-Type: application/json`.
+6. Sets curl options:
    - `CURLOPT_URL`, `CURLOPT_HTTPHEADER`, `CURLOPT_POSTFIELDS`
-   - `CURLOPT_WRITEFUNCTION` / `CURLOPT_WRITEDATA` → appends to `m_ReadBuffer`
-   - `CURLOPT_TIMEOUT_MS` if `m_TimeoutMs > 0`
+   - `CURLOPT_HTTP_VERSION = CURL_HTTP_VERSION_2TLS` (HTTP/2 over ALPN; falls back to HTTP/1.1)
+   - `CURLOPT_WRITEFUNCTION` / `CURLOPT_WRITEDATA` → bounded + exception-safe append to `m_ReadBuffer`
+   - `CURLOPT_TIMEOUT_MS` from `m_TimeoutMs` (0 = no timeout)
    - `CURLOPT_CAINFO` if a CA bundle path is available (see Section 9)
    - Progress callback that aborts mid-request on engine shutdown signal
-6. Calls `curl_easy_perform(m_Curl)`.
-7. Reads HTTP response code via `curl_easy_getinfo(CURLINFO_RESPONSE_CODE)`.
-8. Returns `QueryResult::Ok()` on success, or `QueryResult::Fail(errorCode, …)` on transport or HTTP error.
+7. Captures `qnum` locally (`uint32_t qnum = ++m_QueryCounter`) so subsequent log lines stay correlated under concurrent calls.
+8. Calls `curl_easy_perform(m_Curl)`.
+9. On `CURLE_OK` reads HTTP response code via `curl_easy_getinfo(CURLINFO_RESPONSE_CODE)`.
+10. Returns `QueryResult::Ok()` on success (HTTP <400), or `QueryResult::Fail(errorCode, …)` on curl-level error / HTTP ≥400 — fail paths log `LOG_CORE_ERROR` with `qnum`, `url`, and `quotaKey` substrings for run-analyzer surfacing (Section 12).
+
+The async path (`CurlMultiDispatcher`, Section 15) shares steps 4 (signer) and 6 (curl options) verbatim — no per-style branching diverges between sync and async surfaces.
 
 ---
 
 ## 7. Response Buffering
 
-The write callback appends incoming chunks:
+The write callback appends incoming chunks into `m_ReadBuffer`, with three safety properties:
+
+- **Bounded.** Response body is capped at 32 MiB.  When an append would push the buffer past the cap, the callback returns a short-write to libcurl, which translates to `CURLE_WRITE_ERROR` and aborts the transfer.  Defends the engine against a runaway server streaming gigabytes into a single `std::string`.
+- **Exception-safe.** The callback body is wrapped in `try / catch (...)`; `std::string::append` can throw `bad_alloc` / `length_error`, and an exception escaping a libcurl callback is UB (libcurl is C).  On any throw the callback returns 0 and libcurl aborts cleanly.
+- **Auto-cleared.** `Query()` calls `m_ReadBuffer.clear()` at entry.  This makes `CurlManager::GetThreadCurl()`'s thread-local-reuse pattern safe by default — sequential queries on the same `CurlWrapper` no longer concatenate the previous response into the next one.
+
+After a request:
 
 ```cpp
-buffer->append(static_cast<char*>(contents), totalSize);
+std::string& GetBuffer();   // Access the response body for the most recent Query
+void Clear();               // Defensive no-op; Query() now clears at entry
 ```
 
-After the request:
-
-```cpp
-std::string& GetBuffer();   // Access the accumulated response body
-void Clear();               // Reset the buffer for the next query
-```
+The same 32 MiB body cap is enforced by `CurlMultiDispatcher::MultiWriteCallback` for the async path; both surfaces fail closed identically.
 
 ---
 
@@ -261,13 +284,20 @@ This calls `curl_global_cleanup()`.
 
 ## 12. Error Handling & Logging
 
-Uses the CORE logger. Examples:
+Uses the CORE logger.  Failure-path lines are `LOG_CORE_ERROR` and carry `url` + `quotaKey` substrings so the dashboard's Run Analyzer (which filters issues by run-identifier substring) surfaces them.  `IsValid()` field-empty logs are `LOG_CORE_ERROR` (per-request misconfiguration), not `LOG_CORE_CRITICAL`.
+
+The query number `qnum` is captured locally at dispatch (`uint32_t qnum = ++m_QueryCounter`) and reused in every subsequent log line; reading the static `m_QueryCounter` again on the error path could observe an increment from a concurrent `Query()` on another thread and produce a mismatched qnum.
+
+Examples:
 
 ```
 thread 1234 got a good curl
 curl_easy_init() failed
-query 42 curl error (7): couldn't connect to server
-query 42 HTTP error 429
+sending query 42
+query 42 used HTTP/2 (HTTP 200)
+curl error (code 7): Couldn't connect to server url='https://api.example.com/v1/...' quotaKey='api.example.com|model-x'
+HTTP error 503 for query 42 url='https://api.example.com/v1/...' quotaKey='api.example.com|model-x'
+HTTP 429 rate limit for query 42 — AI provider rejected the request (too many requests or insufficient credits) url='...' quotaKey='...'
 ```
 
 ---
@@ -281,7 +311,7 @@ query 42 HTTP error 429
 | Memory safety | RAII (`CurlSlist`, destructor cleanup) |
 | Unified error reporting | `QueryResult` + `QueryErrorCode` |
 | Per-request API key | `QueryData::m_ApiKey` (set by caller per request) |
-| Multi-provider auth | `AuthStyle::Bearer` / `AuthStyle::XGoogApiKey` |
+| Multi-provider auth | `AuthStyle::{Bearer, XGoogApiKey, AnthropicXApiKey, AzureApiKey, AwsSigV4}` via `IAuthSigner` |
 | Per-request timeout | `QueryData::m_TimeoutMs` → `CURLOPT_TIMEOUT_MS` (size-aware budget when set by `AiRequestPool::Submit`) |
 | Graceful shutdown | Progress callback aborts in-flight requests |
 | Response buffering | Internal `std::string m_ReadBuffer` |

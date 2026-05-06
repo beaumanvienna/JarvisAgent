@@ -150,6 +150,17 @@ namespace AIAssistant
 #endif
 
     private:
+        // Closed set of failure modes for SetupEasyHandle.  Replaces a fragile
+        // string-prefix match on the error message that used to map to
+        // QueryErrorCode at the call site.  Adding a variant triggers -Wswitch
+        // at every consumer.
+        enum class SetupError
+        {
+            None,
+            CurlInit,    // curl_easy_init() returned NULL
+            AuthSigner,  // IAuthSigner::Apply rejected the request
+        };
+
         struct PendingRequest
         {
             CurlWrapper::QueryData m_QueryData;
@@ -201,7 +212,22 @@ namespace AIAssistant
         // Process pending cancellation requests pushed via CancelByCancelKey.
         // I/O thread only — mutates curl handles.
         void DrainPendingCancellations();
-        CURL* SetupEasyHandle(ActiveRequest& req);
+        // Returns the configured easy handle, or nullptr on failure.
+        // On nullptr: errorKind names the closed-set failure mode and errorMessage
+        // carries the human-readable reason; caller maps both into a QueryResult::Fail.
+        [[nodiscard]] CURL* SetupEasyHandle(ActiveRequest& req,
+                                            SetupError& errorKind,
+                                            std::string& errorMessage);
+
+        // Find-or-create a RateLimitController for the given quotaKey.  Initial
+        // cap is read from the per-interface strategy (or 4 if interfaceType is
+        // unknown); hard cap from queryData.m_MaxConcurrency or kMaxActivePerHost.
+        // Caller must hold m_DebugMutex.  Centralises the construction logic so
+        // DrainInbox (admission gate) and ParseRateLimitHeaders (controller
+        // observation) can't drift apart on probe / hardCap derivation.
+        std::unordered_map<std::string, RateLimitController>::iterator
+        EnsureController(std::string const& quotaKey,
+                         CurlWrapper::QueryData const& queryData);
 
         // Parse rate limit headers from the accumulated header buffer, merge
         // them into the legacy HostRateLimitState (for /api/debug/signals)
