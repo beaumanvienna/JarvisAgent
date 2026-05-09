@@ -42,31 +42,31 @@ namespace AIAssistant
         // Extract a .jcwf zip to a target directory.
         // Creates the target directory if it doesn't exist.
         // Returns true on success.
-        static bool Extract(std::filesystem::path const& jcwfPath, std::filesystem::path const& targetDir,
-                            std::string& errorMessage);
+        [[nodiscard]] static bool Extract(std::filesystem::path const& jcwfPath, std::filesystem::path const& targetDir,
+                                          std::string& errorMessage);
 
         // Pack a directory tree into a .jcwf zip file.
         // Recursively adds all files and folders from sourceDir.
         // Returns true on success.
-        static bool Pack(std::filesystem::path const& sourceDir, std::filesystem::path const& jcwfPath,
-                         std::string& errorMessage);
+        [[nodiscard]] static bool Pack(std::filesystem::path const& sourceDir, std::filesystem::path const& jcwfPath,
+                                       std::string& errorMessage);
 
         // Read a single file from a .jcwf zip without full extraction.
         // internalPath uses forward slashes (e.g. "global.json" or "sub/sub.json").
         // Returns true on success; content is written to outContent.
-        static bool ReadFile(std::filesystem::path const& jcwfPath, std::string const& internalPath,
-                             std::string& outContent, std::string& errorMessage);
+        [[nodiscard]] static bool ReadFile(std::filesystem::path const& jcwfPath, std::string const& internalPath,
+                                           std::string& outContent, std::string& errorMessage);
 
         // List all entries in a .jcwf zip (files and directories).
         // Returns empty vector on error.
         static std::vector<std::string> ListEntries(std::filesystem::path const& jcwfPath);
 
         // Check if a .jcwf file is a valid zip container.
-        static bool IsValidContainer(std::filesystem::path const& jcwfPath);
+        [[nodiscard]] static bool IsValidContainer(std::filesystem::path const& jcwfPath);
 
         // Check if the extracted folder is stale (zip is newer than the folder).
-        static bool IsExtractedStale(std::filesystem::path const& jcwfPath,
-                                     std::filesystem::path const& extractedDir);
+        [[nodiscard]] static bool IsExtractedStale(std::filesystem::path const& jcwfPath,
+                                                   std::filesystem::path const& extractedDir);
     };
 
 } // namespace AIAssistant

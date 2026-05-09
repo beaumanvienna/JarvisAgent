@@ -167,7 +167,7 @@ namespace AIAssistant
                      {});
             return;
         }
-        // §14 Tier B: capture submission for size-aware-budget hermetic tests.
+        // Capture submission for hermetic size-aware-budget tests.
         // Separate mutex to avoid contending with the inbox lock.
         {
             std::lock_guard<std::mutex> lock(m_RecentSubmissionsMutex);
@@ -207,7 +207,7 @@ namespace AIAssistant
 #ifdef DEBUG
     void CurlMultiDispatcher::ResetTestState()
     {
-        // §14 Tier B test isolation.  m_Controllers + m_HostRateLimits hold
+        // Hermetic-test isolation.  m_Controllers + m_HostRateLimits hold
         // adaptive state (AIMD cap, last observation) accumulated across
         // submissions; without resetting them, repeated Phase B test runs
         // see residue from prior runs.  m_Active / m_Inbox / m_RetryQueue
@@ -417,7 +417,7 @@ namespace AIAssistant
         curl_easy_setopt(easy, CURLOPT_NOPROGRESS,       0L);
         curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION, MultiProgressCallback);
 
-        // §6.4 liveness: TCP keepalive helps long-idle in-flight connections
+        // Liveness: TCP keepalive helps long-idle in-flight connections
         // notice they're dead.  Default CURLOPT_TCP_KEEPIDLE (60s) is fine for
         // AI requests that may "think" silently before emitting tokens.
         curl_easy_setopt(easy, CURLOPT_TCP_KEEPALIVE,    1L);
@@ -434,7 +434,7 @@ namespace AIAssistant
         }
 
 #ifdef DEBUG
-        // §14 Tier B hermetic tests configure AI interfaces pointing at the
+        // Hermetic dispatcher tests configure AI interfaces pointing at the
         // j9t server's own debug mock endpoint (https://localhost:8443/...).
         // The j9t HTTPS cert is self-signed; the system CA bundle doesn't
         // trust it, so curl returns CURLE_SSL_PEER_CERTIFICATE.  Disable

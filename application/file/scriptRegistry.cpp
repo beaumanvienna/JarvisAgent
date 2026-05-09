@@ -356,7 +356,8 @@ namespace AIAssistant
     }
 
     // ----------------------------------------------------------------
-    // SerializeMarkdownTable — for AI context injection (§11.6)
+    // SerializeMarkdownTable — for AI context injection
+    // (see `doc/JC_Workflow_Specification.md` §11.6).
     // ----------------------------------------------------------------
     std::string ScriptRegistry::SerializeMarkdownTable() const
     {

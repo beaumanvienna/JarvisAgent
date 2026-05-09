@@ -23,6 +23,7 @@
 #include "workflow/templateEngine.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +35,8 @@
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "content/chunkPlanner.h"
+#include "file/pathConfinement.h"
+#include "json/jsonHelper.h"
 #include "session/fileWriter.h"
 #include "workflow/aiInvocation.h"
 #include "workflow/aiRequestPool.h"
@@ -45,6 +48,58 @@ namespace AIAssistant
 {
     namespace
     {
+        // Hard cap on file reads — prevents a malicious or runaway path
+        // (`/dev/zero`, an in-progress 100 GB log, a fifo) from exhausting
+        // the parsing thread's heap.  100 MB is generous for prompt/context
+        // material that's about to be sent to an AI provider.
+        constexpr std::uintmax_t kMaxReadBytes = 100ULL * 1024ULL * 1024ULL;
+
+        // Cap on glob match count.  Defends against a directory path that
+        // resolves to a tree containing millions of small files (which can
+        // happen with broken symlink loops or attacker-planted file farms).
+        constexpr std::size_t kMaxGlobMatches = 10'000;
+
+        // CNTX/PROB source paths are confined under the project root
+        // (`ConfineUnderProjectRoot` from `application/file/pathConfinement.h`)
+        // at every materialise site.  Cross-task data flow inside the
+        // project (e.g. `ai_call` reading another task's output via
+        // `../../../workflows/<id>/<other_task>/output.json`) is the
+        // documented JCWF pattern, so the gate is project-root-wide rather
+        // than task-folder-wide.  Defends against `/etc/shadow`-style
+        // absolute paths and against `..`-laden relative paths that escape
+        // the project tree.
+
+        // Allowlist for paths handed to the markitdown shell command.  popen()
+        // executes through /bin/sh so anything that could be parsed as a
+        // metacharacter (including `;`, `|`, `&`, `(`, `)`, `<`, `>`, `$`, `\``,
+        // `\n`, `\r`, etc.) must be rejected.  The previous blocklist missed
+        // most of these.  Allowlist matches typical filesystem paths only.
+        [[nodiscard]] static bool IsAllowedMarkitdownPath(std::string const& path) noexcept
+        {
+            if (path.empty() || path.size() > 4096)
+            {
+                return false;
+            }
+            for (char const c : path)
+            {
+                bool const ok =
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '/' || c == '.' || c == '_' || c == '-' || c == '+' || c == '=' || c == ':';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            // Reject any `..` segment defensively.
+            if (path.find("..") != std::string::npos)
+            {
+                return false;
+            }
+            return true;
+        }
+
         static int64_t NowTimestampNs()
         {
             auto const now = std::chrono::system_clock::now().time_since_epoch();
@@ -193,9 +248,14 @@ namespace AIAssistant
                     }
                 }
             }
+            catch (std::exception const& e)
+            {
+                LOG_APP_WARN("BuildDefaultsMap: simdjson parse exception; defaults map left empty/partial: {}",
+                             e.what());
+            }
             catch (...)
             {
-                // Silently fall through — result will be empty or partial.
+                LOG_APP_WARN("BuildDefaultsMap: non-std exception during parse; defaults map left empty/partial");
             }
 
             return result;
@@ -251,12 +311,23 @@ namespace AIAssistant
 
         static bool ReadTextFile(std::filesystem::path const& filePath, std::string& outText, std::string& outErrorMessage)
         {
+            std::error_code sizeErrorCode;
+            std::uintmax_t const fileBytes = std::filesystem::file_size(filePath, sizeErrorCode);
+            if (sizeErrorCode)
+            {
+                outErrorMessage = std::string("Failed to stat file: ") + sizeErrorCode.message();
+                return false;
+            }
+            if (fileBytes > kMaxReadBytes)
+            {
+                outErrorMessage = "Refusing to read file: size " + std::to_string(fileBytes) +
+                                  " bytes exceeds cap " + std::to_string(kMaxReadBytes);
+                return false;
+            }
             std::ifstream inputStream(filePath, std::ios::binary);
             if (!inputStream.is_open())
             {
-                std::ostringstream errorStream;
-                errorStream << "Failed to open file for reading: " << filePath.string();
-                outErrorMessage = errorStream.str();
+                outErrorMessage = std::string("Failed to open file for reading: ") + filePath.filename().string();
                 return false;
             }
 
@@ -287,12 +358,13 @@ namespace AIAssistant
             outMarkdown.clear();
             outErrorMessage.clear();
 
-            // Single-arg quoting is enough for well-formed paths; JarvisAgent already
-            // resolves paths via lexically_normal() upstream.  Rejecting quotes in the
-            // path keeps the shell invocation robust.
+            // Allowlist gate (replaces the previous narrow blocklist).  popen
+            // routes through /bin/sh, so the path string MUST be limited to
+            // characters that cannot be misinterpreted as shell metacharacters.
+            // Future migration to argv-based execution (posix_spawn / fork+
+            // execvp) would lift this restriction.
             std::string const rawPath = inputPath.string();
-            if (rawPath.find('"') != std::string::npos || rawPath.find('\'') != std::string::npos ||
-                rawPath.find('`') != std::string::npos || rawPath.find('$') != std::string::npos)
+            if (!IsAllowedMarkitdownPath(rawPath))
             {
                 outErrorMessage = "markitdown: refusing unsafe input path '" + rawPath + "'";
                 return false;
@@ -449,6 +521,13 @@ namespace AIAssistant
 
                     if (MatchGlob(filenamePattern, entry.path().filename().string()))
                     {
+                        if (matches.size() >= kMaxGlobMatches)
+                        {
+                            outErrorMessage = "cntx_files glob match count exceeds cap " +
+                                              std::to_string(kMaxGlobMatches) + " for pattern '" +
+                                              fileRef.m_Path + "'";
+                            return false;
+                        }
                         matches.push_back(entry.path());
                     }
                 }
@@ -506,6 +585,20 @@ namespace AIAssistant
                 {
                     sourcePath = sourcePath.lexically_normal();
                 }
+
+                // Containment gate — refuse CNTX paths that resolve outside
+                // the project root (e.g. `/etc/shadow`, or a `..`-laden
+                // path that escapes the project tree).  Cross-task data
+                // flow inside the project is allowed.
+                std::filesystem::path const confinedSource = ConfineUnderProjectRoot(sourcePath);
+                if (confinedSource.empty())
+                {
+                    outErrorMessage = "CNTX source path resolves outside project root: '" +
+                                      fileRef.m_Path + "'";
+                    LOG_APP_ERROR("[ai_call] {}", outErrorMessage);
+                    return false;
+                }
+                sourcePath = confinedSource;
 
                 // Office formats (.pdf/.docx/.xlsx/.pptx/.odt) can't be sent raw to
                 // an AI — convert synchronously via markitdown and substitute the
@@ -636,11 +729,22 @@ namespace AIAssistant
                     sourcePath = sourcePath.lexically_normal();
                 }
 
+                std::filesystem::path const confinedProbSource = ConfineUnderProjectRoot(sourcePath);
+                if (confinedProbSource.empty())
+                {
+                    outErrorMessage = "PROB source path resolves outside project root: '" +
+                                      fileRef.m_Path + "'";
+                    LOG_APP_ERROR("[ai_call] {}", outErrorMessage);
+                    return false;
+                }
+                sourcePath = confinedProbSource;
+
                 std::string sourceText;
                 if (!ReadTextFile(sourcePath, sourceText, outErrorMessage))
                 {
                     std::ostringstream errorStream;
-                    errorStream << "Missing PROB source '" << sourcePath.string() << "': " << outErrorMessage;
+                    errorStream << "Missing PROB source '" << sourcePath.filename().string() << "': "
+                                << outErrorMessage;
                     outErrorMessage = errorStream.str();
                     return false;
                 }
@@ -738,17 +842,48 @@ namespace AIAssistant
             }
         }
 
-        std::ofstream outputStream(filePath, std::ios::binary | std::ios::trunc);
-        if (!outputStream.is_open())
-        {
-            outErrorMessage = "failed to open for writing: " + filePath;
-            return false;
-        }
+        // Atomic write: open <final>.tmp.<counter> → write → close → rename.
+        // A SIGKILL or disk-full mid-write leaves the previous version of the
+        // final file intact, instead of a truncated partial that downstream
+        // consumers parse as malformed.  The counter (atomic) makes the temp
+        // name unique under concurrent writers targeting the same final path.
+        static std::atomic<uint64_t> s_TempCounter{0};
+        uint64_t const counter = s_TempCounter.fetch_add(1, std::memory_order_relaxed);
+        std::filesystem::path const tempPath =
+            filesystemPath.parent_path() /
+            (filesystemPath.filename().string() + ".tmp." + std::to_string(counter));
+        std::string const tempPathString = tempPath.string();
 
-        outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
-        if (!outputStream.good())
         {
-            outErrorMessage = "failed while writing: " + filePath;
+            std::ofstream outputStream(tempPathString, std::ios::binary | std::ios::trunc);
+            if (!outputStream.is_open())
+            {
+                outErrorMessage = "failed to open for writing: " + filesystemPath.filename().string();
+                LOG_APP_ERROR("[ai_call] WriteTextFile open failed path='{}'", filePath);
+                return false;
+            }
+
+            outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
+            if (!outputStream.good())
+            {
+                outErrorMessage = "failed while writing: " + filesystemPath.filename().string();
+                LOG_APP_ERROR("[ai_call] WriteTextFile write failed path='{}'", filePath);
+                std::error_code rmEc;
+                std::filesystem::remove(tempPathString, rmEc); // best-effort cleanup
+                return false;
+            }
+        } // ofstream destructor closes the stream BEFORE rename
+
+        std::error_code renameEc;
+        std::filesystem::rename(tempPathString, filePath, renameEc);
+        if (renameEc)
+        {
+            outErrorMessage = "failed to finalize write: " + filesystemPath.filename().string() +
+                              " (" + renameEc.message() + ")";
+            LOG_APP_ERROR("[ai_call] WriteTextFile rename failed temp='{}' final='{}' ec={}",
+                          tempPathString, filePath, renameEc.message());
+            std::error_code rmEc;
+            std::filesystem::remove(tempPathString, rmEc); // best-effort cleanup
             return false;
         }
 
@@ -1164,6 +1299,14 @@ namespace AIAssistant
                     std::string effectiveModel;
                     std::string keyNameForProv; // key_name from interface → goes into PROV "provider"
                     {
+                        if (Core::g_Core == nullptr)
+                        {
+                            taskState.m_LastErrorMessage = "AiCallTaskExecutor: Core::g_Core is null";
+                            taskState.m_State = TaskInstanceStateKind::Failed;
+                            LOG_APP_ERROR("[ai_call] Core::g_Core is null run='{}' workflow='{}' task='{}'",
+                                          workflowRun.m_RunId, workflowRun.m_WorkflowId, taskDefinition.m_Id);
+                            return false;
+                        }
                         auto const& interfaces = Core::g_Core->GetConfig().m_ApiInterfaces;
 
                         // Primary lookup: match by interface name.
@@ -1200,29 +1343,56 @@ namespace AIAssistant
                         }
                     }
 
+                    // Every string value is JSON-escaped before embedding.
+                    // Previous direct concatenation could produce malformed
+                    // (or attacker-shaped) JSON if any field contained `"`,
+                    // `\`, or control characters.
                     std::string sidecarJson = "{";
                     // Store key_name (not interface name) so replay tooling can resolve the API key.
                     std::string const& provForSidecar = keyNameForProv.empty() ? providerOpt.value() : keyNameForProv;
-                    sidecarJson += "\"provider\":\"" + provForSidecar + "\"";
+                    sidecarJson += "\"provider\":\"" + JsonHelper::EscapeJsonString(provForSidecar) + "\"";
 
                     if (!resolvedUrl.empty())
                     {
-                        sidecarJson += ",\"url\":\"" + resolvedUrl + "\"";
+                        sidecarJson += ",\"url\":\"" + JsonHelper::EscapeJsonString(resolvedUrl) + "\"";
                     }
 
                     if (!resolvedApiType.empty())
                     {
-                        sidecarJson += ",\"api_type\":\"" + resolvedApiType + "\"";
+                        sidecarJson += ",\"api_type\":\"" + JsonHelper::EscapeJsonString(resolvedApiType) + "\"";
                     }
 
                     if (!effectiveModel.empty())
                     {
-                        sidecarJson += ",\"model\":\"" + effectiveModel + "\"";
+                        sidecarJson += ",\"model\":\"" + JsonHelper::EscapeJsonString(effectiveModel) + "\"";
                     }
 
                     if (temperatureOpt.has_value())
                     {
-                        sidecarJson += ",\"temperature\":" + temperatureOpt.value();
+                        // Validate as a finite double in a sane range before
+                        // emitting as a JSON number — drops attacker-shaped
+                        // strings (e.g. `1},"injected":true`) at the gate.
+                        try
+                        {
+                            std::size_t consumed = 0;
+                            double const temperatureValue = std::stod(temperatureOpt.value(), &consumed);
+                            if (consumed == temperatureOpt.value().size() &&
+                                std::isfinite(temperatureValue) &&
+                                temperatureValue >= 0.0 && temperatureValue <= 2.0)
+                            {
+                                sidecarJson += ",\"temperature\":" + std::to_string(temperatureValue);
+                            }
+                            else
+                            {
+                                LOG_APP_WARN("Sidecar: refusing temperature out of range [0,2] or non-finite: '{}'",
+                                             temperatureOpt.value());
+                            }
+                        }
+                        catch (std::exception const&)
+                        {
+                            LOG_APP_WARN("Sidecar: refusing non-numeric temperature value '{}'",
+                                         temperatureOpt.value());
+                        }
                     }
 
                     sidecarJson += "}";
@@ -1437,6 +1607,7 @@ namespace AIAssistant
                 // single-envelope dispatch proceeds (possibly oversized) and the
                 // provider may reject it.
                 uint64_t maxContextTokens = 0;
+                if (Core::g_Core != nullptr)
                 {
                     auto const& configForChunk = Core::g_Core->GetConfig();
                     for (auto const& apiCandidate : configForChunk.m_ApiInterfaces)
@@ -1521,6 +1692,13 @@ namespace AIAssistant
                         std::string m_FirstErrorMessage;
                         std::filesystem::path m_QueueFolder;
                         std::string m_ProbName;
+                        // Borrowed pointer to the AiRequestPool that owns the curl callbacks
+                        // dispatching to this aggregator.  The pool is owned by
+                        // `JarvisAgent::m_AiRequestPool` as `std::unique_ptr<AiRequestPool>`;
+                        // its `Shutdown()` drains all in-flight curl callbacks BEFORE the pool
+                        // destructs, so the raw pointer is stable for the entire aggregator
+                        // lifetime under correct shutdown ordering.  Every consumer site
+                        // ALSO null-checks before deref as defense in depth.
                         AiRequestPool* m_RequestPool;
                         std::string m_TaskIdForLog;
                         // Reduce-pass context: carries instruction prefix/suffix so the
@@ -1565,7 +1743,10 @@ namespace AIAssistant
                                 std::filesystem::absolute(outputPath).lexically_normal().generic_string();
                             if (agg->m_RequestPool != nullptr)
                             {
-                                agg->m_RequestPool->OnOutputFileCreated(normalizedPath);
+                                // Aggregator's reduce-pass fallback writes the final output;
+                                // the per-path lookup signal is observability only — a missing
+                                // pending entry here just means the binding already completed.
+                                (void)agg->m_RequestPool->OnOutputFileCreated(normalizedPath);
                             }
                         }
                         LOG_APP_WARN("[ai_call] task '{}' reduce pass fallback to plain concat ({})",
@@ -1688,9 +1869,13 @@ namespace AIAssistant
                             // will write <prob>.output.txt and signal OnOutputFileCreated for us
                             // (because m_ChunkIndex is unset).  If Submit rejects the envelope
                             // synchronously (e.g. interface changed, key missing), fall back.
-                            if (!aggregator->m_RequestPool->Submit(reduceEnvelope, nullptr))
+                            if (aggregator->m_RequestPool == nullptr ||
+                                !aggregator->m_RequestPool->Submit(reduceEnvelope, nullptr))
                             {
-                                writeConcatFallback(aggregator, totalChunks, "reduce Submit rejected");
+                                writeConcatFallback(aggregator, totalChunks,
+                                                    aggregator->m_RequestPool == nullptr
+                                                        ? "request pool unavailable (shutdown?)"
+                                                        : "reduce Submit rejected");
                                 return;
                             }
 

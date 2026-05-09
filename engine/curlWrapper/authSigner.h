@@ -44,7 +44,8 @@ namespace AIAssistant
     //
     // The signer subsystem has no run context (no runId / workflowId), so it
     // does NOT emit the failure log — the caller (which has run context) is
-    // responsible for the structured ERROR line.  See feedback_log_failures.md.
+    // responsible for the structured ERROR line so the dashboard run analyzer
+    // can attribute it.
     class IAuthSigner
     {
     public:

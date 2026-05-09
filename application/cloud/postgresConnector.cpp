@@ -88,10 +88,9 @@ namespace AIAssistant
         // Bracketed IPv6 literal — `[fc00::1]:5432` or just `[fc00::1]`.  The
         // brackets are URL syntax to disambiguate the inner colons from the
         // host:port separator; libpq's libpq-fe accepts the bare IPv6 form,
-        // so we strip the brackets after extracting the optional port.  This
-        // closes the gap noted in sitting 27 — without bracket-stripping,
-        // `host = "[fc00::1]"` would have a leading `[` that fails
-        // IsLocalNetworkHost's IPv6-literal classifier.
+        // so we strip the brackets after extracting the optional port.  Without
+        // bracket-stripping, `host = "[fc00::1]"` would have a leading `[` that
+        // fails IsLocalNetworkHost's IPv6-literal classifier.
         if (connection.m_Endpoint.front() == '[')
         {
             std::size_t const closeBracket = connection.m_Endpoint.find(']');

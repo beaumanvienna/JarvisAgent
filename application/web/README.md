@@ -35,3 +35,5 @@ The server broadcasts JSON messages to connected clients:
 - `workflowRunsSnapshot` — periodic run state updates
 - `sessionStatus` — session manager state changes
 - `logLine` — real-time log streaming
+
+The upgrade is auth-gated identically to the REST API (`onaccept` runs `Authenticate(req)`); a missing or invalid credential returns a connection refusal that fires the client's `onclose` handler.  The client (dashboard `useWebSocket` hook) reconnects with **exponential backoff** — base 2 s, doubles per consecutive failed connect, capped at 30 s, resets to base on successful `onopen`.  Without the backoff a long-open dashboard tab opened before the user logged in would generate one `[security] auth_failure reason=missing_credential` + one `[security] ws_upgrade_rejected` line every 2 s in `log/security.txt`, drowning genuine signal.

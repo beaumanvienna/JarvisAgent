@@ -171,8 +171,8 @@ namespace AIAssistant
         }
 
         // POST /api/v2/statements with SELECT 1.  BuildApiBaseUrl validates the
-        // endpoint allowlist (sitting 14 fix) and returns "" on rejection — already
-        // logged at the helper.
+        // endpoint allowlist and returns "" on rejection — already logged at
+        // the helper.
         std::string apiBase = BuildApiBaseUrl(connection.m_Endpoint);
         if (apiBase.empty())
         {
@@ -204,7 +204,7 @@ namespace AIAssistant
         {
             requestBody = "{\"statement\":\"SELECT 1\",\"timeout\":10";
             // Escape warehouse/database/schema before splicing — same JSON injection
-            // vector the executor closed (sitting 14).
+            // vector the executor closes.
             if (warehouseIt != connection.m_Params.end() && !warehouseIt->second.empty())
             {
                 requestBody += ",\"warehouse\":\"" + JsonHelper::EscapeJsonString(warehouseIt->second) + "\"";

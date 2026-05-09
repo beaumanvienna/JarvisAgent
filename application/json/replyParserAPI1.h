@@ -73,7 +73,7 @@ namespace AIAssistant
             };
             std::string m_Id;
             std::string m_Object;
-            int m_Created;
+            uint64_t m_Created{0};
             std::string m_Model;
             std::vector<Choice> m_Choices;
             Usage m_Usage;
@@ -103,22 +103,22 @@ namespace AIAssistant
         ReplyParserAPI1(std::string const& jsonString);
         virtual ~ReplyParserAPI1() = default;
 
-        ErrorInfo const& GetErrorInfo() const;
-        ErrorType GetErrorType() const;
+        [[nodiscard]] ErrorInfo const& GetErrorInfo() const;
+        [[nodiscard]] ErrorType GetErrorType() const;
 
-        virtual size_t HasContent() const override;
-        virtual std::string GetContent(size_t index = 0) const override;
-        virtual AiError GetError() const override;
-        virtual AiUsage GetUsage() const override;
-        virtual std::string GetFinishReason() const override;
-        virtual std::string GetSystemFingerprint() const override;
+        [[nodiscard]] virtual size_t HasContent() const override;
+        [[nodiscard]] virtual std::string GetContent(size_t index = 0) const override;
+        [[nodiscard]] virtual AiError GetError() const override;
+        [[nodiscard]] virtual AiUsage GetUsage() const override;
+        [[nodiscard]] virtual std::string GetFinishReason() const override;
+        [[nodiscard]] virtual std::string GetSystemFingerprint() const override;
 
     private:
         void Parse();
         void ParseContent(simdjson::ondemand::array, Reply&);
-        void ParseUsage(simdjson::ondemand::object);
+        void ParseUsage(simdjson::ondemand::object, Reply&);
         void ParseError(simdjson::ondemand::object);
-        ReplyParserAPI1::ErrorType ParseErrorType(std::string_view type);
+        static ReplyParserAPI1::ErrorType ParseErrorType(std::string_view type);
 
     private:
         // good reply

@@ -44,7 +44,7 @@ namespace AIAssistant
                 API2,
                 API3,
                 API4,
-                Test, // No-network fixture-driven backend for integration tests (§8 Phase 7)
+                Test, // No-network fixture-driven backend for integration tests
                 API5, // AWS Bedrock: per-model-family body, SigV4 signing
                 API6, // Azure OpenAI: API1 body shape, deployment URL template, api-key header
                 NumAPIs,
@@ -90,11 +90,11 @@ namespace AIAssistant
                 std::string m_Model;
                 std::string m_KeyName;
                 InterfaceType m_InterfaceType{InterfaceType::InvalidAPI};
-                // Structure-aware chunking budget (§8 Phase 6). Zero = "no limit known,
+                // Structure-aware chunking budget. Zero = "no limit known,
                 // fall back to a conservative default". Chars ÷ 4 is the rough token
                 // estimator for English text.
                 uint64_t m_MaxContextTokens{0};
-                // Adaptive rate-limit + size-aware budget knobs (§7).  Fields are
+                // Adaptive rate-limit + size-aware budget knobs.  Fields are
                 // optional in config.json; missing fields fall back to the per-
                 // InterfaceType defaults baked in here.
                 RateLimit m_RateLimit;

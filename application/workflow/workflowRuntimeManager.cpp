@@ -297,8 +297,8 @@ namespace AIAssistant
         // multi-segment path.  Iterative two-pointer match with backtracking;
         // O(name × pattern) worst case, no allocations.  Replaces an ad-hoc
         // matcher that only handled `*` at the very start or very end and
-        // would silently fail on patterns like `PROB_*.json` (cyber-sec audit
-        // MEDIUM 2).  Path-confinement still gates the resulting paths via
+        // would silently fail on patterns like `PROB_*.json`.  Path-confinement
+        // still gates the resulting paths via
         // ConfineUnderProjectRoot, so a too-permissive pattern can only ever
         // match files inside the project tree.
         bool GlobMatchesFilename(std::string_view pattern, std::string_view name)
@@ -345,7 +345,7 @@ namespace AIAssistant
         // direct caller (integration / test harness / new MCP tool) cannot
         // smuggle path-traversal segments or shell-metachar identifiers into
         // the on-disk paths the runtime later builds (queue/<id>, run-state
-        // tracking maps, log lines).  Per cyber-sec audit LOW 2.
+        // tracking maps, log lines).
         constexpr size_t kMaxRunIdLen = 256;
         bool IsValidRunOrWorkflowId(std::string const& id)
         {
@@ -496,8 +496,7 @@ namespace AIAssistant
         // (a JCWF or webhook trigger payload can seed context).  Without this gate, a
         // malicious workflow could point the callback at internal services
         // (cloud-metadata endpoints like 169.254.169.254, intra-VPC databases, the
-        // local control-plane) and exfiltrate task outputs to them.  Per cyber-sec
-        // audit HIGH 2 + LOW 1.
+        // local control-plane) and exfiltrate task outputs to them.
 
         bool IsIp4InRejectedRange(uint32_t ip4HostOrder)
         {
@@ -616,8 +615,16 @@ namespace AIAssistant
             int const gai = ::getaddrinfo(host.c_str(), "443", &hints, &results);
             if (gai != 0 || results == nullptr)
             {
-                outReason = std::string("DNS resolution failed: ") +
-                            (gai == 0 ? "no addresses" : ::gai_strerror(gai));
+                // gai_strerror's char width is platform-dependent: on Windows
+                // when _UNICODE is defined it expands to gai_strerrorW which
+                // returns WCHAR*, breaking the ternary against the narrow
+                // string literal.  Pin to the ANSI variant on Windows.
+#if defined(_WIN32)
+                char const* const gaiMessage = (gai == 0) ? "no addresses" : ::gai_strerrorA(gai);
+#else
+                char const* const gaiMessage = (gai == 0) ? "no addresses" : ::gai_strerror(gai);
+#endif
+                outReason = std::string("DNS resolution failed: ") + gaiMessage;
                 if (results) { ::freeaddrinfo(results); }
                 return false;
             }
@@ -673,10 +680,10 @@ namespace AIAssistant
             // Output content is included by default for backwards compatibility.
             // Setting `callback_include_outputs` to "false" / "0" / "no" in the run
             // context strips per-task output values + file contents from the payload,
-            // leaving only run-level state + per-task state + error messages.  Per
-            // cyber-sec audit MEDIUM 1: callers handling sensitive data (PII,
-            // secrets, output blobs that could contain credentials) should opt out
-            // explicitly so a leaked callback URL doesn't exfiltrate the content.
+            // leaving only run-level state + per-task state + error messages.
+            // Callers handling sensitive data (PII, secrets, output blobs that could
+            // contain credentials) should opt out explicitly so a leaked callback URL
+            // doesn't exfiltrate the content.
             bool includeOutputs = true;
             if (auto const it = workflowRun.m_Context.find("callback_include_outputs");
                 it != workflowRun.m_Context.end())
@@ -830,7 +837,7 @@ namespace AIAssistant
                     // TLS hardening + SSRF defense in depth.  IsCallbackUrlAllowed
                     // already gates host range; these options ensure curl itself
                     // cannot silently downgrade or redirect the request to a worse
-                    // destination (cyber-sec audit LOW 1).
+                    // destination.
                     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
                     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
                     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
@@ -1690,7 +1697,7 @@ namespace AIAssistant
 
                 if (active.m_Run.m_IsCompleted)
                 {
-                    // 2-second minimum-visibility hold (plan §6): sub-second runs — common for adhoc
+                    // 2-second minimum-visibility hold: sub-second runs — common for adhoc
                     // submissions — would otherwise slip through m_ActiveRuns between snapshot
                     // broadcasts and never surface on the dashboard. Keep completed entries in the
                     // active list until at least 2 s have elapsed since the run started, then let
@@ -2291,7 +2298,7 @@ namespace AIAssistant
 
             // Per-run AI call cap — "max_ai_calls_per_jcwf" (0 = no cap). Guards against
             // a single runaway JCWF (especially adhoc) consuming the entire AI budget.
-            if (taskDefinition.m_Type == TaskType::AiCall)
+            if (taskDefinition.m_Type == TaskType::AiCall && Core::g_Core != nullptr)
             {
                 size_t const cap = Core::g_Core->GetConfig().m_MaxAiCallsPerJcwf;
                 if (cap > 0 && activeRun.m_AiCallsDispatched >= cap)
@@ -2316,8 +2323,8 @@ namespace AIAssistant
             // Capture by value, not by reference.  WaitStop()'s shutdown path may clear
             // m_ActiveRuns before all in-flight worker futures have completed; a captured
             // reference into ActiveRun::m_Definition would then dangle.  WorkflowDefinition
-            // is heavyweight but the copy is per-dispatch (not per-tick), and the safety
-            // guarantee is mandatory per `feedback_capture_by_value_async`.
+            // is heavyweight but the copy is per-dispatch (not per-tick) — never reach into
+            // caller-stack data from an async work site.
             activeRun.m_RunningTasks[taskId] =
                 pool.SubmitTask(
                         [this, workflowDefinitionCopy = workflowDefinition, workflowRunSnapshot,
@@ -3092,10 +3099,10 @@ namespace AIAssistant
         // ConfineUnderProjectRoot.  An attacker-controlled file_outputs / working
         // directory entry — or a workflowId smuggled with `..` segments — could
         // otherwise resolve to a path outside the project tree (e.g. /etc/passwd,
-        // /home/<user>/...).  Per cyber-sec audit HIGH 1: refuse to delete
-        // anything that does not canonicalise inside the project root.  The
-        // helper also rejects symlink targets that point out of tree, closing
-        // the symlink-attack vector noted as cyber-sec audit LOW 4.
+        // /home/<user>/...).  Refuse to delete anything that does not
+        // canonicalise inside the project root.  The helper also rejects
+        // symlink targets that point out of tree, closing the symlink-attack
+        // vector.
         //
         // The helper combines existence + type + delete in a single fs::remove*
         // syscall — fs::remove returns false (not error) for a non-existent path,
@@ -3530,8 +3537,7 @@ namespace AIAssistant
         // engineConfig.m_MaxPerItemFanOut.  An attacker-supplied filter (e.g. a
         // CSV with millions of rows, or a Polarion query that returns the entire
         // tracker) would otherwise spawn one task child + downstream dispatch
-        // per item — exhausting threads, memory, and the AI provider quota
-        // (cyber-sec audit MEDIUM 3).
+        // per item — exhausting threads, memory, and the AI provider quota.
         if (Core::g_Core != nullptr)
         {
             size_t const cap = Core::g_Core->GetConfig().m_MaxPerItemFanOut;

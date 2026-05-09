@@ -25,9 +25,11 @@
 
 #include "engine.h"
 #include "core.h"
+#include "file/pathConfinement.h"
 #include "shellTaskExecutor.h"
 #include "workflow/templateEngine.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -56,15 +58,55 @@ namespace AIAssistant
     namespace
     {
 
+        // Serializes captured-output execution.  Originally protected
+        // process-wide `current_path` mutation; that mutation was retired in
+        // favour of `cd` inside the spawned subshell, so today the lock acts
+        // as a coarse one-shell-task-at-a-time gate that bounds concurrent
+        // pressure on the system.  The per-task unique stderr filename below
+        // means we no longer rely on this mutex for race avoidance — it
+        // could be relaxed (e.g., per-working-directory) if shell-task
+        // throughput becomes a bottleneck.
         std::mutex g_ShellTaskExecutorCurrentPathMutex;
+
+        // Atomic counter providing per-task uniqueness for `.ja_stderr_tmp`
+        // filenames.  Pre-fix: a single fixed `.ja_stderr_tmp` per working
+        // directory races with concurrent shell tasks in the same dir AND
+        // is symlink-baitable in multi-tenant deployments.  Post-fix: the
+        // filename is `.ja_stderr_<pid>_<counter>.tmp` — process-PID +
+        // monotonic counter is collision-free without needing filesystem
+        // calls.  Caller cleans up the file on the success path.
+        std::atomic<uint64_t> g_StderrTmpCounter{0};
+
+        // RAII wrapper for popen-returned FILE*.  Pre-fix: an exception
+        // anywhere in the captured-output read loop (std::string allocation,
+        // logger throwing, etc.) leaves the popen'd FILE* + child process
+        // un-reaped, which leaks until process exit.  Post-fix: pclose runs
+        // on every exit path.  The deleter returns the exit status into a
+        // captured int* on close so the caller can recover it.
+        struct PipeCloser
+        {
+            int* m_ExitOut = nullptr;
+            void operator()(FILE* p) const noexcept
+            {
+                if (p == nullptr) return;
+#if defined(_WIN32)
+                int const status = _pclose(p);
+#else
+                int const status = pclose(p);
+#endif
+                if (m_ExitOut != nullptr) *m_ExitOut = status;
+            }
+        };
+        using PipePtr = std::unique_ptr<FILE, PipeCloser>;
 #if defined(_WIN32)
         FILE* OpenPipe(char const* command, char const* mode) { return _popen(command, mode); }
-
-        int ClosePipe(FILE* pipe) { return _pclose(pipe); }
 #else
         FILE* OpenPipe(char const* command, char const* mode) { return popen(command, mode); }
 
-        int ClosePipe(FILE* pipe)
+        // ClosePipe is now the deleter inside PipeCloser; retained here as a
+        // utility for any future non-RAII call site.  Currently unused
+        // outside PipeCloser; if it stays unused, this can be removed.
+        [[maybe_unused]] int ClosePipe(FILE* pipe)
         {
             int const status = pclose(pipe);
             if (status == -1)
@@ -207,9 +249,19 @@ namespace AIAssistant
 
         std::string JoinArgumentsForSystem(std::vector<std::string> const& arguments)
         {
-            // NOTE:
-            // This is used to build a command line for /bin/sh -c via popen().
-            // If an argument contains whitespace, it must be quoted so it survives the shell.
+            // ALWAYS single-quote every argument before joining — this is
+            // the load-bearing defense against shell injection through `args[]`.
+            // Pre-fix only quoted whitespace-bearing args; a non-whitespace
+            // arg containing `$(...)` slipped past unquoted and reached the
+            // shell as command substitution.  Post-fix: every arg is wrapped
+            // in single quotes via `QuoteForPosixShell` (which handles
+            // embedded single quotes via `'\''`), so the shell treats it as
+            // a literal regardless of contents.  Workflow-author globbing
+            // expectation (`*.txt` etc.) is supported via the `command` field
+            // (concatenated raw); `args[]` is for positional arguments and
+            // SHOULD be literal.
+            //
+            // Used to build a command line for /bin/sh -c via popen().
             std::ostringstream stringStream;
             bool isFirst = true;
             for (std::string const& argument : arguments)
@@ -219,15 +271,7 @@ namespace AIAssistant
                     stringStream << " ";
                 }
 
-                bool const hasWhitespace = argument.find_first_of(" \t\r\n") != std::string::npos;
-                if (hasWhitespace)
-                {
-                    stringStream << QuoteForPosixShell(argument);
-                }
-                else
-                {
-                    stringStream << argument;
-                }
+                stringStream << QuoteForPosixShell(argument);
 
                 isFirst = false;
             }
@@ -305,7 +349,20 @@ namespace AIAssistant
             // Do NOT change the process-wide current_path; other threads (for example the file watcher)
             // rely on it. Instead, run the command inside a subshell that changes directory only for
             // the spawned shell process.
-            std::filesystem::path const stderrTmpPath = workingDirectoryPath / ".ja_stderr_tmp";
+            // Per-task unique stderr temp filename (PID + monotonic counter).
+            // Prevents two concurrent shell tasks in the same working
+            // directory from clobbering each other's stderr capture, and
+            // makes symlink-bait attacks futile because the filename isn't
+            // predictable across invocations.
+#if defined(_WIN32)
+            uint64_t const pid = static_cast<uint64_t>(::_getpid());
+#else
+            uint64_t const pid = static_cast<uint64_t>(::getpid());
+#endif
+            uint64_t const counter = g_StderrTmpCounter.fetch_add(1, std::memory_order_relaxed);
+            std::string const stderrFileName = ".ja_stderr_" + std::to_string(pid) + "_" +
+                                                std::to_string(counter) + ".tmp";
+            std::filesystem::path const stderrTmpPath = workingDirectoryPath / stderrFileName;
 
 #if defined(_WIN32)
             std::string commandWithRedirect;
@@ -341,8 +398,14 @@ namespace AIAssistant
                 "cd " + QuoteForPosixShell(workingDirectoryPath.string()) + " && " + command + stderrRedirect;
 #endif
 
-            FILE* pipe = OpenPipe(commandWithRedirect.c_str(), "r");
-            if (pipe == nullptr)
+            // RAII pipe — pclose runs even if the read loop throws (logger
+            // alloc, std::string growth, etc.).  Pre-fix code reached the
+            // explicit ClosePipe only on the happy path; an exception in
+            // between leaked the FILE* and the underlying child process
+            // until process exit.
+            int closeStatus = -1;
+            PipePtr pipe(OpenPipe(commandWithRedirect.c_str(), "r"), PipeCloser{&closeStatus});
+            if (!pipe)
             {
                 LOG_APP_ERROR("ShellTaskExecutor: Failed to open pipe for command '{}' (task='{}')", command, taskId);
                 return false;
@@ -352,7 +415,7 @@ namespace AIAssistant
             pending.reserve(4096);
 
             char buffer[4096];
-            while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe) != nullptr)
+            while (std::fgets(buffer, static_cast<int>(sizeof(buffer)), pipe.get()) != nullptr)
             {
                 stdoutOut.append(buffer);
                 pending.append(buffer);
@@ -393,7 +456,9 @@ namespace AIAssistant
                 }
             }
 
-            exitCodeOut = ClosePipe(pipe);
+            // Trigger the RAII close + pull the exit status into our local.
+            pipe.reset();
+            exitCodeOut = closeStatus;
 
             // Read stderr from the temp file
             {
@@ -407,7 +472,13 @@ namespace AIAssistant
                         ss << stderrFile.rdbuf();
                         stderrOut = ss.str();
                     }
-                    std::filesystem::remove(stderrTmpPath, ec);
+                    std::error_code rmEc;
+                    std::filesystem::remove(stderrTmpPath, rmEc);
+                    if (rmEc)
+                    {
+                        LOG_APP_WARN("ShellTaskExecutor: failed to remove stderr temp file '{}' task='{}': {}",
+                                     stderrTmpPath.string(), taskId, rmEc.message());
+                    }
 
                     // Log stderr lines
                     if (!stderrOut.empty())
@@ -492,8 +563,22 @@ namespace AIAssistant
                 close(stdoutPipe[1]);
                 close(stderrPipe[1]);
 
-                // Set environment variables for heartbeat API
-                setenv("JARVIS_PORT", "8080", 1);
+                // Set environment variables for heartbeat API.  Pull the port
+                // from config so the child reaches the same j9t the parent is
+                // running.  Pre-fix hardcoded "8080" — wrong for HTTPS-default
+                // deployments (j9t lands on 8443) and discloses the assumed
+                // topology.  Note: this branch runs in the forked child after
+                // dup2/close — async-signal-safety would be ideal, but
+                // setenv() is already non-async-safe and this path is in
+                // service today; the config read is bounded and the snprintf
+                // is fast.  Acceptable for the existing posture.
+                uint16_t const childServerPort =
+                    (Core::g_Core != nullptr && Core::g_Core->GetConfig().m_Port != 0)
+                        ? Core::g_Core->GetConfig().m_Port
+                        : static_cast<uint16_t>(8443);
+                char childPortBuf[8] = {};
+                std::snprintf(childPortBuf, sizeof(childPortBuf), "%u", childServerPort);
+                setenv("JARVIS_PORT", childPortBuf, 1);
                 setenv("JARVIS_TASK_ID", taskId.c_str(), 1);
 
                 // Change to working directory and exec
@@ -655,7 +740,9 @@ namespace AIAssistant
                 }
             }
 
-            // Flush any remaining partial lines
+            // Flush any remaining partial lines.  Sanitise externally-sourced
+            // bytes so malformed UTF-8 / control chars from the spawned command
+            // don't reach the log/dashboard pipeline raw.
             if (!stdoutPending.empty())
             {
                 if (stdoutPending.back() == '\r')
@@ -664,7 +751,7 @@ namespace AIAssistant
                 }
                 if (!stdoutPending.empty())
                 {
-                    LOG_APP_INFO("[shell:{}] {}", taskId, stdoutPending);
+                    LOG_APP_INFO("[shell:{}] {}", taskId, SanitizeUtf8(stdoutPending));
                 }
             }
             if (!stderrPending.empty())
@@ -675,7 +762,7 @@ namespace AIAssistant
                 }
                 if (!stderrPending.empty())
                 {
-                    LOG_APP_INFO("[shell:{}:stderr] {}", taskId, stderrPending);
+                    LOG_APP_INFO("[shell:{}:stderr] {}", taskId, SanitizeUtf8(stderrPending));
                 }
             }
 
@@ -717,13 +804,13 @@ namespace AIAssistant
     } // anonymous namespace
 
 #if defined(_WIN32)
-    WindowsShell ShellTaskExecutor::s_WindowsShell = WindowsShell::PowerShell;
+    std::atomic<WindowsShell> ShellTaskExecutor::s_WindowsShell{WindowsShell::PowerShell};
 
     void ShellTaskExecutor::ProbeWindowsShell(bool useBashConfig)
     {
         if (!useBashConfig)
         {
-            s_WindowsShell = WindowsShell::PowerShell;
+            s_WindowsShell.store(WindowsShell::PowerShell, std::memory_order_release);
             LOG_CORE_INFO("[shell] Windows shell: PowerShell (use_bash is false)");
             return;
         }
@@ -732,41 +819,76 @@ namespace AIAssistant
         int const result = std::system("bash --version >NUL 2>&1");
         if (result == 0)
         {
-            s_WindowsShell = WindowsShell::Bash;
+            s_WindowsShell.store(WindowsShell::Bash, std::memory_order_release);
             LOG_CORE_INFO("[shell] Windows shell: Bash (found on PATH)");
         }
         else
         {
-            s_WindowsShell = WindowsShell::PowerShell;
+            s_WindowsShell.store(WindowsShell::PowerShell, std::memory_order_release);
             LOG_CORE_WARN("[shell] Windows shell: PowerShell (use_bash is true but bash not found on PATH — falling back)");
         }
     }
 
-    WindowsShell ShellTaskExecutor::GetWindowsShell() { return s_WindowsShell; }
+    WindowsShell ShellTaskExecutor::GetWindowsShell()
+    {
+        return s_WindowsShell.load(std::memory_order_acquire);
+    }
 #endif
 
     bool ShellTaskExecutor::ValidateScriptPath(std::string const& path) const
     {
         // Enforce "scripts/" prefix to avoid arbitrary command execution.
+        // Three checks:
+        //   1. Raw path must start with "scripts/" (cheap reject of absolute
+        //      or unrelated paths before any filesystem operation).
+        //   2. After ConfineUnderProjectRoot — which runs `weakly_canonical`
+        //      + lexically_relative containment + fail-closes on any error
+        //      — the resolved absolute path must land under
+        //      `<projectRoot>/scripts/`.  This is what catches a symlink
+        //      `scripts/foo` that points at `/etc/passwd` AND a `..`-laced
+        //      raw input that survives the prefix check (e.g.,
+        //      `scripts/../etc/passwd` lexically-normalises but symlink
+        //      semantics could differ; weakly_canonical resolves
+        //      consistently).
         if (path.rfind("scripts/", 0) != 0)
         {
             return false;
         }
 
-        // The raw path may contain ".." (e.g. scripts/helpers/../run.sh) but
-        // the resolved path must still land inside scripts/ (JCWF spec §3.1.2).
-        std::string const normalized = std::filesystem::path(path).lexically_normal().string();
-        return normalized.rfind("scripts/", 0) == 0;
+        std::filesystem::path const confined = ConfineUnderProjectRoot(path);
+        if (confined.empty())
+        {
+            return false;
+        }
+
+        std::error_code ec;
+        std::filesystem::path const projectRoot = std::filesystem::weakly_canonical(std::filesystem::current_path(ec), ec);
+        if (ec || projectRoot.empty())
+        {
+            return false;
+        }
+        std::filesystem::path const scriptsRoot = projectRoot / "scripts";
+
+        std::filesystem::path const rel = confined.lexically_relative(scriptsRoot);
+        std::string const relStr = rel.string();
+        if (relStr.empty() || relStr == ".." || relStr.rfind("..", 0) == 0)
+        {
+            return false;
+        }
+        return true;
     }
 
     bool ShellTaskExecutor::IsSafeArgument(std::string const& argument) const
     {
-        // Conservative safety check:
-        //  * Allow typical filename / flag characters and spaces.
-        //  * Forbid characters commonly used in shell injection.
+        // Defense in depth on top of the always-quote in JoinArgumentsForSystem.
+        // The single-quote wrap there is the load-bearing protection; this
+        // blocklist catches obviously-hostile bytes before they even reach
+        // the quoter and serves as an early-fail gate that makes log lines
+        // attributable to a specific arg rather than a shell quoting bug.
         //
-        // This is not a perfect sandbox, but combined with ValidateScriptPath
-        // it strongly nudges workflows toward simple, safe commands.
+        // Forbidden chars: standard shell control + globbing/expansion
+        // operators that have no legitimate place in a literal positional
+        // arg.  Glob-expansion patterns belong in the `command` field.
         for (char character : argument)
         {
             unsigned char const ch = static_cast<unsigned char>(character);
@@ -786,6 +908,10 @@ namespace AIAssistant
                 case '\'':
                 case '"':
                 case '`':
+                case '$':
+                case '(':
+                case ')':
+                case '\\':
                     return false;
                 default:
                     break;
@@ -1239,35 +1365,61 @@ namespace AIAssistant
         capturedStderr = SanitizeUtf8(capturedStderr);
 
         // Write stdout.txt and stderr.txt to the task working directory (full size).
+        // Stream good() check after write so a disk-full / quota-loss
+        // mid-write surfaces as an ERROR log with task context instead of
+        // silently producing a truncated file.
         {
+            std::filesystem::path const stdoutPath = taskWorkingDirectoryPathAbsolute / "stdout.txt";
+            std::filesystem::path const stderrPath = taskWorkingDirectoryPathAbsolute / "stderr.txt";
             std::error_code ec;
             if (!capturedStdout.empty())
             {
-                std::ofstream stdoutFile(taskWorkingDirectoryPathAbsolute / "stdout.txt",
-                                         std::ios::binary | std::ios::trunc);
+                std::ofstream stdoutFile(stdoutPath, std::ios::binary | std::ios::trunc);
                 if (stdoutFile.is_open())
                 {
                     stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
+                    if (!stdoutFile.good())
+                    {
+                        LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed mid-stream task='{}'",
+                                      stdoutPath.string(), taskDefinition.m_Id);
+                    }
                 }
             }
             else
             {
-                std::filesystem::remove(taskWorkingDirectoryPathAbsolute / "stdout.txt", ec);
+                std::error_code rmEc;
+                std::filesystem::remove(stdoutPath, rmEc);
+                if (rmEc)
+                {
+                    LOG_APP_WARN("ShellTaskExecutor: failed to remove empty stdout.txt at '{}' task='{}': {}",
+                                 stdoutPath.string(), taskDefinition.m_Id, rmEc.message());
+                }
             }
 
             if (!capturedStderr.empty())
             {
-                std::ofstream stderrFile(taskWorkingDirectoryPathAbsolute / "stderr.txt",
-                                         std::ios::binary | std::ios::trunc);
+                std::ofstream stderrFile(stderrPath, std::ios::binary | std::ios::trunc);
                 if (stderrFile.is_open())
                 {
                     stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
+                    if (!stderrFile.good())
+                    {
+                        LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed mid-stream task='{}'",
+                                      stderrPath.string(), taskDefinition.m_Id);
+                    }
                 }
             }
             else
             {
-                std::filesystem::remove(taskWorkingDirectoryPathAbsolute / "stderr.txt", ec);
+                std::error_code rmEc;
+                std::filesystem::remove(stderrPath, rmEc);
+                if (rmEc)
+                {
+                    LOG_APP_WARN("ShellTaskExecutor: failed to remove empty stderr.txt at '{}' task='{}': {}",
+                                 stderrPath.string(), taskDefinition.m_Id, rmEc.message());
+                }
             }
+            (void)ec;
         }
 
         // Store first 1024 characters for the frontend tooltip.

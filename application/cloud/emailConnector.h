@@ -79,8 +79,8 @@ namespace AIAssistant
         // ===================================================================
         // Input validators (used by both this connector and emailCloudTaskExecutor).
         // Public statics so callers across the email surface share a single source
-        // of truth for the allowlists; sitting 11's executor-side gates and
-        // sitting 13's connector-side gates use the same predicates.
+        // of truth for the allowlists; the executor-side and connector-side gates
+        // use the same predicates.
         // ===================================================================
 
         // IMAP mailbox name: alphanumeric + `.` + `_` + `/` + `-`, max 256 bytes,

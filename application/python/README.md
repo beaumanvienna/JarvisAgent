@@ -37,7 +37,7 @@ See `doc/cyber security.md` and `doc/architecture.md` "Key Design Decisions" for
 
 - **`m_InterpreterState`** — set once by `PythonEnginePool::Initialize` (via `SetInterpreterState`) and read by the worker thread under the GIL. The pointed-to `PyInterpreterState` has process lifetime: sub-interpreters are torn down only by `Py_Finalize` at process exit, and the pool intentionally keeps the main-thread state alive (see the `Initialize` comment). The worker thread's `PyThreadState_New(m_InterpreterState)` therefore always operates on a live interpreter. An assertion immediately before `PyThreadState_New` makes this contract explicit; a misordered call site (e.g. `StartWorkerThread` before `SetInterpreterState`) trips it loudly in Debug.
 - **`m_ScriptRegistry`** — borrowed pointer owned by `JarvisAgent`. The pool is destroyed before the registry, so the pointer is valid for the engine's whole lifetime.
-- **`WorkflowTaskRequest::m_InputValues` / `m_ContextValues`** — owned-by-value copies of the caller's maps. The previous design held raw `const*` to caller stack frames; the new owned form is safe even if a future call site switches to fire-and-forget (see `feedback_capture_by_value_async` in the project memory).
+- **`WorkflowTaskRequest::m_InputValues` / `m_ContextValues`** — owned-by-value copies of the caller's maps. The previous design held raw `const*` to caller stack frames; the new owned form is safe even if a future call site switches to fire-and-forget (capture-by-value into async work sites is the codebase rule — references into caller-stack data are a use-after-free waiting to happen).
 
 ---
 

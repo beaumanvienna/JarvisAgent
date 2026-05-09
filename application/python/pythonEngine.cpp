@@ -75,6 +75,7 @@ JARVIS_PY_EXPORT void JarvisPyStatus(char const* message)
     std::cout << "[PYTHON-ERROR] " << message << std::endl;
 
     // stop python
+    if (AIAssistant::Core::g_Core != nullptr)
     {
         auto event = std::make_shared<AIAssistant::PythonCrashedEvent>(message);
 
@@ -619,8 +620,9 @@ namespace AIAssistant
         // caller's stack frame, which is safe only as long as the caller
         // blocks on resultFuture.get() (current behaviour) but breaks
         // catastrophically if a future caller switches to fire-and-forget.
-        // Per memory feedback_capture_by_value_async: capture by value into
-        // async work sites, no exceptions for "fast paths".
+        // Capture by value into async work sites, no exceptions for "fast paths"
+        // — references into the caller's stack frame are a use-after-free waiting
+        // to happen the moment a future caller switches to fire-and-forget.
         auto request = std::make_shared<WorkflowTaskRequest>();
         request->m_TaskDefinition = &taskDefinition;
         request->m_TaskWorkingDirectory = taskWorkingDirectory;

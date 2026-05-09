@@ -264,10 +264,10 @@ namespace AIAssistant
             return false;
         }
 
-        // Validate remote_path before any URL build — closes the audit's CRITICAL
-        // "Path Traversal via remote_path in URL Construction (SSRF / Injection)"
-        // finding.  Pre-fix `graphBase + "/me/drive/root:/" + remotePath + ":/content"`
-        // would interpolate `../../etc/passwd` or `?x=&y=` directly.
+        // Validate remote_path before any URL build.  Without this, the URL
+        // builder `graphBase + "/me/drive/root:/" + remotePath + ":/content"`
+        // would interpolate `../../etc/passwd` or `?x=&y=` directly into the
+        // request URL — path traversal + SSRF + arbitrary-query-param injection.
         if (!IsValidOneDriveRemotePath(remotePath))
         {
             taskState.m_LastErrorMessage =
@@ -324,9 +324,9 @@ namespace AIAssistant
             }
 
             auto const fileSize = file.tellg();
-            // Cap on upload file size — closes the audit's HIGH "uncontrolled file
-            // read into memory on upload" finding.  256 MB matches Phase 9b's
-            // existing CURLOPT_MAXFILESIZE_LARGE for downloads.
+            // Cap on upload file size to bound peak RAM during the read-and-
+            // POST cycle.  256 MB matches the existing CURLOPT_MAXFILESIZE_LARGE
+            // for downloads.
             static constexpr std::streamoff kMaxOneDriveUploadBytes = 256 * 1024 * 1024;
             if (fileSize < 0 || fileSize > kMaxOneDriveUploadBytes)
             {

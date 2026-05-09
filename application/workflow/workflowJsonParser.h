@@ -49,8 +49,12 @@ namespace AIAssistant
                              std::string& errorMessage) const;
 
     private:
-        // Root object parser (top-level workflow object).
-        bool ParseRootObject(simdjson::ondemand::object rootObject, WorkflowDefinition& workflowOut,
+        // Root object parser (top-level workflow object).  The simdjson
+        // ondemand object is taken by reference — copying it is a shallow
+        // copy of pointers into the document arena and would dangle if the
+        // arena moves.  Every Parse* helper in this file follows the same
+        // by-reference convention.
+        bool ParseRootObject(simdjson::ondemand::object& rootObject, WorkflowDefinition& workflowOut,
                              std::string& errorMessage) const;
 
         // Sub-parsers (implemented in workflowJsonParserDetails.cpp)

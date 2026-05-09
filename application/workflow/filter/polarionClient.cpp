@@ -35,12 +35,83 @@
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
 #include "cloud/connectorHttp.h"
+#include "file/pathConfinement.h"
+#include "json/jsonHelper.h"
 #include "keys/credential.h"
 #include "keys/keyManager.h"
 #include "simdjson/simdjson.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Cap on response body fragment included in error messages.  Pre-fix
+        // was 500 bytes — a JSON:API error body can include tokens or
+        // identifiers we don't want in dashboard logs.  200 bytes is enough
+        // to convey "what kind of error" without leaking content; the full
+        // body is still available via debug logging if a maintainer needs it.
+        constexpr size_t kMaxErrorBodyBytes = 200;
+
+        // CURLOPT_MAXFILESIZE for HttpDownloadFile.  100 MB is well above
+        // realistic Polarion attachment sizes (PDFs, screenshots, requirement
+        // exports) and well below RAM/disk-budget concerns.
+        constexpr long kMaxDownloadBytes = 100ll * 1024 * 1024;
+
+        // Filesystem-safe filter.m_Id allowlist: alphanumeric + `._-`, no `/`,
+        // no `..`, capped at 64 bytes.  Matches AdhocWorkflowManager::
+        // SanitizeUserSlug's character set for cross-component consistency.
+        // Used in WriteItemFile to defend against a hostile JCWF putting `..`
+        // in filter.m_Id and escaping `<workflowBaseDir>/<filter.m_Id>/`.
+        bool IsValidFilesystemId(std::string const& id)
+        {
+            if (id.empty() || id.size() > 64) return false;
+            if (id == "." || id == "..") return false;
+            if (id.front() == '.') return false;
+            for (char c : id)
+            {
+                bool const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+                if (!ok) return false;
+            }
+            return true;
+        }
+
+        // URL-path-component allowlist for Polarion IDs (project, workitem,
+        // attachment).  These flow into the URL after UrlEncode — UrlEncode
+        // is the standard defense against URL injection, but defense in
+        // depth: refuse anything that doesn't match the documented Polarion
+        // ID shape.  Allows alphanumeric + `._-/` (Polarion work-item IDs
+        // can include `/` for project-qualified form like "Proj/REQ-001").
+        // Caps length at 256 bytes; rejects `..` segments outright.
+        bool IsValidPolarionId(std::string const& id)
+        {
+            if (id.empty() || id.size() > 256) return false;
+            // Reject `..` as a substring — Polarion IDs don't have parent
+            // directories, and `..` in any segment indicates a traversal
+            // attempt rather than a legitimate identifier.
+            if (id.find("..") != std::string::npos) return false;
+            for (char c : id)
+            {
+                bool const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/';
+                if (!ok) return false;
+            }
+            return true;
+        }
+
+        // Truncate-and-sanitize a response body fragment for inclusion in an
+        // error message.  Caps at kMaxErrorBodyBytes and runs through
+        // SanitizeUtf8 so malformed bytes don't leak into the dashboard / log.
+        std::string SanitizeErrorBody(std::string const& body)
+        {
+            if (body.empty()) return {};
+            std::string truncated = body.size() > kMaxErrorBodyBytes
+                                        ? body.substr(0, kMaxErrorBodyBytes) + "... (truncated)"
+                                        : body;
+            return SanitizeUtf8(truncated);
+        }
+    } // anonymous namespace
 
     // =================================================================
     // FetchAll — paginated work-item retrieval
@@ -55,6 +126,13 @@ namespace AIAssistant
         if (source.m_KeyName.empty())
         {
             errorMessage = "filter '" + filter.m_Id + "': polarion_query requires 'key_name'";
+            return {};
+        }
+
+        if (Core::g_Core == nullptr)
+        {
+            errorMessage = "filter '" + filter.m_Id + "': Core::g_Core is null, cannot resolve credentials";
+            LOG_APP_ERROR("[polarion] Core::g_Core is null filter='{}'", filter.m_Id);
             return {};
         }
 
@@ -279,9 +357,10 @@ namespace AIAssistant
         if (httpCode >= 400)
         {
             errorMessage = "HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
+            if (!responseBody.empty())
             {
-                errorMessage += ": " + responseBody;
+                std::string const sanitized = SanitizeErrorBody(responseBody);
+                if (!sanitized.empty()) errorMessage += ": " + sanitized;
             }
             return false;
         }
@@ -353,9 +432,10 @@ namespace AIAssistant
         if (httpCode >= 400)
         {
             errorMessage = "HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
+            if (!responseBody.empty())
             {
-                errorMessage += ": " + responseBody;
+                std::string const sanitized = SanitizeErrorBody(responseBody);
+                if (!sanitized.empty()) errorMessage += ": " + sanitized;
             }
             return false;
         }
@@ -389,6 +469,10 @@ namespace AIAssistant
         curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, TIMEOUT_SECONDS * 3); // longer timeout for downloads
+        // Bound peak file size — prevents a hostile or buggy upstream from
+        // streaming gigabytes into the local filesystem.  libcurl aborts the
+        // transfer with CURLE_FILESIZE_EXCEEDED when the body grows past this.
+        curl_easy_setopt(curl, CURLOPT_MAXFILESIZE, kMaxDownloadBytes);
         ConnectorHttp::ApplyHardenedDefaults(curl, url);
 
         struct curl_slist* headers = nullptr;
@@ -483,9 +567,10 @@ namespace AIAssistant
         if (httpCode >= 400)
         {
             errorMessage = "HTTP " + std::to_string(httpCode);
-            if (!responseBody.empty() && responseBody.size() < 500)
+            if (!responseBody.empty())
             {
-                errorMessage += ": " + responseBody;
+                std::string const sanitized = SanitizeErrorBody(responseBody);
+                if (!sanitized.empty()) errorMessage += ": " + sanitized;
             }
             return false;
         }
@@ -502,6 +587,13 @@ namespace AIAssistant
                                         std::string const& jsonApiPatchBody, std::string& responseBody,
                                         std::string& errorMessage) const
     {
+        if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId))
+        {
+            errorMessage = "invalid Polarion identifier (allowlist [A-Za-z0-9._-/], no '..', length 1-256)";
+            LOG_APP_ERROR("[polarion] UpdateWorkItem rejected ids project='{}' workItem='{}'", projectId, workItemId);
+            return false;
+        }
+
         std::string base = baseUrl;
         if (!base.empty() && base.back() == '/')
         {
@@ -522,6 +614,13 @@ namespace AIAssistant
                                         std::string const& bearerToken, std::string const& jsonApiPostBody,
                                         std::string& responseBody, std::string& errorMessage) const
     {
+        if (!IsValidPolarionId(projectId))
+        {
+            errorMessage = "invalid Polarion projectId (allowlist [A-Za-z0-9._-/], no '..', length 1-256)";
+            LOG_APP_ERROR("[polarion] CreateWorkItem rejected projectId '{}'", projectId);
+            return false;
+        }
+
         std::string base = baseUrl;
         if (!base.empty() && base.back() == '/')
         {
@@ -542,6 +641,25 @@ namespace AIAssistant
                                             std::string const& bearerToken, std::string const& outputPath,
                                             std::string& errorMessage) const
     {
+        if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId) || !IsValidPolarionId(attachmentId))
+        {
+            errorMessage = "invalid Polarion identifier (allowlist [A-Za-z0-9._-/], no '..', length 1-256)";
+            LOG_APP_ERROR("[polarion] DownloadAttachment rejected ids project='{}' workItem='{}' attachment='{}'",
+                          projectId, workItemId, attachmentId);
+            return false;
+        }
+        // Output path containment — defends against an attacker-supplied
+        // outputPath escaping the project tree.  Combined with the
+        // CURLOPT_MAXFILESIZE cap inside HttpDownloadFile, the worst case is
+        // a sized file inside the project tree.
+        std::filesystem::path const confinedOutput = ConfineUnderProjectRoot(outputPath);
+        if (confinedOutput.empty())
+        {
+            errorMessage = "attachment output path does not resolve under project root: " + outputPath;
+            LOG_APP_ERROR("[polarion] DownloadAttachment outputPath rejected '{}'", outputPath);
+            return false;
+        }
+
         std::string base = baseUrl;
         if (!base.empty() && base.back() == '/')
         {
@@ -552,7 +670,7 @@ namespace AIAssistant
                           "/workitems/" + UrlEncode(workItemId) +
                           "/attachments/" + UrlEncode(attachmentId) + "/content";
 
-        return HttpDownloadFile(url, bearerToken, outputPath, errorMessage);
+        return HttpDownloadFile(url, bearerToken, confinedOutput.string(), errorMessage);
     }
 
     // =================================================================
@@ -564,6 +682,14 @@ namespace AIAssistant
                                           std::string const& filePath, std::string const& fileName,
                                           std::string& responseBody, std::string& errorMessage) const
     {
+        if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId))
+        {
+            errorMessage = "invalid Polarion identifier (allowlist [A-Za-z0-9._-/], no '..', length 1-256)";
+            LOG_APP_ERROR("[polarion] UploadAttachment rejected ids project='{}' workItem='{}'",
+                          projectId, workItemId);
+            return false;
+        }
+
         std::string base = baseUrl;
         if (!base.empty() && base.back() == '/')
         {
@@ -584,6 +710,14 @@ namespace AIAssistant
                                               std::string const& workItemId, std::string const& bearerToken,
                                               std::string& responseBody, std::string& errorMessage) const
     {
+        if (!IsValidPolarionId(projectId) || !IsValidPolarionId(workItemId))
+        {
+            errorMessage = "invalid Polarion identifier (allowlist [A-Za-z0-9._-/], no '..', length 1-256)";
+            LOG_APP_ERROR("[polarion] FetchLinkedWorkItems rejected ids project='{}' workItem='{}'",
+                          projectId, workItemId);
+            return false;
+        }
+
         std::string base = baseUrl;
         if (!base.empty() && base.back() == '/')
         {
@@ -725,48 +859,52 @@ namespace AIAssistant
     bool PolarionClient::WriteItemFile(FilterItem const& item, FilterDef const& filter, std::string const& workflowBaseDir,
                                        std::string& errorMessage)
     {
-        std::filesystem::path filePath = std::filesystem::path(workflowBaseDir) / filter.m_Id /
-                                         (filter.m_Id + "-" + std::to_string(item.m_Index) + ".json");
+        // Defense in depth on filter.m_Id.  filter.m_Id is JCWF-authored and
+        // generally trusted, but a hostile (or buggy) JCWF could place a
+        // traversal sequence here and write outside <workflowBaseDir>/.
+        // Strict allowlist + path containment close the path-traversal vector.
+        if (!IsValidFilesystemId(filter.m_Id))
+        {
+            errorMessage = "filter.m_Id '" + filter.m_Id + "' contains characters disallowed for filesystem use "
+                           "(allowlist: [A-Za-z0-9._-], no leading dot, length 1-64)";
+            LOG_APP_ERROR("[polarion] WriteItemFile rejected filter.m_Id '{}' — fails allowlist", filter.m_Id);
+            return false;
+        }
+
+        std::filesystem::path const rawFilePath = std::filesystem::path(workflowBaseDir) / filter.m_Id /
+                                                  (filter.m_Id + "-" + std::to_string(item.m_Index) + ".json");
+
+        // Project-root containment — rejects any symlink escape or `..`
+        // sequence that survived the allowlist (defense in depth).
+        std::filesystem::path const filePath = ConfineUnderProjectRoot(rawFilePath);
+        if (filePath.empty())
+        {
+            errorMessage = "polarion item file path rejected (escapes project root)";
+            LOG_APP_ERROR("[polarion] WriteItemFile path rejected filter='{}' path='{}' — does not resolve under "
+                          "project root",
+                          filter.m_Id, rawFilePath.string());
+            return false;
+        }
 
         std::ofstream file(filePath, std::ios::trunc);
         if (!file.is_open())
         {
-            errorMessage = "cannot write to '" + filePath.string() + "'";
+            errorMessage = "cannot open polarion item file for writing (filter='" + filter.m_Id + "')";
+            LOG_APP_ERROR("[polarion] WriteItemFile open failed filter='{}' path='{}'",
+                          filter.m_Id, filePath.string());
             return false;
         }
 
-        // Write a simple JSON object with all values
+        // Write a simple JSON object with all values.  Use the canonical
+        // JsonHelper::EscapeJsonString for full RFC 8259 escape coverage —
+        // pre-fix the local switch handled only 5 characters, leaving raw
+        // control bytes (< 0x20) to land verbatim in the JSON output.
         file << "{\n";
         size_t count = 0;
         for (auto const& [key, value] : item.m_Values)
         {
-            file << "  \"" << key << "\": \"";
-            // Minimal JSON escaping
-            for (char c : value)
-            {
-                switch (c)
-                {
-                    case '"':
-                        file << "\\\"";
-                        break;
-                    case '\\':
-                        file << "\\\\";
-                        break;
-                    case '\n':
-                        file << "\\n";
-                        break;
-                    case '\r':
-                        file << "\\r";
-                        break;
-                    case '\t':
-                        file << "\\t";
-                        break;
-                    default:
-                        file << c;
-                        break;
-                }
-            }
-            file << "\"";
+            file << "  \"" << JsonHelper::EscapeJsonString(key) << "\": \""
+                 << JsonHelper::EscapeJsonString(value) << "\"";
             if (++count < item.m_Values.size())
             {
                 file << ",";
@@ -774,6 +912,16 @@ namespace AIAssistant
             file << "\n";
         }
         file << "}\n";
+
+        // Verify the stream succeeded — `is_open()` only catches open failure;
+        // disk-full or permission-loss-mid-write only show up via fail()/bad().
+        if (!file.good())
+        {
+            errorMessage = "polarion item file write failed (filter='" + filter.m_Id + "')";
+            LOG_APP_ERROR("[polarion] WriteItemFile stream failed mid-write filter='{}' path='{}'",
+                          filter.m_Id, filePath.string());
+            return false;
+        }
 
         return true;
     }

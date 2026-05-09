@@ -63,11 +63,11 @@ namespace AIAssistant
     // provider replies, fixture file reads, captured stdout/stderr) enter
     // the codebase — downstream consumers (LOG_* macros into log/log.txt,
     // dashboard WS broadcasts as JSON, ncurses TUI rendering) all assume
-    // well-formed UTF-8 and choke or corrupt on bad bytes.  Found by the
-    // §14 TUI invalid-UTF-8 stress test (test/dispatch/test_stress_tui_utf8_invalid.py),
-    // which fed orphan continuations / truncated sequences / illegal lead
-    // bytes / overlong encodings / surrogate halves through the dispatcher
-    // and watched them propagate into log/log.txt as raw garbage.
+    // well-formed UTF-8 and choke or corrupt on bad bytes.  The TUI
+    // invalid-UTF-8 stress test (`test/dispatch/test_stress_tui_utf8_invalid.py`)
+    // exercises this path with orphan continuations / truncated sequences /
+    // illegal lead bytes / overlong encodings / surrogate halves and asserts
+    // none of them propagate into log/log.txt as raw garbage.
     //
     // Rejected categories (each becomes a single U+FFFD):
     //   - illegal lead byte (0xFE, 0xFF, 0x80-0xBF as start)

@@ -121,12 +121,11 @@ namespace AIAssistant
         };
         DebugSnapshot GetDebugSnapshot() const;
 
-        // Per-Submit() snapshot used by §14 Tier B size-aware-budget tests to
-        // verify the timeout formula in `AI call performance optimization.md`
-        // §6.2 without scraping logs.  Captured at the dispatcher boundary so
-        // tests see exactly the QueryData the dispatcher received.  Bounded
-        // ring; the oldest entries roll off once kRecentSubmissionsCapacity is
-        // exceeded.
+        // Per-Submit() snapshot used by hermetic size-aware-budget tests to
+        // verify the timeout formula without scraping logs.  Captured at the
+        // dispatcher boundary so tests see exactly the QueryData the
+        // dispatcher received.  Bounded ring; the oldest entries roll off
+        // once kRecentSubmissionsCapacity is exceeded.
         struct RecentSubmission
         {
             std::string m_QuotaKey;
@@ -141,7 +140,7 @@ namespace AIAssistant
         std::vector<RecentSubmission> GetRecentSubmissions(size_t maxCount = 64) const;
 
 #ifdef DEBUG
-        // §14 Tier B test isolation: clears controllers + host rate-limit state
+        // Hermetic-test isolation: clears controllers + host rate-limit state
         // + recent-submissions ring.  Lets repeated test runs start from a
         // clean slate without restarting j9t.  Does NOT touch m_Active /
         // m_Inbox / m_RetryQueue — those carry live in-flight work.  Debug
@@ -241,8 +240,7 @@ namespace AIAssistant
         // Fallback constants used only when QueryData doesn't pre-resolve a
         // per-interface override (rare — only legacy callers like assistant /
         // jcwfService Test-connection that bypass AiRequestPool::Submit).
-        // The values come from config.api_interfaces[i].rate_limit; see §7
-        // of "AI call performance optimization.md".
+        // The values come from config.api_interfaces[i].rate_limit.
         static constexpr int kDefaultMaxRetries429 = 10;
         static constexpr int kDefaultMaxRetriesTransient = 2;
         static constexpr int kDefaultBaseRetryMs = 1000;
@@ -293,8 +291,8 @@ namespace AIAssistant
         std::vector<std::string> m_PendingCancellations;
         mutable std::mutex m_PendingCancellationsMutex;
 
-        // Bounded ring of recent submissions for §14 Tier B size-aware-budget
-        // hermetic tests.  Captured at Submit() boundary so tests see the
+        // Bounded ring of recent submissions for hermetic size-aware-budget
+        // tests.  Captured at Submit() boundary so tests see the
         // QueryData::m_TimeoutMs the dispatcher actually received.
         static constexpr size_t kRecentSubmissionsCapacity = 64;
         std::deque<RecentSubmission> m_RecentSubmissions;

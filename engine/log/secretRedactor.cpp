@@ -64,6 +64,19 @@ namespace AIAssistant
         }
 
         m_Secrets.emplace_back(secret);
+
+        // Sort longest-first so a longer secret matches before any shorter
+        // secret that happens to be a prefix.  Without this, registering a
+        // short secret first and a longer secret second leaves the longer
+        // secret's tail bytes leaking when it appears in a log line —
+        // Redact()'s first pass redacts the short prefix, the second pass
+        // can't match because the prefix has already been replaced.
+        // The vector is small (< 100 entries in practice) and AddSecret is
+        // rare (per-credential, at registration time), so an O(N log N)
+        // sort here is cheap and keeps Redact()'s loop straightforward.
+        std::sort(m_Secrets.begin(), m_Secrets.end(),
+                  [](std::string const& a, std::string const& b) { return a.size() > b.size(); });
+
         m_HasSecretsHint.store(true, std::memory_order_release);
     }
 

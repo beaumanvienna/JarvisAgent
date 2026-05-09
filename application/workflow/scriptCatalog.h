@@ -67,18 +67,23 @@ namespace AIAssistant
         };
 
         // (Re-)scan the scripts folder and rebuild the catalog. Thread-safe.
+        // Symlinked files are skipped — a malicious symlink under scripts/
+        // pointing at /etc/shadow or similar must not produce a catalog entry
+        // whose `m_Path` lets a downstream consumer escape the scripts root.
+        // Entries are also capped at kMaxEntries to bound heap pressure
+        // against directories that have grown unexpectedly.
         void Refresh(std::filesystem::path const& scriptsBaseFolder);
 
         // Snapshot of all known scripts. Filter by type ("shell" / "python") or
         // pass an empty string to list everything.
-        std::vector<Entry> List(std::string const& typeFilter = {}) const;
+        [[nodiscard]] std::vector<Entry> List(std::string const& typeFilter = {}) const;
 
         // Lookup by path (shell) or module (python). Returns nullopt on miss.
-        std::optional<Entry> GetByPath(std::string const& relativePath) const;
-        std::optional<Entry> GetByModule(std::string const& moduleName) const;
+        [[nodiscard]] std::optional<Entry> GetByPath(std::string const& relativePath) const;
+        [[nodiscard]] std::optional<Entry> GetByModule(std::string const& moduleName) const;
 
-        std::filesystem::path GetRootDirectory() const;
-        size_t Size() const;
+        [[nodiscard]] std::filesystem::path GetRootDirectory() const;
+        [[nodiscard]] size_t Size() const;
 
     private:
         // Parse a single file's @jarvis-script metadata. Opens and reads the

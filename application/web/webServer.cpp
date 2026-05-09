@@ -226,9 +226,8 @@ namespace AIAssistant
 
     // SanitizeUtf8 lives in workflow/workflowTypes.h (AIAssistant namespace).
     // Previously this file had its own anonymous-namespace copy; consolidated
-    // 2026-04-28 when the §14 TUI invalid-UTF-8 stress test surfaced bytes
-    // leaking into log/log.txt — sanitization now applies project-wide at
-    // the boundaries where external bytes enter, not just at the WS layer.
+    // so sanitization applies project-wide at the boundaries where external
+    // bytes enter, not just at the WS layer.
 
     void WebServer::BroadcastWorkflowRunsSnapshot()
     {
@@ -819,11 +818,16 @@ namespace AIAssistant
         if (!outAuth.m_Error.empty()) return outAuth.m_Error;
         if (!HasRole(outAuth, minRole))
         {
-            // Authenticated but lacks the required role.
+            // Authenticated but lacks the required role.  Return the typed
+            // "insufficient_role" code so MakeAuthErrorResponse routes to the
+            // matching response-body branch ("Your role does not have
+            // permission for this endpoint.") instead of the generic
+            // fall-through "Invalid API token." which is misleading when the
+            // token is in fact valid.
             LOG_SECURITY_WARN("[security] forbidden reason=insufficient_role ip={} user={} role={} "
                               "required={} endpoint={}",
                               req.remote_ip_address, outAuth.m_User, outAuth.m_Role, minRole, req.url);
-            return "forbidden";
+            return "insufficient_role";
         }
         return "";
     }
@@ -1026,10 +1030,10 @@ namespace AIAssistant
                     return HandleParseRateLimitHeadersPost(req);
                 });
 
-        // §14 Tier B size-aware-budget readback — surfaces the dispatcher's
-        // bounded ring of recent submissions (QueryData::m_TimeoutMs etc.)
-        // so test_size_aware_budget.py can assert the §6.2 formula without
-        // scraping logs.
+        // Size-aware-budget readback — surfaces the dispatcher's bounded
+        // ring of recent submissions (QueryData::m_TimeoutMs etc.) so
+        // test_size_aware_budget.py can assert the timeout-budget formula
+        // without scraping logs.
         CROW_ROUTE(m_Server, "/api/debug/recent-submissions")
             .methods("GET"_method)(
                 [this](crow::request const& req)
@@ -1039,10 +1043,10 @@ namespace AIAssistant
                     return HandleDebugRecentSubmissionsGet();
                 });
 
-        // §14 Tier B Observe-idempotent contract test entry.  Test feeds a
-        // sequence of observations through an ephemeral RateLimitController
-        // and reads back the merged state, asserting that headers-only +
-        // body-only observations produce the same state as a single combined
+        // Observe-idempotent contract test entry.  Test feeds a sequence of
+        // observations through an ephemeral RateLimitController and reads
+        // back the merged state, asserting that headers-only + body-only
+        // observations produce the same state as a single combined
         // observation (idempotence-by-replacement).
         CROW_ROUTE(m_Server, "/api/debug/test-observe-idempotent")
             .methods("POST"_method)(
@@ -1053,10 +1057,10 @@ namespace AIAssistant
                     return HandleDebugTestObserveIdempotentPost(req);
                 });
 
-        // §14 Tier B mock-AI-response endpoint.  Auth-free on purpose — the
-        // dispatcher hits this with provider auth (Bearer/x-api-key/etc.),
-        // not an MCP key.  Compiled out of release builds with the rest of
-        // the #ifdef DEBUG block.
+        // Mock-AI-response endpoint for hermetic dispatcher tests.  Auth-free
+        // on purpose — the dispatcher hits this with provider auth
+        // (Bearer/x-api-key/etc.), not an MCP key.  Compiled out of release
+        // builds with the rest of the #ifdef DEBUG block.
         CROW_ROUTE(m_Server, "/api/debug/mock-ai-response")
             .methods("POST"_method)(
                 [this](crow::request const& req)
@@ -1064,8 +1068,8 @@ namespace AIAssistant
                     return HandleDebugMockAiResponsePost(req);
                 });
 
-        // §14 Tier B test-isolation reset.  Phase B tests call this at
-        // setup so each run starts from a clean dispatcher state.
+        // Hermetic-dispatcher-test isolation reset.  Phase B tests call this
+        // at setup so each run starts from a clean dispatcher state.
         CROW_ROUTE(m_Server, "/api/debug/reset-dispatcher-state")
             .methods("POST"_method)(
                 [this](crow::request const& req)
@@ -1727,8 +1731,7 @@ namespace AIAssistant
         status["capabilities"]["ai_assistant"] = false;
         status["capabilities"]["ai_jcwf"] = false;
 #endif
-        // Routes that landed in Common after §5i — registered in both editions,
-        // role-gated at the handler.
+        // Common routes registered in both editions, role-gated at the handler.
         status["capabilities"]["workflow_run_endpoint"] = true;  // POST /api/workflows/<id>/run (operator+)
         status["capabilities"]["settings_api"] = true;           // /api/settings/* + /api/connections/* (admin)
         status["capabilities"]["log_analyze"] = true;            // GET /api/log/analyze-last-run (operator+)
@@ -1744,7 +1747,7 @@ namespace AIAssistant
             status["mcp_keys_loaded"] = m_McpKeysLoaded.load();
         }
 
-        // Adhoc workflow submission stats (plan §6).
+        // Adhoc workflow submission stats.
         if (m_AdhocManager)
         {
             status["adhoc_runs_active"] = static_cast<int64_t>(m_AdhocManager->GetActiveRunCount());
@@ -3485,7 +3488,7 @@ namespace AIAssistant
         // Lines must mention this run's runId or workflowId; concurrent runs
         // interleave in the log so unscoped errors would attribute to the wrong run.
         // Every fail-path log in the backend MUST carry one of those identifiers,
-        // otherwise it is invisible to per-run analysis (see feedback_log_failures).
+        // otherwise it is invisible to per-run analysis.
         //
         // Match by log-level tags: [error], [critical], [warning], [warn].
         // Also match [workflow] lines containing "failed" or "skipping" (task-level events).
@@ -3551,9 +3554,9 @@ namespace AIAssistant
     {
         CROW_WEBSOCKET_ROUTE(m_Server, "/ws")
             // Validate the credential at upgrade time in both editions.
-            // §5i made the auth funnel identical across Studio and Engine —
-            // anonymous WS clients otherwise receive workflow-run snapshots
-            // and log lines on connect, which is a real data leak.
+            // The auth funnel is identical across Studio and Engine — anonymous
+            // WS clients would otherwise receive workflow-run snapshots and
+            // log lines on connect, which is a real data leak.
             .onaccept(
                 [this](crow::request const& req, void** userdata)
                 {
@@ -4476,7 +4479,6 @@ namespace AIAssistant
         // silently no-ops (no exception, no SUCCESS) — this exact bug used to
         // make POST/PUT bodies' rate_limit and default_output_tokens overrides
         // get dropped, leaving every new interface with C++ struct defaults.
-        // §14 Tier B test_size_aware_budget surfaced it.
         simdjson::ondemand::parser parser;
         try
         {
@@ -4965,8 +4967,8 @@ namespace AIAssistant
             // RFC 8259 escape every caller-supplied string field — without this an admin
             // submitting a name / description / url / model / key_name with `"`, `\`,
             // newline, or any control byte would corrupt the resulting config.json
-            // (cybersec audit HIGH: "writes config by naive string replacement without
-            // JSON escaping").  apiStr comes from a closed enum and needs no escaping.
+            // (naive string replacement without JSON escaping breaks the file).  apiStr
+            // comes from a closed enum and needs no escaping.
             newArray += "        {\n";
             newArray += "            \"name\": \"" + JsonHelper::EscapeJsonString(iface.m_Name) + "\",\n";
             if (!iface.m_Description.empty())
@@ -5125,9 +5127,9 @@ namespace AIAssistant
         }
 
         // Atomic write — tmp-file + rename.  A failed / partial write previously
-        // truncated config.json (safety audit HIGH: "writes config file
-        // non-atomically").  WriteTextFileAtomic returns false without touching
-        // the target file on any failure.
+        // truncated config.json (non-atomic write would corrupt the file on disk-
+        // full / SIGKILL mid-write).  WriteTextFileAtomic returns false without
+        // touching the target file on any failure.
         std::string writeError;
         if (!WriteTextFileAtomic(configPath, fileContent, writeError))
         {
@@ -5415,9 +5417,9 @@ namespace AIAssistant
                 // Replace a top-level scalar field value in-place.  Object-depth-aware
                 // so a key that also appears inside a nested object (e.g. inside the
                 // "API interfaces" array elements) does not collide with the same
-                // top-level key — closes the cybersec audit HIGH: "key search is a
-                // simple find() with no brace/object scope awareness".  Only matches
-                // at object depth 1 (immediately inside the root `{`).
+                // top-level key — a naive find() across the whole document would
+                // collide with the same key name nested inside array elements.  Only
+                // matches at object depth 1 (immediately inside the root `{`).
                 auto replaceField = [&](std::string const& key, std::string const& newValue)
                 {
                     std::string const searchKey = "\"" + key + "\"";
@@ -5544,8 +5546,8 @@ namespace AIAssistant
                     }
                 }
 
-                // Atomic write — tmp-file + rename.  Closes safety audit HIGH:
-                // "writes config file non-atomically".
+                // Atomic write — tmp-file + rename.  Disk-full / SIGKILL during a
+                // non-atomic write would leave a truncated config.json on disk.
                 std::string writeError;
                 if (!WriteTextFileAtomic(configPath, fileContent, writeError))
                 {
@@ -6416,8 +6418,7 @@ namespace AIAssistant
 
         // Save to connections.json in the launch directory.  Atomic write
         // (tmp-file + rename) so a partial / failed write never leaves the
-        // existing connections.json truncated or empty — see safety audit
-        // [HIGH] HandleConnectionsSavePost writes connections file non-atomically.
+        // existing connections.json truncated or empty.
         std::filesystem::path const connectionsFilePath =
             Core::g_Core->GetLaunchCWDAbsolute() / "connections.json";
 
@@ -7562,10 +7563,10 @@ namespace AIAssistant
 
         // Script-existence pre-check: external callers cannot submit scripts, so every
         // shell `params.command` and python `params.module` referenced by the JCWF must
-        // already exist on disk under scripts/. This is the hard security boundary from
-        // "Adhoc Workflow Submission and MCP plan.md" §2. Runs through the top-level
-        // tasks object only — sub-workflow canvases inside an adhoc submission are not
-        // supported today.
+        // already exist on disk under scripts/.  This is the hard security boundary on
+        // adhoc submission (see `doc/cyber security.md` "Adhoc workflow submission").
+        // Runs through the top-level tasks object only — sub-workflow canvases inside
+        // an adhoc submission are not supported today.
         std::vector<std::string> missingScripts;
         {
             fs::path const launchCWD = Core::g_Core ? Core::g_Core->GetLaunchCWDAbsolute() : fs::path{};
@@ -8444,7 +8445,9 @@ namespace AIAssistant
                 static_cast<int64_t>(m_WsPeakPendingBroadcasts);
             signals["websocket_pending_broadcasts"] = static_cast<int64_t>(m_PendingBroadcasts.size());
 
-            // Diagnostic counters for TODO List §17 (dashboard live-update bug).
+            // Diagnostic counters for the dashboard live-update queue path —
+            // a flatlining snapshot counter while completions arrive means a
+            // producer-side bug; the per-type counters narrow it down.
             signals["websocket_total_broadcasts_enqueued"] =
                 static_cast<int64_t>(m_WsTotalBroadcastsEnqueued);
             signals["websocket_total_runs_snapshots_enqueued"] =
@@ -8567,9 +8570,9 @@ namespace AIAssistant
                 signals["dispatcher_active_count"]            = static_cast<int64_t>(snap.m_ActiveCount);
                 signals["dispatcher_retry_queue_size"]        = static_cast<int64_t>(snap.m_RetryQueueSize);
                 // CURLOPT_TCP_KEEPALIVE is set unconditionally on every easy
-                // handle in CurlMultiDispatcher::SetupEasyHandle (§6.4).
-                // Surfaced as a flag so test_tcp_keepalive_set.py can assert
-                // the policy without poking at libcurl internals.
+                // handle in CurlMultiDispatcher::SetupEasyHandle.  Surfaced
+                // as a flag so test_tcp_keepalive_set.py can assert the
+                // policy without poking at libcurl internals.
                 signals["dispatcher_keepalive_enabled"]       = true;
 
                 crow::json::wvalue::list hosts;

@@ -36,10 +36,11 @@ namespace AIAssistant
         AiCallTaskExecutor() = default;
         virtual ~AiCallTaskExecutor() = default;
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
-                     TaskInstanceState& taskState) override;
+        [[nodiscard]] bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                   TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
 
-        static bool WriteTextFile(std::string const& filePath, std::string const& fileContent, std::string& outErrorMessage);
+        [[nodiscard]] static bool WriteTextFile(std::string const& filePath, std::string const& fileContent,
+                                                std::string& outErrorMessage);
 
     private:
         static std::string BuildProbFilename(int64_t const requestId, int64_t const timestampNs);
@@ -50,6 +51,7 @@ namespace AIAssistant
         static std::string ApplySimpleTemplate(std::string const& templateText, TaskInstanceState const& taskState);
         static std::string TryBuildPromptFromParams(TaskDef const& taskDefinition, TaskInstanceState const& taskState);
 
-        static bool WriteInlineQueueBindingFiles(QueueBinding const& queueBinding, std::string& outErrorMessage);
+        [[nodiscard]] static bool WriteInlineQueueBindingFiles(QueueBinding const& queueBinding,
+                                                               std::string& outErrorMessage);
     };
 } // namespace AIAssistant

@@ -44,8 +44,8 @@ namespace AIAssistant
     static constexpr long kTimeoutSeconds = 300;
     static constexpr curl_off_t kMaxDownloadBytes = 256 * 1024 * 1024; // 256 MB
 
-    // Bound on the response body — closes the audit's HIGH "unbound growth of
-    // responseBody in GcsRequest" finding.  64 MB matches the cloud-surface
+    // Bound on the response body to prevent uncontrolled growth of the
+    // libcurl write-callback buffer.  64 MB matches the cloud-surface
     // pattern; GCS metadata responses are typically tens of KB.
     static constexpr size_t kMaxGcsResponseBytes = 64 * 1024 * 1024;
 
@@ -87,7 +87,7 @@ namespace AIAssistant
                            char const* uploadData = nullptr, size_t uploadSize = 0)
     {
         // Reject CR/LF in the bearer token before splicing into the Authorization
-        // header.  Same defensive check as sitting 14's Snowflake JWT.
+        // header.  Same defensive check as the Snowflake JWT path.
         if (ICloudTaskExecutor::ContainsCrlf(accessToken))
         {
             ConnectorHttp::IncrementCredentialCrlfRejection();
@@ -290,9 +290,8 @@ namespace AIAssistant
         // attacker-controlled bucket value containing `/`, `?`, `#`, or `:` would
         // otherwise inject URL components past the canonical
         // `https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?...`
-        // path — closes the audit's CRITICAL "Path Traversal via object_name /
-        // Unvalidated bucket in URL Construction" finding (the bucket half;
-        // object_name is already URL-encoded via the existing UrlEncode lambda).
+        // path layout — the bucket half of the URL-injection vector.  object_name
+        // is already URL-encoded via the existing UrlEncode lambda.
         if (!IsValidGcsBucket(bucket))
         {
             taskState.m_LastErrorMessage = "Invalid GCS bucket name: must match GCS naming rules "
@@ -359,9 +358,9 @@ namespace AIAssistant
             }
 
             auto const fileSize = file.tellg();
-            // Cap on upload file size — closes the audit's HIGH "unbounded file
-            // read into memory on upload" finding for GCS.  256 MB matches Phase 9b's
-            // existing CURLOPT_MAXFILESIZE_LARGE for downloads.
+            // Cap on upload file size to bound peak RAM during the read-and-
+            // POST cycle.  256 MB matches the existing CURLOPT_MAXFILESIZE_LARGE
+            // for downloads.
             static constexpr std::streamoff kMaxGcsUploadBytes = 256 * 1024 * 1024;
             if (fileSize < 0 || fileSize > kMaxGcsUploadBytes)
             {

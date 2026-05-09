@@ -31,6 +31,7 @@
 #include "core.h"
 #include "engine.h"
 #include "file/fileWatcher.h"
+#include "file/pathConfinement.h"
 #include "log/secretRedactor.h"
 #include "cloud/emailConnector.h"
 
@@ -233,9 +234,25 @@ namespace AIAssistant
 
     TriggerEngine::~TriggerEngine()
     {
-        if (m_TriggerFileWatcher)
+        // Destructors are noexcept by default in C++11+; an exception escaping
+        // here would call std::terminate.  FileWatcher::Stop() joins worker
+        // threads and tears down inotify/ReadDirectoryChangesW state — any of
+        // those can throw on hostile environments.  Swallow + log so a
+        // teardown failure can't take the process down.
+        try
         {
-            m_TriggerFileWatcher->Stop();
+            if (m_TriggerFileWatcher)
+            {
+                m_TriggerFileWatcher->Stop();
+            }
+        }
+        catch (std::exception const& e)
+        {
+            LOG_APP_ERROR("TriggerEngine::~TriggerEngine: FileWatcher::Stop() threw: {}", e.what());
+        }
+        catch (...)
+        {
+            LOG_APP_ERROR("TriggerEngine::~TriggerEngine: FileWatcher::Stop() threw non-std exception");
         }
     }
 
@@ -307,6 +324,16 @@ namespace AIAssistant
                                             uint32_t debounceMilliseconds, bool isEnabled)
     {
         std::string const normalizedPath = NormalizePath(path);
+        if (normalizedPath.empty())
+        {
+            // ConfineUnderProjectRoot rejected the path — empty input,
+            // `..`-escape, absolute path outside the project root, or symlink
+            // pointing out of tree.  Operator-config error; refuse to register.
+            LOG_APP_ERROR("TriggerEngine::AddFileWatchTrigger: rejected path '{}' (does not resolve under "
+                          "project root) workflow='{}' trigger='{}'",
+                          path, workflowId, triggerId);
+            return;
+        }
 
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
@@ -330,7 +357,7 @@ namespace AIAssistant
         // Register the path with the owned watcher so file events flow to the global
         // event queue and back into NotifyFileEvent.  AddPath is idempotent — multiple
         // triggers on the same directory are fine, the watcher tracks it once.
-        if (m_TriggerFileWatcher && !normalizedPath.empty())
+        if (m_TriggerFileWatcher)
         {
             m_TriggerFileWatcher->AddPath(std::filesystem::path{normalizedPath});
         }
@@ -509,7 +536,20 @@ namespace AIAssistant
         {
             return nullptr;
         }
-        return &m_WebhookTriggers[iterator->second];
+        size_t const index = iterator->second;
+        if (index >= m_WebhookTriggers.size())
+        {
+            // The index map and the trigger vector must stay in sync — every
+            // mutation site (AddWebhookTrigger, ClearWorkflowTriggers, ClearAll)
+            // rebuilds or maintains the index under the same lock as the
+            // vector.  Tripping this guard means a future change broke the
+            // invariant; fail closed and surface it loudly.
+            LOG_APP_ERROR("TriggerEngine::GetWebhookTrigger: m_WebhookIndex points at out-of-range slot {} "
+                          "(size={}) for workflow '{}' — index/vector skew",
+                          index, m_WebhookTriggers.size(), workflowId);
+            return nullptr;
+        }
+        return &m_WebhookTriggers[index];
     }
 
     void TriggerEngine::ClearAll()
@@ -608,9 +648,19 @@ namespace AIAssistant
     {
         std::vector<TriggerFiredEvent> eventsToFire;
 
+        // EmailPollJob carries trigger identity (workflowId + triggerId) — not an
+        // index into m_EmailWatchTriggers — because the lock is dropped while
+        // network I/O happens.  Between the under-lock collection pass and
+        // re-acquiring the lock to update the watermark, another thread can
+        // call ClearWorkflowTriggers / AddEmailWatchTrigger and shift the
+        // vector.  An index-based lookup would either OOB (bounds check
+        // catches that) or — worse — silently land on a different trigger and
+        // overwrite its watermark.  Identity-based lookup post-network is
+        // fail-safe: if the trigger is gone, the watermark update is dropped.
         struct EmailPollJob
         {
-            size_t m_Index;
+            std::string m_WorkflowId;
+            std::string m_TriggerId;
             std::string m_ConnectionName;
             std::string m_Folder;
             std::string m_SubjectFilter;
@@ -678,16 +728,16 @@ namespace AIAssistant
             }
 
             // Email watch triggers — collect due triggers under lock, IMAP check happens below
-            for (size_t i = 0; i < m_EmailWatchTriggers.size(); ++i)
+            for (EmailWatchTriggerInstance& emailInstance : m_EmailWatchTriggers)
             {
-                EmailWatchTriggerInstance& emailInstance = m_EmailWatchTriggers[i];
                 if (!emailInstance.m_IsEnabled || steadyNow < emailInstance.m_NextPollTime)
                 {
                     continue;
                 }
 
                 emailInstance.m_NextPollTime = steadyNow + emailInstance.m_PollInterval;
-                emailPollJobs.push_back({i, emailInstance.m_ConnectionName, emailInstance.m_Folder,
+                emailPollJobs.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId,
+                                         emailInstance.m_ConnectionName, emailInstance.m_Folder,
                                          emailInstance.m_SubjectFilter, emailInstance.m_LastSeenUid});
             }
 
@@ -716,13 +766,41 @@ namespace AIAssistant
             }
         }
 
-        // Email watch: perform IMAP UID checks outside the lock (network I/O)
+        // Email watch: perform IMAP UID checks outside the lock (network I/O).
+        // Lookup-by-identity helper: returns the index of the trigger matching
+        // (workflowId, triggerId) at call time, or m_EmailWatchTriggers.size()
+        // if it's gone (cleared / replaced during the network window).  Caller
+        // must hold m_Mutex.
+        auto findEmailTriggerIndexLocked = [&](EmailPollJob const& job) -> size_t
+        {
+            for (size_t k = 0; k < m_EmailWatchTriggers.size(); ++k)
+            {
+                if (m_EmailWatchTriggers[k].m_WorkflowId == job.m_WorkflowId &&
+                    m_EmailWatchTriggers[k].m_TriggerId == job.m_TriggerId)
+                {
+                    return k;
+                }
+            }
+            return m_EmailWatchTriggers.size();
+        };
+
         for (auto const& job : emailPollJobs)
         {
+            if (Core::g_Core == nullptr)
+            {
+                LOG_APP_ERROR("[email_watch] Core::g_Core is null, skipping IMAP check workflow='{}' trigger='{}'",
+                              job.m_WorkflowId, job.m_TriggerId);
+                continue;
+            }
             auto connection = Core::g_Core->GetCloudConnectionManager().GetConnection(job.m_ConnectionName);
             if (!connection)
             {
-                LOG_APP_WARN("[email_watch] connection '{}' not found, skipping IMAP check", job.m_ConnectionName);
+                // Operator-config error — workflow names a connection that
+                // isn't registered.  Unrecoverable until config is fixed; ERROR
+                // so the dashboard run analyzer surfaces it.
+                LOG_APP_ERROR("[email_watch] connection '{}' not found, skipping IMAP check "
+                              "workflow='{}' trigger='{}'",
+                              job.m_ConnectionName, job.m_WorkflowId, job.m_TriggerId);
                 continue;
             }
 
@@ -731,8 +809,11 @@ namespace AIAssistant
             std::string errorMessage;
             if (!emailConnector.ResolveCredentials(*connection, credentials, errorMessage))
             {
-                LOG_APP_WARN("[email_watch] failed to resolve credentials for '{}': {}", job.m_ConnectionName,
-                             errorMessage);
+                // Keystore unlock / credentials decode failure — operator must
+                // intervene.  ERROR per fail-path discipline.
+                LOG_APP_ERROR("[email_watch] failed to resolve credentials for '{}': {} "
+                              "workflow='{}' trigger='{}'",
+                              job.m_ConnectionName, errorMessage, job.m_WorkflowId, job.m_TriggerId);
                 continue;
             }
 
@@ -743,40 +824,62 @@ namespace AIAssistant
 
             if (highestUid.empty() && !errorMessage.empty())
             {
-                LOG_APP_WARN("[email_watch] IMAP check failed for '{}': {}", job.m_ConnectionName, errorMessage);
+                // Transient network / IMAP error — recoverable on next poll.
+                // WARN with full context so the dashboard can still spot
+                // chronic failures.
+                LOG_APP_WARN("[email_watch] IMAP check failed for '{}': {} workflow='{}' trigger='{}'",
+                             job.m_ConnectionName, errorMessage, job.m_WorkflowId, job.m_TriggerId);
                 continue;
             }
 
             if (!hasNewMail && job.m_LastSeenUid.empty() && !highestUid.empty())
             {
-                LOG_APP_INFO("[email_watch] seeded UID watermark for '{}' folder '{}' (highest UID {})",
-                             job.m_ConnectionName, job.m_Folder, highestUid);
+                LOG_APP_INFO("[email_watch] seeded UID watermark for '{}' folder '{}' (highest UID {}) "
+                             "workflow='{}' trigger='{}'",
+                             job.m_ConnectionName, job.m_Folder, highestUid, job.m_WorkflowId, job.m_TriggerId);
             }
             else if (!hasNewMail)
             {
-                LOG_APP_INFO("[email_watch] polled '{}' folder '{}' — no new mail (watermark UID {})",
+                LOG_APP_INFO("[email_watch] polled '{}' folder '{}' — no new mail (watermark UID {}) "
+                             "workflow='{}' trigger='{}'",
                              job.m_ConnectionName, job.m_Folder,
-                             highestUid.empty() ? "<empty>" : highestUid);
+                             highestUid.empty() ? "<empty>" : highestUid, job.m_WorkflowId, job.m_TriggerId);
             }
 
-            // Update the watermark under lock
+            // Update the watermark under lock, looking up by identity.  If the
+            // trigger was removed during the network call, drop the update —
+            // there's nothing valid to write it to.
             {
                 std::scoped_lock<std::mutex> const lock(m_Mutex);
-                if (job.m_Index < m_EmailWatchTriggers.size())
+                size_t const triggerIndex = findEmailTriggerIndexLocked(job);
+                if (triggerIndex < m_EmailWatchTriggers.size())
                 {
-                    m_EmailWatchTriggers[job.m_Index].m_LastSeenUid = highestUid;
+                    m_EmailWatchTriggers[triggerIndex].m_LastSeenUid = highestUid;
+                }
+                else
+                {
+                    LOG_APP_INFO("[email_watch] trigger removed during IMAP check; dropping watermark update "
+                                 "workflow='{}' trigger='{}'",
+                                 job.m_WorkflowId, job.m_TriggerId);
                 }
             }
 
             if (hasNewMail)
             {
-                std::scoped_lock<std::mutex> const lock(m_Mutex);
-                if (job.m_Index < m_EmailWatchTriggers.size())
+                // Identity is locked in via the job; re-confirm under lock
+                // that the trigger still exists before queuing the fire.
+                bool stillActive = false;
                 {
-                    auto const& emailInstance = m_EmailWatchTriggers[job.m_Index];
-                    LOG_APP_INFO("[email_watch] new mail detected in '{}' (UID {}), firing trigger '{}'",
-                                 job.m_Folder, highestUid, emailInstance.m_TriggerId);
-                    eventsToFire.push_back({emailInstance.m_WorkflowId, emailInstance.m_TriggerId});
+                    std::scoped_lock<std::mutex> const lock(m_Mutex);
+                    size_t const triggerIndex = findEmailTriggerIndexLocked(job);
+                    stillActive = triggerIndex < m_EmailWatchTriggers.size();
+                }
+                if (stillActive)
+                {
+                    LOG_APP_INFO("[email_watch] new mail detected in '{}' (UID {}), firing trigger "
+                                 "workflow='{}' trigger='{}'",
+                                 job.m_Folder, highestUid, job.m_WorkflowId, job.m_TriggerId);
+                    eventsToFire.push_back({job.m_WorkflowId, job.m_TriggerId});
                 }
             }
         }
@@ -791,6 +894,17 @@ namespace AIAssistant
                                         std::chrono::system_clock::time_point const& now)
     {
         std::string const normalizedEventPath = NormalizePath(path);
+        if (normalizedEventPath.empty())
+        {
+            // Event path doesn't resolve under the project root — drop it.
+            // Not security-critical (no trigger fires), but worth visibility
+            // since it usually means a misconfigured watch path or an OS-level
+            // path race.  WARN rather than ERROR — recoverable.
+            LOG_APP_WARN("TriggerEngine::NotifyFileEvent: event path '{}' does not resolve under project root, "
+                         "dropping event (eventType={})",
+                         path, static_cast<int>(fileEventType));
+            return;
+        }
         LOG_APP_INFO("[paths debug] debug TriggerEngine::NotifyFileEvent: reason=triggerEvent eventPathProvided='{}' "
                      "eventPathNormalized='{}' eventType='{}'",
                      path, normalizedEventPath, static_cast<int>(fileEventType));
@@ -802,10 +916,18 @@ namespace AIAssistant
 
             std::unordered_set<size_t> processedIndices;
 
+            // Bounds check on triggerIndex is the safety guard that lets
+            // m_FileWatchIndex carry indices into m_FileWatchTriggers — both
+            // are mutated only under m_Mutex (held throughout this lambda's
+            // call sites), so the index is valid by construction here.  The
+            // guard catches a future change that lets the two drift.
             auto processIndex = [&](size_t triggerIndex)
             {
                 if (triggerIndex >= m_FileWatchTriggers.size())
                 {
+                    LOG_APP_ERROR("TriggerEngine::NotifyFileEvent: m_FileWatchIndex points at out-of-range slot "
+                                  "{} (size={}) — index/vector skew",
+                                  triggerIndex, m_FileWatchTriggers.size());
                     return;
                 }
 
@@ -953,31 +1075,30 @@ namespace AIAssistant
 
     std::string TriggerEngine::NormalizePath(std::string const& path)
     {
-        std::string normalizedPath;
-        normalizedPath.reserve(path.size());
-
-        bool previousWasSlash = false;
-        for (char character : path)
+        // Per JC_Workflow_Specification §3.2.2, file_watch paths are
+        // project-root-relative (e.g. "data/report.xlsx").  The match key for
+        // both watch-path registration and event-path lookup is the canonical
+        // absolute path under the project root, produced via the shared
+        // ConfineUnderProjectRoot helper (fs::weakly_canonical +
+        // lexically_relative containment + symlink-escape rejection).  An
+        // event path with embedded `..` cannot escape the watched tree because
+        // both sides of the comparison are reduced to canonical form.
+        //
+        // Empty input → empty output (nothing to register or match).
+        // Containment failure → empty output (caller rejects via the empty
+        // sentinel).  Forward-slash form is enforced via .generic_string() so
+        // Windows event paths normalize to the same key shape as the
+        // JCWF-supplied path.
+        if (path.empty())
         {
-            char const normalizedCharacter = (character == '\\') ? '/' : character;
-
-            if (normalizedCharacter == '/')
-            {
-                if (previousWasSlash)
-                {
-                    continue;
-                }
-                previousWasSlash = true;
-            }
-            else
-            {
-                previousWasSlash = false;
-            }
-
-            normalizedPath.push_back(normalizedCharacter);
+            return {};
         }
-
-        return normalizedPath;
+        std::filesystem::path const confined = ConfineUnderProjectRoot(path);
+        if (confined.empty())
+        {
+            return {};
+        }
+        return confined.generic_string();
     }
 
     bool TriggerEngine::IsPathMatch(std::string const& watchedPath, std::string const& eventPath)

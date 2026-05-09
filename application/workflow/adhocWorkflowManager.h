@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -113,7 +114,7 @@ namespace AIAssistant
 
         // Quota queries.
         size_t GetUserDiskUsageBytes(std::string const& user) const;
-        bool WouldExceedQuota(std::string const& user, int diskQuotaMb, size_t additionalBytes) const;
+        [[nodiscard]] bool WouldExceedQuota(std::string const& user, int diskQuotaMb, size_t additionalBytes) const;
 
         // Accessors for tests and status endpoints.
         size_t GetActiveRunCount() const;
@@ -158,7 +159,11 @@ namespace AIAssistant
         std::string GenerateFolderName(std::string const& cleanupPolicy);
         std::string RewriteWorkflowId(std::string const& jcwfJson, std::string const& newId) const;
         size_t MeasureFolderBytes(std::filesystem::path const& folder) const;
-        void WriteMeta(std::filesystem::path const& folder, RunMeta const& meta) const;
+        // Returns true on success, false if the meta file couldn't be opened
+        // (already logged inside).  Callers in Stage roll back the partial
+        // folder if this fails — meta.json is the artifact-attribution gate
+        // and a missing one breaks downstream ownership checks.
+        [[nodiscard]] bool WriteMeta(std::filesystem::path const& folder, RunMeta const& meta) const;
         std::optional<RunMeta> ReadMeta(std::filesystem::path const& folder) const;
         // Writes manifest.json describing the run's outputs — called from
         // OnRunCompleted so downstream listing endpoints can serve the same
@@ -178,7 +183,17 @@ namespace AIAssistant
         std::unordered_map<std::string, RunMeta> m_RunIdToMeta;
         std::unordered_map<std::string, size_t> m_DiskUsageByUser;
 
+        // Reaper-thread lifecycle.  m_ReaperRunning is the externally-visible
+        // run flag; m_ReaperThread is the std::thread handle.  Both are
+        // accessed from Start/StopReaperThread + the destructor — concurrent
+        // Start/Stop on the same instance would race on the std::thread
+        // assignment (atomic doesn't make a non-atomic member safe).  Both
+        // are guarded by m_ReaperLifecycleMutex.  Inside ReaperLoop the
+        // m_ReaperCv + m_Mutex pair lets Stop() wake the loop immediately
+        // instead of waiting up to a second for the next sleep slice.
         std::thread m_ReaperThread;
+        mutable std::mutex m_ReaperLifecycleMutex;
         std::atomic<bool> m_ReaperRunning{false};
+        std::condition_variable m_ReaperCv;
     };
 } // namespace AIAssistant

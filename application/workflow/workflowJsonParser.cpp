@@ -102,11 +102,14 @@ Expected JCWF JSON structure:
 */
 
 #include "workflow/workflowJsonParser.h"
+
 #include <filesystem>
+#include <limits>
 #include <string_view>
 #include <unordered_set>
 
 #include "engine.h"
+#include "workflow/workflowJsonParserDetails.h"
 #include "workflow/workflowTypes.h"
 
 namespace AIAssistant
@@ -130,6 +133,7 @@ namespace AIAssistant
     static bool ReadQueueFileRefArray(simdjson::ondemand::value& value, std::vector<QueueFileRef>& outFileRefs,
                                       std::string const& context, std::string& outErrorMessage)
     {
+        using namespace WorkflowParserLimits;
         outFileRefs.clear();
 
         simdjson::ondemand::array array;
@@ -142,6 +146,12 @@ namespace AIAssistant
 
         for (simdjson::ondemand::value item : array)
         {
+            if (outFileRefs.size() >= kMaxQueueFilesPerSection)
+            {
+                outErrorMessage = context + " exceeds max queue-file count (" +
+                                  std::to_string(kMaxQueueFilesPerSection) + ")";
+                return false;
+            }
             // Either "path string" OR {"path":"...", "content":"..."}.
             if (item.type() == simdjson::ondemand::json_type::string)
             {
@@ -153,8 +163,15 @@ namespace AIAssistant
                     return false;
                 }
 
+                std::string const pathStr(pathText);
+                if (!IsAcceptedRelativePath(pathStr))
+                {
+                    outErrorMessage = context + " path rejected (absolute, empty, "
+                                      "or overlength): '" + pathStr + "'";
+                    return false;
+                }
                 QueueFileRef fileRef{};
-                fileRef.m_Path = std::string(pathText);
+                fileRef.m_Path = pathStr;
                 fileRef.m_HasInlineContent = false;
                 outFileRefs.push_back(std::move(fileRef));
                 continue;
@@ -187,8 +204,22 @@ namespace AIAssistant
                     return false;
                 }
 
+                std::string const pathStr(pathText);
+                if (!IsAcceptedRelativePath(pathStr))
+                {
+                    outErrorMessage = context + " path rejected (absolute, empty, "
+                                      "or overlength): '" + pathStr + "'";
+                    return false;
+                }
+                if (contentText.size() > kMaxInlineContentBytes)
+                {
+                    outErrorMessage = context + " inline 'content' size " +
+                                      std::to_string(contentText.size()) +
+                                      " exceeds cap " + std::to_string(kMaxInlineContentBytes);
+                    return false;
+                }
                 QueueFileRef fileRef{};
-                fileRef.m_Path = std::string(pathText);
+                fileRef.m_Path = pathStr;
                 fileRef.m_Content = std::string(contentText);
                 fileRef.m_HasInlineContent = true;
                 outFileRefs.push_back(std::move(fileRef));
@@ -616,6 +647,15 @@ namespace AIAssistant
                     errorMessage = "task field 'working_directory' must be a string";
                     return false;
                 }
+                // Empty string is the documented "use queue folder" default;
+                // anything non-empty must pass the parse-time syntactic gate.
+                if (!taskOut.m_WorkingDirectory.empty() &&
+                    !IsAcceptedRelativePath(taskOut.m_WorkingDirectory))
+                {
+                    errorMessage = "task field 'working_directory' rejected (absolute, '..' "
+                                   "segment, empty, or overlength): '" + taskOut.m_WorkingDirectory + "'";
+                    return false;
+                }
             }
             else if (key == "mode")
             {
@@ -640,6 +680,12 @@ namespace AIAssistant
                 simdjson::ondemand::array dependsArray = arrayResult.value();
                 for (simdjson::ondemand::value dependencyValue : dependsArray)
                 {
+                    if (taskOut.m_DependsOn.size() >= WorkflowParserLimits::kMaxDependsOnPerTask)
+                    {
+                        errorMessage = "task field 'depends_on' exceeds max count (" +
+                                       std::to_string(WorkflowParserLimits::kMaxDependsOnPerTask) + ")";
+                        return false;
+                    }
                     auto stringResult = dependencyValue.get_string(false);
                     if (stringResult.error() != simdjson::SUCCESS)
                     {
@@ -687,6 +733,12 @@ namespace AIAssistant
                     errorMessage = "task field 'output_retries' must be a non-negative integer";
                     return false;
                 }
+                if (retriesValue > std::numeric_limits<std::uint32_t>::max())
+                {
+                    errorMessage = "task field 'output_retries' exceeds uint32 range: " +
+                                   std::to_string(retriesValue);
+                    return false;
+                }
                 taskOut.m_OutputSchemaMaxAttempts = static_cast<uint32_t>(retriesValue);
             }
             else if (key == "file_inputs")
@@ -701,6 +753,12 @@ namespace AIAssistant
                 simdjson::ondemand::array inputsArray = arrayResult.value();
                 for (simdjson::ondemand::value inputValue : inputsArray)
                 {
+                    if (taskOut.m_FileInputs.size() >= WorkflowParserLimits::kMaxFileInputsPerTask)
+                    {
+                        errorMessage = "task field 'file_inputs' exceeds max count (" +
+                                       std::to_string(WorkflowParserLimits::kMaxFileInputsPerTask) + ")";
+                        return false;
+                    }
                     auto stringResult = inputValue.get_string(false);
                     if (stringResult.error() != simdjson::SUCCESS)
                     {
@@ -709,7 +767,14 @@ namespace AIAssistant
                     }
 
                     std::string_view inputView = stringResult.value();
-                    taskOut.m_FileInputs.emplace_back(inputView.begin(), inputView.end());
+                    std::string const inputPath(inputView);
+                    if (!IsAcceptedRelativePath(inputPath))
+                    {
+                        errorMessage = "task 'file_inputs' path rejected (absolute, "
+                                       "empty, or overlength): '" + inputPath + "'";
+                        return false;
+                    }
+                    taskOut.m_FileInputs.push_back(inputPath);
                 }
             }
             else if (key == "file_outputs")
@@ -724,6 +789,12 @@ namespace AIAssistant
                 simdjson::ondemand::array outputsArray = arrayResult.value();
                 for (simdjson::ondemand::value outputValue : outputsArray)
                 {
+                    if (taskOut.m_FileOutputs.size() >= WorkflowParserLimits::kMaxFileOutputsPerTask)
+                    {
+                        errorMessage = "task field 'file_outputs' exceeds max count (" +
+                                       std::to_string(WorkflowParserLimits::kMaxFileOutputsPerTask) + ")";
+                        return false;
+                    }
                     auto stringResult = outputValue.get_string(false);
                     if (stringResult.error() != simdjson::SUCCESS)
                     {
@@ -732,7 +803,14 @@ namespace AIAssistant
                     }
 
                     std::string_view outputView = stringResult.value();
-                    taskOut.m_FileOutputs.emplace_back(outputView.begin(), outputView.end());
+                    std::string const outputPath(outputView);
+                    if (!IsAcceptedRelativePath(outputPath))
+                    {
+                        errorMessage = "task 'file_outputs' path rejected (absolute, "
+                                       "empty, or overlength): '" + outputPath + "'";
+                        return false;
+                    }
+                    taskOut.m_FileOutputs.push_back(outputPath);
                 }
             }
             else if (key == "materialize")
@@ -803,8 +881,20 @@ namespace AIAssistant
                     errorMessage = "task field 'timeout_ms' must be integer";
                     return false;
                 }
-
-                taskOut.m_TimeoutMs = static_cast<uint64_t>(timeoutResult.value());
+                int64_t const timeoutSigned = timeoutResult.value();
+                if (timeoutSigned < 0)
+                {
+                    errorMessage = "task field 'timeout_ms' must be non-negative, got " +
+                                   std::to_string(timeoutSigned);
+                    return false;
+                }
+                if (static_cast<uint64_t>(timeoutSigned) > WorkflowParserLimits::kMaxTimeoutMs)
+                {
+                    errorMessage = "task field 'timeout_ms' exceeds 7-day cap: " +
+                                   std::to_string(timeoutSigned);
+                    return false;
+                }
+                taskOut.m_TimeoutMs = static_cast<uint64_t>(timeoutSigned);
             }
             else if (key == "retries")
             {
@@ -843,6 +933,10 @@ namespace AIAssistant
             }
         }
 
+        // Note: m_Id MAY be empty here — ParseTasks (the only caller) falls
+        // back to the JSON map key when no explicit "id" is provided.  The
+        // empty-id-equals-map-key contract lives in ParseTasks; do not add
+        // a strict check here without updating that fallback in lockstep.
         if (taskOut.m_Type == TaskType::Unknown)
         {
             errorMessage = "task missing required field: type";
@@ -928,8 +1022,21 @@ namespace AIAssistant
                     errorMessage = "retries field 'max_attempts' must be integer";
                     return false;
                 }
-
-                retryPolicyOut.m_MaxAttempts = static_cast<uint32_t>(maxAttemptsResult.value());
+                int64_t const maxAttempts = maxAttemptsResult.value();
+                if (maxAttempts < 0)
+                {
+                    errorMessage = "retries field 'max_attempts' must be non-negative, got " +
+                                   std::to_string(maxAttempts);
+                    return false;
+                }
+                if (static_cast<uint64_t>(maxAttempts) > WorkflowParserLimits::kMaxRetryAttempts)
+                {
+                    errorMessage = "retries field 'max_attempts' exceeds cap " +
+                                   std::to_string(WorkflowParserLimits::kMaxRetryAttempts) + ": " +
+                                   std::to_string(maxAttempts);
+                    return false;
+                }
+                retryPolicyOut.m_MaxAttempts = static_cast<uint32_t>(maxAttempts);
             }
             else if (key == "backoff_ms")
             {
@@ -939,8 +1046,21 @@ namespace AIAssistant
                     errorMessage = "retries field 'backoff_ms' must be integer";
                     return false;
                 }
-
-                retryPolicyOut.m_BackoffMs = static_cast<uint32_t>(backoffResult.value());
+                int64_t const backoff = backoffResult.value();
+                if (backoff < 0)
+                {
+                    errorMessage = "retries field 'backoff_ms' must be non-negative, got " +
+                                   std::to_string(backoff);
+                    return false;
+                }
+                if (static_cast<uint64_t>(backoff) > WorkflowParserLimits::kMaxBackoffMs)
+                {
+                    errorMessage = "retries field 'backoff_ms' exceeds cap " +
+                                   std::to_string(WorkflowParserLimits::kMaxBackoffMs) + ": " +
+                                   std::to_string(backoff);
+                    return false;
+                }
+                retryPolicyOut.m_BackoffMs = static_cast<uint32_t>(backoff);
             }
             else
             {
@@ -977,8 +1097,20 @@ namespace AIAssistant
                     errorMessage = "defaults field 'timeout_ms' must be integer";
                     return false;
                 }
-
-                defaultsOut.m_TimeoutMs = static_cast<uint64_t>(timeoutResult.value());
+                int64_t const timeoutSigned = timeoutResult.value();
+                if (timeoutSigned < 0)
+                {
+                    errorMessage = "defaults field 'timeout_ms' must be non-negative, got " +
+                                   std::to_string(timeoutSigned);
+                    return false;
+                }
+                if (static_cast<uint64_t>(timeoutSigned) > WorkflowParserLimits::kMaxTimeoutMs)
+                {
+                    errorMessage = "defaults field 'timeout_ms' exceeds 7-day cap: " +
+                                   std::to_string(timeoutSigned);
+                    return false;
+                }
+                defaultsOut.m_TimeoutMs = static_cast<uint64_t>(timeoutSigned);
             }
             else if (key == "retries")
             {
@@ -1041,7 +1173,7 @@ namespace AIAssistant
         return ParseRootObject(rootObject, outputDefinition, errorMessage);
     }
 
-    bool WorkflowJsonParser::ParseRootObject(simdjson::ondemand::object root, WorkflowDefinition& outputDefinition,
+    bool WorkflowJsonParser::ParseRootObject(simdjson::ondemand::object& root, WorkflowDefinition& outputDefinition,
                                              std::string& errorMessage) const
     {
         bool hasVersion = false;
@@ -1145,6 +1277,14 @@ namespace AIAssistant
                     errorMessage = "field 'base_directory' must be a string";
                     return false;
                 }
+                if (!outputDefinition.m_WorkflowBaseDirectory.empty() &&
+                    !IsAcceptedRelativePath(outputDefinition.m_WorkflowBaseDirectory))
+                {
+                    errorMessage = "field 'base_directory' rejected (absolute, "
+                                   "empty, or overlength): '" +
+                                   outputDefinition.m_WorkflowBaseDirectory + "'";
+                    return false;
+                }
             }
             else if (key == "manual_start")
             {
@@ -1217,15 +1357,20 @@ namespace AIAssistant
                     simdjson::ondemand::parser defaultsParser;
                     simdjson::padded_string paddedDefaults(outputDefinition.m_DefaultsJson);
                     simdjson::ondemand::document defaultsDoc;
-                    simdjson::error_code ec = defaultsParser.iterate(paddedDefaults).get(defaultsDoc);
-                    if (ec)
+                    if (auto ec = defaultsParser.iterate(paddedDefaults).get(defaultsDoc); ec)
                     {
                         errorMessage = "failed to re-parse 'defaults' JSON: ";
                         errorMessage += simdjson::error_message(ec);
                         return false;
                     }
 
-                    simdjson::ondemand::object defaultsObj = defaultsDoc.get_object();
+                    simdjson::ondemand::object defaultsObj;
+                    if (auto ec = defaultsDoc.get_object().get(defaultsObj); ec)
+                    {
+                        errorMessage = "'defaults' value must be an object: ";
+                        errorMessage += simdjson::error_message(ec);
+                        return false;
+                    }
                     if (!ParseDefaults(defaultsObj, outputDefinition.m_Defaults, errorMessage))
                     {
                         return false;
@@ -1356,7 +1501,9 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                continue;
+                errorMessage = std::string("global.json: failed to read field key: ") +
+                               simdjson::error_message(keyResult.error());
+                return false;
             }
 
             std::string_view keyView = keyResult.value();
@@ -1365,23 +1512,51 @@ namespace AIAssistant
 
             if (key == "version")
             {
-                ElementToString(value, workflowOut.m_Version);
+                if (!ElementToString(value, workflowOut.m_Version))
+                {
+                    errorMessage = "global.json field 'version' must be string";
+                    return false;
+                }
             }
             else if (key == "id")
             {
-                ElementToString(value, workflowOut.m_Id);
+                if (!ElementToString(value, workflowOut.m_Id))
+                {
+                    errorMessage = "global.json field 'id' must be string";
+                    return false;
+                }
             }
             else if (key == "label")
             {
-                ElementToString(value, workflowOut.m_Label);
+                if (!ElementToString(value, workflowOut.m_Label))
+                {
+                    errorMessage = "global.json field 'label' must be string";
+                    return false;
+                }
             }
             else if (key == "doc")
             {
-                ExtractRawJson(value, workflowOut.m_Doc);
+                if (!ExtractRawJson(value, workflowOut.m_Doc))
+                {
+                    errorMessage = "global.json field 'doc' must be a JSON value";
+                    return false;
+                }
             }
             else if (key == "base_directory")
             {
-                ElementToString(value, workflowOut.m_WorkflowBaseDirectory);
+                if (!ElementToString(value, workflowOut.m_WorkflowBaseDirectory))
+                {
+                    errorMessage = "global.json field 'base_directory' must be string";
+                    return false;
+                }
+                if (!workflowOut.m_WorkflowBaseDirectory.empty() &&
+                    !IsAcceptedRelativePath(workflowOut.m_WorkflowBaseDirectory))
+                {
+                    errorMessage = "global.json field 'base_directory' rejected (absolute, '..' "
+                                   "segment, empty, or overlength): '" +
+                                   workflowOut.m_WorkflowBaseDirectory + "'";
+                    return false;
+                }
             }
             else if (key == "manual_start")
             {
@@ -1389,22 +1564,45 @@ namespace AIAssistant
                 {
                     workflowOut.m_ManualStart = value.get_bool().value();
                 }
+                else
+                {
+                    errorMessage = "global.json field 'manual_start' must be boolean";
+                    return false;
+                }
             }
             else if (key == "triggers")
             {
-                ParseTriggers(value, workflowOut.m_Triggers, errorMessage);
+                if (!ParseTriggers(value, workflowOut.m_Triggers, errorMessage))
+                {
+                    return false;
+                }
             }
             else if (key == "defaults")
             {
-                ExtractRawJson(value, workflowOut.m_DefaultsJson);
+                if (!ExtractRawJson(value, workflowOut.m_DefaultsJson))
+                {
+                    errorMessage = "global.json field 'defaults' must be a JSON value";
+                    return false;
+                }
                 simdjson::ondemand::parser defaultsParser;
                 simdjson::padded_string paddedDefaults(workflowOut.m_DefaultsJson);
                 simdjson::ondemand::document defaultsDoc;
-                simdjson::error_code defaultsEc = defaultsParser.iterate(paddedDefaults).get(defaultsDoc);
-                if (!defaultsEc)
+                if (auto defaultsParseEc = defaultsParser.iterate(paddedDefaults).get(defaultsDoc); defaultsParseEc)
                 {
-                    simdjson::ondemand::object defaultsObj = defaultsDoc.get_object();
-                    ParseDefaults(defaultsObj, workflowOut.m_Defaults, errorMessage);
+                    errorMessage = std::string("global.json: failed to re-parse 'defaults' JSON: ") +
+                                   simdjson::error_message(defaultsParseEc);
+                    return false;
+                }
+                simdjson::ondemand::object defaultsObj;
+                if (auto defaultsObjEc = defaultsDoc.get_object().get(defaultsObj); defaultsObjEc)
+                {
+                    errorMessage = std::string("global.json: 'defaults' must be an object: ") +
+                                   simdjson::error_message(defaultsObjEc);
+                    return false;
+                }
+                if (!ParseDefaults(defaultsObj, workflowOut.m_Defaults, errorMessage))
+                {
+                    return false;
                 }
             }
             // Silently ignore tasks, dataflow, etc. — those belong in canvas JSONs.
@@ -1452,7 +1650,9 @@ namespace AIAssistant
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
-                continue;
+                errorMessage = std::string("canvas JSON: failed to read field key: ") +
+                               simdjson::error_message(keyResult.error());
+                return false;
             }
 
             std::string_view keyView = keyResult.value();

@@ -406,7 +406,11 @@ namespace AIAssistant
             if (m_WorkflowRegistry != nullptr)
             {
                 std::string removeError;
-                m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError);
+                if (!m_WorkflowRegistry->RemoveWorkflow(workflowId, false, removeError))
+                {
+                    LOG_APP_WARN("HandleWorkflowDelete: registry RemoveWorkflow failed workflow='{}': {}",
+                                 workflowId, removeError);
+                }
             }
         }
 

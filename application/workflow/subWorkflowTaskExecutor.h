@@ -39,8 +39,8 @@ namespace AIAssistant
         // Late binding: the runtime manager is created after executor registration.
         void SetRuntimeManager(WorkflowRuntimeManager* runtimeManager);
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
-                     TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
+        [[nodiscard]] bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                   TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
 
     private:
         WorkflowRegistry const* m_WorkflowRegistry = nullptr;

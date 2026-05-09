@@ -34,4 +34,4 @@ The built `dist/` folder is served by j9t at `http://localhost:8080/`.
 | `src/components/WorkflowsPanel.tsx` | Workflow list, run actions, task state display |
 | `src/components/LogViewerPanel.tsx` | Log viewer with byte-offset pagination |
 | `src/types.ts` | TypeScript interfaces for API responses |
-| `src/hooks/useWebSocket.ts` | WebSocket connection and message parsing |
+| `src/hooks/useWebSocket.ts` | WebSocket connection, message parsing, exponential-backoff reconnect (2 s → 30 s, resets on success) |

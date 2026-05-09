@@ -85,8 +85,8 @@ namespace AIAssistant
         // function exits, so a concurrent writer that subsequently rehashes or erases
         // m_Connections cannot invalidate the caller's view.  This is the C++ idiom for
         // Rust's Option<&T> with the borrow checker enforcing that no reference outlives
-        // the lock guard.  See header comment + cybersec audit (cloudConnectionManager,
-        // HIGH "Dangling pointer from GetConnection across lock boundary").
+        // the lock guard.  See header comment for the dangling-pointer hazard
+        // this guards against.
         std::shared_lock lock(m_Mutex);
         auto const it = m_Connections.find(name);
         if (it == m_Connections.end())

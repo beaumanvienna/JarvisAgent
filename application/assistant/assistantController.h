@@ -175,8 +175,9 @@ namespace AIAssistant
         std::vector<std::string> m_PendingMessages;
 
         // Background AI lambdas, dispatched onto Core::g_Core->GetThreadPool().
-        // Reuses the engine pool (memory feedback_no_jthread_use_threadpool)
-        // instead of spawning a fresh std::thread per AI turn.  Future is
+        // Reuses the engine threadpool instead of spawning a fresh std::thread per
+        // AI turn — keeps thread lifetime managed by Core's existing shutdown
+        // ordering and avoids the platform-dependence of std::jthread.  Future is
         // shared so JoinFinishedFutures can poll wait_for(0ms) without
         // consuming the result.
         std::mutex m_ThreadsMutex;

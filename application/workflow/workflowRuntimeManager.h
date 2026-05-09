@@ -92,24 +92,24 @@ namespace AIAssistant
 
         // Must be called periodically (from main thread).
         // Returns true if any workflow run changed state (completed, failed, new run started).
-        bool Update();
+        [[nodiscard]] bool Update();
 
         void SetRegistry(WorkflowRegistry const* workflowRegistry);
 
-        bool TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const;
+        [[nodiscard]] bool TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const;
 
-        bool TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const;
+        [[nodiscard]] bool TryGetActiveRun(std::string const& runId, WorkflowRun& outRun) const;
 
         // Returns true if cancellation was requested successfully for an active run.
-        bool RequestCancelRun(std::string const& runId);
+        [[nodiscard]] bool RequestCancelRun(std::string const& runId);
 
         // Returns true if the pause/resume/stop was applied to an active run.
-        bool RequestPauseRun(std::string const& runId);
-        bool RequestResumeRun(std::string const& runId);
-        bool RequestStopRun(std::string const& runId);
+        [[nodiscard]] bool RequestPauseRun(std::string const& runId);
+        [[nodiscard]] bool RequestResumeRun(std::string const& runId);
+        [[nodiscard]] bool RequestStopRun(std::string const& runId);
 
         // Finds a run by run id across active and last-runs snapshots.
-        bool TryGetRunById(std::string const& runId, WorkflowRun& outRun) const;
+        [[nodiscard]] bool TryGetRunById(std::string const& runId, WorkflowRun& outRun) const;
 
         // Returns a copy of all active runs (thread-safe snapshot).
         std::vector<WorkflowRun> GetActiveRunsSnapshot() const;
@@ -120,13 +120,13 @@ namespace AIAssistant
         // Deletes all output artifacts produced by running the given workflow.
         // Returns true on success.  On failure, outErrorMessage describes the issue.
         // Source/input files are never touched.
-        bool CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage);
+        [[nodiscard]] bool CleanWorkflow(std::string const& workflowId, std::string& outErrorMessage);
 
         void GetRunCounters(uint64_t& outCompleted, uint64_t& outFailed) const;
 
         // Heartbeat watchdog: called by the REST endpoint to reset the inactivity timer.
         // Returns true if the task was found and kicked.
-        bool Heartbeat(std::string const& taskInstanceId);
+        [[nodiscard]] bool Heartbeat(std::string const& taskInstanceId);
 
         // Sub-workflow support: register a parent-child link so the runtime manager
         // can propagate child run completion back to the parent task.

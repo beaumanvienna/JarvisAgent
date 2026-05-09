@@ -30,6 +30,26 @@
 
 namespace AIAssistant
 {
+    // ------------------------------------------------------------------------
+    // TaskPathResolver — pure path-resolution helpers.
+    //
+    // **Trust model:** these helpers are pass-through resolvers — they do NOT
+    // enforce containment.  An attacker-supplied path with `..` segments or
+    // an absolute path outside the project tree will resolve verbatim.
+    //
+    // Containment is the **caller's** responsibility — pass any external
+    // path string through `application/file/pathConfinement.h::
+    // ConfineUnderProjectRoot` BEFORE handing the resolved value to a
+    // filesystem-touching API (read / write / remove).  The caller knows
+    // the intended scope (project root / scripts dir / task working dir /
+    // etc.) and applies the corresponding containment gate.
+    //
+    // The reason this responsibility lives at the caller, not here: the
+    // intended scope varies per call site (some legitimately resolve cross-
+    // task input paths inside the workflow base, others stay strictly inside
+    // a task working dir).  A one-size containment policy in this resolver
+    // would either reject legitimate paths or fail open on hostile ones.
+    // ------------------------------------------------------------------------
     class TaskPathResolver
     {
     public:

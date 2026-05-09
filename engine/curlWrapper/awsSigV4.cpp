@@ -46,8 +46,8 @@ namespace AIAssistant
         // Wraps the intermediate signing-key material derived from the AWS
         // secret_access_key (kSecret, kDate, kRegion, kService, kSigning) so the
         // secret-derived bytes don't linger on the heap after Sign() returns.
-        // Same posture sittings 1-3 closed for the master-password KEK in
-        // keyEncryption.cpp via ScopedKey<N>; this is the std::vector variant.
+        // Same posture as the master-password KEK wrapping in keyEncryption.cpp
+        // via ScopedKey<N>; this is the std::vector variant.
         //
         // OPENSSL_cleanse uses memory barriers to prevent the compiler from
         // dead-store-eliminating the zero — std::memset would be optimised away.
@@ -396,7 +396,7 @@ namespace AIAssistant
             // (4) Full-chain known-answer test: locks in the EXACT signature for the
             // determinism inputs above so any regression in canonical-request assembly,
             // UriEncode, CanonicalQuery, or stringToSign concatenation is caught.
-            // The expected signature was captured from a trusted run after sitting 10's
+            // The expected signature was captured from a trusted run after the
             // OPENSSL_cleanse + RAII changes landed; the inputs use the AWS-published
             // example secret (wJalrXUtn...EXAMPLEKEY) and AKIDEXAMPLE access key, so a
             // future cross-check against an independent SigV4 implementation (aws-cli,

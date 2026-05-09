@@ -506,6 +506,7 @@ Submit a JCWF canvas for one-shot execution without permanent registration. Requ
 - `403 insufficient_role` — your role is `viewer`.
 - `403 mcp_key_required` — session cookie or gateway header is not sufficient; adhoc needs an MCP key.
 - `403 policy_exceeds_ceiling` — the requested `cleanup_policy` is longer than the key's `default_cleanup_policy` (admin-configured maximum). Response includes `"ceiling"` with the maximum-allowed policy.
+- `413 jcwf_too_large` — submitted JCWF JSON exceeds the 4 MB hard cap. Cap is enforced before any folder is created or registry mutation happens, so a rejected oversized submission has zero filesystem footprint.
 - `413 quota_exceeded` — cumulative adhoc disk usage for your user would exceed `disk_quota_mb`.
 - `503 adhoc_unavailable` — WorkflowRegistry not yet attached (server startup race — retry).
 

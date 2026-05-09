@@ -467,6 +467,12 @@ namespace AIAssistant
         FilterDef resolvedFilter = filter;
         if (!filter.m_Source.m_Connection.empty())
         {
+            if (Core::g_Core == nullptr)
+            {
+                errorMessage = "filter '" + filter.m_Id + "': Core::g_Core is null, cannot resolve connection";
+                LOG_APP_ERROR("[filter] Core::g_Core is null filter='{}'", filter.m_Id);
+                return {};
+            }
             auto conn =
                 Core::g_Core->GetCloudConnectionManager().GetConnection(filter.m_Source.m_Connection);
             if (!conn)

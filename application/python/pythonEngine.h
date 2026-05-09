@@ -115,7 +115,7 @@ namespace AIAssistant
         // engine) imports the hook module.  Returns false if scriptDir does not
         // resolve to a directory inside the project root — the path-traversal
         // gate that defends sys.path from arbitrary-location injection.
-        bool SetupSubInterpreter(std::string const& scriptDir, std::string const& moduleName, bool loadHooks);
+        [[nodiscard]] bool SetupSubInterpreter(std::string const& scriptDir, std::string const& moduleName, bool loadHooks);
 
         void SetInterpreterState(PyInterpreterState* interpState) { m_InterpreterState = interpState; }
         void SetScriptRegistry(ScriptRegistry const* registry) { m_ScriptRegistry = registry; }
@@ -133,10 +133,10 @@ namespace AIAssistant
         size_t GetEngineIndex() const { return m_EngineIndex; }
         size_t GetTasksCompleted() const { return m_TasksCompleted.load(std::memory_order_relaxed); }
 
-        bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
-                                 std::string const& workflowId, std::string const& runId,
-                                 std::unordered_map<std::string, std::string> const& inputValues,
-                                 std::unordered_map<std::string, std::string> const& contextValues,
+        [[nodiscard]] bool ExecuteWorkflowTask(TaskDef const& taskDefinition, std::string const& taskWorkingDirectory,
+                                               std::string const& workflowId, std::string const& runId,
+                                               std::unordered_map<std::string, std::string> const& inputValues,
+                                               std::unordered_map<std::string, std::string> const& contextValues,
                                  std::unordered_map<std::string, std::string>& outputValuesOut, std::string& errorMessage,
                                  std::string& capturedStdout, std::string& capturedStderr);
 

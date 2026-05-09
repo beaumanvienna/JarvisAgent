@@ -72,8 +72,7 @@ namespace AIAssistant
     // Bound on the response body the writeCallback will accept.  Closes the
     // unbounded-responseBody DoS — a hostile or compromised endpoint can otherwise
     // stream arbitrary bytes into our process.  64 MB matches the cloud-surface
-    // pattern (see sitting 14's kMaxSnowflakeResponseBytes); Azure Blob list/copy
-    // responses are well under this cap in practice.
+    // pattern; Azure Blob list/copy responses are well under this cap in practice.
     static constexpr size_t kMaxAzureBlobResponseBytes = 64 * 1024 * 1024;
 
     // Azure Blob container name validator.  Per Microsoft's container-naming
@@ -355,9 +354,6 @@ namespace AIAssistant
         // attacker-controlled value containing `/`, `?`, `#`, or `:` would
         // otherwise inject URL components past the canonical
         // `https://{account}.blob.core.windows.net/{container}/{blob}` layout.
-        // Closes the audit's HIGH "Path Traversal via blob_name / Unvalidated
-        // container in URL Construction" finding (deferred from sitting 18 —
-        // azureBlob was outside the 5-executor cluster swept then).
         if (!IsValidAzureContainer(container))
         {
             taskState.m_LastErrorMessage = "Invalid Azure Blob container name: must match Azure naming rules "

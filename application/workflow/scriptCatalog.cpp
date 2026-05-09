@@ -36,6 +36,43 @@ namespace AIAssistant
     {
         constexpr int kMaxMetadataLines = 60;
 
+        // Hard cap on catalog size — defends against a directory that has
+        // grown out of bounds (or been weaponised with thousands of crafted
+        // small files) from exhausting heap memory in the parsing thread.
+        constexpr std::size_t kMaxEntries = 10'000;
+
+        // Returns true if the canonicalised absolute path lies inside the
+        // canonicalised root directory.  Resolves symlinks before comparing,
+        // so a symlink under root/ that points outside root is rejected even
+        // though its directory entry sits "inside" root from the iterator's
+        // perspective.  Fails closed on any canonicalisation error.
+        [[nodiscard]] bool PathIsUnderRoot(std::filesystem::path const& absolutePath,
+                                            std::filesystem::path const& rootDir) noexcept
+        {
+            std::error_code rootError;
+            std::filesystem::path const canonicalRoot = std::filesystem::weakly_canonical(rootDir, rootError);
+            if (rootError || canonicalRoot.empty())
+            {
+                return false;
+            }
+            std::error_code pathError;
+            std::filesystem::path const canonicalPath = std::filesystem::weakly_canonical(absolutePath, pathError);
+            if (pathError || canonicalPath.empty())
+            {
+                return false;
+            }
+            // lexically_relative produces a leading ".." segment when the
+            // candidate escapes the base — that's the canonical containment
+            // signal in C++17/20.
+            std::filesystem::path const rel = canonicalPath.lexically_relative(canonicalRoot);
+            if (rel.empty())
+            {
+                return false;
+            }
+            auto const it = rel.begin();
+            return it != rel.end() && *it != "..";
+        }
+
         // Strip leading whitespace + optional comment chars (#, --) so we can
         // match `# @short: foo` regardless of formatting style.
         std::string StripCommentPrefix(std::string const& line)
@@ -103,18 +140,14 @@ namespace AIAssistant
         if (ext == ".py")
         {
             entry.m_Type = "python";
-            // scripts/<stem>.py → module "scripts.<stem>"; nested packages folded via '.'
+            // scripts/<stem>.py → module "scripts.<stem>"; nested packages folded via '.'.
+            // The Refresh-side filter excludes __init__.py before this point,
+            // so no /__init__ stripping is needed here.
             auto rel = std::filesystem::relative(absolutePath, rootDir.parent_path());
             std::string mod = rel.generic_string();
-            // Trim ".py"
             if (mod.size() > 3 && mod.substr(mod.size() - 3) == ".py")
             {
                 mod = mod.substr(0, mod.size() - 3);
-            }
-            // __init__ files describe the package, not a standalone module.
-            if (mod.size() > 9 && mod.substr(mod.size() - 9) == "/__init__")
-            {
-                mod = mod.substr(0, mod.size() - 9);
             }
             std::replace(mod.begin(), mod.end(), '/', '.');
             entry.m_Module = mod;
@@ -193,9 +226,14 @@ namespace AIAssistant
                 if (!value.empty() && value.front() == ' ') value.erase(0, 1);
                 entry.m_Outputs = value;
             }
-            else if (!currentTag.empty() && (line.empty() || line[0] == '#'))
+            else if (!currentTag.empty() && !stripped.empty() && stripped[0] != '@')
             {
-                // Continuation line — belongs to the most recent tag.
+                // Continuation line — belongs to the most recent tag.  The
+                // previous check used `line[0] == '#'` after TrimRight, which
+                // wrongly rejected indented continuations like "   # foo"
+                // (the first char is space, not '#').  Test the stripped
+                // form instead — that's the format the tag-handlers above
+                // already operate on.
                 if (currentTag == "description")
                 {
                     if (!descriptionBuffer.empty()) descriptionBuffer.push_back(' ');
@@ -220,32 +258,90 @@ namespace AIAssistant
 
     void ScriptCatalog::Refresh(std::filesystem::path const& scriptsBaseFolder)
     {
-        std::lock_guard lock(m_Mutex);
-        m_RootDirectory = scriptsBaseFolder;
-        m_Entries.clear();
-
-        std::error_code ec;
-        if (!std::filesystem::exists(m_RootDirectory, ec)) return;
-
-        for (auto const& e : std::filesystem::recursive_directory_iterator(m_RootDirectory, ec))
+        // Build the new entry vector entirely OUTSIDE the lock so concurrent
+        // List / GetByPath / GetByModule callers are not blocked for the full
+        // I/O duration of the scan (which can be hundreds of milliseconds for
+        // a large scripts directory).  Lock is acquired only for the swap.
+        std::vector<Entry> newEntries;
+        std::error_code iterError;
+        // Drop the explicit exists() pre-check — race-prone, and the iterator
+        // constructor already reports "no such directory" via its own ec
+        // out-parameter.  Single atomic operation, single error path.
+        std::filesystem::recursive_directory_iterator it(scriptsBaseFolder, iterError);
+        if (iterError)
         {
-            if (ec) break;
-            if (!e.is_regular_file()) continue;
-            std::string const ext = e.path().extension().string();
-            if (ext != ".sh" && ext != ".py" && ext != ".ps1") continue;
-            // Skip python package markers — the package itself is the module
-            // and a standalone __init__ rarely carries jarvis-script metadata.
-            if (e.path().filename() == "__init__.py") continue;
-
-            Entry entry = ParseFile(e.path(), m_RootDirectory);
-            m_Entries.push_back(std::move(entry));
+            // Missing directory is the common case on a fresh checkout — keep
+            // it quiet (TRACE).  Other errors (permission, I/O) deserve ERROR.
+            if (iterError == std::errc::no_such_file_or_directory)
+            {
+                LOG_APP_TRACE("[scripts] root '{}' does not exist; catalog cleared",
+                              scriptsBaseFolder.string());
+            }
+            else
+            {
+                LOG_APP_ERROR("[scripts] cannot open root '{}': {}",
+                              scriptsBaseFolder.string(), iterError.message());
+            }
+            std::lock_guard const lock(m_Mutex);
+            m_RootDirectory = scriptsBaseFolder;
+            m_Entries.clear();
+            return;
         }
 
-        std::sort(m_Entries.begin(), m_Entries.end(),
+        std::error_code stepError;
+        std::filesystem::recursive_directory_iterator const end;
+        for (; it != end; it.increment(stepError))
+        {
+            if (stepError)
+            {
+                LOG_APP_ERROR("[scripts] directory scan stepped on error under '{}': {}; "
+                              "returning partial catalog",
+                              scriptsBaseFolder.string(), stepError.message());
+                break;
+            }
+            if (newEntries.size() >= kMaxEntries)
+            {
+                LOG_APP_ERROR("[scripts] catalog cap {} reached under '{}'; remaining entries ignored",
+                              kMaxEntries, scriptsBaseFolder.string());
+                break;
+            }
+            auto const& entry = *it;
+            // Skip symlinks — their target may resolve outside the scripts
+            // root.  PathIsUnderRoot below catches this defensively even if
+            // a future refactor relaxes the symlink skip; both gates run.
+            if (entry.is_symlink()) continue;
+            if (!entry.is_regular_file()) continue;
+            std::string const ext = entry.path().extension().string();
+            if (ext != ".sh" && ext != ".py" && ext != ".ps1") continue;
+            // Python package markers — `__init__.py` describes the package,
+            // not a standalone module.  The corresponding stripping branch
+            // in ParseFile is dead code now that the exclusion lives here.
+            if (entry.path().filename() == "__init__.py") continue;
+            // Path-traversal gate: reject any entry whose canonical path
+            // does not lie under the canonical scripts root.  Defends
+            // against a symlink-bait race we missed and against ANY future
+            // relaxation of the symlink skip above.
+            if (!PathIsUnderRoot(entry.path(), scriptsBaseFolder))
+            {
+                LOG_APP_ERROR("[scripts] rejecting entry '{}': resolves outside scripts root '{}'",
+                              entry.path().string(), scriptsBaseFolder.string());
+                continue;
+            }
+
+            newEntries.push_back(ParseFile(entry.path(), scriptsBaseFolder));
+        }
+
+        std::sort(newEntries.begin(), newEntries.end(),
                   [](Entry const& a, Entry const& b) { return a.m_Path < b.m_Path; });
 
+        std::size_t const finalCount = newEntries.size();
+        {
+            std::lock_guard const lock(m_Mutex);
+            m_RootDirectory = scriptsBaseFolder;
+            m_Entries = std::move(newEntries);
+        }
         LOG_APP_INFO("[scripts] catalog refreshed: {} entries under '{}'",
-                     m_Entries.size(), m_RootDirectory.string());
+                     finalCount, scriptsBaseFolder.string());
     }
 
     std::vector<ScriptCatalog::Entry>

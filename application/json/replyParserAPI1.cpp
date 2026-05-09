@@ -19,6 +19,10 @@
    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
+#include <cstdint>
+#include <iterator>
+#include <limits>
+
 #include "core.h"
 #include "engine.h"
 #include "json/replyParserAPI1.h"
@@ -27,6 +31,25 @@
 
 namespace AIAssistant
 {
+    namespace
+    {
+        // Cap on the number of choices materialised from a single provider
+        // reply.  In practice n=1 is what we ever request; this guards the
+        // parsing thread against a hostile or MITM response inflating the
+        // array to exhaust heap memory.
+        constexpr std::size_t kMaxChoices = 64;
+
+        // Cap applied to externally-sourced strings before they reach the
+        // structured log.  Keeps log lines bounded and prevents log/dashboard
+        // poisoning through megabyte-scale field values.
+        constexpr std::size_t kLogStringCap = 256;
+
+        // Tighter cap for short identifier-like fields (id, type, code, model,
+        // role, finish_reason).  These should never carry free-form content;
+        // if a provider sends one that exceeds this, log the truncated form.
+        constexpr std::size_t kLogIdCap = 128;
+    } // namespace
+
     ReplyParserAPI1::ReplyParserAPI1(std::string const& jsonString) : ReplyParser(jsonString) { Parse(); }
 
     ReplyParserAPI1::ErrorInfo const& ReplyParserAPI1::GetErrorInfo() const { return m_ErrorInfo; }
@@ -54,31 +77,39 @@ namespace AIAssistant
         }
         error.m_Kind = AiError::Kind::Provider;
         error.m_Message = m_ErrorInfo.m_Message;
-        if (m_ErrorType == ErrorType::RateLimitError)
+
+        switch (m_ErrorType)
         {
-            error.m_HttpStatus = 429;
-        }
-        else if (m_ErrorType == ErrorType::AuthenticationError)
-        {
-            error.m_HttpStatus = 401;
-        }
-        else if (m_ErrorType == ErrorType::PermissionError)
-        {
-            error.m_HttpStatus = 403;
-        }
-        else if (m_ErrorType == ErrorType::ServerError)
-        {
-            error.m_HttpStatus = 500;
+            case ErrorType::Unknown:             error.m_HttpStatus = 0;   break;
+            case ErrorType::InvalidRequestError: error.m_HttpStatus = 400; break;
+            case ErrorType::AuthenticationError: error.m_HttpStatus = 401; break;
+            case ErrorType::PermissionError:     error.m_HttpStatus = 403; break;
+            case ErrorType::RateLimitError:      error.m_HttpStatus = 429; break;
+            case ErrorType::ServerError:         error.m_HttpStatus = 500; break;
+            case ErrorType::InsufficientQuota:   error.m_HttpStatus = 429; break;
         }
         return error;
     }
 
     AiUsage ReplyParserAPI1::GetUsage() const
     {
+        constexpr uint64_t kCap = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+
+        auto clamp = [](uint64_t value, char const* fieldName) -> int32_t
+        {
+            if (value > kCap)
+            {
+                LOG_APP_WARN("ReplyParserAPI1::GetUsage: {} exceeds INT32_MAX ({}), clamping",
+                             fieldName, value);
+                return std::numeric_limits<int32_t>::max();
+            }
+            return static_cast<int32_t>(value);
+        };
+
         AiUsage usage;
-        usage.m_InputTokens = static_cast<int32_t>(m_Reply.m_Usage.m_PromptTokens);
-        usage.m_OutputTokens = static_cast<int32_t>(m_Reply.m_Usage.m_CompletionTokens);
-        usage.m_TotalTokens = static_cast<int32_t>(m_Reply.m_Usage.m_TotalTokens);
+        usage.m_InputTokens  = clamp(m_Reply.m_Usage.m_PromptTokens,     "prompt_tokens");
+        usage.m_OutputTokens = clamp(m_Reply.m_Usage.m_CompletionTokens, "completion_tokens");
+        usage.m_TotalTokens  = clamp(m_Reply.m_Usage.m_TotalTokens,      "total_tokens");
         return usage;
     }
 
@@ -98,105 +129,211 @@ namespace AIAssistant
         using namespace simdjson;
         ondemand::parser parser;
 
+        // padded_string is a local; every string_view extracted below points
+        // into its backing buffer and MUST be copied to std::string before
+        // this function returns.  Do not call ParseContent / ParseUsage /
+        // ParseError asynchronously, store views as members, or move json
+        // elsewhere — the borrowed views dangle the moment json is destroyed.
         padded_string json = padded_string(m_JsonString.data(), m_JsonString.size());
 
-        ondemand::document doc;
-        auto error = parser.iterate(json).get(doc);
-
-        if (error)
+        ondemand::document responseDocument;
+        if (auto err = parser.iterate(json).get(responseDocument); err)
         {
-            LOG_APP_ERROR("ReplyParserAPI1::Parse: An error occurred during parsing: {}", error_message(error));
+            LOG_APP_ERROR("ReplyParserAPI1::Parse: iterate failed: {}", error_message(err));
             m_State = ReplyParser::State::ParseFailure;
             return;
         }
 
-        ondemand::document sceneDocument = parser.iterate(json);
-        ondemand::object jsonObjects = sceneDocument.get_object();
+        ondemand::object jsonObjects;
+        if (auto err = responseDocument.get_object().get(jsonObjects); err)
+        {
+            LOG_APP_ERROR("ReplyParserAPI1::Parse: top-level get_object failed: {}", error_message(err));
+            m_State = ReplyParser::State::ParseFailure;
+            return;
+        }
 
         Reply reply{};
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view key = jsonObject.unescaped_key();
+            std::string_view key;
+            if (auto err = jsonObject.unescaped_key().get(key); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::Parse: unescaped_key failed: {}", error_message(err));
+                continue;
+            }
+
+            ondemand::value val;
+            if (auto err = jsonObject.value().get(val); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::Parse: value() for key '{}' failed: {}",
+                              key, error_message(err));
+                continue;
+            }
 
             if (key == "id")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "id must be string");
-                std::string_view id = jsonObject.value().get_string();
-                LOG_APP_INFO("id: {}", id);
-                m_Reply.m_Id = id;
+                std::string_view id;
+                if (auto err = val.get_string().get(id); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'id' not a string: {}", error_message(err));
+                    continue;
+                }
+                reply.m_Id = std::string(id);
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: id='{}'",
+                              TruncateUtf8Safe(SanitizeUtf8(reply.m_Id), kLogIdCap));
             }
             else if (key == "object")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "object must be string");
-                std::string_view object = jsonObject.value().get_string();
-                LOG_APP_INFO("object: {}", object);
-                m_Reply.m_Object = object;
+                std::string_view object;
+                if (auto err = val.get_string().get(object); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'object' not a string: {}", error_message(err));
+                    continue;
+                }
+                reply.m_Object = std::string(object);
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: object='{}'",
+                              TruncateUtf8Safe(SanitizeUtf8(reply.m_Object), kLogIdCap));
             }
             else if (key == "created")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "created must be integer");
-                uint64_t created = jsonObject.value().get_uint64();
-                LOG_APP_INFO("created: {}", created);
-                m_Reply.m_Created = created;
+                uint64_t created = 0;
+                if (auto err = val.get_uint64().get(created); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'created' not a number: {}", error_message(err));
+                    continue;
+                }
+                reply.m_Created = created;
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: created={}", created);
             }
             else if (key == "model")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "model must be string");
-                std::string_view model = jsonObject.value().get_string();
-                LOG_APP_INFO("model: {}", model);
-                m_Reply.m_Model = model;
+                std::string_view model;
+                if (auto err = val.get_string().get(model); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'model' not a string: {}", error_message(err));
+                    continue;
+                }
+                reply.m_Model = std::string(model);
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: model='{}'",
+                              TruncateUtf8Safe(SanitizeUtf8(reply.m_Model), kLogIdCap));
             }
             else if (key == "choices")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::array), "type must be array");
-                LOG_APP_INFO("parsing content: ");
-                ParseContent(jsonObject.value(), reply);
+                ondemand::array choicesArr;
+                if (auto err = val.get_array().get(choicesArr); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'choices' not an array: {}", error_message(err));
+                    m_State = ReplyParser::State::ParseFailure;
+                    continue;
+                }
+                ParseContent(choicesArr, reply);
                 m_State = ReplyParser::State::ReplyOk;
             }
             else if (key == "usage")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
-                ParseUsage(jsonObject.value());
+                ondemand::object usageObj;
+                if (auto err = val.get_object().get(usageObj); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'usage' not an object: {}", error_message(err));
+                    continue;
+                }
+                ParseUsage(usageObj, reply);
             }
             else if (key == "error")
             {
-                if (jsonObject.value().type() != ondemand::json_type::null)
+                ondemand::json_type t;
+                if (auto err = val.type().get(t); err)
                 {
-                    CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::object), "type must be object");
-                    LOG_APP_ERROR("error: ");
-                    ParseError(jsonObject.value());
-                    m_HasError = true;
-                    m_State = ReplyParser::State::ReplyError;
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'error' type() failed: {}", error_message(err));
+                    continue;
+                }
+                if (t == ondemand::json_type::null)
+                {
+                    continue;
+                }
+                ondemand::object errorObj;
+                if (auto err = val.get_object().get(errorObj); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'error' not an object: {}", error_message(err));
+                    m_State = ReplyParser::State::ParseFailure;
+                    continue;
+                }
+                ParseError(errorObj);
+                m_HasError = true;
+                m_State = ReplyParser::State::ReplyError;
+
+                // One consolidated log line at the right severity, with both
+                // type and message bounded.  Recoverable errors (rate-limit,
+                // quota) are WARN; the rest are ERROR.
+                std::string const truncatedType =
+                    TruncateUtf8Safe(SanitizeUtf8(m_ErrorInfo.m_Type), kLogIdCap);
+                std::string const truncatedMsg =
+                    TruncateUtf8Safe(SanitizeUtf8(m_ErrorInfo.m_Message), kLogStringCap);
+                if (m_ErrorType == ErrorType::RateLimitError ||
+                    m_ErrorType == ErrorType::InsufficientQuota)
+                {
+                    LOG_APP_WARN("ReplyParserAPI1::Parse: provider returned recoverable error "
+                                 "type='{}' message='{}'",
+                                 truncatedType, truncatedMsg);
+                }
+                else
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: provider returned error "
+                                  "type='{}' message='{}'",
+                                  truncatedType, truncatedMsg);
                 }
             }
             else if (key == "requestId")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "requestID must be string");
-                std::string_view str = jsonObject.value().get_string();
-                LOG_APP_INFO("Request ID: {}", str);
+                std::string_view str;
+                if (auto err = val.get_string().get(str); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'requestId' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: requestId='{}'",
+                              TruncateUtf8Safe(SanitizeUtf8(std::string(str)), kLogIdCap));
             }
             else if (key == "statusCode")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "status code must be a number");
-                int64_t num = jsonObject.value().get_int64();
-                LOG_APP_INFO("Status code: {}", num);
+                int64_t num = 0;
+                if (auto err = val.get_int64().get(num); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'statusCode' not an integer: {}",
+                                  error_message(err));
+                    continue;
+                }
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: statusCode={}", num);
             }
             else if (key == "timestamp")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "timestamp must be string");
-                std::string_view str = jsonObject.value().get_string();
-                LOG_APP_INFO("TimeStamp: {}", str);
+                std::string_view str;
+                if (auto err = val.get_string().get(str); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: 'timestamp' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: timestamp='{}'",
+                              TruncateUtf8Safe(SanitizeUtf8(std::string(str)), kLogIdCap));
             }
             else if (key == "message")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "message must be a string");
-                std::string_view message = jsonObject.value().get_string();
-                LOG_APP_INFO("The server says: \"{}\"", message);
+                // top-level "message" is the provider's free-form text and may
+                // contain user-influenced fragments — log only its length.
+                std::string_view message;
+                if (auto err = val.get_string().get(message); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::Parse: top-level 'message' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                LOG_APP_TRACE("ReplyParserAPI1::Parse: top-level message bytes={}", message.size());
             }
             else
             {
-                simdjson::ondemand::value val = jsonObject.value();
                 JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in main reply");
             }
         }
@@ -207,7 +344,10 @@ namespace AIAssistant
         }
         else
         {
-            LOG_APP_CRITICAL("void ReplyParserAPI1::Parse(): reply discarded");
+            // Discarding the reply payload on a provider error is the expected
+            // behaviour, not a critical event — the consolidated ERROR/WARN log
+            // above already surfaced the type+message at the right severity.
+            LOG_APP_TRACE("ReplyParserAPI1::Parse: reply payload discarded (provider error)");
         }
     }
 
@@ -217,61 +357,132 @@ namespace AIAssistant
 
         for (auto element : jsonArray)
         {
-            ondemand::object choiceObj = element.get_object();
+            if (reply.m_Choices.size() >= kMaxChoices)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseContent: choices count exceeds cap ({}); "
+                              "remaining elements ignored",
+                              kMaxChoices);
+                break;
+            }
+
+            ondemand::object choiceObj;
+            if (auto err = element.get_object().get(choiceObj); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseContent: choice element not an object: {}",
+                              error_message(err));
+                continue;
+            }
+
             Reply::Choice choice{};
 
             for (auto field : choiceObj)
             {
-                std::string_view key = field.unescaped_key();
+                std::string_view key;
+                if (auto err = field.unescaped_key().get(key); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseContent: choice unescaped_key failed: {}",
+                                  error_message(err));
+                    continue;
+                }
+
+                ondemand::value val;
+                if (auto err = field.value().get(val); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseContent: value() for key '{}' failed: {}",
+                                  key, error_message(err));
+                    continue;
+                }
 
                 if (key == "index")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::number), "index must be integer");
-                    uint64_t index = field.value().get_uint64();
-                    LOG_APP_INFO("index: {}", index);
+                    uint64_t index = 0;
+                    if (auto err = val.get_uint64().get(index); err)
+                    {
+                        LOG_APP_ERROR("ReplyParserAPI1::ParseContent: 'index' not an integer: {}",
+                                      error_message(err));
+                        continue;
+                    }
                     choice.m_Index = index;
+                    LOG_APP_TRACE("ReplyParserAPI1::ParseContent: index={}", index);
                 }
                 else if (key == "message")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::object), "message must be object");
-                    ondemand::object messageObj = field.value().get_object();
+                    ondemand::object messageObj;
+                    if (auto err = val.get_object().get(messageObj); err)
+                    {
+                        LOG_APP_ERROR("ReplyParserAPI1::ParseContent: 'message' not an object: {}",
+                                      error_message(err));
+                        continue;
+                    }
 
                     for (auto messageField : messageObj)
                     {
-                        std::string_view msgKey = messageField.unescaped_key();
+                        std::string_view msgKey;
+                        if (auto err = messageField.unescaped_key().get(msgKey); err)
+                        {
+                            LOG_APP_ERROR("ReplyParserAPI1::ParseContent: message unescaped_key failed: {}",
+                                          error_message(err));
+                            continue;
+                        }
+
+                        ondemand::value msgVal;
+                        if (auto err = messageField.value().get(msgVal); err)
+                        {
+                            LOG_APP_ERROR("ReplyParserAPI1::ParseContent: message value() for '{}' failed: {}",
+                                          msgKey, error_message(err));
+                            continue;
+                        }
 
                         if (msgKey == "role")
                         {
-                            CORE_ASSERT((messageField.value().type() == ondemand::json_type::string), "role must be string");
-                            std::string_view role = messageField.value().get_string();
-                            LOG_APP_INFO("role: {}", role);
-                            choice.m_Message.m_Role = role;
+                            std::string_view role;
+                            if (auto err = msgVal.get_string().get(role); err)
+                            {
+                                LOG_APP_ERROR("ReplyParserAPI1::ParseContent: 'role' not a string: {}",
+                                              error_message(err));
+                                continue;
+                            }
+                            choice.m_Message.m_Role = std::string(role);
+                            LOG_APP_TRACE("ReplyParserAPI1::ParseContent: role='{}'",
+                                          TruncateUtf8Safe(SanitizeUtf8(choice.m_Message.m_Role), kLogIdCap));
                         }
                         else if (msgKey == "content")
                         {
-                            CORE_ASSERT((messageField.value().type() == ondemand::json_type::string),
-                                        "content must be string");
-                            std::string_view content = messageField.value().get_string();
+                            std::string_view content;
+                            if (auto err = msgVal.get_string().get(content); err)
+                            {
+                                LOG_APP_ERROR("ReplyParserAPI1::ParseContent: 'content' not a string: {}",
+                                              error_message(err));
+                                continue;
+                            }
                             choice.m_Message.m_Content = SanitizeUtf8(std::string(content));
-                            LOG_APP_INFO("content: {}", choice.m_Message.m_Content);
+                            // content may carry user PII or prompt-injection
+                            // payloads; log only its byte length, never the value.
+                            LOG_APP_TRACE("ReplyParserAPI1::ParseContent: content bytes={}",
+                                          choice.m_Message.m_Content.size());
                         }
                         else
                         {
-                            simdjson::ondemand::value val = messageField.value();
-                            JsonObjectParser jsonObjectParser(msgKey, val, "Uncaught json field in message object");
+                            JsonObjectParser jsonObjectParser(msgKey, msgVal,
+                                                              "Uncaught json field in message object");
                         }
                     }
                 }
                 else if (key == "finish_reason")
                 {
-                    CORE_ASSERT((field.value().type() == ondemand::json_type::string), "finish_reason must be string");
-                    std::string_view reason = field.value().get_string();
-                    LOG_APP_INFO("finish_reason: {}", reason);
-                    choice.m_FinishReason = reason;
+                    std::string_view reason;
+                    if (auto err = val.get_string().get(reason); err)
+                    {
+                        LOG_APP_ERROR("ReplyParserAPI1::ParseContent: 'finish_reason' not a string: {}",
+                                      error_message(err));
+                        continue;
+                    }
+                    choice.m_FinishReason = std::string(reason);
+                    LOG_APP_TRACE("ReplyParserAPI1::ParseContent: finish_reason='{}'",
+                                  TruncateUtf8Safe(SanitizeUtf8(choice.m_FinishReason), kLogIdCap));
                 }
                 else
                 {
-                    simdjson::ondemand::value val = field.value();
                     JsonObjectParser jsonObjectParser(key, val, "uncaught json field in choice object");
                 }
             }
@@ -280,38 +491,67 @@ namespace AIAssistant
         }
     }
 
-    void ReplyParserAPI1::ParseUsage(simdjson::ondemand::object jsonObjects)
+    void ReplyParserAPI1::ParseUsage(simdjson::ondemand::object jsonObjects, Reply& reply)
     {
         using namespace simdjson;
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view key = jsonObject.unescaped_key();
+            std::string_view key;
+            if (auto err = jsonObject.unescaped_key().get(key); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseUsage: unescaped_key failed: {}", error_message(err));
+                continue;
+            }
+
+            ondemand::value val;
+            if (auto err = jsonObject.value().get(val); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseUsage: value() for key '{}' failed: {}",
+                              key, error_message(err));
+                continue;
+            }
+
             if (key == "prompt_tokens")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
-                uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_APP_INFO("prompt_tokens: {}", tokens);
-                m_Reply.m_Usage.m_PromptTokens = tokens;
+                uint64_t tokens = 0;
+                if (auto err = val.get_uint64().get(tokens); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseUsage: 'prompt_tokens' not a number: {}",
+                                  error_message(err));
+                    continue;
+                }
+                reply.m_Usage.m_PromptTokens = tokens;
+                LOG_APP_TRACE("ReplyParserAPI1::ParseUsage: prompt_tokens={}", tokens);
             }
             else if (key == "completion_tokens")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
-                uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_APP_INFO("completion_tokens: {}", tokens);
-                m_Reply.m_Usage.m_CompletionTokens = tokens;
+                uint64_t tokens = 0;
+                if (auto err = val.get_uint64().get(tokens); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseUsage: 'completion_tokens' not a number: {}",
+                                  error_message(err));
+                    continue;
+                }
+                reply.m_Usage.m_CompletionTokens = tokens;
+                LOG_APP_TRACE("ReplyParserAPI1::ParseUsage: completion_tokens={}", tokens);
             }
             else if (key == "total_tokens")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::number), "type must be a number");
-                uint64_t tokens = jsonObject.value().get_uint64();
-                LOG_APP_INFO("total_tokens: {}", tokens);
-                m_Reply.m_Usage.m_TotalTokens = tokens;
+                uint64_t tokens = 0;
+                if (auto err = val.get_uint64().get(tokens); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseUsage: 'total_tokens' not a number: {}",
+                                  error_message(err));
+                    continue;
+                }
+                reply.m_Usage.m_TotalTokens = tokens;
+                LOG_APP_TRACE("ReplyParserAPI1::ParseUsage: total_tokens={}", tokens);
             }
             else
             {
-                simdjson::ondemand::value val = jsonObject.value();
-                JsonObjectParser jsonObjectParser(key, val, "uncaught json field in server error reply (usage field)");
+                JsonObjectParser jsonObjectParser(key, val,
+                                                  "uncaught json field in server error reply (usage field)");
             }
         }
     }
@@ -323,42 +563,83 @@ namespace AIAssistant
 
         for (auto jsonObject : jsonObjects)
         {
-            std::string_view key = jsonObject.unescaped_key();
+            std::string_view key;
+            if (auto err = jsonObject.unescaped_key().get(key); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseError: unescaped_key failed: {}", error_message(err));
+                continue;
+            }
+
+            ondemand::value val;
+            if (auto err = jsonObject.value().get(val); err)
+            {
+                LOG_APP_ERROR("ReplyParserAPI1::ParseError: value() for key '{}' failed: {}",
+                              key, error_message(err));
+                continue;
+            }
+
             if (key == "message")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view message = jsonObject.value().get_string();
+                std::string_view message;
+                if (auto err = val.get_string().get(message); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'message' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                // Provider error message may echo back fragments of the request
+                // or an API-key suffix.  Sanitize but defer logging — the
+                // caller emits a single consolidated, length-capped log line.
                 errorInfo.m_Message = SanitizeUtf8(std::string(message));
-                LOG_APP_INFO("message: {}", errorInfo.m_Message);
             }
             else if (key == "type")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view type = jsonObject.value().get_string();
-                LOG_APP_INFO("type: {}", type);
-                errorInfo.m_Type = type;
+                std::string_view type;
+                if (auto err = val.get_string().get(type); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'type' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                errorInfo.m_Type = std::string(type);
             }
             else if (key == "code")
             {
-                CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                std::string_view code = jsonObject.value().get_string();
-                LOG_APP_INFO("code: {}", code);
-                errorInfo.m_Code = code;
+                std::string_view code;
+                if (auto err = val.get_string().get(code); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'code' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                errorInfo.m_Code = std::string(code);
             }
             else if (key == "param")
             {
-                if (!jsonObject.value().is_null())
+                ondemand::json_type t;
+                if (auto err = val.type().get(t); err)
                 {
-                    CORE_ASSERT((jsonObject.value().type() == ondemand::json_type::string), "type must be string");
-                    std::string_view param = jsonObject.value().get_string();
-                    LOG_APP_INFO("parameter: {}", param);
-                    errorInfo.m_Param = param;
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'param' type() failed: {}",
+                                  error_message(err));
+                    continue;
                 }
+                if (t == ondemand::json_type::null)
+                {
+                    continue;
+                }
+                std::string_view param;
+                if (auto err = val.get_string().get(param); err)
+                {
+                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'param' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                errorInfo.m_Param = std::string(param);
             }
             else
             {
-                simdjson::ondemand::value val = jsonObject.value();
-                JsonObjectParser jsonObjectParser(key, val, "uncaught json field in server error reply");
+                JsonObjectParser jsonObjectParser(key, val,
+                                                  "uncaught json field in server error reply");
             }
         }
         m_ErrorInfo = errorInfo;
@@ -367,35 +648,31 @@ namespace AIAssistant
 
     ReplyParserAPI1::ErrorType ReplyParserAPI1::ParseErrorType(std::string_view type)
     {
-        if (type == "invalid_request_error")
+        struct Entry
         {
-            LOG_APP_CRITICAL("There was a invalid request error.");
-            return ErrorType::InvalidRequestError;
-        }
-        if (type == "authentication_error")
+            std::string_view m_Name;
+            ErrorType m_Type;
+        };
+        static constexpr Entry kErrorTypes[] = {
+            {"invalid_request_error", ErrorType::InvalidRequestError},
+            {"authentication_error",  ErrorType::AuthenticationError},
+            {"permission_error",      ErrorType::PermissionError},
+            {"rate_limit_error",      ErrorType::RateLimitError},
+            {"server_error",          ErrorType::ServerError},
+            {"insufficient_quota",    ErrorType::InsufficientQuota},
+        };
+        // Lock the table to the enum: changing either side without updating
+        // the other becomes a compile error.  Adding a new variant or renaming
+        // InsufficientQuota's underlying value will break this assertion and
+        // force a deliberate update.
+        static_assert(std::size(kErrorTypes) == 6 &&
+                          static_cast<int>(ErrorType::InsufficientQuota) == 6,
+                      "ErrorType variants changed — extend kErrorTypes (and bump these constants) to match");
+
+        for (auto const& entry : kErrorTypes)
         {
-            LOG_APP_CRITICAL("There was an authentication error.");
-            return ErrorType::AuthenticationError;
-        }
-        if (type == "permission_error")
-        {
-            LOG_APP_CRITICAL("There was a permission error.");
-            return ErrorType::PermissionError;
-        }
-        if (type == "rate_limit_error")
-        {
-            LOG_APP_CRITICAL("There was a rate limit error");
-            return ErrorType::RateLimitError;
-        }
-        if (type == "server_error")
-        {
-            LOG_APP_CRITICAL("There was a server error");
-            return ErrorType::ServerError;
-        }
-        if (type == "insufficient_quota")
-        {
-            LOG_APP_CRITICAL("You have insufficient quota. Try again later.");
-            return ErrorType::InsufficientQuota;
+            if (type == entry.m_Name)
+                return entry.m_Type;
         }
         return ErrorType::Unknown;
     }

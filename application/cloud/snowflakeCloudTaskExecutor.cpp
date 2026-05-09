@@ -47,9 +47,9 @@ namespace AIAssistant
     static constexpr long kCurlTimeoutSeconds = 60;
     static constexpr int kDefaultPollIntervalSeconds = 2;
     static constexpr int kDefaultStatementTimeoutSeconds = 3600;
-    // Bound on the response body the writeCallback will accept.  64 MB matches the
-    // audit recommendation — Snowflake result sets are paged, so a single response
-    // larger than this is already pathological (or attacker-controlled).
+    // Bound on the response body the writeCallback will accept.  Snowflake result
+    // sets are paged, so a single response larger than this is already pathological
+    // (or attacker-controlled).  64 MB matches the rest of the cloud surface.
     static constexpr size_t kMaxSnowflakeResponseBytes = 64 * 1024 * 1024;
     // Bounds on the timeout / poll interval params.  Pre-clamp the uint64_t value
     // BEFORE any int cast so values larger than INT_MAX cannot wrap to negative
@@ -260,10 +260,10 @@ namespace AIAssistant
             }
         }
 
-        // JWT must contain no CR/LF before splicing into the Authorization header
-        // (sitting 14 cluster fix).  ResolveCredentials produces the JWT via
-        // JwtGenerator which is well-behaved, but a future credential type or
-        // renewal flow could inject hostile bytes; check defensively.
+        // JWT must contain no CR/LF before splicing into the Authorization header.
+        // ResolveCredentials produces the JWT via JwtGenerator which is
+        // well-behaved, but a future credential type or renewal flow could
+        // inject hostile bytes; check defensively.
         if (ICloudTaskExecutor::ContainsCrlf(credentials.m_Token))
         {
             taskState.m_LastErrorMessage = "Snowflake JWT contains CR/LF — refusing to send";
@@ -588,7 +588,7 @@ namespace AIAssistant
         // Confine outputFile under workDir.  An attacker-controlled value such as
         // `../../etc/cron.d/evil` or an absolute path would otherwise let the task
         // overwrite arbitrary files writable by the j9t process.  Same gate as
-        // sitting 11's email attachment path-traversal fix.
+        // the email attachment path-traversal fix.
         if (!ValidateLocalPath(outputFile, workDir, taskDefinition.m_Id))
         {
             taskState.m_LastErrorMessage =

@@ -36,7 +36,10 @@ namespace AIAssistant
         mz_zip_archive zip{};
         if (!mz_zip_reader_init_file(&zip, jcwfPath.string().c_str(), 0))
         {
-            errorMessage = "Failed to open zip: " + jcwfPath.string();
+            // Surface only the basename to API consumers — full install path
+            // belongs in the operator's local log, not the response body.
+            errorMessage = "Failed to open zip: " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] Extract: failed to open zip path='{}'", jcwfPath.string());
             return false;
         }
 
@@ -45,7 +48,10 @@ namespace AIAssistant
         if (ec)
         {
             mz_zip_reader_end(&zip);
-            errorMessage = "Failed to create directory: " + targetDir.string() + " (" + ec.message() + ")";
+            errorMessage = "Failed to create extraction directory '" +
+                           targetDir.filename().string() + "' (" + ec.message() + ")";
+            LOG_APP_ERROR("[jcwf] Extract: failed to create directory path='{}' ec={}",
+                          targetDir.string(), ec.message());
             return false;
         }
 
@@ -74,7 +80,10 @@ namespace AIAssistant
             if (!mz_zip_reader_extract_to_file(&zip, i, destPath.string().c_str(), 0))
             {
                 mz_zip_reader_end(&zip);
-                errorMessage = "Failed to extract '" + std::string(filename) + "' from " + jcwfPath.string();
+                errorMessage = "Failed to extract '" + std::string(filename) + "' from " +
+                               jcwfPath.filename().string();
+                LOG_APP_ERROR("[jcwf] Extract: failed to write entry='{}' container='{}'",
+                              filename, jcwfPath.string());
                 return false;
             }
         }
@@ -91,14 +100,16 @@ namespace AIAssistant
     {
         if (!std::filesystem::is_directory(sourceDir))
         {
-            errorMessage = "Source is not a directory: " + sourceDir.string();
+            errorMessage = "Source is not a directory: " + sourceDir.filename().string();
+            LOG_APP_ERROR("[jcwf] Pack: source is not a directory path='{}'", sourceDir.string());
             return false;
         }
 
         mz_zip_archive zip{};
         if (!mz_zip_writer_init_file(&zip, jcwfPath.string().c_str(), 0))
         {
-            errorMessage = "Failed to create zip: " + jcwfPath.string();
+            errorMessage = "Failed to create zip: " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] Pack: failed to create zip path='{}'", jcwfPath.string());
             return false;
         }
 
@@ -140,7 +151,8 @@ namespace AIAssistant
         if (!mz_zip_writer_finalize_archive(&zip))
         {
             mz_zip_writer_end(&zip);
-            errorMessage = "Failed to finalize zip: " + jcwfPath.string();
+            errorMessage = "Failed to finalize zip: " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] Pack: failed to finalize zip path='{}'", jcwfPath.string());
             return false;
         }
 
@@ -157,7 +169,8 @@ namespace AIAssistant
         mz_zip_archive zip{};
         if (!mz_zip_reader_init_file(&zip, jcwfPath.string().c_str(), 0))
         {
-            errorMessage = "Failed to open zip: " + jcwfPath.string();
+            errorMessage = "Failed to open zip: " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] ReadFile: failed to open zip path='{}'", jcwfPath.string());
             return false;
         }
 
@@ -167,7 +180,9 @@ namespace AIAssistant
         if (data == nullptr)
         {
             mz_zip_reader_end(&zip);
-            errorMessage = "File '" + internalPath + "' not found in " + jcwfPath.string();
+            errorMessage = "File '" + internalPath + "' not found in " + jcwfPath.filename().string();
+            LOG_APP_ERROR("[jcwf] ReadFile: entry not found entry='{}' container='{}'",
+                          internalPath, jcwfPath.string());
             return false;
         }
 

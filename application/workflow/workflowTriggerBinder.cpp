@@ -299,9 +299,17 @@ namespace
     {
         outSecret.clear();
 
+        // Webhook secret is **mandatory** — pre-fix, missing/empty/invalid
+        // params silently produced an open webhook (any caller could trigger
+        // the workflow without HMAC).  Post-fix: every failure mode returns
+        // false with ERROR log; only an explicitly-supplied non-empty
+        // `secret` field leads to a registered webhook trigger.  The
+        // TriggerEngine validator additionally refuses empty-secret webhooks
+        // at registration; this gate is defense in depth at the parse layer.
         if (paramsJson.empty())
         {
-            return true; // no params → open webhook (no secret)
+            LOG_APP_ERROR("ParseWebhookParams: webhook params JSON is empty — secret is required");
+            return false;
         }
 
         ondemand::parser parser;
@@ -311,14 +319,16 @@ namespace
         simdjson::error_code errorCode = parser.iterate(json).get(document);
         if (errorCode != simdjson::SUCCESS)
         {
-            LOG_APP_WARN("ParseWebhookParams: failed to parse params JSON: {}", simdjson::error_message(errorCode));
-            return true; // treat as open webhook
+            LOG_APP_ERROR("ParseWebhookParams: failed to parse params JSON: {}",
+                          simdjson::error_message(errorCode));
+            return false;
         }
 
         auto objectResult = document.get_object();
         if (objectResult.error() != simdjson::SUCCESS)
         {
-            return true;
+            LOG_APP_ERROR("ParseWebhookParams: webhook params root is not a JSON object");
+            return false;
         }
 
         ondemand::object rootObject = objectResult.value();
@@ -345,6 +355,11 @@ namespace
             }
         }
 
+        if (outSecret.empty())
+        {
+            LOG_APP_ERROR("ParseWebhookParams: 'secret' field missing or empty in webhook params");
+            return false;
+        }
         return true;
     }
 
@@ -475,7 +490,16 @@ namespace AIAssistant
                     case WorkflowTriggerType::Webhook:
                     {
                         std::string secret;
-                        ParseWebhookParams(workflowTrigger.m_ParamsJson, secret);
+                        if (!ParseWebhookParams(workflowTrigger.m_ParamsJson, secret))
+                        {
+                            // Webhook secret is mandatory.  Skip registration on
+                            // any parse failure or missing/empty secret — the
+                            // ERROR log inside ParseWebhookParams details which.
+                            LOG_APP_ERROR("WorkflowTriggerBinder: skipping webhook trigger '{}' for workflow '{}' "
+                                          "— secret invalid or missing",
+                                          workflowTrigger.m_Id, workflowDefinition.m_Id);
+                            break;
+                        }
 
                         triggerEngine.AddWebhookTrigger(workflowDefinition.m_Id, workflowTrigger.m_Id, secret,
                                                         workflowTrigger.m_IsEnabled);

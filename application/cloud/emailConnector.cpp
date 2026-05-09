@@ -39,9 +39,9 @@ namespace AIAssistant
 {
     namespace
     {
-        // Used at the IMAP send-buffer cap.  10 MB matches the audit recommendation
-        // (a SEARCH response that large is already pathological — production
-        // mailboxes rarely produce more than tens of KB per response).
+        // Used at the IMAP send-buffer cap.  A SEARCH response of 10 MB+ is
+        // already pathological — production mailboxes rarely produce more than
+        // tens of KB per response.
         constexpr size_t kMaxImapResponseBytes = 10 * 1024 * 1024;
     } // namespace
 
@@ -451,10 +451,10 @@ namespace AIAssistant
     {
         hasNewMail = false;
 
-        // Defense-in-depth folder validation.  The executor (sitting 11) already
-        // validates upstream, but the connector's public API can be invoked from
-        // future call sites with no prior validation — and the folder is
-        // interpolated directly into the IMAP URL below.
+        // Defense-in-depth folder validation.  The executor already validates
+        // upstream, but the connector's public API can be invoked from future
+        // call sites with no prior validation — and the folder is interpolated
+        // directly into the IMAP URL below.
         if (!IsValidImapFolder(folder))
         {
             errorMessage = "Invalid IMAP folder name: contains characters outside the allowed "

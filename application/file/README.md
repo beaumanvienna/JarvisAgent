@@ -74,8 +74,42 @@ Single canonical helper used everywhere j9t handles an external string that reso
 - `application/python/pythonEngine.cpp::ExecuteWorkflowTaskOnWorker` — gates `taskWorkingDirectory` before injecting it into Python's context.
 - `application/python/pythonEnginePool.cpp::Initialize` — gates the resolved script directory at the pool boundary (defense in depth).
 - `application/workflow/workflowRuntimeManager.cpp::CleanWorkflow` — gates every `fs::remove` / `fs::remove_all` target (5 sites: queue dir, glob-matched file_outputs, literal file_outputs, working directories, empty workflow dir).
+- `application/workflow/triggerEngine.cpp::NormalizePath` — gates both the file-watch trigger registration path AND the FileWatcher event path (canonical form keys both sides of the comparison so an embedded `..` cannot escape the watched tree).
+- `application/workflow/aiRequestPool.cpp::WriteTextFile` — gates AI-task output file writes; the canonical `confinedPath` is also the rename target of the atomic `<final>.tmp.<counter>` write so symlink targets resolve to their real on-tree location *and* a SIGKILL/disk-full mid-write leaves the previous version intact.
+- `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile` (public static) — same atomic-rename + canonical-path pattern, used by inline queue-file writes, the ConvertWithMarkitdown destination write, and the provider-sidecar JSON write.
+- `application/workflow/aiRequestPool.cpp::OnOutputFileCreated` — gates the read side of the AI-task output pipeline (map-key lookup + file read happen on the same canonical form).
+- `application/workflow/aiRequestPool.cpp::RegisterPendingWorkflowTask` — gates the `expectedOutputPath` insert into `m_PendingByOutputPath` so a hostile JCWF can't register a binding under a path outside the project tree.
+- `application/workflow/aiRequestPool.cpp::Submit` — log-attribution lookup (`m_PendingByOutputPath` find) AND cancel-key build use the same canonical form for matching across insert/lookup/cancel.
+- `application/workflow/aiRequestPool.cpp::OnRequestFailed` — symmetry with the insert side.
+- `application/workflow/workflowRegistry.cpp::SaveOrUpdateWorkflowFromJson` — gates the JCWF write target so a malicious editor PUT or adhoc submission can't write the canvas + zip outside the project tree.
+- `application/workflow/workflowRegistry.cpp::RemoveWorkflow` — gates the file-deletion side; defense in depth (the path was canonicalised at insert time, but a future bug that lets a non-confined path into the registry can't trigger an arbitrary-file delete via this path).
+- `application/workflow/shellTaskExecutor.cpp::ValidateScriptPath` — gates the `command` field of shell tasks; combined with explicit `lexically_relative(<projectRoot>/scripts/)` containment, refuses any script reference that lands outside the trusted scripts directory (also rejects symlink targets that point out of tree).
+- `application/workflow/subWorkflowTaskExecutor.cpp::Execute` — gates `taskDefinition.m_WorkflowFile` before registry lookup so a hostile JCWF can't reference a workflow file outside the project tree.
+- `application/workflow/pythonTaskExecutor.cpp::ValidateFileInputsExist` — gates each `taskDefinition.m_FileInputs[i]` before the existence check so a hostile JCWF can't read files outside the project tree via Python context plumbing.
+- `application/cloud/dbQueryCloudTaskExecutor.cpp::ExecuteCloud` — gates the resolved output-file path so even if `taskWorkingDirectoryPath` itself somehow points outside the project tree (workflow-base-directory bug), the SQL result write stays confined.
+- `application/workflow/filter/filterManifest.cpp::ManifestPath` — gates the manifest target path; combined with an `IsValidFilterId` allowlist (alphanumerics + `_-.`) that rejects path-separator and `..` characters in the filterId itself.
+- `application/workflow/aiCallTaskExecutor.cpp::MaterializeCntxFilesFromQueueBinding` and `MaterializeProbFilesFromQueueBinding` — every queue-binding source path is gated through `ConfineUnderProjectRoot` before the file is opened for read.  Project-root-wide (not task-folder-tight) because shipped JCWFs use cross-task data-flow paths like `../../../workflows/<id>/<other_task>/output.json` to read sibling task outputs — the path is outside the task working directory but inside the project tree.
+
+In addition to `ConfineUnderProjectRoot`, several call sites use **scope-tighter `lexically_relative(<base>)` containment** when the operation must stay inside a narrower subtree than the project root:
+- `application/workflow/taskExecutorRegistry.cpp::MaterializeFiles` — `targetFilename` containment under `taskWorkingDirectoryPath`.
+- `application/workflow/workflowFileIndex.cpp::FindByRelativePath` — `relativePath` containment under `m_RootDirectory`.
+- `application/workflow/scriptCatalog.cpp::Refresh` — `weakly_canonical` containment under the scripts root for every directory entry; combined with an explicit `is_symlink()` skip.
+
+The workflow JSON parser (`application/workflow/workflowJsonParser.cpp` + `workflowJsonParserDetails.cpp`) adds a **parse-time syntactic gate** via `IsAcceptedRelativePath` that rejects empty, overlength, and absolute paths in `base_directory`, `working_directory`, `file_inputs`, `file_outputs`, and queue-binding `path` fields.  `..` segments are **allowed** at parse time because the shipped JCWF convention uses `working_directory: "../../queue/<workflow>/<task>"` to navigate from `workflows/<id>/` up to the project-root-anchored queue tree.  This is layered defense — the deeper canonical-containment check happens at the consumer sites listed above; both gates fail closed.
 
 When a third + a fourth + ... call site appears, **add to the list above instead of writing a new local helper** — the established pattern is one canonical gate, fail-closed, ERROR-logged on rejection.
+
+## Atomic-rename writes
+
+Several writers materialise their output via the **temp-write-then-rename** pattern: open `<final>.tmp.<counter>` → write → close → `fs::rename`.  A SIGKILL or disk-full mid-write leaves the previous version of the final file intact instead of a truncated partial that downstream readers parse as malformed.  Use sites:
+
+- `application/workflow/filter/filterManifest.cpp::WriteManifest` — uses `<path>.tmp` (single-writer guarantee from per-filter manifest mutex).
+- `application/workflow/aiTranscript.cpp::WriteFile` — single in-process mutex serialises writers; temp-then-rename ensures crash-safety.
+- `application/workflow/aiRequestPool.cpp::WriteTextFile` — atomic write of AI-task output files (`<prob>.output.{txt,json}`); a `static std::atomic<uint64_t>` counter makes the temp name unique under concurrent writers targeting the same final path.  Load-bearing because the rename event is what `OnOutputFileCreated` keys completion off — a torn write would surface to workflow runtime as a malformed completion signal.
+- `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile` (public static) — same atomic + counter pattern, applied to inline queue-file writes + ConvertWithMarkitdown destination + provider-sidecar JSON.
+- `application/web/webServerHelpers::WriteTextFileAtomic` — used by `HandleAiInterfacesSavePost`/`HandleConfigSettingsPut`/`HandleConnectionsSavePost` to persist `config.json` / `connections.json` from the REST handlers (full pipeline: parse-edit-revalidate-rename per the architecture decision row).
+
+When adding a new file-output writer, prefer the atomic pattern over open→write→close.  The cost is a single rename syscall per write; the benefit is crash-safety for the entire downstream pipeline that depends on the file's contents being either fully-old or fully-new.
 
 ---
 

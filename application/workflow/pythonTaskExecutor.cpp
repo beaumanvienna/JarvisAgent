@@ -24,6 +24,7 @@
 */
 
 #include "engine.h"
+#include "file/pathConfinement.h"
 #include "jarvisAgent.h"
 #include "pythonTaskExecutor.h"
 #include "python/pythonEnginePool.h"
@@ -50,13 +51,27 @@ namespace AIAssistant
 
                 inputPath = TaskPathResolver::ResolvePath(taskWorkingDirectoryPath, inputPath);
 
+                // Containment gate — fileInput is JCWF-authored.  Routes through
+                // the shared helper so a `..`-laced path or symlink-escape is
+                // rejected before the existence check.  Fail-closed.
+                fs::path const confined = ConfineUnderProjectRoot(inputPath);
+                if (confined.empty())
+                {
+                    errorMessageOut = "PythonTaskExecutor: input path '" + fileInput +
+                                      "' does not resolve under project root";
+                    LOG_APP_ERROR("PythonTaskExecutor: input path '{}' rejected — does not resolve under project "
+                                  "root (task '{}')",
+                                  fileInput, taskDefinition.m_Id);
+                    return false;
+                }
+
                 LOG_APP_INFO(
                     "[paths debug] debug reason=validateInputPath taskId='{}' inputPathRelative='{}' inputPathAbsolute='{}'",
-                    taskDefinition.m_Id, fileInput, inputPath.string());
+                    taskDefinition.m_Id, fileInput, confined.string());
 
-                if (!fs::exists(inputPath, errorCode))
+                if (!fs::exists(confined, errorCode))
                 {
-                    errorMessageOut = "PythonTaskExecutor: Missing input file: " + inputPath.string();
+                    errorMessageOut = "PythonTaskExecutor: Missing input file: " + confined.string();
                     return false;
                 }
             }
@@ -70,12 +85,23 @@ namespace AIAssistant
     {
         LOG_APP_INFO("[python] Executing Python task '{}'", taskDefinition.m_Id);
 
+        if (App::g_App == nullptr)
+        {
+            taskState.m_LastErrorMessage = "PythonTaskExecutor: App::g_App is null";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[python] App::g_App is null run='{}' workflow='{}' task='{}'",
+                          workflowRun.m_RunId, workflowRun.m_WorkflowId, taskDefinition.m_Id);
+            return false;
+        }
+
         PythonEnginePool* pythonEnginePool = App::g_App->GetPythonEnginePool();
 
         if (pythonEnginePool == nullptr)
         {
             taskState.m_LastErrorMessage = "PythonTaskExecutor: PythonEnginePool not initialized";
             taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[python] PythonEnginePool not initialized run='{}' workflow='{}' task='{}'",
+                          workflowRun.m_RunId, workflowRun.m_WorkflowId, taskDefinition.m_Id);
             return false;
         }
 

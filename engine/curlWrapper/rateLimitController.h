@@ -32,10 +32,10 @@ namespace AIAssistant
 {
     // Per-(host, modelFamily) adaptive controller for AI request dispatch.
     //
-    // Composes three mechanisms (per "AI call performance optimization.md" §4):
-    //   §4.1  Token-bucket mirror — never overshoots provider's stated quota
-    //   §4.2  AIMD concurrency cap — finds the sustainable concurrency in-bucket
-    //   §4.3  Server-directed waits — Retry-After is a floor on next admission
+    // Composes three mechanisms:
+    //   - Token-bucket mirror: never overshoots the provider's stated quota.
+    //   - AIMD concurrency cap: finds the sustainable concurrency in-bucket.
+    //   - Server-directed waits: Retry-After is a floor on next admission.
     //
     // Threading: instances are owned by CurlMultiDispatcher and accessed only
     // while m_DebugMutex is held.  Methods are NOT internally synchronized.

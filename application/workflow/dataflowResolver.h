@@ -63,13 +63,16 @@ namespace AIAssistant
                                                                std::string const& taskId) const;
 
         // Look up whether any dataflow edge maps to this input field.
-        bool TryResolveFromDataflowEdges(WorkflowDefinition const& workflowDefinition, WorkflowRun const& workflowRun,
-                                         std::string const& targetTaskId, std::string const& targetInputName,
-                                         std::string& resolvedValueOut) const;
+        [[nodiscard]] bool TryResolveFromDataflowEdges(WorkflowDefinition const& workflowDefinition,
+                                                       WorkflowRun const& workflowRun,
+                                                       std::string const& targetTaskId,
+                                                       std::string const& targetInputName,
+                                                       std::string& resolvedValueOut) const;
 
         // Template expansion: resolve {{inputs.x}} inside a string.
-        bool ExpandTemplates(std::string const& rawValue, std::unordered_map<std::string, std::string> const& inputValues,
-                             std::string& expandedOut) const;
+        [[nodiscard]] bool ExpandTemplates(std::string const& rawValue,
+                                           std::unordered_map<std::string, std::string> const& inputValues,
+                                           std::string& expandedOut) const;
     };
 
 } // namespace AIAssistant

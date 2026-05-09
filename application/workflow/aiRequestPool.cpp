@@ -23,6 +23,7 @@
 #include "workflow/aiRequestPool.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
@@ -35,6 +36,7 @@
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "curlWrapper/curlWrapper.h"
 #include "curlWrapper/rateLimitStrategy.h"
+#include "file/pathConfinement.h"
 #include "jarvisAgent.h"
 #include "json/configParser.h"
 #include "json/jsonHelper.h"
@@ -56,30 +58,40 @@ namespace AIAssistant
     {
         uint64_t const kFileActivityWatchdogMs = 5000; // 5 seconds — max gap between file writes or curl dispatch
 
+        // Cap on a single ai_call output file read into memory.  10 MB is an
+        // order of magnitude above realistic AI text replies and well below
+        // any reasonable RAM-budget concern.  Prevents a malicious workflow
+        // from triggering a huge allocation by pointing expectedOutputPath at
+        // a giant file.
+        std::size_t const kMaxOutputFileBytes = 10ull * 1024ull * 1024ull;
+
         bool WriteTextFile(std::string const& filePath, std::string const& fileContent, std::string& outErrorMessage)
         {
             outErrorMessage.clear();
 
-            fs::path const filesystemPath(filePath);
-
-            if (filesystemPath.is_relative())
+            // Containment gate.  All ai_call output paths originate from
+            // workflow/task input (queue folders + JCWF-declared file_outputs)
+            // and resolve under the project root.  Routing through the shared
+            // helper rejects any `..`/symlink escape with an empty return —
+            // fail-closed.  This is the canonical project-root gate; an
+            // Engine-edition queue-root tightening would be additive on top.
+            fs::path const confinedPath = ConfineUnderProjectRoot(filePath);
+            if (confinedPath.empty())
             {
-                std::string const launchCWDAbsoluteText =
-                    (Core::g_Core != nullptr) ? Core::g_Core->GetLaunchCWDAbsolute().string() : "<null>";
-                LOG_APP_INFO("[paths debug] debug reason=writeAiRequestPoolTextFileCwdFallback filePathRelative='{}' "
-                             "launchCWDAbsolute='{}'",
-                             filePath, launchCWDAbsoluteText);
+                outErrorMessage = "path does not resolve under project root: " + filePath;
+                LOG_APP_ERROR("AiRequestPool::WriteTextFile: rejected path '{}' — does not resolve under project root",
+                              filePath);
+                return false;
             }
 
-            fs::path const filesystemPathAbsolute = fs::absolute(filesystemPath).lexically_normal();
+            fs::path const filesystemPathAbsolute = confinedPath;
             LOG_APP_INFO("[paths debug] debug reason=writeAiRequestPoolTextFile filePathRelative='{}' filePathAbsolute='{}' "
                          "wasRelative='{}'",
-                         filePath, filesystemPathAbsolute.generic_string(), filesystemPath.is_relative());
+                         filePath, filesystemPathAbsolute.generic_string(), fs::path(filePath).is_relative());
             std::error_code errorCode;
 
-            fs::path const parent = filesystemPath.parent_path();
             fs::path const parentAbsolute = filesystemPathAbsolute.parent_path();
-            if (!parent.empty())
+            if (!parentAbsolute.empty())
             {
                 std::error_code existsBeforeErrorCode;
                 bool const existedBefore = fs::exists(parentAbsolute, existsBeforeErrorCode);
@@ -88,7 +100,7 @@ namespace AIAssistant
                              "parent directory'",
                              parentAbsolute.generic_string());
 
-                fs::create_directories(parent, errorCode);
+                fs::create_directories(parentAbsolute, errorCode);
                 if (errorCode)
                 {
                     LOG_APP_INFO("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}' "
@@ -105,17 +117,49 @@ namespace AIAssistant
                              parentAbsolute.generic_string(), created);
             }
 
-            std::ofstream outputStream(filePath, std::ios::binary | std::ios::trunc);
-            if (!outputStream.is_open())
-            {
-                outErrorMessage = "failed to open for writing: " + filePath;
-                return false;
-            }
+            // Atomic write via the confined path: open <final>.tmp.<counter> →
+            // write → close → rename.  Lands at the canonical location (not
+            // any symlinked alias the input string pointed at).  A SIGKILL or
+            // disk-full mid-write leaves the previous version intact instead
+            // of a truncated partial that downstream consumers parse as
+            // malformed (notably AiRequestPool::OnOutputFileCreated reading
+            // the .output.{txt,json} file as the completion signal).
+            static std::atomic<uint64_t> s_TempCounter{0};
+            uint64_t const counter = s_TempCounter.fetch_add(1, std::memory_order_relaxed);
+            fs::path const tempPath = filesystemPathAbsolute.parent_path() /
+                                      (filesystemPathAbsolute.filename().string() + ".tmp." +
+                                       std::to_string(counter));
 
-            outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
-            if (!outputStream.good())
             {
-                outErrorMessage = "failed while writing: " + filePath;
+                std::ofstream outputStream(tempPath, std::ios::binary | std::ios::trunc);
+                if (!outputStream.is_open())
+                {
+                    outErrorMessage = "failed to open for writing: " + filesystemPathAbsolute.filename().string();
+                    LOG_APP_ERROR("AiRequestPool::WriteTextFile open failed path='{}'", filePath);
+                    return false;
+                }
+
+                outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
+                if (!outputStream.good())
+                {
+                    outErrorMessage = "failed while writing: " + filesystemPathAbsolute.filename().string();
+                    LOG_APP_ERROR("AiRequestPool::WriteTextFile write failed path='{}'", filePath);
+                    std::error_code rmEc;
+                    fs::remove(tempPath, rmEc); // best-effort cleanup
+                    return false;
+                }
+            } // ofstream destructor closes the stream BEFORE rename
+
+            std::error_code renameEc;
+            fs::rename(tempPath, filesystemPathAbsolute, renameEc);
+            if (renameEc)
+            {
+                outErrorMessage = "failed to finalize write: " + filesystemPathAbsolute.filename().string() +
+                                  " (" + renameEc.message() + ")";
+                LOG_APP_ERROR("AiRequestPool::WriteTextFile rename failed temp='{}' final='{}' ec={}",
+                              tempPath.string(), filesystemPathAbsolute.string(), renameEc.message());
+                std::error_code rmEc;
+                fs::remove(tempPath, rmEc); // best-effort cleanup
                 return false;
             }
 
@@ -341,9 +385,21 @@ namespace AIAssistant
         }
 
         // Register in path-based lookup map (for non-PROB_<id>_<ts> naming).
+        // Containment gate: the expectedOutputPath comes from the workflow
+        // executor's task plumbing — defense in depth ensures it canonicalises
+        // under the project root before becoming a map key (so a hostile JCWF
+        // can't register a binding under `/etc/passwd`).
         if (!expectedOutputPath.empty())
         {
-            std::string const canonicalPath = fs::absolute(fs::path(expectedOutputPath)).lexically_normal().generic_string();
+            fs::path const confinedExpected = ConfineUnderProjectRoot(expectedOutputPath);
+            if (confinedExpected.empty())
+            {
+                LOG_APP_ERROR("AiRequestPool::RegisterPendingWorkflowTask: rejected expectedOutputPath '{}' "
+                              "run='{}' workflow='{}' task='{}' — does not resolve under project root",
+                              expectedOutputPath, runId, workflowId, taskId);
+                return {};
+            }
+            std::string const canonicalPath = confinedExpected.generic_string();
 
             std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
             m_PendingByOutputPath[canonicalPath] = pendingEntry;
@@ -414,7 +470,21 @@ namespace AIAssistant
 
     bool AiRequestPool::OnOutputFileCreated(std::string const& fullFilePath)
     {
-        std::string const canonicalPath = fs::absolute(fs::path(fullFilePath)).lexically_normal().generic_string();
+        // Containment gate.  fullFilePath is the canonical absolute path
+        // produced by Submit's reply callback for an ai_call task; it must
+        // resolve under the project root.  Pass through ConfineUnderProjectRoot
+        // (no-op for already-canonical absolute paths inside the tree, fail-
+        // closed for anything else).  The path is then used both as the map
+        // key and as the read source — same gate covers both.
+        fs::path const confinedPath = ConfineUnderProjectRoot(fullFilePath);
+        if (confinedPath.empty())
+        {
+            LOG_APP_ERROR("AiRequestPool::OnOutputFileCreated: rejected path '{}' — does not resolve under "
+                          "project root",
+                          fullFilePath);
+            return false;
+        }
+        std::string const canonicalPath = confinedPath.generic_string();
 
         std::shared_ptr<PendingEntry> pendingEntry;
 
@@ -440,19 +510,27 @@ namespace AIAssistant
             }
         }
 
-        // Read file content.
+        // Read file content.  Open via the confined path so symlink targets
+        // resolved into the canonical form are honoured, not the raw input.
         std::string fileContent;
         {
-            std::ifstream inputStream(fullFilePath, std::ios::binary);
+            std::ifstream inputStream(confinedPath, std::ios::binary);
             if (!inputStream.is_open())
             {
+                std::string contextRunId, contextWorkflowId, contextTaskId;
                 {
                     std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+                    contextRunId = pendingEntry->m_Context.m_RunId;
+                    contextWorkflowId = pendingEntry->m_Context.m_WorkflowId;
+                    contextTaskId = pendingEntry->m_Context.m_TaskId;
                     pendingEntry->m_IsCompleted = true;
                     pendingEntry->m_IsFailed = true;
                     pendingEntry->m_ErrorMessage = "ai_call output file could not be opened: " + fullFilePath;
                     pendingEntry->conditionVariable.notify_all();
                 }
+                LOG_APP_ERROR("[AiRequestPool] OnOutputFileCreated: failed to open output file run='{}' workflow='{}' "
+                              "task='{}' path='{}'",
+                              contextRunId, contextWorkflowId, contextTaskId, fullFilePath);
                 QueueCompletionIfNeeded(pendingEntry);
                 return true;
             }
@@ -460,6 +538,31 @@ namespace AIAssistant
             inputStream.seekg(0, std::ios::end);
             std::streamoff const size = inputStream.tellg();
             inputStream.seekg(0, std::ios::beg);
+
+            // Cap to kMaxOutputFileBytes — defend against an attacker-pointed
+            // expectedOutputPath landing on a multi-GB file and exhausting RAM.
+            if (size > 0 && static_cast<std::size_t>(size) > kMaxOutputFileBytes)
+            {
+                std::string contextRunId, contextWorkflowId, contextTaskId;
+                {
+                    std::scoped_lock<std::mutex> const lock(pendingEntry->mutex);
+                    contextRunId = pendingEntry->m_Context.m_RunId;
+                    contextWorkflowId = pendingEntry->m_Context.m_WorkflowId;
+                    contextTaskId = pendingEntry->m_Context.m_TaskId;
+                    pendingEntry->m_IsCompleted = true;
+                    pendingEntry->m_IsFailed = true;
+                    pendingEntry->m_ErrorMessage = "ai_call output file exceeds " +
+                                                   std::to_string(kMaxOutputFileBytes) + " byte cap (size " +
+                                                   std::to_string(size) + ")";
+                    pendingEntry->conditionVariable.notify_all();
+                }
+                LOG_APP_ERROR("[AiRequestPool] OnOutputFileCreated: output file exceeds size cap run='{}' "
+                              "workflow='{}' task='{}' path='{}' bytes={} cap={}",
+                              contextRunId, contextWorkflowId, contextTaskId, fullFilePath, size,
+                              kMaxOutputFileBytes);
+                QueueCompletionIfNeeded(pendingEntry);
+                return true;
+            }
 
             if (size > 0)
             {
@@ -489,7 +592,17 @@ namespace AIAssistant
         {
             return false;
         }
-        std::string const canonicalPath = fs::absolute(fs::path(expectedOutputPath)).lexically_normal().generic_string();
+        // Containment gate: expectedOutputPath here is the same shape as the
+        // map key inserted in RegisterPendingWorkflowTask, so the canonical
+        // form must match.  Pass through ConfineUnderProjectRoot for symmetry;
+        // a path that doesn't resolve under project root won't have a
+        // registered entry anyway (containment was enforced at insert time).
+        fs::path const confinedExpected = ConfineUnderProjectRoot(expectedOutputPath);
+        if (confinedExpected.empty())
+        {
+            return false;
+        }
+        std::string const canonicalPath = confinedExpected.generic_string();
 
         std::shared_ptr<PendingEntry> pendingEntry;
         {
@@ -793,6 +906,13 @@ namespace AIAssistant
         // Snapshot under the lock so the dispatcher call doesn't happen while
         // m_OutputPathMutex is held (the dispatcher's I/O thread takes its own
         // mutexes and we don't want to introduce a lock-ordering trap).
+        //
+        // Lifetime safety: only `std::string` path keys leave the lock — no
+        // PendingEntry pointer crosses the boundary.  The dispatcher matches
+        // by opaque cancel-key string set into QueryData::m_CancelKey at
+        // submit time, so cancellation never needs an entry deref — closes
+        // the UAF window where a snapshot of `shared_ptr<PendingEntry>`
+        // would race with concurrent erase.
         std::vector<std::string> cancelKeys;
         {
             std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
@@ -1089,7 +1209,7 @@ namespace AIAssistant
         // Resolve the workflow binding (registered by RegisterPendingWorkflowTask before Submit)
         // upfront so every fail-path log line in this function and the dispatch callback can
         // carry runId/workflowId/taskId. The dashboard run analyzer's per-run filter requires
-        // these markers — see feedback_log_failures memory. Empty strings for non-workflow
+        // these markers as literal substrings.  Empty strings for non-workflow
         // callers (assistant, jcwfService) — log lines render run='' there.
         // Suffix matches what RegisterPendingWorkflowTask was given: structured
         // tasks register under .output.json (writes via FileWriter when reply
@@ -1107,16 +1227,25 @@ namespace AIAssistant
         std::string taskIdForLog;
         if (!envelope.m_QueueFolder.empty() && !envelope.m_ProbName.empty())
         {
+            // Use ConfineUnderProjectRoot for the lookup so the canonical
+            // form matches RegisterPendingWorkflowTask's insertion form.
+            // A symlinked queue path that resolves differently under the
+            // two normalizations would otherwise cause a binding-lookup
+            // miss and downgrade fail-path logs to empty run='' attribution.
             fs::path const outputPath =
                 envelope.m_QueueFolder / (fs::path(envelope.m_ProbName).stem().string() + outputSuffix);
-            std::string const lookupKey = fs::absolute(outputPath).lexically_normal().generic_string();
-            std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
-            auto const it = m_PendingByOutputPath.find(lookupKey);
-            if (it != m_PendingByOutputPath.end() && it->second != nullptr)
+            fs::path const confinedOutputPath = ConfineUnderProjectRoot(outputPath);
+            if (!confinedOutputPath.empty())
             {
-                runIdForLog = it->second->m_Context.m_RunId;
-                workflowIdForLog = it->second->m_Context.m_WorkflowId;
-                taskIdForLog = it->second->m_Context.m_TaskId;
+                std::string const lookupKey = confinedOutputPath.generic_string();
+                std::scoped_lock<std::mutex> const lock(m_OutputPathMutex);
+                auto const it = m_PendingByOutputPath.find(lookupKey);
+                if (it != m_PendingByOutputPath.end() && it->second != nullptr)
+                {
+                    runIdForLog = it->second->m_Context.m_RunId;
+                    workflowIdForLog = it->second->m_Context.m_WorkflowId;
+                    taskIdForLog = it->second->m_Context.m_TaskId;
+                }
             }
         }
 
@@ -1158,9 +1287,20 @@ namespace AIAssistant
         std::string const model =
             envelope.m_ModelOverride.has_value() ? envelope.m_ModelOverride.value() : api->m_Model;
 
-        // TestInterface: short-circuit curl and synthesize a canned reply (§8 Phase 7).
+        // TestInterface: short-circuit curl and synthesize a canned reply.
         // The interface's m_Url field is repurposed as an optional fixture path.
         // An empty or missing fixture produces a generic "test reply" placeholder.
+        //
+        // Locked-in variant count: Test is the only InterfaceType that requires
+        // a hand-coded special-case here.  Every other variant is dispatched
+        // generically through IRequestBuilder::Create + IRateLimitStrategy::Get.
+        // If a new InterfaceType variant is added that needs Test-style
+        // short-circuit handling, this static_assert will fail compilation as a
+        // forcing function to make the change deliberate (no `default:` over
+        // closed enums we own — lock the variant count instead).
+        static_assert(ConfigParser::EngineConfig::NumAPIs == 7,
+                      "InterfaceType variant count changed — review whether the new variant needs Test-style "
+                      "short-circuit handling in AiRequestPool::Submit, then bump this assertion");
         if (api->m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::Test)
         {
             std::string replyText = "test reply (no fixture configured)";
@@ -1175,10 +1315,11 @@ namespace AIAssistant
                     replyText = buffer.str();
                 }
             }
-            // §14 TUI invalid-UTF-8 stress fixture: malformed bytes from a
-            // Test-interface fixture must be sanitized before they enter the
-            // log/dashboard pipeline.  Output file (binary write below)
-            // legitimately preserves the original bytes for inspection.
+            // Test-interface fixtures may carry malformed UTF-8 bytes (the
+            // TUI invalid-UTF-8 stress test is the worked example); sanitize
+            // before they enter the log/dashboard pipeline.  Output file
+            // (binary write below) legitimately preserves the original bytes
+            // for inspection.
             std::string const replyTextSanitized = SanitizeUtf8(replyText);
 
             fs::path const queueFolderCopy = envelope.m_QueueFolder;
@@ -1189,7 +1330,11 @@ namespace AIAssistant
             {
                 transcriptPathLocal =
                     queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".transcript.json");
-                AiTranscript::AppendRequest(transcriptPathLocal, envelope, modelLocal);
+                if (!AiTranscript::AppendRequest(transcriptPathLocal, envelope, modelLocal))
+                {
+                    // AiTranscript logs the specific failure internally; the
+                    // dispatch proceeds without a transcript entry.
+                }
             }
 
             if (Core::g_Core != nullptr)
@@ -1216,7 +1361,10 @@ namespace AIAssistant
 
             if (!transcriptPathLocal.empty())
             {
-                AiTranscript::AppendResponse(transcriptPathLocal, testReply);
+                if (!AiTranscript::AppendResponse(transcriptPathLocal, testReply))
+                {
+                    // logged inside AiTranscript
+                }
             }
 
             // Signal completion so workflow-bound tasks release from waiting_external.
@@ -1226,7 +1374,9 @@ namespace AIAssistant
             {
                 std::string const normalizedPath =
                     fs::absolute(writtenOutputPath).lexically_normal().generic_string();
-                OnOutputFileCreated(normalizedPath);
+                // Best-effort signal — a missing pending entry just means the binding
+                // already completed via another path; not an error.
+                (void)OnOutputFileCreated(normalizedPath);
             }
 
             if (Core::g_Core != nullptr)
@@ -1290,7 +1440,7 @@ namespace AIAssistant
         int64_t const estimatedInputTokens =
             IRateLimitStrategy::Get(api->m_InterfaceType).EstimateInputTokens(combinedPrompt);
 
-        // Size-aware in-flight budget (§6).  Computed here, enforced by curl's
+        // Size-aware in-flight budget.  Computed here, enforced by curl's
         // CURLOPT_TIMEOUT_MS — only counts time on the wire, resets per attempt
         // because each retry creates a fresh easy handle.  Replaces the old
         // AiRequestPool::m_Deadline machinery (deferred-arm + retry-extend).
@@ -1349,22 +1499,41 @@ namespace AIAssistant
         if (!queueFolder.empty() && !probName.empty())
         {
             // Same suffix logic as the binding-lookup above so onDispatched and
-            // OnRequestFailed find the registered entry.
+            // OnRequestFailed find the registered entry.  Use ConfineUnderProjectRoot
+            // for the same canonical form as RegisterPendingWorkflowTask's insert
+            // (line ~346).  Empty result = path didn't resolve under project root,
+            // which would also have caused the registration to fail; the empty
+            // string flows through downstream checks as "no expected path".
             fs::path outputPath = queueFolder / (fs::path(probName).stem().string() + outputSuffix);
-            expectedOutputPath = fs::absolute(outputPath).lexically_normal().generic_string();
+            fs::path const confinedOutputPath = ConfineUnderProjectRoot(outputPath);
+            expectedOutputPath = confinedOutputPath.empty() ? std::string{} : confinedOutputPath.generic_string();
         }
         // Cancel key = expectedOutputPath (unique per workflow task per run).
         // Used by AiRequestPool::CancelRequestsForRun → dispatcher CancelByCancelKey
         // to abort in-flight HTTP requests when the calling workflow terminates.
         queryData.m_CancelKey = expectedOutputPath;
 
-        ++m_DirectDispatchInflight;
+        // Inflight counter discipline (safety HIGH).  Pre-fix code used
+        // `if (m_DirectDispatchInflight.load() > 0) { --m_DirectDispatchInflight; }`
+        // at both decrement sites — that's a check-then-act race: two
+        // concurrent decrement attempts could both observe count == 1 and
+        // both decrement, underflowing the unsigned counter to SIZE_MAX.
+        // Fix: capture a per-submission `decrementOnce` flag in the callback;
+        // the first decrement wins (test_and_set returns false), subsequent
+        // attempts no-op cleanly.  This is defense in depth — a synchronously-
+        // invoked curlCallback (mock dispatcher / dispatcher error path) and
+        // the schema-retry decrement-then-recurse pattern both stay balanced.
+        m_DirectDispatchInflight.fetch_add(1, std::memory_order_acq_rel);
+        auto decrementOnce = std::make_shared<std::atomic_flag>();
 
         fs::path transcriptPath;
         if (!queueFolder.empty() && !probName.empty())
         {
             transcriptPath = queueFolder / (fs::path(probName).stem().string() + ".transcript.json");
-            AiTranscript::AppendRequest(transcriptPath, envelope, modelCapture);
+            if (!AiTranscript::AppendRequest(transcriptPath, envelope, modelCapture))
+            {
+                // logged inside AiTranscript
+            }
         }
 
         if (Core::g_Core != nullptr)
@@ -1376,7 +1545,7 @@ namespace AIAssistant
         AiInvocation envelopeForRetry = envelope;
 
         auto curlCallback = [this, interfaceType, queueFolder, probName, modelCapture, expectedOutputPath,
-                             transcriptPath, callbackCopy, envelopeForRetry,
+                             transcriptPath, callbackCopy, envelopeForRetry, decrementOnce,
                              runIdForLog, workflowIdForLog,
                              taskIdForLog](QueryResult curlResult, std::string responseBody) mutable
         {
@@ -1486,15 +1655,32 @@ namespace AIAssistant
 
                                 if (!transcriptPath.empty())
                                 {
-                                    AiTranscript::AppendResponse(transcriptPath, aiReply);
+                                    if (!AiTranscript::AppendResponse(transcriptPath, aiReply))
+                                    {
+                                        // logged inside AiTranscript
+                                    }
                                 }
 
-                                if (m_DirectDispatchInflight.load() > 0)
+                                // Schema-retry: decrement THIS submission's inflight slot
+                                // (gated by decrementOnce so the eventual end-of-callback
+                                // decrement won't fire again) before the recursive Submit
+                                // takes a fresh slot.  Net inflight is unchanged across
+                                // the retry handoff.
+                                if (!decrementOnce->test_and_set(std::memory_order_acq_rel))
                                 {
-                                    --m_DirectDispatchInflight;
+                                    m_DirectDispatchInflight.fetch_sub(1, std::memory_order_acq_rel);
                                 }
 
-                                Submit(retryEnvelope, callbackCopy);
+                                if (!Submit(retryEnvelope, callbackCopy))
+                                {
+                                    LOG_APP_ERROR("AiRequestPool::Submit: schema-retry submission failed run='{}' "
+                                                  "workflow='{}' task='{}' prob='{}'",
+                                                  runIdForLog, workflowIdForLog, taskIdForLog, probName);
+                                    if (!expectedOutputPath.empty())
+                                    {
+                                        (void)OnRequestFailed(expectedOutputPath, "schema-retry submission failed");
+                                    }
+                                }
                                 return;
                             }
                             ++m_SchemaValidationFailures;
@@ -1548,19 +1734,24 @@ namespace AIAssistant
                 {
                     std::string const normalizedPath =
                         fs::absolute(writtenOutputPath).lexically_normal().generic_string();
-                    OnOutputFileCreated(normalizedPath);
+                    // Best-effort signal — a missing pending entry just means the binding
+                    // already completed via another path; not an error.
+                    (void)OnOutputFileCreated(normalizedPath);
                 }
                 else if (aiReply.m_Kind == AiReply::Kind::Error && !isChunked && !expectedOutputPath.empty())
                 {
                     // No .output.* file is written for error replies; without this signal the
                     // workflow runtime would stay parked in waiting_external until the ai_call
                     // deadline fires. Symmetric to the success path above.
-                    OnRequestFailed(expectedOutputPath, aiReply.m_Error.m_Message);
+                    (void)OnRequestFailed(expectedOutputPath, aiReply.m_Error.m_Message);
                 }
 
                 if (!transcriptPath.empty())
                 {
-                    AiTranscript::AppendResponse(transcriptPath, aiReply);
+                    if (!AiTranscript::AppendResponse(transcriptPath, aiReply))
+                    {
+                        // logged inside AiTranscript
+                    }
                 }
 
                 if (Core::g_Core != nullptr)
@@ -1593,7 +1784,9 @@ namespace AIAssistant
                 errorReply.m_Error.m_Message = e.what();
                 if (!expectedOutputPath.empty())
                 {
-                    OnRequestFailed(expectedOutputPath, errorReply.m_Error.m_Message);
+                    // Best-effort failure signal — exception path; pending entry may
+                    // already have been resolved by the prior success branch.
+                    (void)OnRequestFailed(expectedOutputPath, errorReply.m_Error.m_Message);
                 }
                 if (callbackCopy)
                 {
@@ -1601,9 +1794,12 @@ namespace AIAssistant
                 }
             }
 
-            if (m_DirectDispatchInflight.load() > 0)
+            // Final inflight decrement (gated by decrementOnce — see Submit-side
+            // comment).  Atomic flag ensures at-most-once dec per submission even
+            // if the callback is somehow invoked twice.
+            if (!decrementOnce->test_and_set(std::memory_order_acq_rel))
             {
-                --m_DirectDispatchInflight;
+                m_DirectDispatchInflight.fetch_sub(1, std::memory_order_acq_rel);
             }
         };
 

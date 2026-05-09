@@ -51,17 +51,45 @@ namespace AIAssistant
     // It does NOT parse JCWF JSON. The WorkflowJsonParser turns JSON into
     // high-level trigger definitions, and Orchestrator then registers those
     // triggers here.
-    // ------------------------------------------------------------------------
+    //
+    // --- Threading & lifetime contract -------------------------------------
+    // Tick() is called from the JarvisAgent main loop (single-threaded).
+    // Add*Trigger / Clear* / NotifyFileEvent / GetWebhookTrigger may be
+    // invoked concurrently by REST handlers, file-watcher worker threads, and
+    // workflow-registry reload — all serialized through `m_Mutex`.
+    //
+    // Index maps `m_FileWatchIndex` and `m_WebhookIndex` are protected by
+    // `m_Mutex`; their indices into the trigger vectors are valid only while
+    // the lock is held.  They are rebuilt from scratch on every
+    // `ClearWorkflowTriggers` / `ClearAll`, so any caller that drops the lock
+    // and re-acquires it MUST re-look-up by identity (`workflowId` +
+    // `triggerId`) rather than reusing a stored index — see the Tick() email-
+    // poll loop for the canonical pattern.
+    //
+    // `m_WebhookTriggers[i].m_Secret` is operator-supplied HMAC material.  It
+    // is registered with `SecretRedactor` at AddWebhookTrigger time so the
+    // value is filtered out of the log stream.  Future maintainers MUST NOT
+    // iterate `m_WebhookTriggers` and log the secret field directly — the
+    // redactor catches casual leaks but not log lines built deliberately
+    // around the field.  Shape-only logging (`<set>` / `<none>`) is the rule.
+    // -----------------------------------------------------------------------
     class TriggerEngine
     {
     public:
         // File events understood by file-watch triggers.
+        // Closed enum we own — per project discipline (CLAUDE.md), every
+        // exhaustive switch on this type either enumerates all cases (with
+        // `-Wswitch` enforcement) or pairs with a static_assert on the
+        // variant count below.  No `default:` over closed enums.
         enum class FileEventType
         {
             Created = 0,
             Modified,
             Deleted
         };
+        static_assert(static_cast<int>(FileEventType::Deleted) == 2,
+                      "FileEventType variant count changed — review ContainsEvent / NotifyFileEvent / "
+                      "event-type logging sites for new variants");
 
         // Fired when a trigger wants to start a workflow run.
         struct TriggerFiredEvent
@@ -78,6 +106,16 @@ namespace AIAssistant
             bool m_IsEnabled{true};
         };
 
+        // Callback invoked when any trigger fires.
+        // Lifetime contract: the callable MUST own (capture-by-value or move)
+        // every piece of state it touches.  `TriggerEngine` stores the
+        // std::function for the engine's lifetime and invokes it from
+        // arbitrary threads (Tick on the main loop; NotifyFileEvent on the
+        // file-watcher worker; FireManualTrigger on whatever thread the REST
+        // handler is dispatched from).  A callback that captures references
+        // to caller-stack objects, or to objects that may outlive the
+        // engine's owner, is a use-after-free waiting to happen — capture by
+        // value or move into the std::function.
         using TriggerCallback = std::function<void(TriggerFiredEvent const&)>;
 
     public:
@@ -204,7 +242,7 @@ namespace AIAssistant
 
             // Attempt to parse "m h dom mon dow".
             // On failure, returns false and leaves the expression invalid.
-            bool Parse(std::string const& expression);
+            [[nodiscard]] bool Parse(std::string const& expression);
 
             // Compute the next fire time strictly after "referenceTime".
             // timezone: IANA timezone name (e.g. "America/Los_Angeles"). Empty = system local time.
@@ -338,6 +376,15 @@ namespace AIAssistant
         template <typename TriggerVector>
         void EraseWorkflowFromVector(TriggerVector& triggerVector, std::string const& workflowId);
 
+        // Canonicalize a path to its project-root-confined form for use as a
+        // watch-path key or event-path comparison subject.  Routes through
+        // `ConfineUnderProjectRoot` (fs::weakly_canonical + lexically_relative
+        // containment), so an embedded `..` that escapes the project tree
+        // cannot match a registered watch via either side of the comparison.
+        // Per JC_Workflow_Specification §3.2.2 file_watch paths are
+        // project-root-relative.  Returns empty string on rejection
+        // (fail-closed); callers MUST treat empty as a containment failure
+        // and refuse to register / refuse to fire.
         static std::string NormalizePath(std::string const& path);
         static bool IsPathMatch(std::string const& watchedPath, std::string const& eventPath);
 

@@ -126,8 +126,11 @@ namespace AIAssistant
 
                     if (error)
                     {
-                        LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}'",
-                                      parentPath.string(), error.value(), error.message());
+                        // Best-effort parent-directory creation; the actual
+                        // task-level fail path (with run/workflow/task context)
+                        // surfaces if the subsequent write fails.
+                        LOG_APP_WARN("[internal] create_directories failed path='{}' ec={} message='{}'",
+                                     parentPath.string(), error.value(), error.message());
                     }
                     else
                     {
@@ -178,11 +181,15 @@ namespace AIAssistant
             std::filesystem::create_directories(taskWorkingDirectoryPath, error);
             if (error)
             {
-                LOG_APP_ERROR("[folder creation debug] debug create_directories failed path='{}' ec={} message='{}'",
+                LOG_APP_ERROR("[internal] create_directories failed run='{}' workflow='{}' task='{}' "
+                              "path='{}' ec={} message='{}'",
+                              workflowRun.m_RunId, workflowRun.m_WorkflowId, taskDefinition.m_Id,
                               taskWorkingDirectoryPath.string(), error.value(), error.message());
                 taskState.m_LastErrorMessage =
                     "Failed to create internal task working directory: " + taskWorkingDirectoryPath.string();
-                LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+                LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                              taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                              taskState.m_LastErrorMessage);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
@@ -220,7 +227,9 @@ namespace AIAssistant
             if (!ValidateExistingInputs(resolvedInputPaths, validationError))
             {
                 taskState.m_LastErrorMessage = validationError;
-                LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+                LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                              taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                              taskState.m_LastErrorMessage);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
@@ -234,7 +243,9 @@ namespace AIAssistant
             if (!TryGetActionFromParamsJson(taskDefinition.m_ParamsJson, action, paramsError))
             {
                 taskState.m_LastErrorMessage = paramsError;
-                LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+                LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                              taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                              taskState.m_LastErrorMessage);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
@@ -254,7 +265,9 @@ namespace AIAssistant
             if (App::g_App == nullptr)
             {
                 taskState.m_LastErrorMessage = "App::g_App is null (cannot access internal task registry).";
-                LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+                LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                              taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                              taskState.m_LastErrorMessage);
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
@@ -265,7 +278,9 @@ namespace AIAssistant
         {
             taskState.m_LastErrorMessage =
                 "Internal task registry is null (did you register internal tasks in JarvisAgent::OnStart?).";
-            LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+            LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                          taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                          taskState.m_LastErrorMessage);
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
@@ -274,7 +289,9 @@ namespace AIAssistant
         if (!task)
         {
             taskState.m_LastErrorMessage = "No internal task registered for action: " + action;
-            LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+            LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                          taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                          taskState.m_LastErrorMessage);
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }
@@ -295,7 +312,9 @@ namespace AIAssistant
         if (!ok)
         {
             taskState.m_LastErrorMessage = taskError.empty() ? "Internal task failed." : taskError;
-            LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage);
+            LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
+                          taskDefinition.m_Id, workflowRun.m_RunId, workflowRun.m_WorkflowId,
+                          taskState.m_LastErrorMessage);
             taskState.m_State = TaskInstanceStateKind::Failed;
             return false;
         }

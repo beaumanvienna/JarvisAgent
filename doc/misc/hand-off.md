@@ -15,6 +15,277 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-08 (S3=D1 sitting 13 — close-out + horizontal sweeps + audit republish) → next session
+
+Final sitting of S3=D1.  Phased into 13a/b/c/d (per JC's "stop at sub-boundary" preference): 13a mechanical sweeps, 13b logger discipline, 13c deferred refactors from sitting 12b, 13d UX + close-out + audit republish.  All 4 binaries built clean across each phase; smoke matrix passing throughout.  Audit republish shows lone CRITICAL closed (sitting 9 dbQueryCloudTaskExecutor structural fix) and a substantial HIGH-density reduction in workflow orchestration; 4 D1 cyber HIGHs + 6 D1 safety HIGHs remaining, all documented as defense-in-depth recommendations or as known follow-ups (markitdown argv migration, ChunkAggregator weak_ptr migration, TaskExecutorRegistry singleton thread-safety, RemoveWorkflow logging completeness).
+
+S3=D1 is now done: 13 sittings, 13 phases of close-out work, clean.  JC's planned commit: "part 5 of the cyber sec and C++ safety audit" covering sittings 6-13 as one bundle.
+
+### What landed
+
+**Sitting 13a — mechanical sweeps:**
+
+- **Audit-citation cleanup follow-up.**  Workflow README description of aiCallTaskExecutor's path confinement was stale (named the previous-iteration `ConfineUnderTaskWorkingDirectory` helper that no longer exists) — sitting 12 switched to `ConfineUnderProjectRoot` per the regression fix #2 but the README + `application/file/README.md` + `workflowJsonParserDetails.h` + `doc/architecture.md` still mentioned the old helper name.  All 4 sites updated; aiCallTaskExecutor entry moved out of the "scope-tighter `lexically_relative`" section into the main `ConfineUnderProjectRoot` use-site list with the cross-task data-flow rationale recorded inline.  Source code itself was clean — sitting 12's audit-citation sweep was thorough.
+- **`App::g_App` / `Core::g_Core` null-deref defense — horizontal sweep across D1.**  8 unguarded sites identified across 6 files: `fileWatcher.cpp` (5 sites: Start's GetThreadPool + Watch's 4 PushEvent calls), `pythonTaskExecutor.cpp::Execute` (App::g_App→GetPythonEnginePool), `pythonEngine.cpp::JarvisPyStatus` (PushEvent), `triggerEngine.cpp::Tick` (email-poll loop), `aiCallTaskExecutor.cpp::Execute` (2 GetConfig sites), `polarionClient.cpp::FetchAll` (KeyManager lookup), `filterEngine.cpp::Evaluate` (CloudConnectionManager lookup), `workflowRuntimeManager.cpp::TickActiveRun` (1 GetConfig site).  All other previously-flagged sites already had explicit nullptr checks or were already routed through `(g_X != nullptr) ? ... : ...` ternaries (sittings 1-12 covered them).  The fix shape is consistent: explicit `if (Core::g_Core == nullptr)` at top-of-block with ERROR log carrying run/workflow/task context where available, or silent guard for observability paths (event PushEvent in Watch).
+- **`[[nodiscard]]` sweep on D1 bool-returning APIs.**  16 headers updated: `taskExecutor.h` (the virtual base — `[[nodiscard]]` propagates the warning to all 6 task-executor overriders), `workflowRegistry.h` (5 methods including `LoadDirectory`/`SaveOrUpdateWorkflowFromJson`/`RemoveWorkflow`/`LoadContainer`/`LoadContainerSubWorkflows`), `aiCallTaskExecutor.h` (3 methods: `Execute`/`WriteTextFile`/`WriteInlineQueueBindingFiles`), `aiRequestPool.h` (5 methods including `OnOutputFileCreated`/`OnRequestFailed`/`TryConsumeResult`/`TryPopCompletion`/`WaitForCompletion`/`Submit`), `workflowRuntimeManager.h` (10 methods including all the `Try*` accessors + `Request{Cancel,Pause,Resume,Stop}Run` + `CleanWorkflow` + `Heartbeat`), `jcwfContainer.h` (4 methods), `pythonEngine.h` (2 methods), `taskFreshnessChecker.h` (2 methods), `dataflowResolver.h` (2 methods), `triggerEngine.h::CronExpression::Parse`, `shellTaskExecutor.h` (3 methods), `adhocWorkflowManager.h::WouldExceedQuota`, plus the 5 task-executor override headers.  Build surfaced 3 callers ignoring the result: `workflowRegistry.cpp` recursive `LoadContainerSubWorkflows` × 2 (acknowledged with `(void)` + comment explaining sub-workflow load failure is non-fatal for the container) + `webServer_studio.cpp::HandleWorkflowDelete` (added `if (!Remove...)` with WARN log).  4 internal `OnOutputFileCreated`/`OnRequestFailed` callsites in `aiRequestPool.cpp` (Test-interface short-circuit + reply-callback success branch + reply-callback error branch + exception-handler) explicitly `(void)`-cast with comments explaining best-effort signal semantics.  1 schema-retry `Submit` callsite turned from silent-discard into a proper fail-path with `OnRequestFailed` notification.
+
+**Sitting 13b — logger discipline + path leak:**
+
+- **Log-injection sanitisation at format-arg boundary.**  Two unsanitised stdout/stderr partial-line flush sites in `shellTaskExecutor.cpp::ExecuteWithWatchdog` (Linux fork/exec/poll path) wrapped with `SanitizeUtf8(...)` for parity with the four already-sanitised line-flush sites earlier in the same function.  External-string log channels in polarionClient (already sanitise via `SanitizeErrorBody` from sitting 9) and aiTranscript (already sanitise via `SanitizeUtf8` + `TruncateUtf8Safe(1024)` from sitting 12) were re-verified — the existing sanitisation is comprehensive at all attacker-influenced boundaries.
+- **Logger fail-path runId/workflowId context completeness.**  `internalTaskExecutor.cpp::Execute` had 8 `LOG_APP_ERROR("debug: {}", taskState.m_LastErrorMessage)` sites lacking run/workflow/task context.  All 8 reformatted to `LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}", ...)` so the dashboard run analyzer attributes them.  The folder-creation helper `EnsureOutputParentDirectories` (no run-context in scope) had its sole ERROR demoted to WARN with a note that the actual task-level fail path (with full context) surfaces if the subsequent write fails.  Parser-helper-level ERROR sites in `workflowTriggerBinder.cpp::Parse{Cron,FileWatch,Webhook,EmailWatch}Params` deliberately left as-is for now: those fire at JCWF-load time (no runId yet); refactoring to caller-side logging requires API-shape change to `[[nodiscard]] std::expected` returns — captured as a follow-up under the existing `todo.md` "API-shape sweep" entry.
+- **Internal-path leak in error messages.**  Three high-value sites where errorMessage flows back to authenticated REST/MCP API callers updated to surface only the basename (or generic message) while routing the full absolute path to a server-side `LOG_APP_ERROR`: (1) `jcwfContainer.cpp` (5 sites: Extract/Pack/ReadFile failure messages — adhoc upload surface), (2) `workflowRegistry.cpp::SaveOrUpdateWorkflowFromJson` (3 sites: extracted-dir creation + global.json/canvas write — editor PUT + adhoc submission surface), (3) `polarionClient.cpp::WriteItemFile` (3 sites: containment rejection + open failure + write failure — surfaced via task-state error message in the dashboard).  Operator-authored paths in workflowJsonParser / aiCallTaskExecutor / filterManifest deliberately not changed — they reveal what the operator typed, not install paths.
+
+**Sitting 13c — deferred refactors from sitting 12b:**
+
+- **`WriteTextFile` atomic-rename refactor.**  Both implementations refactored — `AiCallTaskExecutor::WriteTextFile` (the public static, called from inline queue-file writes + provider-sidecar writes + ConvertWithMarkitdown destPath writes — 4 call sites) and `aiRequestPool.cpp` anon-ns `WriteTextFile` (called from the AI-call output write path).  Pattern: open `<final>.tmp.<counter>` → write → close (via ofstream destructor scoping) → `fs::rename`.  Counter is a static `std::atomic<uint64_t>` per implementation, ensuring temp-name uniqueness under concurrent writers targeting the same final path.  On rename failure the temp file is best-effort cleaned up.  Errors come back as basename-only (per 13b internal-path discipline).  Pattern applied: under SIGKILL or disk-full mid-write, the previous version of the final file stays intact instead of being a truncated partial that downstream consumers (notably `OnOutputFileCreated` reading `.output.{txt,json}` as the completion signal) parse as malformed.
+- **Chunked-aggregator raw-pointer → weak_ptr — partial.**  Full `std::weak_ptr<AiRequestPool>` migration requires `AiRequestPool` ownership change from `std::unique_ptr<AiRequestPool>` (in `JarvisAgent::m_AiRequestPool`) to `std::shared_ptr<AiRequestPool>` — a broader refactor with caller-side fanout that's bigger than this sitting's boundary.  Lighter-touch fix landed: documented the lifetime invariant on the `m_RequestPool` field with explicit cross-reference to `feedback_capture_by_value_async`, and added a defensive null-check at the previously-unguarded reduce-pass `Submit` callsite in the aggregator (now `if (m_RequestPool == nullptr || !Submit(...))` falls back to the plain-concat write).  The 13a [[nodiscard]] sweep also turned the discarded `Submit` return at this site into a proper conditional check.  Full weak_ptr migration filed as a follow-up; the actual UAF risk under correct shutdown ordering (where AiRequestPool::Shutdown drains all in-flight curl callbacks before destruct) is bounded.
+
+**Sitting 13d — UX + close-out:**
+
+- **Dashboard WS reconnect / lockout interaction.**  Frontend fix in `dashboard/ui/src/hooks/useWebSocket.ts`: replaced the fixed-2s reconnect timer with exponential backoff (base 2s, doubles on each consecutive failed connect, capped at 30s, resets to base on successful onopen).  Pre-fix: dashboard with no session would spam `wss://.../ws` every 2s, generating one `[security] auth_failure reason=missing_credential` + one `[security] ws_upgrade_rejected` log line per attempt.  Post-fix: same scenario settles at ~30s between attempts after ~5 failures, dramatically reducing log noise.  Backend unchanged — the `Authenticate()` rate-limit + lockout + ws-reject paths all stayed.  Dashboard rebuilt (`dashboard/ui && npm run build`).
+- **D1 close-out: audit republish.**  Both audit JCWFs (`jarvisCppCyberSecAudit` + `jarvisCppSafetyAudit`) re-run end-to-end against the post-sittings 6-13 codebase.  Output published to `doc/combinedCyberSecAudit.md` (253 KB, was 842 KB pre-S3) and `doc/combinedSafetyAudit.md` (663 KB, was 1.37 MB pre-S3) — substantial finding-density reduction.  **Cyber:** 0 CRITICALs (was 1), 4 D1 HIGHs remaining (FileWatch path traversal at binder layer / Python exception sanitisation hardening / ScriptRegistry bypass under operator-trust-model / Markitdown shell-injection).  **Safety:** 0 CRITICALs, 6 D1 HIGHs remaining (Python ref-counting / TaskDef::m_Id / ChunkAggregator raw-ptr / TaskExecutorRegistry singleton / email-trigger iterator / RemoveWorkflow silent-failure logging).  All remaining HIGHs documented in the dev-plan close-out entries as either defense-in-depth recommendations, operator-trust-model items, or known cross-cutting follow-ups.  Dev plans (`cybersec-hardening-dev-plan.md` + `cpp-safety-hardening-dev-plan.md`) gained 2026-05-08 decision-log entries enumerating the 13-sitting closure.
+
+### What's verified
+
+| Step | Result |
+|---|---|
+| Studio Debug build (after each phase 13a/b/c) | clean |
+| Studio Release build (after each phase) | clean |
+| Engine Debug build (after each phase) | clean |
+| Engine Release build (after each phase) | clean |
+| Edition isolation (Engine ~1 MB smaller than Studio Release) | confirmed (~1.08 MB delta after each phase) |
+| 28-test assistant non-AI suite (after each phase) | 28/28 each time |
+| `ai-zip-demo` (4 ai_call + zip) | succeeded across all phases (4/4) |
+| `bookSummaryPipeline` (text_lines fan-out) | succeeded across all phases (16-19 tasks depending on freshness) |
+| `cyber2` (Python parse + ai_call cross-task) | succeeded across phases tested |
+| `postgresDemo` (12 tasks) | 12/12 |
+| `[error]` / `[critical]` lines in log post-tests | 0 across all phases |
+| `jarvisCppCyberSecAudit` (141 tasks) | 141/141 — fresh audit republished |
+| `jarvisCppSafetyAudit` (141 tasks) | 141/141 — fresh audit republished |
+| Atomic-rename verification | confirmed via `ai-zip-demo` + `bookSummaryPipeline` post-clean — final files land at expected paths, no `.tmp.<counter>` leftovers in queue dirs |
+
+What's NOT directly verified:
+- Atomic-rename SIGKILL-mid-write recovery (would need fault-injection test).  Code path is structurally identical to filterManifest's existing atomic-write pattern (sitting 12).
+- Dashboard WS exponential backoff under sustained reconnect storm.  Code review only — the math is straightforward (`Math.min(prev * 2, 30000)`).
+- Chunked-aggregator UAF under shutdown-during-reduce.  Defensive null-check at the previously-unguarded reduce-pass site catches the post-shutdown case; full UAF closure requires the deferred shared_ptr migration.
+- Negative-path verification fixtures for D1 hardening (existing `todo.md` entry — covers all the rejection branches across sittings 6-13).
+
+### Open items / next-session candidates
+
+**S3=D1 is done.** Next session candidates:
+
+- **JC commit plan** — "part 5 of the cyber sec and C++ safety audit" bundling sittings 6-13 (huge diff: 60+ files modified across application/workflow, application/json, application/python, application/file, application/cloud, engine/curlWrapper, engine/log, engine/json, doc/, plus dashboard UI rebuild output).  Working tree is the source of truth — git status will show the full surface.
+- **S2 = D3 next session** — Core engine hardening per `doc/misc/cybersec-hardening-dev-plan.md` §8 + `cpp-safety-hardening-dev-plan.md` §8.  Lighter density than D1; sittings 14-20 already landed earlier as part of S2 prep work (curlMultiDispatcher / authSigner / configParser).  See `doc/misc/S2-session-note.md` if it exists, or open a fresh `S2-D3-session-note.md`.
+- **Carryover from sitting 13** — full weak_ptr migration of AiRequestPool (requires shared_ptr ownership refactor in JarvisAgent), parser-helper API-shape sweep to `std::expected` returns (cuts the workflowTriggerBinder fail-path-context gap), TaskExecutorRegistry singleton thread-safety, RemoveWorkflow silent-failure logging.  All filed as todo.md entries or implicit in the audit's residual HIGHs.
+- **`todo.md` carryover** — same 9 pre-existing entries; nothing closed in this sitting was on `todo.md`, only the §5i and §5g items already-archived from prior sittings.
+
+### Gotchas next-session-Claude should know
+
+- **`[[nodiscard]]` is now on most D1 public bool returners.**  Adding new callers that ignore the return will produce `-Wunused-result` warnings.  Pattern to acknowledge a deliberate discard is `(void)foo()` with a comment explaining why ignoring the return is correct.  Several internal `OnOutputFileCreated`/`OnRequestFailed` callsites in `aiRequestPool.cpp` (Test-interface and reply-callback paths) follow this pattern with comments explaining best-effort signal semantics.
+- **Atomic-rename-write is the new pattern for `WriteTextFile`.**  Any future hand-built JSON writer that bypasses `WriteTextFile` (e.g. `polarionClient::WriteItemFile`, `AdhocWorkflowManager::WriteMeta`, `aiTranscript`'s temp-then-rename) should use the same shape: `<final>.tmp.<counter>` + close-via-scope + `fs::rename`.  `filterManifest::WriteManifest` (sitting 12) is the existing reference; the AiCall/AiRequestPool implementations match.
+- **Internal-path leak discipline for new error messages.**  If you add a new errorMessage that flows to a REST/MCP API consumer (Workflow operations, JCWF parse errors, polarion filter errors, etc.), surface only the basename or a generic message; route the full absolute path to a server-side `LOG_APP_ERROR` for operator debugging.  The pattern in `jcwfContainer.cpp` after sitting 13b is the worked example.
+- **App::g_App / Core::g_Core null-deref defense is the new D1 baseline.**  Any new D1 code that touches the globals must null-check first.  Worker-thread sites that run during shutdown (fileWatcher::Watch, pythonEngine::JarvisPyStatus) silently no-op on null; main-thread sites with run/workflow/task context emit ERROR with identifiers.
+- **Dashboard WS reconnect backoff is now exponential.**  Pre-fix the reconnect was a fixed 2s loop; post-fix it doubles up to 30s on consecutive failures and resets on success.  Don't reintroduce the fixed-2s loop without a strong reason — the security log was getting hammered by every-2s probes from un-authenticated dashboards.
+- **Audit republish shows D1 HIGHs are non-zero.**  4 cyber HIGHs and 6 safety HIGHs remain in workflow orchestration after S3.  Each is documented as either defense-in-depth, operator-trust-model, or a deferred follow-up — see `doc/misc/cybersec-hardening-dev-plan.md` and `doc/misc/cpp-safety-hardening-dev-plan.md` 2026-05-08 decision-log entries.  Don't reopen them as "regressions" without checking the rationale first.
+- **`feedback_session_handoff_log` requires this entry to be self-contained** — newest-on-top, fresh-Claude can pick up without scrolling further.  Always read this entry first before picking up "let's keep going" from JC.
+
+---
+
+## 2026-05-07 (S3=D1 sitting 12 — parser cluster + aiCallTaskExecutor) → next session
+
+Full sitting 12 landed in one block — 7 files hardened across the parser cluster + aiCallTaskExecutor, plus the deferred RewriteWorkflowId simdjson rewrite from sitting 8.  S3=D1 is now 12/13 sittings done.  Two real regressions surfaced via live JCWF testing and were fixed before close-out.  All 4 binaries built clean; full smoke-test matrix passing.  Remaining: sitting 13 (horizontal sweeps + D1 close-out + audit republish).
+
+### What landed
+
+**Sitting 12a — parser cluster (5 small files):**
+
+- **`replyParserAPI1.{h,cpp}`** (cyber 2H+5M+2L, safety 3H+4M+4L) — single-iterate (replaces double-iterate), `.get(out)` error-checking replaces every `CORE_ASSERT` (which compiled away in release), `Reply::m_Created` widened from `int` to `uint64_t` (Y2038), `ParseUsage(obj, Reply&)` writes to local reply not `m_Reply` directly (was zeroing usage on success), `MAX_CHOICES=64` cap, `clamp uint64→int32` in `GetUsage` with WARN, attacker-controlled fields demoted to TRACE-with-`TruncateUtf8Safe(SanitizeUtf8(...))`, content/message logged as length-only, ParseErrorType is now table-driven with `static_assert(size==6)`, `GetError` switch on ErrorType + `InsufficientQuota → 429` mapping, ParseError CRITICALs demoted (rate_limit/quota → WARN; rest → ERROR).  Note: `LOG_APP_DEBUG` doesn't exist in this codebase — used `LOG_APP_TRACE` instead (lowest level).
+
+- **`schemaValidator.{h,cpp}`** (safety 3H+4M+5L) — `IsLoaded`/`LoadError` deduped (delegate to Impl), `ResolveRef` returns `std::optional<dom::element>`, `m_RegexCache` populated at load time by `CheckSupportedKeywords` (validates each `pattern` once; throws → `m_LoadError`), regex lookup at validate is O(1) cache hit, `ValidateNumberConstraints` becomes explicit `dom::element_type` switch, `anyOf` sub-error accumulation uses `std::make_move_iterator`, `ElementTypeName` gets a comment instead of static_assert (simdjson's enum is char-literal-valued, not 0..N).  HIGH 1 (member-destruction-order) was a false-positive in the audit — current declaration order already destroys borrowing elements before `m_Parser`; added a lifetime-invariant comment block explaining the constraint instead of reordering.
+
+- **`aiTranscript.{h,cpp}`** (cyber 4M+2L, safety 5M+3L) — single-mutex serialisation of all transcript writes, atomic temp-write-then-rename in `WriteFile`, file-size cap (64MB) in `ReadFile`, `MessageRoleToString`/`AiReply::Kind`/`AiError::Kind` exhaustive switches (`-Wswitch` catches future variants), `m_StructuredJson` round-tripped through simdjson DOM (canonical re-emission closes JSON-injection class), provider error message `SanitizeUtf8 + TruncateUtf8Safe(1024)` before disk, `[[nodiscard]]` on AppendRequest/AppendResponse + 5 call sites in `aiRequestPool.cpp` updated with intent-clear discard pattern.  Note: `JsonHelper::EscapeJsonString` is RFC 8259-compliant (per `engine/json/json.md`) — the audit's MED on "incomplete escaping" was already addressed; we did not migrate to nlohmann/RapidJSON per `feedback_simdjson_only`.
+
+- **`filter/filterManifest.{h,cpp}`** (cyber 2H+3M+1L, safety 3H+5M+2L) — `IsValidFilterId` allowlist (`[A-Za-z0-9._-]`, no leading dot, no `..`, ≤256 chars) gates `ManifestPath`, then `ConfineUnderProjectRoot` is the second band; atomic temp-write-then-rename in `WriteManifest` with `failbit\|badbit` exceptions; file-size cap (16MB) and items cap (1M) in `ReadManifest`; OpenSSL SHA-256 fallback to `std::hash` removed (dead code anyway — vendor/openssl is always present); TOCTOU `exists()` check dropped before `ifstream` open; `FileMtimeString` switched from racy two-now()-call clock-offset to C++20 `std::chrono::file_clock::to_sys`.
+
+- **`scriptCatalog.{h,cpp}`** — Session note said "cyber 0H+0M, safety 0H+3M" but the audit actually had 2 cyber HIGH (path traversal via `relative()`, symlink following).  Refresh now builds the new entry vector OUTSIDE the lock and swaps under-lock at the end (concurrent List/GetByPath callers don't block for the I/O); symlinks skipped at iterator level; every entry's path is `weakly_canonical`-confined under the canonical scripts root; entries capped at 10000; ParseFile continuation-line bug fixed (was using `line[0]=='#'` after TrimRight which didn't match indented continuations); dead `__init__` stripping branch dropped.
+
+**Sitting 12 main file — `workflowJsonParser` + Details + RewriteWorkflowId:**
+
+- **`workflowJsonParser.{h,cpp}` + `workflowJsonParserDetails.{h,cpp}`** (cyber 5H+3M, safety 5H+4M+1L).  New `WorkflowParserLimits` namespace + `IsAcceptedRelativePath` helper in the Details header.  `ParseRootObject` signature changed from `simdjson::ondemand::object` (by value!) to `simdjson::ondemand::object&` (matches every other Parse* helper — copying an ondemand object is a shallow copy of pointers into the document arena and is documented-undefined).  Element-count caps applied across collection parsers: tasks=1000, triggers=100, dataflows=10000, filters=100, control_nodes=1000, controlflow=10000, file_inputs/outputs/queue-files-per-section=1000, depends_on=1000, inline content=1MB.  Negative-int gates on `timeout_ms` (≤7d cap), `retries.max_attempts` (≤100), `retries.backoff_ms` (≤1h), `output_retries` (≤UINT32_MAX) — closes the negative-wrap-to-near-INFINITY DoS class.  `ParseGlobalJson`/`ParseCanvasJson` propagate every sub-call bool return AND fail-closed on key-read errors (was silent partial parse).  Re-parsed `defaults` object now checks `get_object()` error in BOTH ParseRootObject and ParseGlobalJson (was unchecked).
+- **`adhocWorkflowManager::RewriteWorkflowId`** — replaced `std::regex_replace` with simdjson DOM parse-and-rebuild (per `feedback_simdjson_only`); structurally aware so a stray `"id":"..."` substring in a description field can no longer be matched first.  `<regex>` include dropped from this TU.
+
+**Sitting 12b — `aiCallTaskExecutor.{h,cpp}` (1742 lines):**
+
+CRITICAL closures:
+- `ConvertWithMarkitdown` switched to **allowlist** (`[A-Za-z0-9/._-+=:]`) replacing a too-narrow blocklist that missed `;`, `\|`, `&`, `(`, `)`, `<`, `>`, etc.  Migration to argv-based execution (`posix_spawn`) is tracked as future work; allowlist is the interim fix.
+- `ReadTextFile` enforces 100 MB file-size cap (defends against `/dev/zero`, fifos, runaway logs).
+- `MaterializeCntxFilesFromQueueBinding` and `MaterializeProbFilesFromQueueBinding` route every resolved CNTX/PROB source path through `ConfineUnderProjectRoot` BEFORE opening for read.
+
+HIGH closures:
+- `ExpandCntxFileGlobs` capped at 10000 matches.
+- Provider-sidecar JSON (`PROV_provider.json`) routes every string through `JsonHelper::EscapeJsonString`; `temperature` is parsed as a finite double in `[0,2]` before emission as a JSON number (closes the `1},"injected":true` injection vector).
+- `BuildDefaultsMap` logs at WARN on simdjson exceptions instead of swallowing silently.
+
+Deferred to sitting 13:
+- WriteTextFile atomic-rename (broader refactor across all WriteTextFile consumers).
+- Chunked-aggregator raw-pointer → weak_ptr (significant refactor).
+- Path-logging info-disclosure broad sweep + internal-path leak in error messages (cross-cutting).
+
+**Two regressions surfaced via live JCWF testing — both fixed in this session:**
+
+1. **Parse-time `..`-rejection in workflowJsonParser broke 27 of 30 shipped JCWFs.**  Established convention is `working_directory: "../../queue/<workflow>/<task>"` to navigate from `workflows/<id>/` up to the project-root-anchored queue tree.  My initial `IsAcceptedRelativePath` rejected any path with a `..` segment — too strict.  Fix: dropped the `..`-rejection from the parse-time gate, kept absolute-path rejection + size cap + emptiness check.  `..` containment lives in the consumer-side `ConfineUnderProjectRoot` gate (the canonical-form filter).  After fix: 30/30 workflows registered.
+
+2. **`aiCallTaskExecutor`'s task-folder containment broke `cyber2`.**  My initial `ConfineUnderTaskWorkingDirectory` rejected `cyber2`'s legit cross-task data flow where `analyze_threats` reads `parse_ssh_log`'s output via `../../../workflows/cyber2/OpenSSH_2k/01_parse/attack_stats.json` (queue-folder-up-to-root-down-to-workflows pattern).  The path is OUTSIDE the task working dir but INSIDE the project tree.  Fix: switched to `ConfineUnderProjectRoot` (project-root-wide gate matching the project's existing pattern at every other ai_call/queue site).  After fix: cyber2 succeeds.
+
+**Tracked-doc sweep:**
+
+- `application/file/README.md` — pathConfinement use-site list extended with filterManifest::ManifestPath, scriptCatalog::Refresh, aiCallTaskExecutor materialise sites; new section on the parse-time syntactic gate (`IsAcceptedRelativePath`) layered with the consumer-side gate.
+- `application/workflow/README.md` — new rows for `aiTranscript`, `scriptCatalog`, `filter/filterManifest`; expanded `workflowJsonParser` row with caps + signature note; expanded `aiCallTaskExecutor` row with materialise containment + markitdown allowlist + provider-sidecar JSON discipline.
+- `doc/architecture.md` — five new Key Design Decisions rows: parser caps + parse-time syntactic gate, scriptCatalog offline-build/symlink-skip, RewriteWorkflowId simdjson rewrite, ai_call queue-binding source-path containment.
+
+**Audit-citation cleanup sweep (after the main sitting closed).**  Per `feedback_no_audit_traces_in_code` — sweep over all tracked docs + C++ sources for stale session/audit/refactor refs.  ~37 citations stripped across 14 files: `connectorHttp.h` ("Sitting 27 fixed..."), `application/workflow/README.md` ("Sitting 1's taskWorkingDirectory..."), `webServer.{h,cpp}` (§14 Tier B + §6.2 + TODO List §17 + "plan §6" + "Adhoc Workflow Submission and MCP plan.md §2"), `curlMultiDispatcher.{h,cpp}` (§14 Tier B + §6.2/§6.4/§7), `rateLimitController.{h,cpp}` (§4 / §4.1 / §4.2 / §4.3), `rateLimitStrategy.cpp` ("§2 verification"), `workflowRuntimeManager.cpp` ("plan §6"), `workflowTypes.h` ("§14 TUI invalid-UTF-8 stress test"), `aiRequestPool.cpp` (§8 Phase 7 + §14 + §6), `chunkPlanner.h` ("§8 Phase 6"), `configParser.h` (§8 Phase 7 + §8 Phase 6 + §7), `scriptRegistry.cpp` (bare `(§11.6)` → explicit `JC_Workflow_Specification.md §11.6`), `doc/architecture.md` ("JarvisAgent TODO List.md §5e", "§5f").  Kept (legitimate per the rule): all `JC_Workflow_Specification §X` cross-refs, `RFC NNNN §X`, named tracked-doc cross-refs (`engine/json/json.md §4`, `engine/curlWrapper/curlWrapper.md §15`), and self-references within tracked docs.
+
+**Small todo.md items closed alongside:**
+
+- **`SecretRedactor::Redact` multi-secret prefix-collision over-leak** — `engine/log/secretRedactor.cpp::AddSecret` now sorts `m_Secrets` longest-first after every insert via `std::sort` with `size() > size()` comparator, so a longer secret matches before any prefix-collision shorter secret runs in `Redact()`'s loop.  Closes the latent leak where `"abcd1234"` registered first leaves `"5678"` of `"abcd12345678"` exposed as `[REDACTED]5678` in logs.
+
+- **`POST /api/shutdown` response-body misnomer (and the broader role-gate response message across all admin endpoints)** — `WebServer::CheckAuth` now returns the typed `"insufficient_role"` code (was returning the generic `"forbidden"`), so `MakeAuthErrorResponse` routes to its existing `insufficient_role` branch and the response body reads "Your role does not have permission for this endpoint." instead of the misleading "Invalid API token." (the token IS valid; it's the role that's too low).  The fix applies to every endpoint that uses `CheckAuth`, not just `/api/shutdown`.  The audit-log half of the original todo entry — "operator denials emit only `mcp_auth_success` and silently 403" — was already closed in a prior sitting (the unified-auth-funnel work); live-verified end-of-session that an operator-role MCP key hitting `/api/shutdown` correctly emits BOTH `mcp_auth_success` AND `forbidden reason=insufficient_role` log lines.  Build-verified studio Release; live-verification of the new response-body string deferred to next-session-Claude (j9t shut down at session end and didn't auto-restart).  Removed the §5i `POST /api/shutdown` entry from `todo.md`.
+
+### What's verified
+
+| Step | Result |
+|---|---|
+| Studio Debug build | clean |
+| Studio Release build | clean |
+| Engine Debug build | clean |
+| Engine Release build | clean |
+| Edition isolation (Engine ~1 MB smaller than Studio Release) | confirmed (~1.08 MB delta) |
+| 28-test assistant non-AI suite | 28/28 |
+| `ai-zip-demo` (3 ai_call + 1 zip shell task) | 4/4 succeeded |
+| `bookSummaryPipeline` (per-item fan-out) | 16 tasks succeeded, 3 freshness-skipped (extractChapters / combineSummaries / convertToMarkdown — expected) |
+| `cyber2` (Python parse + ai_call cross-task) | succeeded (parse_ssh_log freshness-skipped from prior cached output, analyze_threats ran on the cached attack_stats.json via cross-task `../../../workflows/cyber2/...` path that fix #2 now allows) |
+| `postgresDemo` (12 tasks: db_query + ai_call + write_analysis fan-out) | 12/12 succeeded |
+| 30 workflows registered after reload | confirmed (regression fix #1 above) |
+
+What's NOT directly verified (defer to sitting 13 / negative-path test fixtures):
+- Hostile-path rejection branches in the new aiCallTaskExecutor `ConfineUnderProjectRoot` gates.
+- Negative-`timeout_ms` / negative-`max_attempts` / negative-`backoff_ms` rejection in workflowJsonParser.
+- Element-count cap rejection branches (no test JCWF hits the 1000-tasks / 10000-edges limits today).
+- `MAX_CHOICES=64` overflow in replyParserAPI1 (would need a mock provider returning n>64 choices).
+- File-size cap rejections (16 MB filterManifest, 100 MB ReadTextFile, 64 MB transcript).
+- markitdown allowlist rejection (no test fixture with a hostile filename today).
+- Schema-validator regex pre-compilation failure path (no test fixture with an invalid pattern).
+- Sidecar JSON injection via crafted `temperature` (mock-provider workflow).
+
+### Open items / next-session candidates
+
+**Sitting 13** — horizontal sweeps + D1 close-out + audit republish:
+- `App::g_App` / `Core::g_Core` null-deref defense across D1 (safety MEDIUM 5; horizontal sweep, 1 fix × N files).
+- Logger fail-path context completeness across D1 surfaces still missing runId/workflowId (safety MEDIUM).
+- Log-injection sanitisation across attacker-influenced log args at the format-arg boundary (cyber MEDIUMs from sittings 7+9 + new ones from sitting 12).
+- `[[nodiscard]]` sweep on bool-returning public APIs in the D1 surface (mechanical attribute-add).
+- `WriteTextFile` atomic-rename refactor across all consumers (deferred from sitting 12b).
+- Chunked-aggregator `m_RequestPool` raw pointer → `std::weak_ptr<AiRequestPool>` lifetime fence (deferred from sitting 12b).
+- Internal-path leak in error messages across D1 (deferred from sitting 12b).
+- Audit-citation cleanup sweep — workflow README still has at least one "Sitting 1's taskWorkingDirectory" mention from earlier sittings; tighten per `feedback_no_audit_traces_in_code`.
+- Dashboard WS reconnect / lockout interaction (defensive UX issue captured under sitting-4 verification).
+- **D1 close-out:** publish refreshed `combinedCyberSecAudit.md` + `combinedSafetyAudit.md` to `doc/`; verify the post-D1 audit shows zero remaining HIGHs in workflow orchestration; tick the `cybersec-hardening-dev-plan.md` + `cpp-safety-hardening-dev-plan.md` checkmarks.
+
+**JC commit plan** — "part 5 of the cyber sec and C++ safety audit" covering sittings 6-13 as one bundle, after sitting 13 closes.
+
+### Gotchas next-session-Claude should know
+
+- **Parse-time path gates must allow `..` segments.**  Shipped JCWFs use `working_directory: "../../queue/<workflow>/<task>"` to navigate from `workflows/<id>/` up to the project-root-anchored queue tree.  Same pattern for ai_call cross-task data flow (`../../../workflows/<id>/<other_task>/output.json`).  The parse-time syntactic gate (`IsAcceptedRelativePath` in `workflowJsonParserDetails.h`) only rejects empty/overlength/absolute; the canonical-form `..`-traversal escape is the consumer-side gate's responsibility (`ConfineUnderProjectRoot`).  Both fail closed.
+- **AI-call queue-binding paths confine to project root, not task working directory.**  `MaterializeCntxFilesFromQueueBinding` and `MaterializeProbFilesFromQueueBinding` use `ConfineUnderProjectRoot` directly.  Cross-task data flow is the documented JCWF pattern; a task-folder-only gate would break it.
+- **`LOG_APP_DEBUG` doesn't exist in this codebase.**  Use `LOG_APP_TRACE` for the lowest verbosity level.  spdlog has trace/info/warn/error/critical; we never wired a "debug" macro.
+- **`feedback_simdjson_only` blocked the audit's "use nlohmann/json" recommendation.**  When audit findings recommend a different JSON library, push back — `JsonHelper::EscapeJsonString` is the project's RFC 8259-compliant escaper, simdjson is the only parser, the docs at `engine/json/json.md` are authoritative.
+- **`std::regex` in adhoc rewrite is gone.**  `RewriteWorkflowId` uses simdjson DOM parse-and-rebuild — `<regex>` include removed from `adhocWorkflowManager.cpp`.  The pattern (parse → walk top-level fields → emit canonical with one field replaced) generalises to any JSON-rewrite task; reference for any future JSON-mutation work.
+- **simdjson `dom::element_type` is a char-literal enum** (`ARRAY='['`, `NULL_VALUE='n'`, etc.) — NOT a 0..N enum.  A `static_assert(static_cast<int>(...::ARRAY) == 7, ...)` won't compile.  Use a `default:` arm + comment, or anchor on the actual character values if a static_assert is needed.
+- **simdjson DOM elements borrow from `dom::parser`'s arena.**  Member declaration order in `SchemaValidator::Impl` matters: `m_Parser` must be declared BEFORE `m_SchemaRoot` and `m_Defs` so reverse-destruction-order destroys the borrowing elements first.  Lifetime-invariant comment block in the header makes this explicit; do not move `m_Parser` later in the declaration list.
+- **OpenSSL is vendored at `vendor/openssl/`** and always available — there is no "no-OpenSSL" build configuration.  When extending crypto-bearing code, drop `#if HAS_OPENSSL_SHA` fallbacks (they're dead code AND a security weak spot, since `std::hash` is collision-prone).
+- **`feedback_session_handoff_log` requires this entry to be self-contained** — newest-on-top, fresh-Claude can pick up without scrolling further.  Always read this entry first before picking up "let's keep going" from JC.
+
+---
+
+## 2026-05-06 (S3=D1 sittings 6-11 + audit-citation sweep + Windows CI fix) → next session
+
+Big session — six sittings landed (sittings 6, 7, 8, 9, 10, 11), three tracked-doc sweeps, a cross-codebase audit-citation cleanup, plus a Windows CI fix from yesterday's check-in.  S3=D1 is now 11/13 sittings done.  **The lone CRITICAL in the entire fresh cyber-sec audit is closed** (sitting 9, dbQueryCloudTaskExecutor SQL injection — closed structurally via trust-model + blast-radius caps rather than parameterized-query rewrite, since `query` IS the SQL the author wrote).
+
+Tomorrow: sitting 12 (parser cluster + aiCallTaskExecutor folded in) + sitting 13 (horizontal sweeps + D1 close-out + audit republish).  JC's commit plan: "part 5 of the cyber sec and C++ safety audit" covering sittings 6-13 as one bundle.
+
+### What landed
+
+**Sitting 6 — `triggerEngine.{h,cpp}`** (2 safety HIGH + 6 safety MEDIUM + 2 cyber LOW).  Email-poll **identity-based lookup** instead of vector-index across the inter-lock window (concurrent `ClearWorkflowTriggers` would have misrouted IMAP watermarks otherwise); `static_assert` on `FileEventType` count; TriggerCallback lifetime contract in header doc; `GetWebhookTrigger` bounds check; `~TriggerEngine` try/catch; WARN→ERROR log promotion for unrecoverable email/cloud failures with workflowId/triggerId context; `NormalizePath` routes through `application/file/pathConfinement.h::ConfineUnderProjectRoot` (registration AND event side, so embedded `..` can't prefix-match a watched directory); webhook secret-handling discipline doc.
+
+**Sitting 7 — `aiRequestPool.{h,cpp}`** (1 structural safety HIGH + 1 doc-only safety HIGH + 4 safety MEDIUM + 2 cyber MEDIUM + 3 cyber LOW).  `m_DirectDispatchInflight` race fixed via per-submission `shared_ptr<atomic_flag>` captured into the curlCallback (replaces the broken `if (load > 0) --` check-then-act race that could underflow `size_t` to `SIZE_MAX`).  All four path-normalization sites converged onto `ConfineUnderProjectRoot` (insert in `RegisterPendingWorkflowTask`, lookup in `OnRequestFailed` / `Submit` log-attribution / `Submit` cancel-key build) — same canonical form across insert/lookup/cancel matching.  10 MB cap on `OnOutputFileCreated` reads.  Plus: `OnOutputFileCreated` early-return ERROR log, `static_assert` on `InterfaceType::NumAPIs`, threading-discipline doc block.
+
+**Sitting 8 — `adhocWorkflowManager` + `workflowRegistry` (bundled)** (4 safety HIGH + 6 safety MEDIUM + 1 cyber MEDIUM + 1 cyber LOW).  WorkflowRegistry: `mutable std::mutex m_Mutex` covering every public method; caught + fixed a recursive-lock deadlock in `GetSubWorkflowDependencyGraph` → extracted `TryGetWorkflowIdByFilePathLocked`; `SaveOrUpdateWorkflowFromJson` exception-safety wrapper with the m_Workflows insert as the LAST step inside the try; `ConfineUnderProjectRoot` on save + delete; `GetBrokenWorkflows` returns by-value snapshot.  AdhocWorkflowManager: `m_ReaperLifecycleMutex` serializing Start/Stop on the std::thread member; `m_ReaperCv` for fast shutdown wake; `WriteMeta` returns `[[nodiscard]] bool` so a failed meta.json triggers folder rollback rather than leaving an un-attributable run on disk; 4 MB JCWF size cap on Stage; full Stage cleanup on every post-create-directories failure path.
+
+**Sitting 9 — `dbQueryCloudTaskExecutor` + `polarionClient`** (1 cyber CRITICAL + 2 cyber HIGH + 1 safety HIGH + 4 cyber MEDIUM + 4 safety MEDIUM + 1 cyber LOW).  **Lone audit CRITICAL closed.**  dbQuery: trust-model header doc + new params `max_rows` (100k/1M ceiling), `max_output_bytes` (100MB/1GB ceiling), `statement_timeout_ms` (60s/600s ceiling) with server-side enforcement via `SET statement_timeout`; `output_file` must be bare filename + `ConfineUnderProjectRoot`; `unique_ptr<PGconn/PGresult>` with custom deleters (RAII); `PQconnectdb` nullptr check; `TruncateLibpqError` 250-char cap to prevent DB schema leak through error messages; full fail-path log discipline.  PolarionClient: `IsValidFilesystemId` allowlist for `filter.m_Id` + `ConfineUnderProjectRoot` + post-write `file.good()` check; `IsValidPolarionId` URL component allowlist at all 5 URL builders; `SanitizeErrorBody` (200-byte cap + SanitizeUtf8) on HTTP error body fragments; `CURLOPT_MAXFILESIZE = 100MB` on download + path containment on `outputPath`; `JsonHelper::EscapeJsonString` convergence in WriteItemFile.
+
+**Sitting 10 — `shellTaskExecutor.{h,cpp}`** (2 cyber HIGH + 1 cyber MED + 1 cyber LOW + 1 safety HIGH + 4 safety MEDIUM).  Plan brief said "cyber axis empty" but a closer read found the audit's HIGH on `JoinArgumentsForSystem` was real — non-whitespace args slipped through unquoted, so `$(rm -rf /)` would pass `IsSafeArgument` (didn't reject `$ ( )`) and reach the shell as command substitution.  Fix: **always single-quote every arg** in `JoinArgumentsForSystem` regardless of whitespace + extended `IsSafeArgument` blocklist with `$ ( ) \`.  `ValidateScriptPath` rewritten on `ConfineUnderProjectRoot` + explicit `lexically_relative(<projectRoot>/scripts/)`.  `s_WindowsShell` → `std::atomic<WindowsShell>` with acquire/release.  `PipePtr` RAII (unique_ptr + custom `PipeCloser` deleter) — pclose runs on every exit path.  Per-task unique `.ja_stderr_<pid>_<counter>.tmp` filename eliminates cross-task race + symlink-bait predictability.  `JARVIS_PORT` injected into the spawned child env now reads from `Core::g_Core->GetConfig().m_Port` (8443 fallback) instead of hardcoded 8080.
+
+**Sitting 11 — task-executor + small-file bundle** (5 cyber HIGH + 1 cyber MEDIUM closed across 6 files).  `subWorkflowTaskExecutor::Execute` — `m_WorkflowFile` → `ConfineUnderProjectRoot`.  `taskExecutorRegistry::MaterializeFiles` — `targetFilename` `lexically_relative(taskWorkingDirectoryPath)` containment.  `pythonTaskExecutor::ValidateFileInputsExist` — `ConfineUnderProjectRoot` on each `m_FileInputs[i]` (live-verified via cyber2 Python task running OpenSSH_2k.log input).  `workflowFileIndex::FindByRelativePath` — `lexically_relative(m_RootDirectory)` containment.  **`workflowTriggerBinder::ParseWebhookParams` — webhook secret now MANDATORY** (every failure mode returns false with ERROR log; caller no longer ignores the return value, so an empty-secret webhook is never registered — load-bearing fix because pre-fix the upstream gate-passing masked a downstream gate-broken).  `taskPathResolver` — pass-through trust-model doc in header.  **aiCallTaskExecutor (1796 lines) deferred** to sitting 12 — too big to fold without busting scope.
+
+**Three tracked-doc sweeps:**
+- **After sittings 6/7/8** — `application/file/README.md` pathConfinement use-site list extended (8 new entries); `application/workflow/README.md` rows for workflowRegistry + triggerEngine + aiRequestPool + new adhocWorkflowManager row; `doc/architecture.md` Key Design Decisions for inflight-counter atomic-flag + identity-not-index lookup + WorkflowRegistry single-mutex + AdhocWorkflowManager reaper CV; `doc/api-endpoints.md` adds `413 jcwf_too_large`.
+- **After sittings 10/11** — pathConfinement use-site list grew to 12 sites; new section listing scope-tighter `lexically_relative(<base>)` containment sites; `doc/cyber security.md` webhook-secret-mandatory wording fixed (now both editions); `doc/architecture.md` Key Design Decisions row for shell-task `args[]` always-quote; workflow README rows updated for shellTaskExecutor + small files (deduped a duplicate workflowFileIndex row I introduced mid-edit); `doc/api-endpoints.md` already current.
+- **Final sweep (today)** — `doc/JC_Workflow_Specification.md` §3.2.6 webhook secret marked **REQUIRED** (was "optional"); `doc/cloud-integration.md` §10 db_query param table extended with `max_rows` / `max_output_bytes` / `statement_timeout_ms` + trust-model paragraph.
+
+**Audit-citation cleanup sweep (cross-codebase).**  JC caught a slip in sitting 10 ("don't talk about the cyber audit in code comments") so I scrubbed all session-trace citations from the C++ source per `feedback_no_audit_traces_in_code`.  **38 references stripped across 17 files** — "audit's HIGH/CRITICAL/MEDIUM X", "Per cyber-sec audit Y", "(safety audit Z)", "sitting N", "§5i" / "§14".  Pattern applied uniformly: keep the technical reasoning, drop the citation.  Comments now stand on their own without invoking the session that introduced them.  Heaviest hitters: `workflowRuntimeManager.cpp` (8), `webServer.cpp` (7), `connectorHttp.h` (5), various cloud executors (1-3 each).  **Preserved as legitimate**: AWS CloudTrail "audit" terminology in `credential.h`; "downstream audit logging" referring to operational `LOG_SECURITY` lines; `audit_*` log keys; `doc/cyber security.md` cross-refs.
+
+**Windows CI fix.**  Yesterday's check-in (S3=D1 sittings 1-5) failed Windows CI at `workflowRuntimeManager.cpp:620` — `gai_strerror` is a Windows macro that expands to `gai_strerrorW` returning `WCHAR*` when `_UNICODE` is defined, breaking the ternary `(gai == 0 ? "no addresses" : ::gai_strerror(gai))` against the narrow string literal.  Fix: `#if defined(_WIN32)` use the explicit ANSI variant `gai_strerrorA`, else use `gai_strerror`.  Linux/macOS CI passed because their `gai_strerror` returns `char*` directly.  All 4 binaries built clean post-fix.
+
+**Earlier in the session — n8n callback integration.**  JC was getting the callback refused with `scheme not https`.  Confirmed two-layer SSRF gate (scheme + DNS-resolved address) in sitting 3's `IsCallbackUrlAllowed` is doing exactly what it's designed to do — `localhost`/`127.0.0.1` is rejected as loopback even with HTTPS.  Cleanest workaround for local-dev: cloudflared HTTPS tunnel (`cloudflared tunnel --url http://localhost:5678` → `https://<random>.trycloudflare.com`).  JC verified end-to-end: hamburg-tourist-day-planner → j9t → cloudflared callback → n8n received HTTP 200.
+
+### What's verified
+
+| Step | Result |
+|---|---|
+| Studio Debug build | clean |
+| Studio Release build | clean |
+| Engine Debug build | clean |
+| Engine Release build | clean |
+| Edition isolation invariant (Engine Release ~1 MB smaller than Studio Release) | confirmed |
+| 28-test assistant non-AI suite (after every sitting) | 28/28 each time |
+| `ai-zip-demo` (4 ai_call + zip_responses shell task) | succeeded across all 6 sittings' verifications |
+| `bookSummaryPipeline` (16 ai_call + 2 freshness-skipped Python) | succeeded across all 6 sittings' verifications |
+| `cyber2` after clean (Python via fork/exec/poll watchdog) | succeeded across all 6 sittings' verifications (one transient AI provider timeout in sitting 7's first attempt — retry succeeded; not a regression) |
+| `postgresDemo` (7 db_query executions) | succeeded — full live verification of sitting 9's RAII handles + statement_timeout + row/byte caps + output containment |
+| **Live n8n → j9t hamburg-tourist-day-planner → cloudflared callback round-trip** | **HTTP 200**, JC user-verified |
+| **Live adhoc workflow submission** | full lifecycle: Stage → SaveOrUpdateWorkflowFromJson → WriteMeta → run → OnRunCompleted → on_completion cleanup → user-slug parent dir cleaned |
+| Hamburg webhook still registers (`secret=<set>`) post-sitting-11 | confirmed via startup log |
+
+What's not directly verified:
+- **Hostile-path rejection branches** in all the sittings 6-11 cyber-HIGH gates.  Code review only; bundled into the "Negative-path verification fixtures for D1 hardening" entry in `todo.md`.
+- **Inflight-counter race under sync curlCallback** (sitting 7).  Needs a mock dispatcher — folds into the existing "Per-interface mock transport for parser fault injection" entry (MockTransport configured to return synchronously is the verification vector).
+- **WorkflowRegistry mutex stress under concurrent reload + REST-editor PUT** (sitting 8).
+- **JCWF size cap negative path at 4 MB** (sitting 8) and `OnOutputFileCreated` size cap at 10 MB (sitting 7).
+- **shellTaskExecutor `s_WindowsShell` atomic race** under concurrent Probe+Get (Windows-only path).
+- **PolarionClient end-to-end** (sitting 9).  No Polarion fixture available.
+- **db_query CRITICAL rejection branches** (max_rows / max_output_bytes / statement_timeout / output_file separator).
+
+### Open items / next-session candidates
+
+- **Sitting 12** (planned) — parser cluster + `aiCallTaskExecutor` folded in.  Files: `workflowJsonParser`, `aiTranscript`, `filterManifest`, `scriptCatalog`, `schemaValidator`, `replyParserAPI1`, plus `aiCallTaskExecutor` (1796 lines).  Picks up the deferred `RewriteWorkflowId` simdjson rewrite from sitting 8 as part of the same simdjson surface.  May split 12a (parser cluster) / 12b (aiCallTaskExecutor) if too big.
+- **Sitting 13** (planned) — horizontal sweeps + D1 close-out.  `App::g_App` / `Core::g_Core` null-deref defense, logger fail-path context completeness, log-injection sanitisation breadth, `[[nodiscard]]` sweep, dashboard WS reconnect / lockout interaction, publish refreshed `combinedCyberSecAudit.md` + `combinedSafetyAudit.md` to `doc/`, tick the dev-plan checklists.
+- **JC commit plan** — "part 5 of the cyber sec and C++ safety audit" covering sittings 6-13 as one bundle, after sitting 13 closes.
+- **Carryover from `todo.md`** — 6 entries added during sittings 7-9 (SanitizeUserSlug collision, SecureString-only HTTP path, atomic-write pattern, ofstream exception-safety, std::optional/std::expected API-shape sweep, negative-path verification fixtures); plus the 9 pre-existing items.
+- **Audit posture at session end:** **0 cyber CRITICAL** (was 1 at session start), HIGH-and-above density steadily collapsing in the workflow-orchestration domain.  Most remaining HIGHs in D1 are in sitting 12's targets (the parser cluster + aiCallTaskExecutor).
+
+### Gotchas next-session-Claude should know
+
+- **Don't cite the audit in code comments.**  `feedback_no_audit_traces_in_code` was tightened today after JC caught a slip — the rule covers "audit's HIGH X" / "cyber-sec audit Y" / "safety audit Z" / "sitting N" / "§5i" — anything that ties a code comment to a session/audit artifact.  Tracked-doc references (e.g. "see `doc/cyber security.md` §..."), AWS CloudTrail terminology, operational audit-log keys, "downstream audit logging" — all legitimate, those stay.  When writing a comment that justifies a defense, frame it as "what this guards against" rather than "which audit finding this closes".
+- **Webhook secret is now MANDATORY in both editions.**  `WorkflowTriggerBinder::ParseWebhookParams` fail-closes on every failure mode (empty params, parse error, non-object root, missing/empty `secret`); the caller now checks the return value and skips registration entirely.  The TriggerEngine validator additionally refuses empty-secret registrations.  Tracked in `doc/JC_Workflow_Specification.md` §3.2.6 + `doc/cyber security.md` + `doc/architecture.md`.  Hamburg-tourist-day-planner has `params.secret = "demo-shared-secret-..."` so it still registers; any future webhook JCWF without a secret will be refused at parse time with an ERROR log.
+- **Shell-task `args[]` are ALWAYS single-quoted.**  Pre-sitting-10, `JoinArgumentsForSystem` only quoted whitespace-bearing args, so a literal `$(rm -rf /)` arg passed `IsSafeArgument` and reached the shell as command substitution.  Post-fix: every arg is single-quoted with embedded-quote escape (`'\''`); globbing, variable expansion, and command substitution are neutralised regardless of arg content.  Glob-expansion expectations belong in the `command` field (concatenated raw); `args[]` is for positional arguments and SHOULD be literal.  `IsSafeArgument` extends the blocklist to `; & | > < ' " \` $ ( ) \\` as defense in depth.
+- **`db_query` is operator-trusted SQL with three blast-radius caps.**  Don't try to parameterize the `query` field — it IS the SQL the author wrote.  Trust model lives in: operator-gate-at-submission + DB-side permissions (operator MUST configure read-only credentials for read-only workloads) + `max_rows` (100k default, 1M ceiling) + `max_output_bytes` (100MB default, 1GB ceiling) + `statement_timeout_ms` (60s default, 600s ceiling).  Documented in `doc/cloud-integration.md` §10 + the header trust-model block in `dbQueryCloudTaskExecutor.h`.
+- **`TaskPathResolver` is pure pass-through — does NOT enforce containment.**  Per the new header trust-model block, callers MUST gate any external path through `application/file/pathConfinement.h::ConfineUnderProjectRoot` BEFORE handing the resolved value to a filesystem-touching API.  See the established pattern: pythonEngine sandboxing, workflowRuntimeManager CleanWorkflow, triggerEngine NormalizePath, aiRequestPool four sites, workflowRegistry write/delete, shellTaskExecutor ValidateScriptPath, subWorkflowTaskExecutor m_WorkflowFile, pythonTaskExecutor m_FileInputs, dbQueryCloudTaskExecutor output path.  Plus the scope-tighter `lexically_relative(<base>)` pattern at taskExecutorRegistry MaterializeFiles + workflowFileIndex FindByRelativePath.  Full inventory in `application/file/README.md`.
+- **`gai_strerror` on Windows expands to `gai_strerrorW` (WCHAR\*) when `_UNICODE` is defined.**  Use `gai_strerrorA` explicitly on Windows.  Pattern in `workflowRuntimeManager.cpp:620` is the worked example.
+- **Sittings 12 is bigger than originally planned.**  The "parser cluster" (6 files) + `aiCallTaskExecutor` (1796 lines) bundle may need splitting into 12a / 12b.  The `aiCallTaskExecutor` size is comparable to `workflowRuntimeManager` and `polarionClient.cpp` was 816 lines for sitting 9 — this is bigger.  Plan accordingly; the natural escape hatch is splitting.
+- **Local n8n callback integration uses cloudflared.**  `cloudflared tunnel --url http://localhost:5678` → public HTTPS URL → use as `callbackUrl` in n8n trigger payload.  trycloudflare URLs are ephemeral (regenerate per cloudflared session); never bake one into a JCWF.  See memory `project_n8n_callback_tunnel`.
+
+---
+
 ## 2026-05-05 (S3=D1 sittings 2-5 + remaining-sitting plan) → next session
 
 > **Date note:** the previous entry below is dated `2026-05-06` but was actually written 2026-05-05; this entry uses the system's actual date.  Newest-on-top still holds when reading head-down.

@@ -51,10 +51,9 @@ namespace AIAssistant
     // URL-encode an S3 key or prefix for safe interpolation into a request URL.
     // Per RFC 3986 + AWS S3 conventions, `/` is preserved as the path delimiter
     // (S3 keys can contain `/` to express prefixes); every other byte is
-    // percent-encoded via curl_easy_escape.  This closes the audit's HIGH
-    // "Unencoded prefix and key Appended to URL" finding by ensuring no
-    // injection chars (`?`, `#`, `&`, `=`, `%`, whitespace, control chars,
-    // etc.) reach the URL unencoded.
+    // percent-encoded via curl_easy_escape.  Ensures no injection chars
+    // (`?`, `#`, `&`, `=`, `%`, whitespace, control chars, etc.) reach the URL
+    // unencoded.
     static std::string UrlEncodeS3Key(std::string const& key)
     {
         CURL* encoderCurl = curl_easy_init();
@@ -343,9 +342,9 @@ namespace AIAssistant
             }
 
             auto const fileSize = file.tellg();
-            // Cap on upload file size — closes the audit's CRITICAL "uncontrolled
-            // file read into memory" finding for S3.  256 MB matches Phase 9b's
-            // existing CURLOPT_MAXFILESIZE_LARGE for downloads.
+            // Cap on upload file size to bound peak RAM during the read-and-
+            // POST cycle.  256 MB matches the existing CURLOPT_MAXFILESIZE_LARGE
+            // for downloads.
             static constexpr std::streamoff kMaxS3UploadBytes = 256 * 1024 * 1024;
             if (fileSize < 0 || fileSize > kMaxS3UploadBytes)
             {

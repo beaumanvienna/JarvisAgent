@@ -68,6 +68,47 @@ namespace AIAssistant
     //  - This pool must not require blocking waits for the workflow runtime.
     //  - Timeouts are handled via Update(), which should be called periodically.
     //  - Completions are queued and can be drained non-blocking via TryPopCompletion().
+    //
+    // --- Threading & lifetime contract -------------------------------------
+    // Mutex layout:
+    //   m_MapMutex         guards m_PendingRequests
+    //   m_CompletedMutex   guards m_Completed
+    //   m_OutputPathMutex  guards m_PendingByOutputPath
+    //   m_IdMutex          guards m_NextRequestId
+    //   PendingEntry::mutex guards per-entry mutable state (response/error/flags)
+    //
+    // Lock-acquire order when nesting is required (top → bottom):
+    //   m_OutputPathMutex → PendingEntry::mutex
+    //   m_MapMutex        → PendingEntry::mutex
+    // The two pool-level mutexes (m_OutputPathMutex, m_MapMutex) are never
+    // held simultaneously; deadlock-free by construction.
+    //
+    // Path containment:
+    //   Every filesystem-touching path here (filePath into WriteTextFile,
+    //   fullFilePath into OnOutputFileCreated, expectedOutputPath into
+    //   RegisterPendingWorkflowTask / OnRequestFailed / Submit's cancel-key
+    //   builder) is gated by `application/file/pathConfinement.h::
+    //   ConfineUnderProjectRoot()`.  The same canonical form is used for
+    //   m_PendingByOutputPath insertion and lookup, so a hostile JCWF
+    //   `expected_output` field can't escape the project tree on either side
+    //   of the comparison.
+    //
+    // Erasure invariant for m_PendingByOutputPath:
+    //   Each entry is inserted exactly once (in RegisterPendingWorkflowTask)
+    //   and erased by exactly one of OnOutputFileCreated() / OnRequestFailed()
+    //   — whichever fires first.  The OTHER call's lookup returns end() and
+    //   short-circuits via `return false`, so a "double-remove" is structurally
+    //   impossible (it's a "second-lookup-misses-and-bails" pattern).  Do not
+    //   add new erasure sites without re-checking this invariant.
+    //
+    // App::g_App downcast:
+    //   `dynamic_cast<JarvisAgent*>(App::g_App)` appears at the dispatcher
+    //   resolution sites (Submit, CancelRequestsForRun).  The runtime contract
+    //   is that the application's global is always JarvisAgent in production
+    //   builds, but defense in depth: the nullptr branch is handled at every
+    //   call site (ERROR-log + early return without touching the inflight
+    //   counter).  If a future refactor wants to remove dynamic_cast, the
+    //   replacement should still preserve the nullptr-recovery behaviour.
     class AiRequestPool final
     {
     public:
@@ -107,14 +148,14 @@ namespace AIAssistant
         // artifact has been written.  Looks up the pending entry by canonical path
         // and signals completion to blocking waiters / the workflow runtime queue.
         // Returns true if the path matched a registered expected output.
-        bool OnOutputFileCreated(std::string const& fullFilePath);
+        [[nodiscard]] bool OnOutputFileCreated(std::string const& fullFilePath);
 
         // Symmetric failure path: called when the AI request errored before any
         // .output.* file could be written (HTTP failure, parse error, transport
         // exception). Marks the matching pending entry failed and queues a failed
         // completion so the workflow runtime transitions out of waiting_external.
         // Returns true if the path matched a registered expected output.
-        bool OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage);
+        [[nodiscard]] bool OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage);
 
         // Resets the file-activity watchdog for the given request.
         // Call after each queue-file write so the watchdog knows the executor is still making progress.
@@ -123,8 +164,8 @@ namespace AIAssistant
 
         // Non-blocking: if the request is completed (success or failure), returns true and consumes the result.
         // If not completed yet, returns false.
-        bool TryConsumeResult(AiRequestHandle const& requestHandle, bool& outWasFailed, std::string& outResponseText,
-                              std::string& outErrorMessage);
+        [[nodiscard]] bool TryConsumeResult(AiRequestHandle const& requestHandle, bool& outWasFailed,
+                                            std::string& outResponseText, std::string& outErrorMessage);
 
         // Non-blocking: pop the next queued workflow completion (if any).
         //
@@ -132,7 +173,7 @@ namespace AIAssistant
         // - This is intended for the tick-based workflow runtime.
         // - The consumer should call Forget(handle) when it is done with the request entry,
         //   OR use TryConsumeResult() instead of this queue mechanism (not both).
-        bool TryPopCompletion(AiRequestCompletion& outCompletion);
+        [[nodiscard]] bool TryPopCompletion(AiRequestCompletion& outCompletion);
 
         // Periodic maintenance: applies timeouts to pending requests.
         // Should be called from JarvisAgent::OnUpdate().
@@ -140,8 +181,8 @@ namespace AIAssistant
 
         // Waits for completion (or timeout). Returns true on success, false on failure/timeout.
         // NOTE: Prefer TryPopCompletion()+Update() for workflow runtime (non-blocking).
-        bool WaitForCompletion(AiRequestHandle const& requestHandle, uint64_t const timeoutMs, std::string& outResponseText,
-                               std::string& outErrorMessage);
+        [[nodiscard]] bool WaitForCompletion(AiRequestHandle const& requestHandle, uint64_t const timeoutMs,
+                                             std::string& outResponseText, std::string& outErrorMessage);
 
         // Removes any pending entry (safe to call even if the entry does not exist).
         void Forget(AiRequestHandle const& requestHandle);
@@ -165,7 +206,7 @@ namespace AIAssistant
         // Returns false if dispatch could not be submitted (no dispatcher, invalid interface,
         // empty body). On false, `onReply` is not invoked.
         using ReplyCallback = std::function<void(AiReply const&)>;
-        bool Submit(AiInvocation const& envelope, ReplyCallback onReply);
+        [[nodiscard]] bool Submit(AiInvocation const& envelope, ReplyCallback onReply);
 
         // Count of envelope-based dispatches currently in flight.  Consumed by the TUI/dashboard
         // "queries in flight" LED and the `/api/status` endpoint.

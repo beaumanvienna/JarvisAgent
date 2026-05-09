@@ -29,7 +29,7 @@
 
 namespace AIAssistant
 {
-    // Structure-aware chunk planner (§8 Phase 6).
+    // Structure-aware chunk planner.
     //
     // Given a body, a context budget (in estimated tokens), and the prompt overhead,
     // returns N chunks that each fit inside (budget - overhead).  The planner prefers

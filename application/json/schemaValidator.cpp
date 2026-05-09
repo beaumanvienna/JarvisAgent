@@ -24,17 +24,28 @@
 #include "json/schemaValidator.h"
 
 #include <cmath>
+#include <iterator>
+#include <optional>
 #include <regex>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "engine.h"
+
+// simdjson convention used throughout this file:
+//   `auto err = element["key"].get(out)` returns a simdjson error_code where
+//   0 == success and non-zero == failure.  The pattern `if (!element[k].get(out))`
+//   therefore enters the block ON SUCCESS — the `!` inverts the success-as-zero
+//   convention into a boolean truth.  Every such site below follows this
+//   convention; do not refactor any of them to `if (element[k].get(out))`
+//   without inverting the body, that flip silently skips the validation.
 
 namespace AIAssistant
 {
     namespace
     {
-        bool IsIntegerValue(simdjson::dom::element const& element)
+        [[nodiscard]] bool IsIntegerValue(simdjson::dom::element const& element)
         {
             if (element.is<int64_t>() || element.is<uint64_t>())
             {
@@ -48,9 +59,14 @@ namespace AIAssistant
             return false;
         }
 
-        std::string ElementTypeName(simdjson::dom::element const& element)
+        [[nodiscard]] std::string ElementTypeName(simdjson::dom::element const& element)
         {
             using namespace simdjson;
+            // simdjson::dom::element_type is a non-owned third-party enum; the
+            // project's no-`default:`-over-closed-enums rule applies only to
+            // enums we own.  -Wswitch is on, so adding a new simdjson variant
+            // will surface as a compile warning that points here.  The trailing
+            // "unknown" return is the safety fallback.
             switch (element.type())
             {
                 case dom::element_type::NULL_VALUE: return "null";
@@ -65,7 +81,7 @@ namespace AIAssistant
             return "unknown";
         }
 
-        std::string ElementToString(simdjson::dom::element const& element)
+        [[nodiscard]] std::string ElementToString(simdjson::dom::element const& element)
         {
             std::ostringstream stream;
             stream << element;
@@ -141,8 +157,16 @@ namespace AIAssistant
         }
 
     private:
+        // Walks the schema recursively, validating supported-keyword usage
+        // AND pre-compiling every `pattern` regex into m_RegexCache.  Doing
+        // both here means: (a) load-time rejects schemas using rejected
+        // keywords (early failure with `outError` populated), (b) a malformed
+        // regex breaks the load, never a per-validate call, and (c) Validate
+        // does an O(1) cache lookup instead of an O(N) regex compile per
+        // string-constraint check.  Drops `const` because m_RegexCache is
+        // populated here.
         bool CheckSupportedKeywords(simdjson::dom::element schema, std::string const& pointer,
-                                     std::string& outError) const
+                                     std::string& outError)
         {
             using namespace simdjson;
             static std::unordered_set<std::string> const kSupported = {
@@ -173,6 +197,31 @@ namespace AIAssistant
                 if (kSupported.count(key) == 0)
                 {
                     LOG_APP_INFO("SchemaValidator: unknown schema keyword '{}' at {} — ignored", key, pointer);
+                }
+                if (key == "pattern" && field.value.is_string())
+                {
+                    std::string_view patternView;
+                    if (!field.value.get(patternView))
+                    {
+                        std::string const patternStr(patternView);
+                        if (m_RegexCache.find(patternStr) == m_RegexCache.end())
+                        {
+                            try
+                            {
+                                m_RegexCache.emplace(patternStr, std::regex(patternStr));
+                            }
+                            catch (std::regex_error const& e)
+                            {
+                                outError = "invalid regex at " + pointer + "/pattern: " + e.what();
+                                return false;
+                            }
+                            catch (std::bad_alloc const&)
+                            {
+                                outError = "regex compile out-of-memory at " + pointer + "/pattern";
+                                return false;
+                            }
+                        }
+                    }
                 }
                 if (key == "properties" && field.value.is_object())
                 {
@@ -219,18 +268,23 @@ namespace AIAssistant
             return true;
         }
 
-        simdjson::dom::element ResolveRef(std::string const& ref) const
+        // Resolves a `#/$defs/<key>` reference.  Returns std::nullopt when the
+        // ref is malformed or the key is absent — emulates Rust's Option<T>
+        // and forces the caller to handle the absent case explicitly, instead
+        // of relying on a default-constructed simdjson element whose `.type()`
+        // is implementation-defined.
+        [[nodiscard]] std::optional<simdjson::dom::element> ResolveRef(std::string const& ref) const
         {
             std::string const prefix = "#/$defs/";
             if (ref.rfind(prefix, 0) != 0)
             {
-                return {};
+                return std::nullopt;
             }
             std::string const key = ref.substr(prefix.size());
             auto const iterator = m_Defs.find(key);
             if (iterator == m_Defs.end())
             {
-                return {};
+                return std::nullopt;
             }
             return iterator->second;
         }
@@ -250,10 +304,9 @@ namespace AIAssistant
                 std::string_view refView;
                 if (!refElement.get(refView))
                 {
-                    auto const resolved = ResolveRef(std::string(refView));
-                    if (resolved.type() != dom::element_type::NULL_VALUE)
+                    if (auto const resolved = ResolveRef(std::string(refView)); resolved.has_value())
                     {
-                        ValidateAgainst(resolved, value, pointer, errors);
+                        ValidateAgainst(*resolved, value, pointer, errors);
                         return;
                     }
                     errors.push_back({pointer, "unresolved $ref: " + std::string(refView)});
@@ -355,10 +408,9 @@ namespace AIAssistant
                 if (!anyMatched)
                 {
                     errors.push_back({pointer, "anyOf: no branch matched"});
-                    for (auto const& subError : lastSubErrors)
-                    {
-                        errors.push_back(subError);
-                    }
+                    errors.insert(errors.end(),
+                                  std::make_move_iterator(lastSubErrors.begin()),
+                                  std::make_move_iterator(lastSubErrors.end()));
                 }
             }
 
@@ -415,17 +467,21 @@ namespace AIAssistant
             std::string_view patternView;
             if (!schema["pattern"].get(patternView))
             {
-                try
+                std::string const patternStr(patternView);
+                auto const it = m_RegexCache.find(patternStr);
+                if (it == m_RegexCache.end())
                 {
-                    std::regex const pattern{std::string(patternView)};
-                    if (!std::regex_search(std::string(stringView), pattern))
-                    {
-                        errors.push_back({pointer, "string does not match pattern '" + std::string(patternView) + "'"});
-                    }
+                    // Pre-compilation in CheckSupportedKeywords should have
+                    // populated every pattern at load time.  A miss here means
+                    // the schema was mutated after load or load skipped a
+                    // branch — either is a load-side bug, surface it.
+                    errors.push_back({pointer, "internal: pattern '" + patternStr + "' not pre-compiled"});
+                    return;
                 }
-                catch (std::regex_error const& e)
+                std::string const stringCopy(stringView);
+                if (!std::regex_search(stringCopy, it->second))
                 {
-                    errors.push_back({pointer, std::string("invalid regex in schema: ") + e.what()});
+                    errors.push_back({pointer, "string does not match pattern '" + patternStr + "'"});
                 }
             }
         }
@@ -433,13 +489,26 @@ namespace AIAssistant
         void ValidateNumberConstraints(simdjson::dom::element schema, simdjson::dom::element value,
                                         std::string const& pointer, std::vector<ValidationError>& errors) const
         {
-            if (!value.is_number() && !value.is_int64() && !value.is_uint64())
+            using namespace simdjson;
+            // Explicit switch over the three numeric variants — replaces a
+            // ternary chain whose exhaustiveness was not obvious at a glance.
+            // The value_unsafe() calls are safe because the type is confirmed
+            // by the case arm.
+            double numberValue = 0.0;
+            switch (value.type())
             {
-                return;
+                case dom::element_type::DOUBLE:
+                    numberValue = value.get<double>().value_unsafe();
+                    break;
+                case dom::element_type::INT64:
+                    numberValue = static_cast<double>(value.get<int64_t>().value_unsafe());
+                    break;
+                case dom::element_type::UINT64:
+                    numberValue = static_cast<double>(value.get<uint64_t>().value_unsafe());
+                    break;
+                default:
+                    return;
             }
-            double const numberValue = value.is<double>() ? value.get<double>().value()
-                                        : value.is<int64_t>() ? static_cast<double>(value.get<int64_t>().value())
-                                                               : static_cast<double>(value.get<uint64_t>().value());
             double minimum = 0;
             if (!schema["minimum"].get(minimum))
             {
@@ -557,29 +626,42 @@ namespace AIAssistant
         }
 
     private:
+        // Lifetime invariant — m_Parser owns the simdjson arena into which
+        // m_SchemaRoot and every value in m_Defs hold pointers.  Members are
+        // destroyed in reverse declaration order, so m_Parser MUST be declared
+        // before m_SchemaRoot and m_Defs (it is below) — that way m_Parser is
+        // destroyed LAST and the borrowing elements are torn down first.
+        // Adding new simdjson::dom::element members below this line is fine;
+        // do not move m_Parser later in the declaration list.
         std::string m_SchemaJson;
         simdjson::dom::parser m_Parser;
         simdjson::dom::element m_SchemaRoot;
+        std::unordered_map<std::string, simdjson::dom::element> m_Defs;
+        // Pre-compiled patterns from CheckSupportedKeywords.  Read-only after
+        // load — no synchronisation needed for concurrent Validate() calls.
+        std::unordered_map<std::string, std::regex> m_RegexCache;
         bool m_IsLoaded = false;
         std::string m_LoadError;
-        std::unordered_map<std::string, simdjson::dom::element> m_Defs;
     };
 
-    SchemaValidator::SchemaValidator(std::string schemaJson) : m_Impl(std::make_unique<Impl>(std::move(schemaJson)))
+    SchemaValidator::SchemaValidator(std::string schemaJson)
+        : m_Impl(std::make_unique<Impl>(std::move(schemaJson)))
     {
-        m_IsLoaded = m_Impl->IsLoaded();
-        m_LoadError = m_Impl->LoadError();
     }
 
     SchemaValidator::~SchemaValidator() = default;
 
+    bool SchemaValidator::IsLoaded() const { return m_Impl->IsLoaded(); }
+
+    std::string const& SchemaValidator::LoadError() const { return m_Impl->LoadError(); }
+
     ValidationResult SchemaValidator::Validate(std::string const& documentJson) const
     {
-        if (!m_IsLoaded)
+        if (!m_Impl->IsLoaded())
         {
             ValidationResult result;
             result.m_Ok = false;
-            result.m_Errors.push_back({"", "schema not loaded: " + m_LoadError});
+            result.m_Errors.push_back({"", "schema not loaded: " + m_Impl->LoadError()});
             return result;
         }
         return m_Impl->Validate(documentJson);

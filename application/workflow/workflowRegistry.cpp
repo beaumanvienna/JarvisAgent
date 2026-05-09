@@ -25,6 +25,7 @@
 
 #include "engine.h"
 #include "core.h"
+#include "file/pathConfinement.h"
 #include "workflow/jcwfContainer.h"
 #include "workflow/workflowJsonParser.h"
 
@@ -68,11 +69,22 @@ namespace AIAssistant
         // -----------------------------------------------------------------
     } // namespace
 
-    void WorkflowRegistry::Clear() { m_Workflows.clear(); m_BrokenWorkflows.clear(); }
+    void WorkflowRegistry::Clear()
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        m_Workflows.clear();
+        m_BrokenWorkflows.clear();
+        m_LastContainerError.clear();
+    }
 
     bool WorkflowRegistry::LoadDirectory(std::filesystem::path const& workflowsDirectoryPath)
     {
-        Clear();
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        // Inline the Clear() body — calling Clear() here would re-acquire the
+        // (non-recursive) mutex and deadlock.
+        m_Workflows.clear();
+        m_BrokenWorkflows.clear();
+        m_LastContainerError.clear();
 
         if (workflowsDirectoryPath.empty())
         {
@@ -146,6 +158,7 @@ namespace AIAssistant
 
     std::vector<std::string> WorkflowRegistry::GetWorkflowIds() const
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         std::vector<std::string> workflowIds;
         workflowIds.reserve(m_Workflows.size());
 
@@ -160,6 +173,7 @@ namespace AIAssistant
 
     std::optional<WorkflowDefinition> WorkflowRegistry::GetWorkflow(std::string const& workflowId) const
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         auto const iterator = m_Workflows.find(workflowId);
         if (iterator == m_Workflows.end())
         {
@@ -167,6 +181,12 @@ namespace AIAssistant
         }
 
         return iterator->second; // copy (keeps call sites simple)
+    }
+
+    std::vector<WorkflowRegistry::BrokenWorkflow> WorkflowRegistry::GetBrokenWorkflows() const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+        return m_BrokenWorkflows; // by-value snapshot
     }
 
     // LoadWorkflowFile is deprecated — .jcwf files are always zip containers now.
@@ -181,6 +201,7 @@ namespace AIAssistant
 
     bool WorkflowRegistry::ValidateAll() const
     {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
         bool allValid = true;
 
         for (auto const& workflowPair : m_Workflows)
@@ -235,6 +256,7 @@ namespace AIAssistant
 
 std::optional<std::string> WorkflowRegistry::TryGetWorkflowFilePathAbsolute(std::string const& workflowId) const
 {
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
     auto const iterator = m_Workflows.find(workflowId);
     if (iterator == m_Workflows.end())
     {
@@ -251,6 +273,13 @@ std::optional<std::string> WorkflowRegistry::TryGetWorkflowFilePathAbsolute(std:
 }
 
 std::optional<std::string> WorkflowRegistry::TryGetWorkflowIdByFilePath(std::string const& absoluteFilePath) const
+{
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
+    return TryGetWorkflowIdByFilePathLocked(absoluteFilePath);
+}
+
+std::optional<std::string>
+WorkflowRegistry::TryGetWorkflowIdByFilePathLocked(std::string const& absoluteFilePath) const
 {
     std::filesystem::path const normalizedTarget = std::filesystem::weakly_canonical(absoluteFilePath);
 
@@ -290,6 +319,7 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
                                                     std::filesystem::path const& workflowFilePathAbsolute,
                                                     std::string& errorMessage)
 {
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
     errorMessage.clear();
 
     if (workflowFilePathAbsolute.empty())
@@ -298,8 +328,21 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
         return false;
     }
 
-    std::filesystem::path const jcwfPath =
-        std::filesystem::absolute(workflowFilePathAbsolute).lexically_normal();
+    // Path containment.  workflowFilePathAbsolute reaches us from the REST
+    // editor surface (PUT /api/workflows/<id>) and from AdhocWorkflowManager::Stage.
+    // A malicious caller could pass `..`-laced paths or absolute paths outside
+    // the project root.  Gate via ConfineUnderProjectRoot — empty return means
+    // the path doesn't resolve under project root; fail closed with ERROR.
+    std::filesystem::path const jcwfPath = ConfineUnderProjectRoot(workflowFilePathAbsolute);
+    if (jcwfPath.empty())
+    {
+        errorMessage = "workflowFilePathAbsolute does not resolve under project root: " +
+                       workflowFilePathAbsolute.string();
+        LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: rejected path '{}' — does not resolve "
+                      "under project root",
+                      workflowFilePathAbsolute.string());
+        return false;
+    }
 
     // Parse the incoming JSON to extract the workflow ID.
     // The editor sends a full JCWF JSON (tasks + metadata merged).
@@ -325,77 +368,114 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
     std::filesystem::create_directories(extractedDir, ec);
     if (ec)
     {
-        errorMessage = "Failed to create directory: " + extractedDir.string() + " (" + ec.message() + ")";
+        errorMessage = "Failed to create extraction directory '" +
+                       extractedDir.filename().string() + "' (" + ec.message() + ")";
+        LOG_APP_ERROR("WorkflowRegistry: create_directories failed path='{}' ec={}",
+                      extractedDir.string(), ec.message());
         return false;
     }
 
-    // Read existing global.json to preserve metadata the editor may not send (label, doc, triggers).
-    std::filesystem::path const globalJsonPath = extractedDir / "global.json";
-    if (std::filesystem::exists(globalJsonPath))
+    // Multi-step file work (read existing global.json, write canvas JSON, pack
+    // .jcwf zip, set path info).  Wrap in try/catch so an exception thrown by
+    // the filesystem layer (permissions, disk full, weakly_canonical on a
+    // pathological tree) doesn't leak partially-written state into the
+    // registry — the m_Workflows insert is the LAST step and only happens on
+    // a fully-successful save.
+    try
     {
-        std::string existingGlobalContent;
-        if (ReadFileToStringStatic(globalJsonPath, existingGlobalContent))
+        // Read existing global.json to preserve metadata the editor may not send (label, doc, triggers).
+        std::filesystem::path const globalJsonPath = extractedDir / "global.json";
+        if (std::filesystem::exists(globalJsonPath))
         {
-            WorkflowJsonParser globalParser;
-            WorkflowDefinition existingGlobal;
-            std::string globalParseError;
-            if (globalParser.ParseGlobalJson(existingGlobalContent, existingGlobal, globalParseError))
+            std::string existingGlobalContent;
+            if (ReadFileToStringStatic(globalJsonPath, existingGlobalContent))
             {
-                if (workflowDefinition.m_Label.empty() && !existingGlobal.m_Label.empty())
+                WorkflowJsonParser globalParser;
+                WorkflowDefinition existingGlobal;
+                std::string globalParseError;
+                if (globalParser.ParseGlobalJson(existingGlobalContent, existingGlobal, globalParseError))
                 {
-                    workflowDefinition.m_Label = existingGlobal.m_Label;
-                }
-                if (workflowDefinition.m_Doc.empty() && !existingGlobal.m_Doc.empty())
-                {
-                    workflowDefinition.m_Doc = existingGlobal.m_Doc;
+                    if (workflowDefinition.m_Label.empty() && !existingGlobal.m_Label.empty())
+                    {
+                        workflowDefinition.m_Label = existingGlobal.m_Label;
+                    }
+                    if (workflowDefinition.m_Doc.empty() && !existingGlobal.m_Doc.empty())
+                    {
+                        workflowDefinition.m_Doc = existingGlobal.m_Doc;
+                    }
                 }
             }
         }
-    }
-    else
-    {
-        std::ofstream globalStream(globalJsonPath, std::ios::binary | std::ios::trunc);
-        if (globalStream.is_open())
+        else
         {
-            // Build a minimal global.json from the parsed metadata.
-            globalStream << "{\n"
-                         << "  \"version\": \"" << workflowDefinition.m_Version << "\",\n"
-                         << "  \"id\": \"" << workflowId << "\",\n"
-                         << "  \"manual_start\": " << (workflowDefinition.m_ManualStart ? "true" : "false") << "\n"
-                         << "}\n";
+            std::ofstream globalStream(globalJsonPath, std::ios::binary | std::ios::trunc);
+            if (globalStream.is_open())
+            {
+                // Build a minimal global.json from the parsed metadata.
+                globalStream << "{\n"
+                             << "  \"version\": \"" << workflowDefinition.m_Version << "\",\n"
+                             << "  \"id\": \"" << workflowId << "\",\n"
+                             << "  \"manual_start\": " << (workflowDefinition.m_ManualStart ? "true" : "false") << "\n"
+                             << "}\n";
+            }
+            else
+            {
+                errorMessage = "Failed to open global.json for writing";
+                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: failed to open global.json "
+                              "workflow='{}' path='{}'",
+                              workflowId, globalJsonPath.string());
+                return false;
+            }
         }
-    }
 
-    // Write the canvas JSON (the full body — the editor sends tasks + metadata merged,
-    // and ParseCanvasJson tolerates extra metadata fields).
-    std::filesystem::path const canvasJsonPath = extractedDir / (workflowId + ".json");
-    {
-        std::ofstream canvasStream(canvasJsonPath, std::ios::binary | std::ios::trunc);
-        if (!canvasStream.is_open())
+        // Write the canvas JSON (the full body — the editor sends tasks + metadata merged,
+        // and ParseCanvasJson tolerates extra metadata fields).
+        std::filesystem::path const canvasJsonPath = extractedDir / (workflowId + ".json");
         {
-            errorMessage = "Failed to write canvas JSON: " + canvasJsonPath.string();
+            std::ofstream canvasStream(canvasJsonPath, std::ios::binary | std::ios::trunc);
+            if (!canvasStream.is_open())
+            {
+                errorMessage = "Failed to open canvas JSON for writing";
+                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: failed to open canvas "
+                              "workflow='{}' path='{}'",
+                              workflowId, canvasJsonPath.string());
+                return false;
+            }
+            canvasStream.write(workflowJson.data(), static_cast<std::streamsize>(workflowJson.size()));
+        }
+
+        // Pack the extracted directory into a .jcwf zip container.
+        if (!JcwfContainer::Pack(extractedDir, jcwfPath, errorMessage))
+        {
             return false;
         }
-        canvasStream.write(workflowJson.data(), static_cast<std::streamsize>(workflowJson.size()));
-    }
 
-    // Pack the extracted directory into a .jcwf zip container.
-    if (!JcwfContainer::Pack(extractedDir, jcwfPath, errorMessage))
+        // Set path information on the definition.
+        std::filesystem::path const absoluteExtracted = std::filesystem::weakly_canonical(extractedDir);
+        workflowDefinition.m_WorkflowFilePath = canvasJsonPath.string();
+        workflowDefinition.m_WorkflowFilePathAbsolute = std::filesystem::weakly_canonical(canvasJsonPath).string();
+        workflowDefinition.m_WorkflowFileDirectory = extractedDir.string();
+        workflowDefinition.m_WorkflowFileDirectoryAbsolute = absoluteExtracted.string();
+        workflowDefinition.m_WorkflowBaseDirectoryAbsolute = absoluteExtracted.string();
+        workflowDefinition.m_ContainerPath = jcwfPath.string();
+
+        // Insert or replace in registry.
+        m_Workflows[workflowId] = workflowDefinition;
+    }
+    catch (std::exception const& e)
     {
+        errorMessage = std::string("Exception during workflow save: ") + e.what();
+        LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: exception workflow='{}' path='{}': {}",
+                      workflowId, jcwfPath.string(), e.what());
         return false;
     }
-
-    // Set path information on the definition.
-    std::filesystem::path const absoluteExtracted = std::filesystem::weakly_canonical(extractedDir);
-    workflowDefinition.m_WorkflowFilePath = canvasJsonPath.string();
-    workflowDefinition.m_WorkflowFilePathAbsolute = std::filesystem::weakly_canonical(canvasJsonPath).string();
-    workflowDefinition.m_WorkflowFileDirectory = extractedDir.string();
-    workflowDefinition.m_WorkflowFileDirectoryAbsolute = absoluteExtracted.string();
-    workflowDefinition.m_WorkflowBaseDirectoryAbsolute = absoluteExtracted.string();
-    workflowDefinition.m_ContainerPath = jcwfPath.string();
-
-    // Insert or replace in registry.
-    m_Workflows[workflowId] = workflowDefinition;
+    catch (...)
+    {
+        errorMessage = "Unknown exception during workflow save";
+        LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: unknown exception workflow='{}' path='{}'",
+                      workflowId, jcwfPath.string());
+        return false;
+    }
 
     LOG_APP_INFO("WorkflowRegistry: saved workflow '{}' as container '{}'", workflowId, jcwfPath.string());
     return true;
@@ -403,6 +483,7 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
 
 bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool deleteFile, std::string& errorMessage)
 {
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
     errorMessage.clear();
 
     auto const iterator = m_Workflows.find(workflowId);
@@ -418,8 +499,21 @@ bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool delete
 
     if (deleteFile && !workflowFilePathAbsolute.empty())
     {
+        // Path containment on the deletion site — defense in depth: the path
+        // was canonicalised at insert time, but rejecting a tree-escape here
+        // means a future bug that lets a non-confined path into the registry
+        // can't trigger an arbitrary-file delete via RemoveWorkflow.
+        std::filesystem::path const confinedPath = ConfineUnderProjectRoot(workflowFilePathAbsolute);
+        if (confinedPath.empty())
+        {
+            errorMessage = "workflow file path does not resolve under project root: " + workflowFilePathAbsolute;
+            LOG_APP_ERROR("WorkflowRegistry::RemoveWorkflow: refused delete workflow='{}' path='{}' — does not "
+                          "resolve under project root",
+                          workflowId, workflowFilePathAbsolute);
+            return false;
+        }
         std::error_code errorCode;
-        std::filesystem::remove(std::filesystem::path(workflowFilePathAbsolute), errorCode);
+        std::filesystem::remove(confinedPath, errorCode);
         if (errorCode)
         {
             errorMessage = "Failed to delete workflow file '" + workflowFilePathAbsolute + "': " + errorCode.message();
@@ -432,6 +526,7 @@ bool WorkflowRegistry::RemoveWorkflow(std::string const& workflowId, bool delete
 
 std::unordered_map<std::string, std::vector<std::string>> WorkflowRegistry::GetSubWorkflowDependencyGraph() const
 {
+    std::scoped_lock<std::mutex> const lock(m_Mutex);
     std::unordered_map<std::string, std::vector<std::string>> graph;
 
     for (auto const& [parentId, parentDef] : m_Workflows)
@@ -455,7 +550,8 @@ std::unordered_map<std::string, std::vector<std::string>> WorkflowRegistry::GetS
             }();
 
             std::string const absolutePath = std::filesystem::weakly_canonical(resolvedPath).string();
-            std::optional<std::string> const childId = TryGetWorkflowIdByFilePath(absolutePath);
+            // Use the locked variant — m_Mutex is already held by this method.
+            std::optional<std::string> const childId = TryGetWorkflowIdByFilePathLocked(absolutePath);
 
             if (childId.has_value())
             {
@@ -597,8 +693,10 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
     LOG_APP_INFO("WorkflowRegistry: loaded container '{}' as workflow '{}' from '{}'", stem, rootId,
                  jcwfContainerPath.string());
 
-    // Recursively load sub-workflows from subfolders.
-    LoadContainerSubWorkflows(extractedDir, rootId, m_Workflows[rootId].m_ContainerPath, "", globalMetadata);
+    // Recursively load sub-workflows from subfolders.  A sub-workflow load failure
+    // is non-fatal for the container — the root + already-loaded subs stay registered;
+    // the failure is logged inside the recursive helper.
+    (void)LoadContainerSubWorkflows(extractedDir, rootId, m_Workflows[rootId].m_ContainerPath, "", globalMetadata);
 
     return true;
 }
@@ -727,8 +825,10 @@ bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& fo
 
         LOG_APP_INFO("WorkflowRegistry: loaded sub-workflow '{}' (folder '{}') from container", subId, subRelPath);
 
-        // Recurse into nested sub-workflows.
-        LoadContainerSubWorkflows(entry.path(), subId, containerPath, subRelPath, globalMetadata);
+        // Recurse into nested sub-workflows — a nested-load failure is non-fatal
+        // for the parent (already registered above); the failure is logged in the
+        // deeper recursion.
+        (void)LoadContainerSubWorkflows(entry.path(), subId, containerPath, subRelPath, globalMetadata);
     }
 
     return true;

@@ -39,8 +39,8 @@ namespace AIAssistant
         explicit InternalTaskExecutor(std::shared_ptr<IInternalTaskRegistry> const& internalTaskRegistryPtr);
         virtual ~InternalTaskExecutor() = default;
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
-                     TaskInstanceState& taskState) override;
+        [[nodiscard]] bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                   TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
 
     private:
         std::shared_ptr<IInternalTaskRegistry> m_InternalTaskRegistryPtr;

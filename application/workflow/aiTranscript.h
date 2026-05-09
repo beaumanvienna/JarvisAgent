@@ -43,12 +43,19 @@ namespace AIAssistant
     //
     // When chunking (Phase 6) produces multiple dispatches per PROB the convention
     // will be <prob>_chunk<N>.transcript.json plus an aggregate <prob>.transcript.json.
+    //
+    // Thread safety: concurrent calls to AppendRequest / AppendResponse from
+    // worker threads are safe.  The implementation serialises all transcript
+    // writes through a single in-process mutex; the read-modify-write
+    // sequence is atomic and the file is replaced via temp-write-then-rename
+    // so a crash mid-write never leaves a truncated file.
     class AiTranscript
     {
     public:
-        static bool AppendRequest(std::filesystem::path const& transcriptPath, AiInvocation const& envelope,
-                                   std::string const& resolvedModel);
+        [[nodiscard]] static bool AppendRequest(std::filesystem::path const& transcriptPath,
+                                                 AiInvocation const& envelope,
+                                                 std::string const& resolvedModel);
 
-        static bool AppendResponse(std::filesystem::path const& transcriptPath, AiReply const& reply);
+        [[nodiscard]] static bool AppendResponse(std::filesystem::path const& transcriptPath, AiReply const& reply);
     };
 } // namespace AIAssistant

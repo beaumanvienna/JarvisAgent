@@ -23,6 +23,8 @@
 
 #include "workflow/filter/filterManifest.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -31,19 +33,60 @@
 #include <sstream>
 #include <unordered_map>
 
+#include <openssl/sha.h>
+
 #include "engine.h"
+#include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
 
-#if __has_include(<openssl/sha.h>)
-#include <openssl/sha.h>
-#define HAS_OPENSSL_SHA 1
-#else
-#define HAS_OPENSSL_SHA 0
-#endif
-
 namespace AIAssistant
 {
+    namespace
+    {
+        // Hard cap on manifest file size during read.  The manifest is a flat
+        // index keyed by filter; even very large filters should be well under
+        // this.  An attacker who plants a multi-GB file at the manifest path
+        // (via path-traversal, symlink, or filesystem compromise) cannot cause
+        // unbounded heap allocation in the parsing thread.
+        constexpr std::uintmax_t kMaxManifestBytes = 16ULL * 1024ULL * 1024ULL;
+
+        // Hard cap on the number of items materialised from a manifest.  At
+        // 1M items the manifest itself is far over kMaxManifestBytes already,
+        // but bound here as well for defense-in-depth.
+        constexpr std::size_t kMaxManifestItems = 1'000'000;
+
+        // filterId allowlist: alphanumerics plus `_-.` (the dot allowed for
+        // versioned filter ids like `myFilter.v2`).  No path separators, no
+        // leading dot, no `..` sequences.  Empty rejected.  Any character
+        // outside this set is a hard reject — if a workflow author needs a
+        // funky filter id, they update the workflow, not the allowlist.
+        [[nodiscard]] bool IsValidFilterId(std::string const& id) noexcept
+        {
+            if (id.empty() || id.size() > 256)
+            {
+                return false;
+            }
+            if (id.front() == '.' || id.find("..") != std::string::npos)
+            {
+                return false;
+            }
+            for (char const c : id)
+            {
+                bool const ok =
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '_' || c == '-' || c == '.';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
+
 
     // -----------------------------------------------------------------
     // BuildManifest
@@ -80,24 +123,35 @@ namespace AIAssistant
                                               std::string& errorMessage) const
     {
         std::string const path = ManifestPath(manifest.m_FilterId, workflowBaseDir);
+        if (path.empty())
+        {
+            errorMessage = "manifest path rejected (invalid filterId or escapes project root): '" +
+                           manifest.m_FilterId + "'";
+            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
+            return false;
+        }
 
         // Ensure the directory exists
-        std::filesystem::path dirPath = std::filesystem::path(path).parent_path();
+        std::filesystem::path const dirPath = std::filesystem::path(path).parent_path();
         std::error_code ec;
         std::filesystem::create_directories(dirPath, ec);
         if (ec)
         {
             errorMessage = "failed to create manifest directory '" + dirPath.string() + "': " + ec.message();
+            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
             return false;
         }
 
-        // Build JSON manually (the structure is small and fixed)
+        // Build JSON manually (the structure is small and fixed).  item_count
+        // is derived from m_Items.size() — never trust a separate counter
+        // field that can drift from the array contents.
+        std::size_t const itemCount = manifest.m_Items.size();
         std::ostringstream json;
         json << "{\n";
         json << "  \"filter_id\": \"" << JsonHelper::EscapeJsonString(manifest.m_FilterId) << "\",\n";
         json << "  \"evaluated_at\": \"" << JsonHelper::EscapeJsonString(manifest.m_EvaluatedAt) << "\",\n";
         json << "  \"query_hash\": \"" << JsonHelper::EscapeJsonString(manifest.m_QueryHash) << "\",\n";
-        json << "  \"item_count\": " << manifest.m_ItemCount << ",\n";
+        json << "  \"item_count\": " << itemCount << ",\n";
         json << "  \"items\": [\n";
 
         for (size_t i = 0; i < manifest.m_Items.size(); ++i)
@@ -119,18 +173,42 @@ namespace AIAssistant
         json << "  ]\n";
         json << "}\n";
 
-        std::ofstream file(path, std::ios::trunc);
-        if (!file.is_open())
+        // Atomic write: <path>.tmp -> rename(path).  Promotes stream errors
+        // to exceptions so we can fail visibly on disk-full or short writes.
+        std::string const tempPath = path + ".tmp";
+        try
         {
-            errorMessage = "failed to write manifest to '" + path + "'";
+            std::ofstream file(tempPath, std::ios::trunc);
+            if (!file.is_open())
+            {
+                errorMessage = "cannot open temp manifest file '" + tempPath + "'";
+                LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
+                return false;
+            }
+            file.exceptions(std::ios::failbit | std::ios::badbit);
+            file << json.str();
+            file.close();
+        }
+        catch (std::exception const& e)
+        {
+            errorMessage = std::string("manifest write to '") + tempPath + "' failed: " + e.what();
+            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
             return false;
         }
 
-        file << json.str();
-        file.close();
+        std::error_code renameError;
+        std::filesystem::rename(tempPath, path, renameError);
+        if (renameError)
+        {
+            errorMessage = "rename '" + tempPath + "' -> '" + path + "' failed: " + renameError.message();
+            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
+            return false;
+        }
 
-        LOG_APP_INFO("[filter] wrote manifest for filter '{}' ({} items) to '{}'", manifest.m_FilterId, manifest.m_ItemCount,
-                     path);
+        // Path omitted from the success log to avoid persisting full
+        // filesystem layout into log aggregation; filterId + count is
+        // enough for triage.
+        LOG_APP_INFO("[filter] wrote manifest for filter '{}' ({} items)", manifest.m_FilterId, itemCount);
 
         return true;
     }
@@ -143,44 +221,78 @@ namespace AIAssistant
                                              FilterManifest& manifestOut, std::string& errorMessage) const
     {
         std::string const path = ManifestPath(filterId, workflowBaseDir);
-
-        if (!std::filesystem::exists(path))
+        if (path.empty())
         {
-            errorMessage = "manifest file does not exist: " + path;
+            errorMessage = "manifest path rejected (invalid filterId or escapes project root): '" + filterId + "'";
+            LOG_APP_ERROR("[filter] ReadManifest: {}", errorMessage);
             return false;
         }
 
-        std::ifstream file(path);
+        // No exists() check — race-free single open() instead.  ENOENT is
+        // an expected outcome (first run; manifest not yet written) so we
+        // do not log it; other open errors are real and get a log line.
+        std::error_code sizeErrorCode;
+        std::uintmax_t const fileBytes = std::filesystem::file_size(path, sizeErrorCode);
+        if (sizeErrorCode)
+        {
+            // File missing or unreadable — treat as "no previous manifest".
+            errorMessage = "manifest file unavailable: " + sizeErrorCode.message();
+            return false;
+        }
+        if (fileBytes > kMaxManifestBytes)
+        {
+            errorMessage = "manifest file size " + std::to_string(fileBytes) + " bytes exceeds cap " +
+                           std::to_string(kMaxManifestBytes);
+            LOG_APP_ERROR("[filter] ReadManifest: {} (filterId='{}')", errorMessage, filterId);
+            return false;
+        }
+
+        std::ifstream file(path, std::ios::binary);
         if (!file.is_open())
         {
             errorMessage = "cannot open manifest file: " + path;
+            LOG_APP_ERROR("[filter] ReadManifest: {}", errorMessage);
             return false;
         }
 
         std::ostringstream oss;
         oss << file.rdbuf();
-        std::string content = oss.str();
+        std::string const content = oss.str();
 
         simdjson::ondemand::parser parser;
         simdjson::padded_string paddedJson(content);
         simdjson::ondemand::document document;
 
-        simdjson::error_code ec = parser.iterate(paddedJson).get(document);
-        if (ec)
+        if (auto ec = parser.iterate(paddedJson).get(document); ec)
         {
-            errorMessage = "failed to parse manifest JSON: ";
-            errorMessage += simdjson::error_message(ec);
+            errorMessage = std::string("failed to parse manifest JSON: ") + simdjson::error_message(ec);
+            LOG_APP_ERROR("[filter] ReadManifest: {} (filterId='{}')", errorMessage, filterId);
             return false;
         }
 
-        simdjson::ondemand::object root = document.get_object();
+        simdjson::ondemand::object root;
+        if (auto ec = document.get_object().get(root); ec)
+        {
+            errorMessage = std::string("manifest top-level not an object: ") + simdjson::error_message(ec);
+            LOG_APP_ERROR("[filter] ReadManifest: {} (filterId='{}')", errorMessage, filterId);
+            return false;
+        }
 
-        // Read top-level fields
+        // Read top-level fields.  filter_id is required — if it is missing
+        // or empty we fail closed; the manifest is corrupt, treat as absent.
+        // The simdjson view-into-paddedJson borrow lifetime is the enclosing
+        // brace-scope below; do not extend a string_view past this scope.
         {
             std::string_view sv;
             if (root["filter_id"].get_string().get(sv) == simdjson::SUCCESS)
             {
                 manifestOut.m_FilterId = std::string(sv);
+            }
+            if (manifestOut.m_FilterId.empty())
+            {
+                errorMessage = "manifest missing required field 'filter_id'";
+                LOG_APP_ERROR("[filter] ReadManifest: {} (filterId='{}')", errorMessage, filterId);
+                return false;
             }
 
             if (root["evaluated_at"].get_string().get(sv) == simdjson::SUCCESS)
@@ -194,23 +306,36 @@ namespace AIAssistant
             }
 
             int64_t count = 0;
-            if (root["item_count"].get_int64().get(count) == simdjson::SUCCESS)
+            if (root["item_count"].get_int64().get(count) == simdjson::SUCCESS && count >= 0)
             {
                 manifestOut.m_ItemCount = static_cast<size_t>(count);
             }
         }
 
-        // Read items array
+        // Read items array, capped at kMaxManifestItems.  Excess entries
+        // beyond the cap are dropped with an error log so the operator can
+        // see the truncation.
         simdjson::ondemand::array itemsArray;
         if (root["items"].get_array().get(itemsArray) == simdjson::SUCCESS)
         {
             for (simdjson::ondemand::value itemValue : itemsArray)
             {
-                simdjson::ondemand::object itemObj = itemValue.get_object();
+                if (manifestOut.m_Items.size() >= kMaxManifestItems)
+                {
+                    LOG_APP_ERROR("[filter] ReadManifest: items count exceeds cap {} for filterId='{}'; "
+                                  "remaining entries ignored",
+                                  kMaxManifestItems, filterId);
+                    break;
+                }
+                simdjson::ondemand::object itemObj;
+                if (itemValue.get_object().get(itemObj) != simdjson::SUCCESS)
+                {
+                    continue;
+                }
                 FilterManifestEntry entry;
 
                 int64_t idx = 0;
-                if (itemObj["index"].get_int64().get(idx) == simdjson::SUCCESS)
+                if (itemObj["index"].get_int64().get(idx) == simdjson::SUCCESS && idx >= 0)
                 {
                     entry.m_Index = static_cast<size_t>(idx);
                 }
@@ -233,6 +358,16 @@ namespace AIAssistant
 
                 manifestOut.m_Items.push_back(std::move(entry));
             }
+        }
+
+        // Cross-validate item_count against actual array size; warn (not
+        // fail) on disagreement — a hand-edited or stale manifest where
+        // m_ItemCount drifted should be flagged but still usable.
+        if (manifestOut.m_ItemCount != manifestOut.m_Items.size())
+        {
+            LOG_APP_WARN("[filter] ReadManifest: item_count={} disagrees with items.size={} for filterId='{}'",
+                         manifestOut.m_ItemCount, manifestOut.m_Items.size(), filterId);
+            manifestOut.m_ItemCount = manifestOut.m_Items.size();
         }
 
         return true;
@@ -328,7 +463,9 @@ namespace AIAssistant
             canonical += "field=" + field + ";";
         }
 
-#if HAS_OPENSSL_SHA
+        // OpenSSL is vendored under vendor/openssl and always present in
+        // every supported build; the previous std::hash fallback was dead
+        // code AND a security weak spot (collision-prone, predictable).
         unsigned char hash[SHA256_DIGEST_LENGTH];
         SHA256(reinterpret_cast<unsigned char const*>(canonical.data()), canonical.size(), hash);
 
@@ -340,10 +477,6 @@ namespace AIAssistant
         }
 
         return hex.str();
-#else
-        // Fallback: std::hash
-        return std::to_string(std::hash<std::string>{}(canonical));
-#endif
     }
 
     // -----------------------------------------------------------------
@@ -352,7 +485,23 @@ namespace AIAssistant
 
     std::string FilterManifestManager::ManifestPath(std::string const& filterId, std::string const& workflowBaseDir)
     {
-        return (std::filesystem::path(workflowBaseDir) / filterId / (filterId + ".manifest.json")).string();
+        // First gate: filterId allowlist.  Rejects path-separators, ..,
+        // leading dot, and characters outside [A-Za-z0-9._-].
+        if (!IsValidFilterId(filterId))
+        {
+            return std::string();
+        }
+        // Second gate: ConfineUnderProjectRoot resolves the candidate path
+        // and rejects anything that escapes the project root via absolute
+        // workflowBaseDir, symlink chains, or remaining slip we missed.
+        std::filesystem::path const candidate =
+            std::filesystem::path(workflowBaseDir) / filterId / (filterId + ".manifest.json");
+        std::filesystem::path const confined = ConfineUnderProjectRoot(candidate);
+        if (confined.empty())
+        {
+            return std::string();
+        }
+        return confined.string();
     }
 
     // -----------------------------------------------------------------
@@ -393,12 +542,12 @@ namespace AIAssistant
             return "";
         }
 
-        // Convert file_time to system_clock time.
-        // file_clock::to_sys() is C++20 but MSVC does not implement it yet,
-        // so we use a portable clock-offset approach instead.
-        auto const fileNow = std::filesystem::file_time_type::clock::now();
-        auto const sysNow = std::chrono::system_clock::now();
-        auto const sysTime = sysNow + std::chrono::duration_cast<std::chrono::system_clock::duration>(ftime - fileNow);
+        // file_clock::to_sys (C++20) is implemented in libstdc++ 13+, libc++
+        // 16+, and MSVC 19.30+ — all toolchains supported by this project.
+        // Replaces the previous two-now()-call clock-offset approximation,
+        // which was racy under thread preemption and NTP adjustments and
+        // could produce wrong timestamps used as the change-detection key.
+        auto const sysTime = std::chrono::file_clock::to_sys(ftime);
         auto const timeT = std::chrono::system_clock::to_time_t(sysTime);
 
         std::tm tm{};

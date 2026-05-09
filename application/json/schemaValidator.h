@@ -65,17 +65,15 @@ namespace AIAssistant
         SchemaValidator(SchemaValidator const&) = delete;
         SchemaValidator& operator=(SchemaValidator const&) = delete;
 
-        bool IsLoaded() const { return m_IsLoaded; }
-        std::string const& LoadError() const { return m_LoadError; }
+        [[nodiscard]] bool IsLoaded() const;
+        [[nodiscard]] std::string const& LoadError() const;
 
-        ValidationResult Validate(std::string const& documentJson) const;
+        [[nodiscard]] ValidationResult Validate(std::string const& documentJson) const;
 
-        static std::string FormatErrorsForModel(std::vector<ValidationError> const& errors);
+        [[nodiscard]] static std::string FormatErrorsForModel(std::vector<ValidationError> const& errors);
 
     private:
         class Impl;
         std::unique_ptr<Impl> m_Impl;
-        bool m_IsLoaded = false;
-        std::string m_LoadError;
     };
 } // namespace AIAssistant

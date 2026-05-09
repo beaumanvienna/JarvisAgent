@@ -49,8 +49,7 @@ namespace AIAssistant
     // an attacker-controlled value containing `/`, `?`, `#`, `:`, `@`, or `%`
     // would otherwise inject URL components past the canonical
     // `https://sheets.googleapis.com/v4/spreadsheets/{id}/values/{range}`
-    // layout.  Closes the audit's HIGH "Unvalidated spreadsheet_id in URL
-    // Construction" finding (deferred from sitting 18).
+    // layout.
     static bool IsValidSpreadsheetId(std::string const& spreadsheetId)
     {
         if (spreadsheetId.empty() || spreadsheetId.size() > 128)
@@ -202,9 +201,9 @@ namespace AIAssistant
         return fields;
     }
 
-    // Bound on the response body — closes the audit's "uncontrolled response
-    // body accumulation" concern.  64 MB matches the cloud-surface pattern;
-    // Sheets values responses are bounded by Google's API quotas.
+    // Bound on the response body to prevent uncontrolled accumulation in the
+    // libcurl write callback.  64 MB matches the cloud-surface pattern; Sheets
+    // values responses are bounded by Google's API quotas.
     static constexpr size_t kMaxSheetsResponseBytes = 64 * 1024 * 1024;
 
     static bool SheetsRequest(std::string const& method, std::string const& url,
@@ -340,8 +339,6 @@ namespace AIAssistant
         // Validate spreadsheet_id + range before any URL build.  spreadsheet_id
         // flows unencoded into the URL path; range is URL-encoded but still
         // validated for protocol-syntactic sanity + to keep audit logs clean.
-        // Closes the audit's HIGH "Unvalidated spreadsheet_id / range in URL
-        // Construction" finding (deferred from sitting 18).
         if (!IsValidSpreadsheetId(spreadsheetId))
         {
             taskState.m_LastErrorMessage = "Invalid Google Sheets spreadsheet_id: must be 1-128 chars, "

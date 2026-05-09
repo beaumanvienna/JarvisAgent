@@ -61,37 +61,47 @@ namespace AIAssistant
     };
 
     // Manages reading, writing, and comparing filter manifests.
+    //
+    // Trust model: filterId comes from the workflow definition (operator-
+    // trusted) and ends up in a filesystem path.  ManifestPath validates
+    // filterId against an allowlist AND routes the resulting path through
+    // ConfineUnderProjectRoot so a malformed id (containing `..`, slashes,
+    // or absolute prefixes) cannot escape the workflow directory.
     class FilterManifestManager
     {
     public:
         // Build a manifest from filter evaluation results.
-        FilterManifest BuildManifest(std::string const& filterId, std::vector<FilterItem> const& items,
-                                     FilterDef const& filterDef) const;
+        [[nodiscard]] FilterManifest BuildManifest(std::string const& filterId, std::vector<FilterItem> const& items,
+                                                    FilterDef const& filterDef) const;
 
         // Write manifest JSON to <workflowBaseDir>/<filterID>/<filterID>.manifest.json.
-        // Creates the directory if it does not exist.
-        bool WriteManifest(FilterManifest const& manifest, std::string const& workflowBaseDir,
-                           std::string& errorMessage) const;
+        // Creates the directory if it does not exist.  Atomic via temp-then-rename.
+        [[nodiscard]] bool WriteManifest(FilterManifest const& manifest, std::string const& workflowBaseDir,
+                                          std::string& errorMessage) const;
 
-        // Read a previously written manifest. Returns false if the file doesn't exist or is malformed.
-        bool ReadManifest(std::string const& filterId, std::string const& workflowBaseDir, FilterManifest& manifestOut,
-                          std::string& errorMessage) const;
+        // Read a previously written manifest.  Returns false if the file doesn't
+        // exist, is malformed, or exceeds the size cap.
+        [[nodiscard]] bool ReadManifest(std::string const& filterId, std::string const& workflowBaseDir,
+                                         FilterManifest& manifestOut, std::string& errorMessage) const;
 
         // Compare a newly built manifest against a previous one.
-        FilterManifestDiff CompareManifests(FilterManifest const& previous, FilterManifest const& current) const;
+        [[nodiscard]] FilterManifestDiff CompareManifests(FilterManifest const& previous,
+                                                           FilterManifest const& current) const;
 
         // Compute SHA-256 hash of the normalized filter expression (for change detection).
-        static std::string ComputeQueryHash(FilterDef const& filterDef);
+        [[nodiscard]] static std::string ComputeQueryHash(FilterDef const& filterDef);
 
-        // Get the manifest file path for a filter.
-        static std::string ManifestPath(std::string const& filterId, std::string const& workflowBaseDir);
+        // Get the manifest file path for a filter.  Returns empty string if
+        // filterId fails the allowlist check or the resulting path escapes
+        // the project root.
+        [[nodiscard]] static std::string ManifestPath(std::string const& filterId, std::string const& workflowBaseDir);
 
     private:
         // Get current time as ISO 8601 string.
-        static std::string NowIso8601();
+        [[nodiscard]] static std::string NowIso8601();
 
         // Get file modification time as string.
-        static std::string FileMtimeString(std::string const& path);
+        [[nodiscard]] static std::string FileMtimeString(std::string const& path);
     };
 
 } // namespace AIAssistant

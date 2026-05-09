@@ -205,8 +205,8 @@ namespace AIAssistant
             case BedrockFamily::Unknown:
                 // No standalone log here: the parser has no run context. The error message
                 // propagates via GetError()->m_Message into AiRequestPool::OnRequestFailed,
-                // which logs at ERROR with runId/workflowId/taskId attached. See
-                // feedback_log_failures memory.
+                // which logs at ERROR with runId/workflowId/taskId attached so the
+                // dashboard run analyzer can attribute it to this run.
                 m_HasError = true;
                 m_State = State::ParseFailure;
                 break;

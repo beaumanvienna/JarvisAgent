@@ -34,7 +34,7 @@ namespace AIAssistant
     public:
         virtual ~PythonTaskExecutor() = default;
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
-                     TaskInstanceState& taskState) override;
+        [[nodiscard]] bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                   TaskDef const& taskDefinition, TaskInstanceState& taskState) override;
     };
 } // namespace AIAssistant

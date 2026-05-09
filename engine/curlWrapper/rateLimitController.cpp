@@ -49,9 +49,9 @@ namespace AIAssistant
             return decision;
         }
 
-        // AIMD concurrency cap (§4.2).  This is the predictive layer: after a
-        // 429 we halve cap so the next several requests don't pile up against
-        // a quota we just learned is full.
+        // AIMD concurrency cap.  This is the predictive layer: after a 429
+        // we halve cap so the next several requests don't pile up against a
+        // quota we just learned is full.
         if (currentInflight >= m_CurrentConcurrencyCap)
         {
             decision.m_Admit = false;
@@ -59,10 +59,11 @@ namespace AIAssistant
             return decision;
         }
 
-        // Server-directed wait (§4.3).  Retry-After is a floor: never re-dispatch
+        // Server-directed wait.  Retry-After is a floor: never re-dispatch
         // sooner than the server explicitly told us to.  The observation's
-        // RetryAfter has already been folded into the *_ResetAt times by Observe(),
-        // so checking those here covers both Retry-After and proactive reset hints.
+        // RetryAfter has already been folded into the *_ResetAt times by
+        // Observe(), so checking those here covers both Retry-After and
+        // proactive reset hints.
         if (m_LastObservation.m_RequestsResetAt.has_value() && now < *m_LastObservation.m_RequestsResetAt)
         {
             // Subtract our own in-flight from the request quota — provider's
@@ -79,7 +80,7 @@ namespace AIAssistant
 
         if (m_LastObservation.m_TokensResetAt.has_value() && now < *m_LastObservation.m_TokensResetAt)
         {
-            // Token-bucket projection (§4.1): take the tightest of input,
+            // Token-bucket projection: take the tightest of input,
             // output, combined — whichever the provider exposes.  Subtract
             // the current request's estimated input cost.
             int64_t mergedRemaining = -1;
@@ -140,9 +141,9 @@ namespace AIAssistant
         if (observation.m_ConsumedOutputTokens >= 0)
             m_LastObservation.m_ConsumedOutputTokens = observation.m_ConsumedOutputTokens;
 
-        // AIMD update (§4.2).  Multiplicative decrease on 429, additive
-        // increase on streak of clean completions.  Cap floor = 1; ceiling
-        // = m_HardCap (HTTP/2 stream cap or config max_concurrency).
+        // AIMD update.  Multiplicative decrease on 429, additive increase
+        // on streak of clean completions.  Cap floor = 1; ceiling = m_HardCap
+        // (HTTP/2 stream cap or config max_concurrency).
         if (was429)
         {
             m_CurrentConcurrencyCap = std::max(1, m_CurrentConcurrencyCap / 2);

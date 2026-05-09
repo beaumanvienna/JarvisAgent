@@ -143,7 +143,7 @@ namespace AIAssistant
         // ----------------------------------------------------------------
         // Empty strategy — providers without proactive rate-limit feedback.
         // Used for InterfaceType::API3 (Gemini), API5 (Bedrock), Test until
-        // §2 verification confirms what (if anything) they expose.  Phase 3
+        // verification confirms what (if anything) they expose.  Future work
         // will refine these with proper provider-specific parsing.
         // ----------------------------------------------------------------
         class RateLimitStrategyEmpty final : public IRateLimitStrategy

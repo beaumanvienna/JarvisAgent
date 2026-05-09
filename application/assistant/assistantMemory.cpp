@@ -332,8 +332,8 @@ namespace AIAssistant
         if (queryWords.empty())
             return m_Entries;
 
-        // Score by index — never store raw pointers into m_Entries.  An audit-level
-        // lifetime hazard if any caller drops the lock between scoring and dereferencing.
+        // Score by index — never store raw pointers into m_Entries.  Lifetime
+        // hazard if any caller drops the lock between scoring and dereferencing.
         struct Scored
         {
             int score;

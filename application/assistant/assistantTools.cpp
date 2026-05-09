@@ -1788,9 +1788,10 @@ namespace AIAssistant
     // -----------------------------------------------------------------
     //
     // The user-supplied command is passed to /bin/sh -c — that's the contract
-    // of run_shell.  No blocklist (blocklists fail open; see memory
-    // `feedback_allowlist_not_blocklist`).  The defense is the human-approval
-    // flow at the controller layer.
+    // of run_shell.  No blocklist (blocklists fail open: an attacker only needs
+    // one bypass to break the gate; the project's discipline is allowlists where
+    // the gate either matches the expected shape or refuses).  The defense is
+    // the human-approval flow at the controller layer.
     //
     // The validated cwd is applied via chdir() in the child, never composed
     // into the shell command string, so a hostile cwd value cannot inject

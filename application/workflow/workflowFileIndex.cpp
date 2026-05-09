@@ -101,11 +101,26 @@ namespace AIAssistant
             return {};
         }
 
-        std::filesystem::path const candidate = (m_RootDirectory / relativePath).lexically_normal();
-        std::error_code ec;
-        if (std::filesystem::exists(candidate, ec))
+        // Containment gate.  `relativePath` is JCWF-authored — a `..`-laced
+        // value would join with m_RootDirectory and lexically-normalise into
+        // a path outside the root.  Verify the resolved path stays under
+        // m_RootDirectory via lexically_relative; reject empty / dot / `..`
+        // prefix.  Closes the path-traversal vector where a hostile JCWF
+        // could enumerate files outside the workflow directory.
+        std::filesystem::path const candidateRaw = (m_RootDirectory / relativePath).lexically_normal();
+        std::filesystem::path const rel = candidateRaw.lexically_relative(m_RootDirectory);
+        std::string const relStr = rel.string();
+        if (relStr.empty() || relStr == ".." || relStr.rfind("..", 0) == 0)
         {
-            return candidate;
+            LOG_APP_ERROR("WorkflowFileIndex::FindByRelativePath: rejected '{}' — escapes root '{}'",
+                          relativePath, m_RootDirectory.string());
+            return {};
+        }
+
+        std::error_code ec;
+        if (std::filesystem::exists(candidateRaw, ec))
+        {
+            return candidateRaw;
         }
         return {};
     }

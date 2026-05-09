@@ -112,6 +112,12 @@ namespace AIAssistant
             return;
         }
 
+        if (Core::g_Core == nullptr)
+        {
+            LOG_APP_ERROR("FileWatcher::Start: Core::g_Core is null, cannot submit watch task");
+            return;
+        }
+
         m_Running = true;
         // Submit watcher to the thread pool
         m_WatchTask = Core::g_Core->GetThreadPool().SubmitTask([this]() { Watch(); });
@@ -185,7 +191,7 @@ namespace AIAssistant
                     std::string const pathStr = file.path().string();
                     if (!files.contains(pathStr))
                     {
-                        if (fireAdd)
+                        if (fireAdd && Core::g_Core != nullptr)
                         {
                             Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr));
                         }
@@ -193,7 +199,10 @@ namespace AIAssistant
                     }
                     else if (files[pathStr] != currentTime)
                     {
-                        Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr));
+                        if (Core::g_Core != nullptr)
+                        {
+                            Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr));
+                        }
                         files[pathStr] = currentTime;
                     }
                 }
@@ -249,8 +258,11 @@ namespace AIAssistant
             if (!m_PrimaryRoot.empty() && !fs::is_directory(m_PrimaryRoot))
             {
                 LOG_APP_INFO("folder '{}' no longer exists, requesting shutdown", m_PrimaryRoot.string());
-                auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                Core::g_Core->PushEvent(event);
+                if (Core::g_Core != nullptr)
+                {
+                    auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
+                    Core::g_Core->PushEvent(event);
+                }
             }
 
             // 3) Scan every registered root.
@@ -266,7 +278,10 @@ namespace AIAssistant
                 if (!fs::exists(it->first))
                 {
                     LOG_APP_INFO("FileWatcher: file deleted from disk: {}", it->first);
-                    Core::g_Core->PushEvent(std::make_shared<FileRemovedEvent>(it->first));
+                    if (Core::g_Core != nullptr)
+                    {
+                        Core::g_Core->PushEvent(std::make_shared<FileRemovedEvent>(it->first));
+                    }
                     it = files.erase(it);
                 }
                 else

@@ -418,13 +418,14 @@ At runtime, the engine will expand designated tasks from this iterator (see task
   "id": "webhook-trigger",
   "enabled": true,
   "params": {
-    "secret": "my-shared-secret"   // optional HMAC-SHA256 shared secret
+    "secret": "my-shared-secret"   // REQUIRED — HMAC-SHA256 shared secret
   }
 }
 ```
 
 - Webhook triggers expose the workflow at `POST /api/webhook/<workflowId>`.
 - When a POST request is received, the runtime enqueues a new workflow run.
+- **`secret` is mandatory.**  A webhook trigger missing the field, with an empty `secret`, or with malformed/missing `params` is refused at JCWF parse time (`WorkflowTriggerBinder::ParseWebhookParams` fails closed) and never registered.  The TriggerEngine validator additionally refuses empty-secret registrations as defense in depth.  Operators authoring webhook triggers without a secret will see an ERROR log naming the cause; runtime requests against a registered webhook always enforce the HMAC over the raw body.
 - The request body MAY contain optional fields:
   - `runId` (string) — caller-chosen run identifier (auto-generated if omitted).
   - `callbackUrl` (string) — URL to POST completion results to when the run finishes.

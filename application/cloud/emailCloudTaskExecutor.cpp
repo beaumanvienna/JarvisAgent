@@ -240,8 +240,8 @@ namespace AIAssistant
     }
 
     // IMAP folder + UID validators live as public static methods on EmailConnector
-    // (lifted in sitting 13 to share a single source of truth between the executor
-    // and the connector layer's defense-in-depth gates).  Use those directly.
+    // — single source of truth shared between the executor and the connector
+    // layer's defense-in-depth gates.  Use those directly.
 
     static std::vector<std::string> ParseSearchUids(std::string const& searchResponse)
     {
@@ -722,9 +722,10 @@ namespace AIAssistant
 
         LOG_APP_INFO("[email] sent to {} via connection '{}' (subject: {})", to, connection.m_Name, subject);
 
-        // Escape `to` and `subject` before splicing — sitting 11's CRLF gate stops the
-        // worst injection (newlines), but `"` and `\` would still corrupt the JSON or
-        // smuggle additional fields.  JsonHelper produces RFC 8259 §7-compliant escapes.
+        // Escape `to` and `subject` before splicing — the upstream CRLF gate
+        // stops the worst injection (newlines), but `"` and `\` would still
+        // corrupt the JSON or smuggle additional fields.  JsonHelper produces
+        // RFC 8259 §7-compliant escapes.
         std::string summary = "{\"ok\":true,\"to\":\"" + JsonHelper::EscapeJsonString(to) +
                               "\",\"subject\":\"" + JsonHelper::EscapeJsonString(subject) +
                               "\",\"attachments\":" + std::to_string(attachments.size()) + "}";

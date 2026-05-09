@@ -38,8 +38,8 @@ namespace AIAssistant
 
         void RegisterExecutor(TaskType type, std::shared_ptr<ITaskExecutor> const& executorPtr);
 
-        bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun, TaskDef const& taskDefinition,
-                     TaskInstanceState& taskState);
+        [[nodiscard]] bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                   TaskDef const& taskDefinition, TaskInstanceState& taskState);
 
     private:
         TaskExecutorRegistry() = default;

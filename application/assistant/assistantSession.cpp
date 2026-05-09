@@ -131,8 +131,8 @@ namespace AIAssistant
         size_t tokenCount = 0;
 
         // Walk backwards from newest turn, collecting until budget is exhausted.
-        // The audit calls out a stale `!result.empty()` guard that always returned at
-        // least one turn even if it alone exceeded maxTokens — removed.
+        // A previous `!result.empty()` guard always returned at least one turn
+        // even if it alone exceeded maxTokens — removed; budget is honoured strictly.
         for (auto it = m_Turns.rbegin(); it != m_Turns.rend(); ++it)
         {
             size_t turnTokens = it->text.size() / 4; // rough estimate

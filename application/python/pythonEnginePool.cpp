@@ -79,8 +79,8 @@ namespace AIAssistant
         // directory under the project root before letting any of it touch
         // Python state — an unconfined scriptPath would let an attacker place
         // a forged module on Python's import path.  Mirrors the gate already
-        // applied inside PythonEngine::SetupSubInterpreter (defense in depth
-        // at the pool boundary; cyber-sec audit MEDIUM).
+        // applied inside PythonEngine::SetupSubInterpreter — defense in depth
+        // at the pool boundary.
         std::string scriptDir;
         std::string moduleName;
         try

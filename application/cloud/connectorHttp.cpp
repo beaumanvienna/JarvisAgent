@@ -244,8 +244,7 @@ namespace AIAssistant::ConnectorHttp
         // IPv6 literals never reach this function via `ValidatePublicHttpEndpoint`.
         // Postgres-style host extraction in `ParseHostPort` may leave a bracketed
         // form, but the leading `[` causes IsIPv6Literal to return false there
-        // too — bracketed IPv6 in postgres connections needs a separate fix
-        // (sitting 28+ scope).
+        // too — bracketed IPv6 in postgres connections needs a separate fix.
         bool IsIPv6Literal(std::string const& host)
         {
             if (host.empty())

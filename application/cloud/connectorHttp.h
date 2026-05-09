@@ -45,8 +45,8 @@ namespace AIAssistant::ConnectorHttp
     // Apply hardened libcurl defaults shared across every cloud connector's
     // TestConnection path:
     //   - SSL_VERIFYPEER=1, SSL_VERIFYHOST=2  — defense-in-depth (libcurl
-    //     defaults match, but the audit's "TLS verify" finding requires
-    //     explicit posture per sitting-17 sweep #3).
+    //     defaults match, but explicit posture protects against a future
+    //     build that silently weakens the verification defaults).
     //   - FOLLOWLOCATION=0                    — no redirect following.  A 30x
     //     to attacker-controlled host would otherwise leak the bearer/PAT in
     //     the Authorization header — the redirect-amplified SSRF vector.
@@ -93,14 +93,13 @@ namespace AIAssistant::ConnectorHttp
     // The IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`) prefix
     // check is gated on a structural IPv6-literal classifier, so public
     // hostnames starting with the same letters (`fc-acme.example.com`,
-    // `fdsoftware.example.com`) are NOT flagged as local.  Sitting 27 fixed
-    // the previous over-broad behavior.
+    // `fdsoftware.example.com`) are NOT flagged as local.
     //
     // Bracketed IPv6 literals in URLs (`[fc00::1]`) are handled upstream by
     // `ValidatePublicHttpEndpoint`: the host charset rejects `[` / `]` so
     // bracketed forms never reach here.  Postgres-style bare-host extraction
     // doesn't strip brackets, so an IPv6 in a postgres connection's endpoint
-    // would slip through this check — separate cleanup, sitting 28+.
+    // would slip through this check — separate cleanup tracked elsewhere.
     bool IsLocalNetworkHost(std::string const& host);
 
     // Validate a user-supplied HTTP(S) endpoint URL for SSRF safety.
@@ -128,20 +127,19 @@ namespace AIAssistant::ConnectorHttp
     // question without grepping `log/log.txt`.
     //
     // Categories:
-    //   - DnsResolvedIp: resolved IP fell in local-net (sitting 28).  Bumped
-    //     by OpensocketStrictCallback before returning CURL_SOCKET_BAD.
-    //   - EndpointSsrf: syntactic SSRF gate rejected the URL (sitting 22).
-    //     Bumped by ValidatePublicHttpEndpoint at every false-return path.
-    //   - CredentialCrlf: bearer/PAT/JWT/API-key contained CR/LF (sittings
-    //     13, 21, 22).  Bumped at every connector / executor splice site that
-    //     calls ContainsCrlf and emits *_crlf_rejected.
+    //   - DnsResolvedIp: resolved IP fell in local-net.  Bumped by
+    //     OpensocketStrictCallback before returning CURL_SOCKET_BAD.
+    //   - EndpointSsrf: syntactic SSRF gate rejected the URL.  Bumped by
+    //     ValidatePublicHttpEndpoint at every false-return path.
+    //   - CredentialCrlf: bearer/PAT/JWT/API-key contained CR/LF.  Bumped at
+    //     every connector / executor splice site that calls ContainsCrlf and
+    //     emits *_crlf_rejected.
     //   - InputValidation: bucket/blob/key/range/folder/handle validator
-    //     rejected user-supplied input (sittings 14, 15, 18, 23).  Bumped at
-    //     every *_invalid_* log site.
+    //     rejected user-supplied input.  Bumped at every *_invalid_* log
+    //     site.
     //   - PostgresInvalidSslmode: sslmode allowlist or non-localhost
-    //     production posture rejected (sitting 26).
-    //   - PostgresForbiddenParam: libpq cert/key/file-path tripwire (sitting
-    //     30).
+    //     production posture rejected.
+    //   - PostgresForbiddenParam: libpq cert/key/file-path tripwire.
     std::uint64_t GetDnsResolvedIpRejectionCount();
     std::uint64_t GetEndpointSsrfRejectionCount();
     std::uint64_t GetCredentialCrlfRejectionCount();

@@ -26,6 +26,7 @@
 #include <filesystem>
 
 #include "engine.h"
+#include "file/pathConfinement.h"
 #include "workflowRegistry.h"
 #include "workflowRuntimeManager.h"
 
@@ -79,7 +80,23 @@ namespace AIAssistant
             return std::filesystem::path(workflowDefinition.m_WorkflowFileDirectoryAbsolute) / raw;
         }();
 
-        std::string const absolutePath = std::filesystem::weakly_canonical(workflowFilePath).string();
+        // Containment gate: m_WorkflowFile is JCWF-authored.  A hostile JCWF
+        // could supply `..`-laced or absolute paths to reference workflows
+        // outside the project tree.  ConfineUnderProjectRoot rejects with an
+        // empty path on traversal/symlink-escape; fail-closed with ERROR.
+        std::filesystem::path const confinedPath = ConfineUnderProjectRoot(workflowFilePath);
+        if (confinedPath.empty())
+        {
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            taskState.m_LastErrorMessage =
+                "SubWorkflowTaskExecutor: workflow_file '" + taskDefinition.m_WorkflowFile +
+                "' does not resolve under project root";
+            LOG_APP_ERROR("SubWorkflowTaskExecutor: workflow_file '{}' rejected — does not resolve under project "
+                          "root (task '{}')",
+                          taskDefinition.m_WorkflowFile, taskDefinition.m_Id);
+            return false;
+        }
+        std::string const absolutePath = confinedPath.string();
 
         // Look up the child workflow in the registry by file path.
         std::optional<std::string> const childWorkflowId = m_WorkflowRegistry->TryGetWorkflowIdByFilePath(absolutePath);

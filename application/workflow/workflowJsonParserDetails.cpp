@@ -26,6 +26,7 @@
 #include <string_view>
 
 #include "engine.h"
+#include "workflow/workflowJsonParserDetails.h"
 
 namespace AIAssistant
 {
@@ -105,6 +106,12 @@ namespace AIAssistant
 
         for (simdjson::ondemand::value triggerValue : triggerArray)
         {
+            if (triggersOut.size() >= WorkflowParserLimits::kMaxTriggers)
+            {
+                errorMessage = "'triggers' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxTriggers) + ")";
+                return false;
+            }
             WorkflowTrigger trigger;
 
             auto objectResult = triggerValue.get_object();
@@ -183,6 +190,12 @@ namespace AIAssistant
         simdjson::ondemand::array nodeArray = arrayResult.value();
         for (simdjson::ondemand::value entryValue : nodeArray)
         {
+            if (controlNodesOut.size() >= WorkflowParserLimits::kMaxControlNodes)
+            {
+                errorMessage = "'control_nodes' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxControlNodes) + ")";
+                return false;
+            }
             auto objectResult = entryValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
@@ -281,6 +294,12 @@ namespace AIAssistant
         simdjson::ondemand::array edgeArray = arrayResult.value();
         for (simdjson::ondemand::value entryValue : edgeArray)
         {
+            if (controlflowOut.size() >= WorkflowParserLimits::kMaxControlflowEdges)
+            {
+                errorMessage = "'controlflow' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxControlflowEdges) + ")";
+                return false;
+            }
             auto objectResult = entryValue.get_object();
             if (objectResult.error() != simdjson::SUCCESS)
             {
@@ -389,6 +408,12 @@ namespace AIAssistant
 
         for (auto field : tasksObject)
         {
+            if (tasksOut.size() >= WorkflowParserLimits::kMaxTasks)
+            {
+                errorMessage = "'tasks' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxTasks) + ")";
+                return false;
+            }
             auto keyResult = field.unescaped_key();
             if (keyResult.error() != simdjson::SUCCESS)
             {
@@ -755,6 +780,12 @@ namespace AIAssistant
 
         for (simdjson::ondemand::value entryValue : dataflowArray)
         {
+            if (dataflowsOut.size() >= WorkflowParserLimits::kMaxDataflows)
+            {
+                errorMessage = "'dataflow' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxDataflows) + ")";
+                return false;
+            }
             DataflowDef dataflowDefinition;
 
             auto objectResult = entryValue.get_object();
@@ -924,6 +955,12 @@ namespace AIAssistant
 
         for (simdjson::ondemand::value filterValue : filterArray)
         {
+            if (filtersOut.size() >= WorkflowParserLimits::kMaxFilters)
+            {
+                errorMessage = "'filters' exceeds max count (" +
+                               std::to_string(WorkflowParserLimits::kMaxFilters) + ")";
+                return false;
+            }
             FilterDef filter;
 
             auto objectResult = filterValue.get_object();

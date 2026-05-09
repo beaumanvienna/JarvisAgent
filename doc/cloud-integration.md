@@ -82,7 +82,7 @@ Includes a `TaskCancellationToken` for cooperative cancellation (no-op in Phase 
 
 ### ICredential
 
-Abstract base for all credential types stored in `KeyManager`. Type-safe polymorphism with `SecureString`-backed secret fields (mlock'd, zero-on-destruct).  Consumers `dynamic_cast` to the expected concrete subtype with fail-closed null-check on type mismatch (per `feedback_allowlist_not_blocklist`).
+Abstract base for all credential types stored in `KeyManager`. Type-safe polymorphism with `SecureString`-backed secret fields (mlock'd, zero-on-destruct).  Consumers `dynamic_cast` to the expected concrete subtype with fail-closed null-check on type mismatch — allowlist discipline (the cast either matches the expected type or refuses).
 
 | Subclass | `GetType()` | Secret fields (`SecureString`) | Non-secret fields | Use case |
 |----------|-------------|-------------------------------|-------------------|----------|
@@ -524,13 +524,18 @@ JCWF task type `"db_query"` executes SQL queries and writes results to disk.
 | Param | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `connection` | yes | | Named CloudConnection (type `postgres`) |
-| `query` | yes | | SQL query string |
+| `query` | yes | | SQL query string (operator-authored — see trust model below) |
 | `format` | no | `csv` | Output format: `csv` or `json` |
-| `output_file` | no | `result.csv`/`result.json` | Output filename |
+| `output_file` | no | `result.csv`/`result.json` | Output filename — **bare filename only**, no path separators (rejected) |
+| `max_rows` | no | `100000` (ceiling `1000000`) | Refuse to write if the result set has more rows |
+| `max_output_bytes` | no | `100MB` (ceiling `1GB`) | Refuse to keep writing if the output file exceeds this size |
+| `statement_timeout_ms` | no | `60000` (ceiling `600000`) | Server-side `SET statement_timeout` enforced before the user query |
 
 - CSV output follows RFC 4180 (proper quoting/escaping)
 - JSON output is an array of objects with column names as keys
 - NULL values produce empty CSV fields or JSON `null`
+
+**Trust model.**  `query` is operator-authored — the workflow author writes the SQL.  Defense-in-depth lives in three layers: (1) operator gate at submission (db_query workflows reach the runtime only via JCWFs the operator authored or approved); (2) DB-side permissions (operators MUST configure the connection's DB user with the minimum permissions required — read-only for read-only workloads); (3) blast-radius caps above (`max_rows` / `max_output_bytes` / `statement_timeout_ms` with hard ceilings the JCWF can't override).  String-level "validation" inside the executor would either reject legitimate queries or miss a clever payload — DB-side permissions are the durable defense.
 
 ### Connections UI
 

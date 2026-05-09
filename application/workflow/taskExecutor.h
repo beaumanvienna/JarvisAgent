@@ -35,8 +35,8 @@ namespace AIAssistant
         virtual ~ITaskExecutor() = default;
 
         // The unified executor entry point.
-        virtual bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
-                             TaskDef const& taskDefinition, TaskInstanceState& taskState) = 0;
+        [[nodiscard]] virtual bool Execute(WorkflowDefinition const& workflowDefinition, WorkflowRun& workflowRun,
+                                           TaskDef const& taskDefinition, TaskInstanceState& taskState) = 0;
     };
 
 } // namespace AIAssistant

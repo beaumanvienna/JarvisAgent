@@ -125,10 +125,15 @@ Shell tasks must not write directly to the terminal (stdout/stderr), because tha
 ### Important Behaviors
 - Shell execution captures output via a pipe (`popen` / `_popen`) instead of using `std::system`.
 - `stderr` is redirected into `stdout` (`2>&1`) so both streams are captured.
-- Output is forwarded **line-by-line** as log messages so `TerminalLogStreamBuf` can enforce the “one log message = one line” rule.
+- Output is forwarded **line-by-line** as log messages so `TerminalLogStreamBuf` can enforce the "one log message = one line" rule.
+- Captured output is **routed through `SanitizeUtf8(...)` before reaching `LOG_APP_INFO`** at every flush site (per-line, per-fragment, residual-flush at end-of-stream).  Spawned commands can emit malformed UTF-8 / control characters / overlong encodings that would otherwise corrupt the ncurses pipeline or crash dashboard JSON serialisation.  The `SanitizeUtf8` helper lives in `application/workflow/workflowTypes.h`; its sibling `TruncateUtf8Safe(N)` bounds size and respects multi-byte boundaries.
 - The executor logs:
   - the command being executed (e.g. `[shell] Command: ...`)
   - each output line (e.g. `[shell:<taskId>] <line>`)
+
+### Log-injection discipline (codebase-wide)
+
+The `SanitizeUtf8` + `TruncateUtf8Safe` pair is the convention for **every** boundary where externally-sourced bytes (AI provider replies, fixture file reads, captured stdout/stderr, HTTP error body fragments, JSON field values) enter the codebase.  Without it, a malicious upstream can land arbitrary bytes — including ANSI escape codes, embedded `\r`/`\n` for log forging, or invalid UTF-8 that crashes downstream JSON serialisation — into `log.txt`, the dashboard WebSocket stream, and the ncurses TUI.  Sanitise once at the boundary; don't sprinkle defensive copies through downstream code.
 
 ---
 

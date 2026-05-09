@@ -23,6 +23,14 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
   const logCallbackRef = useRef<((lines: string[]) => void) | null>(null);
+  // Reconnect backoff: doubles on each consecutive failed connect, capped at
+  // 30s.  Prevents the dashboard from flooding /ws with reconnect attempts
+  // before the user has logged in (each attempt emits a [security]
+  // ws_upgrade_rejected line on the server).  Reset to base on successful
+  // connect.
+  const reconnectDelayMs = useRef<number>(2000);
+  const kBaseReconnectMs = 2000;
+  const kMaxReconnectMs = 30000;
 
   const registerLogCallback = useCallback((cb: ((lines: string[]) => void) | null) => {
     logCallbackRef.current = cb;
@@ -37,6 +45,8 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setState((prev) => ({ ...prev, connected: true }));
+      // Successful connect — reset the reconnect backoff to base.
+      reconnectDelayMs.current = kBaseReconnectMs;
       // Engine validates the session cookie at the WebSocket upgrade handshake
       // (.onaccept); by the time we are connected, auth is already done. Studio
       // has no auth. Either way the client does not send an auth message.
@@ -52,7 +62,9 @@ export function useWebSocket() {
       if ((ws as any)._pingId) clearInterval((ws as any)._pingId);
       wsRef.current = null;
       setState((prev) => ({ ...prev, connected: false }));
-      reconnectTimer.current = window.setTimeout(connect, 2000);
+      reconnectTimer.current = window.setTimeout(connect, reconnectDelayMs.current);
+      // Double for next attempt, capped.  A successful onopen resets to base.
+      reconnectDelayMs.current = Math.min(reconnectDelayMs.current * 2, kMaxReconnectMs);
     };
 
     ws.onerror = () => {

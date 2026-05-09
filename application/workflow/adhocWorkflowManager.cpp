@@ -27,12 +27,12 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
-#include <regex>
 #include <sstream>
 
 #include "engine.h"
 #include "file/fileWatcher.h"
 #include "json/jsonHelper.h"
+#include "simdjson/simdjson.h"
 #include "web/mcpKeyManager.h"
 #include "workflow/workflowRegistry.h"
 
@@ -44,6 +44,14 @@ namespace AIAssistant
         constexpr char const* kManifestFileName = "manifest.json";
         constexpr char const* kWorkflowIdPrefix = "_adhoc_";
         constexpr size_t kMaxUserSlugLength = 64;
+
+        // Hard cap on a single submitted JCWF JSON.  Prevents a malicious
+        // caller from sending a multi-GB payload that would consume RAM
+        // before the per-user disk-quota check kicks in.  4 MB is well above
+        // realistic JCWF size (existing example workflows top out around
+        // 50 KB) and well below the 100 MB Crow body cap configured at the
+        // server layer.
+        constexpr size_t kMaxJcwfBytes = 4ull * 1024ull * 1024ull;
 
         std::string FormatIsoCompact(std::chrono::system_clock::time_point tp)
         {
@@ -232,13 +240,56 @@ namespace AIAssistant
     std::string AdhocWorkflowManager::RewriteWorkflowId(std::string const& jcwfJson,
                                                         std::string const& newId) const
     {
-        // Replace the first occurrence of the top-level "id" field value with `newId`.
-        // Canvas JSON always has "id" near the top; we only rewrite the first match so
-        // sub-workflow nested ids stay untouched.
-        std::regex const idPattern(R"("id"\s*:\s*"[^"]*")");
-        return std::regex_replace(jcwfJson, idPattern,
-                                  std::string("\"id\": \"") + newId + "\"",
-                                  std::regex_constants::format_first_only);
+        // Replace the top-level "id" field value with `newId`.  The previous
+        // regex-based rewrite was structurally blind: a stray `"id":"..."`
+        // substring in a `description` or `doc` field could be matched first,
+        // and the regex had no way to distinguish a valid JSON value from
+        // attacker-shaped lookalike text.  simdjson DOM gives us structural
+        // awareness — only the actual top-level id is rewritten; nested
+        // sub-workflow ids stay untouched.  On parse failure or non-object
+        // root we pass the input through unchanged with an ERROR log so the
+        // caller can decide whether to proceed (matches the previous
+        // best-effort semantics).
+        using namespace simdjson;
+
+        dom::parser parser;
+        dom::element root;
+        if (auto err = parser.parse(jcwfJson).get(root); err)
+        {
+            LOG_APP_ERROR("[adhoc] RewriteWorkflowId: simdjson parse failed: {}; passing input through",
+                          error_message(err));
+            return jcwfJson;
+        }
+        if (!root.is_object())
+        {
+            LOG_APP_ERROR("[adhoc] RewriteWorkflowId: root is not an object; passing input through");
+            return jcwfJson;
+        }
+        // If the top-level "id" field is missing we leave the document alone —
+        // matches the regex's "no match means no rewrite" behaviour.
+        dom::element existingId;
+        if (root["id"].get(existingId) != SUCCESS)
+        {
+            return jcwfJson;
+        }
+
+        // Rebuild canonically: emit "id" first with the new value, then every
+        // other top-level field re-serialised via simdjson's element-to-stream
+        // operator (which is the supported one-pass canonical re-emitter).
+        std::ostringstream out;
+        out << "{\n";
+        out << "  \"id\": \"" << JsonHelper::EscapeJsonString(newId) << "\"";
+        for (auto const field : root.get_object())
+        {
+            std::string const key(field.key);
+            if (key == "id")
+            {
+                continue;
+            }
+            out << ",\n  \"" << JsonHelper::EscapeJsonString(key) << "\": " << field.value;
+        }
+        out << "\n}";
+        return out.str();
     }
 
     size_t AdhocWorkflowManager::MeasureFolderBytes(std::filesystem::path const& folder) const
@@ -257,10 +308,18 @@ namespace AIAssistant
         return total;
     }
 
-    void AdhocWorkflowManager::WriteMeta(std::filesystem::path const& folder, RunMeta const& meta) const
+    bool AdhocWorkflowManager::WriteMeta(std::filesystem::path const& folder, RunMeta const& meta) const
     {
-        std::ofstream os(folder / kMetaFileName, std::ios::binary | std::ios::trunc);
-        if (!os) return;
+        std::filesystem::path const metaPath = folder / kMetaFileName;
+        std::ofstream os(metaPath, std::ios::binary | std::ios::trunc);
+        if (!os)
+        {
+            // Operator-visible: meta.json is the artifact-attribution gate, so a
+            // silent failure here breaks the artifact-retrieval security contract.
+            LOG_APP_ERROR("[adhoc] WriteMeta: failed to open '{}' for writing user='{}' folder='{}'",
+                          metaPath.string(), meta.m_User, folder.string());
+            return false;
+        }
         // Minimal hand-built JSON; fields are validated server-side so no escaping
         // pass is needed. owner_slug is the filesystem-safe derivative of user.
         os << "{\n"
@@ -269,6 +328,13 @@ namespace AIAssistant
            << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
            << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\"\n"
            << "}\n";
+        if (!os.good())
+        {
+            LOG_APP_ERROR("[adhoc] WriteMeta: failed while writing '{}' user='{}' folder='{}'",
+                          metaPath.string(), meta.m_User, folder.string());
+            return false;
+        }
+        return true;
     }
 
     std::optional<AdhocWorkflowManager::RunMeta>
@@ -329,6 +395,15 @@ namespace AIAssistant
         }
         if (req.m_User.empty()) return std::string("user is required");
 
+        // Hard size cap on the submitted JCWF — defends against multi-GB
+        // payloads exhausting RAM before the per-user disk quota kicks in.
+        if (req.m_JcwfJson.size() > kMaxJcwfBytes)
+        {
+            LOG_APP_ERROR("[adhoc] Stage: JCWF JSON exceeds {} byte cap (got {} bytes) user='{}'",
+                          kMaxJcwfBytes, req.m_JcwfJson.size(), req.m_User);
+            return std::string("jcwf_too_large");
+        }
+
         // Policy validation happens on the REST handler side; default if empty.
         std::string const policy = req.m_CleanupPolicy.empty() ? std::string("ttl_72h") : req.m_CleanupPolicy;
 
@@ -351,11 +426,27 @@ namespace AIAssistant
         std::string const folderName = GenerateFolderName(policy);
         std::filesystem::path const folder = m_BasePath / userSlug / folderName;
 
+        // Cleanup discipline: every early-return path AFTER directory creation
+        // must call RemoveFolder(folder) so a partial stage doesn't leak disk
+        // space.  The pattern is repeated rather than RAII-wrapped because the
+        // success path needs the folder to live on; a cleanup-guard with an
+        // explicit Dismiss() would be cleaner but the surface is small enough
+        // that an inline pattern is clearer to read.
         std::error_code ec;
         std::filesystem::create_directories(folder / "workflows", ec);
-        if (ec) return std::string("failed to create folder: ") + ec.message();
+        if (ec)
+        {
+            // Best-effort cleanup of whatever the partial create_directories
+            // managed to leave on disk before failing.
+            RemoveFolder(folder);
+            return std::string("failed to create folder: ") + ec.message();
+        }
         std::filesystem::create_directories(folder / "queue", ec);
-        if (ec) return std::string("failed to create queue folder: ") + ec.message();
+        if (ec)
+        {
+            RemoveFolder(folder);
+            return std::string("failed to create queue folder: ") + ec.message();
+        }
 
         // Workflow id is the folder stem (prefixed with "_adhoc_"): "<ts>_<counter>".
         std::string const folderStem = folderName.substr(0, folderName.find("_del-"));
@@ -381,7 +472,14 @@ namespace AIAssistant
         meta.m_FolderPath = folder;
         meta.m_DiskBytes = MeasureFolderBytes(folder);
 
-        WriteMeta(folder, meta);
+        if (!WriteMeta(folder, meta))
+        {
+            // meta.json is load-bearing for artifact-retrieval ownership checks
+            // — if it didn't land, the staged run is unreachable + un-attributable.
+            // Roll back rather than return success on a half-staged run.
+            RemoveFolder(folder);
+            return std::string("failed to write meta.json (see log)");
+        }
         m_RunIdToMeta[runId] = meta;
         m_DiskUsageByUser[req.m_User] += meta.m_DiskBytes;
         m_KeyManager.RecordDiskUsage(req.m_User, m_DiskUsageByUser[req.m_User]);
@@ -400,7 +498,16 @@ namespace AIAssistant
     {
         std::lock_guard lock(m_Mutex);
         auto it = m_RunIdToMeta.find(runId);
-        if (it == m_RunIdToMeta.end()) return;
+        if (it == m_RunIdToMeta.end())
+        {
+            // Reaching here for an unknown runId means either the runtime fired
+            // a duplicate completion (already removed by a prior call) OR a logic
+            // bug upstream.  Either way, surface it — silent return would mask
+            // both classes.
+            LOG_APP_WARN("[adhoc] OnRunCompleted: runId '{}' not in run table (already reaped or unknown)",
+                         runId);
+            return;
+        }
 
         // Recompute bytes at completion time — task outputs have accumulated.
         size_t const finalBytes = MeasureFolderBytes(it->second.m_FolderPath);
@@ -496,8 +603,17 @@ namespace AIAssistant
         std::sort(entries.begin(), entries.end(),
                   [](auto const& a, auto const& b) { return a.m_RelPath < b.m_RelPath; });
 
-        std::ofstream os(folder / kManifestFileName, std::ios::binary | std::ios::trunc);
-        if (!os) return;
+        std::filesystem::path const manifestPath = folder / kManifestFileName;
+        std::ofstream os(manifestPath, std::ios::binary | std::ios::trunc);
+        if (!os)
+        {
+            // Manifest is consumed by artifact-listing endpoints; silent failure
+            // results in 500s + no diagnostic.  Operator-visible per fail-path
+            // discipline.
+            LOG_APP_ERROR("[adhoc] WriteManifest: failed to open '{}' for writing runId='{}' user='{}'",
+                          manifestPath.string(), runId, meta.m_User);
+            return;
+        }
 
         // delete_at is encoded in the folder name — re-derive for the manifest.
         std::string deleteAtStr;
@@ -628,13 +744,26 @@ namespace AIAssistant
 
     void AdhocWorkflowManager::StartReaperThread()
     {
+        // m_ReaperLifecycleMutex serializes Start/Stop so a concurrent stop
+        // can't observe m_ReaperRunning == true and try to join an
+        // m_ReaperThread that another Start is mid-overwriting.  The atomic
+        // exchange itself is fine, but the std::thread member assignment is
+        // not atomic — that's what the lock protects.
+        std::scoped_lock<std::mutex> const lifecycleLock(m_ReaperLifecycleMutex);
         if (m_ReaperRunning.exchange(true)) return; // already running
         m_ReaperThread = std::thread(&AdhocWorkflowManager::ReaperLoop, this);
     }
 
     void AdhocWorkflowManager::StopReaperThread()
     {
+        std::scoped_lock<std::mutex> const lifecycleLock(m_ReaperLifecycleMutex);
         if (!m_ReaperRunning.exchange(false)) return;
+        // Wake the reaper out of its CV wait so it observes the new flag and
+        // returns immediately instead of sleeping out the next interval.
+        {
+            std::scoped_lock<std::mutex> const lock(m_Mutex);
+            m_ReaperCv.notify_all();
+        }
         if (m_ReaperThread.joinable()) m_ReaperThread.join();
     }
 
@@ -642,10 +771,14 @@ namespace AIAssistant
     {
         while (m_ReaperRunning.load())
         {
-            // Sleep in small chunks so Stop() doesn't have to wait 60 s.
-            for (int i = 0; i < 60 && m_ReaperRunning.load(); ++i)
+            // CV-based sleep: wait up to 60 s, but Stop() can wake us
+            // immediately by notifying after flipping m_ReaperRunning.  The
+            // lambda predicate also returns true on stop so spurious wakeups
+            // don't cause busy-loops.
             {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                std::unique_lock<std::mutex> lock(m_Mutex);
+                m_ReaperCv.wait_for(lock, std::chrono::seconds(60),
+                                    [this]() { return !m_ReaperRunning.load(); });
             }
             if (!m_ReaperRunning.load()) break;
             try

@@ -113,7 +113,24 @@ namespace AIAssistant
             }
 
             // Resolve target path in working directory.
-            std::filesystem::path const targetPath = (taskWorkingDirectoryPath / targetFilename).lexically_normal();
+            std::filesystem::path const targetPathRaw = (taskWorkingDirectoryPath / targetFilename).lexically_normal();
+
+            // Containment gate.  `targetFilename` is JCWF-authored (`m_Materialize`
+            // map) — a hostile filename like `../../../etc/passwd` would
+            // join with the working dir + lexically-normalise into an
+            // absolute path that escapes the workflow tree.  Verify the
+            // resolved target stays under taskWorkingDirectoryPath via
+            // lexically_relative; reject `..`-prefixed relatives.
+            std::filesystem::path const targetRel = targetPathRaw.lexically_relative(taskWorkingDirectoryPath);
+            std::string const targetRelStr = targetRel.string();
+            if (targetRelStr.empty() || targetRelStr == ".." || targetRelStr.rfind("..", 0) == 0)
+            {
+                LOG_APP_ERROR("MaterializeFiles: target filename '{}' escapes task working directory '{}' for "
+                              "task '{}'",
+                              targetFilename, taskWorkingDirectoryPath.string(), taskDefinition.m_Id);
+                return false;
+            }
+            std::filesystem::path const targetPath = targetPathRaw;
 
             // Ensure target parent directory exists.
             std::filesystem::path const targetParent = targetPath.parent_path();
