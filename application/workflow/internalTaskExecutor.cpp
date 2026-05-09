@@ -262,7 +262,8 @@ namespace AIAssistant
         }
         else
         {
-            if (App::g_App == nullptr)
+            JarvisAgent* const app = App::g_App.load(std::memory_order_acquire);
+            if (app == nullptr)
             {
                 taskState.m_LastErrorMessage = "App::g_App is null (cannot access internal task registry).";
                 LOG_APP_ERROR("[internal] task '{}' run='{}' workflow='{}': {}",
@@ -271,7 +272,7 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
-            registry = App::g_App->GetInternalTaskRegistry();
+            registry = app->GetInternalTaskRegistry();
         }
 
         if (registry == nullptr)

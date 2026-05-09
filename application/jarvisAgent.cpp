@@ -95,7 +95,7 @@ namespace
 
 namespace AIAssistant
 {
-    JarvisAgent* App::g_App = nullptr;
+    std::atomic<JarvisAgent*> App::g_App{nullptr};
     std::unique_ptr<Application> JarvisAgent::Create() { return std::make_unique<JarvisAgent>(); }
 
     void JarvisAgent::OnStart()
@@ -106,7 +106,7 @@ namespace AIAssistant
         m_StartupTime = std::chrono::system_clock::now();
 
         LOG_APP_INFO("starting JarvisAgent version {}", JARVIS_AGENT_VERSION);
-        App::g_App = this;
+        App::g_App.store(this, std::memory_order_release);
 
         // ---------------------------------------------------------
         // Internal task registrations
@@ -856,7 +856,7 @@ namespace AIAssistant
         RAW_ONSHUTDOWN("[OnShutdown] CurlMultiDispatcher stopped\n");
         LOG_APP_INFO("[shutdown] CurlMultiDispatcher stopped");
 
-        App::g_App = nullptr;
+        App::g_App.store(nullptr, std::memory_order_release);
 
         RAW_ONSHUTDOWN("[OnShutdown] PythonEnginePool::WaitStop...\n");
         if (m_PythonEnginePool != nullptr)

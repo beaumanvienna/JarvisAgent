@@ -1059,7 +1059,7 @@ namespace AIAssistant
                      workflowDefinition.m_Id, workflowRun.m_RunId, taskDefinition.m_Id, taskDefinition.m_WorkingDirectory,
                      taskWorkingDirectoryPath.lexically_normal().generic_string());
 
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (app == nullptr)
         {
             taskState.m_State = TaskInstanceStateKind::Failed;

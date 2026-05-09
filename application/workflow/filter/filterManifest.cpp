@@ -547,7 +547,13 @@ namespace AIAssistant
         // Replaces the previous two-now()-call clock-offset approximation,
         // which was racy under thread preemption and NTP adjustments and
         // could produce wrong timestamps used as the change-detection key.
-        auto const sysTime = std::chrono::file_clock::to_sys(ftime);
+        // libc++ on macOS returns nanoseconds-precision time_point from
+        // file_clock::to_sys, which does not implicitly convert to the
+        // microsecond-precision time_point that to_time_t expects; cast
+        // explicitly to system_clock::duration to keep the call portable
+        // across libstdc++ and libc++.
+        auto const sysTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            std::chrono::file_clock::to_sys(ftime));
         auto const timeT = std::chrono::system_clock::to_time_t(sysTime);
 
         std::tm tm{};

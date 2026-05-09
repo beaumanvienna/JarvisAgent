@@ -85,7 +85,8 @@ namespace AIAssistant
     {
         LOG_APP_INFO("[python] Executing Python task '{}'", taskDefinition.m_Id);
 
-        if (App::g_App == nullptr)
+        JarvisAgent* const app = App::g_App.load(std::memory_order_acquire);
+        if (app == nullptr)
         {
             taskState.m_LastErrorMessage = "PythonTaskExecutor: App::g_App is null";
             taskState.m_State = TaskInstanceStateKind::Failed;
@@ -94,7 +95,7 @@ namespace AIAssistant
             return false;
         }
 
-        PythonEnginePool* pythonEnginePool = App::g_App->GetPythonEnginePool();
+        PythonEnginePool* pythonEnginePool = app->GetPythonEnginePool();
 
         if (pythonEnginePool == nullptr)
         {

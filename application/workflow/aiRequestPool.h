@@ -102,13 +102,17 @@ namespace AIAssistant
     //   add new erasure sites without re-checking this invariant.
     //
     // App::g_App downcast:
-    //   `dynamic_cast<JarvisAgent*>(App::g_App)` appears at the dispatcher
-    //   resolution sites (Submit, CancelRequestsForRun).  The runtime contract
-    //   is that the application's global is always JarvisAgent in production
-    //   builds, but defense in depth: the nullptr branch is handled at every
-    //   call site (ERROR-log + early return without touching the inflight
-    //   counter).  If a future refactor wants to remove dynamic_cast, the
-    //   replacement should still preserve the nullptr-recovery behaviour.
+    //   `dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire))`
+    //   appears at the dispatcher resolution sites (Submit, CancelRequestsForRun).
+    //   The runtime contract is that the application's global is always
+    //   JarvisAgent in production builds, but defense in depth: the nullptr
+    //   branch is handled at every call site (ERROR-log + early return without
+    //   touching the inflight counter).  The acquire load pairs with the
+    //   release store in JarvisAgent::OnStart so background workers that race
+    //   the engine startup either observe a fully-constructed JarvisAgent or
+    //   nullptr — never a torn pointer.  If a future refactor wants to remove
+    //   dynamic_cast, the replacement should still preserve both the atomic
+    //   load and the nullptr-recovery behaviour.
     class AiRequestPool final
     {
     public:

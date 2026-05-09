@@ -724,7 +724,8 @@ namespace AIAssistant
         // GET /api/scripts/registry
         // Returns: { "scripts": [ { "path", "short", "params", "description", "outputs" }, ... ] }
 
-        auto* registry = App::g_App ? App::g_App->GetScriptRegistry() : nullptr;
+        JarvisAgent* const app = App::g_App.load(std::memory_order_acquire);
+        auto* registry = (app != nullptr) ? app->GetScriptRegistry() : nullptr;
         if (registry == nullptr)
         {
             crow::json::wvalue responseJson;

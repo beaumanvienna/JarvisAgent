@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #pragma once
+#include <atomic>
 #include <chrono>
 #include <memory>
 
@@ -101,9 +102,19 @@ namespace AIAssistant
         std::shared_ptr<SubWorkflowTaskExecutor> m_SubWorkflowExecutor;
     };
 
+    // Process-wide singleton handle for JarvisAgent.  The pointer is set in
+    // JarvisAgent::OnStart and cleared in JarvisAgent::OnShutdown after every
+    // subordinate subsystem has been signalled, joined, and reset.  Background
+    // threads (file watcher, AI request worker pool, etc.) read the pointer
+    // throughout the engine's running lifetime, so the storage is
+    // `std::atomic<JarvisAgent*>` with acquire/release ordering — a plain
+    // pointer would race the read against the OnShutdown nullify in the
+    // window between subsystem WaitStop and the final assignment.  Callers
+    // load via `App::g_App.load(std::memory_order_acquire)` and null-check
+    // before deref.
     class App
     {
     public:
-        static JarvisAgent* g_App;
+        static std::atomic<JarvisAgent*> g_App;
     };
 } // namespace AIAssistant

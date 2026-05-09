@@ -1229,7 +1229,7 @@ namespace AIAssistant
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
 
-            JarvisAgent* app = App::g_App;
+            JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
             AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
             for (auto& activeRunPtr : m_ActiveRuns)
@@ -1423,7 +1423,7 @@ namespace AIAssistant
     // manager — safe to hold the lock across).
     void WorkflowRuntimeManager::DrainAiRequestCompletions()
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
         if (requestPool == nullptr)
@@ -1522,7 +1522,7 @@ namespace AIAssistant
 
             // Forget the old request handle before potentially clearing correlation IDs.
             {
-                JarvisAgent* app = App::g_App;
+                JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
                 AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
                 if (requestPool != nullptr)
@@ -1771,7 +1771,7 @@ namespace AIAssistant
         // could itself touch this manager via the public read APIs.
         if (!postTickActions.empty())
         {
-            JarvisAgent* app = App::g_App;
+            JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
             AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
             for (auto const& action : postTickActions)
@@ -2032,7 +2032,7 @@ namespace AIAssistant
         if (workflowRun.m_HasFailed && activeRun.m_RunningTasks.empty() && activeRun.m_FilterEvalTasks.empty())
         {
             // Ensure WaitingExternal tasks don't linger forever once the run is failed.
-            JarvisAgent* app = App::g_App;
+            JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
             AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
             for (auto& taskPair : workflowRun.m_TaskStates)
@@ -2533,7 +2533,7 @@ namespace AIAssistant
         WorkflowDefinition const& workflowDefinition = activeRun.m_Definition;
         auto const now = std::chrono::steady_clock::now();
 
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         AiRequestPool* requestPool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
 
         for (auto& [taskId, taskState] : workflowRun.m_TaskStates)

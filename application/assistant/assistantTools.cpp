@@ -1029,7 +1029,7 @@ namespace AIAssistant
 
     ToolResult ToolRegistry::ExecGetSystemStatus(std::unordered_map<std::string, std::string> const& /*args*/)
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (!app)
             return {"get_system_status", false, "Application not available"};
 
@@ -2403,7 +2403,7 @@ namespace AIAssistant
 
     ToolResult ToolRegistry::ExecGetDashboardStatus(std::unordered_map<std::string, std::string> const& /*args*/)
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (!app)
             return {"get_dashboard_status", false, "Application not available"};
 
@@ -2758,7 +2758,7 @@ namespace AIAssistant
             return {"jcwf_validate", false, error};
 
         // Get script registry for validation.
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         ScriptRegistry* scriptRegistry = app ? app->GetScriptRegistry() : nullptr;
 
         std::string validationSummary;

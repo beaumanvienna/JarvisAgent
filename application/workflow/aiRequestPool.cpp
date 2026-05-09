@@ -936,7 +936,7 @@ namespace AIAssistant
             return;
         }
 
-        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
         if (dispatcher == nullptr)
         {
@@ -1480,7 +1480,7 @@ namespace AIAssistant
                                           .m_MaxRetriesTransient = api->m_RateLimit.m_MaxRetriesTransient,
                                           .m_BaseRetryMs = api->m_RateLimit.m_BaseRetryMs};
 
-        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App);
+        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
         if (dispatcher == nullptr)
         {

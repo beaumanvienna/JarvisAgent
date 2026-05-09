@@ -1066,7 +1066,7 @@ namespace AIAssistant
         }
 
         WorkflowFileIndex const* fileIndex = nullptr;
-        if (JarvisAgent* app = App::g_App)
+        if (JarvisAgent* app = App::g_App.load(std::memory_order_acquire); app != nullptr)
         {
             fileIndex = app->GetWorkflowFileIndex();
         }
@@ -1269,7 +1269,7 @@ namespace AIAssistant
         outResponseText.clear();
         outError.clear();
 
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (app == nullptr)
         {
             outError = "Application not available";
@@ -1669,13 +1669,13 @@ namespace AIAssistant
                 }
 
                 std::string scriptRegistryTable;
-                if (JarvisAgent* app = App::g_App; app && app->GetScriptRegistry())
+                if (JarvisAgent* app = App::g_App.load(std::memory_order_acquire); app && app->GetScriptRegistry())
                 {
                     scriptRegistryTable = app->GetScriptRegistry()->SerializeMarkdownTable();
                 }
 
                 std::string workflowFileListing;
-                if (JarvisAgent* app = App::g_App; app && app->GetWorkflowFileIndex())
+                if (JarvisAgent* app = App::g_App.load(std::memory_order_acquire); app && app->GetWorkflowFileIndex())
                 {
                     // Re-scan so the listing is fresh
                     app->GetWorkflowFileIndex()->ScanDirectory(app->GetWorkflowFileIndex()->GetRootDirectory());
@@ -2413,7 +2413,7 @@ namespace AIAssistant
                 auto runValidation = [&](std::string const& taskLabel) -> ValidationResult
                 {
                     ScriptRegistry const* scriptRegistry = nullptr;
-                    if (JarvisAgent* app = App::g_App; app != nullptr)
+                    if (JarvisAgent* app = App::g_App.load(std::memory_order_acquire); app != nullptr)
                     {
                         scriptRegistry = app->GetScriptRegistry();
                     }

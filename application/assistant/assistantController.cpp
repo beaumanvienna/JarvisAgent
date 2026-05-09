@@ -1161,7 +1161,7 @@ namespace AIAssistant
         outResponseText.clear();
         outError.clear();
 
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (!app)
         {
             outError = "Application not available";
@@ -1312,7 +1312,7 @@ namespace AIAssistant
 
     std::string AssistantController::HandleStatusCommand()
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (!app)
             return "Error: JarvisAgent not available.";
 

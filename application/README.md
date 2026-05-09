@@ -11,7 +11,7 @@
 - AI request pool (envelope-direct `ai_call` dispatch + completion tracking)
 
 It inherits from `Application` and implements the full application lifecycle.
-A global singleton is accessible via `App::g_App`.
+A global singleton is accessible via `App::g_App` — declared `std::atomic<JarvisAgent*>` so background-thread reads pair with the release store in `OnStart` and the release-store-to-null in `OnShutdown`. Callers must `App::g_App.load(std::memory_order_acquire)` and null-check before deref.
 
 ---
 

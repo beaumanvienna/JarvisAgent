@@ -1243,7 +1243,7 @@ namespace AIAssistant
                     if (!err.empty())
                         return MakeAuthErrorResponse(err);
 
-                    JarvisAgent* app = App::g_App;
+                    JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
                     if (app == nullptr || app->GetWorkflowRuntimeManager() == nullptr)
                     {
                         crow::json::wvalue response;
@@ -1782,7 +1782,7 @@ namespace AIAssistant
         status["workflow_runs_active"] = static_cast<int64_t>(activeWorkflowRuns);
 
         // AI dispatch
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         {
             AiRequestPool const* pool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
             status["ai_calls_inflight"] = static_cast<int64_t>(pool != nullptr ? pool->GetDirectDispatchInflight() : 0);
@@ -8531,7 +8531,7 @@ namespace AIAssistant
         signals["workflow_runs_active"] = static_cast<int64_t>(activeRuns);
 
         // ---- AI dispatch state ----
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         if (app != nullptr)
         {
             AiRequestPool const* pool = app->GetAiRequestPool();
@@ -8750,7 +8750,7 @@ namespace AIAssistant
 
     crow::response WebServer::HandleDebugRecentSubmissionsGet()
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         CurlMultiDispatcher* dispatcher = (app != nullptr) ? app->GetCurlMultiDispatcher() : nullptr;
         crow::json::wvalue body;
         body["ok"] = true;
@@ -9054,7 +9054,7 @@ namespace AIAssistant
 
     crow::response WebServer::HandleDebugResetDispatcherStatePost()
     {
-        JarvisAgent* app = App::g_App;
+        JarvisAgent* app = App::g_App.load(std::memory_order_acquire);
         CurlMultiDispatcher* dispatcher = (app != nullptr) ? app->GetCurlMultiDispatcher() : nullptr;
         crow::json::wvalue body;
         body["ok"] = true;
