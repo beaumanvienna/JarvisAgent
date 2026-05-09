@@ -542,18 +542,32 @@ namespace AIAssistant
             return "";
         }
 
-        // file_clock::to_sys (C++20) is implemented in libstdc++ 13+, libc++
-        // 16+, and MSVC 19.30+ — all toolchains supported by this project.
-        // Replaces the previous two-now()-call clock-offset approximation,
-        // which was racy under thread preemption and NTP adjustments and
-        // could produce wrong timestamps used as the change-detection key.
-        // libc++ on macOS returns nanoseconds-precision time_point from
-        // file_clock::to_sys, which does not implicitly convert to the
-        // microsecond-precision time_point that to_time_t expects; cast
-        // explicitly to system_clock::duration to keep the call portable
-        // across libstdc++ and libc++.
+        // Convert filesystem file_time_type to a system_clock::time_point.
+        //
+        // Toolchain support map for the C++20 cross-clock conversion:
+        //   • libstdc++ 13+   — std::chrono::file_clock::to_sys works
+        //   • libc++ 16+      — to_sys returns nanoseconds-precision time_point
+        //                       that does not implicitly convert to the
+        //                       microsecond-precision system_clock::time_point
+        //                       to_time_t expects (needs time_point_cast)
+        //   • MSVC 19.34+     — to_sys works (VS 2022 17.4, Nov 2022)
+        //   • MSVC 19.30-33   — to_sys missing; clock_cast missing too
+        //
+        // The Windows CI runner is on an MSVC older than 19.34, so we use
+        // the toolchain-portable two-now() offset approach instead.  The
+        // offset between file_clock and system_clock is computed once per
+        // call from back-to-back clock reads (race window microseconds);
+        // it is collapsed by to_time_t's 1-second precision floor below,
+        // so the result of put_time below is unaffected.  This output is
+        // for display only (filter manifest mtime field), so the bounded
+        // race is acceptable.  For a use case that needed nanosecond-stable
+        // mtime as a change-detection key (the previous concern that drove
+        // the to_sys switch), we would need a platform-dispatched solution
+        // using FILETIME on Windows and to_sys elsewhere.
+        auto const fileNow = std::chrono::file_clock::now();
+        auto const sysNow = std::chrono::system_clock::now();
         auto const sysTime = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            std::chrono::file_clock::to_sys(ftime));
+            sysNow + (ftime - fileNow));
         auto const timeT = std::chrono::system_clock::to_time_t(sysTime);
 
         std::tm tm{};

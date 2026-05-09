@@ -119,6 +119,12 @@ namespace AIAssistant
         {
             TerminalManager* terminal = Core::g_Core->GetTerminalManager();
             {
+                // Lifetime contract: the [this] captures below are read on the
+                // TUI redraw thread (engine-owned).  TerminalManager outlives
+                // JarvisAgent during shutdown, so JarvisAgent::OnShutdown's
+                // first action is to call SetStatusCallbacks({}, {}) — without
+                // that, a redraw after JarvisAgent destruction would deref a
+                // dangling `this`.
                 terminal->SetStatusCallbacks(
                     // Build status lines dynamically
                     [this](std::vector<std::string>& lines, int maxWidth)
@@ -230,7 +236,14 @@ namespace AIAssistant
 
         if (!m_WorkflowRegistry->LoadDirectory(workflowsDirectory))
         {
-            LOG_APP_WARN("JarvisAgent::InitializeWorkflows: no workflows loaded from '{}'", workflowsDirectory.string());
+            // ERROR-level so the dashboard's Run Analyzer surfaces the load
+            // failure rather than burying it in WARN.  Includes the resolved
+            // directory as a literal substring so log queries can attribute
+            // it; downstream workflow runs will fail because no JCWFs are
+            // registered, and JC needs the upstream cause visible.
+            LOG_APP_ERROR("JarvisAgent::InitializeWorkflows: failed to load workflows from directory='{}' "
+                          "(downstream runs will fail with 'workflow not found')",
+                          workflowsDirectory.string());
         }
         else
         {
@@ -238,7 +251,12 @@ namespace AIAssistant
                          workflowsDirectory.string());
             if (!m_WorkflowRegistry->ValidateAll())
             {
-                LOG_APP_WARN("JarvisAgent::InitializeWorkflows: one or more workflows failed validation");
+                // ERROR-level: a workflow that fails validation will fail at
+                // run time too.  Surfacing this at boot lets JC see the bad
+                // JCWF before a trigger fires it.
+                LOG_APP_ERROR("JarvisAgent::InitializeWorkflows: one or more workflows failed validation in "
+                              "directory='{}' — check earlier validator log lines for the offending workflow id",
+                              workflowsDirectory.string());
             }
         }
 
@@ -529,6 +547,13 @@ namespace AIAssistant
                 });
         }
 
+        // Lifetime contract: this [this] capture fires from a TriggerEngine-
+        // owned thread (cron / file-watch / webhook / manual).  m_TriggerEngine
+        // is reset in OnShutdown phase 2 (after WebServer::WaitStop, before
+        // engine thread-pool drain), so the lambda body cannot run after
+        // JarvisAgent destruction — the unique_ptr reset blocks until the
+        // trigger thread joins.  Body still null-checks m_WorkflowRuntimeManager
+        // because it is reset earlier in phase 2 than m_TriggerEngine.
         m_TriggerEngine = std::make_unique<TriggerEngine>(
             [this](TriggerEngine::TriggerFiredEvent const& triggerEvent)
             {
@@ -558,7 +583,13 @@ namespace AIAssistant
         }
         else
         {
-            LOG_APP_WARN("JarvisAgent::InitializeWorkflows: skipping trigger registration (registry or engine missing)");
+            // ERROR-level: missing registry or trigger engine at this point
+            // means the agent will boot but cannot fire any cron / file-watch
+            // / webhook / manual trigger — silent dead-air for users.
+            LOG_APP_ERROR("JarvisAgent::InitializeWorkflows: skipping trigger registration "
+                          "(registry={}, engine={}) — workflows will not auto-fire",
+                          m_WorkflowRegistry != nullptr ? "ok" : "null",
+                          m_TriggerEngine != nullptr ? "ok" : "null");
         }
     }
 
@@ -782,6 +813,21 @@ namespace AIAssistant
 
         RAW_ONSHUTDOWN("[OnShutdown] entered\n");
         LOG_APP_INFO("leaving JarvisAgent");
+
+        // Detach status callbacks BEFORE any subsystem teardown.  TerminalManager
+        // is engine-owned and outlives JarvisAgent during the engine's own
+        // shutdown phase; without this clear, a TUI redraw triggered after
+        // JarvisAgent destruction would dereference `this` through the captured
+        // [this] in the lambdas wired in OnStart and run-into-use-after-free.
+        // Both invocation sites in TerminalManager null-check the std::function
+        // so an empty assignment is the explicit "no more status updates" signal.
+        if (Core::g_Core != nullptr)
+        {
+            if (TerminalManager* terminal = Core::g_Core->GetTerminalManager(); terminal != nullptr)
+            {
+                terminal->SetStatusCallbacks({}, {});
+            }
+        }
 
         // ── Phase 1: signal all subsystems (non-blocking) ──────────────────
         RAW_ONSHUTDOWN("[OnShutdown] SignalShutdown...\n");
