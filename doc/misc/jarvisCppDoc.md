@@ -1,20 +1,21 @@
 # jarvisCppDocu — header → cpp pairing review
 
-Walked `engine/` and `application/` — found 139 headers and 117 cpp files.
-Pairing rule: a header pairs with the .cpp of the same stem in the same directory.
+Walked `engine/` and `application/` — found 141 headers and 121 cpp files (excluding the two generated headers under `application/json/`).
+Pairing rule: a header pairs with the .cpp of the same stem in the same directory.  Additional files in a row's second column are bundled into the same ai_call so the auditor sees the base class or critical helper alongside the primary file (without bundling, an audit of `azureBlobConnector.cpp` would not see the `ICloudConnector` contract it implements; an audit of `pythonTaskExecutor.cpp` would not see the `ConfineUnderProjectRoot` security gate it depends on).
 
 | Header (.h) | Paired cpp (same dir, same stem) |
 |---|---|
 | `application/application.h` |  |
-| `application/assistant/assistantController.h` | `application/assistant/assistantController.cpp` |
-| `application/assistant/assistantMemory.h` | `application/assistant/assistantMemory.cpp` |
-| `application/assistant/assistantSession.h` | `application/assistant/assistantSession.cpp` |
+| `application/assistant/assistantController.h` | `application/assistant/assistantController.cpp`, `application/assistant/assistantHelpers.h`, `application/assistant/assistantHelpers.cpp` |
+| `application/assistant/assistantHelpers.h` | `application/assistant/assistantHelpers.cpp` |
+| `application/assistant/assistantMemory.h` | `application/assistant/assistantMemory.cpp`, `application/assistant/assistantHelpers.h`, `application/assistant/assistantHelpers.cpp` |
+| `application/assistant/assistantSession.h` | `application/assistant/assistantSession.cpp`, `application/assistant/assistantHelpers.h`, `application/assistant/assistantHelpers.cpp` |
 | `application/assistant/assistantTools.h` | `application/assistant/assistantTools.cpp` |
 | `application/assistant/contextAssembler.h` | `application/assistant/contextAssembler.cpp` |
 | `application/assistant/workspaceIndexer.h` | `application/assistant/workspaceIndexer.cpp` |
-| `application/cloud/azureBlobCloudTaskExecutor.h` | `application/cloud/azureBlobCloudTaskExecutor.cpp` |
+| `application/cloud/azureBlobCloudTaskExecutor.h` | `application/cloud/azureBlobCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
 | `application/cloud/connectorHttp.h` | `application/cloud/connectorHttp.cpp` |
-| `application/cloud/azureBlobConnector.h` | `application/cloud/azureBlobConnector.cpp` |
+| `application/cloud/azureBlobConnector.h` | `application/cloud/azureBlobConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/azureSharedKeySigner.h` | `application/cloud/azureSharedKeySigner.cpp` |
 | `application/cloud/cloudCircuitBreaker.h` | `application/cloud/cloudCircuitBreaker.cpp` |
 | `application/cloud/cloudConnectionManager.h` | `application/cloud/cloudConnectionManager.cpp` |
@@ -23,38 +24,39 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/cloud/cloudConnectorRegistry.h` | `application/cloud/cloudConnectorRegistry.cpp` |
 | `application/cloud/cloudRetryPolicy.h` | `application/cloud/cloudRetryPolicy.cpp` |
 | `application/cloud/cloudTaskExecutor.h` | `application/cloud/cloudTaskExecutor.cpp` |
-| `application/cloud/dbQueryCloudTaskExecutor.h` | `application/cloud/dbQueryCloudTaskExecutor.cpp` |
-| `application/cloud/emailCloudTaskExecutor.h` | `application/cloud/emailCloudTaskExecutor.cpp` |
-| `application/cloud/emailConnector.h` | `application/cloud/emailConnector.cpp` |
-| `application/cloud/gcsCloudTaskExecutor.h` | `application/cloud/gcsCloudTaskExecutor.cpp` |
-| `application/cloud/gcsConnector.h` | `application/cloud/gcsConnector.cpp` |
-| `application/cloud/gitHubCloudTaskExecutor.h` | `application/cloud/gitHubCloudTaskExecutor.cpp` |
-| `application/cloud/gitHubConnector.h` | `application/cloud/gitHubConnector.cpp` |
-| `application/cloud/googleSheetsCloudTaskExecutor.h` | `application/cloud/googleSheetsCloudTaskExecutor.cpp` |
-| `application/cloud/googleSheetsConnector.h` | `application/cloud/googleSheetsConnector.cpp` |
-| `application/cloud/jiraCloudTaskExecutor.h` | `application/cloud/jiraCloudTaskExecutor.cpp` |
-| `application/cloud/jiraConnector.h` | `application/cloud/jiraConnector.cpp` |
-| `application/cloud/oneDriveCloudTaskExecutor.h` | `application/cloud/oneDriveCloudTaskExecutor.cpp` |
-| `application/cloud/oneDriveConnector.h` | `application/cloud/oneDriveConnector.cpp` |
-| `application/cloud/polarionConnector.h` | `application/cloud/polarionConnector.cpp` |
-| `application/cloud/polarionWriteTaskExecutor.h` | `application/cloud/polarionWriteTaskExecutor.cpp` |
-| `application/cloud/postgresConnector.h` | `application/cloud/postgresConnector.cpp` |
+| `application/cloud/dbQueryCloudTaskExecutor.h` | `application/cloud/dbQueryCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/cloud/emailCloudTaskExecutor.h` | `application/cloud/emailCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/emailConnector.h` | `application/cloud/emailConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/gcsCloudTaskExecutor.h` | `application/cloud/gcsCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/gcsConnector.h` | `application/cloud/gcsConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/gitHubCloudTaskExecutor.h` | `application/cloud/gitHubCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/gitHubConnector.h` | `application/cloud/gitHubConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/googleSheetsCloudTaskExecutor.h` | `application/cloud/googleSheetsCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/googleSheetsConnector.h` | `application/cloud/googleSheetsConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/jiraCloudTaskExecutor.h` | `application/cloud/jiraCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/jiraConnector.h` | `application/cloud/jiraConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/oneDriveCloudTaskExecutor.h` | `application/cloud/oneDriveCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/oneDriveConnector.h` | `application/cloud/oneDriveConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/polarionConnector.h` | `application/cloud/polarionConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/polarionWriteTaskExecutor.h` | `application/cloud/polarionWriteTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/postgresConnector.h` | `application/cloud/postgresConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/providerRateLimitPolicy.h` | `application/cloud/providerRateLimitPolicy.cpp` |
-| `application/cloud/redmineCloudTaskExecutor.h` | `application/cloud/redmineCloudTaskExecutor.cpp` |
-| `application/cloud/redmineConnector.h` | `application/cloud/redmineConnector.cpp` |
-| `application/cloud/s3CloudTaskExecutor.h` | `application/cloud/s3CloudTaskExecutor.cpp` |
-| `application/cloud/s3Connector.h` | `application/cloud/s3Connector.cpp` |
+| `application/cloud/redmineCloudTaskExecutor.h` | `application/cloud/redmineCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/redmineConnector.h` | `application/cloud/redmineConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/s3CloudTaskExecutor.h` | `application/cloud/s3CloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/s3Connector.h` | `application/cloud/s3Connector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/sigV4Signer.h` | `application/cloud/sigV4Signer.cpp` |
-| `application/cloud/slackCloudTaskExecutor.h` | `application/cloud/slackCloudTaskExecutor.cpp` |
-| `application/cloud/slackConnector.h` | `application/cloud/slackConnector.cpp` |
-| `application/cloud/snowflakeCloudTaskExecutor.h` | `application/cloud/snowflakeCloudTaskExecutor.cpp` |
-| `application/cloud/snowflakeConnector.h` | `application/cloud/snowflakeConnector.cpp` |
+| `application/cloud/slackCloudTaskExecutor.h` | `application/cloud/slackCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/slackConnector.h` | `application/cloud/slackConnector.cpp`, `application/cloud/cloudConnector.h` |
+| `application/cloud/snowflakeCloudTaskExecutor.h` | `application/cloud/snowflakeCloudTaskExecutor.cpp`, `application/cloud/cloudTaskExecutor.h` |
+| `application/cloud/snowflakeConnector.h` | `application/cloud/snowflakeConnector.cpp`, `application/cloud/cloudConnector.h` |
 | `application/cloud/taskCancellationToken.h` |  |
 | `application/content/chunkPlanner.h` | `application/content/chunkPlanner.cpp` |
 | `application/content/markdownSectionSplitter.h` | `application/content/markdownSectionSplitter.cpp` |
 | `application/file/fileWatcher.h` | `application/file/fileWatcher.cpp` |
+| `application/file/pathConfinement.h` | `application/file/pathConfinement.cpp` |
 | `application/file/scriptRegistry.h` | `application/file/scriptRegistry.cpp` |
-| `application/jarvisAgent.h` | `application/jarvisAgent.cpp` |
+| `application/jarvisAgent.h` | `application/jarvisAgent.cpp`, `application/application.h` |
 | `application/json/jcwfGenerationGuide.generated.h` |  |
 | `application/json/jcwfSchema.generated.h` |  |
 | `application/json/jsonObjectParser.h` | `application/json/jsonObjectParser.cpp` |
@@ -67,7 +69,7 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/json/requestBuilder.h` | `application/json/requestBuilder.cpp` |
 | `application/json/schemaValidator.h` | `application/json/schemaValidator.cpp` |
 | `application/log/statusRenderer.h` | `application/log/statusRenderer.cpp` |
-| `application/python/pythonEngine.h` | `application/python/pythonEngine.cpp` |
+| `application/python/pythonEngine.h` | `application/python/pythonEngine.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/python/pythonEnginePool.h` | `application/python/pythonEnginePool.cpp` |
 | `application/session/fileWriter.h` | `application/session/fileWriter.cpp` |
 | `application/task/carMaintenanceTask.h` | `application/task/carMaintenanceTask.cpp` |
@@ -79,41 +81,42 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `application/web/webSessionManager.h` | `application/web/webSessionManager.cpp` |
 | `application/workflow/adhocWorkflowManager.h` | `application/workflow/adhocWorkflowManager.cpp` |
 | `application/workflow/aiCallEvents.h` |  |
-| `application/workflow/aiCallTaskExecutor.h` | `application/workflow/aiCallTaskExecutor.cpp` |
+| `application/workflow/aiCallTaskExecutor.h` | `application/workflow/aiCallTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/aiInvocation.h` |  |
 | `application/workflow/aiReply.h` |  |
-| `application/workflow/aiRequestPool.h` | `application/workflow/aiRequestPool.cpp` |
+| `application/workflow/aiRequestPool.h` | `application/workflow/aiRequestPool.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/aiTranscript.h` | `application/workflow/aiTranscript.cpp` |
 | `application/workflow/dataflowResolver.h` | `application/workflow/dataflowResolver.cpp` |
 | `application/workflow/filter/filterEngine.h` | `application/workflow/filter/filterEngine.cpp` |
-| `application/workflow/filter/filterManifest.h` | `application/workflow/filter/filterManifest.cpp` |
-| `application/workflow/filter/polarionClient.h` | `application/workflow/filter/polarionClient.cpp` |
+| `application/workflow/filter/filterManifest.h` | `application/workflow/filter/filterManifest.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/workflow/filter/polarionClient.h` | `application/workflow/filter/polarionClient.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/filter/queryParser.h` | `application/workflow/filter/queryParser.cpp` |
-| `application/workflow/internalTaskExecutor.h` | `application/workflow/internalTaskExecutor.cpp` |
+| `application/workflow/internalTaskExecutor.h` | `application/workflow/internalTaskExecutor.cpp`, `application/workflow/taskExecutor.h` |
 | `application/workflow/jcwfContainer.h` | `application/workflow/jcwfContainer.cpp` |
-| `application/workflow/pythonTaskExecutor.h` | `application/workflow/pythonTaskExecutor.cpp` |
+| `application/workflow/pythonTaskExecutor.h` | `application/workflow/pythonTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/scriptCatalog.h` | `application/workflow/scriptCatalog.cpp` |
-| `application/workflow/shellTaskExecutor.h` | `application/workflow/shellTaskExecutor.cpp` |
-| `application/workflow/subWorkflowTaskExecutor.h` | `application/workflow/subWorkflowTaskExecutor.cpp` |
+| `application/workflow/shellTaskExecutor.h` | `application/workflow/shellTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/workflow/subWorkflowTaskExecutor.h` | `application/workflow/subWorkflowTaskExecutor.cpp`, `application/workflow/taskExecutor.h`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/taskExecutor.h` |  |
 | `application/workflow/taskExecutorRegistry.h` | `application/workflow/taskExecutorRegistry.cpp` |
 | `application/workflow/taskFreshnessChecker.h` | `application/workflow/taskFreshnessChecker.cpp` |
-| `application/workflow/taskPathResolver.h` | `application/workflow/taskPathResolver.cpp` |
+| `application/workflow/taskPathResolver.h` | `application/workflow/taskPathResolver.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/templateEngine.h` | `application/workflow/templateEngine.cpp` |
-| `application/workflow/triggerEngine.h` | `application/workflow/triggerEngine.cpp` |
+| `application/workflow/triggerEngine.h` | `application/workflow/triggerEngine.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/workflowFileIndex.h` | `application/workflow/workflowFileIndex.cpp` |
 | `application/workflow/workflowJsonParser.h` | `application/workflow/workflowJsonParser.cpp` |
-| `application/workflow/workflowJsonParserDetails.h` | `application/workflow/workflowJsonParserDetails.cpp` |
-| `application/workflow/workflowRegistry.h` | `application/workflow/workflowRegistry.cpp` |
-| `application/workflow/workflowRuntimeManager.h` | `application/workflow/workflowRuntimeManager.cpp` |
+| `application/workflow/workflowJsonParserDetails.h` | `application/workflow/workflowJsonParserDetails.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/workflow/workflowRegistry.h` | `application/workflow/workflowRegistry.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
+| `application/workflow/workflowRuntimeManager.h` | `application/workflow/workflowRuntimeManager.cpp`, `application/file/pathConfinement.h`, `application/file/pathConfinement.cpp` |
 | `application/workflow/workflowTriggerBinder.h` | `application/workflow/workflowTriggerBinder.cpp` |
 | `application/workflow/workflowTypes.h` |  |
 | `application/workflow/workflowValidator.h` | `application/workflow/workflowValidator.cpp` |
 | `engine/auxiliary/file.h` | `engine/auxiliary/file.cpp` |
 | `engine/auxiliary/threadPool.h` | `engine/auxiliary/threadPool.cpp` |
 | `engine/core.h` | `engine/core.cpp` |
-| `engine/curlWrapper/authSigner.h` | `engine/curlWrapper/authSigner.cpp` |
-| `engine/curlWrapper/awsSigV4.h` | `engine/curlWrapper/awsSigV4.cpp` |
+| `engine/curlWrapper/authSigner.h` | `engine/curlWrapper/authSigner.cpp`, `engine/curlWrapper/credValidation.h` |
+| `engine/curlWrapper/awsSigV4.h` | `engine/curlWrapper/awsSigV4.cpp`, `engine/curlWrapper/credValidation.h` |
+| `engine/curlWrapper/credValidation.h` |  |
 | `engine/curlWrapper/curlManager.h` |  |
 | `engine/curlWrapper/curlMultiDispatcher.h` | `engine/curlWrapper/curlMultiDispatcher.cpp` |
 | `engine/curlWrapper/curlWrapper.h` | `engine/curlWrapper/curlWrapper.cpp` |
@@ -134,7 +137,7 @@ Pairing rule: a header pairs with the .cpp of the same stem in the same director
 | `engine/json/configChecker.h` | `engine/json/configChecker.cpp` |
 | `engine/json/configParser.h` | `engine/json/configParser.cpp` |
 | `engine/json/jsonHelper.h` | `engine/json/jsonHelper.cpp` |
-| `engine/keys/credential.h` |  |
+| `engine/keys/credential.h` | `engine/keys/credential.cpp` |
 | `engine/keys/jwtGenerator.h` | `engine/keys/jwtGenerator.cpp` |
 | `engine/keys/keyEncryption.h` | `engine/keys/keyEncryption.cpp` |
 | `engine/keys/keyManager.h` | `engine/keys/keyManager.cpp` |

@@ -45,7 +45,33 @@ namespace AIAssistant
     // queue directory for replay/debug — the envelope is authoritative for dispatch.
     // Progress and results are delivered through the BroadcastFn callback (WebSocket).
     //
-    // Thread safety: all public methods are safe to call from any thread.
+    // THREADING & LIFETIME CONTRACT
+    //
+    // - All public methods are safe to call from any thread.
+    // - `ExplainAsync` / `GenerateAsync` / `FixFailedScriptAsync` each spawn a
+    //   background `std::thread` that captures `[this, ...by value]` in its
+    //   lambda.  The captures are NOT detached — every spawned thread is
+    //   tracked in `m_BackgroundThreads` and joined at `Shutdown()` time.
+    // - `[this]` capture is safe under the invariant: every path that destroys
+    //   an `AiJcwfService` instance routes through `~AiJcwfService`, which
+    //   calls `Shutdown()`, which joins ALL outstanding threads BEFORE any
+    //   member is destroyed.  In other words: a captured `this` outlives every
+    //   member it might dereference.  Per `feedback_capture_by_value_async`
+    //   this is the documented lifetime guarantee that makes `[this]` capture
+    //   acceptable here.
+    // - The class is non-copyable and non-movable (=delete below), so the
+    //   instance cannot be relocated mid-flight.  The owning pointer must
+    //   destroy via the destructor (unique_ptr, automatic storage, etc.) —
+    //   abandoning an instance via `delete`-of-base-via-cast or similar would
+    //   skip Shutdown and break the contract.  No such path exists today; the
+    //   service is owned by the WebServer subsystem in JarvisAgent.
+    // - `Shutdown()` is idempotent: calling it more than once (e.g. an
+    //   external operator Shutdown followed by ~AiJcwfService) is safe; the
+    //   second call observes an empty `m_BackgroundThreads`.
+    // - Background lambdas observe `m_ShuttingDown` at every safe break point
+    //   (pre-broadcast, between AI stages) and bail early; the join in
+    //   `Shutdown` therefore waits at most for the currently-active AI call
+    //   to time out via `RunSingleAiCall`'s `wait_for`.
     class AiJcwfService final
     {
     public:

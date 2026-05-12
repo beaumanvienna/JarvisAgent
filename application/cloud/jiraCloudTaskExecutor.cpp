@@ -33,12 +33,116 @@
 #include "cloud/jiraConnector.h"
 #include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
+
+    namespace
+    {
+        // Jira issue keys: `^[A-Z][A-Z0-9_]+-\d+$`.  Project key is an
+        // uppercase short-prefix (2-10 chars typically); issue number is
+        // a positive decimal.  Caps: 32-char prefix + `-` + 10-digit ID =
+        // 43 max to stay well within sane URL component lengths.
+        bool IsValidJiraIssueKey(std::string_view value)
+        {
+            if (value.empty() || value.size() > 43)
+            {
+                return false;
+            }
+            size_t i = 0;
+            if (!(value[i] >= 'A' && value[i] <= 'Z'))
+            {
+                return false;
+            }
+            ++i;
+            // Prefix: uppercase + digits + underscore, then a single '-'.
+            while (i < value.size())
+            {
+                char c = value[i];
+                if (c == '-')
+                {
+                    break;
+                }
+                bool const ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+                if (!ok)
+                {
+                    return false;
+                }
+                ++i;
+            }
+            if (i == value.size() || value[i] != '-' || i < 2 || i > 32)
+            {
+                // Prefix must be at least 2 chars (first is upper-alpha + at
+                // least one more from the prefix set) and at most 32.
+                return false;
+            }
+            ++i; // skip '-'
+            if (i == value.size())
+            {
+                return false; // need at least one digit
+            }
+            for (size_t suffixLen = 0; i < value.size(); ++i, ++suffixLen)
+            {
+                if (suffixLen >= 10)
+                {
+                    return false;
+                }
+                if (value[i] < '0' || value[i] > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Jira project keys: `^[A-Z][A-Z0-9_]+$`, 2-32 chars.  Same charset
+        // as the prefix portion of the issue key above; reused for the bare
+        // project_key param that lands in JSON body (not URL), but kept as a
+        // structural allowlist so the value can't smuggle JSON-injection
+        // shapes either (defense-in-depth alongside JsonHelper::Escape).
+        bool IsValidJiraProjectKey(std::string_view value)
+        {
+            if (value.size() < 2 || value.size() > 32)
+            {
+                return false;
+            }
+            if (!(value[0] >= 'A' && value[0] <= 'Z'))
+            {
+                return false;
+            }
+            for (size_t i = 1; i < value.size(); ++i)
+            {
+                char c = value[i];
+                bool const ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Jira transition IDs are positive integers in the Atlassian REST API.
+        bool IsValidJiraTransitionId(std::string_view value)
+        {
+            if (value.empty() || value.size() > 10)
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
 
     static bool JiraRequest(std::string const& method, std::string const& url,
                             CloudCredentials const& credentials, std::string& responseBody, long& httpCode,
@@ -158,6 +262,15 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidJiraProjectKey(projectKey))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'create': invalid 'project_key' (must match "
+                                               "[A-Z][A-Z0-9_]+, 2-32 chars)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid project_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, projectKey);
+                return false;
+            }
 
             std::string summary = getStringParam("summary");
             if (summary.empty())
@@ -179,12 +292,29 @@ namespace AIAssistant
             std::string descriptionFile = getStringParam("description_file");
             if (!descriptionFile.empty())
             {
-                std::ifstream in(descriptionFile);
+                // Containment gate: a JCWF or AI-supplied `description_file`
+                // value of `/etc/shadow` or `../../etc/passwd` must not be
+                // read.  ConfineUnderProjectRoot is the canonical project-root
+                // boundary per `feedback_path_containment_scope`.
+                std::filesystem::path const confined = ConfineUnderProjectRoot(descriptionFile);
+                if (confined.empty())
+                {
+                    taskState.m_LastErrorMessage =
+                        "jira_issue 'create': description_file does not lie under the project root: " +
+                        descriptionFile;
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[jira] description_file rejected task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, descriptionFile);
+                    return false;
+                }
+                std::ifstream in(confined);
                 if (!in.is_open())
                 {
                     taskState.m_LastErrorMessage =
                         "jira_issue 'create': description_file not readable: " + descriptionFile;
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[jira] description_file not readable task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, descriptionFile);
                     return false;
                 }
                 std::ostringstream oss;
@@ -276,6 +406,15 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidJiraIssueKey(issueKey))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'update': invalid 'issue_key' (must match "
+                                               "[A-Z][A-Z0-9_]+-\\d+, e.g. 'PROJ-123')";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
+                return false;
+            }
 
             // The 'fields' param is a raw JSON object passed through directly
             std::string fieldsJson = getStringParam("fields");
@@ -286,8 +425,13 @@ namespace AIAssistant
                 return false;
             }
 
+            // Defense-in-depth percent-encode after the allowlist: the
+            // allowlist already excludes `/`, `?`, `&` from issueKey, but the
+            // encode keeps a future allowlist relaxation from silently
+            // re-introducing URL injection.
+            std::string const issueKeyEnc = ConnectorHttp::UrlEncodeComponent(issueKey);
             std::string requestBody = "{\"fields\":" + fieldsJson + "}";
-            std::string url = baseUrl + "/rest/api/3/issue/" + issueKey;
+            std::string url = baseUrl + "/rest/api/3/issue/" + issueKeyEnc;
 
             if (!JiraRequest("PUT", url, credentials, responseBody, httpCode, requestBody))
             {
@@ -325,9 +469,28 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidJiraIssueKey(issueKey))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'transition': invalid 'issue_key' (must match "
+                                               "[A-Z][A-Z0-9_]+-\\d+)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
+                return false;
+            }
+            if (!IsValidJiraTransitionId(transitionId))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'transition': invalid 'transition_id' (must be a positive "
+                                               "integer)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid transition_id task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, transitionId);
+                return false;
+            }
 
+            std::string const issueKeyEnc = ConnectorHttp::UrlEncodeComponent(issueKey);
             std::string requestBody = "{\"transition\":{\"id\":\"" + JsonHelper::EscapeJsonString(transitionId) + "\"}}";
-            std::string url = baseUrl + "/rest/api/3/issue/" + issueKey + "/transitions";
+            std::string url = baseUrl + "/rest/api/3/issue/" + issueKeyEnc + "/transitions";
 
             if (!JiraRequest("POST", url, credentials, responseBody, httpCode, requestBody))
             {
@@ -361,10 +524,20 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidJiraIssueKey(issueKey))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'comment': invalid 'issue_key' (must match "
+                                               "[A-Z][A-Z0-9_]+-\\d+)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
+                return false;
+            }
 
+            std::string const issueKeyEnc = ConnectorHttp::UrlEncodeComponent(issueKey);
             // Jira v3 comment uses ADF format
             std::string requestBody = "{\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + JsonHelper::EscapeJsonString(body) + "\"}]}]}}";
-            std::string url = baseUrl + "/rest/api/3/issue/" + issueKey + "/comment";
+            std::string url = baseUrl + "/rest/api/3/issue/" + issueKeyEnc + "/comment";
 
             if (!JiraRequest("POST", url, credentials, responseBody, httpCode, requestBody))
             {
@@ -391,8 +564,18 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidJiraIssueKey(issueKey))
+            {
+                taskState.m_LastErrorMessage = "jira_issue 'get': invalid 'issue_key' (must match "
+                                               "[A-Z][A-Z0-9_]+-\\d+)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[jira] invalid issue_key task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueKey);
+                return false;
+            }
 
-            std::string url = baseUrl + "/rest/api/3/issue/" + issueKey;
+            std::string const issueKeyEnc = ConnectorHttp::UrlEncodeComponent(issueKey);
+            std::string url = baseUrl + "/rest/api/3/issue/" + issueKeyEnc;
 
             if (!JiraRequest("GET", url, credentials, responseBody, httpCode))
             {

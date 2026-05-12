@@ -34,12 +34,26 @@ namespace AIAssistant
 {
     namespace
     {
-        void SafeTruncateUtf8(std::string& text, int maxColumns)
+        // Bound `text` to at most `maxColumns` codepoints, landing on a
+        // validated UTF-8 boundary.  One codepoint ≈ one column — the wide-char
+        // width is intentionally NOT consulted; the approximation has been
+        // good enough since the TUI shipped, and PDC_transform_line at refresh
+        // time is what actually arbitrates wide-cell placement.
+        //
+        // Continuation-byte validation: a lead byte's *claimed* length is
+        // honored only if every claimed continuation exists and starts with
+        // 10xxxxxx.  Otherwise the lead is consumed as a single byte and the
+        // malformed remnant survives into the output string — where
+        // TerminalManager::SanitizeForCurses replaces it with '?' before it
+        // reaches ncurses.  The earlier implementation trusted the lead byte
+        // blindly, so a fake 4-byte lead near the end of a string could
+        // over-skip past the actual character boundary, mis-counting columns
+        // and potentially landing the cut mid-codepoint.
+        std::string TruncateColumns(std::string_view text, int maxColumns)
         {
             if (maxColumns <= 0)
             {
-                text.clear();
-                return;
+                return {};
             }
 
             int columnCount = 0;
@@ -48,24 +62,50 @@ namespace AIAssistant
 
             while (byteIndex < totalBytes)
             {
-                unsigned char c = static_cast<unsigned char>(text[byteIndex]);
+                unsigned char const lead = static_cast<unsigned char>(text[byteIndex]);
 
-                int charLength = (c & 0x80) == 0      ? 1
-                                 : (c & 0xE0) == 0xC0 ? 2
-                                 : (c & 0xF0) == 0xE0 ? 3
-                                 : (c & 0xF8) == 0xF0 ? 4
-                                                      : 1;
+                int const claimed = (lead & 0x80) == 0       ? 1
+                                    : (lead & 0xE0) == 0xC0 ? 2
+                                    : (lead & 0xF0) == 0xE0 ? 3
+                                    : (lead & 0xF8) == 0xF0 ? 4
+                                                            : 0;
+                int charLength = 1;
+                if (claimed >= 2 && byteIndex + static_cast<size_t>(claimed) <= totalBytes)
+                {
+                    bool valid = true;
+                    for (int k = 1; k < claimed; ++k)
+                    {
+                        unsigned char const cont =
+                            static_cast<unsigned char>(text[byteIndex + static_cast<size_t>(k)]);
+                        if ((cont & 0xC0) != 0x80)
+                        {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (valid) charLength = claimed;
+                }
 
                 if (columnCount + 1 > maxColumns)
                 {
-                    text.resize(byteIndex);
-                    return;
+                    return std::string(text.substr(0, byteIndex));
                 }
 
                 byteIndex += static_cast<size_t>(charLength);
                 columnCount += 1;
             }
+            return std::string(text);
         }
+
+        // Per-field caps for externally-sourced text dropped into the status
+        // line.  The values are loose — well above any realistic legitimate
+        // input — so well-formed displayIds and key-status labels render in
+        // full; the cap only kicks in for pathological input (huge adhoc
+        // suffix, malformed JCWF id, surprise upstream value).  Without these
+        // bounds, a single long field would consume the row's column budget
+        // and silently elide the rest of the status indicators.
+        constexpr int kDisplayIdMaxColumns = 48;
+        constexpr int kKeysStatusEchoMaxColumns = 24;
 
         std::string FormatRelative(std::string const& iso)
         {
@@ -203,7 +243,13 @@ namespace AIAssistant
             }
             else
             {
-                oss << "● Keys: " << (snap.keysStatus.empty() ? "?" : snap.keysStatus);
+                // Externally-sourced echo path — bound the value so an
+                // unexpected long status string can't crowd out the rest of
+                // the row.  The four expected values above all fit in well
+                // under the cap.
+                oss << "● Keys: "
+                    << (snap.keysStatus.empty() ? std::string("?")
+                                                : TruncateColumns(snap.keysStatus, kKeysStatusEchoMaxColumns));
             }
 
             // AI in flight.
@@ -259,9 +305,7 @@ namespace AIAssistant
                 oss << "  !! Python offline";
             }
 
-            std::string line = oss.str();
-            SafeTruncateUtf8(line, maxColumns);
-            outLines.push_back(std::move(line));
+            outLines.push_back(TruncateColumns(oss.str(), maxColumns));
         }
 
         // ---------- Row 2 — last runs, plus a sealed-keys hint when applicable ----------
@@ -281,7 +325,12 @@ namespace AIAssistant
                 {
                     for (auto const& run : runs)
                     {
-                        oss << "  " << StateGlyph(run.state) << " " << run.displayId;
+                        // displayId carries workflow-id substrings and adhoc
+                        // suffixes — both are externally controllable (JCWF
+                        // upload, MCP run-with-id).  Bound here so a single
+                        // pathological id can't fill the entire row.
+                        oss << "  " << StateGlyph(run.state) << " "
+                            << TruncateColumns(run.displayId, kDisplayIdMaxColumns);
                         if (run.isAdhoc)
                         {
                             oss << " [adhoc]";
@@ -309,9 +358,7 @@ namespace AIAssistant
                        "Unlock the master password, or add providers in the Settings UI.";
             }
 
-            std::string line = oss.str();
-            SafeTruncateUtf8(line, maxColumns);
-            outLines.push_back(std::move(line));
+            outLines.push_back(TruncateColumns(oss.str(), maxColumns));
         }
     }
 } // namespace AIAssistant

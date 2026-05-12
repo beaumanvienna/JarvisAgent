@@ -16,10 +16,21 @@ This document describes:
 ## Core Responsibilities
 
 ### 1. Initialize global systems
-- Install SIGINT handler (`Core::SignalHandler`).
+- Install signal handlers via `Core::InstallSignalHandlers()`:
+  - `SIGINT` and `SIGTERM` → `Core::SignalHandler` (graceful shutdown; second
+    arrival force-exits via `_exit(EXIT_FAILURE)`).
+  - `SIGPIPE` → `SIG_IGN` (libcurl runs with `CURLOPT_NOSIGNAL=1`, so a
+    socket closed mid-write would terminate the process by default; the
+    EPIPE surfaces to libcurl as `CURLE_SEND_ERROR` instead).
+  - POSIX uses `sigaction` with both signals blocked during handler
+    execution and `SA_RESTART` cleared so the engine main-loop sleep
+    wakes promptly; Windows uses `signal()` (no `sigaction` available).
+  - The handler discipline (async-signal-safe operations only — no
+    `LOG_*`, no heap, no mutex) is documented in the comment block on
+    `Core::SignalHandler` in `engine/core.cpp`.
 - Disable CTRL‑C echo on terminals.
 - Construct `TerminalManager` and redirect `std::cout` / `std::cerr` to `TerminalLogStreamBuf`.
-- Open `/tmp/log.txt` for file logging.
+- Open `log/log.txt` for file logging.
 - Create engine + application spdlog loggers (`Core::g_Logger`).
 
 ### 2. Load and validate configuration
@@ -43,7 +54,7 @@ This document describes:
 
 ### 4. Main loop (`Core::Run`)
 Executed until `Application::IsFinished()` returns true:
-1. Poll the SIGINT atomic via `CheckSignalFlags()` — pushes an `EngineEventShutdown` if a Ctrl+C arrived since the last iteration.
+1. Poll the signal flags via `CheckSignalFlags()` — pushes an `EngineEventShutdown` if a SIGINT or SIGTERM arrived since the last iteration. Flags are `volatile std::sig_atomic_t` (POSIX-blessed for signal-handler ↔ main-thread communication; `std::atomic<bool>` is lock-free in practice but not standard-guaranteed async-signal-safe). A two-flag dance (`s_ShutdownRequested` transient + `s_ShutdownAcked` sticky) preserves the "second press force-exits" escape hatch through both rapid double-press and post-ack double-press races.
 2. Drain and dispatch events from `EventQueue` (done **before** `OnUpdate` so quit/SIGINT is processed promptly):
    - `m_EventQueue.PopAll()` swaps the underlying queue out under the mutex (O(1)) and drains to a local vector outside the lock — producer threads aren't blocked by main-thread housekeeping.
    - Dispatch engine‑handled events (`AppErrorEvent`).
@@ -122,15 +133,50 @@ Applications must implement:
 ```cpp
 class Application {
 public:
+    Application() = default;
+    virtual ~Application() = default;
+
+    // Non-copyable, non-movable: polymorphic-base slicing prevention.
+    Application(Application const&) = delete;
+    Application& operator=(Application const&) = delete;
+    Application(Application&&) = delete;
+    Application& operator=(Application&&) = delete;
+
     virtual void OnStart() = 0;
     virtual void OnUpdate() = 0;
     virtual void OnEvent(std::shared_ptr<Event>&) = 0;
     virtual void OnShutdown() = 0;
-    virtual bool IsFinished() const = 0;
+
+    [[nodiscard]] virtual bool IsFinished() const = 0;
+
+    // Set by derived OnStart() on a fatal-start path.  If non-empty after
+    // OnShutdown returns, the engine surfaces it on stderr before the
+    // process exits.
+    [[nodiscard]] std::string const& GetFatalStartupMessage() const;
+
+protected:
+    std::string m_FatalStartupMessage;
 };
 ```
 
 JarvisAgent uses `JarvisAgent::Create()` to construct the app.
+
+The engine drives the four lifecycle hooks in fixed order:
+
+```
+OnStart()                         // once, blocking, may throw
+while (!IsFinished())
+{
+    for each pending event: OnEvent(event)
+    OnUpdate()
+}
+OnShutdown()                      // once, blocking
+// stderr-surface GetFatalStartupMessage() if non-empty
+```
+
+All four hooks run on the engine's main thread; never concurrent with each other.  Implementations may spawn worker threads internally and own the synchronisation discipline for shared state with those threads (see `JarvisAgent`'s threading + lifetime contract block on `application/jarvisAgent.h` for the canonical pattern, including the `App::g_App` `std::atomic<JarvisAgent*>` global with acquire/release ordering).
+
+The engine does NOT skip OnShutdown when OnStart sets a fatal message — the derived class must arrange OnShutdown to be safe-after-partial-OnStart (typically: nullptr-guard each subsystem reset).
 
 ---
 

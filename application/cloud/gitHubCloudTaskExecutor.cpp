@@ -33,6 +33,7 @@
 #include "cloud/gitHubConnector.h"
 #include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
@@ -43,6 +44,97 @@
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
+
+    namespace
+    {
+        // GitHub's owner / repo character set (per the public API docs and the
+        // GitHub web UI signup form): alphanumerics plus `_` `.` `-`, must NOT
+        // start with `-` or `.`.  Owner cap is 39 chars in practice (login),
+        // repo cap is 100; we use 100 as the upper bound for both to keep a
+        // single helper.  An allowlist forecloses URL-injection via `/`, `?`,
+        // `#`, `..`, whitespace, or control bytes before the value ever touches
+        // string concatenation.
+        bool IsValidGitHubName(std::string_view name)
+        {
+            if (name.empty() || name.size() > 100)
+            {
+                return false;
+            }
+            if (name.front() == '-' || name.front() == '.')
+            {
+                return false;
+            }
+            for (char c : name)
+            {
+                bool const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // GitHub issue / PR numbers are positive integers; cap at 10 digits to
+        // stay safely under INT32_MAX without depending on stoi/atoi parse
+        // errors.
+        bool IsValidIssueNumber(std::string_view value)
+        {
+            if (value.empty() || value.size() > 10)
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // GitHub refs (branch / tag / SHA / refs/heads/x) allow `/` between
+        // segments and the standard alnum + `_` `.` `-` set within segments.
+        // We reject empty segments and `..` segments structurally — those
+        // patterns are not legal Git refs (per git-check-ref-format) and an
+        // attacker passing them is trying to break URL containment.
+        bool IsValidGitHubRef(std::string_view value)
+        {
+            if (value.empty() || value.size() > 255)
+            {
+                return false;
+            }
+            size_t pos = 0;
+            while (pos < value.size())
+            {
+                size_t const sep = value.find('/', pos);
+                std::string_view const segment = (sep == std::string_view::npos)
+                                                     ? value.substr(pos)
+                                                     : value.substr(pos, sep - pos);
+                if (segment.empty() || segment == "..")
+                {
+                    return false;
+                }
+                for (char c : segment)
+                {
+                    bool const ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                    (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+                    if (!ok)
+                    {
+                        return false;
+                    }
+                }
+                if (sep == std::string_view::npos)
+                {
+                    break;
+                }
+                pos = sep + 1;
+            }
+            return true;
+        }
+    } // namespace
 
 
     // Base64-decode (for GitHub file content which is base64-encoded)
@@ -179,6 +271,38 @@ namespace AIAssistant
         if (owner.empty()) owner = getConnParam("owner");
         if (repo.empty()) repo = getConnParam("repo");
 
+        // Allowlist-validate owner / repo BEFORE they touch any URL or log line.
+        // Both are user-supplied (task params override connection defaults), so
+        // any URL component that flows from here must be allowlist-shaped first
+        // (URL-injection / SSRF defense per `feedback_allowlist_not_blocklist`).
+        // The op-specific "missing param" check still applies in each branch.
+        if (!owner.empty() && !IsValidGitHubName(owner))
+        {
+            taskState.m_LastErrorMessage = "github_issue: invalid 'owner' (must match [A-Za-z0-9._-], 1-100 chars, not "
+                                           "starting with '-' or '.')";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[github] invalid owner task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                          workflowDefinition.m_Id, workflowRun.m_RunId, owner);
+            return false;
+        }
+        if (!repo.empty() && !IsValidGitHubName(repo))
+        {
+            taskState.m_LastErrorMessage = "github_issue: invalid 'repo' (must match [A-Za-z0-9._-], 1-100 chars, not "
+                                           "starting with '-' or '.')";
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[github] invalid repo task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                          workflowDefinition.m_Id, workflowRun.m_RunId, repo);
+            return false;
+        }
+
+        // Owner / repo are now allowlist-clean; encode for URL splice.  This
+        // is defense-in-depth: the allowlist already excludes URL-meta chars,
+        // but percent-encoding ensures a future allowlist relaxation can't
+        // silently re-introduce URL injection.  Encode-after-validate is the
+        // canonical pattern from the dbQuery / polarionWrite hardening.
+        std::string const ownerEnc = ConnectorHttp::UrlEncodeComponent(owner);
+        std::string const repoEnc = ConnectorHttp::UrlEncodeComponent(repo);
+
         std::string apiBase = GitHubConnector::GetApiBaseUrl(connection);
         std::string responseBody;
         long httpCode = 0;
@@ -227,7 +351,7 @@ namespace AIAssistant
             }
             requestBody += "}";
 
-            std::string url = apiBase + "/repos/" + owner + "/" + repo + "/issues";
+            std::string url = apiBase + "/repos/" + ownerEnc + "/" + repoEnc + "/issues";
 
             if (!GitHubRequest("POST", url, credentials.m_Token, responseBody, httpCode, requestBody))
             {
@@ -259,8 +383,16 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidIssueNumber(issueNumber))
+            {
+                taskState.m_LastErrorMessage = "github_issue 'comment': 'issue_number' must be a positive integer";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[github] invalid issue_number task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueNumber);
+                return false;
+            }
 
-            std::string url = apiBase + "/repos/" + owner + "/" + repo + "/issues/" + issueNumber + "/comments";
+            std::string url = apiBase + "/repos/" + ownerEnc + "/" + repoEnc + "/issues/" + issueNumber + "/comments";
             std::string requestBody = "{\"body\":\"" + JsonHelper::EscapeJsonString(body) + "\"}";
 
             if (!GitHubRequest("POST", url, credentials.m_Token, responseBody, httpCode, requestBody))
@@ -288,8 +420,16 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidIssueNumber(issueNumber))
+            {
+                taskState.m_LastErrorMessage = "github_issue 'close': 'issue_number' must be a positive integer";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[github] invalid issue_number task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueNumber);
+                return false;
+            }
 
-            std::string url = apiBase + "/repos/" + owner + "/" + repo + "/issues/" + issueNumber;
+            std::string url = apiBase + "/repos/" + ownerEnc + "/" + repoEnc + "/issues/" + issueNumber;
             std::string requestBody = "{\"state\":\"closed\"}";
 
             if (!GitHubRequest("PATCH", url, credentials.m_Token, responseBody, httpCode, requestBody))
@@ -318,11 +458,39 @@ namespace AIAssistant
                 return false;
             }
 
-            std::string url = apiBase + "/repos/" + owner + "/" + repo + "/contents/" + path;
+            // Per-segment validate + percent-encode the GitHub repo-relative
+            // path.  Rejects `..`, `.`, empty segments, embedded NUL.  The
+            // encoded form has every byte that isn't unreserved (except `/`)
+            // percent-encoded, so a path containing `?` / `#` / `&` / unicode
+            // can't escape the URL path into the query / fragment.
+            std::string pathEncodeError;
+            std::string const pathEnc = ConnectorHttp::UrlEncodePathSegments(path, pathEncodeError);
+            if (pathEnc.empty())
+            {
+                taskState.m_LastErrorMessage =
+                    "github_issue 'get_file': invalid 'path' (" + pathEncodeError + ")";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[github] invalid get_file path task='{}' workflow='{}' run='{}': '{}' ({})",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, path,
+                              pathEncodeError);
+                return false;
+            }
+
+            std::string url = apiBase + "/repos/" + ownerEnc + "/" + repoEnc + "/contents/" + pathEnc;
             std::string ref = getStringParam("ref");
             if (!ref.empty())
             {
-                url += "?ref=" + ref;
+                if (!IsValidGitHubRef(ref))
+                {
+                    taskState.m_LastErrorMessage = "github_issue 'get_file': invalid 'ref' (must match git-check-ref-"
+                                                   "format-ish: [A-Za-z0-9._/-], no '..' segment, 1-255 chars)";
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[github] invalid get_file ref task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, ref);
+                    return false;
+                }
+                std::string const refEnc = ConnectorHttp::UrlEncodeComponent(ref);
+                url += "?ref=" + refEnc;
             }
 
             if (!GitHubRequest("GET", url, credentials.m_Token, responseBody, httpCode))
@@ -359,9 +527,38 @@ namespace AIAssistant
                     std::error_code ec;
                     std::filesystem::create_directories(workDir, ec);
 
-                    // Use the filename from the path
+                    // Filename derivation: take just the trailing segment of the
+                    // validated path.  Since the validator already rejected `..`
+                    // segments, the resulting filename is a relative leaf name.
+                    // ConfineUnderProjectRoot is the canonical containment gate
+                    // (see `feedback_path_containment_scope`) — even though the
+                    // workDir is task-local, a hostile workflow_base_directory
+                    // in `workflowDefinition` could move workDir outside the
+                    // project tree.  Fail-closed if the resolved write path
+                    // escapes the project root.
                     std::string filename = std::filesystem::path(path).filename().string();
-                    std::ofstream outFile(workDir / filename, std::ios::binary | std::ios::trunc);
+                    if (filename.empty() || filename == "." || filename == "..")
+                    {
+                        taskState.m_LastErrorMessage =
+                            "github_issue 'get_file': cannot derive a filename from 'path'";
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        LOG_APP_ERROR("[github] cannot derive filename task='{}' workflow='{}' run='{}': '{}'",
+                                      taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, path);
+                        return false;
+                    }
+                    std::filesystem::path const writePathRaw = workDir / filename;
+                    std::filesystem::path const writePath = ConfineUnderProjectRoot(writePathRaw);
+                    if (writePath.empty())
+                    {
+                        taskState.m_LastErrorMessage =
+                            "github_issue 'get_file': resolved write path does not lie under the project root";
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        LOG_APP_ERROR("[github] write path rejected task='{}' workflow='{}' run='{}' path='{}'",
+                                      taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                                      writePathRaw.string());
+                        return false;
+                    }
+                    std::ofstream outFile(writePath, std::ios::binary | std::ios::trunc);
                     if (outFile.is_open())
                     {
                         outFile.write(decoded.data(), static_cast<std::streamsize>(decoded.size()));
@@ -373,7 +570,7 @@ namespace AIAssistant
         }
         else if (operation == "list_issues")
         {
-            std::string url = apiBase + "/repos/" + owner + "/" + repo + "/issues?state=open&per_page=100";
+            std::string url = apiBase + "/repos/" + ownerEnc + "/" + repoEnc + "/issues?state=open&per_page=100";
 
             if (!GitHubRequest("GET", url, credentials.m_Token, responseBody, httpCode))
             {

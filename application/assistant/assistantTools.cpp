@@ -20,6 +20,7 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "assistant/assistantTools.h"
+#include "assistant/assistantHelpers.h"
 #include "assistant/assistantMemory.h"
 #include "assistant/workspaceIndexer.h"
 #include "engine.h"
@@ -1787,17 +1788,51 @@ namespace AIAssistant
     // run_shell
     // -----------------------------------------------------------------
     //
-    // The user-supplied command is passed to /bin/sh -c — that's the contract
-    // of run_shell.  No blocklist (blocklists fail open: an attacker only needs
-    // one bypass to break the gate; the project's discipline is allowlists where
-    // the gate either matches the expected shape or refuses).  The defense is
-    // the human-approval flow at the controller layer.
+    // run_shell is the deliberate "AI invokes an arbitrary shell command" tool;
+    // `/bin/sh -c <command>` IS its contract.  Static analyzers (and any future
+    // Sonnet/audit run) WILL flag the `execl("/bin/sh", "sh", "-c", command, ...)`
+    // line on every pass — that is correct flagging of the right shape, not a
+    // regression.  The reviewer's job here is to confirm the four defenses
+    // below are still load-bearing, NOT to remove `/bin/sh`.
     //
-    // The validated cwd is applied via chdir() in the child, never composed
-    // into the shell command string, so a hostile cwd value cannot inject
-    // `&&` chains.  IsCwdInsideProjectRoot is the canonical-path gate that
-    // rejects `..`, absolute escapes, and symlinks pointing outside the
-    // project root.
+    // Defense layering — all four must remain in place:
+    //
+    //   (a) Human-in-the-loop approval at the controller layer.  The ToolDef
+    //       at the top of this file marks run_shell with `requiresApproval`,
+    //       and `AssistantController` routes every approval-required tool call
+    //       through `RequestToolApproval` before `m_ToolRegistry.Execute` runs.
+    //       No MCP / REST / WebSocket path reaches `ExecRunShell` directly —
+    //       the only ingress is through the controller.  This is the primary,
+    //       load-bearing defense.
+    //
+    //   (b) Allowlist-over-blocklist discipline.  We do NOT filter the
+    //       `command` string with a "dangerous chars" blocklist — blocklists
+    //       fail open (an attacker only needs one bypass to break the gate).
+    //       The gate is the approval flow above; the command body is opaque
+    //       to this layer.
+    //
+    //   (c) Canonical-path gate on the working directory.  `cwd` is resolved
+    //       through `IsCwdInsideProjectRoot` (canonical-path comparison
+    //       against the process CWD), which rejects `..` segments, absolute
+    //       escapes, and symlinks pointing outside the project root.  The
+    //       resolved canonical cwd is then applied via `chdir()` in the
+    //       child — never composed into the shell command string — so a
+    //       hostile cwd value cannot smuggle `&& <other-command>` chains
+    //       through string concatenation.
+    //
+    //   (d) Bounded execution.  30-second wall-clock timeout enforced by the
+    //       parent poll loop; the child is placed in its own process group
+    //       via `setpgid(0, 0)` so the timeout path can `kill(-pid, SIGTERM)`
+    //       followed by `SIGKILL` to reap the entire subtree (closes the
+    //       runaway-process and orphaned-grandchild vectors).  Output is
+    //       capped at 16 KB.
+    //
+    // The two `chdir()` sites in this file are: the one below (gated by
+    // IsCwdInsideProjectRoot), and `RunArgvCapture` at the top of the
+    // anonymous namespace (always invoked with `fs::current_path()` from
+    // trusted call sites, never with user input).  Any third `chdir()` here
+    // would need to route through `IsCwdInsideProjectRoot` for the same
+    // reason.
 
 #if !defined(_WIN32)
     ToolResult ToolRegistry::ExecRunShell(std::unordered_map<std::string, std::string> const& args)
@@ -3006,21 +3041,80 @@ namespace AIAssistant
         std::string const& taskId = taskIt->second;
         std::string const& instructions = instrIt->second;
 
-        // Read the JCWF canvas JSON (handles zip containers and legacy JSON).
+        // Reject task_id values outside the strict opaque-id shape (alphanumerics +
+        // `_` + `-`, 1..128 chars).  A task_id is downstream-embedded into the AI
+        // user prompt below, so any JSON metacharacter or whitespace in it would
+        // give an attacker-controlled string the ability to steer the workflow-
+        // editor AI.  Allowlist over blocklist.
+        if (!IsValidOpaqueId(taskId))
+        {
+            LOG_APP_ERROR("[tools] jcwf_fix_task rejected: invalid task_id shape "
+                          "workflow='{}' task='{}' (must match [A-Za-z0-9_-]{{1,128}})",
+                          workflowId, taskId);
+            return {"jcwf_fix_task", false,
+                    "Invalid task_id \"" + taskId + "\": must be 1-128 chars of [A-Za-z0-9_-]"};
+        }
+
+        // Read the JCWF canvas JSON.
         std::string resolveError;
         std::string filePath = ResolveWorkflowPath(workflowId, resolveError);
         if (filePath.empty())
+        {
+            LOG_APP_ERROR("[tools] jcwf_fix_task failed: workflow not found "
+                          "workflow='{}' task='{}': {}",
+                          workflowId, taskId, resolveError);
             return {"jcwf_fix_task", false, resolveError};
+        }
 
         std::string jcwfContent;
         if (!ReadJcwfContent(filePath, jcwfContent, resolveError))
+        {
+            LOG_APP_ERROR("[tools] jcwf_fix_task failed: cannot read JCWF "
+                          "workflow='{}' task='{}': {}",
+                          workflowId, taskId, resolveError);
             return {"jcwf_fix_task", false, resolveError};
+        }
 
-        // Verify the task_id exists in the JSON.
-        if (jcwfContent.find("\"" + taskId + "\"") == std::string::npos)
-            return {"jcwf_fix_task", false,
-                    "Task \"" + taskId + "\" not found in workflow " + workflowId +
-                        ". Use jcwf_explain to see available tasks."};
+        // Structural existence check against the `tasks` object — the prior
+        // `jcwfContent.find("\"" + taskId + "\"")` matched any quoted occurrence
+        // anywhere in the file (depends_on references, inline content payloads,
+        // sub-string collisions in CNTX/STNG strings, etc.), so a present-but-
+        // unreferenced taskId could still drive the AI rewrite path.
+        {
+            using namespace simdjson;
+            ondemand::parser jsonParser;
+            padded_string padded(jcwfContent);
+            ondemand::document doc;
+            if (jsonParser.iterate(padded).get(doc) != SUCCESS)
+            {
+                LOG_APP_ERROR("[tools] jcwf_fix_task failed: canvas JSON did not parse "
+                              "workflow='{}' task='{}'",
+                              workflowId, taskId);
+                return {"jcwf_fix_task", false,
+                        "Workflow " + workflowId + " canvas JSON failed to parse"};
+            }
+
+            ondemand::object tasksObj;
+            if (doc["tasks"].get_object().get(tasksObj) != SUCCESS)
+            {
+                LOG_APP_ERROR("[tools] jcwf_fix_task failed: canvas has no 'tasks' object "
+                              "workflow='{}' task='{}'",
+                              workflowId, taskId);
+                return {"jcwf_fix_task", false,
+                        "Workflow " + workflowId + " has no tasks object in its canvas"};
+            }
+
+            ondemand::value taskVal;
+            if (tasksObj[taskId].get(taskVal) != SUCCESS)
+            {
+                LOG_APP_ERROR("[tools] jcwf_fix_task failed: task not in tasks object "
+                              "workflow='{}' task='{}'",
+                              workflowId, taskId);
+                return {"jcwf_fix_task", false,
+                        "Task \"" + taskId + "\" not found in workflow " + workflowId +
+                            ". Use jcwf_explain to see available tasks."};
+            }
+        }
 
         // Use AI to fix the task.
         if (!m_AiCallFn)

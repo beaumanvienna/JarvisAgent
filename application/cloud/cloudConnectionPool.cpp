@@ -48,101 +48,146 @@ namespace AIAssistant
                                                                     CreateFn const& createFn,
                                                                     std::string& errorMessage)
     {
+        // Single loop with explicit re-evaluation on each iteration.  The prior
+        // implementation held a long-lived `auto&` reference to the deque and
+        // active-count map entries across the cv `wait_for` AND across the
+        // `lock.unlock() / createFn(...) / lock.lock()` window.  Both windows
+        // permit other threads to mutate the unordered_maps (RegisterType /
+        // concurrent Acquire / Release), which can rehash and invalidate
+        // those references plus the `callbacksIt` iterator.  Even when the
+        // map's bucket layout was stable, the fall-through to `++m_ActiveCount`
+        // after an unlocked createFn meant two concurrent waiters could both
+        // create a connection and push the active count past
+        // `m_MaxConnectionsPerName` — every assumption the cv predicate
+        // relies on requires the map state to be re-read after each lock
+        // re-acquisition.
+        //
+        // The loop below re-resolves the type callbacks, the deque, and the
+        // active count each iteration, and reserves the active-count slot
+        // BEFORE unlocking for `createFn` so a concurrent waiter sees the
+        // slot taken and blocks on the cv (no over-create race).  Slot
+        // rollback on createFn failure is paired with `notify_one` so any
+        // waiter that would now succeed wakes up immediately.
         std::unique_lock lock(m_Mutex);
+        auto const deadline = std::chrono::steady_clock::now() + m_Config.m_AcquireTimeout;
 
-        auto& idle = m_Pool[connectionName];
-        auto& active = m_ActiveCount[connectionName];
-
-        auto callbacksIt = m_TypeCallbacks.find(type);
-
-        // Try to reuse an idle connection
-        while (!idle.empty())
+        for (;;)
         {
-            PooledHandle handle = std::move(idle.front());
-            idle.pop_front();
+            // Re-resolve the type callbacks every iteration: `RegisterType`
+            // could fire between the `wait_for` waking and us re-acquiring
+            // the lock.  Lookup is O(1) and dwarfed by the connection cost.
+            auto callbacksIt = m_TypeCallbacks.find(type);
 
-            // Check if stale
-            auto idleTime = std::chrono::steady_clock::now() - handle.m_LastUsed;
-            if (idleTime > m_Config.m_MaxIdleTime)
+            // 1. Try to reuse a healthy idle connection.
+            auto& idle = m_Pool[connectionName];
+            while (!idle.empty())
             {
-                // Evict stale connection
-                if (callbacksIt != m_TypeCallbacks.end() && callbacksIt->second.m_Destroy && handle.m_Connection)
-                {
-                    callbacksIt->second.m_Destroy(handle.m_Connection);
-                }
-                LOG_APP_INFO("[connection-pool] evicted stale connection for '{}'", connectionName);
-                continue;
-            }
+                PooledHandle handle = std::move(idle.front());
+                idle.pop_front();
 
-            // Health check
-            if (callbacksIt != m_TypeCallbacks.end() && callbacksIt->second.m_HealthCheck)
-            {
-                if (!callbacksIt->second.m_HealthCheck(handle.m_Connection))
+                auto idleTime = std::chrono::steady_clock::now() - handle.m_LastUsed;
+                if (idleTime > m_Config.m_MaxIdleTime)
                 {
-                    // Connection is dead, destroy and try next
-                    if (callbacksIt->second.m_Destroy && handle.m_Connection)
+                    if (callbacksIt != m_TypeCallbacks.end() && callbacksIt->second.m_Destroy && handle.m_Connection)
                     {
                         callbacksIt->second.m_Destroy(handle.m_Connection);
                     }
-                    LOG_APP_INFO("[connection-pool] evicted unhealthy connection for '{}'", connectionName);
+                    LOG_APP_INFO("[connection-pool] evicted stale connection for '{}'", connectionName);
                     continue;
                 }
+
+                if (callbacksIt != m_TypeCallbacks.end() && callbacksIt->second.m_HealthCheck)
+                {
+                    if (!callbacksIt->second.m_HealthCheck(handle.m_Connection))
+                    {
+                        if (callbacksIt->second.m_Destroy && handle.m_Connection)
+                        {
+                            callbacksIt->second.m_Destroy(handle.m_Connection);
+                        }
+                        LOG_APP_INFO("[connection-pool] evicted unhealthy connection for '{}'", connectionName);
+                        continue;
+                    }
+                }
+
+                ++m_ActiveCount[connectionName];
+                handle.m_LastUsed = std::chrono::steady_clock::now();
+                return handle;
             }
 
-            ++active;
-            handle.m_LastUsed = std::chrono::steady_clock::now();
-            return handle;
-        }
-
-        // No idle connections — check if we can create a new one
-        int total = active + static_cast<int>(idle.size());
-        if (total >= m_Config.m_MaxConnectionsPerName)
-        {
-            // Wait for a release
-            bool available = m_Cv.wait_for(lock, m_Config.m_AcquireTimeout, [&]()
+            // 2. Idle pool empty — check if we can create a new connection.
+            int const totalNow =
+                m_ActiveCount[connectionName] + static_cast<int>(m_Pool[connectionName].size());
+            if (totalNow < m_Config.m_MaxConnectionsPerName)
             {
-                return !m_Pool[connectionName].empty() || m_ActiveCount[connectionName] < m_Config.m_MaxConnectionsPerName;
-            });
+                // 3. Reserve the slot BEFORE unlocking.  This prevents a second
+                //    waiter from racing into the create path during our
+                //    unlocked window and over-creating past
+                //    m_MaxConnectionsPerName.  On createFn failure we roll
+                //    back the slot AND notify one waiter that the budget is
+                //    available again.
+                ++m_ActiveCount[connectionName];
 
-            if (!available)
+                std::string createError;
+                void* conn = nullptr;
+                lock.unlock();
+                try
+                {
+                    conn = createFn(createError);
+                }
+                catch (std::exception const& e)
+                {
+                    createError = "createFn threw: " + std::string(e.what());
+                    conn = nullptr;
+                }
+                catch (...)
+                {
+                    createError = "createFn threw: unknown exception";
+                    conn = nullptr;
+                }
+                lock.lock();
+
+                if (!conn)
+                {
+                    // Roll back the slot reservation.  Re-resolve the entry
+                    // by key — the map's internal layout may have changed
+                    // while we were unlocked, so the prior `auto&` references
+                    // would be stale.
+                    if (auto countIt = m_ActiveCount.find(connectionName);
+                        countIt != m_ActiveCount.end() && countIt->second > 0)
+                    {
+                        --countIt->second;
+                    }
+                    errorMessage = createError.empty()
+                                       ? "Failed to create connection for '" + connectionName + "'"
+                                       : createError;
+                    m_Cv.notify_one();
+                    return {};
+                }
+
+                PooledHandle handle;
+                handle.m_Connection = conn;
+                handle.m_LastUsed = std::chrono::steady_clock::now();
+                handle.m_Valid = true;
+                return handle;
+            }
+
+            // 4. Pool at capacity — wait for a release or a slot opening.
+            //    `wait_until` against a single deadline is correct under
+            //    spurious wake-ups: each wake re-runs the loop from the top,
+            //    re-reading map state with the lock re-acquired.
+            bool const becameAvailable = m_Cv.wait_until(lock, deadline, [&]()
+            {
+                return !m_Pool[connectionName].empty() ||
+                       m_ActiveCount[connectionName] < m_Config.m_MaxConnectionsPerName;
+            });
+            if (!becameAvailable)
             {
                 errorMessage = "Connection pool exhausted for '" + connectionName + "' (timeout)";
                 LOG_APP_WARN("[connection-pool] acquire timeout for '{}'", connectionName);
                 return {};
             }
-
-            // Retry — a connection may have been released
-            if (!m_Pool[connectionName].empty())
-            {
-                PooledHandle handle = std::move(m_Pool[connectionName].front());
-                m_Pool[connectionName].pop_front();
-                ++active;
-                handle.m_LastUsed = std::chrono::steady_clock::now();
-                return handle;
-            }
+            // Loop and retry — re-resolve idle pool, callbacks, total count.
         }
-
-        // Create a new connection
-        lock.unlock();
-        void* conn = createFn(errorMessage);
-        lock.lock();
-
-        if (!conn)
-        {
-            if (errorMessage.empty())
-            {
-                errorMessage = "Failed to create connection for '" + connectionName + "'";
-            }
-            return {};
-        }
-
-        ++m_ActiveCount[connectionName];
-
-        PooledHandle handle;
-        handle.m_Connection = conn;
-        handle.m_LastUsed = std::chrono::steady_clock::now();
-        handle.m_Valid = true;
-        return handle;
     }
 
     void CloudConnectionPool::Release(std::string const& connectionName, std::string const& type,

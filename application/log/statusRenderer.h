@@ -30,6 +30,34 @@
 
 namespace AIAssistant
 {
+    // ─────────────────────────────────────────────────────────────────────────
+    // StatusRenderer — assembles the two-row status block at the bottom of the
+    // ncurses TUI from runtime signals (key state, AI in-flight, active runs,
+    // MCP connectivity, cloud breaker health, run totals, recent runs).
+    //
+    // Threading + lifetime contract
+    // ─────────────────────────────
+    //   • BuildStatusLines / GetRowCount  — called from the engine's main
+    //     render thread (TerminalManager::Render via Core::Run).
+    //   • Set*Provider                    — called once during JarvisAgent
+    //     OnStart, before the engine loop reaches its first render.  Subsequent
+    //     re-registration is allowed but uncommon.
+    //   • All members are guarded by m_Mutex.  Provider std::functions are
+    //     copied out under the lock and invoked unlocked, so a long-running
+    //     provider does not block re-registration.
+    //
+    // Defense layering (TUI byte safety)
+    // ─────────────────────────────────
+    //   • Externally-sourced fields (snap.keysStatus echo on the unknown-value
+    //     branch, run.displayId) are bounded per-field inside BuildStatusLines
+    //     so one outsized field can't crowd out the rest of a row.
+    //   • The renderer's UTF-8 truncator lands cuts on a validated codepoint
+    //     boundary — a malformed lead byte does NOT over-skip past the actual
+    //     character boundary.
+    //   • ncurses-level sanitization (replacing malformed UTF-8 / C0 controls
+    //     with '?') is the responsibility of TerminalManager::SanitizeForCurses
+    //     downstream; do not duplicate it here.
+    // ─────────────────────────────────────────────────────────────────────────
     class StatusRenderer
     {
     public:
@@ -77,8 +105,9 @@ namespace AIAssistant
         // "Unlock in the dashboard" hint (the TUI itself has no unlock affordance).
         void BuildStatusLines(std::vector<std::string>& outLines, int maxColumns);
 
-        // Always returns 2.
-        size_t GetRowCount();
+        // Always returns 2.  TerminalManager uses the value to size the status
+        // window; silently discarding it would mis-allocate rows.
+        [[nodiscard]] size_t GetRowCount();
 
     private:
         std::mutex m_Mutex;

@@ -63,6 +63,7 @@ ICloudTaskExecutor       — base class (resolves connection + credentials, dele
 
 | File | Purpose |
 |------|---------|
+| `connectorHttp.h/cpp` | Shared libcurl helpers used by every cloud connector + executor.  `ApplyHardenedDefaults` sets `SSL_VERIFYPEER` / `SSL_VERIFYHOST` / `FOLLOWLOCATION=0` / CAINFO and (for `https://`) installs an `OPENSOCKETFUNCTION` that rejects DNS-resolved local-net IPs.  `ValidatePublicHttpEndpoint` is the SSRF gate for user-supplied endpoint URLs.  `UrlEncodeComponent` + `UrlEncodePathSegments` are the shared percent-encode helpers — every cloud executor that splices user-controlled values into URLs runs them through these (`UrlEncodeComponent` for single segments, `UrlEncodePathSegments` for `/`-separated paths with per-segment `..`/`.`/empty rejection).  Defense-in-depth after each executor's per-provider allowlist regex on identifier shape. |
 | `cloudConnector.h` | `ICloudConnector` interface, `CloudConnection`, `CloudCredentials`, `CloudAuthType` |
 | `cloudConnectorRegistry` | Registry mapping type names to connector instances |
 | `cloudConnectionManager` | In-memory CRUD store for `CloudConnection` configs |

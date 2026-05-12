@@ -34,6 +34,7 @@
 #include "cloud/slackConnector.h"
 #include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
@@ -222,11 +223,26 @@ namespace AIAssistant
         std::string textFile = getStringParam("text_file");
         if (!textFile.empty())
         {
-            std::string loaded = ReadFileToString(textFile);
+            // Containment gate: a hostile JCWF or AI-supplied text_file path
+            // (e.g. /etc/passwd, ../../etc/shadow) must not be read.  Same
+            // pattern as jira/redmine *_file params.
+            std::filesystem::path const confined = ConfineUnderProjectRoot(textFile);
+            if (confined.empty())
+            {
+                taskState.m_LastErrorMessage =
+                    "slack_message: text_file does not lie under the project root: " + textFile;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[slack] text_file rejected task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, textFile);
+                return false;
+            }
+            std::string loaded = ReadFileToString(confined.string());
             if (loaded.empty())
             {
                 taskState.m_LastErrorMessage = "slack_message: cannot open or empty text_file '" + textFile + "'";
                 taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[slack] text_file not readable task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, textFile);
                 return false;
             }
             text = TrimTrailing(std::move(loaded));
@@ -242,7 +258,17 @@ namespace AIAssistant
         std::string threadTsFile = getStringParam("thread_ts_file");
         if (!threadTsFile.empty())
         {
-            std::string loaded = ReadFileToString(threadTsFile);
+            std::filesystem::path const confined = ConfineUnderProjectRoot(threadTsFile);
+            if (confined.empty())
+            {
+                taskState.m_LastErrorMessage =
+                    "slack_message: thread_ts_file does not lie under the project root: " + threadTsFile;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[slack] thread_ts_file rejected task='{}' workflow='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, threadTsFile);
+                return false;
+            }
+            std::string loaded = ReadFileToString(confined.string());
             threadTs = TrimTrailing(std::move(loaded));
         }
 

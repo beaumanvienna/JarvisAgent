@@ -188,6 +188,111 @@ namespace AIAssistant::ConnectorHttp
         }
     } // namespace
 
+    std::string UrlEncodeComponent(std::string_view value)
+    {
+        if (value.empty())
+        {
+            return {};
+        }
+        CURL* encoder = curl_easy_init();
+        if (!encoder)
+        {
+            return {};
+        }
+        char* escaped = curl_easy_escape(encoder, value.data(), static_cast<int>(value.size()));
+        std::string out;
+        if (escaped)
+        {
+            out.assign(escaped);
+            curl_free(escaped);
+        }
+        curl_easy_cleanup(encoder);
+        return out;
+    }
+
+    std::string UrlEncodePathSegments(std::string_view path, std::string& outError)
+    {
+        if (path.empty())
+        {
+            outError = "empty path";
+            return {};
+        }
+        if (path.find('\0') != std::string_view::npos)
+        {
+            outError = "embedded NUL byte";
+            return {};
+        }
+
+        CURL* encoder = curl_easy_init();
+        if (!encoder)
+        {
+            outError = "curl_easy_init failed";
+            return {};
+        }
+
+        std::string out;
+        out.reserve(path.size() + 16);
+
+        // Preserve a single leading '/' if present — vendor APIs like GitHub
+        // expose paths like `/repos/owner/repo/contents/<path>` where the
+        // <path> portion arrives without a leading slash; if a caller passes
+        // a leading slash we keep it rather than dropping it silently.
+        size_t pos = 0;
+        if (path.front() == '/')
+        {
+            out += '/';
+            pos = 1;
+        }
+
+        bool firstSegment = true;
+        while (pos <= path.size())
+        {
+            size_t const sep = path.find('/', pos);
+            std::string_view const segment = (sep == std::string_view::npos)
+                                                 ? path.substr(pos)
+                                                 : path.substr(pos, sep - pos);
+
+            if (segment.empty())
+            {
+                outError = "empty path segment";
+                curl_easy_cleanup(encoder);
+                return {};
+            }
+            if (segment == ".." || segment == ".")
+            {
+                outError = "parent-directory or current-directory segment ('" +
+                           std::string(segment) + "')";
+                curl_easy_cleanup(encoder);
+                return {};
+            }
+
+            if (!firstSegment)
+            {
+                out += '/';
+            }
+            firstSegment = false;
+
+            char* escaped = curl_easy_escape(encoder, segment.data(), static_cast<int>(segment.size()));
+            if (!escaped)
+            {
+                outError = "curl_easy_escape failed for segment";
+                curl_easy_cleanup(encoder);
+                return {};
+            }
+            out += escaped;
+            curl_free(escaped);
+
+            if (sep == std::string_view::npos)
+            {
+                break;
+            }
+            pos = sep + 1;
+        }
+
+        curl_easy_cleanup(encoder);
+        return out;
+    }
+
     void ApplyHardenedDefaults(CURL* handle, std::string_view url)
     {
         curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);

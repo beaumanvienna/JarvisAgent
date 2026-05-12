@@ -13,9 +13,18 @@ Importantly:
   - The three jarvisCpp JCWFs reference CNTX files via relative paths
     (`../../../application/...`) that resolve correctly when the workflow
     runs from `workflows/<name>/`.  Adhoc submission relocates the working
-    directory to `_adhoc/<run>/...`, breaking those relative paths.  This
-    helper rewrites every relative cntx_files entry to its absolute
-    equivalent (resolved relative to the original workflow location).
+    directory to `_adhoc/<run>/...`, breaking that relative resolution.
+    Two earlier escape hatches were both wrong: rewriting to absolute
+    triggers the parser's `IsAcceptedRelativePath` gate
+    (workflowJsonParserDetails.h), and keeping the path relative would
+    fail to resolve at runtime.  This helper inlines each referenced file
+    as `{"path": <repo-relative id>, "content": <stub>}` instead — the
+    parser accepts the relative `path` field, the queue binding gets a
+    small placeholder string, and the JCWF stays well under the 4 MB
+    `kMaxJcwfBytes` cap in adhocWorkflowManager.cpp.  CNTX content drives
+    only request-envelope assembly here; the bytes that actually reach
+    the renderer come from the TestInterface fixture (the AI **reply**),
+    which is what these tests stress.
 """
 
 from __future__ import annotations
@@ -35,9 +44,10 @@ def load_jarvisCpp_workflow(workflow_name: str, *,
                             interface_override: str,
                             id_suffix: str) -> dict:
     """Load `workflows/<workflow_name>/global.json` + `<workflow_name>.json`,
-    merge them, override every ai_call task's `params.provider`, rewrite
-    cntx_files relative paths to absolute, and return a JCWF dict suitable
-    for /api/workflows/run-adhoc.
+    merge them, override every ai_call task's `params.provider`, inline
+    every cntx_files entry as `{"path": <repo-relative id>, "content":
+    <bytes>}` (see module docstring for why), and return a JCWF dict
+    suitable for /api/workflows/run-adhoc.
 
     `id_suffix` is appended to the workflow id so concurrent submissions
     don't collide on disk."""
@@ -85,12 +95,27 @@ def load_jarvisCpp_workflow(workflow_name: str, *,
         for entry in cntx:
             if isinstance(entry, str):
                 p = Path(entry)
-                if not p.is_absolute():
-                    new_cntx.append(str((orig_task_wd / entry).resolve()))
-                else:
-                    new_cntx.append(entry)
+                src = p if p.is_absolute() else (orig_task_wd / entry).resolve()
+                # `path` is a repo-relative identifier so two cntx entries
+                # with the same basename (e.g. application/log/log.h vs
+                # engine/log/log.h) don't collide in the queue folder.  Falls
+                # back to basename if the source lives outside REPO_ROOT.
+                try:
+                    rel_id = str(src.relative_to(REPO_ROOT))
+                except ValueError:
+                    rel_id = src.name
+                # Stubbed content (not the real file bytes).  The TUI stress
+                # test injects malformed/heavy bytes via the AI **reply**
+                # (TestInterface fixture) — CNTX content drives only request-
+                # envelope assembly and never reaches the renderer.  Reading
+                # real source bytes would inflate each JCWF by ~3.5 MB and
+                # trip the 4 MB `kMaxJcwfBytes` cap in
+                # adhocWorkflowManager.cpp; the stub keeps the JCWF small
+                # while still exercising the inline-content parser path.
+                stub = f"# stress test cntx stub: {rel_id}\n"
+                new_cntx.append({"path": rel_id, "content": stub})
             else:
-                # Inline-content cntx file ({"path": ..., "content": ...}) — keep as-is.
+                # Inline-content cntx file already in the right shape.
                 new_cntx.append(entry)
         if new_cntx:
             qb["cntx_files"] = new_cntx

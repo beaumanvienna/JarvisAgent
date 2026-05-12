@@ -83,6 +83,40 @@ namespace AIAssistant::ConnectorHttp
     // is real even on cloud surfaces with valid TLS certs.
     void ApplyExecutorRedirectDefaults(CURL* handle, std::string_view url = {});
 
+    // Percent-encode a single URL component (path segment, query value, etc.)
+    // via libcurl's curl_easy_escape.  Every byte that isn't in RFC 3986's
+    // unreserved set is escaped — including `/`, `?`, `&`, `=`, `#`, `%`, and
+    // control bytes.  Use this for SINGLE segments where `/` is NOT a wanted
+    // delimiter; for multi-segment paths see UrlEncodePathSegments below.
+    //
+    // Returns an empty string on curl_easy_init failure; callers should treat
+    // that as a transient error (an actual request would also fail).  Defense-
+    // in-depth after the per-component allowlist validators in each executor —
+    // even if a future allowlist relaxes, the percent-encode keeps unintended
+    // metacharacters out of the URL.
+    std::string UrlEncodeComponent(std::string_view value);
+    inline std::string UrlEncodeComponent(std::string const& value)
+    {
+        return UrlEncodeComponent(std::string_view{value});
+    }
+    inline std::string UrlEncodeComponent(char const* value)
+    {
+        return UrlEncodeComponent(std::string_view{value ? value : ""});
+    }
+
+    // Percent-encode a `/`-separated path while preserving `/` as the segment
+    // delimiter.  Rejects (returns empty + sets outError) on:
+    //   - empty input
+    //   - any `..` or `.` segment
+    //   - any empty segment (two consecutive `/`)
+    //   - any embedded NUL byte
+    // Each surviving segment is run through curl_easy_escape so query / fragment
+    // metacharacters (`?`, `#`, `&`, etc.) embedded inside a segment cannot
+    // escape into the URL.  Use for vendor-API paths that legitimately contain
+    // `/` (GitHub `contents/<repo-relative-path>`, Jira `/rest/api/3/issue/<key>`
+    // where `<key>` is already validated against the issue-key regex).
+    std::string UrlEncodePathSegments(std::string_view path, std::string& outError);
+
     // Loopback / link-local / RFC-1918 private / cloud-metadata IP detection.
     // Used by the SSRF gate for connectors that accept a user-supplied endpoint
     // URL (jira, redmine, polarion) and by `PostgresConnector::IsValidSslMode`

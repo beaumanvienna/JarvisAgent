@@ -36,8 +36,8 @@
 #include "event/events.h"
 #include "curlWrapper/curlWrapper.h"
 
-std::atomic<bool> AIAssistant::Core::s_ShutdownRequested{false};
-std::atomic<bool> AIAssistant::Core::s_ForceShutdownRequested{false};
+volatile std::sig_atomic_t AIAssistant::Core::s_ShutdownRequested{0};
+volatile std::sig_atomic_t AIAssistant::Core::s_ShutdownAcked{0};
 
 extern "C" void JarvisRedirect(const char* message)
 {
@@ -61,8 +61,7 @@ namespace AIAssistant
     Core::Core() : m_LaunchCWDAbsolute(std::filesystem::current_path())
     {
         g_Core = this;
-        // signal handling
-        signal(SIGINT, SignalHandler);
+        InstallSignalHandlers();
         DisableCtrlCOutput();
 
         // -----------------------------------------------------------------
@@ -103,33 +102,115 @@ namespace AIAssistant
         }
     }
 
-    void Core::SignalHandler(int signal)
+    // ─────────────────────────────────────────────────────────────────────
+    // Async-signal-safety contract
+    // ─────────────────────────────
+    // SignalHandler runs in signal context, which means the C++ standard
+    // library is almost entirely off-limits.  POSIX defines a small set
+    // of operations that are async-signal-safe; we constrain the handler
+    // to those only:
+    //
+    //   PERMITTED:  _exit, write, raise, kill, sigaction, signal,
+    //               atomic load/store of `volatile sig_atomic_t`,
+    //               std::atomic_flag::test_and_set.
+    //   FORBIDDEN:  LOG_APP_* / LOG_CORE_* / LOG_SECURITY_* (spdlog locks
+    //               + heap), malloc/new/delete, std::mutex, std::cout /
+    //               std::cerr, std::string operations, std::filesystem,
+    //               std::shared_ptr / std::make_shared, anything that may
+    //               throw, anything that allocates.
+    //
+    // The two-flag dance (s_ShutdownRequested + s_ShutdownAcked) keeps
+    // the handler trivial while preserving the "Ctrl+C twice = force
+    // exit" escape hatch:
+    //
+    //   • First signal: handler sets s_ShutdownRequested=1.  Main loop's
+    //     CheckSignalFlags consumes it, sets s_ShutdownAcked=1, emits the
+    //     log line, requests quit, pushes the engine shutdown event.
+    //   • Second signal arrives AFTER the main loop ack'd: handler sees
+    //     s_ShutdownAcked=1 → _exit(EXIT_FAILURE).  No graceful path.
+    //   • Rapid double-press BEFORE the main loop ack'd: handler sees
+    //     s_ShutdownRequested already 1 → _exit(EXIT_FAILURE).  Same
+    //     outcome, different race.
+    //
+    // The handler is registered for SIGINT (Ctrl+C) and SIGTERM (kill,
+    // pkill, systemd `stop`).  SIGPIPE is process-wide ignored because
+    // libcurl is configured with CURLOPT_NOSIGNAL=1
+    // (workflowRuntimeManager.cpp), which disables curl's internal
+    // SIGPIPE handler — without our explicit ignore a remote peer
+    // closing a socket mid-write would terminate the process.  Crash
+    // signals (SIGSEGV / SIGBUS / SIGFPE / SIGILL / SIGABRT) are
+    // intentionally NOT handled: any non-trivial work in their handlers
+    // is undefined behaviour because the program state is already
+    // corrupt, and our log path is async-signal-unsafe regardless.  Let
+    // the OS produce a core dump.
+    // ─────────────────────────────────────────────────────────────────────
+    void Core::SignalHandler(int sig)
     {
-        // IMPORTANT: Signal handlers must only use async-signal-safe operations.
-        // No logging, no heap allocation, no mutex acquisition.
-        if (signal == SIGINT)
+        if (sig != SIGINT && sig != SIGTERM)
         {
-            if (s_ShutdownRequested.load(std::memory_order_relaxed))
-            {
-                // Second Ctrl+C: force immediate exit
-                s_ForceShutdownRequested.store(true, std::memory_order_relaxed);
-                _exit(EXIT_FAILURE);
-            }
-            s_ShutdownRequested.store(true, std::memory_order_relaxed);
+            return;
         }
+        // Either flag set means "already in shutdown" — second arrival is
+        // the user asking us to give up gracefully and die now.
+        if (s_ShutdownAcked != 0 || s_ShutdownRequested != 0)
+        {
+            _exit(EXIT_FAILURE);
+        }
+        s_ShutdownRequested = 1;
+    }
+
+    void Core::InstallSignalHandlers()
+    {
+#ifdef _WIN32
+        // Windows lacks sigaction; the CRT's signal() supports SIGINT and
+        // SIGTERM in a limited fashion.  No SIGPIPE on Windows (no Unix
+        // sockets in the POSIX sense).
+        std::signal(SIGINT, &Core::SignalHandler);
+        std::signal(SIGTERM, &Core::SignalHandler);
+#else
+        // sigaction over signal(): predictable semantics across Linux/macOS
+        // (signal() inherits BSD vs SysV ambiguity), explicit mask, no
+        // SA_RESTART so a slow syscall (e.g. sleep_for in the engine main
+        // loop) wakes promptly when the signal arrives.
+        struct sigaction sa{};
+        sa.sa_handler = &Core::SignalHandler;
+        sigemptyset(&sa.sa_mask);
+        // Block both SIGINT and SIGTERM during handler execution so a
+        // SIGTERM mid-SIGINT-handler (or vice versa) cannot interleave the
+        // flag updates.  The default mask only blocks the delivered
+        // signal; we widen to both since they share the same handler.
+        sigaddset(&sa.sa_mask, SIGINT);
+        sigaddset(&sa.sa_mask, SIGTERM);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+
+        // SIGPIPE: ignore process-wide.  EPIPE surfaces on the originating
+        // syscall instead of killing the process; libcurl translates it
+        // into CURLE_SEND_ERROR / CURLE_RECV_ERROR for the caller to
+        // handle.  See header comment block on s_ShutdownRequested for
+        // the libcurl CURLOPT_NOSIGNAL background.
+        struct sigaction saIgnore{};
+        saIgnore.sa_handler = SIG_IGN;
+        sigemptyset(&saIgnore.sa_mask);
+        saIgnore.sa_flags = 0;
+        sigaction(SIGPIPE, &saIgnore, nullptr);
+#endif
     }
 
     void Core::CheckSignalFlags()
     {
-        if (s_ForceShutdownRequested.load(std::memory_order_relaxed))
+        if (s_ShutdownRequested != 0)
         {
-            LOG_CORE_INFO("Force shutdown requested");
-            exit(EXIT_FAILURE);
-        }
-
-        if (s_ShutdownRequested.exchange(false, std::memory_order_relaxed))
-        {
-            LOG_CORE_INFO("Received signal SIGINT, exiting");
+            // Order matters: set the ack BEFORE clearing the request.  If
+            // a second signal arrives between these two stores, the
+            // handler still sees s_ShutdownAcked=1 and force-exits — the
+            // narrow window is safe in either ordering.  Also, never reset
+            // s_ShutdownAcked: the handler must remain able to escalate
+            // to force-exit until the process actually terminates.
+            s_ShutdownAcked = 1;
+            s_ShutdownRequested = 0;
+            LOG_CORE_INFO("Received signal SIGINT/SIGTERM, exiting");
             g_Core->RequestQuit();
             auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
             g_Core->PushEvent(event);

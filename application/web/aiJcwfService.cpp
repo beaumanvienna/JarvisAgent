@@ -1002,16 +1002,33 @@ namespace AIAssistant
 
     void AiJcwfService::Shutdown()
     {
+        // Two-phase shutdown to avoid joining-under-lock deadlock.  A background
+        // thread that calls back into a public method (e.g. a future change adds
+        // `JoinFinishedThreads` mid-lambda) would re-acquire `m_ThreadsMutex` and
+        // deadlock against this join.  Holding the lock only while we move-out
+        // the vector keeps the public-method ↔ Shutdown contract safe even if
+        // future code calls Shutdown from a path that ALSO touches m_ThreadsMutex.
+        //
+        // Idempotency: this method may be called multiple times (~AiJcwfService
+        // is the canonical caller; an external explicit Shutdown is also
+        // permitted).  Second-call observes an already-empty vector, no-ops the
+        // join loop, and re-sets m_ShuttingDown (already true).  No double-join
+        // because the threads were already moved-out and joined on the first
+        // call.
         m_ShuttingDown.store(true);
-        std::lock_guard<std::mutex> lock(m_ThreadsMutex);
-        for (auto& thread : m_BackgroundThreads)
+        std::vector<std::thread> toJoin;
+        {
+            std::lock_guard<std::mutex> lock(m_ThreadsMutex);
+            toJoin = std::move(m_BackgroundThreads);
+            m_BackgroundThreads.clear(); // moved-from vector is in valid-unspecified state; clear to canonicalize.
+        }
+        for (auto& thread : toJoin)
         {
             if (thread.joinable())
             {
                 thread.join();
             }
         }
-        m_BackgroundThreads.clear();
     }
 
     void AiJcwfService::SetBroadcastFn(BroadcastFn broadcastFn)
@@ -1376,7 +1393,29 @@ namespace AIAssistant
 
         // Blocking wait via std::promise — this runs on a background thread, and Submit's
         // callback fires on the curl I/O thread (or synchronously for InterfaceType::Test).
+        //
+        // Two safety properties on the callback path:
+        //
+        //   (1) Both `promise` and `fulfilled` are captured by value as
+        //       shared_ptr<...>, so the callback owns its own references to
+        //       both shared states.  If `RunSingleAiCall` returns on the
+        //       timeout branch below before the network reply arrives, the
+        //       caller's `future` is destroyed during stack unwind — but
+        //       the promise's shared state stays alive (held by the callback's
+        //       shared_ptr), so a LATE `set_value` is well-defined per the
+        //       C++ standard: it stores the value into the shared state with
+        //       no waiters, which is harmless.
+        //
+        //   (2) The atomic-CAS guard on `fulfilled` ensures that even if
+        //       `AiRequestPool::Submit` were to invoke the callback more than
+        //       once (today's contract is single-callback, but defense-in-
+        //       depth against a future cancel-after-success race in the
+        //       dispatcher), only the first `set_value` lands.  Without this
+        //       guard a second `set_value` would throw
+        //       `future_error(promise_already_satisfied)`, and an uncaught
+        //       exception inside the curl thread's lambda would terminate.
         auto promise = std::make_shared<std::promise<AiReply>>();
+        auto fulfilled = std::make_shared<std::atomic<bool>>(false);
         std::future<AiReply> future = promise->get_future();
 
         LOG_APP_INFO("[AiJcwfService] AI call dispatched: subfolder='{}' probFile='{}' interface='{}'", subfolderName,
@@ -1384,9 +1423,26 @@ namespace AIAssistant
                      envelope.m_InterfaceName.empty() ? "<default>" : envelope.m_InterfaceName);
 
         bool const submitted = requestPool->Submit(envelope,
-            [promise](AiReply const& reply) mutable
+            [promise, fulfilled](AiReply const& reply) mutable
             {
-                promise->set_value(reply);
+                bool expected = false;
+                if (!fulfilled->compare_exchange_strong(expected, true))
+                {
+                    return; // already fulfilled — second callback is a no-op
+                }
+                try
+                {
+                    promise->set_value(reply);
+                }
+                catch (std::future_error const&)
+                {
+                    // Spec-wise set_value should not throw here (CAS above
+                    // guards against the only realistic throw class,
+                    // promise_already_satisfied; the future being destroyed
+                    // does NOT invalidate the shared state).  Catch as
+                    // belt-and-suspenders so any future toolchain quirk
+                    // doesn't take down the curl thread.
+                }
             });
 
         if (!submitted)

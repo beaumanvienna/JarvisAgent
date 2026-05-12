@@ -15,22 +15,45 @@ All components work together to produce clean, line‑based logging in both the 
 
 # StatusRenderer
 
-Drives the terminal's status window. Two sections:
+Drives the terminal's status window — two fixed-height rows that mirror the
+signals the dashboard consumes from `/api/status` + `/api/settings/keys/status`,
+so the TUI and web views stay in sync.
 
-1. **AI aggregate row** — `[AI] In flight: N | Completed: M | Failed: K` plus a braille spinner while anything is in flight.
-2. **Last runs rows** — up to 3 rolling entries (`✓ workflowId (12s ago)`), same shape the dashboard's `LastRunsBar` shows.
+1. **Row 1 — status LEDs** — edition prefix, then key state (locked / unlocked
+   / wrong-password / missing-file), AI in-flight (with braille spinner while
+   anything is in flight), active workflow runs, MCP sidecar state, cloud
+   connector health, run totals (succeeded / failed), and a Python-offline
+   indicator when the engine pool is down.
+2. **Row 2 — last runs** — up to 3 rolling entries (`✓ workflowId (12s ago)`),
+   same shape as the dashboard's `LastRunsBar`. When keys are locked or no
+   providers are loaded, the row carries a sealed-keys hint instead since the
+   TUI has no unlock affordance.
 
-### Responsibilities
-- Count in-flight / completed / failed AI calls from `EventCategoryAi` dispatcher hooks
-- Pull a rolling last-runs snapshot from `WorkflowRuntimeManager::GetLastRunsSnapshot` via an injected provider
-- Emit UTF-8-safe, width-limited status lines
-- Thread-safe
+### Architecture
+- **Provider-driven, polled per render.** `JarvisAgent` registers two
+  `std::function` providers via `SetRuntimeSnapshotProvider` and
+  `SetLastRunsProvider` once during `OnStart`. `BuildStatusLines` calls
+  them on every `TerminalManager::Render` tick.
+- **Thread-safe.** All state is guarded by `m_Mutex`. Provider functions are
+  copied out under the lock and invoked unlocked, so a slow provider doesn't
+  block re-registration.
+- **Defense layering for byte safety.** Externally-sourced fields
+  (workflow IDs, unknown key-status echoes) are bounded per-field at the
+  entry point so one outsized value can't crowd out the row. The renderer's
+  UTF-8 truncator validates continuation bytes before consuming them, so a
+  malformed lead can't over-skip past the actual character boundary.
+  ncurses-level sanitization (replacing malformed UTF-8 / C0 controls with
+  `?`) is the responsibility of `TerminalManager::SanitizeForCurses`
+  downstream — see the comment block at the top of
+  `application/log/statusRenderer.h` for the canonical contract.
 
 ### Key Operations
-- `OnAiCallStarted/Completed/Failed()` — invoked from the event dispatcher in `JarvisAgent::OnEvent`
-- `SetLastRunsProvider(provider)` — called once after `WorkflowRuntimeManager` is up
-- `BuildStatusLines(outLines, maxWidth)` — one AI row + up to 3 last-run rows
-- `GetRowCount()` — used by `TerminalManager` to size the status window (1 + last-runs count)
+- `SetRuntimeSnapshotProvider(provider)` / `SetLastRunsProvider(provider)`
+  — registered once during `JarvisAgent::OnStart`.
+- `BuildStatusLines(outLines, maxColumns)` — assembles both rows; called
+  by `TerminalManager` on every render.
+- `GetRowCount()` — always returns 2; `[[nodiscard]]` because
+  `TerminalManager` sizes the status window from it.
 
 ---
 

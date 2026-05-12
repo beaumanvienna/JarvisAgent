@@ -21,6 +21,7 @@
 
 #pragma once
 #include <atomic>
+#include <csignal>
 #include <memory>
 #include <filesystem>
 
@@ -83,12 +84,34 @@ namespace AIAssistant
         static Core* g_Core;
 
     private:
-        static void SignalHandler(int signal);
+        static void SignalHandler(int sig);
+        static void InstallSignalHandlers();
         void DisableCtrlCOutput();
         void CheckSignalFlags();
 
-        static std::atomic<bool> s_ShutdownRequested;
-        static std::atomic<bool> s_ForceShutdownRequested;
+        // Signal-handler flags.  `volatile std::sig_atomic_t` is the only
+        // POSIX-blessed way to communicate from a signal handler to the
+        // main thread; std::atomic<bool> is lock-free in practice on every
+        // platform we target but the C++ standard does NOT guarantee it
+        // is async-signal-safe (only std::atomic_flag carries that
+        // guarantee, and a flag-only API is too thin for the two-state
+        // ack dance).  Loads / stores of sig_atomic_t are atomic per
+        // POSIX; the polling pattern in Core::Run + Core::CheckSignalFlags
+        // observes writes via the periodic re-read.
+        //
+        // s_ShutdownRequested  — set to 1 by the handler on first
+        //                        SIGINT/SIGTERM; CheckSignalFlags consumes
+        //                        it and pushes the shutdown event.
+        // s_ShutdownAcked      — set to 1 by CheckSignalFlags after first
+        //                        ack; the handler force-_exits if it sees
+        //                        ack=1 (the user pressed Ctrl+C twice and
+        //                        the orderly shutdown is taking too long).
+        //                        Also force-exits if the request flag is
+        //                        already set when a new signal arrives,
+        //                        covering rapid double-press before the
+        //                        main loop has had a chance to ack.
+        static volatile std::sig_atomic_t s_ShutdownRequested;
+        static volatile std::sig_atomic_t s_ShutdownAcked;
 
     private:
         // THREADS_REQUIRED_BY_APP:

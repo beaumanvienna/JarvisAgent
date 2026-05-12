@@ -34,12 +34,75 @@
 #include "cloud/redmineConnector.h"
 #include "cloud/connectorHttp.h"
 #include "curlWrapper/curlWrapper.h"
+#include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
 #include "workflow/taskPathResolver.h"
 
 namespace AIAssistant
 {
     static constexpr size_t kMaxCaptureChars = 1024;
+
+    namespace
+    {
+        // Redmine issue IDs are positive integers; cap at 10 digits.
+        bool IsValidRedmineIssueId(std::string_view value)
+        {
+            if (value.empty() || value.size() > 10)
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Redmine project identifiers are slug-style: lowercase alpha + digits
+        // + `_` + `-`, length 1-100.
+        bool IsValidRedmineProjectIdent(std::string_view value)
+        {
+            if (value.empty() || value.size() > 100)
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                bool const ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Redmine status_id is either `open` / `closed` / `*` (literal
+        // keyword) or a positive integer.  Accept either shape; reject
+        // anything else.
+        bool IsValidRedmineStatus(std::string_view value)
+        {
+            if (value == "open" || value == "closed" || value == "*")
+            {
+                return true;
+            }
+            if (value.empty() || value.size() > 10)
+            {
+                return false;
+            }
+            for (char c : value)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    } // namespace
 
     static std::string ReadFileToString(std::string const& path)
     {
@@ -180,11 +243,29 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidRedmineProjectIdent(projectIdent))
+            {
+                taskState.m_LastErrorMessage = "redmine_issue/list_issues: invalid 'project_identifier' (must match "
+                                               "[a-z0-9_-], 1-100 chars)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[redmine] invalid project_identifier task='{}' workflow='{}' run='{}': '{}'",
+                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, projectIdent);
+                return false;
+            }
 
             std::string status = getStringParam("status");
             if (status.empty())
             {
                 status = "open";
+            }
+            if (!IsValidRedmineStatus(status))
+            {
+                taskState.m_LastErrorMessage = "redmine_issue/list_issues: invalid 'status' (must be 'open', 'closed', "
+                                               "'*', or a positive integer)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[redmine] invalid status task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, status);
+                return false;
             }
             int64_t limitVal = 25;
             if (doc["limit"].get_int64().get(limitVal) != simdjson::SUCCESS)
@@ -192,7 +273,10 @@ namespace AIAssistant
                 limitVal = 25;
             }
 
-            std::string url = baseUrl + "/issues.json?project_id=" + projectIdent + "&status_id=" + status +
+            // Defense-in-depth percent-encode after the allowlist.
+            std::string const projectIdentEnc = ConnectorHttp::UrlEncodeComponent(projectIdent);
+            std::string const statusEnc = ConnectorHttp::UrlEncodeComponent(status);
+            std::string url = baseUrl + "/issues.json?project_id=" + projectIdentEnc + "&status_id=" + statusEnc +
                               "&limit=" + std::to_string(limitVal);
 
             if (!RedmineRequest("GET", url, credentials.m_Token, responseBody, httpCode))
@@ -231,23 +315,47 @@ namespace AIAssistant
                 taskState.m_State = TaskInstanceStateKind::Failed;
                 return false;
             }
+            if (!IsValidRedmineIssueId(issueId))
+            {
+                taskState.m_LastErrorMessage =
+                    "redmine_issue/update_issue: invalid 'issue_id' (must be a positive integer)";
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[redmine] invalid issue_id task='{}' workflow='{}' run='{}': '{}'", taskDefinition.m_Id,
+                              workflowDefinition.m_Id, workflowRun.m_RunId, issueId);
+                return false;
+            }
 
-            // Resolve notes (inline or from file)
+            // Resolve notes (inline or from file).  notes_file goes through
+            // ConfineUnderProjectRoot — a hostile JCWF cannot bait us into
+            // reading `/etc/passwd` or anything outside the project tree.
             std::string notes = getStringParam("notes");
             std::string notesFile = getStringParam("notes_file");
             if (!notesFile.empty())
             {
-                std::string loaded = ReadFileToString(notesFile);
+                std::filesystem::path const confined = ConfineUnderProjectRoot(notesFile);
+                if (confined.empty())
+                {
+                    taskState.m_LastErrorMessage =
+                        "redmine_issue/update_issue: notes_file does not lie under the project root: " + notesFile;
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[redmine] notes_file rejected task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, notesFile);
+                    return false;
+                }
+                std::string loaded = ReadFileToString(confined.string());
                 if (loaded.empty())
                 {
                     taskState.m_LastErrorMessage = "redmine_issue/update_issue: cannot open notes_file '" + notesFile + "'";
                     taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[redmine] notes_file not readable task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, notesFile);
                     return false;
                 }
                 notes = TrimWhitespace(std::move(loaded));
             }
 
-            // Resolve assigned_to_id (inline string, inline int, or from file)
+            // Resolve assigned_to_id (inline string, inline int, or from file).
+            // assigned_to_id_file is path-confined the same way as notes_file.
             std::string assignedToId = getStringParam("assigned_to_id");
             if (assignedToId.empty())
             {
@@ -260,7 +368,18 @@ namespace AIAssistant
             std::string assignedToIdFile = getStringParam("assigned_to_id_file");
             if (!assignedToIdFile.empty())
             {
-                std::string loaded = ReadFileToString(assignedToIdFile);
+                std::filesystem::path const confined = ConfineUnderProjectRoot(assignedToIdFile);
+                if (confined.empty())
+                {
+                    taskState.m_LastErrorMessage =
+                        "redmine_issue/update_issue: assigned_to_id_file does not lie under the project root: " +
+                        assignedToIdFile;
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[redmine] assigned_to_id_file rejected task='{}' workflow='{}' run='{}': '{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, assignedToIdFile);
+                    return false;
+                }
+                std::string loaded = ReadFileToString(confined.string());
                 assignedToId = TrimWhitespace(std::move(loaded));
             }
 
@@ -300,7 +419,10 @@ namespace AIAssistant
             body << "}}";
             std::string requestBody = body.str();
 
-            std::string url = baseUrl + "/issues/" + issueId + ".json";
+            // issueId is allowlist-validated above (digits only); encode for
+            // defense-in-depth.
+            std::string const issueIdEnc = ConnectorHttp::UrlEncodeComponent(issueId);
+            std::string url = baseUrl + "/issues/" + issueIdEnc + ".json";
 
             if (!RedmineRequest("PUT", url, credentials.m_Token, responseBody, httpCode, requestBody))
             {
