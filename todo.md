@@ -40,12 +40,6 @@ Dashboard work pairs with this:
 
 Per-run queue folder (separate, deeper work, not blocking this entry): `queue/<workflowId>/<runId>/<NN>_<task>/` instead of `queue/<workflowId>/<NN>_<task>/`.  Required for `parallel`-opted workflows to be hermetic.  Tracked here as a follow-up rather than its own entry because it only matters once `parallel` is opt-in.
 
-### Cyber-security hardening pass
-Plan: `doc/misc/cybersec-hardening-dev-plan.md`.  Source: `doc/combinedCyberSecAudit.md` (729 findings: 54 CRITICAL, 239 HIGH, 279 MEDIUM, 157 LOW).  4-domain split, 4 combined sessions with §19.  Session order: S1=D2 web+cloud+assistant (densest CRITICAL surface), S2=D3 core engine, S3=D1 workflow orchestration, S4=D4 app infrastructure.
-
-### C++ safety hardening pass
-Plan: `doc/misc/cpp-safety-hardening-dev-plan.md`.  Source: `doc/combinedSafetyAudit.md` (1243 findings: 13 CRITICAL, 277 HIGH, 483 MEDIUM, 470 LOW).  Same 4-session schedule as cyber-sec, run together.  Memo organized as Rust-emulating C++ defaults.
-
 ### Per-interface mock transport for parser fault injection
 Sequenced after the 4 hardening sessions.  New `IInterfaceTransport` abstraction with two impls per real `InterfaceType` (API1–API5 + API6 reusing API1's parser): `LiveTransport` (real curl + auth signer, current behavior) and `MockTransport` (canned responses from disk fixtures).  Switch is dispatch-time, driven by the request: if the request carries a `X-J9T-Mock-Fixture: <name>` header (and a hermetic-mode flag), `MockTransport` is selected and serves bytes from `test/dispatch/fixtures/<api>/<name>.json` (or similar); otherwise `LiveTransport` runs unchanged.  Match strategy is **InterfaceType + fixture-name header only** — no URL or full-header matching, keeping the mock cheap to maintain.
 
@@ -113,10 +107,9 @@ The AI dispatch refactor's main work is committed; these are slice items the §5
 
 ## Cloud integration tail (post-implementation)
 
-The bulk of the cloud-integration work landed (Phases 0-12 done; see `doc/misc/cloud-integration-dev-plan.md`).  Two open items remain:
+The bulk of the cloud-integration work landed (Phases 0-12 done; see `doc/misc/cloud-integration-dev-plan.md`).  One open item remains:
 
 - **`email_watch` trigger doesn't actually check IMAP** — currently fires on the polling timer regardless of whether new mail arrived.  Wire the trigger to perform an actual IMAP UID check before firing so it only triggers on genuinely-new messages.
-- **Mailpit (send-only) has no JCWF coverage** — the dashboard's manual cloud-connection test shows 14 healthy, but a full JCWF run only flips 13 to healthy.  Root cause: the cloud integration plan's "Simulatable Without Real Cloud Accounts" list has **two** email Docker mocks (`Mailpit` for SMTP-only send + `GreenMail` for SMTP+IMAP round-trip).  `emailDemo.jcwf` exercises only the GreenMail connection; Mailpit never gets `RecordSuccess` from any workflow.  Two fix options: (a) add a separate send-only `mailpitDemo.jcwf` (or rename it to `emailSendDemo.jcwf`) that drives only `email_send` against the Mailpit connection; (b) parameterize `emailDemo.jcwf` to take the connection name as input and run it twice (once per email mock).
 
 (The two cloud-integration-dev-plan checkboxes for Redmine frontend and Snowflake round-trip E2E were both stale — Redmine has full frontend coverage in `ConnectionsView.tsx` + `WorkflowEditorView.tsx`, and `snowflakeQueryDemo.md` documents the verified round-trip end-to-end.  Plan checkboxes never got flipped; closed here.)
 

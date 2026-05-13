@@ -15,6 +15,72 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-12 (post-S5 — JCWF cleanup, mailpit coverage, freshness verification) → next session
+
+First "normal" session after the S5 hardening close-out.  Nothing structural; this was a small-feature + bug-fix sitting that strengthened the demo-pack health.  Branch is clean except for the tracked-changes list at the bottom of this entry — JC is preparing to commit the JCWF updates.
+
+**Post-hardening behavior observation (JC, end of session):** no regressions surfaced through ~30 JCWFs run in parallel + an aggressive credential-rotation arc + multiple register/reload cycles.  The one period of "dispatch is super slow" was traced to OpenAI's account being out of credits (negative balance triggered persistent 429s with `insufficient_quota`, NOT throttling — see auto-memory `reference_openai_429_billing`); after JC topped up, mass-run wall time was excellent (jarvisCppDocu 1m 50s cold, jarvisCppSafetyAudit 4m 43s, all other demo workflows 2-30s).  **Massive parallel work is fast and reliable post-hardening** — confidence-level upgrade for the next session's focus.
+
+**Next session's focus (JC):** tackle the miscellaneous debris in `todo.md` — currently 33 open items, with 3 stale-as-done that should be closed first (cyber-sec hardening pass, C++ safety hardening pass, Mailpit JCWF coverage).  Natural debris cohort is the ~10 small items (§5i + §5g bullets + `replayTranscript.py` + `HandleWorkflowVersionRestorePost` + `ConfigParser` boilerplate + `RedactingFormatter` allocation) plus parts of the medium-scope cohort (EventQueue cap, malformed-config test, ofstream exception-safety, atomic-write pattern, etc.).  Larger structural items (concurrent-run policy, per-interface mock transport, native LLM tool-calling, Claude Code PoC, repo layout reorg) and marketing/UX items (dogfood editor, dogfood assistant, landing page, promo video) deserve their own dedicated thrusts later.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **Freshness logic verified end-to-end** | n/a (read + observe) | `application/workflow/taskFreshnessChecker.cpp` is full Makefile-style; covers source files (`file_inputs`), transitive upstream `file_outputs`, AND **JCWF mtime** for any task with inline `queue_binding` content (`taskPathResolver.cpp:300-313`).  Verified on `jarvisCppDocu`: cold rebuild 145 ai_calls in 2m 03s → edit one `.cpp` → 27s with 143 skipped + 1 ai_call + combine cascade.  Pinned as `project_freshness_logic` in auto-memory. |
+| **`jiraIssueDemo` JCWF fix** | `example/workflows/jiraIssueDemo.jcwf` | `create_issue` task was missing required `project_key` param → connector short-circuited with `jira_issue 'create' requires 'project_key'` before the API call.  Added `"project_key": "SCRUM"` (matches JC's Atlassian project at `jctechnolabs.atlassian.net/jira/software/projects/SCRUM`). |
+| **`cyber2` + `cyber3` JCWF fix** | `example/workflows/cyber2.jcwf`, `example/workflows/cyber3.jcwf` | Both had `defaults.timeout_ms` overrides (60s and 30s) on the AI call; cyber3's 30s caused mass-run failure with `curl error (28) Timeout was reached`.  Removed the `defaults` block entirely from both; AI calls now use the size-aware budget (`api->m_RateLimit.m_RequestBudget` formula) which is more adaptive. |
+| **NEW JCWF — `mailpitSmtpDemo`** | `example/workflows/mailpitSmtpDemo.{jcwf,md}` + `scripts/verifyMailpitMessage.py` | Closes a test-coverage gap: `my-email` (mailpit) was the only configured cloud connection without a JCWF exercising it (`my-greenmail` covered IMAP+SMTP, `my-email` was orphaned because mailpit has no IMAP).  2-task DAG: `email_send` via `my-email` → `python` verifier hits mailpit's HTTP API at `http://localhost:8025/api/v1/messages` and asserts the message landed.  Verified end-to-end (single test run, 2s, `verification.txt` written). |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Freshness — cold rebuild on jarvisCppDocu | ✅ 145 succeeded in 2m 03s |
+| Freshness — single-source-file edit | ✅ 1 ai_call ran (the one declaring `jarvisAgent.cpp`), 143 skipped, combine cascaded |
+| Mass-run (30 JCWFs) post-OpenAI-topup | ✅ 29/30 succeeded; only failure was `cyber3` on the 30s timeout (now fixed in JCWF — not yet re-tested at scale) |
+| `mailpitSmtpDemo` end-to-end | ✅ succeeded in 2s; `verification.txt` matched `[mailpitSmtpDemo] hello` subject |
+| All 14 cloud connection credentials | ✅ green via dashboard / workflow runs (after JC re-fixed greenmail + Atlassian token + Sheets OAuth + GitHub PAT post-keystore-restore) |
+| `my-polarion` endpoint | Now `http://localhost:18080/polarion` (was `https://polarion.company.com` placeholder); JC's local mock at `../polarionMockup` serves under `/polarion/rest/v1/...`, the connector adds `/rest/v1/...` so the prefix has to be in the endpoint |
+| Build / type-check / clean compile | NOT re-tested this session — only JCWF + script + .md changes; no C++ touched (except the freshness-test year edit on `application/jarvisAgent.cpp` line 1, see "open items") |
+
+### Open items / next-session candidates
+
+1. **`application/jarvisAgent.cpp` year change (2025 → 2026, line 1)** — was an artifact of the freshness test (single-byte source-file edit to demonstrate per-file invalidation).  JC's call whether to commit (legitimate year refresh) or revert (it served its test purpose and isn't part of any other change).  Currently in working tree; flagged at the bottom of this entry.
+2. **`config.json` is `M` in working tree** — predates this session (was already modified at session start per the initial git status snapshot).  JC's call.
+3. **Re-run cyber3 alone (or another mass-run)** to verify the timeout fix lands — the size-aware budget should give it ample headroom; not re-tested this session.
+4. **`test/run_tests.py` has no token plumbing** — the runner predates the auth requirement, so it 401s against any authenticated j9t.  Worth a small patch (`--token` flag + `J9T_TOKEN` env-var fallback, same pattern as `test/dispatch/`).  Tracked nowhere; if it matters, add to `todo.md`.
+5. **Dispatcher 429 log line should distinguish causes** — current line is `HTTP 429 rate limit for query …` regardless of whether the response body has `error.code = "rate_limit_exceeded"` (real throttling) or `"insufficient_quota"` (billing/credits).  Distinguishing them in the log would have saved a long AIMD-debug detour this session — see auto-memory `reference_openai_429_billing`.  Small `engine/curlWrapper/` change.
+6. **Workflow-runtime stale-queue-folder GC** (carried over from the S5 hand-off) — `CleanWorkflow` only iterates the *current* JCWF's task list; orphaned per-task folders from prior generations linger in both `queue/<id>/` and `workflows/<id>/`.  Not done this session; a JCWF that adds/removes tasks across versions still leaves orphans.
+
+### Gotchas for next-session-Claude
+
+- **`example/workflows/` is git-tracked canonical; `workflows/` is transient runtime scratch.**  The runtime ONLY scans `workflows/*.jcwf` (sibling-extracted via `JcwfContainer::IsExtractedStale` mtime check, per JCWF spec §"Extraction model").  There is **no auto-sync** from canonical to runtime.  When creating a NEW JCWF, drop the `.jcwf` zip in **both** locations: `workflows/<id>.jcwf` for the live registry to pick up on `POST /api/workflows/reload`, AND `example/workflows/<id>.jcwf` for the persistent home.  Verified the hard way this session — see updated auto-memory `feedback_jcwf_canonical_location`.
+- **The size-aware AI timeout budget is per-attempt, on-the-wire only.**  Queue waiting + AIMD throttling + retry backoff sleep don't bleed into it; the formula models a single curl_easy_perform attempt.  Two-stage architecture in `engine/curlWrapper/curlMultiDispatcher.cpp:483-549`: (1) pre-wire throttle/queue (timer NOT running), (2) wire (CURLOPT_TIMEOUT_MS counts).  This is the right shape — don't try to add concurrency-aware backoff to the formula itself; rely on AIMD's halve-on-429 + safety margin.
+- **OpenAI 429 can be billing, not throttling.**  `insufficient_quota` returns the same HTTP status as `rate_limit_exceeded` and trips the AIMD cap-halve cascade identically.  When 429s persist and the cap is pinned at 1 with no recovery, **check OpenAI billing first** before debugging the dispatcher.  Auto-memory: `reference_openai_429_billing`.
+- **`test/run_tests.py` doesn't pass `--base-url` is needed** AND it has no token plumbing — runs against `http://localhost:8080` by default and 401s.  For ad-hoc workflow runs this session we used direct curl with `Authorization: Bearer $J9T_TOKEN` instead.  See open item #4 for the fix shape.
+- **Mailpit's web/HTTP API is on port 8025; SMTP is on 1025.**  Not the same port.  The verifier in `scripts/verifyMailpitMessage.py` uses 8025; the `my-email` connection's `smtp_port` param uses 1025.  Don't conflate.
+- The `mailpitSmtpDemo` Python verifier uses `urllib` to hit `http://localhost:8025` from inside the embedded Python engine.  This bypasses both `IsCallbackUrlAllowed` (callbackUrl SSRF gate) and `ConnectorHttp::ValidatePublicHttpEndpoint` (cloud-connector gate) — those gates only apply to those specific code paths.  A python_task using urllib has no SSRF gate; the JCWF's `module` allowlist (`# @jarvis-script` header + `ScriptRegistry`) is the actual containment.
+
+### Files in working tree (uncommitted, ready for commit)
+
+```
+M  application/jarvisAgent.cpp           # year 2025→2026 line 1; freshness-test artifact, JC's call
+M  config.json                           # predates this session, JC's call
+M  example/workflows/cyber2.jcwf         # removed defaults.timeout_ms (60000)
+M  example/workflows/cyber3.jcwf         # removed defaults.timeout_ms (30000)
+M  example/workflows/jiraIssueDemo.jcwf  # added project_key: "SCRUM" to create_issue
+?? example/workflows/mailpitSmtpDemo.jcwf  # new JCWF
+?? example/workflows/mailpitSmtpDemo.md    # companion doc
+?? scripts/verifyMailpitMessage.py         # python verifier for mailpitSmtpDemo
+```
+
+### Source of truth
+
+This entry is the canonical record of the session's project-state changes.  No new dev plan was opened; the work was tactical (one new JCWF + three JCWF fixes + one verification arc).  Auto-memory captures the durable per-session lessons (freshness behavior, OpenAI 429 triage, JCWF location convention).
+
+---
+
 ## 2026-05-12 (END-OF-S5 AUDIT REPUBLISH — **hardening initiative complete**) → next session
 
 End of the multi-session cyber-sec + C++ safety hardening arc.  JC ran both `jarvisCppCyberSecAudit` + `jarvisCppSafetyAudit` with Sonnet 4.6 after the queue cleanup described below, and the final tally is **zero CRITICALs in both audits** — better than the planned outcome (which expected 1 forever-CRIT for `run_shell`).  The published outputs are at `doc/combinedCyberSecAudit.md` + `doc/combinedSafetyAudit.md`.
