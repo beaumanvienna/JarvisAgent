@@ -15,6 +15,333 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-14 (Foundation Sitting 2 — MockTransport + cyber-sec hardening + TestInterface removal) → next session
+
+Foundation Sitting 2 of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed in the same calendar day as Sitting 1.  MockTransport (fixture-driven `IInterfaceTransport`) implemented with all §1 hardening in the first commit; per-request dispatch routing on `is_mock: true` wired through the dispatcher; TestInterface code path removed entirely (`InterfaceType::Test` enum variant deleted, short-circuit in `AiRequestPool::Submit` deleted, REST/configParser legacy `"Test"` rejected with migration guidance); 7 Python tests + 2 fixtures migrated to JSON-shaped golden_success.json fixtures; PROV sidecar carries `mocked: true` + `fixture_path` for mock dispatches; doc sweep across cyber security.md, jarvisagent.md, JC_Workflow_Specification.md, engine/json/json.md.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **New `MockTransport`** | `engine/curlWrapper/mockTransport.{h,cpp}` (new) | Per-request fixture replay; ConfineUnderProjectRoot at fixture-load (defense-in-depth on top of ConfigParser); 10 MiB per-fixture size cap; `<fixture>.meta.json` parsed for `http_status` (allowlist `[200, 599]`) + `headers` (allowlist `{Content-Type, Retry-After}` only; other keys dropped with WARN); `SanitizeUtf8` on fixture-path strings before they enter logs; one-time INFO log per `(quotaKey, fixturePath)` first-seen; Pump-only completion delivery (no synchronous callback from Submit). |
+| **QueryData routing fields** | `engine/curlWrapper/curlWrapper.h` | `m_IsMock: bool` + `m_FixturePath: string` carried per-request.  AiRequestPool::Submit populates from the resolved ApiInterface; dispatcher's DrainInbox selects `m_MockTransport` vs `m_LiveTransport` based on `m_IsMock`. |
+| **Dispatcher dual-transport composition** | `engine/curlWrapper/curlMultiDispatcher.{h,cpp}` | Holds `unique_ptr<IInterfaceTransport> m_LiveTransport + m_MockTransport`.  Both share the dispatcher's RequestId space + `OnTransportComplete` sink; Submit fans out to the selected transport via `QueryData::m_IsMock`; Pump drives both each tick; Wait blocks only LiveTransport (Mock has no I/O); Wakeup fans out; CancelByCancelKey fans out (silent on both — dispatcher fires user callback synchronously). |
+| **ConfigParser hardening** | `engine/json/configParser.{h,cpp}` | Removed `InterfaceType::Test` enum variant (NumAPIs: 7 → 6).  Removed `{"Test", ...}` from `kInterfaceTypeMappings`.  `static_assert(NumAPIs == 6, ...)`.  Legacy `api_type: "Test"` → ERROR at parse time with migration guidance pointing at `is_mock` + `fixture_path`.  is_mock+fixture_path coupling enforced (`is_mock: true` requires non-empty `fixture_path` that resolves under project root; else InvalidAPI). |
+| **REST API hardening** | `application/web/webServer.cpp` | POST/PUT `/api/settings/ai-interfaces` accept `is_mock` + `fixture_path` fields; reject legacy `api_type: "Test"` with structured error; enforce is_mock+fixture_path coupling at admission.  GET serializes both fields; save-to-config.json persists them (only when non-default).  Debug `parse-rate-limit-headers` endpoint drops the `"Test"` branch. |
+| **PROV sidecar `mocked: true`** | `application/workflow/aiCallTaskExecutor.cpp` | When the resolved interface has `is_mock: true`, PROV_provider.json carries `"mocked": true` + `"fixture_path": "<path>"` so post-mortem tooling distinguishes mock dispatches from live ones. |
+| **TestInterface code-path removal** | `application/workflow/aiRequestPool.cpp` | 88 lines deleted: the short-circuit at the former 1304-1393 (read fixture → sanitize → write `.output.txt` → fire onReply).  All dispatch now flows through `CurlMultiDispatcher`; mock-ness is a transport-layer concern, transparent to the request pool.  Comment + static_assert updated to mention generic dispatch + NumAPIs=6. |
+| **rateLimitStrategy + aiJcwfService cleanup** | `engine/curlWrapper/rateLimitStrategy.cpp`, `application/web/aiJcwfService.cpp` | `case Test: return s_Empty` removed; `static_assert(NumAPIs == 6)`.  aiJcwfService comment updated to mention LiveTransport / MockTransport (no more synchronous-Test branch). |
+| **Test migration** | 7 Python files + 2 new fixture JSONs | `test/dispatch/_stress_tui_helpers.py`: `provision_mock_interface` (back-compat alias `provision_test_interface` preserved).  `test/dispatch/test_mock_dispatch_hermetic.py` (new — replaces `test_testinterface_hermetic.py`).  Migrated tests: `test_cross_workflow_parallel.py`, `test_chunking_fanout.py`, `test_relaxed_env_warnings.py`, `test_markitdown_cntx.py`, `test_stress_tui_utf8_heavy.py`, `test_rate_limit_observation_parse.py`, `test_rate_limit_strategy_dispatch.py`.  New shared fixtures: `test/dispatch/fixtures/api1/golden_success.json` (OpenAI chat completion shape, ~16-token reply), `test/dispatch/fixtures/api1/utf8_heavy.json` (heavy-UTF-8 content wrapped in OpenAI shape).  Deleted: `test_testinterface_hermetic.py`, `test_stress_tui_utf8_invalid.py` (superseded by Sitting 3's per-API fixture battery), `fixtures/hermetic_reply.txt`, `fixtures/utf8_invalid.txt`. |
+| **Doc sweep (initial)** | `engine/json/json.md`, `doc/jarvisagent.md`, `doc/JC_Workflow_Specification.md`, `doc/cyber security.md` | api_type list reduced to API1-API6 + is_mock pairing note.  jarvisagent.md got two new bullets (`is_mock` + `fixture_path`) with full hardening description.  cyber security.md got a new "MockTransport Security" section covering path confinement, size cap, status/header allowlist, UTF-8 sanitization, admin-only access, operator transparency, Pump-only delivery, TestInterface removal note.  json.md updated for NumAPIs == 6 and is_mock semantics. |
+| **Doc sweep (post-close, end of day)** | `doc/api-endpoints.md`, `engine/curlWrapper/curlWrapper.md`, `application/file/README.md`, `application/workflow/README.md`, `test/dispatch/README.md`, `test/dispatch/test_cross_workflow_parallel.py` (docstring), `doc/misc/AI dispatch refactor.md` (deprecation banner), `doc/misc/ai-provider-error-visibility-dev-plan.md` (status: rev3, Sittings 1+2 marked ✅) | Second pass on JC's request, covering surfaces that the initial sweep missed.  api-endpoints.md: `is_mock` + `fixture_path` documented on `POST /api/settings/ai-interfaces` request/response, with the four rejection cases (path escape, missing fixture, oversize, legacy Test) enumerated and pointers to jarvisagent.md + cyber security.md for the full posture.  curlWrapper.md §15: dispatcher composes with BOTH `LiveTransport` + `MockTransport`, dispatch-pipeline diagram updated to show per-request routing on `m_IsMock` + both `Pump()` calls per tick + LiveTransport-only `Wait()`; rate-limit strategy list trimmed (no "Test" entry).  application/file/README.md: ConfineUnderProjectRoot use-site list extended with the two new MockTransport sites (`LoadFixtureBody` + `LoadFixtureMeta`) + ConfigParser fixture_path validation + REST POST/PUT fixture_path validation.  application/workflow/README.md: aiRequestPool.h/cpp row mentions is_mock + fixture_path forwarding; aiCallTaskExecutor.h/cpp row mentions the PROV `mocked: true` + `fixture_path` fields.  test/dispatch/README.md: comprehensive rewrite of "Offline / no live AI" and "TUI ncurses stress tests" sections to reflect MockTransport replacing TestInterface, with a note that malformed-UTF-8 stress is deferred to Sitting 3.  Fixtures section rewritten to describe the new `fixtures/api1/golden_success.json` + `utf8_heavy.json` shape and forecast the Sitting 3 per-API battery.  AI dispatch refactor.md got a top-of-file deprecation banner — every "TestInterface / api_type: Test" reference below it describes pre-2026-05-14 system state, not current; readers are redirected to jarvisagent.md / api-endpoints.md for the supported migration path.  Dev plan §6 sitting table now marks Sittings 1 + 2 as ✅ landed 2026-05-14 so a fresh-context Claude knows where to pick up. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build clean | Studio Debug + Studio Release + Engine Debug + Engine Release (no warnings) |
+| Dispatch test suite | **18/18 pass** — `test_mock_dispatch_hermetic` (new), `test_aimd_concurrency_cap`, `test_chunking_fanout`, `test_cross_workflow_parallel`, `test_curlopt_timeout_fires`, `test_direct_dispatch_signals`, `test_envelope_empty_body_rejected`, `test_observe_idempotent`, `test_output_schema_roundtrip`, `test_quota_key_isolation`, `test_rate_limit_observation_parse`, `test_rate_limit_strategy_dispatch`, `test_relaxed_env_warnings`, `test_schema_covers_parser`, `test_size_aware_budget`, `test_stress_tui_utf8_heavy`, `test_tcp_keepalive_set`, `test_token_bucket_mirror` |
+| Edition contract suite | 49/49 pass (Studio capabilities + endpoints + WS + audit log unchanged) |
+| `make-example` workflow via MCP | Succeeded — non-AI shell pipeline intact |
+| Hermetic mock end-to-end | PROV sidecar contains `mocked: true` + correct `fixture_path`; `.output.txt` matches the fixture's `content` field byte-exact after FileWriter header strip; ReplyParserAPI1 ran on the canned JSON response |
+| Cyber-sec acceptance — path escape `../../etc/passwd` | Rejected by REST POST with `fixture_path_rejected` error; ERROR log fires with structured fields |
+| Cyber-sec acceptance — oversized fixture (11 MiB) | Created at REST OK (cap is at consume site); dispatch fails with `MockTransport: fixture exceeds size cap` ERROR carrying cancelKey + quotaKey |
+| Cyber-sec acceptance — `.meta.json` `http_status: 999` | Rejected with `MockTransport: meta.json 'http_status' outside [200,599]` ERROR |
+| Cyber-sec acceptance — `.meta.json` `X-Evil` header | Dropped with `meta.json header 'X-Evil' not in allowlist {Content-Type, Retry-After}` WARN; valid `Content-Type` propagated |
+| Cyber-sec acceptance — legacy `api_type: "Test"` | REST POST: 400 with `api_type_test_removed` + migration message; ConfigParser: ERROR + InvalidAPI; PUT: 400 with same message |
+| Cyber-sec acceptance — `is_mock` without `fixture_path` | REST POST/PUT: 400 with `is_mock_requires_fixture_path`; ConfigParser: ERROR + InvalidAPI |
+| `grep InterfaceType::Test` across `application/` + `engine/` | 0 hits — fully removed |
+
+### Architecture notes for next-session-Claude
+
+- **Per-request transport selection.**  Dispatcher's DrainInbox chooses `*m_MockTransport` vs `*m_LiveTransport` based on `QueryData::m_IsMock`.  Both transports are constructed at dispatcher startup (no lazy init).  Both share the dispatcher's monotonic `RequestId` allocator + `OnTransportComplete` sink — the dispatcher doesn't track which transport carried which id.  Adding a third transport (e.g. a fault-injection wrapper for Sitting 3 parser tests) means adding another `unique_ptr` and another routing branch in DrainInbox.
+- **MockTransport is stateless across interfaces.**  One instance shared by all is_mock interfaces.  Per-request fixture_path is carried in QueryData (set by AiRequestPool from the resolved ApiInterface).  No per-interface MockTransport instances.  `m_FirstSeenKeys` (the operator-transparency tracker) is keyed on `(quotaKey, fixturePath)` so multiple is_mock interfaces share the single Mock instance cleanly.
+- **`.meta.json` schema is forward-compatible.**  Unknown keys at the root are silently ignored.  Header `value` must be a string (other types skipped with WARN).  Header key allowlist `{Content-Type, Retry-After}` is case-insensitive.  Adding a new allowlisted header means extending `IsAllowedHeaderKey` in `mockTransport.cpp` AND committing that the dispatcher's AIMD path actually honors it identically to a real provider's header.
+- **PROV `mocked` field is the post-mortem discriminator.**  Operators reading a run's PROV_provider.json see `"mocked": true` + `"fixture_path": "<resolved path>"` only when MockTransport handled the call.  Live dispatches omit both fields.  Dashboard / run analyzer can filter on this — the field is stable.
+- **MockTransport fails closed at the request level, not at startup.**  An interface configured with `is_mock: true` + a bad fixture (oversized, missing, path-escape, unreadable) doesn't prevent server boot.  The interface stays in the registry; dispatch attempts fail with structured `MockTransport: ...` ERRORs.  This matches LiveTransport's behavior (a misconfigured real provider doesn't prevent boot either).
+- **Test migration: byte-exact comparisons changed shape.**  Pre-Sitting-2 tests compared `<prob>.output.txt` bytes to the raw fixture bytes.  Post-Sitting-2 they compare to the JSON fixture's `choices[0].message.content` field — and strip the `# Model: ...\n` header line that FileWriter prepends.  The migration helper in test_mock_dispatch_hermetic.py shows the canonical pattern.
+- **`utf8_invalid.txt` stress is gone for now.**  Replaced by Sitting 3's per-API `malformed_utf8.json` battery per the dev plan.  TestInterface let raw malformed bytes flow directly to the log/TUI; under MockTransport, malformed bytes in the JSON body cause simdjson parse failure rather than reaching the log.  Sitting 3 builds the proper byte-level-pathology test pattern: malformed bytes in the parser's input + edge-case codepoints (NUL, BOM, RTL, surrogate halves via \uXXXX escapes) inside valid-JSON `content` strings to exercise the log-boundary `SanitizeUtf8`.
+
+### Schedule (JC's plan at end-of-day Thursday)
+
+| Day | Sittings | Workstreams |
+|---|---|---|
+| **Friday 2026-05-15** | 3, 4 | Foundation 3 (per-API fixture battery + parser fault tests + TUI safety + curated demo fixtures), then A (log enrichment — **first user-visible surfacing**: ERROR line carries `error.code` + `error.type` + `category` + runId from `OnRequestFailed`) |
+| **Saturday 2026-05-16** | 5, 6 | B (`AiError` plumbing — `ProviderErrorCategory` enum, `ParseOpenAiStyleError` helper, `Retry-After` propagation, WS payload extension) + E (cross-provider parsing — API3/API4/API5 billing/throttle/auth/overload discriminators) |
+| **Sunday 2026-05-17** | 7, 8 | C (banner + hazard glyph — **first UI surface**) + D (`ProviderHealthSnapshot` + AI Health LED — proactive cap render) |
+
+Plan close-out at end of Sunday — every plan acceptance bullet (§7) green.
+
+### Open items / next-session candidates
+
+1. **Foundation Sitting 3 — Per-API fixture batteries + parser fault tests + TUI safety + curated demo JCWF fixtures.**  Primary follow-up.  Plan §Foundation Sitting 3 enumerates: `test/dispatch/fixtures/api{1..5}/{golden_success, error_billing, error_throttle, error_auth, error_overload, malformed_utf8, truncated_response}.json` (35 fixtures total); per-interface test drivers (`test_api{1..5}_mock_*.py`); TUI byte-safety stress (`test_tui_stress_malformed_utf8.py`); curated demo JCWF fixtures (`aiZipDemo`, `bookSummary`).  §19 SanitizeUtf8 verification gap closes when these land.
+2. **Workstream A — log enrichment (one sitting).**  After Sitting 3.  ERROR log at `AiRequestPool::OnRequestFailed` carries `m_ProviderErrorCode` + `m_ProviderErrorType` + `m_Category` + runId.  Plan §Workstream A.  Depends on Workstream B (`AiError` plumbing) — but only as ordering of dev plan §6 has them in lockstep; the log change can happen first.
+3. **Test runner auth + base URL.**  `test/run_tests.py` defaults to `http://localhost:8080` with no auth header.  Independent of the dev plan; blocks `--all` against the production 8443+auth setup.  Add `--token` / `J9T_TOKEN` env support + default base-url to `https://localhost:8443`.  Quick standalone ticket.
+4. **`test_markitdown_cntx.py` pre-existing failure.**  Not refactor-related; absolute-path test fixture vs. relative-path API validation.  Either update the test to use a project-relative path (with the 6-dot adhoc-traversal pattern) or rework the test to stage the PDF into the adhoc workspace as a prep step.  Documented at end of Sitting 1 hand-off; status unchanged.
+5. **API key for the API1 mock test.**  Currently the mock interface's `key_name` is empty, but ReplyParserAPI1 doesn't actually need a real API key (MockTransport short-circuits before SetupEasyHandle).  Verify under load that the dispatcher's empty-key validation doesn't bounce mock calls — if it does, an explicit "mock key" sentinel or a bypass on `m_IsMock` may be needed.  Smoke-tested in test_mock_dispatch_hermetic; widening to AIMD-stress with empty keys is a Sitting 3 consideration.
+
+### Files in working tree (uncommitted)
+
+Sitting 1's working-tree files plus:
+
+```
+ M application/file/README.md                       # ConfineUnderProjectRoot use-site list extended (MockTransport + ConfigParser + REST)
+ M application/web/aiJcwfService.cpp                # comment update + m_IsMock init
+ M application/web/webServer.cpp                    # is_mock + fixture_path POST/PUT/GET/save; Test rejection; debug parser cleanup
+ M application/workflow/aiCallTaskExecutor.cpp      # PROV mocked + fixture_path fields
+ M application/workflow/aiRequestPool.cpp           # TestInterface short-circuit deleted; static_assert -> 6
+ M application/workflow/README.md                   # aiRequestPool + aiCallTaskExecutor rows mention is_mock + PROV mocked
+ M doc/JC_Workflow_Specification.md                 # api_type list trimmed, is_mock note
+ M doc/api-endpoints.md                             # is_mock + fixture_path on POST /api/settings/ai-interfaces
+ M doc/cyber security.md                            # MockTransport Security section
+ M doc/jarvisagent.md                               # is_mock + fixture_path bullets
+ M doc/misc/AI dispatch refactor.md                 # top-of-file deprecation banner — historical record marker
+ M doc/misc/ai-provider-error-visibility-dev-plan.md  # Status: rev3, Sittings 1+2 marked ✅ landed 2026-05-14
+ M engine/curlWrapper/curlMultiDispatcher.cpp       # dual-transport composition, DrainInbox routing
+ M engine/curlWrapper/curlMultiDispatcher.h         # m_LiveTransport + m_MockTransport
+ M engine/curlWrapper/curlWrapper.h                 # QueryData.m_IsMock + m_FixturePath
+ M engine/curlWrapper/curlWrapper.md                # §15 dispatcher/transport split shows both Live + Mock; pipeline diagram updated
+ M engine/curlWrapper/rateLimitStrategy.cpp         # Test case removed; static_assert -> 6
+ M engine/json/configParser.cpp                     # Test removed, is_mock validation, path-confinement check
+ M engine/json/configParser.h                       # InterfaceType::Test removed
+ M engine/json/json.md                              # NumAPIs == 6, is_mock semantics, Sitting 2 note
+ M test/dispatch/README.md                          # rewrite for MockTransport; Sitting 3 malformed-UTF-8 forecast
+ M test/dispatch/_stress_tui_helpers.py             # provision_mock_interface (back-compat alias kept)
+ M test/dispatch/test_chunking_fanout.py            # is_mock migration
+ M test/dispatch/test_cross_workflow_parallel.py    # is_mock migration + header strip + docstring updated
+ M test/dispatch/test_markitdown_cntx.py            # fixture path → JSON
+ M test/dispatch/test_rate_limit_observation_parse.py  # "Test" loop entry removed
+ M test/dispatch/test_rate_limit_strategy_dispatch.py  # "Test" map entry removed
+ M test/dispatch/test_relaxed_env_warnings.py       # is_mock migration
+ M test/dispatch/test_stress_tui_utf8_heavy.py      # fixture path → JSON
+?? engine/curlWrapper/mockTransport.cpp             # new — MockTransport implementation
+?? engine/curlWrapper/mockTransport.h               # new — MockTransport header
+?? test/dispatch/fixtures/api1/golden_success.json  # new — shared OpenAI fixture
+?? test/dispatch/fixtures/api1/utf8_heavy.json      # new — heavy UTF-8 wrapped JSON
+?? test/dispatch/test_mock_dispatch_hermetic.py     # new — supersedes test_testinterface_hermetic.py
+D  test/dispatch/test_testinterface_hermetic.py     # superseded
+D  test/dispatch/test_stress_tui_utf8_invalid.py    # Sitting 3 supersedes
+D  test/dispatch/fixtures/hermetic_reply.txt        # plain-text fixture gone
+D  test/dispatch/fixtures/utf8_invalid.txt          # superseded by Sitting 3
+```
+
+---
+
+## 2026-05-14 (Foundation Sitting 1 — IInterfaceTransport + LiveTransport refactor) → next session
+
+Foundation Sitting 1 of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed.  Curl bottom-half extracted from `CurlMultiDispatcher` into a new `LiveTransport` class behind an `IInterfaceTransport` interface — behavior-neutral refactor; AIMD / retry / cancel / inbox stay in the dispatcher.  The plan was also updated (rev 3 in spirit, same file) to capture the resolved narrow-boundary decision so a fresh-context Claude can pick up Sittings 2-3 without re-litigating the boundary.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **New `IInterfaceTransport` abstract** | `engine/curlWrapper/interfaceTransport.h` (new) | Narrow boundary: `Submit(id, QueryData, cb)` + `CancelByCancelKey` (silent cleanup) + `Pump()` (synchronous curl drive) + `Wait(timeoutMs)` + `Wakeup()` + `ActiveCount()`.  `Response` carries `body + rawHeaders + httpStatus + httpVersionLabel + QueryResult` so the dispatcher's `ParseRateLimitHeaders` keeps feeding real AIMD on every response.  Shared `ExtractHostFromUrl` lives here. |
+| **New `LiveTransport`** | `engine/curlWrapper/liveTransport.{h,cpp}` (new) | Owns the curl multi-handle, the static curl callbacks (Write / Header / Progress), `SetupEasyHandle` (auth signer + setopts), curl_multi_perform/info_read/poll/wakeup.  Deferred-completion queue handles setup-failure delivery uniformly through Pump.  Lines moved with comments + log lines preserved (log line prefixes changed `CurlMultiDispatcher:` → `LiveTransport:` only where curl-specific). |
+| **Dispatcher refactor** | `engine/curlWrapper/curlMultiDispatcher.{h,cpp}` | Holds `std::unique_ptr<IInterfaceTransport> m_Transport = std::make_unique<LiveTransport>()`.  `m_Active` re-keyed from `CURL*` → `IInterfaceTransport::RequestId` (monotonic counter `m_NextRequestId`).  `ActiveRequest` struct retired; replaced by `PendingDispatch` (no curl-specific fields).  New `OnTransportComplete(id, Response)` is the completion path — replaces `DrainCompleted`.  `ParseRateLimitHeaders` signature changed to `(QueryData, headerBuffer, body, host, httpCode)`.  `DrainPendingCancellations` fires user callback synchronously on active-set matches, then calls `m_Transport->CancelByCancelKey` for silent handle cleanup. |
+| **`is_mock` + `fixture_path` config schema** | `engine/json/configParser.{h,cpp}` | Added to `ApiInterface` struct.  Parsed via simdjson, logged at INFO when present.  Not yet acted on — Sitting 2 wires dispatch selection.  Validation (path confinement + size cap + status/header allowlist) deferred to Sitting 2's MockTransport. |
+| **Dev plan rev — narrow-boundary capture** | `doc/misc/ai-provider-error-visibility-dev-plan.md` | §Foundation Sitting 1 now spells out the resolved `IInterfaceTransport` wire shape verbatim (interface code block), states the boundary explicitly ("LiveTransport owns curl machinery; AIMD / retry / cancel / inbox stay in dispatcher"), and the §6 sitting-plan row matches.  `ProviderHealthSnapshot.m_IsMock` deferred to Sitting 8 (workstream D) — comment annotates the struct's initial-creation moment.  Eliminates the "one pure-virtual method matching the existing dispatcher request shape" ambiguity that would have re-bit next session. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build clean | Studio Debug + Studio Release + Engine Debug + Engine Release.  No warnings beyond pre-existing. |
+| Dispatcher → transport handshake fires | New log line `LiveTransport: curl multi handle initialised` appears once at startup; existing `CurlMultiDispatcher: I/O thread started` + `CurlMultiDispatcher: throttling key='...'` still fire. |
+| `test_aimd_concurrency_cap.py` | PASS — 4-step 429 burst halves cap 4→2→1→1 (floor).  Critical signal: AIMD code path is unchanged in the dispatcher and still observes the synthetic response correctly through the new boundary. |
+| `test_cross_workflow_parallel.py` | PASS — 12 concurrent adhoc runs each landed their own per-PROB stem byte-exact.  Confirms the new RequestId correlation holds under concurrency. |
+| `test_curlopt_timeout_fires.py` | PASS — CURLOPT_TIMEOUT_MS still aborts in-flight requests through `LiveTransport::SetupEasyHandle`. |
+| `test_quota_key_isolation.py` + `test_token_bucket_mirror.py` | PASS — per-quotaKey controllers + token-bucket admission still independent. |
+| `test_chunking_fanout.py` + `test_output_schema_roundtrip.py` | PASS — chunked + structured-output dispatch flow through the new path. |
+| `test_observe_idempotent.py` + `test_rate_limit_observation_parse.py` + `test_rate_limit_strategy_dispatch.py` | PASS — header parsing + controller Observe semantics intact. |
+| `test_size_aware_budget.py` + `test_tcp_keepalive_set.py` | PASS — recent-submissions ring + TCP keepalive still set. |
+| `test_testinterface_hermetic.py` + `test_envelope_empty_body_rejected.py` + `test_direct_dispatch_signals.py` + `test_schema_covers_parser.py` + `test_relaxed_env_warnings.py` | PASS — TestInterface short-circuit and dispatch-signals surface unchanged. |
+| `test_stress_tui_utf8_heavy.py` (3-way concurrent jarvisCpp, 432 ai_calls) | PASS — j9t survives, log/log.txt remains valid UTF-8 throughout (`SanitizeUtf8` boundary intact). |
+| `test_stress_tui_utf8_invalid.py` (144 malformed-UTF-8 calls) | PASS — server alive, log valid UTF-8. |
+| `test_edition_contract.py --base-url https://localhost:8443` | 49/49 pass — all Studio capabilities, endpoints, WS surfaces, and security audit log endpoint intact. |
+| Workflows via MCP | `make-example` (6 shell tasks) and `inputResolutionTest` (4 shell+python) both reached `succeeded`. |
+| ConfigParser accepts `is_mock` / `fixture_path` cleanly | No errors in log (verified absent).  Positive-path log line not exercised because no interface has the field yet — Sitting 2 adds one and sees the INFO line fire. |
+
+### Pre-existing test failure (NOT refactor-related)
+
+`test/dispatch/test_markitdown_cntx.py` fails: `cntx_files path rejected (absolute, empty, or overlength)`.  The test's `PDF_FIXTURE` is resolved to an absolute path at module-import time (`os.path.abspath`), then submitted into `queue_binding.cntx_files` which enforces relative paths.  The path-confinement code wasn't touched by this refactor.  Looks like a test-fixture vs API-validation mismatch from an earlier sitting — flag for separate cleanup.
+
+### Not exercised (would burn provider credits)
+
+- `test_api4_anthropic_live.py`, `test_api5_bedrock_anthropic_live.py`, `test_api6_live.py` — these go to real providers.  Recommended next-session verification: run `aiCarMaintenancePipeline` or `ai-zip-demo` once against the active cloud `API index` to confirm the AI dispatch path holds with real HTTP/2 traffic.
+- `test/run_tests.py --all` — the runner defaults to `http://localhost:8080` with no auth header, doesn't know about `J9T_TOKEN`.  Pre-existing limitation; out of scope for Sitting 1.
+
+### Architecture notes for next-session-Claude
+
+- **Transport completion delivery: Pump-only.**  `LiveTransport::Submit` does NOT fire the completion callback synchronously even on setup failure (`curl_easy_init` / `IAuthSigner::Apply`).  Setup failures land in `m_DeferredCompletions`; the next `Pump()` drains them.  This is what lets the dispatcher safely `m_Active[id] = ...` BEFORE calling `m_Transport->Submit(id, ...)` without racing the callback.  MockTransport (Sitting 2) must follow the same rule — even though its responses are "synchronous" semantically, the callback should fire from its `Pump()`, not from inside `Submit()`.
+- **Cancellation: dispatcher fires user callback, transport cleans up silently.**  `LiveTransport::CancelByCancelKey` is silent (no completion-cb).  `CurlMultiDispatcher::DrainPendingCancellations` synchronously fires user callback Fail("request cancelled (run terminated)") on every matching `m_Active` entry, erases the entry, increments `m_TotalCancelled`, THEN calls `m_Transport->CancelByCancelKey`.  This preserves the current synchronous-callback contract and avoids a double-fire if the same key is cancelled twice in quick succession.
+- **RequestId is dispatcher-allocated.**  `m_NextRequestId` is a monotonic counter incremented inside `DrainInbox` under `m_DebugMutex`.  The id is stored on `PendingDispatch.m_RequestId` and passed into `m_Transport->Submit(id, …, cb)`.  The transport's completion callback fires `cb(id, response)` → `OnTransportComplete(id, response)` → looks up `m_Active[id]`.  If `m_Active.find(id) == end` (e.g. cancelled mid-flight, edge case during shutdown), the completion is silently dropped.
+- **Shutdown loop unchanged in shape.**  Dispatcher's `IoThreadFunc` still owns the loop body.  Shutdown branch drains inbox + retry queue with "curl request aborted (shutdown)" messages, then `m_Transport->Pump()` runs until in-flight transport requests complete naturally (the `MultiProgressCallback` aborts them via `Core::g_Core->GetThreadPool().IsStopped()`).  Loop exits when `m_Active.empty()` AND `stopping` is true.
+- **`ParseRateLimitHeaders` signature changed.**  Was `(ActiveRequest const&, std::string& host, long httpCode)`.  Now `(CurlWrapper::QueryData const&, std::string const& headerBuffer, std::string const& body, std::string& host, long httpCode)`.  Reason: ActiveRequest was a curl-coupled struct; the new signature takes only the data the function actually reads, and the dispatcher passes it from `Response.m_RawHeaders` / `Response.m_Body` / `PendingDispatch.m_QueryData`.
+- **`ExtractHost` moved to free function.**  Was `CurlMultiDispatcher::ExtractHost(url)` (static method).  Now `AIAssistant::ExtractHostFromUrl(url)` declared in `interfaceTransport.h`, implemented in `liveTransport.cpp` (used by both LiveTransport's `#ifdef DEBUG` localhost TLS-suppression and the dispatcher's AIMD logging).  Single implementation — the IPv6-literal branch was added once in response to a bug and shouldn't be re-implemented per call site.
+- **No code change in `aiRequestPool.cpp`'s TestInterface short-circuit.**  Sitting 1 is explicitly NOT touching that path.  Sitting 2 removes it (replaces with `is_mock: true` + real `api_type` going through `MockTransport`).  TestInterface tests (`test_testinterface_hermetic.py`) still pass — confirms the short-circuit lives.
+
+### Open items / next-session candidates
+
+1. **Foundation Sitting 2 — MockTransport + cyber-sec hardening + dispatch wiring + TestInterface removal + JCWF spec update.**  Primary follow-up.  Plan §4 lists the touchpoints + acceptance bullets in detail.  All §1 cyber-sec items (path confinement, size cap, status/header allowlist, UTF-8 sanitization, `is_mock` admin-only) land in the FIRST commit per the plan's "secure by default" rule.  Path-confinement uses `ConfineUnderProjectRoot` per `feedback_path_containment_scope` + `feedback_path_confinement_edition`.
+2. **Foundation Sitting 3 — Per-interface fixture batteries + parser fault tests + TUI safety + curated demo JCWF fixtures.**  Follows Sitting 2.  Captures the parity matrix from §3 of the plan against real provider responses.
+3. **Pre-existing `test_markitdown_cntx.py` failure.**  Absolute-path test fixture vs. relative-path API validation.  Out of scope for the dev plan but a quick cleanup — either update the test to pass a project-relative path, or document the path-mode expectation in the test's docstring.
+4. **`test/run_tests.py` lacks auth.**  Runner defaults to `http://localhost:8080` with no `J9T_TOKEN` support.  Independent of the dev plan but blocks `--all` from working against the production-style 8443+auth setup.  Worth a tiny separate ticket: add `--token` / `J9T_TOKEN` env support to the runner, default `--base-url` to `https://localhost:8443`.
+5. **Live-AI smoke after Sitting 1.**  Recommended before Sitting 2 lands: one `aiCarMaintenancePipeline` or `ai-zip-demo` run through the active cloud `API index` to add a real-HTTP/2 datapoint on top of the synthetic-server dispatch tests.  Belt-and-suspenders only; the dispatch tests already exercise every curl-path branch.
+
+### Files in working tree (uncommitted)
+
+```
+ M doc/misc/ai-provider-error-visibility-dev-plan.md   # Sitting 1 boundary clarified + PHS deferral; rev 3
+ M doc/misc/hand-off.md                                # this entry
+ M engine/curlWrapper/curlMultiDispatcher.cpp          # refactor: transport delegation, OnTransportComplete, RequestId keying
+ M engine/curlWrapper/curlMultiDispatcher.h            # interface includes, PendingDispatch struct, transport field
+ M engine/json/configParser.cpp                        # parse is_mock + fixture_path
+ M engine/json/configParser.h                          # m_IsMock + m_FixturePath fields on ApiInterface
+?? engine/curlWrapper/interfaceTransport.h             # new — IInterfaceTransport abstract + ExtractHostFromUrl decl
+?? engine/curlWrapper/liveTransport.cpp                # new — moved curl bottom-half
+?? engine/curlWrapper/liveTransport.h                  # new — LiveTransport class
+
+# Carried over from prior sessions (not touched today):
+ M config.json
+ M example/workflows/aiZipDemo.jcwf
+ M todo.md
+```
+
+`bin-int/studio/` + `bin-int/engine/` rebuilt for all 4 configs.  `log/log.txt` has the new `LiveTransport: curl multi handle initialised` line as the first dispatcher-startup signal.
+
+---
+
+## 2026-05-14 (Local Ollama wiring + timeout-formula reality check) → next session
+
+Short session.  Wired a local Ollama endpoint into the AI-interfaces registry as `API index 10`, switched the interactive default to it, and uncovered that the AI-call timeout formula (used when JCWF `defaults.timeout_ms` is absent) is tuned for cloud throughput and is too tight for a local 32B model.  Code change is one field deletion (`timeout_ms: 120000` removed from `aiZipDemo` `global.json`) — the formula tuning itself is deferred to next session.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **New AI interface — local Ollama at index 10** | `config.json` | `localhost/ollama/qwen2.5-coder:32b/API1` → `http://localhost:11434/v1/chat/completions`, `key_name: "ollama"`.  Added via `POST /api/settings/ai-interfaces` + `POST /api/settings/ai-interfaces/save`.  Active `API index` switched from 6 (`gpt-4.1/MAX`) to 10.  `jcwf_ai_interface` stays at 3 (`gpt-4.1-mini/API2`) — JCWF generation stays on cloud. |
+| **New keystore provider `ollama`** | (keystore, not git) | Dummy bearer registered via MCP `manage_keys`.  Ollama itself ignores auth; the j9t dispatcher rejects empty-key dispatches, so the bearer is just a placeholder. |
+| **Removed `timeout_ms: 120000` from `aiZipDemo` `global.json`** | `workflows/aiZipDemo/global.json` (runtime, gitignored), `example/workflows/aiZipDemo.jcwf` (canonical, git-tracked) | JCWF explicit-timeout path was masking the formula path.  Removed at JC's request so the formula is exercised.  Canonical `.jcwf` repackaged via `zip global.json aiZipDemo.json` (only the 2 source files — no run artifacts).  Reloaded via MCP `reload_workflows`. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| `POST /api/settings/ai-interfaces/test` against index 10 | OK in 4.5 s — `"Hello! How can I assist you today?"` from qwen2.5-coder:32b through `ReplyParserAPI1`. |
+| `aiCarMaintenancePipeline` end-to-end on Ollama (formula path, no JCWF timeout) | Completed — `classifyQuestion` ~49 s, `answerWithManual` ~10 s, total run ~60 s.  Both AI calls under their 102 s formula budgets. |
+| `aiZipDemo` re-run after `timeout_ms` removal | Partial fail — `ai_python_trivia_random` succeeded inside 102 s, `ai_vulkan_method_random` hit curl error 28 ("Timeout was reached") at the 102 s budget.  Confirms the formula path is now in use **and** that 102 s is too tight for the longer-output vulkan-method prompt on local qwen.  This was the expected outcome — JC confirmed before signing off. |
+| `timeout_ms` absent from both runtime scratch and canonical `.jcwf` | `grep -c` returned 0 from both. |
+
+### The formula numbers (load-bearing)
+
+`engine/json/configParser.h:68-72` per-interface defaults:
+
+```
+m_Per1kOutputTokenSeconds = 5.0      # tuned for ~200 tok/s cloud
+m_FixedOverheadSeconds    = 5.0
+m_SafetyMarginFactor      = 4.0
+m_MinSeconds              = 60.0
+m_MaxSeconds              = 600.0
+```
+
+Computed at `aiRequestPool.cpp:1457-1466`.  For aiZipDemo (`outTok=4096`):
+`(4096/1000) * 5.0 + 5.0 = 25.48 s`, × 4.0 = **101.9 s**, clamped within [60, 600] → **~102 s budget**.
+
+Cloud at 200 tok/s would generate 4096 tokens in ~20 s, well inside 102 s.  Local qwen at ~8 tok/s needs ~512 s for the same output — 5× over budget.  The formula was tighter than the prior JCWF cap of 120 s, so option 2 made the demo slightly *worse*, not better.  This is the next-session problem.
+
+### Open items / next-session candidates
+
+1. **Local-LLM-aware request-budget tuning (primary follow-up).**  Per-interface `rate_limit.request_budget` override is already a config-schema feature (see `webServer.cpp:4961-5011` for the diff-from-default persistence path) — just isn't used by the new Ollama entry yet.  Candidate values for self-hosted ~8 tok/s on a 32B model: `per_1k_output_token_seconds: 150` (30× cloud), `safety_margin_factor: 1.5`, `min_seconds: 90`, `max_seconds: 1200`.  Decide whether to override per-interface in `config.json` or to bump the global defaults (former is cleaner — cloud entries keep their tight envelope).
+2. **Parallel-dispatch vs single-GPU serialization.**  j9t submits AI calls in parallel; Ollama serves one generation per model at a time, so concurrent tasks serialize behind the GPU but their j9t-side 102 s timer starts simultaneously.  Whichever task drew the back-of-queue slot eats into its budget while another task is generating.  In the aiZipDemo re-run both `ai_python_trivia_random` and `ai_vulkan_method_random` dispatched at 07:27:28.247 — only one could be on the GPU at a time.  Either j9t's pool gains a per-interface concurrency cap (e.g. 1 for `localhost/*`), or the budget needs enough headroom to absorb the worst-case queue wait.  Worth deciding before bumping per-interface coefficients.
+3. **`aiZipDemo` is a customer-visible demo.**  If alpha users (alpha opens 2026-04-05 — already in flight) try it on Ollama out of the box, this is the experience they get.  Decide policy: ship per-interface formula override + concurrency cap, or document "demos require cloud index" prominently in the user manual.
+4. **`manage_keys` MCP — silent field-name acceptance.**  `create` with `{"key": "..."}` succeeded but stored `[no-key]`; the correct field is `api_key` (per `engine/keys.md:81`).  Mild API ergonomics issue — the schema description doesn't say which field carries the secret, and the create path doesn't reject unknown fields.  Either tighten the MCP schema or document in `engine/keys.md`.
+
+### Gotchas for next-session-Claude
+
+- **Two distinct indices in `config.json`** — `"API index"` (interactive default for ad-hoc / dashboard runs) and `"jcwf AI interface"` (used for AI-driven JCWF generation in Studio).  Currently 10 and 3 respectively.  Don't conflate them when swapping defaults.
+- **`workflows/aiZipDemo/global.json` is runtime scratch and gitignored.**  Only the canonical `example/workflows/aiZipDemo.jcwf` is in git.  The pattern when editing a JCWF on disk: edit runtime → `zip global.json aiZipDemo.json` from `workflows/<id>/` → overwrite `example/workflows/<id>.jcwf` → **also copy to `workflows/<id>.jcwf`** → MCP `reload_workflows`.  Do NOT include the per-task output folders (`04_zip_responses/` etc.) in the zip — those are run artifacts, not source.
+- **Canonical → runtime sync is human discipline (not surprising — this is spec §Extraction model).**  `doc/JC_Workflow_Specification.md` §Extraction model items 1-6 and memory `feedback_jcwf_canonical_location` are the authoritative statement: `example/workflows/` is git-tracked canonical, `workflows/` is runtime scratch, the registry scans only `workflows/*.jcwf`, re-extraction into `workflows/<id>/` is mtime-gated.  Operational consequence for THIS session: updating `example/workflows/aiZipDemo.jcwf` alone leaves `workflows/aiZipDemo.jcwf` stale and a restart can re-extract the old zip over the edited folder — so the recipe above includes the copy to both locations.  At end-of-session 2026-05-14 both zips are byte-identical (1895 bytes, no `timeout_ms`).
+- **The formula log line is `inTok=X outTok=Y timeoutMs=Z`; the explicit-timeout log line is `explicit timeoutMs=Z`.**  Grep on `explicit` to distinguish.  `aiRequestPool.cpp:1452` (explicit) vs `aiRequestPool.cpp:1466` (formula).
+- **Ollama bearer is just a placeholder.**  Ollama doesn't validate it; the j9t dispatcher requires non-empty.  When adding more local interfaces (LM Studio, llama.cpp, vLLM) reuse the same convention.
+- **`config.json` `"API index": 10` is committed in the working tree** — leaving the interactive default on Ollama is the in-flight choice as the session ends.  If the next session wants to flip back to cloud while debugging the formula, set via `PUT /api/settings/config {"api_index": 6}` (the old `gpt-4.1/MAX`) — don't hand-edit.
+
+### Files in working tree (uncommitted)
+
+```
+ M config.json                          # API index 6 → 10, new "localhost/ollama/qwen2.5-coder:32b/API1" entry at index 10
+ M example/workflows/aiZipDemo.jcwf     # repackaged without timeout_ms in global.json
+ M doc/misc/hand-off.md                 # this entry
+ M todo.md                              # from prior session (not touched today)
+?? doc/misc/ai-provider-error-visibility-dev-plan.md  # from prior session
+```
+
+`workflows/aiZipDemo/global.json` was also edited (timeout_ms removed) but is gitignored runtime scratch — change survives only as long as the unzipped folder does.  The canonical change is in `example/workflows/aiZipDemo.jcwf`.
+
+---
+
+## 2026-05-13 (AI provider error visibility — dev plan) → next session
+
+Planning-only session.  No code changes; one new dev plan landed and one `todo.md` entry was folded into it.  Working tree at session start was clean on `main`; at session end has only the dev-plan + `todo.md` changes uncommitted (listed at the bottom of this entry).
+
+**Trigger:** the dispatch-slowness incident from 2026-05-12 (OpenAI billing-zero produced persistent 429s with `insufficient_quota`; AIMD pinned cap at floor; dashboard + log + run analyzer all rendered it identically to a real throttle event).  The engine extracted the discriminator and discarded it before any user-visible surface.  Dev plan addresses the plumbing gap + adds proactive AIMD visibility.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **New dev plan** | `doc/misc/ai-provider-error-visibility-dev-plan.md` | 8-sitting plan covering Foundation MockTransport infra (3 sittings) + 5 workstreams A-E.  Closes the parsed-but-discarded billing/throttle discriminator gap, adds AI Health LED to StatusBar, banner for actionable error categories. |
+| **`todo.md` cleanup** | `todo.md` | "Per-interface mock transport for parser fault injection" entry removed; the work now lives in the dev plan as the Foundation workstream (`feedback_no_breadcrumbs`). |
+
+### Key design decisions in the plan (forward-looking — read the plan, not this summary, for authoritative version)
+
+- **`is_mock: bool` flag on provider registry entries** (config.json) replaces `InterfaceType::Test`.  Orthogonal to `api_type` — mock-ness is a transport-layer concern, not a wire-protocol variant.  TestInterface code path at `aiRequestPool.cpp:1304-1393` is removed in Foundation F2.  Per `feedback_no_legacy` — clean removal, no compat shim.  JCWF spec line 1118 loses the `"Test"` entry.
+- **MockTransport in all 4 build targets** (Studio/Engine × Debug/Release).  Originally proposed DEBUG-only; opened up to Release to enable (a) new-user trust building (demo workflows mocked without API keys) and (b) credit conservation on expensive audit JCWFs (e.g. jarvisCppDocu at 144 calls).  Cyber-sec hardening at the boundary instead of being excluded by build mode: `ConfineUnderProjectRoot` on fixture paths, per-fixture size cap, HTTP status allowlist `{200..599}`, response header allowlist `{Content-Type, Retry-After}`, `SanitizeUtf8` on fixture bytes reaching logs/TUI, INFO log on first mock activation per provider, PROV sidecar gains `mocked: true` field.  `is_mock` is admin-only (same access surface as `api_key`).
+- **Foundation Sitting 3 closes the §19 SanitizeUtf8 verification gap** that `cpp-safety-hardening-dev-plan.md` left open.  Includes hand-crafted malformed UTF-8 fixtures AND real-world ugly content samples (n8n callback payloads, Polarion XML).  TUI crash or terminal corruption blocks sitting close.
+- **`ProviderErrorCategory` closed enum** populated by parsers; UI branches on category, not on per-provider raw strings.  Keeps provider names out of React.  Variants: `Unknown` / `BillingExhausted` / `ThrottleRateLimit` / `AuthFailure` / `ServiceOverload` / `ModelNotFound` / `InvalidRequest`.
+- **`ProviderHealthSnapshot` struct** + `SnapshotHealth()` getter on `CurlMultiDispatcher`.  Single critical section, atomic copy.  Includes `m_CapPinnedAtFloorSince` to power the "cap pinned >60s → red LED" rule that catches billing-induced floor-pin even when classification fails.
+- **UI mappings reuse existing patterns** — no MUI/shadcn/toast in the dashboard today.  Banner mirrors `.no-keys-banner` (`WorkflowsPanel.tsx:105-130`) in red severity.  AI Health LED is the 6th LED in the existing `.led-group` row (`StatusBar.tsx:24-156`).  Hazard glyph extends `.hazard-icon` (`WorkflowsPanel.tsx:155-159`) — red variant when any ai_call task uses a degraded interface.  All copy is generic or uses user-configured `m_InterfaceName`; no hardcoded provider names; dismiss-only (no external links).
+- **PROV portability vs cyber-sec is intentional non-portability.**  PROV references admin-owned config.json provider entries → JCWFs are non-portable across installs without name alignment.  By design — JCWF authors cannot inject endpoints, route to personal API keys, or bypass admin policy (e.g. air-gapped-only providers).  Provider resolution is one admin-controlled gate per `feedback_auth_funnel_one_gate`.  `is_mock` is the graceful-degradation surface: receivers can run shared JCWFs against mocked providers without provisioning real keys.
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| Plan structure | ✅ 8 sittings, structure self-contained, discussion traces stripped |
+| `todo.md` MockTransport entry removed | ✅ verified — only the demo/dogfood entries follow the concurrent-run-policy entry now |
+| Auto-memory cross-refs in plan | ✅ references resolve: `feedback_path_containment_scope`, `feedback_path_confinement_edition`, `feedback_established_safety_patterns`, `feedback_cpp_discipline`, `feedback_auth_funnel_one_gate`, `feedback_no_legacy`, `feedback_log_failures`, `feedback_use_log_macros`, `feedback_simdjson_only`, `feedback_rust_emulating_defaults` |
+| Build | Not exercised this session — no code changes |
+| Tests | Not exercised this session — no code changes |
+
+### Open items / next-session candidates
+
+1. **Start Foundation Sitting 1** (`IInterfaceTransport` + `LiveTransport` refactor) when ready.  Behavior-neutral refactor; should take one sitting and unblock everything else.  Per `feedback_premake_regen_for_new_cpp` — running `premake5 gmake` after adding `engine/curlWrapper/{interfaceTransport.h,liveTransport.{h,cpp}}` is mandatory.
+2. **Existing todo.md "Concurrent-run policy for JCWFs" entry** survives the cleanup — that's its own thing, unrelated to this plan.
+3. **§5g + §5i tail follow-ups** in `todo.md` are still open (not touched this session): `HandleAiInterfaceTestPost` Engine fallback, AI-WebSocket dispatch extraction, bootstrap admin user/role collision, schema-enforced JCWF generation, EventCategoryAi consumers, replayTranscript.py, HandleWorkflowVersionRestorePost broken, ConfigParser boilerplate refactor, RedactingFormatter allocation, EventQueue cap, malformed-config test, ofstream exception-safety, atomic-write pattern, std::expected API shape.  The post-2026-05-12 hand-off flagged the small-item debris cohort as next-session focus; this session pivoted to the AI provider error visibility scope instead.  Both directions remain open; pick by appetite.
+4. **`EventCategoryAi::CapChanged` event variant** is introduced in workstream D (Sitting 8).  Fits the existing `EventCategoryAi` consumer story from the §5g remaining follow-ups in `todo.md`.
+
+### Gotchas for next-session-Claude
+
+- **`is_mock` is the new way** — when adding a new test JCWF or example config, use `api_type: "API1"` (or whichever real api_type) + `is_mock: true` + `fixture_path: ...`.  Do NOT use `api_type: "Test"` — that's being removed in Foundation F2 and will become an ERROR-at-startup once the migration sweep lands.
+- **MockTransport is config-driven, not header-driven.**  The earlier todo.md entry mentioned an `X-J9T-Mock-Fixture` header for dispatch-time selection — the plan replaces this with the orthogonal `is_mock: bool` flag on the provider registry.  Selection happens at dispatch based on provider config, not on per-request header.  Cleaner; admin-controlled; no JCWF-level mock injection.
+- **All MockTransport code is unguarded** (no `#ifdef DEBUG`) — but the cyber-sec hardening list in §1 is non-negotiable.  Path confinement, size cap, status/header allowlist, sanitization, transparency log, admin-only flag.  If any boundary mitigation is skipped, the plan's premise breaks.  Foundation Sitting 2 closes only when every cyber-sec acceptance bullet has a green test.
+- **Plan structure intentionally puts Foundation BEFORE workstreams A-E.**  Sittings 1-3 (Foundation) are prerequisites for sittings 4-8 (the actual user-visible features).  Without MockTransport, sittings 4-8 can't be E2E-tested without burning real provider credit.
+- **§19 SanitizeUtf8 verification gap** — `cpp-safety-hardening-dev-plan.md` references this as deferred verification work.  Foundation Sitting 3 is the explicit closer for it; the captured fixtures + TUI stress tests are the verification artifact.  Don't track it as separately-pending in `cpp-safety-hardening-dev-plan.md` once Foundation F3 closes.
+- **Plan strips conversation traces** — the plan is forward-looking and self-contained.  Don't add "see commit X" / "discussed with JC on date Y" / "originally proposed Z" framings if you edit it in future sessions.  Per the cleanup convention applied 2026-05-13.
+
+### Files in working tree (uncommitted)
+
+```
+?? doc/misc/ai-provider-error-visibility-dev-plan.md   # new dev plan (~430 lines)
+M  todo.md                                              # removed "Per-interface mock transport for parser fault injection" entry
+M  doc/misc/hand-off.md                                 # this entry
+```
+
+### Source of truth
+
+`doc/misc/ai-provider-error-visibility-dev-plan.md` is the canonical record of the planned work.  This hand-off entry summarizes only what's needed for fresh-context Claude to understand "what just happened and why the plan looks like it does."
+
+---
+
 ## 2026-05-12 (post-S5 — JCWF cleanup, mailpit coverage, freshness verification) → next session
 
 First "normal" session after the S5 hardening close-out.  Nothing structural; this was a small-feature + bug-fix sitting that strengthened the demo-pack health.  Branch is clean except for the tracked-changes list at the bottom of this entry — JC is preparing to commit the JCWF updates.

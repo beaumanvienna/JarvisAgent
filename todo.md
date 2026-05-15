@@ -40,21 +40,6 @@ Dashboard work pairs with this:
 
 Per-run queue folder (separate, deeper work, not blocking this entry): `queue/<workflowId>/<runId>/<NN>_<task>/` instead of `queue/<workflowId>/<NN>_<task>/`.  Required for `parallel`-opted workflows to be hermetic.  Tracked here as a follow-up rather than its own entry because it only matters once `parallel` is opt-in.
 
-### Per-interface mock transport for parser fault injection
-Sequenced after the 4 hardening sessions.  New `IInterfaceTransport` abstraction with two impls per real `InterfaceType` (API1–API5 + API6 reusing API1's parser): `LiveTransport` (real curl + auth signer, current behavior) and `MockTransport` (canned responses from disk fixtures).  Switch is dispatch-time, driven by the request: if the request carries a `X-J9T-Mock-Fixture: <name>` header (and a hermetic-mode flag), `MockTransport` is selected and serves bytes from `test/dispatch/fixtures/<api>/<name>.json` (or similar); otherwise `LiveTransport` runs unchanged.  Match strategy is **InterfaceType + fixture-name header only** — no URL or full-header matching, keeping the mock cheap to maintain.
-
-Goal trio: (1) byte-level fault injection through real parsers (malformed UTF-8, surrogate halves, truncated multi-byte, overlong encodings) — closes the §19 SanitizeUtf8 verification gap that today's hermetic dispatcher can't reach; (2) per-interface contract tests catching response-shape drift (provider adds/renames fields) without burning quota; (3) reproducible parser regression fixtures.
-
-**Complementary to existing HTTP mocks** (`aoai-api-simulator` for API6, LocalStack for API5) — those keep covering auth + curl + multi-dispatcher behavior with realistic well-formed bodies.  The routing-layer mock focuses on parser/byte pathology where the HTTP mocks are weak.  Not redundant: different layers, different bug classes.
-
-Implementation skeleton:
-- New header `engine/curlWrapper/interfaceTransport.h` defines `IInterfaceTransport` (one virtual dispatch method matching today's `CurlMultiDispatcher` request shape).
-- `LiveTransport` wraps the existing curl path verbatim (refactor, not rewrite).
-- `MockTransport` reads `<fixture>.json` (or `.bin` for binary-pathology fixtures) plus an optional `<fixture>.meta.json` for HTTP status / headers / latency injection.
-- Selection at `AiRequestPool::Submit` time: if `m_MockFixture` is set on the envelope, use Mock; else Live.
-- Fixtures committed under `test/dispatch/fixtures/api{1..6}/`.  Each interface gets a baseline `golden_response.json` + a battery of pathology fixtures (`malformed_utf8.json`, `truncated_multibyte.json`, `surrogate_half.json`, `overlong.json`, `empty_choices.json`, `missing_finish_reason.json`, etc.).
-- New test files `test/dispatch/test_api{1..6}_mock_*.py` per interface drive the dispatcher with fixture names and assert downstream invariants.
-
 ### Dogfood the workflow editor (JC)
 Write a few non-trivial JCWFs **directly in the editor** rather than as raw JSON: sub-workflow nesting, per-item fan-out, mixed task types (ai_call + python + shell + cloud), file_watch trigger, error-branching edges.  The editor exists and has a 70-test suite, but it's never been driven by JC in anger.  Goal: surface UX gaps, validation-surprise messaging, broken-state visibility, inspector quirks.  Findings inform 1.0 polish or post-1.0 backlog depending on severity.
 

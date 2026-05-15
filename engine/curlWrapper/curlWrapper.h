@@ -122,6 +122,16 @@ namespace AIAssistant
             int m_MaxRetries429{-1};
             int m_MaxRetriesTransient{-1};
             int m_BaseRetryMs{-1};
+            // Mock-transport routing.  Set by AiRequestPool::Submit when the
+            // resolved ApiInterface has is_mock=true; the dispatcher routes
+            // through MockTransport instead of LiveTransport when both are
+            // present.  fixture_path is the on-disk path to the canned
+            // response body (a sibling `<fixture>.meta.json` may override
+            // HTTP status + headers).  ConfineUnderProjectRoot enforcement
+            // happens at the transport boundary; defense in depth against
+            // the config-parse-time check.
+            bool m_IsMock{false};
+            std::string m_FixturePath;
 
             bool IsValid() const;
         };

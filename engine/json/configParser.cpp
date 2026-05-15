@@ -22,10 +22,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <filesystem>
 
 #include "simdjson/simdjson.h"
 
 #include "engine.h"
+#include "file/pathConfinement.h"
 #include "json/configParser.h"
 #include "auxiliary/file.h"
 
@@ -105,12 +107,11 @@ namespace AIAssistant
             ConfigParser::EngineConfig::InterfaceType m_Type;
         };
 
-        constexpr std::array<InterfaceTypeMapping, 7> kInterfaceTypeMappings = {{
+        constexpr std::array<InterfaceTypeMapping, 6> kInterfaceTypeMappings = {{
             {"API1", ConfigParser::EngineConfig::InterfaceType::API1},
             {"API2", ConfigParser::EngineConfig::InterfaceType::API2},
             {"API3", ConfigParser::EngineConfig::InterfaceType::API3},
             {"API4", ConfigParser::EngineConfig::InterfaceType::API4},
-            {"Test", ConfigParser::EngineConfig::InterfaceType::Test},
             {"API5", ConfigParser::EngineConfig::InterfaceType::API5},
             {"API6", ConfigParser::EngineConfig::InterfaceType::API6},
         }};
@@ -126,7 +127,7 @@ namespace AIAssistant
 
         std::string_view InterfaceTypeName(ConfigParser::EngineConfig::InterfaceType type)
         {
-            static_assert(static_cast<int>(ConfigParser::EngineConfig::InterfaceType::NumAPIs) == 7,
+            static_assert(static_cast<int>(ConfigParser::EngineConfig::InterfaceType::NumAPIs) == 6,
                           "InterfaceType count changed; update kInterfaceTypeMappings and this switch");
             switch (type)
             {
@@ -134,7 +135,6 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API2: return "API2";
                 case ConfigParser::EngineConfig::InterfaceType::API3: return "API3";
                 case ConfigParser::EngineConfig::InterfaceType::API4: return "API4";
-                case ConfigParser::EngineConfig::InterfaceType::Test: return "Test";
                 case ConfigParser::EngineConfig::InterfaceType::API5: return "API5";
                 case ConfigParser::EngineConfig::InterfaceType::API6: return "API6";
                 case ConfigParser::EngineConfig::InterfaceType::NumAPIs:
@@ -841,14 +841,84 @@ namespace AIAssistant
                         continue;
                     }
                     LOG_CORE_INFO("API: {}", api);
+                    // Legacy "Test" api_type — migrated to is_mock flag in
+                    // Foundation Sitting 2.  Reject with explicit migration
+                    // guidance so the operator knows what to change.
+                    if (api == "Test")
+                    {
+                        LOG_CORE_ERROR("ConfigParser: api_type 'Test' has been removed; migrate this interface to "
+                                       "api_type: '<API1..API6>' + is_mock: true + fixture_path: '<path>'.  See "
+                                       "doc/jarvisagent.md is_mock section.  Interface will be marked InvalidAPI "
+                                       "and skipped by configChecker.");
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
+                        ++fieldOccurances[ConfigFields::InterfaceType];
+                        continue;
+                    }
                     apiInterface.m_InterfaceType = ParseInterfaceType(api);
                     if (apiInterface.m_InterfaceType == EngineConfig::InterfaceType::InvalidAPI)
                     {
-                        LOG_CORE_ERROR("ConfigParser: unknown API '{}' in interface (expected API1-API6 or Test); "
+                        LOG_CORE_ERROR("ConfigParser: unknown API '{}' in interface (expected API1-API6); "
                                        "interface will be marked InvalidAPI and skipped by configChecker",
                                        api);
                     }
                     ++fieldOccurances[ConfigFields::InterfaceType];
+                }
+                else if (jsonObjectKey == "is_mock")
+                {
+                    // Foundation Sitting 1: parse-but-don't-act.  Dispatch
+                    // selection on this flag wires in Sitting 2 alongside
+                    // MockTransport.  Fixture-path containment + size cap +
+                    // status/header allowlist enforced at consume time.
+                    bool value = false;
+                    if (field.value().get_bool().get(value) == simdjson::SUCCESS)
+                    {
+                        apiInterface.m_IsMock = value;
+                        LOG_CORE_INFO("is_mock: {}", value);
+                    }
+                    else
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface 'is_mock' must be a bool");
+                    }
+                }
+                else if (jsonObjectKey == "fixture_path")
+                {
+                    std::string_view fixturePath;
+                    if (field.value().get_string().get(fixturePath) == simdjson::SUCCESS)
+                    {
+                        apiInterface.m_FixturePath = fixturePath;
+                        LOG_CORE_INFO("fixture_path: {}", fixturePath);
+                    }
+                    else
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface 'fixture_path' must be a string");
+                    }
+                }
+            }
+
+            // is_mock + fixture_path coupling: when is_mock is true the
+            // fixture_path field must be present AND resolve under the
+            // project root.  Defense-in-depth — MockTransport re-checks at
+            // load time, but rejecting at config parse fails the interface
+            // up front and gives the operator a clear error message.
+            if (apiInterface.m_IsMock)
+            {
+                if (apiInterface.m_FixturePath.empty())
+                {
+                    LOG_CORE_ERROR("ConfigParser: API interface has is_mock=true but no fixture_path; mock dispatch "
+                                   "requires a non-empty fixture_path.  Marking interface InvalidAPI.");
+                    apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
+                }
+                else
+                {
+                    std::filesystem::path const confined = ConfineUnderProjectRoot(apiInterface.m_FixturePath);
+                    if (confined.empty())
+                    {
+                        LOG_CORE_ERROR("ConfigParser: API interface fixture_path '{}' rejected by "
+                                       "ConfineUnderProjectRoot (outside project root, symlink escape, or "
+                                       "unresolvable).  Marking interface InvalidAPI.",
+                                       apiInterface.m_FixturePath);
+                        apiInterface.m_InterfaceType = EngineConfig::InterfaceType::InvalidAPI;
+                    }
                 }
             }
 

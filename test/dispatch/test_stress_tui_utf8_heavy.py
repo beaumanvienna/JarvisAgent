@@ -40,12 +40,12 @@ import _stress_tui_helpers as h  # noqa: E402
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 INTERFACE_NAME = "stress_tui_heavy"
-FIXTURE_PATH = h.REPO_ROOT / "test" / "dispatch" / "fixtures" / "utf8_heavy.txt"
+FIXTURE_PATH = h.REPO_ROOT / "test" / "dispatch" / "fixtures" / "api1" / "utf8_heavy.json"
 JARVISCPP_WORKFLOWS = ["jarvisCppDocu", "jarvisCppCyberSecAudit", "jarvisCppSafetyAudit"]
 
-# Generous timeout — TestInterface short-circuits curl, so 420 tasks should
-# complete in well under 5 minutes.  Set the upper bound at 10 min to absorb
-# disk-write contention without false-flagging slowness.
+# Generous timeout — MockTransport replays fixtures synchronously, so 420
+# tasks should complete in well under 5 minutes.  Set the upper bound at 10
+# min to absorb disk-write contention without false-flagging slowness.
 RUN_TIMEOUT_S = 600.0
 
 

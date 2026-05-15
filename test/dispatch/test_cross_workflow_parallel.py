@@ -22,13 +22,15 @@ Approach
   * N (default 12) adhoc JCWFs submitted as fast as possible via
     `POST /api/workflows/run-adhoc`. Each JCWF uses a unique `id`,
     a unique PROB filename (`PROB_<runIndex>.txt`) and routes through
-    the hermetic `InterfaceType::Test` backend so the test is offline.
+    a hermetic `is_mock: true` interface (MockTransport replay) so
+    the test is offline.
   * After all runs reach a terminal state, for every run we fetch
     `/api/workflow-runs/{run_id}/files` and verify:
       - the run succeeded,
       - exactly one `.output.txt` is present (no cross-contamination),
       - its filename matches this run's own unique PROB prefix, and
-      - its bytes match the canned fixture byte-exact.
+      - its bytes match the fixture's parsed `content` field byte-exact
+        (after stripping FileWriter's `# Model: …` header line).
 
 If the concurrency bug regresses, a later run's push_back dangles an
 earlier lambda's reference and that lambda ends up resolving its output
@@ -42,6 +44,7 @@ Requires an MCP admin key via --token or the J9T_TOKEN env var.
 
 import argparse
 import concurrent.futures
+import json
 import os
 import sys
 import time
@@ -57,7 +60,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TEST_INTERFACE_NAME = "hermetic_crossparallel"
 FIXTURE_PATH_DEFAULT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "fixtures", "hermetic_reply.txt")
+    os.path.join(os.path.dirname(__file__), "fixtures", "api1", "golden_success.json")
 )
 
 
@@ -96,11 +99,13 @@ def build_jcwf(run_index: int, interface_name: str) -> dict:
 def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
     body = {
         "name": TEST_INTERFACE_NAME,
-        "description": "Hermetic interface for cross-parallel dispatch regression",
-        "url": fixture_path,
-        "model": "hermetic-stub",
-        "api_type": "Test",
+        "description": "Hermetic MockTransport interface for cross-parallel dispatch regression",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": "API1",
         "key_name": "",
+        "is_mock": True,
+        "fixture_path": fixture_path,
     }
     r = requests.post(
         f"{base_url}/api/settings/ai-interfaces",
@@ -175,8 +180,12 @@ def main() -> int:
         print(f"FAIL: fixture file not found at {args.fixture_path}")
         return 1
 
-    with open(args.fixture_path, "rb") as f:
-        expected_bytes = f.read()
+    # Extract the parsed-content bytes from the JSON fixture — that's what
+    # ReplyParserAPI1 will write to <prob>.output.txt (post-MockTransport
+    # migration; the fixture is now a full OpenAI chat completion response).
+    with open(args.fixture_path, "r", encoding="utf-8") as f:
+        fixture_doc = json.load(f)
+    expected_bytes = fixture_doc["choices"][0]["message"]["content"].encode("utf-8")
 
     headers = {"Authorization": f"Bearer {args.token}"}
 
@@ -251,9 +260,17 @@ def main() -> int:
             if rc.status_code != 200:
                 print(f"FAIL: output fetch for run {idx:02d} returned {rc.status_code}")
                 return 1
-            if rc.content != expected_bytes:
-                print(f"FAIL: run {idx:02d} output bytes differ from fixture "
-                      f"({len(rc.content)}b vs {len(expected_bytes)}b expected)")
+            # FileWriter prepends a "# Model: …\n" header line before the
+            # parsed reply.  Strip it before byte-comparing against the
+            # fixture's content field.
+            actual_bytes = rc.content
+            if actual_bytes.startswith(b"# Model:"):
+                nl = actual_bytes.find(b"\n")
+                if nl != -1:
+                    actual_bytes = actual_bytes[nl + 1:]
+            if actual_bytes != expected_bytes:
+                print(f"FAIL: run {idx:02d} output bytes differ from fixture content "
+                      f"({len(actual_bytes)}b vs {len(expected_bytes)}b expected)")
                 return 1
 
         print(f"OK: every run's output landed in its own folder with its own PROB stem "

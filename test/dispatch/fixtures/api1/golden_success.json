@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-golden-success",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This is a canned reply from the MockTransport.\nNo network call was made.\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 16,
+    "total_tokens": 26
+  }
+}

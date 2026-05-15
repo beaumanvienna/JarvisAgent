@@ -4,6 +4,8 @@
 **Target:** j9t 1.0
 **Tracking:** `JarvisAgent TODO List.md` §5g (pre-1.0 priority). Subsumes §5c.
 
+> ⚠️ **Historical record — `TestInterface` removed in Sitting 2 of `ai-provider-error-visibility-dev-plan.md` (2026-05-14).**  Every reference below to `InterfaceType::Test`, `api_type: "Test"`, or "TestInterface" describes how the system worked through 2026-04 / early 2026-05.  Current dispatch architecture replaces TestInterface with the `is_mock: true` + `fixture_path` pair on real `api_type` entries (`API1..API6`) — the dispatcher routes mock-flagged calls through `MockTransport` (fixture replay) while everything else goes through `LiveTransport` (real curl).  Instructions in this doc that POST `api_type: "Test"` will now return 400 with `api_type_test_removed` — see `doc/jarvisagent.md` "API interfaces" + `doc/api-endpoints.md` `POST /api/settings/ai-interfaces` for the supported migration path.
+
 ---
 
 > ## Session end — 2026-04-25 (TPM throttle + retry budget + dashboard live progress — fresh start tomorrow)

@@ -704,7 +704,8 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
   "api_index": 0,
   "dirty": false,
   "interfaces": [
-    { "name": "...", "description": "...", "url": "...", "model": "...", "api_type": "API1", "key_name": "..." }
+    { "name": "...", "description": "...", "url": "...", "model": "...", "api_type": "API1",
+      "key_name": "...", "is_mock": false, "fixture_path": "" }
   ]
 }
 ```
@@ -712,15 +713,18 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 | Field | Description |
 |-------|-------------|
 | `dirty` | `true` when the in-memory interfaces differ from the on-disk `config.json`. Set by create/update/delete, cleared by save and reload. Used by the editor to show an unsaved-changes badge. |
+| `is_mock` | `true` when the dispatcher routes calls to this interface through MockTransport (fixture replay) instead of LiveTransport (real HTTPS). Admin-only — same access surface as `api_key`. |
+| `fixture_path` | Path to the on-disk fixture file (relative to project root) MockTransport reads as the canned response body. Required when `is_mock` is `true`. |
 
 ### POST /api/settings/ai-interfaces
 **Request body:**
 ```json
-{ "name": "optional", "url": "https://...", "model": "gpt-4", "api_type": "API1", "description": "...", "key_name": "..." }
+{ "name": "optional", "url": "https://...", "model": "gpt-4", "api_type": "API1",
+  "description": "...", "key_name": "...", "is_mock": false, "fixture_path": "" }
 ```
 `url` is required. `name` is auto-generated if omitted. Returns 409 on duplicate name.
 
-`api_type` accepts `API1`, `API2`, `API3`, `API4`, `API5`, `API6`, or `Test`. Examples:
+`api_type` accepts `API1`, `API2`, `API3`, `API4`, `API5`, or `API6`. Legacy `"Test"` is rejected with a 400 + `api_type_test_removed` error pointing at the `is_mock` + `fixture_path` migration. Examples:
 
 ```json
 // AWS Bedrock: regional base URL in `url`; model is the full Bedrock modelId; key_name points at a provider with credential_type "aws".
@@ -730,7 +734,20 @@ Manage the `"API interfaces"` array in `config.json` (in-memory + persist to dis
 // Azure OpenAI: full deployment URL in `url`; key_name points at a provider with credential_type "api_key".
 { "url": "https://my-resource.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2024-08-01",
   "model": "gpt-4", "api_type": "API6", "key_name": "azure-prod" }
+
+// MockTransport — hermetic fixture replay. The full OpenAI-shape JSON at `fixture_path`
+// is fed through ReplyParserAPI1 (or whichever api_type is configured), so the test
+// surface is the parser, AIMD, retry queue — the dispatcher's full code path.
+{ "url": "https://localhost/_mock_/never_called", "model": "mock-stub", "api_type": "API1",
+  "is_mock": true, "fixture_path": "test/dispatch/fixtures/api1/golden_success.json" }
 ```
+
+**`is_mock` hardening (rejected with 400 at this endpoint):**
+- `is_mock: true` without a non-empty `fixture_path` → `is_mock_requires_fixture_path`.
+- `fixture_path` outside the project root (absolute escape, `..` traversal, symlink target outside) → `fixture_path_rejected` (`ConfineUnderProjectRoot`-gated).
+- Legacy `api_type: "Test"` → `api_type_test_removed` (use `api_type: "API1..6"` + `is_mock: true` + `fixture_path` instead).
+
+Additional MockTransport hardening enforced at request dispatch (not at this endpoint): 10 MiB per-fixture size cap; optional `<fixture>.meta.json` sibling controls HTTP status (must be `[200, 599]`) and headers (allowlist `{Content-Type, Retry-After}` only — others dropped with WARN); PROV sidecar carries `"mocked": true` + the resolved `fixture_path` so post-mortem tooling distinguishes mock dispatches from live ones.  See `doc/jarvisagent.md` "API interfaces" and `doc/cyber security.md` "MockTransport Security" for the complete posture.
 
 ### POST /api/settings/ai-interfaces/save
 Writes the in-memory interfaces back to the `config.json` file by replacing the `"API interfaces"` array.  String fields (`name`, `description`, `url`, `model`, `key_name`) are JSON-escaped, the patched document is re-parsed with simdjson before the on-disk write, and the rename is atomic — on any 5xx error the existing `config.json` is left unchanged.

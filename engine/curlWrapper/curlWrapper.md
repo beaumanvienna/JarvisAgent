@@ -226,7 +226,7 @@ std::string& GetBuffer();   // Access the response body for the most recent Quer
 void Clear();               // Defensive no-op; Query() now clears at entry
 ```
 
-The same 32 MiB body cap is enforced by `CurlMultiDispatcher::MultiWriteCallback` for the async path; both surfaces fail closed identically.
+The same 32 MiB body cap is enforced by `MultiWriteCallback` in `liveTransport.cpp` (the curl write callback that backs the async path); both surfaces fail closed identically.
 
 ---
 
@@ -349,27 +349,44 @@ else
 
 While `CurlWrapper::Query` is the synchronous one-shot path used by REST handlers and connection-test endpoints, `CurlMultiDispatcher` is the async parallel path used by every workflow `ai_call` task. One dedicated I/O thread drives `libcurl multi`; HTTP/2 stream multiplexing carries up to ~100 concurrent requests over a single TCP/TLS connection per host.
 
+### Dispatcher / transport split
+
+The dispatcher does not own the curl machinery directly.  It composes with two `IInterfaceTransport` implementations (`engine/curlWrapper/interfaceTransport.h`) and selects between them per-request:
+
+- **`LiveTransport`** (`engine/curlWrapper/liveTransport.{h,cpp}`) — the production HTTPS path.  Owns the curl easy/multi handles, `IAuthSigner` integration, write/header/progress callbacks, response capture (body + raw headers + HTTP status + version label).
+- **`MockTransport`** (`engine/curlWrapper/mockTransport.{h,cpp}`) — fixture-driven replay for hermetic dispatch tests, demo-JCWF replay, and CI without provider credit burn.  Reads a config-supplied JSON fixture (with optional `<fixture>.meta.json` sibling controlling HTTP status + headers) and synthesises the same `Response` shape LiveTransport produces.
+
+Selection is per-request: `CurlMultiDispatcher::DrainInbox` routes requests whose `QueryData::m_IsMock` is `true` to MockTransport, everything else to LiveTransport.  Both transports share the dispatcher's monotonic `RequestId` counter + `OnTransportComplete` sink — the dispatcher doesn't track which transport carried which id.  Completions correlate via the `RequestId` carried through `IInterfaceTransport::Submit` → completion callback.
+
+Everything above the transports — inbox, AIMD admission gate, per-`QuotaKey` controllers, retry queue, cascade-cancel queue, debug counters, the I/O thread loop — stays in `CurlMultiDispatcher`, so the AIMD code path runs unchanged whether the bottom is real HTTPS or a fixture.  Synthetic 429 → real `RateLimitController::Observe(was_429=true)` → real cap halving → real retry queue.  See `doc/cyber security.md` "MockTransport Security" for the cyber-sec posture at the fixture-load boundary (path confinement, size cap, status/header allowlists, admin-only `is_mock`).
+
 ### Dispatch pipeline
 
 ```
 AiRequestPool::Submit(envelope)
-   ↓ build QueryData (URL, body, auth, m_QuotaKey, m_EstimatedInputTokens, m_TimeoutMs, m_CancelKey)
+   ↓ build QueryData (URL, body, auth, m_QuotaKey, m_EstimatedInputTokens, m_TimeoutMs, m_CancelKey,
+   ↓                 m_IsMock, m_FixturePath)
    ↓ disarm AiRequestPool's pre-dispatch file-activity watchdog (handoff complete)
    ↓
 CurlMultiDispatcher::Submit(queryData, callback)
-   ↓ push to inbox + curl_multi_wakeup
+   ↓ push to inbox + m_{Live,Mock}Transport->Wakeup()
    ↓ I/O thread:
-   ↓   DrainPendingCancellations()  (abort cancelled-run requests first)
-   ↓   DrainInbox()                  (controller.ShouldAdmit gate; curl_multi_add_handle)
+   ↓   DrainPendingCancellations()  (fire user callback Fail; cleanup on both transports)
+   ↓   DrainInbox()                  (controller.ShouldAdmit gate; allocate RequestId;
+   ↓                                  select transport on queryData.m_IsMock; transport->Submit)
    ↓   DrainRetryQueue()             (re-enter inbox when retry-ready)
-   ↓   curl_multi_perform + DrainCompleted (parse rate-limit headers; route 429/transient → retry queue)
+   ↓   m_LiveTransport->Pump()       (curl_multi_perform + HarvestCompletions → OnTransportComplete)
+   ↓   m_MockTransport->Pump()       (deliver queued fixture responses → OnTransportComplete)
+   ↓                                 (OnTransportComplete: ParseRateLimitHeaders + route 429/transient → retry queue,
+   ↓                                  else fire user callback)
+   ↓   m_LiveTransport->Wait(timeoutMs)  (only LiveTransport blocks; Mock has no I/O to wait on)
 ```
 
 ### Adaptive rate-limit + concurrency control
 
 The dispatcher composes three mechanisms keyed by `(host, modelFamily)` via `QueryData::m_QuotaKey`:
 
-- **`IRateLimitStrategy`** (`rateLimitStrategy.h`) — per-`InterfaceType` parser of provider-specific response headers into a normalized `RateLimitObservation`. Implementations: `RateLimitStrategyOpenAI` (API1/API2/API6), `RateLimitStrategyAnthropic` (API4 — split input/output token quotas, ISO 8601 resets, retry-after), `RateLimitStrategyEmpty` (API3 Gemini, API5 Bedrock, Test). Also provides `EstimateInputTokens(prompt)` (chars/4 default), `DeriveQuotaKey(model)` (model→family), and `InitialConcurrencyProbe()`.
+- **`IRateLimitStrategy`** (`rateLimitStrategy.h`) — per-`InterfaceType` parser of provider-specific response headers into a normalized `RateLimitObservation`. Implementations: `RateLimitStrategyOpenAI` (API1/API2/API6), `RateLimitStrategyAnthropic` (API4 — split input/output token quotas, ISO 8601 resets, retry-after), `RateLimitStrategyEmpty` (API3 Gemini, API5 Bedrock). Also provides `EstimateInputTokens(prompt)` (chars/4 default), `DeriveQuotaKey(model)` (model→family), and `InitialConcurrencyProbe()`.
 - **`RateLimitController`** (`rateLimitController.h`) — per-`QuotaKey` adaptive controller. `ShouldAdmit(currentInflight, estimatedInputTokens)` projects the token bucket forward (deny if overshooting) and compares against the AIMD cap. `Observe(observation, was429)` updates state idempotently — known fields replace, unknown fields preserve, multiple calls per request produce identical state. AIMD: cap halves on 429, +1 every 5 clean completions, lower bound 1, upper bound from `config.rate_limit.max_concurrency`.
 - **Server-directed waits** — `Retry-After` / `*-reset` headers are floors on the next admission time.
 
@@ -377,7 +394,11 @@ State surfaces via `GetDebugSnapshot()` → `/api/debug/signals dispatcher_contr
 
 ### Cascade cancellation
 
-`CancelByCancelKey(cancelKey)` is thread-safe; it pushes the key into a pending-cancellations queue and wakes the I/O thread. `DrainPendingCancellations()` (I/O thread only — curl handle mutations must be single-threaded relative to `curl_multi_perform`) drops matching entries from the inbox + retry queue and aborts in-flight `m_Active` handles via `curl_multi_remove_handle` + `curl_easy_cleanup`. Each cancelled request fires its callback with `Fail(CURLE_ABORTED_BY_CALLBACK, "request cancelled (run terminated)")`.
+`CancelByCancelKey(cancelKey)` is thread-safe; it pushes the key into a pending-cancellations queue and wakes the I/O thread.  `DrainPendingCancellations()` runs on the I/O thread and walks three locations:
+
+1. **Inbox** — drops matching entries; fires user callback `Fail(CURLE_ABORTED_BY_CALLBACK, "request cancelled (run terminated)")` synchronously.
+2. **Retry queue** — same: drops + fires callback.
+3. **Active set** (in-flight at the transport) — fires the user callback synchronously, erases the dispatcher-side `PendingDispatch` entry, then calls `m_Transport->CancelByCancelKey(cancelKey)`.  The transport's implementation walks its own in-flight map, runs `curl_multi_remove_handle` + slist free + `curl_easy_cleanup` for each match, and drops the entries silently — no transport-side completion callback fires (the dispatcher already fired the user callback, so the transport firing too would double-fire).  Curl handle mutations stay single-threaded relative to `curl_multi_perform` because both the cancel and the pump run on the dispatcher's I/O thread.
 
 Callers: `AiRequestPool::CancelRequestsForRun(runId)` walks `m_PendingByOutputPath`, finds matching runId entries, fires `CancelByCancelKey` for each. Triggered by `WorkflowRuntimeManager` when `ActiveRun.m_Run.m_HasFailed || m_CancelRequested || m_StopRequested` flips true. Idempotent via `ActiveRun.m_CancelCascadeFired`.
 

@@ -33,7 +33,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TEST_INTERFACE_NAME = "relaxed_env_test_dispatch"
 FIXTURE_PATH_DEFAULT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "fixtures", "hermetic_reply.txt")
+    os.path.join(os.path.dirname(__file__), "fixtures", "api1", "golden_success.json")
 )
 
 
@@ -75,11 +75,13 @@ def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bo
         f"{base_url}/api/settings/ai-interfaces",
         json={
             "name": TEST_INTERFACE_NAME,
-            "description": "Relaxed-env test interface",
-            "url": fixture_path,
-            "model": "hermetic-stub",
-            "api_type": "Test",
+            "description": "Relaxed-env MockTransport interface",
+            "url": "https://localhost/_mock_/never_called",
+            "model": "mock-stub",
+            "api_type": "API1",
             "key_name": "",
+            "is_mock": True,
+            "fixture_path": fixture_path,
         },
         headers=headers, verify=False, timeout=10,
     )

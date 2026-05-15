@@ -45,7 +45,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TEST_INTERFACE_NAME = "chunking_test_dispatch"
 FIXTURE_PATH_DEFAULT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "fixtures", "hermetic_reply.txt")
+    os.path.join(os.path.dirname(__file__), "fixtures", "api1", "golden_success.json")
 )
 
 # Explicit override — the REST create handler accepts `max_context_tokens`
@@ -111,12 +111,14 @@ def build_jcwf(interface_name: str, cntx: str) -> dict:
 def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
     body = {
         "name": TEST_INTERFACE_NAME,
-        "description": "Chunking test — Test interface with deliberately small window",
-        "url": fixture_path,
-        "model": "hermetic-stub",
-        "api_type": "Test",
+        "description": "Chunking test — MockTransport interface with deliberately small window",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": "API1",
         "key_name": "",
         "max_context_tokens": MAX_CONTEXT_TOKENS,
+        "is_mock": True,
+        "fixture_path": fixture_path,
     }
     r = requests.post(
         f"{base_url}/api/settings/ai-interfaces",

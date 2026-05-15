@@ -193,17 +193,31 @@ def log_tail_is_valid_utf8(start_offset: int = 0) -> tuple[bool, str | None]:
         return False, f"{e!s} — context bytes: {bad!r}"
 
 
-def provision_test_interface(base_url: str, headers: dict, *,
-                              name: str, fixture_path: Path) -> bool:
-    """Create a TestInterface pointing at `fixture_path`.  TestInterface short-
-    circuits the dispatcher and synthesizes a reply from the fixture content."""
+def provision_mock_interface(base_url: str, headers: dict, *,
+                              name: str, fixture_path: Path,
+                              api_type: str = "API1") -> bool:
+    """Create an `is_mock`-flagged AI interface pointing at `fixture_path`.
+
+    The dispatcher routes calls to this interface through MockTransport
+    (fixture replay) instead of LiveTransport (real curl).  The fixture is a
+    full OpenAI-shape JSON response body that flows through the real
+    `ReplyParserAPI1` — the dispatcher's full code path (AIMD admission,
+    retry queue, parser dispatch) runs unchanged.
+    """
+    # MockTransport's ConfineUnderProjectRoot resolves both absolute and
+    # project-root-relative inputs.  Make path absolute (REPO_ROOT-based) so
+    # callers can hand in `Path("test/dispatch/fixtures/...")` without
+    # worrying about the launcher's CWD.
+    abs_path = fixture_path if fixture_path.is_absolute() else (REPO_ROOT / fixture_path)
     body = {
         "name": name,
-        "description": f"§14 stress test fixture — {fixture_path.name}",
-        "url": str(fixture_path.resolve()),
-        "model": "stress-stub",
-        "api_type": "Test",
+        "description": f"§14 stress test fixture — {abs_path.name}",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": api_type,
         "key_name": "",
+        "is_mock": True,
+        "fixture_path": str(abs_path),
     }
     r = requests.post(f"{base_url}/api/settings/ai-interfaces",
                       json=body, headers=headers, verify=False, timeout=10)
@@ -211,8 +225,13 @@ def provision_test_interface(base_url: str, headers: dict, *,
         return True
     if r.status_code == 409:
         return True
-    print(f"FAIL: provision_test_interface({name}) returned {r.status_code}: {r.text[:200]}")
+    print(f"FAIL: provision_mock_interface({name}) returned {r.status_code}: {r.text[:200]}")
     return False
+
+
+# Back-compat alias for callers mid-migration.  Will be removed once every
+# call site is updated.
+provision_test_interface = provision_mock_interface
 
 
 def cleanup_test_interface(base_url: str, headers: dict, name: str) -> None:

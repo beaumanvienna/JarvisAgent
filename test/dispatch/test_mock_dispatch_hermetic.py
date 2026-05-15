@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Hermetic TestInterface contract test.
+Hermetic MockTransport contract test.
 
-Configures a transient `InterfaceType::Test` AI interface via REST, submits
-an adhoc ai_call routed to it, and asserts that the canned fixture reply
-lands byte-exact in `<prob>.output.txt`.  Zero network calls — the Test
-interface short-circuits the curl dispatcher (see aiRequestPool.cpp §984).
+Configures a transient `is_mock=true` AI interface (api_type=API1) via REST,
+submits an adhoc ai_call routed to it, and asserts that the canned JSON
+fixture's `content` field lands byte-exact in `<prob>.output.txt`.  Zero
+network calls — MockTransport replays the fixture body through the real
+ReplyParserAPI1, exercising the dispatcher's full code path (AIMD admission,
+retry queue, parser dispatch).
 
-Covers the Phase 7 hermetic-mode requirement from
-`AI dispatch refactor.md` §8 and the refactor handoff's open follow-up
-"Automated hermetic test driving InterfaceType::Test".
-
-Leaves the in-memory config with the Test interface present (no /save call),
-and DELETEs it on exit so nothing persists to disk.
+Replaces the pre-Sitting-2 `test_testinterface_hermetic.py` which exercised
+the now-removed TestInterface short-circuit.  See Foundation Sitting 2 of
+`doc/misc/ai-provider-error-visibility-dev-plan.md`.
 
 Runs against a live JarvisAgent instance (default https://localhost:8443).
 Requires an MCP admin key via --token or the J9T_TOKEN env var.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -32,17 +32,16 @@ except ImportError:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TEST_INTERFACE_NAME = "hermetic_test_dispatch"
-FIXTURE_PATH_DEFAULT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "fixtures", "hermetic_reply.txt")
-)
+MOCK_INTERFACE_NAME = "hermetic_mock_dispatch"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+FIXTURE_PATH_DEFAULT = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "api1", "golden_success.json")
 
 
 def build_jcwf(interface_name: str) -> dict:
     return {
         "version": "1.0",
-        "id": "adhoc_hermetic_dispatch",
-        "label": "Contract: hermetic Test interface round-trip",
+        "id": "adhoc_hermetic_mock_dispatch",
+        "label": "Contract: hermetic MockTransport round-trip",
         "triggers": [{"type": "manual", "id": "manual", "enabled": True, "params": {}}],
         "tasks": {
             "echo": {
@@ -50,7 +49,7 @@ def build_jcwf(interface_name: str) -> dict:
                 "type": "ai_call",
                 "label": "Hermetic dispatch",
                 "mode": "single",
-                "working_directory": "../../queue/adhoc_hermetic_dispatch/01_echo",
+                "working_directory": "../../queue/adhoc_hermetic_mock_dispatch/01_echo",
                 "params": {"provider": interface_name},
                 "queue_binding": {
                     "stng_files": [
@@ -63,7 +62,7 @@ def build_jcwf(interface_name: str) -> dict:
                         {"path": "CNTX_x.txt", "content": "Canned reply test."}
                     ],
                     "prob_files": [
-                        {"path": "PROB_x.txt", "content": "Anything here — the Test interface ignores it."}
+                        {"path": "PROB_x.txt", "content": "Anything here — MockTransport ignores it."}
                     ],
                 },
             }
@@ -71,33 +70,34 @@ def build_jcwf(interface_name: str) -> dict:
     }
 
 
-def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
+def create_mock_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
     body = {
-        "name": TEST_INTERFACE_NAME,
-        "description": "Hermetic Test interface for dispatch contract tests",
-        "url": fixture_path,
-        "model": "hermetic-stub",
-        "api_type": "Test",
+        "name": MOCK_INTERFACE_NAME,
+        "description": "Hermetic MockTransport interface for dispatch contract tests",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": "API1",
         "key_name": "",
+        "is_mock": True,
+        "fixture_path": fixture_path,
     }
     r = requests.post(
         f"{base_url}/api/settings/ai-interfaces",
         json=body, headers=headers, verify=False, timeout=10,
     )
     if r.status_code not in (200, 201):
-        print(f"FAIL: create Test interface returned {r.status_code}: {r.text[:200]}")
+        print(f"FAIL: create mock interface returned {r.status_code}: {r.text[:200]}")
         return False
     return True
 
 
-def delete_test_interface(base_url: str, headers: dict) -> None:
+def delete_mock_interface(base_url: str, headers: dict) -> None:
     try:
         requests.delete(
-            f"{base_url}/api/settings/ai-interfaces/{TEST_INTERFACE_NAME}",
+            f"{base_url}/api/settings/ai-interfaces/{MOCK_INTERFACE_NAME}",
             headers=headers, verify=False, timeout=10,
         )
     except Exception:
-        # Best effort — the test's primary job was verifying dispatch, not teardown.
         pass
 
 
@@ -123,33 +123,37 @@ def main() -> int:
     parser.add_argument("--base-url", default="https://localhost:8443")
     parser.add_argument("--token", default=os.environ.get("J9T_TOKEN"))
     parser.add_argument("--fixture-path", default=FIXTURE_PATH_DEFAULT,
-                        help="Absolute path to the canned-reply fixture the Test interface loads.")
+                        help="Absolute path to the JSON fixture (OpenAI chat completion shape).")
     args = parser.parse_args()
 
     if not args.token:
         print("FAIL: no MCP token provided (use --token or J9T_TOKEN env var)")
         return 1
-
     if not os.path.isfile(args.fixture_path):
         print(f"FAIL: fixture file not found at {args.fixture_path}")
         return 1
 
-    with open(args.fixture_path, "rb") as f:
-        expected_bytes = f.read()
+    # The parser extracts choices[0].message.content from the JSON fixture and
+    # writes it (verbatim, byte-exact) to <prob>.output.txt.  Reading the JSON
+    # here means the test stays correct if the fixture's content string changes.
+    with open(args.fixture_path, "r", encoding="utf-8") as f:
+        fixture_doc = json.load(f)
+    expected_content = fixture_doc["choices"][0]["message"]["content"]
+    expected_bytes = expected_content.encode("utf-8")
 
     headers = {"Authorization": f"Bearer {args.token}"}
 
-    if not create_test_interface(args.base_url, headers, args.fixture_path):
+    if not create_mock_interface(args.base_url, headers, args.fixture_path):
         return 1
 
     try:
-        # ttl_1h (the shortest retention) instead of on_completion — the Test
+        # ttl_1h (the shortest retention) instead of on_completion — the mock
         # backend writes the output and transitions to succeeded in the same
         # tick, which races the on_completion reaper and can wipe the folder
         # before the file-listing call lands.
         r = requests.post(
             f"{args.base_url}/api/workflows/run-adhoc",
-            json={"jcwf": build_jcwf(TEST_INTERFACE_NAME), "cleanup_policy": "ttl_1h"},
+            json={"jcwf": build_jcwf(MOCK_INTERFACE_NAME), "cleanup_policy": "ttl_1h"},
             headers=headers, verify=False, timeout=30,
         )
         if r.status_code not in (200, 202):
@@ -166,10 +170,6 @@ def main() -> int:
             print(f"FAIL: expected terminal state 'succeeded' but got '{terminal}'")
             return 1
 
-        # on_completion cleanup may wipe the folder the instant the run ends;
-        # fetch files immediately via list_run_files.  The Test path also
-        # writes <prob>.output.txt before OnOutputFileCreated fires, so it
-        # should appear even if the cleanup racing begins in parallel.
         rf = requests.get(
             f"{args.base_url}/api/workflow-runs/{run_id}/files",
             headers=headers, verify=False, timeout=10,
@@ -192,16 +192,23 @@ def main() -> int:
             return 1
 
         actual_bytes = rc.content
+        # FileWriter prepends a "# Model: …" header line; strip it before
+        # byte-comparing against the fixture content.  See aiRequestPool's
+        # WriteWithHeader / OutputWriter for the exact header format.
+        if actual_bytes.startswith(b"# Model:"):
+            nl = actual_bytes.find(b"\n")
+            if nl != -1:
+                actual_bytes = actual_bytes[nl + 1:]
         if actual_bytes != expected_bytes:
-            print("FAIL: .output.txt bytes differ from the fixture.")
+            print("FAIL: .output.txt bytes differ from the fixture content field.")
             print(f"     expected ({len(expected_bytes)}b): {expected_bytes!r}")
             print(f"     actual   ({len(actual_bytes)}b): {actual_bytes!r}")
             return 1
 
         # PROV sidecar: the executor writes it per dispatch as a debug/replay
-        # record.  Per refactor §3 it's write-only (never consumed at runtime),
-        # but its presence + `api_type:"Test"` lines up with the envelope and
-        # proves the PROV pipeline wasn't accidentally lost with SessionManager.
+        # record.  When mocked, it carries mocked: true + fixture_path so
+        # operators can distinguish mock dispatches from live ones in
+        # post-mortem.  See Sitting 2 of the dev plan §4 Foundation.
         prov_entry = next((f for f in files if f.get("path", "").startswith("PROV_")
                            or "/PROV_" in f.get("path", "")), None)
         if prov_entry is None:
@@ -216,19 +223,22 @@ def main() -> int:
             print(f"FAIL: PROV fetch returned {rp.status_code}")
             return 1
         prov_text = rp.text
-        if TEST_INTERFACE_NAME not in prov_text:
-            print(f"FAIL: PROV sidecar does not reference interface '{TEST_INTERFACE_NAME}'")
+        if MOCK_INTERFACE_NAME not in prov_text:
+            print(f"FAIL: PROV sidecar does not reference interface '{MOCK_INTERFACE_NAME}'")
             print(f"     content: {prov_text[:300]!r}")
             return 1
-        # PROV currently records provider / url / model only (not api_type).
+        if '"mocked": true' not in prov_text and '"mocked":true' not in prov_text:
+            print(f"FAIL: PROV sidecar missing mocked: true field (Sitting 2 requirement)")
+            print(f"     content: {prov_text[:500]!r}")
+            return 1
 
-        print(f"OK: hermetic Test interface dispatched end-to-end; "
-              f".output.txt matches fixture ({len(expected_bytes)} bytes); "
-              f"PROV sidecar records interface='{TEST_INTERFACE_NAME}'.")
+        print(f"OK: hermetic MockTransport dispatched end-to-end; "
+              f".output.txt matches fixture content field ({len(expected_bytes)} bytes); "
+              f"PROV sidecar records mocked=true + interface='{MOCK_INTERFACE_NAME}'.")
         return 0
 
     finally:
-        delete_test_interface(args.base_url, headers)
+        delete_mock_interface(args.base_url, headers)
 
 
 if __name__ == "__main__":

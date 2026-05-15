@@ -33,18 +33,17 @@
 #include <vector>
 
 #include "curlWrapper.h"
+#include "curlWrapper/interfaceTransport.h"
 #include "rateLimitController.h"
-
-// Opaque libcurl types — avoid pulling in curl headers in this header.
-typedef void CURLM;
-struct curl_slist;
 
 namespace AIAssistant
 {
-    // CurlMultiDispatcher — a single dedicated I/O thread that drives all AI HTTP/2
-    // requests via libcurl's multi interface. All concurrent requests to the same host
-    // share one TCP/TLS connection via HTTP/2 stream multiplexing; no thread-pool
-    // threads are blocked on network I/O.
+    // CurlMultiDispatcher — orchestrator that sits ABOVE an IInterfaceTransport.
+    // Owns the inbox, AIMD admission gate, per-(host, modelFamily) controllers,
+    // retry queue, cascade-cancellation queue, debug counters, and the I/O
+    // thread.  The actual HTTP machinery (curl easy/multi handles, auth signer
+    // integration) lives in LiveTransport — selected by default — or in a
+    // fixture-driven MockTransport (Sitting 2).
     //
     // Thread safety: Submit() is callable from any thread.
     // Callbacks fire on the I/O thread — keep them short (file writes are fine).
@@ -149,17 +148,6 @@ namespace AIAssistant
 #endif
 
     private:
-        // Closed set of failure modes for SetupEasyHandle.  Replaces a fragile
-        // string-prefix match on the error message that used to map to
-        // QueryErrorCode at the call site.  Adding a variant triggers -Wswitch
-        // at every consumer.
-        enum class SetupError
-        {
-            None,
-            CurlInit,    // curl_easy_init() returned NULL
-            AuthSigner,  // IAuthSigner::Apply rejected the request
-        };
-
         struct PendingRequest
         {
             CurlWrapper::QueryData m_QueryData;
@@ -167,19 +155,18 @@ namespace AIAssistant
             int m_RetryCount{0};  // Preserved across retry → inbox round-trips so retries re-enter the throttle gate.
         };
 
-        // All data kept alive for the duration of one in-flight easy handle.
-        // Accessed only from the I/O thread after being inserted into m_Active.
-        struct ActiveRequest
+        // Dispatcher-side per-request state.  Lives in m_Active from Submit
+        // (to the transport) until the transport delivers a final completion
+        // OR the request enters the retry queue.  Holds the QueryData copy
+        // needed for a possible re-Submit on retry.
+        struct PendingDispatch
         {
+            IInterfaceTransport::RequestId m_RequestId{0};
             CurlWrapper::QueryData m_QueryData;
             Callback m_Callback;
-            std::string m_ReadBuffer;   // response body accumulates here
-            std::string m_HeaderBuffer; // response headers accumulate here
-            std::string m_Url;          // stable storage — CURLOPT_URL pointer target
-            std::string m_PostData;     // stable storage — CURLOPT_POSTFIELDS pointer target
-            struct curl_slist* m_Headers{nullptr};
-            int m_RetryCount{0};        // number of 429 retries already attempted
-            int m_InterfaceType{-1};    // forwarded from QueryData; selects rate-limit strategy
+            int m_RetryCount{0};
+            int m_InterfaceType{-1};  // forwarded from QueryData; selects rate-limit strategy
+            std::string m_Url;        // cached for AIMD logging / host extraction without a QueryData lookup
         };
 
         // A request waiting for its retry delay to expire (I/O thread only).
@@ -206,17 +193,16 @@ namespace AIAssistant
 
         void IoThreadFunc();
         void DrainInbox();
-        void DrainCompleted();
         void DrainRetryQueue();
         // Process pending cancellation requests pushed via CancelByCancelKey.
-        // I/O thread only — mutates curl handles.
+        // I/O thread only — delegates active-set aborts to the transport.
         void DrainPendingCancellations();
-        // Returns the configured easy handle, or nullptr on failure.
-        // On nullptr: errorKind names the closed-set failure mode and errorMessage
-        // carries the human-readable reason; caller maps both into a QueryResult::Fail.
-        [[nodiscard]] CURL* SetupEasyHandle(ActiveRequest& req,
-                                            SetupError& errorKind,
-                                            std::string& errorMessage);
+
+        // Completion handler invoked by the transport when a request finishes
+        // (success, transport error, HTTP error, cancellation, or pre-flight
+        // failure).  Runs on the I/O thread inside m_Transport->Pump().
+        void OnTransportComplete(IInterfaceTransport::RequestId id,
+                                 IInterfaceTransport::Response response);
 
         // Find-or-create a RateLimitController for the given quotaKey.  Initial
         // cap is read from the per-interface strategy (or 4 if interfaceType is
@@ -228,14 +214,16 @@ namespace AIAssistant
         EnsureController(std::string const& quotaKey,
                          CurlWrapper::QueryData const& queryData);
 
-        // Parse rate limit headers from the accumulated header buffer, merge
-        // them into the legacy HostRateLimitState (for /api/debug/signals)
-        // AND feed the per-(host, modelFamily) controller's Observe().
-        // httpCode drives the controller's AIMD signal: 429 halves the cap,
-        // any other clean completion advances the streak counter.
-        void ParseRateLimitHeaders(ActiveRequest const& req, std::string& host, long httpCode);
-        // Extract host from URL (e.g. "api.openai.com" from "https://api.openai.com/v1/...").
-        static std::string ExtractHost(std::string const& url);
+        // Parse rate limit headers from the captured header buffer, merge them
+        // into the legacy HostRateLimitState (for /api/debug/signals) AND feed
+        // the per-(host, modelFamily) controller's Observe().  httpCode drives
+        // the controller's AIMD signal: 429 halves the cap, any other clean
+        // completion advances the streak counter.
+        void ParseRateLimitHeaders(CurlWrapper::QueryData const& queryData,
+                                   std::string const& headerBuffer,
+                                   std::string const& body,
+                                   std::string& host,
+                                   long httpCode);
 
         // Fallback constants used only when QueryData doesn't pre-resolve a
         // per-interface override (rare — only legacy callers like assistant /
@@ -246,16 +234,28 @@ namespace AIAssistant
         static constexpr int kDefaultBaseRetryMs = 1000;
         static constexpr size_t kMaxActivePerHost = 48; // hard ceiling on HTTP/2 streams per host (independent of provider quota)
 
-        CURLM* m_MultiHandle{nullptr};
+        // Two transports: LiveTransport is the production HTTP/2 path; MockTransport
+        // replays config-supplied fixtures.  Per-request selection in DrainInbox
+        // routes QueryData::m_IsMock=true requests to the mock, everything else
+        // to live.  Both share the dispatcher's RequestId counter so completions
+        // can fire through the same OnTransportComplete sink — the dispatcher
+        // doesn't need to remember which transport carried which id.
+        std::unique_ptr<IInterfaceTransport> m_LiveTransport;
+        std::unique_ptr<IInterfaceTransport> m_MockTransport;
         std::thread m_IoThread;
         std::atomic<bool> m_Stopping{false};
+
+        // Monotonic request-id allocator (I/O thread only).  Carried through
+        // m_Transport->Submit so completions correlate back to PendingDispatch.
+        IInterfaceTransport::RequestId m_NextRequestId{0};
 
         std::queue<PendingRequest> m_Inbox;
         mutable std::mutex m_InboxMutex;
 
-        // Keyed by CURL* easy handle. Mutated only from the I/O thread; protected by
-        // m_DebugMutex for cross-thread debug snapshot reads.
-        std::unordered_map<CURL*, std::unique_ptr<ActiveRequest>> m_Active;
+        // Per-request dispatch state, keyed by RequestId.  Mutated only from
+        // the I/O thread; protected by m_DebugMutex for cross-thread debug
+        // snapshot reads.
+        std::unordered_map<IInterfaceTransport::RequestId, std::unique_ptr<PendingDispatch>> m_Active;
 
         // Retry queue — sorted by ready-at time. Same threading rules as m_Active.
         std::vector<RetryEntry> m_RetryQueue;
@@ -273,8 +273,8 @@ namespace AIAssistant
         std::unordered_map<std::string, RateLimitController> m_Controllers;
 
         // Recursive so the same I/O-thread call chain can lock at multiple nested levels
-        // (e.g. DrainCompleted holds the lock and calls ParseRateLimitHeaders, which also
-        // wants it). API-thread snapshot reads contend rarely.
+        // (e.g. OnTransportComplete holds the lock and calls ParseRateLimitHeaders, which
+        // also wants it). API-thread snapshot reads contend rarely.
         mutable std::recursive_mutex m_DebugMutex;
 
         // Lifetime counters — atomic so debug reads are wait-free.
@@ -287,7 +287,7 @@ namespace AIAssistant
 
         // Cascade-cancellation queue — populated by CancelByCancelKey on any
         // thread, drained by the I/O thread in DrainPendingCancellations
-        // (where curl handle mutations are safe).
+        // (where transport mutations are safe).
         std::vector<std::string> m_PendingCancellations;
         mutable std::mutex m_PendingCancellationsMutex;
 

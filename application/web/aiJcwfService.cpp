@@ -1240,6 +1240,8 @@ namespace AIAssistant
             .m_MaxRetries429 = -1,
             .m_MaxRetriesTransient = -1,
             .m_BaseRetryMs = -1,
+            .m_IsMock = false,
+            .m_FixturePath = {},
         };
 
         auto const startTime = std::chrono::steady_clock::now();
@@ -1392,7 +1394,8 @@ namespace AIAssistant
         envelope.m_Messages.push_back(std::move(userMessage));
 
         // Blocking wait via std::promise — this runs on a background thread, and Submit's
-        // callback fires on the curl I/O thread (or synchronously for InterfaceType::Test).
+        // callback fires on the dispatcher's I/O thread (LiveTransport curl path or
+        // MockTransport fixture-replay path; both deliver via Pump()).
         //
         // Two safety properties on the callback path:
         //

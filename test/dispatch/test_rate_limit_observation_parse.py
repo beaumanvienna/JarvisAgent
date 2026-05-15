@@ -203,10 +203,10 @@ def main() -> int:
         failures.append("API4 Anthropic 429 fixture")
 
     # ------------------------------------------------------------------
-    # Empty strategy (API3 Gemini, API5 Bedrock, Test) — providers that ship
+    # Empty strategy (API3 Gemini, API5 Bedrock) — providers that ship
     # no proactive feedback. Any header buffer should yield an empty observation.
     # ------------------------------------------------------------------
-    for itype in ("API3", "API5", "Test"):
+    for itype in ("API3", "API5"):
         # Even a populated OpenAI-flavoured buffer should be ignored.
         r = parse(args.base_url, headers, interface_type=itype,
                   fixture="openai_quota.txt", model="some-model")
@@ -256,7 +256,7 @@ def main() -> int:
 
     print("OK: all rate-limit strategy parsers produce expected RateLimitObservation values "
           "(OpenAI duration parsing, 429 retry-after, Anthropic split token quotas + ISO 8601 resets, "
-          "Empty strategy on Gemini / Bedrock / Test, DeriveQuotaKey + InitialConcurrencyProbe).")
+          "Empty strategy on Gemini / Bedrock, DeriveQuotaKey + InitialConcurrencyProbe).")
     return 0
 
 

@@ -1298,6 +1298,8 @@ namespace AIAssistant
                     std::string resolvedApiType;
                     std::string effectiveModel;
                     std::string keyNameForProv; // key_name from interface → goes into PROV "provider"
+                    bool resolvedIsMock = false;
+                    std::string resolvedFixturePath;
                     {
                         if (Core::g_Core == nullptr)
                         {
@@ -1317,6 +1319,8 @@ namespace AIAssistant
                                 resolvedUrl = iface.m_Url;
                                 effectiveModel = modelOpt.value_or(iface.m_Model);
                                 keyNameForProv = iface.m_KeyName;
+                                resolvedIsMock = iface.m_IsMock;
+                                resolvedFixturePath = iface.m_FixturePath;
                                 switch (iface.m_InterfaceType)
                                 {
                                     case ConfigParser::EngineConfig::InterfaceType::API1:
@@ -1392,6 +1396,20 @@ namespace AIAssistant
                         {
                             LOG_APP_WARN("Sidecar: refusing non-numeric temperature value '{}'",
                                          temperatureOpt.value());
+                        }
+                    }
+
+                    // Mock-routing operator-transparency fields (Sitting 2).
+                    // Lets post-mortem tooling distinguish mock dispatches from
+                    // live ones — when present, this run did NOT hit a real
+                    // provider; the response came from the fixture file.
+                    if (resolvedIsMock)
+                    {
+                        sidecarJson += ",\"mocked\":true";
+                        if (!resolvedFixturePath.empty())
+                        {
+                            sidecarJson += ",\"fixture_path\":\"" +
+                                           JsonHelper::EscapeJsonString(resolvedFixturePath) + "\"";
                         }
                     }
 

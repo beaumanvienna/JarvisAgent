@@ -22,103 +22,29 @@
 #include "curlWrapper/curlMultiDispatcher.h"
 
 #include <curl/curl.h>
-#include <curl/multi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
 #include <exception>
 #include <unordered_set>
 
 #include "core.h"
-#include "curlWrapper/authSigner.h"
+#include "curlWrapper/liveTransport.h"
+#include "curlWrapper/mockTransport.h"
 #include "curlWrapper/rateLimitStrategy.h"
 #include "engine.h"
 
 namespace AIAssistant
 {
     // ---------------------------------------------------------------------------
-    // Static callbacks (no class state needed)
-    // ---------------------------------------------------------------------------
-
-    // Hard caps on per-request response body and header accumulation.  A buggy or
-    // hostile upstream could otherwise stream gigabytes into m_ReadBuffer /
-    // m_HeaderBuffer and OOM the engine.  On overflow the callback returns a
-    // short-write to libcurl, which translates to CURLE_WRITE_ERROR and fails
-    // the request through the existing curl-error path.
-    //   Body cap   = 32 MiB.  AI responses are typically < 1 MiB; 32 MiB is
-    //                generous for very long structured-output completions.
-    //   Header cap =  1 MiB.  HTTP/2 header sizes are typically <16 KiB.
-    static constexpr size_t kMaxResponseBodyBytes = 32ULL * 1024 * 1024;
-    static constexpr size_t kMaxHeaderBytes        = 1ULL  * 1024 * 1024;
-
-    static size_t MultiWriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
-    {
-        size_t const totalSize = size * nmemb;
-        // libcurl is C; an exception escaping this callback is UB.  Catch
-        // bad_alloc / length_error from std::string::append and signal a
-        // short-write so libcurl aborts the transfer cleanly.
-        try
-        {
-            auto* buf = static_cast<std::string*>(userp);
-            // Overflow-safe form: buf->size() never exceeds kMax (we enforce it
-            // here), so kMax - buf->size() can't underflow.
-            if (totalSize > kMaxResponseBodyBytes - buf->size())
-            {
-                return 0;
-            }
-            buf->append(static_cast<char*>(contents), totalSize);
-        }
-        catch (...)
-        {
-            return 0;
-        }
-        return totalSize;
-    }
-
-    static size_t MultiHeaderCallback(void* contents, size_t size, size_t nmemb, void* userp)
-    {
-        size_t const totalSize = size * nmemb;
-        try
-        {
-            auto* buf = static_cast<std::string*>(userp);
-            if (totalSize > kMaxHeaderBytes - buf->size())
-            {
-                return 0;
-            }
-            buf->append(static_cast<char*>(contents), totalSize);
-        }
-        catch (...)
-        {
-            return 0;
-        }
-        return totalSize;
-    }
-
-    static int MultiProgressCallback(void* /*clientp*/, curl_off_t /*dltotal*/, curl_off_t /*dlnow*/,
-                                     curl_off_t /*ultotal*/, curl_off_t /*ulnow*/)
-    {
-        // Abort in-flight transfers when the engine is shutting down.
-        if (Core::g_Core != nullptr && Core::g_Core->GetThreadPool().IsStopped())
-        {
-            return 1; // non-zero → libcurl returns CURLE_ABORTED_BY_CALLBACK
-        }
-        return 0;
-    }
-
-    // ---------------------------------------------------------------------------
     // Construction / destruction
     // ---------------------------------------------------------------------------
 
     CurlMultiDispatcher::CurlMultiDispatcher()
+        : m_LiveTransport(std::make_unique<LiveTransport>())
+        , m_MockTransport(std::make_unique<MockTransport>())
     {
-        m_MultiHandle = curl_multi_init();
-        CORE_ASSERT(m_MultiHandle != nullptr, "curl_multi_init() failed");
-
-        // One TCP connection per host; HTTP/2 streams are multiplexed over it.
-        curl_multi_setopt(m_MultiHandle, CURLMOPT_PIPELINING,             CURLPIPE_MULTIPLEX);
-        curl_multi_setopt(m_MultiHandle, CURLMOPT_MAX_HOST_CONNECTIONS,   1L);
-        curl_multi_setopt(m_MultiHandle, CURLMOPT_MAX_CONCURRENT_STREAMS, 100L);
-
         m_IoThread = std::thread(&CurlMultiDispatcher::IoThreadFunc, this);
         LOG_CORE_INFO("CurlMultiDispatcher: I/O thread started");
     }
@@ -127,11 +53,10 @@ namespace AIAssistant
     {
         SignalStop();
         WaitStop();
-        if (m_MultiHandle != nullptr)
-        {
-            curl_multi_cleanup(m_MultiHandle);
-            m_MultiHandle = nullptr;
-        }
+        // Transport unique_ptrs destruct here — LiveTransport's dtor frees the
+        // curl multi handle; MockTransport's dtor is trivial.  I/O thread has
+        // already been joined above so there are no live curl calls during
+        // cleanup.
     }
 
     // ---------------------------------------------------------------------------
@@ -184,7 +109,14 @@ namespace AIAssistant
                 m_RecentSubmissions.pop_front();
             }
         }
-        curl_multi_wakeup(m_MultiHandle);
+        if (m_LiveTransport)
+        {
+            m_LiveTransport->Wakeup();
+        }
+        if (m_MockTransport)
+        {
+            m_MockTransport->Wakeup();
+        }
     }
 
     std::vector<CurlMultiDispatcher::RecentSubmission>
@@ -235,20 +167,28 @@ namespace AIAssistant
             m_PendingCancellations.push_back(cancelKey);
         }
         // Wake the I/O thread so DrainPendingCancellations runs even if no
-        // socket activity is in flight.  curl handle mutations must be on
-        // the I/O thread (single-thread relative to curl_multi_perform).
-        if (m_MultiHandle != nullptr)
+        // socket activity is in flight.  Transport handle mutations must be
+        // on the I/O thread (single-thread relative to curl_multi_perform).
+        if (m_LiveTransport)
         {
-            curl_multi_wakeup(m_MultiHandle);
+            m_LiveTransport->Wakeup();
+        }
+        if (m_MockTransport)
+        {
+            m_MockTransport->Wakeup();
         }
     }
 
     void CurlMultiDispatcher::SignalStop()
     {
         m_Stopping.store(true);
-        if (m_MultiHandle != nullptr)
+        if (m_LiveTransport)
         {
-            curl_multi_wakeup(m_MultiHandle);
+            m_LiveTransport->Wakeup();
+        }
+        if (m_MockTransport)
+        {
+            m_MockTransport->Wakeup();
         }
     }
 
@@ -279,9 +219,9 @@ namespace AIAssistant
             snap.m_RetryQueueSize  = m_RetryQueue.size();
 
             std::unordered_map<std::string, size_t> activePerHost;
-            for (auto const& [handle, req] : m_Active)
+            for (auto const& [id, pd] : m_Active)
             {
-                std::string host = ExtractHost(req->m_Url);
+                std::string host = ExtractHostFromUrl(pd->m_Url);
                 if (!host.empty())
                     ++activePerHost[host];
             }
@@ -363,94 +303,6 @@ namespace AIAssistant
         return inserted.first;
     }
 
-    CURL* CurlMultiDispatcher::SetupEasyHandle(ActiveRequest& req,
-                                               SetupError& errorKind,
-                                               std::string& errorMessage)
-    {
-        errorKind = SetupError::None;
-        errorMessage.clear();
-
-        CURL* easy = curl_easy_init();
-        if (easy == nullptr)
-        {
-            errorKind = SetupError::CurlInit;
-            errorMessage = "curl_easy_init() failed";
-            LOG_CORE_ERROR("CurlMultiDispatcher: curl_easy_init() failed url='{}' cancelKey='{}' quotaKey='{}'",
-                           req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
-            return nullptr;
-        }
-
-        // Auth headers are produced by IAuthSigner so AwsSigV4 / AzureApiKey are
-        // covered identically to CurlWrapper::Query — no per-style branching here.
-        // Pre-fix the async path silently produced unsigned / sentinel-signed requests
-        // when credentials were empty; AWS / OpenAI rejected them as 401 with no
-        // local indication of the root cause.  Now the signer rejects locally and
-        // we emit a structured ERROR with the request's CancelKey (= per-task ID)
-        // for the dashboard's run analyzer.
-        std::vector<std::string> authHeaders;
-        std::string authError;
-        if (!IAuthSigner::Get(req.m_QueryData.m_AuthStyle).Apply(req.m_QueryData, authHeaders, authError))
-        {
-            errorKind = SetupError::AuthSigner;
-            errorMessage = authError;
-            LOG_CORE_ERROR("CurlMultiDispatcher: auth signer rejected url='{}' cancelKey='{}' quotaKey='{}': {}",
-                           req.m_Url, req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey, authError);
-            curl_easy_cleanup(easy);
-            return nullptr;
-        }
-        for (auto const& h : authHeaders)
-        {
-            req.m_Headers = curl_slist_append(req.m_Headers, h.c_str());
-        }
-        req.m_Headers = curl_slist_append(req.m_Headers, "Content-Type: application/json");
-
-        // HTTP/2 for HTTPS (ALPN negotiation); falls back to HTTP/1.1 if unsupported.
-        curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,     CURL_HTTP_VERSION_2TLS);
-
-        curl_easy_setopt(easy, CURLOPT_URL,              req.m_Url.c_str());
-        curl_easy_setopt(easy, CURLOPT_HTTPHEADER,       req.m_Headers);
-        curl_easy_setopt(easy, CURLOPT_POSTFIELDS,       req.m_PostData.c_str());
-        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION,    MultiWriteCallback);
-        curl_easy_setopt(easy, CURLOPT_WRITEDATA,        &req.m_ReadBuffer);
-        curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION,   MultiHeaderCallback);
-        curl_easy_setopt(easy, CURLOPT_HEADERDATA,       &req.m_HeaderBuffer);
-        curl_easy_setopt(easy, CURLOPT_NOPROGRESS,       0L);
-        curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION, MultiProgressCallback);
-
-        // Liveness: TCP keepalive helps long-idle in-flight connections
-        // notice they're dead.  Default CURLOPT_TCP_KEEPIDLE (60s) is fine for
-        // AI requests that may "think" silently before emitting tokens.
-        curl_easy_setopt(easy, CURLOPT_TCP_KEEPALIVE,    1L);
-
-        if (req.m_QueryData.m_TimeoutMs > 0)
-        {
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, req.m_QueryData.m_TimeoutMs);
-        }
-
-        std::string const& caBundle = CurlWrapper::GetCaBundlePath();
-        if (!caBundle.empty())
-        {
-            curl_easy_setopt(easy, CURLOPT_CAINFO, caBundle.c_str());
-        }
-
-#ifdef DEBUG
-        // Hermetic dispatcher tests configure AI interfaces pointing at the
-        // j9t server's own debug mock endpoint (https://localhost:8443/...).
-        // The j9t HTTPS cert is self-signed; the system CA bundle doesn't
-        // trust it, so curl returns CURLE_SSL_PEER_CERTIFICATE.  Disable
-        // verification for localhost ONLY, in debug builds ONLY — production
-        // paths and non-localhost URLs still verify.
-        std::string const host = ExtractHost(req.m_Url);
-        if (host == "localhost" || host == "127.0.0.1" || host == "::1")
-        {
-            curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);
-            curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);
-        }
-#endif
-
-        return easy;
-    }
-
     void CurlMultiDispatcher::DrainInbox()
     {
         std::queue<PendingRequest> local;
@@ -468,14 +320,14 @@ namespace AIAssistant
         // /api/debug/signals snapshot until Phase 5 retires it.
         std::unordered_map<std::string, size_t> activePerKey;
         std::unordered_map<std::string, size_t> activePerHost;
-        for (auto const& [handle, req] : m_Active)
+        for (auto const& [id, pd] : m_Active)
         {
-            std::string const host = ExtractHost(req->m_Url);
+            std::string const host = ExtractHostFromUrl(pd->m_Url);
             if (!host.empty())
                 ++activePerHost[host];
-            std::string const key = req->m_QueryData.m_QuotaKey.empty()
+            std::string const key = pd->m_QueryData.m_QuotaKey.empty()
                                         ? host
-                                        : req->m_QueryData.m_QuotaKey;
+                                        : pd->m_QueryData.m_QuotaKey;
             if (!key.empty())
                 ++activePerKey[key];
         }
@@ -491,7 +343,7 @@ namespace AIAssistant
         while (!local.empty())
         {
             auto& pending = local.front();
-            std::string const host = ExtractHost(pending.m_QueryData.m_Url);
+            std::string const host = ExtractHostFromUrl(pending.m_QueryData.m_Url);
             std::string const quotaKey = pending.m_QueryData.m_QuotaKey.empty()
                                              ? host
                                              : pending.m_QueryData.m_QuotaKey;
@@ -558,61 +410,45 @@ namespace AIAssistant
                 continue;
             }
 
-            auto req = std::make_unique<ActiveRequest>();
-            req->m_QueryData     = pending.m_QueryData;
-            req->m_Callback      = std::move(pending.m_Callback);
-            req->m_Url           = pending.m_QueryData.m_Url;
-            req->m_PostData      = pending.m_QueryData.m_Data;
-            req->m_RetryCount    = pending.m_RetryCount;
-            req->m_InterfaceType = pending.m_QueryData.m_InterfaceType;
+            // Admit: allocate a RequestId, install the PendingDispatch entry,
+            // and forward to the transport.  The transport will eventually
+            // call OnTransportComplete via the completion callback we pass —
+            // either with the HTTP response, a transport error, or a
+            // pre-flight failure surfaced through the deferred-completion path.
+            IInterfaceTransport::RequestId const id = ++m_NextRequestId;
+            auto pd = std::make_unique<PendingDispatch>();
+            pd->m_RequestId    = id;
+            pd->m_Url          = pending.m_QueryData.m_Url;
+            pd->m_RetryCount   = pending.m_RetryCount;
+            pd->m_InterfaceType = pending.m_QueryData.m_InterfaceType;
+            pd->m_Callback     = std::move(pending.m_Callback);
+            pd->m_QueryData    = pending.m_QueryData;  // copy for retry path
+            m_Active[id] = std::move(pd);
 
-            SetupError setupErrorKind = SetupError::None;
-            std::string setupErrorMsg;
-            CURL* easy = SetupEasyHandle(*req, setupErrorKind, setupErrorMsg);
-            if (easy != nullptr)
-            {
-                // Check curl_multi_add_handle return — failure (e.g. CURLM_OUT_OF_MEMORY)
-                // would otherwise leak the easy handle and add a stale entry to m_Active.
-                // Free the slist we built in SetupEasyHandle, cleanup the easy handle,
-                // and surface the failure through the request callback.
-                CURLMcode const addResult = curl_multi_add_handle(m_MultiHandle, easy);
-                if (addResult == CURLM_OK)
-                {
-                    m_Active[easy] = std::move(req);
-                    if (!host.empty())
-                        ++activePerHost[host];
-                    if (!quotaKey.empty())
-                        ++activePerKey[quotaKey];
-                    ++m_TotalDispatched;
-                }
-                else
-                {
-                    LOG_CORE_ERROR("CurlMultiDispatcher: curl_multi_add_handle failed code={} url='{}' "
-                                   "cancelKey='{}' quotaKey='{}'",
-                                   static_cast<int>(addResult), req->m_Url,
-                                   req->m_QueryData.m_CancelKey, req->m_QueryData.m_QuotaKey);
-                    curl_slist_free_all(req->m_Headers);
-                    req->m_Headers = nullptr;
-                    curl_easy_cleanup(easy);
-                    req->m_Callback(QueryResult::Fail(QueryErrorCode::CurlNotInitialized,
-                                                      "curl_multi_add_handle failed"),
-                                    {});
-                }
-            }
-            else
-            {
-                // Map the closed-set failure mode onto the unified QueryErrorCode
-                // scheme.  -Wswitch will flag this if a SetupError variant is added.
-                int code = QueryErrorCode::CurlNotInitialized;
-                switch (setupErrorKind)
-                {
-                    case SetupError::CurlInit:    code = QueryErrorCode::CurlNotInitialized; break;
-                    case SetupError::AuthSigner:  code = QueryErrorCode::NoApiKey;           break;
-                    case SetupError::None:        // unreachable when easy == nullptr
-                        break;
-                }
-                req->m_Callback(QueryResult::Fail(code, setupErrorMsg), {});
-            }
+            if (!host.empty())
+                ++activePerHost[host];
+            if (!quotaKey.empty())
+                ++activePerKey[quotaKey];
+            ++m_TotalDispatched;
+
+            // Per-request transport selection: m_IsMock flagged requests go
+            // through MockTransport (fixture replay), everything else through
+            // LiveTransport (real HTTPS).  Both transports share the
+            // dispatcher's RequestId space + OnTransportComplete sink.
+            //
+            // Lifetime: `this` is safe because both transports are owned by
+            // this dispatcher (unique_ptr); the I/O thread is joined in
+            // WaitStop before the transports destruct.  Per
+            // feedback_capture_by_value_async.
+            IInterfaceTransport& transport = (pending.m_QueryData.m_IsMock && m_MockTransport)
+                                                 ? *m_MockTransport
+                                                 : *m_LiveTransport;
+            transport.Submit(id, std::move(pending.m_QueryData),
+                             [this](IInterfaceTransport::RequestId reqId,
+                                    IInterfaceTransport::Response resp)
+                             {
+                                 OnTransportComplete(reqId, std::move(resp));
+                             });
 
             local.pop();
         }
@@ -622,37 +458,11 @@ namespace AIAssistant
     // Rate limit helpers (I/O thread only)
     // ---------------------------------------------------------------------------
 
-    std::string CurlMultiDispatcher::ExtractHost(std::string const& url)
-    {
-        // "https://api.openai.com/v1/chat/completions" → "api.openai.com"
-        // "https://[::1]:8443/path"                    → "::1"
-        size_t start = url.find("://");
-        if (start == std::string::npos)
-            return {};
-        start += 3;
-
-        // RFC 3986 IPv6 literal: bracketed host runs `[<addr>]`, optionally
-        // followed by `:<port>`.  Without this branch the generic `find(':')`
-        // below clips at the first `:` of `::1` and returns "[".
-        if (start < url.size() && url[start] == '[')
-        {
-            size_t close = url.find(']', start);
-            if (close == std::string::npos)
-                return {};
-            return url.substr(start + 1, close - start - 1);
-        }
-
-        size_t end = url.find('/', start);
-        if (end == std::string::npos)
-            end = url.size();
-        // Strip port if present
-        size_t colon = url.find(':', start);
-        if (colon != std::string::npos && colon < end)
-            end = colon;
-        return url.substr(start, end - start);
-    }
-
-    void CurlMultiDispatcher::ParseRateLimitHeaders(ActiveRequest const& req, std::string& host, long httpCode)
+    void CurlMultiDispatcher::ParseRateLimitHeaders(CurlWrapper::QueryData const& queryData,
+                                                    std::string const& headerBuffer,
+                                                    std::string const& body,
+                                                    std::string& host,
+                                                    long httpCode)
     {
         // Per-provider strategy delegation (Phase 1) + controller Observe (Phase 2).
         // The strategy returns a normalized RateLimitObservation; we merge it into
@@ -660,13 +470,14 @@ namespace AIAssistant
         // AND into the per-(host, modelFamily) controller for AIMD/token-bucket
         // gating.
         ConfigParser::EngineConfig::InterfaceType const interfaceType =
-            (req.m_InterfaceType >= 0 && req.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
-                ? static_cast<ConfigParser::EngineConfig::InterfaceType>(req.m_InterfaceType)
+            (queryData.m_InterfaceType >= 0 &&
+             queryData.m_InterfaceType < ConfigParser::EngineConfig::InterfaceType::NumAPIs)
+                ? static_cast<ConfigParser::EngineConfig::InterfaceType>(queryData.m_InterfaceType)
                 : ConfigParser::EngineConfig::InterfaceType::InvalidAPI;
 
         IRateLimitStrategy const& strategy = IRateLimitStrategy::Get(interfaceType);
         RateLimitObservation const observation =
-            strategy.Parse(req.m_HeaderBuffer, req.m_ReadBuffer, static_cast<int>(httpCode));
+            strategy.Parse(headerBuffer, body, static_cast<int>(httpCode));
 
         std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
 
@@ -676,10 +487,10 @@ namespace AIAssistant
         // exists for snapshot reads even before any ShouldAdmit() runs through
         // it for that key.  hardCap = kMaxActivePerHost; Phase 4 will swap in
         // config.rate_limit.max_concurrency.
-        std::string const quotaKey = req.m_QueryData.m_QuotaKey.empty() ? host : req.m_QueryData.m_QuotaKey;
+        std::string const quotaKey = queryData.m_QuotaKey.empty() ? host : queryData.m_QuotaKey;
         if (!quotaKey.empty())
         {
-            auto controllerIt = EnsureController(quotaKey, req.m_QueryData);
+            auto controllerIt = EnsureController(quotaKey, queryData);
             bool const was429 = (httpCode == 429);
             controllerIt->second.Observe(observation, was429);
         }
@@ -837,30 +648,27 @@ namespace AIAssistant
                 }
             }
 
-            // 3. Active set — abort in-flight curl handle, fire callback.
-            // Iterate by collecting matches first since erasing while iterating
-            // m_Active is awkward; the matches are O(<10) typically per cancel.
-            std::vector<CURL*> toAbort;
-            for (auto const& [easy, req] : m_Active)
+            // 3. Active set — fire user callback synchronously, drop from
+            // m_Active, then ask the transport to abort the in-flight handle
+            // (silent cleanup; no transport-side completion).  Collect matches
+            // first since erasing while iterating m_Active is awkward.
+            std::vector<IInterfaceTransport::RequestId> toErase;
+            for (auto const& [id, pd] : m_Active)
             {
-                if (req->m_QueryData.m_CancelKey == cancelKey)
+                if (pd && pd->m_QueryData.m_CancelKey == cancelKey)
                 {
-                    toAbort.push_back(easy);
+                    toErase.push_back(id);
                 }
             }
-            for (CURL* easy : toAbort)
+            for (IInterfaceTransport::RequestId const id : toErase)
             {
-                auto it = m_Active.find(easy);
+                auto it = m_Active.find(id);
                 if (it == m_Active.end())
                 {
                     continue;
                 }
-                ActiveRequest& req = *it->second;
-                Callback callback = std::move(req.m_Callback);
-                struct curl_slist* hdrs = req.m_Headers;
-                curl_multi_remove_handle(m_MultiHandle, easy);
-                curl_slist_free_all(hdrs);
-                curl_easy_cleanup(easy);
+                PendingDispatch& pd = *it->second;
+                Callback callback = std::move(pd.m_Callback);
                 m_Active.erase(it);
                 if (callback)
                 {
@@ -870,6 +678,16 @@ namespace AIAssistant
                 }
                 ++m_TotalCancelled;
             }
+            // Fan out to both transports — either could hold a matching
+            // in-flight or pending entry.  Each is a no-op when nothing matches.
+            if (m_LiveTransport)
+            {
+                m_LiveTransport->CancelByCancelKey(cancelKey);
+            }
+            if (m_MockTransport)
+            {
+                m_MockTransport->CancelByCancelKey(cancelKey);
+            }
         }
     }
 
@@ -877,225 +695,192 @@ namespace AIAssistant
     // Completion handling with 429 retry
     // ---------------------------------------------------------------------------
 
-    void CurlMultiDispatcher::DrainCompleted()
+    void CurlMultiDispatcher::OnTransportComplete(IInterfaceTransport::RequestId id,
+                                                  IInterfaceTransport::Response response)
     {
         static std::atomic<uint32_t> s_QueryCounter{0};
 
-        int msgsLeft = 0;
-        CURLMsg* msg = nullptr;
-        while ((msg = curl_multi_info_read(m_MultiHandle, &msgsLeft)) != nullptr)
+        std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
+        auto it = m_Active.find(id);
+        if (it == m_Active.end())
         {
-            if (msg->msg != CURLMSG_DONE)
+            // Already cancelled / erased synchronously by DrainPendingCancellations.
+            // Drop the completion silently.
+            return;
+        }
+
+        PendingDispatch& pd = *it->second;
+
+        uint32_t const qnum = ++s_QueryCounter;
+        long const httpCode = response.m_HttpStatus;
+        std::string const versionLabel = response.m_HttpVersionLabel;
+        QueryResult const& transportResult = response.m_Result;
+
+        // Always parse rate limit headers (even on success) to keep state fresh.
+        std::string host = ExtractHostFromUrl(pd.m_Url);
+        if (!host.empty())
+        {
+            ParseRateLimitHeaders(pd.m_QueryData, response.m_RawHeaders, response.m_Body, host, httpCode);
+        }
+
+        // --- Handle 429 with auto-retry ---
+        // Sentinel discipline: -1 (or any negative) = "unset, use dispatcher
+        // default"; 0 = "no retries, fail on first 429"; >0 = explicit retry
+        // budget.  Conflating 0 with the unset case made hermetic tests
+        // (e.g. test_aimd_concurrency_cap.py) silently inherit the default
+        // 10 and fire 11× as many Observe(was_429=true) calls as expected.
+        int const maxRetries429 = (pd.m_QueryData.m_MaxRetries429 >= 0) ? pd.m_QueryData.m_MaxRetries429
+                                                                        : kDefaultMaxRetries429;
+        int const baseRetryMs = (pd.m_QueryData.m_BaseRetryMs > 0) ? pd.m_QueryData.m_BaseRetryMs
+                                                                   : kDefaultBaseRetryMs;
+        int const maxRetriesTransient = (pd.m_QueryData.m_MaxRetriesTransient >= 0)
+                                            ? pd.m_QueryData.m_MaxRetriesTransient
+                                            : kDefaultMaxRetriesTransient;
+
+        bool const transportOk = transportResult.m_Ok;
+
+        if (transportOk && httpCode == 429 && pd.m_RetryCount < maxRetries429 && !m_Stopping.load())
+        {
+            int retryCount = pd.m_RetryCount + 1;
+
+            // Determine delay: prefer Retry-After header, fall back to exponential backoff.
+            int delayMs = baseRetryMs * (1 << (retryCount - 1)); // exponential: 1s, 2s, 4s, 8s, 16s
+
+            // Check if the host state has a reset-at time that's more informative —
+            // wait for the LATER of req/token reset, since either could be what 429'd us.
+            auto hostIt = m_HostRateLimits.find(host);
+            if (hostIt != m_HostRateLimits.end())
             {
-                continue;
-            }
-
-            CURL* easy = msg->easy_handle;
-            CURLcode res = msg->data.result;
-
-            std::lock_guard<std::recursive_mutex> debugLock(m_DebugMutex);
-            auto it = m_Active.find(easy);
-            if (it == m_Active.end())
-            {
-                // Unexpected — clean up defensively.
-                curl_multi_remove_handle(m_MultiHandle, easy);
-                curl_easy_cleanup(easy);
-                continue;
-            }
-
-            ActiveRequest& req = *it->second;
-
-            long httpVersion = 0;
-            curl_easy_getinfo(easy, CURLINFO_HTTP_VERSION, &httpVersion);
-            std::string_view const versionLabel =
-                (httpVersion == CURL_HTTP_VERSION_2) ? "HTTP/2" :
-                (httpVersion == CURL_HTTP_VERSION_1_1) ? "HTTP/1.1" : "HTTP/1.0";
-
-            long httpCode = 0;
-            curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &httpCode);
-
-            uint32_t const qnum = ++s_QueryCounter;
-
-            // Always parse rate limit headers (even on success) to keep state fresh.
-            std::string host = ExtractHost(req.m_Url);
-            if (!host.empty())
-            {
-                ParseRateLimitHeaders(req, host, httpCode);
-            }
-
-            // --- Handle 429 with auto-retry ---
-            // Sentinel discipline: -1 (or any negative) = "unset, use dispatcher
-            // default"; 0 = "no retries, fail on first 429"; >0 = explicit retry
-            // budget.  Conflating 0 with the unset case made hermetic tests
-            // (e.g. test_aimd_concurrency_cap.py) silently inherit the default
-            // 10 and fire 11× as many Observe(was_429=true) calls as expected.
-            int const maxRetries429 = (req.m_QueryData.m_MaxRetries429 >= 0) ? req.m_QueryData.m_MaxRetries429
-                                                                             : kDefaultMaxRetries429;
-            int const baseRetryMs = (req.m_QueryData.m_BaseRetryMs > 0) ? req.m_QueryData.m_BaseRetryMs
-                                                                        : kDefaultBaseRetryMs;
-            int const maxRetriesTransient = (req.m_QueryData.m_MaxRetriesTransient >= 0)
-                                                ? req.m_QueryData.m_MaxRetriesTransient
-                                                : kDefaultMaxRetriesTransient;
-
-            if (res == CURLE_OK && httpCode == 429 && req.m_RetryCount < maxRetries429 && !m_Stopping.load())
-            {
-                int retryCount = req.m_RetryCount + 1;
-
-                // Determine delay: prefer Retry-After header, fall back to exponential backoff.
-                int delayMs = baseRetryMs * (1 << (retryCount - 1)); // exponential: 1s, 2s, 4s, 8s, 16s
-
-                // Check if the host state has a reset-at time that's more informative —
-                // wait for the LATER of req/token reset, since either could be what 429'd us.
-                auto hostIt = m_HostRateLimits.find(host);
-                if (hostIt != m_HostRateLimits.end())
+                auto laterReset = std::max(hostIt->second.m_RequestsResetAt,
+                                           hostIt->second.m_TokensResetAt);
+                auto msUntilReset = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    laterReset - std::chrono::steady_clock::now()).count();
+                if (msUntilReset > 0 && msUntilReset < 120000) // cap at 2 minutes
                 {
-                    auto laterReset = std::max(hostIt->second.m_RequestsResetAt,
-                                               hostIt->second.m_TokensResetAt);
-                    auto msUntilReset = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        laterReset - std::chrono::steady_clock::now()).count();
-                    if (msUntilReset > 0 && msUntilReset < 120000) // cap at 2 minutes
-                    {
-                        delayMs = static_cast<int>(msUntilReset) + 100; // small buffer
-                    }
-                }
-
-                LOG_CORE_WARN("HTTP 429 rate limit for query {} (host: {}) — auto-retrying in {}ms (attempt {}/{})",
-                              qnum, host, delayMs, retryCount, maxRetries429);
-                ++m_Total429s;
-
-                // Build retry entry. Carry the dispatched hook forward so retries
-                // re-fire it (AiRequestPool re-disarms its watchdog on the next
-                // curl_multi_add_handle).  No deadline-extension hook needed —
-                // each retry creates a fresh easy handle with its own
-                // CURLOPT_TIMEOUT_MS budget.
-                PendingRequest pendingRetry;
-                pendingRetry.m_QueryData     = std::move(req.m_QueryData);
-                pendingRetry.m_Callback      = std::move(req.m_Callback);
-
-                RetryEntry entry;
-                entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
-                entry.m_Request    = std::move(pendingRetry);
-                entry.m_RetryCount = retryCount;
-
-                {
-                    std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
-                    m_RetryQueue.push_back(std::move(entry));
-                    curl_multi_remove_handle(m_MultiHandle, easy);
-                    curl_slist_free_all(req.m_Headers);
-                    curl_easy_cleanup(easy);
-                    m_Active.erase(it);
-                }
-                continue; // do NOT invoke callback — retry is pending
-            }
-
-            // --- Handle transient HTTP errors (400, 500, 502, 503) with limited auto-retry ---
-            // Note: curl-level errors (timeout, couldnt-connect, SSL handshake failure)
-            // do NOT enter this retry path — the `res == CURLE_OK` guard means only
-            // server-side HTTP statuses retry here.  Curl-level errors typically indicate
-            // persistent network/auth/cert issues where retrying inside the dispatcher
-            // would burn the per-request timeout budget without changing the outcome;
-            // the higher-level WorkflowRuntimeManager owns retry policy for those.
-            bool const isTransientError = (httpCode == 400 || httpCode == 500 || httpCode == 502 || httpCode == 503);
-            if (res == CURLE_OK && isTransientError && req.m_RetryCount < maxRetriesTransient && !m_Stopping.load())
-            {
-                int retryCount = req.m_RetryCount + 1;
-                int delayMs = baseRetryMs * (1 << (retryCount - 1)); // 1s, 2s
-
-                LOG_CORE_WARN("HTTP {} for query {} — transient error, auto-retrying in {}ms (attempt {}/{})",
-                              httpCode, qnum, delayMs, retryCount, maxRetriesTransient);
-
-                PendingRequest pendingRetry;
-                pendingRetry.m_QueryData     = std::move(req.m_QueryData);
-                pendingRetry.m_Callback      = std::move(req.m_Callback);
-
-                RetryEntry entry;
-                entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
-                entry.m_Request    = std::move(pendingRetry);
-                entry.m_RetryCount = retryCount;
-
-                {
-                    std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
-                    m_RetryQueue.push_back(std::move(entry));
-                    curl_multi_remove_handle(m_MultiHandle, easy);
-                    curl_slist_free_all(req.m_Headers);
-                    curl_easy_cleanup(easy);
-                    m_Active.erase(it);
-                }
-                continue; // do NOT invoke callback — retry is pending
-            }
-
-            LOG_CORE_INFO("query {} used {} (HTTP {}){}", qnum, versionLabel, httpCode,
-                          req.m_RetryCount > 0 ? " [retry " + std::to_string(req.m_RetryCount) + "]" : "");
-
-            // Log rate limit state for the host.
-            if (!host.empty())
-            {
-                auto hostIt = m_HostRateLimits.find(host);
-                if (hostIt != m_HostRateLimits.end() && hostIt->second.m_RemainingRequests >= 0)
-                {
-                    LOG_CORE_INFO("rate limit ({}): {} requests remaining, {} tokens remaining",
-                                  host, hostIt->second.m_RemainingRequests, hostIt->second.m_RemainingTokens);
+                    delayMs = static_cast<int>(msUntilReset) + 100; // small buffer
                 }
             }
 
-            QueryResult result;
-            if (res != CURLE_OK)
+            LOG_CORE_WARN("HTTP 429 rate limit for query {} (host: {}) — auto-retrying in {}ms (attempt {}/{})",
+                          qnum, host, delayMs, retryCount, maxRetries429);
+            ++m_Total429s;
+
+            // Build retry entry. Carry the dispatched hook forward so retries
+            // re-fire it (AiRequestPool re-disarms its watchdog on the next
+            // curl_multi_add_handle).  No deadline-extension hook needed —
+            // each retry creates a fresh easy handle with its own
+            // CURLOPT_TIMEOUT_MS budget.
+            PendingRequest pendingRetry;
+            pendingRetry.m_QueryData     = std::move(pd.m_QueryData);
+            pendingRetry.m_Callback      = std::move(pd.m_Callback);
+
+            RetryEntry entry;
+            entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+            entry.m_Request    = std::move(pendingRetry);
+            entry.m_RetryCount = retryCount;
+
+            m_RetryQueue.push_back(std::move(entry));
+            m_Active.erase(it);
+            return; // do NOT invoke callback — retry is pending
+        }
+
+        // --- Handle transient HTTP errors (400, 500, 502, 503) with limited auto-retry ---
+        // Note: curl-level errors (timeout, couldnt-connect, SSL handshake failure)
+        // do NOT enter this retry path — the `transportOk` guard means only
+        // server-side HTTP statuses retry here.  Curl-level errors typically indicate
+        // persistent network/auth/cert issues where retrying inside the dispatcher
+        // would burn the per-request timeout budget without changing the outcome;
+        // the higher-level WorkflowRuntimeManager owns retry policy for those.
+        bool const isTransientError = (httpCode == 400 || httpCode == 500 || httpCode == 502 || httpCode == 503);
+        if (transportOk && isTransientError && pd.m_RetryCount < maxRetriesTransient && !m_Stopping.load())
+        {
+            int retryCount = pd.m_RetryCount + 1;
+            int delayMs = baseRetryMs * (1 << (retryCount - 1)); // 1s, 2s
+
+            LOG_CORE_WARN("HTTP {} for query {} — transient error, auto-retrying in {}ms (attempt {}/{})",
+                          httpCode, qnum, delayMs, retryCount, maxRetriesTransient);
+
+            PendingRequest pendingRetry;
+            pendingRetry.m_QueryData     = std::move(pd.m_QueryData);
+            pendingRetry.m_Callback      = std::move(pd.m_Callback);
+
+            RetryEntry entry;
+            entry.m_ReadyAt    = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+            entry.m_Request    = std::move(pendingRetry);
+            entry.m_RetryCount = retryCount;
+
+            m_RetryQueue.push_back(std::move(entry));
+            m_Active.erase(it);
+            return; // do NOT invoke callback — retry is pending
+        }
+
+        LOG_CORE_INFO("query {} used {} (HTTP {}){}", qnum, versionLabel, httpCode,
+                      pd.m_RetryCount > 0 ? " [retry " + std::to_string(pd.m_RetryCount) + "]" : "");
+
+        // Log rate limit state for the host.
+        if (!host.empty())
+        {
+            auto hostIt = m_HostRateLimits.find(host);
+            if (hostIt != m_HostRateLimits.end() && hostIt->second.m_RemainingRequests >= 0)
             {
-                int const curlCode = static_cast<int>(res);
-                std::string errMsg = curl_easy_strerror(res);
-                if (res == CURLE_ABORTED_BY_CALLBACK)
-                {
-                    LOG_CORE_INFO("[shutdown] curl request aborted (query {})", qnum);
-                }
-                else
-                {
-                    // cancelKey + quotaKey lets the dashboard run analyzer surface
-                    // this line — it filters issues to ERROR lines containing the
-                    // run's identifiers (per CLAUDE.md "Failure-path logs").
-                    LOG_CORE_ERROR("curl error (code {}): {} cancelKey='{}' quotaKey='{}'",
-                                   curlCode, errMsg,
-                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
-                }
-                result = QueryResult::Fail(curlCode, std::move(errMsg));
+                LOG_CORE_INFO("rate limit ({}): {} requests remaining, {} tokens remaining",
+                              host, hostIt->second.m_RemainingRequests, hostIt->second.m_RemainingTokens);
             }
-            else if (httpCode >= 400)
+        }
+
+        QueryResult result;
+        if (!transportOk)
+        {
+            int const errCode = transportResult.m_ErrorCode;
+            std::string errMsg = transportResult.m_ErrorMessage;
+            if (errCode == static_cast<int>(CURLE_ABORTED_BY_CALLBACK))
             {
-                std::string errMsg = QueryErrorCode::Describe(static_cast<int>(httpCode));
-                if (httpCode == 429)
-                {
-                    LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; "
-                                   "retries exhausted ({}x) cancelKey='{}' quotaKey='{}'",
-                                   qnum, req.m_RetryCount,
-                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
-                    ++m_TotalRetriesExhausted;
-                }
-                else
-                {
-                    LOG_CORE_ERROR("HTTP error {} for query {} cancelKey='{}' quotaKey='{}'",
-                                   httpCode, qnum,
-                                   req.m_QueryData.m_CancelKey, req.m_QueryData.m_QuotaKey);
-                }
-                result = QueryResult::Fail(static_cast<int>(httpCode), std::move(errMsg));
+                LOG_CORE_INFO("[shutdown] curl request aborted (query {})", qnum);
             }
             else
             {
-                result = QueryResult::Ok();
+                // cancelKey + quotaKey lets the dashboard run analyzer surface
+                // this line — it filters issues to ERROR lines containing the
+                // run's identifiers (per CLAUDE.md "Failure-path logs").
+                LOG_CORE_ERROR("curl error (code {}): {} cancelKey='{}' quotaKey='{}'",
+                               errCode, errMsg,
+                               pd.m_QueryData.m_CancelKey, pd.m_QueryData.m_QuotaKey);
             }
-
-            // Move data out of req before erasing (callback may re-enter Submit).
-            std::string responseBody  = std::move(req.m_ReadBuffer);
-            Callback callback         = std::move(req.m_Callback);
-            struct curl_slist* hdrs   = req.m_Headers;
-
+            result = QueryResult::Fail(errCode, std::move(errMsg));
+        }
+        else if (httpCode >= 400)
+        {
+            std::string errMsg = QueryErrorCode::Describe(static_cast<int>(httpCode));
+            if (httpCode == 429)
             {
-                std::lock_guard<std::recursive_mutex> lock(m_DebugMutex);
-                curl_multi_remove_handle(m_MultiHandle, easy);
-                curl_slist_free_all(hdrs);
-                curl_easy_cleanup(easy);
-                m_Active.erase(it);
+                LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; "
+                               "retries exhausted ({}x) cancelKey='{}' quotaKey='{}'",
+                               qnum, pd.m_RetryCount,
+                               pd.m_QueryData.m_CancelKey, pd.m_QueryData.m_QuotaKey);
+                ++m_TotalRetriesExhausted;
             }
-            ++m_TotalCompleted;
+            else
+            {
+                LOG_CORE_ERROR("HTTP error {} for query {} cancelKey='{}' quotaKey='{}'",
+                               httpCode, qnum,
+                               pd.m_QueryData.m_CancelKey, pd.m_QueryData.m_QuotaKey);
+            }
+            result = QueryResult::Fail(static_cast<int>(httpCode), std::move(errMsg));
+        }
+        else
+        {
+            result = QueryResult::Ok();
+        }
 
+        // Move data out of pd before erasing (callback may re-enter Submit).
+        std::string responseBody = std::move(response.m_Body);
+        Callback callback        = std::move(pd.m_Callback);
+
+        m_Active.erase(it);
+        ++m_TotalCompleted;
+
+        if (callback)
+        {
             callback(result, std::move(responseBody));
         }
     }
@@ -1107,8 +892,8 @@ namespace AIAssistant
     void CurlMultiDispatcher::IoThreadFunc()
     {
         // Loop body wrapped in try/catch so a transient bad_alloc anywhere
-        // inside DrainInbox / DrainCompleted / DrainPendingCancellations does
-        // NOT silently terminate the I/O thread (which would freeze every
+        // inside DrainInbox / Pump / DrainPendingCancellations does NOT
+        // silently terminate the I/O thread (which would freeze every
         // subsequent dispatch with no log line pointing at the cause).  The
         // policy is "log loudly + continue": the next iteration retries the
         // failed work from its source state (m_Inbox / m_Active / m_RetryQueue
@@ -1158,17 +943,28 @@ namespace AIAssistant
                     DrainRetryQueue();
                 }
 
-                int running = 0;
-                curl_multi_perform(m_MultiHandle, &running);
-                DrainCompleted();
+                // Drive both transports: LiveTransport's Pump runs
+                // curl_multi_perform + harvests completions; MockTransport's
+                // Pump fires any queued fixture responses.  OnTransportComplete
+                // fires inside each Pump for completed requests and
+                // decrements m_Active.
+                if (m_LiveTransport)
+                {
+                    m_LiveTransport->Pump();
+                }
+                if (m_MockTransport)
+                {
+                    m_MockTransport->Pump();
+                }
 
                 if (stopping && m_Active.empty())
                 {
                     break;
                 }
 
-                // Sleep until socket activity or curl_multi_wakeup() (from Submit/SignalStop).
-                // Use shorter timeout when retries are pending so we wake up to process them.
+                // Sleep until socket activity or transport Wakeup() (from
+                // Submit/SignalStop/CancelByCancelKey).  Use shorter timeout
+                // when retries are pending so we wake up to process them.
                 long timeout_ms = 1000L;
                 if (!m_Active.empty())
                 {
@@ -1187,7 +983,14 @@ namespace AIAssistant
                         earliest - std::chrono::steady_clock::now()).count();
                     timeout_ms = std::clamp(static_cast<long>(ms), 10L, 1000L);
                 }
-                curl_multi_poll(m_MultiHandle, nullptr, 0, timeout_ms, nullptr);
+                // Only LiveTransport blocks on socket activity.  MockTransport's
+                // Wait is a no-op (no I/O to wait on); calling it would just
+                // return immediately.  Skip it so the I/O thread actually
+                // sleeps when there's no live activity.
+                if (m_LiveTransport)
+                {
+                    m_LiveTransport->Wait(timeout_ms);
+                }
             }
             catch (std::bad_alloc const&)
             {

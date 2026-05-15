@@ -388,7 +388,7 @@ namespace AIAssistant
         // Exhaustive switch — no default: arm.  Adding a new InterfaceType
         // breaks the build here until handled, per CLAUDE.md discipline.
         // NumAPIs / InvalidAPI are sentinel values, not real providers.
-        static_assert(ConfigParser::EngineConfig::InterfaceType::NumAPIs == 7,
+        static_assert(ConfigParser::EngineConfig::InterfaceType::NumAPIs == 6,
                       "extend IRateLimitStrategy::Get when adding a new InterfaceType");
 
         switch (interfaceType)
@@ -401,8 +401,6 @@ namespace AIAssistant
                 return s_Empty;
             case ConfigParser::EngineConfig::InterfaceType::API4:
                 return s_Anthropic;
-            case ConfigParser::EngineConfig::InterfaceType::Test:
-                return s_Empty;
             case ConfigParser::EngineConfig::InterfaceType::API5:
                 return s_Empty;
             case ConfigParser::EngineConfig::InterfaceType::API6:

@@ -1287,112 +1287,14 @@ namespace AIAssistant
         std::string const model =
             envelope.m_ModelOverride.has_value() ? envelope.m_ModelOverride.value() : api->m_Model;
 
-        // TestInterface: short-circuit curl and synthesize a canned reply.
-        // The interface's m_Url field is repurposed as an optional fixture path.
-        // An empty or missing fixture produces a generic "test reply" placeholder.
-        //
-        // Locked-in variant count: Test is the only InterfaceType that requires
-        // a hand-coded special-case here.  Every other variant is dispatched
-        // generically through IRequestBuilder::Create + IRateLimitStrategy::Get.
-        // If a new InterfaceType variant is added that needs Test-style
-        // short-circuit handling, this static_assert will fail compilation as a
-        // forcing function to make the change deliberate (no `default:` over
-        // closed enums we own — lock the variant count instead).
-        static_assert(ConfigParser::EngineConfig::NumAPIs == 7,
-                      "InterfaceType variant count changed — review whether the new variant needs Test-style "
-                      "short-circuit handling in AiRequestPool::Submit, then bump this assertion");
-        if (api->m_InterfaceType == ConfigParser::EngineConfig::InterfaceType::Test)
-        {
-            std::string replyText = "test reply (no fixture configured)";
-            fs::path fixturePath(api->m_Url);
-            if (!fixturePath.empty() && fs::exists(fixturePath))
-            {
-                std::ifstream input(fixturePath, std::ios::binary);
-                if (input)
-                {
-                    std::ostringstream buffer;
-                    buffer << input.rdbuf();
-                    replyText = buffer.str();
-                }
-            }
-            // Test-interface fixtures may carry malformed UTF-8 bytes (the
-            // TUI invalid-UTF-8 stress test is the worked example); sanitize
-            // before they enter the log/dashboard pipeline.  Output file
-            // (binary write below) legitimately preserves the original bytes
-            // for inspection.
-            std::string const replyTextSanitized = SanitizeUtf8(replyText);
-
-            fs::path const queueFolderCopy = envelope.m_QueueFolder;
-            std::string const probNameCopy = envelope.m_ProbName;
-            std::string const modelLocal = model;
-            fs::path transcriptPathLocal;
-            if (!queueFolderCopy.empty() && !probNameCopy.empty())
-            {
-                transcriptPathLocal =
-                    queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".transcript.json");
-                if (!AiTranscript::AppendRequest(transcriptPathLocal, envelope, modelLocal))
-                {
-                    // AiTranscript logs the specific failure internally; the
-                    // dispatch proceeds without a transcript entry.
-                }
-            }
-
-            if (Core::g_Core != nullptr)
-            {
-                auto startedEvent = std::make_shared<AiCallStartedEvent>(probNameCopy, api->m_Name);
-                Core::g_Core->PushEvent(startedEvent);
-            }
-
-            fs::path writtenOutputPath;
-            if (!queueFolderCopy.empty() && !probNameCopy.empty())
-            {
-                writtenOutputPath = queueFolderCopy / (fs::path(probNameCopy).stem().string() + ".output.txt");
-                // Output file gets the SANITIZED bytes — downstream tasks
-                // (combineDocumentation et al.) read this file as UTF-8 text;
-                // the inspection-on-disk benefit of preserving raw bytes is
-                // outweighed by every downstream consumer assuming valid UTF-8.
-                FileWriter::Get().WriteWithHeader(writtenOutputPath, replyTextSanitized, modelLocal);
-            }
-
-            AiReply testReply;
-            testReply.m_Kind = AiReply::Kind::Text;
-            testReply.m_Text = replyTextSanitized;
-            testReply.m_FinishReason = "test";
-
-            if (!transcriptPathLocal.empty())
-            {
-                if (!AiTranscript::AppendResponse(transcriptPathLocal, testReply))
-                {
-                    // logged inside AiTranscript
-                }
-            }
-
-            // Signal completion so workflow-bound tasks release from waiting_external.
-            // The real-provider path does this from its curl callback; the Test short-circuit
-            // must do it explicitly since there is no dispatcher callback.
-            if (!writtenOutputPath.empty())
-            {
-                std::string const normalizedPath =
-                    fs::absolute(writtenOutputPath).lexically_normal().generic_string();
-                // Best-effort signal — a missing pending entry just means the binding
-                // already completed via another path; not an error.
-                (void)OnOutputFileCreated(normalizedPath);
-            }
-
-            if (Core::g_Core != nullptr)
-            {
-                auto completedEvent =
-                    std::make_shared<AiCallCompletedEvent>(probNameCopy, testReply.m_Usage, testReply.m_FinishReason);
-                Core::g_Core->PushEvent(completedEvent);
-            }
-
-            if (onReply)
-            {
-                onReply(testReply);
-            }
-            return true;
-        }
-
+        // Locked-in variant count.  All variants dispatch generically through
+        // IRequestBuilder::Create + IRateLimitStrategy::Get; mock-flagged
+        // interfaces route through MockTransport at the dispatcher layer
+        // (transparent to this code).  Adding a new variant: bump this
+        // assertion and verify the new variant works through the generic path.
+        static_assert(ConfigParser::EngineConfig::NumAPIs == 6,
+                      "InterfaceType variant count changed — verify generic dispatch covers the new variant, "
+                      "then bump this assertion");
         auto requestBuilder = IRequestBuilder::Create(api->m_InterfaceType);
         if (!requestBuilder)
         {
@@ -1478,7 +1380,9 @@ namespace AIAssistant
                                           .m_MaxConcurrency = api->m_RateLimit.m_MaxConcurrency,
                                           .m_MaxRetries429 = api->m_RateLimit.m_MaxRetries429,
                                           .m_MaxRetriesTransient = api->m_RateLimit.m_MaxRetriesTransient,
-                                          .m_BaseRetryMs = api->m_RateLimit.m_BaseRetryMs};
+                                          .m_BaseRetryMs = api->m_RateLimit.m_BaseRetryMs,
+                                          .m_IsMock = api->m_IsMock,
+                                          .m_FixturePath = api->m_FixturePath};
 
         JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
         CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;

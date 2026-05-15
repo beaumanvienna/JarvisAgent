@@ -44,7 +44,6 @@ namespace AIAssistant
                 API2,
                 API3,
                 API4,
-                Test, // No-network fixture-driven backend for integration tests
                 API5, // AWS Bedrock: per-model-family body, SigV4 signing
                 API6, // Azure OpenAI: API1 body shape, deployment URL template, api-key header
                 NumAPIs,
@@ -102,6 +101,15 @@ namespace AIAssistant
                 // envelope's m_MaxTokens isn't set.  4096 is conservative for
                 // chat models; raise for long-form generation interfaces.
                 int32_t m_DefaultOutputTokens{4096};
+                // Hermetic-test routing.  When true, the dispatcher routes
+                // calls to this interface through MockTransport (fixture
+                // replay) instead of LiveTransport (real curl).  Admin-only
+                // — same access surface as m_ApiKey; settable via config.json
+                // or authenticated admin REST endpoint.  Fixture path is
+                // ConfineUnderProjectRoot-gated at consume time.  Parsed in
+                // Foundation Sitting 1, dispatch selection wired in Sitting 2.
+                bool m_IsMock{false};
+                std::string m_FixturePath;
             };
 
             // Generate a unique interface name from URL domain + model

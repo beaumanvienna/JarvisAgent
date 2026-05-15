@@ -85,7 +85,7 @@ def parse(base_url: str, headers: dict, *, interface_type: str,
     return r.json()
 
 
-# Expected strategy per InterfaceType (matches the switch at rateLimitStrategy.cpp:377).
+# Expected strategy per InterfaceType (matches the switch in rateLimitStrategy.cpp).
 EXPECTED_STRATEGY = {
     "API1": "openai",
     "API2": "openai",
@@ -93,7 +93,6 @@ EXPECTED_STRATEGY = {
     "API4": "anthropic",
     "API5": "empty",
     "API6": "openai",
-    "Test": "empty",
 }
 
 EXPECTED_PROBE = {

@@ -54,6 +54,7 @@
 #include "python/pythonEnginePool.h"
 #include "web/webServer.h"
 #include "web/webServer_helpers.h"
+#include "file/pathConfinement.h"
 #include "file/scriptRegistry.h"
 #include "workflow/taskPathResolver.h"
 
@@ -4596,7 +4597,6 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API2: item["api_type"] = "API2"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API3: item["api_type"] = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: item["api_type"] = "API4"; break;
-                case ConfigParser::EngineConfig::InterfaceType::Test: item["api_type"] = "Test"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API5: item["api_type"] = "API5"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API6: item["api_type"] = "API6"; break;
                 default: item["api_type"] = "API1"; break;
@@ -4604,6 +4604,8 @@ namespace AIAssistant
             item["key_name"] = iface.m_KeyName;
             item["max_context_tokens"] = static_cast<int64_t>(iface.m_MaxContextTokens);
             item["default_output_tokens"] = static_cast<int64_t>(iface.m_DefaultOutputTokens);
+            item["is_mock"] = iface.m_IsMock;
+            item["fixture_path"] = iface.m_FixturePath;
 
             // Rate-limit + size-aware request budget — always emit so the UI
             // can render current effective values (defaults included) without
@@ -4634,8 +4636,9 @@ namespace AIAssistant
     {
         auto& config = Core::g_Core->GetMutableConfig();
 
-        std::string name, description, url, model, apiTypeStr, keyName;
+        std::string name, description, url, model, apiTypeStr, keyName, fixturePath;
         uint64_t maxContextTokensOverride = 0; // 0 = fall back to model-name resolution
+        bool isMock = false;
 
         {
             simdjson::ondemand::parser parser;
@@ -4680,6 +4683,21 @@ namespace AIAssistant
                         maxContextTokensOverride = static_cast<uint64_t>(ctxVal);
                     }
                 }
+                {
+                    auto d2 = parser.iterate(json);
+                    bool isMockVal = false;
+                    if (d2["is_mock"].get_bool().get(isMockVal) == simdjson::SUCCESS)
+                    {
+                        isMock = isMockVal;
+                    }
+                }
+                {
+                    auto d2 = parser.iterate(json);
+                    if (d2["fixture_path"].get_string().get(sv) == simdjson::SUCCESS)
+                    {
+                        fixturePath = std::string(sv);
+                    }
+                }
             }
             catch (...)
             {
@@ -4700,11 +4718,49 @@ namespace AIAssistant
             return MakeJsonResponse(400, err);
         }
 
+        // Legacy api_type "Test" rejection with migration guidance.
+        if (apiTypeStr == "Test")
+        {
+            crow::json::wvalue err;
+            err["ok"] = false;
+            err["error"] = "api_type_test_removed";
+            err["message"] = "api_type 'Test' has been removed.  Use api_type: '<API1..API6>' + "
+                             "is_mock: true + fixture_path: '<path>' instead.  See doc/jarvisagent.md.";
+            return MakeJsonResponse(400, err);
+        }
+
+        // is_mock + fixture_path coupling — same fail-closed rule as
+        // ConfigParser: is_mock=true requires a fixture_path that resolves
+        // under the project root.
+        if (isMock)
+        {
+            if (fixturePath.empty())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "is_mock_requires_fixture_path";
+                err["message"] = "is_mock=true requires a non-empty fixture_path.";
+                return MakeJsonResponse(400, err);
+            }
+            std::filesystem::path const confined = ConfineUnderProjectRoot(fixturePath);
+            if (confined.empty())
+            {
+                crow::json::wvalue err;
+                err["ok"] = false;
+                err["error"] = "fixture_path_rejected";
+                err["message"] = "fixture_path rejected by ConfineUnderProjectRoot "
+                                 "(outside project root, symlink escape, or unresolvable): '" + fixturePath + "'";
+                return MakeJsonResponse(400, err);
+            }
+        }
+
         ConfigParser::EngineConfig::ApiInterface newIface;
         newIface.m_Url = url;
         newIface.m_Model = model;
         newIface.m_Description = description;
         newIface.m_KeyName = keyName;
+        newIface.m_IsMock = isMock;
+        newIface.m_FixturePath = fixturePath;
         newIface.m_Name =
             name.empty()
                 ? ConfigParser::EngineConfig::GenerateInterfaceName(url, model, apiTypeStr.empty() ? "API1" : apiTypeStr)
@@ -4724,8 +4780,6 @@ namespace AIAssistant
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
         else if (apiTypeStr == "API2")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
-        else if (apiTypeStr == "Test")
-            newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
         else if (apiTypeStr == "API5")
             newIface.m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
         else if (apiTypeStr == "API6")
@@ -4812,14 +4866,21 @@ namespace AIAssistant
                     if (d["api_type"].get_string().get(sv) == simdjson::SUCCESS)
                     {
                         std::string apiTypeStr(sv);
+                        if (apiTypeStr == "Test")
+                        {
+                            crow::json::wvalue err;
+                            err["ok"] = false;
+                            err["error"] = "api_type_test_removed";
+                            err["message"] = "api_type 'Test' has been removed.  Use api_type: '<API1..API6>' + "
+                                             "is_mock: true + fixture_path: '<path>' instead.";
+                            return MakeJsonResponse(400, err);
+                        }
                         if (apiTypeStr == "API4")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
                         else if (apiTypeStr == "API3")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
                         else if (apiTypeStr == "API2")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
-                        else if (apiTypeStr == "Test")
-                            target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
                         else if (apiTypeStr == "API5")
                             target->m_InterfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
                         else if (apiTypeStr == "API6")
@@ -4838,6 +4899,44 @@ namespace AIAssistant
                     int64_t v = 0;
                     if (d["max_context_tokens"].get_int64().get(v) == simdjson::SUCCESS && v > 0)
                         target->m_MaxContextTokens = static_cast<uint64_t>(v);
+                }
+                {
+                    auto d = parser.iterate(json);
+                    bool isMockVal = false;
+                    if (d["is_mock"].get_bool().get(isMockVal) == simdjson::SUCCESS)
+                        target->m_IsMock = isMockVal;
+                }
+                {
+                    auto d = parser.iterate(json);
+                    if (d["fixture_path"].get_string().get(sv) == simdjson::SUCCESS)
+                        target->m_FixturePath = std::string(sv);
+                }
+
+                // After applying updates, validate the is_mock + fixture_path
+                // coupling.  If either field is in an invalid state, reject
+                // the whole update — partial-update semantics are still kept
+                // because the prior values stay if the body didn't override
+                // them, but the resulting coupling must satisfy the rule.
+                if (target->m_IsMock)
+                {
+                    if (target->m_FixturePath.empty())
+                    {
+                        crow::json::wvalue err;
+                        err["ok"] = false;
+                        err["error"] = "is_mock_requires_fixture_path";
+                        err["message"] = "is_mock=true requires a non-empty fixture_path.";
+                        return MakeJsonResponse(400, err);
+                    }
+                    std::filesystem::path const confined = ConfineUnderProjectRoot(target->m_FixturePath);
+                    if (confined.empty())
+                    {
+                        crow::json::wvalue err;
+                        err["ok"] = false;
+                        err["error"] = "fixture_path_rejected";
+                        err["message"] = "fixture_path rejected by ConfineUnderProjectRoot: '" +
+                                         target->m_FixturePath + "'";
+                        return MakeJsonResponse(400, err);
+                    }
                 }
             }
             catch (...)
@@ -4937,7 +5036,6 @@ namespace AIAssistant
                 case ConfigParser::EngineConfig::InterfaceType::API2: apiStr = "API2"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API3: apiStr = "API3"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API4: apiStr = "API4"; break;
-                case ConfigParser::EngineConfig::InterfaceType::Test: apiStr = "Test"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API5: apiStr = "API5"; break;
                 case ConfigParser::EngineConfig::InterfaceType::API6: apiStr = "API6"; break;
                 default: apiStr = "API1"; break;
@@ -4982,6 +5080,16 @@ namespace AIAssistant
             {
                 newArray += ",\n";
                 newArray += "            \"key_name\": \"" + JsonHelper::EscapeJsonString(iface.m_KeyName) + "\"";
+            }
+            if (iface.m_IsMock)
+            {
+                newArray += ",\n";
+                newArray += "            \"is_mock\": true";
+            }
+            if (!iface.m_FixturePath.empty())
+            {
+                newArray += ",\n";
+                newArray += "            \"fixture_path\": \"" + JsonHelper::EscapeJsonString(iface.m_FixturePath) + "\"";
             }
             if (iface.m_DefaultOutputTokens != 4096)
             {
@@ -8698,7 +8806,6 @@ namespace AIAssistant
         else if (interfaceTypeStr == "API2")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API2;
         else if (interfaceTypeStr == "API3")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API3;
         else if (interfaceTypeStr == "API4")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API4;
-        else if (interfaceTypeStr == "Test")  interfaceType = ConfigParser::EngineConfig::InterfaceType::Test;
         else if (interfaceTypeStr == "API5")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API5;
         else if (interfaceTypeStr == "API6")  interfaceType = ConfigParser::EngineConfig::InterfaceType::API6;
         else

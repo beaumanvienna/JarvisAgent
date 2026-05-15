@@ -37,7 +37,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TEST_INTERFACE_NAME = "markitdown_test_dispatch"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-FIXTURE_FIXTURE = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "hermetic_reply.txt")
+FIXTURE_FIXTURE = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "api1", "golden_success.json")
 PDF_FIXTURE = os.path.join(REPO_ROOT, "workflows", "in.pdf")
 
 
@@ -77,11 +77,13 @@ def build_jcwf(interface_name: str, pdf_path: str) -> dict:
 def create_test_interface(base_url: str, headers: dict, fixture_path: str) -> bool:
     body = {
         "name": TEST_INTERFACE_NAME,
-        "description": "Markitdown test — Test backend, network-free",
-        "url": fixture_path,
-        "model": "hermetic-stub",
-        "api_type": "Test",
+        "description": "Markitdown test — MockTransport backend, network-free",
+        "url": "https://localhost/_mock_/never_called",
+        "model": "mock-stub",
+        "api_type": "API1",
         "key_name": "",
+        "is_mock": True,
+        "fixture_path": fixture_path,
     }
     r = requests.post(
         f"{base_url}/api/settings/ai-interfaces",

@@ -17,34 +17,38 @@ export J9T_TOKEN=mcp_...                 # or pass --token on the CLI
 ### Offline / no live AI
 
 These tests drive the refactored dispatch end-to-end without any network
-call outside localhost.  The `TestInterface` (Phase 7) is used as a hermetic
-AI backend — it short-circuits the curl dispatcher and returns a canned
-reply from a fixture file.
+call outside localhost.  `MockTransport` (Foundation Sitting 2, 2026-05-14)
+is used as the hermetic AI backend — the dispatcher routes calls whose
+interface has `is_mock: true` through MockTransport's fixture-replay path
+instead of LiveTransport's real curl.  Crucially MockTransport feeds the
+response body through the **real** ReplyParserAPI{1..6}, AIMD controller,
+retry queue, and cascade-cancel queue — only the bottom HTTP layer is
+replaced.  Fixtures are full API-shape JSON responses (e.g. OpenAI chat
+completions), shared at `test/dispatch/fixtures/api1/golden_success.json`.
 
 ```
-python3 test/dispatch/test_schema_covers_parser.py        # JCWF schema ⊇ parser
-python3 test/dispatch/test_direct_dispatch_signals.py     # refactor signals + no-legacy fields
-python3 test/dispatch/test_envelope_empty_body_rejected.py# empty prompt -> Failed
-python3 test/dispatch/test_testinterface_hermetic.py      # Test interface byte-exact round-trip + PROV sidecar
-python3 test/dispatch/test_relaxed_env_warnings.py        # Phase 1 relaxed env (STNG/TASK/CNTX optional)
-python3 test/dispatch/test_chunking_fanout.py             # Phase 6 chunked fan-out + reduce pass
-python3 test/dispatch/test_markitdown_cntx.py             # CNTX office-file auto-conversion
-python3 test/dispatch/test_cross_workflow_parallel.py     # cross-workflow concurrency (2026-04-22 bug)
+python3 test/dispatch/test_schema_covers_parser.py         # JCWF schema ⊇ parser
+python3 test/dispatch/test_direct_dispatch_signals.py      # refactor signals + no-legacy fields
+python3 test/dispatch/test_envelope_empty_body_rejected.py # empty prompt -> Failed
+python3 test/dispatch/test_mock_dispatch_hermetic.py       # MockTransport byte-exact round-trip + PROV `mocked: true`
+python3 test/dispatch/test_relaxed_env_warnings.py         # Phase 1 relaxed env (STNG/TASK/CNTX optional)
+python3 test/dispatch/test_chunking_fanout.py              # Phase 6 chunked fan-out + reduce pass
+python3 test/dispatch/test_markitdown_cntx.py              # CNTX office-file auto-conversion
+python3 test/dispatch/test_cross_workflow_parallel.py      # cross-workflow concurrency (2026-04-22 bug)
 python3 test/dispatch/test_rate_limit_observation_parse.py # §14 Tier A: per-provider strategy parser contract
 ```
 
-The chunking and markitdown tests use the hermetic Test interface too —
-no network.  Markitdown requires the `markitdown` CLI on PATH (pip install
-markitdown).  An 8 MB sample PDF at `workflows/in.pdf` is the input
-fixture.
+The chunking and markitdown tests use MockTransport too — no network.
+Markitdown requires the `markitdown` CLI on PATH (pip install markitdown).
+An 8 MB sample PDF at `workflows/in.pdf` is the input fixture.
 
 `test_rate_limit_observation_parse.py` drives every per-provider
 `IRateLimitStrategy::Parse(...)` through canned header fixtures via
 `POST /api/debug/parse-rate-limit-headers` (debug builds only). Asserts
 OpenAI duration syntax (`200ms`/`6s`/`1m30s`), Anthropic ISO 8601 resets,
 split input/output token quotas, retry-after on 429, the Empty strategy
-for Gemini / Bedrock / Test, plus `DeriveQuotaKey` and
-`InitialConcurrencyProbe` per provider. Zero AI calls; ~1 s wall.
+for Gemini / Bedrock, plus `DeriveQuotaKey` and `InitialConcurrencyProbe`
+per provider. Zero AI calls; ~1 s wall.
 
 ### §14 Tier B hermetic dispatcher tests
 
@@ -82,39 +86,45 @@ Production paths still verify; the bypass is gated on
 
 ### TUI ncurses stress tests
 
-Two regression-armor tests for the ncurses TUI renderer's UTF-8 byte
-handling.  Drive heavy or malformed reply text through the full j9t
-pipeline (TestInterface short-circuit → LOG macros → ncurses TUI +
-log/log.txt + dashboard WebSocket) at `~140-420 ai_call` task volumes.
+Regression-armor for the ncurses TUI renderer's UTF-8 byte handling.
+Drives heavy multi-byte reply text through the full j9t pipeline
+(MockTransport fixture replay → ReplyParser → AiCallTaskExecutor →
+LOG macros → ncurses TUI + log/log.txt + dashboard WebSocket) at
+~420 `ai_call` task volume.
 
 ```
 python3 test/dispatch/test_stress_tui_utf8_heavy.py    # 3-way concurrent jarvisCpp, heavy multi-byte UTF-8
-python3 test/dispatch/test_stress_tui_utf8_invalid.py  # malformed bytes, sanitization-required path
 ```
 
-The heavy test runs all three jarvisCpp JCWFs (Docu / CyberSecAudit /
-SafetyAudit) simultaneously with every ai_call routed to a TestInterface
-backed by `test/dispatch/fixtures/utf8_heavy.txt` — CJK ideographs,
+The test runs all three jarvisCpp JCWFs (Docu / CyberSecAudit /
+SafetyAudit) simultaneously with every ai_call routed to a MockTransport
+interface backed by `test/dispatch/fixtures/api1/utf8_heavy.json` —
+the OpenAI-shape JSON wraps a content string containing CJK ideographs,
 emoji, accented Latin, math symbols, RTL Arabic + Hebrew, combining
 diacritics. ~420 tasks, ~16 s wall.
 
-The invalid-bytes test feeds `test/dispatch/fixtures/utf8_invalid.txt` —
-hand-crafted byte salad with orphan continuations, truncated 2/3/4-byte
-sequences, illegal lead bytes (0xFE, 0xFF), overlong encodings, and
-surrogate halves — through 140 ai_call tasks. j9t must not crash AND
-log/log.txt must remain well-formed UTF-8 (the `SanitizeUtf8` helper at
-the TestInterface boundary catches every bad byte and replaces with
-U+FFFD before it leaks into spdlog / dashboard / TUI).
-
 Shared helpers in `_stress_tui_helpers.py`. Tests load each jarvisCpp
 JCWF from `workflows/<name>/`, override `params.provider` per task to
-the TestInterface, and absolutize relative `cntx_files` paths so adhoc
-submission resolves correctly.
+the mock interface, and inline `cntx_files` entries as
+`{path, content}` placeholders so adhoc submission resolves under the
+JCWF size cap.
 
-The hermetic / relaxed-env tests create a transient `InterfaceType::Test`
-entry via `POST /api/settings/ai-interfaces`, run, and `DELETE` it on exit.
-They never call `/api/settings/ai-interfaces/save`, so `config.json` on disk
-stays untouched.
+The hermetic / relaxed-env tests create a transient `is_mock: true`
+interface via `POST /api/settings/ai-interfaces`, run, and `DELETE` it
+on exit.  They never call `/api/settings/ai-interfaces/save`, so
+`config.json` on disk stays untouched.
+
+**Malformed-UTF-8 stress is deferred to Foundation Sitting 3.**  The
+pre-Sitting-2 `test_stress_tui_utf8_invalid.py` was designed around
+TestInterface's short-circuit (raw bytes flowed straight to the log,
+bypassing the parser).  Under MockTransport that approach is structurally
+broken — simdjson rejects malformed UTF-8 in JSON strings before the
+parser sees it.  Sitting 3 rebuilds it per the dev plan §Foundation
+Sitting 3 as `malformed_utf8.json` per-API: valid JSON wrapping content
+strings with edge-case codepoints (NUL, BOM, RTL/LTR override marks,
+unpaired surrogate halves via `\uXXXX` escapes) so the byte-safety code
+at the log boundary still gets exercised without violating JSON
+well-formedness.
 
 ### Live AI (`--with-ai` style — costs real tokens)
 
@@ -153,6 +163,20 @@ API6) stays as a best-guess until they come online.
 
 ## Fixtures
 
-* `fixtures/hermetic_reply.txt` — canned reply for the TestInterface.  The
-  hermetic + relaxed-env tests assert `<prob>.output.txt` is a byte-exact
-  copy of this file.  Do not add trailing whitespace or encoding BOMs.
+* `fixtures/api1/golden_success.json` — canned OpenAI chat completion
+  response for the hermetic / relaxed-env / cross-workflow / chunking
+  / markitdown tests.  MockTransport returns this body as-is; ReplyParserAPI1
+  parses it and extracts `choices[0].message.content` to write
+  `<prob>.output.txt`.  Tests compare against the `content` field
+  (after stripping FileWriter's `# Model: …\n` header line).
+* `fixtures/api1/utf8_heavy.json` — same OpenAI shape with a content
+  string of heavy multi-byte text (CJK ideographs, emoji, accented Latin,
+  math symbols, RTL Arabic + Hebrew, combining diacritics).  Drives the
+  TUI byte-safety stress test.
+* `fixtures/headers/`, `fixtures/responses/` — header / body fixtures
+  for the §14 Tier B mock-AI-response endpoint (independent of MockTransport;
+  used by the in-process `POST /api/debug/mock-ai-response` helper).
+* `fixtures/api{1..5}/{error_*,malformed_utf8,truncated_response}.json` —
+  Foundation Sitting 3 (pending) populates the per-API fault-injection
+  battery for parser-level negative-path testing.  See dev plan
+  `doc/misc/ai-provider-error-visibility-dev-plan.md` §Foundation Sitting 3.
