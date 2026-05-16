@@ -78,6 +78,15 @@ namespace AIAssistant
         error.m_Kind = AiError::Kind::Provider;
         error.m_Message = m_ErrorInfo.m_Message;
 
+        // Raw discriminators (logs only) + UI-facing category come from the
+        // shared OpenAI-style classifier; HTTP status keeps the parser's
+        // legacy synthesised mapping (the real network status is overlaid
+        // by the dispatcher in OnRequestFailed once Sitting 4's threading
+        // lands).
+        error.m_ProviderErrorCode = m_ErrorInfo.m_Code;
+        error.m_ProviderErrorType = m_ErrorInfo.m_Type;
+        error.m_Category          = ClassifyOpenAiStyleErrorType(m_ErrorInfo.m_Type);
+
         switch (m_ErrorType)
         {
             case ErrorType::Unknown:             error.m_HttpStatus = 0;   break;
@@ -558,92 +567,16 @@ namespace AIAssistant
 
     void ReplyParserAPI1::ParseError(simdjson::ondemand::object jsonObjects)
     {
-        using namespace simdjson;
-        ReplyParserAPI1::ErrorInfo errorInfo;
-
-        for (auto jsonObject : jsonObjects)
-        {
-            std::string_view key;
-            if (auto err = jsonObject.unescaped_key().get(key); err)
-            {
-                LOG_APP_ERROR("ReplyParserAPI1::ParseError: unescaped_key failed: {}", error_message(err));
-                continue;
-            }
-
-            ondemand::value val;
-            if (auto err = jsonObject.value().get(val); err)
-            {
-                LOG_APP_ERROR("ReplyParserAPI1::ParseError: value() for key '{}' failed: {}",
-                              key, error_message(err));
-                continue;
-            }
-
-            if (key == "message")
-            {
-                std::string_view message;
-                if (auto err = val.get_string().get(message); err)
-                {
-                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'message' not a string: {}",
-                                  error_message(err));
-                    continue;
-                }
-                // Provider error message may echo back fragments of the request
-                // or an API-key suffix.  Sanitize but defer logging — the
-                // caller emits a single consolidated, length-capped log line.
-                errorInfo.m_Message = SanitizeUtf8(std::string(message));
-            }
-            else if (key == "type")
-            {
-                std::string_view type;
-                if (auto err = val.get_string().get(type); err)
-                {
-                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'type' not a string: {}",
-                                  error_message(err));
-                    continue;
-                }
-                errorInfo.m_Type = std::string(type);
-            }
-            else if (key == "code")
-            {
-                std::string_view code;
-                if (auto err = val.get_string().get(code); err)
-                {
-                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'code' not a string: {}",
-                                  error_message(err));
-                    continue;
-                }
-                errorInfo.m_Code = std::string(code);
-            }
-            else if (key == "param")
-            {
-                ondemand::json_type t;
-                if (auto err = val.type().get(t); err)
-                {
-                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'param' type() failed: {}",
-                                  error_message(err));
-                    continue;
-                }
-                if (t == ondemand::json_type::null)
-                {
-                    continue;
-                }
-                std::string_view param;
-                if (auto err = val.get_string().get(param); err)
-                {
-                    LOG_APP_ERROR("ReplyParserAPI1::ParseError: 'param' not a string: {}",
-                                  error_message(err));
-                    continue;
-                }
-                errorInfo.m_Param = std::string(param);
-            }
-            else
-            {
-                JsonObjectParser jsonObjectParser(key, val,
-                                                  "uncaught json field in server error reply");
-            }
-        }
-        m_ErrorInfo = errorInfo;
-        m_ErrorType = ParseErrorType(m_ErrorInfo.m_Type);
+        // Shared OpenAI-style envelope parser — same shape as API2 (Responses)
+        // and API6 (Azure, routed via this parser).  Local API1::ErrorInfo is
+        // populated from the helper's return so existing GetErrorInfo()
+        // consumers keep their field names.
+        OpenAiStyleErrorInfo const info = ParseOpenAiStyleError(jsonObjects);
+        m_ErrorInfo.m_Message = info.m_Message;
+        m_ErrorInfo.m_Type    = info.m_Type;
+        m_ErrorInfo.m_Code    = info.m_Code;
+        m_ErrorInfo.m_Param   = info.m_Param;
+        m_ErrorType           = ParseErrorType(m_ErrorInfo.m_Type);
     }
 
     ReplyParserAPI1::ErrorType ReplyParserAPI1::ParseErrorType(std::string_view type)

@@ -1,5 +1,23 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { RunSnapshot, LastRunInfo } from "../types";
+import type {
+  RunSnapshot,
+  LastRunInfo,
+  ProviderAlertEntry,
+  ProviderErrorCategory,
+} from "../types";
+
+// Categories that warrant a dashboard banner.  ThrottleRateLimit + Unknown +
+// InvalidRequest are deliberately excluded: AIMD handles throttling silently
+// (Workstream D / Sitting 8 surfaces the cap drop via the AI Health LED),
+// Unknown is too vague to show in a banner copy template, and InvalidRequest
+// indicates a caller bug rather than provider state — workflow author sees
+// it in the task output already.
+const BANNER_CATEGORIES = new Set<ProviderErrorCategory>([
+  "BillingExhausted",
+  "AuthFailure",
+  "ServiceOverload",
+  "ModelNotFound",
+]);
 
 interface WebSocketState {
   connected: boolean;
@@ -8,6 +26,15 @@ interface WebSocketState {
   totalCompleted: number;
   totalFailed: number;
   pythonRunning: boolean;
+  // Active per-(interface_name, category) alerts.  Map key shape:
+  // `${interfaceName}|${category}`.  Banners dismissed via X are removed
+  // from the map; banners auto-clear on the next ai-call-completed from the
+  // same interface.  See ProviderAlertBanner in WorkflowsPanel.
+  providerAlerts: Map<string, ProviderAlertEntry>;
+}
+
+function alertKey(interfaceName: string, category: ProviderErrorCategory): string {
+  return `${interfaceName}|${category}`;
 }
 
 export function useWebSocket() {
@@ -18,6 +45,7 @@ export function useWebSocket() {
     totalCompleted: 0,
     totalFailed: 0,
     pythonRunning: true,
+    providerAlerts: new Map<string, ProviderAlertEntry>(),
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -34,6 +62,29 @@ export function useWebSocket() {
 
   const registerLogCallback = useCallback((cb: ((lines: string[]) => void) | null) => {
     logCallbackRef.current = cb;
+  }, []);
+
+  // Banner X button → drop one (interface, category) entry from the alert map.
+  // The dismissal lasts until either the same combo fires another ai-call-failed
+  // (banner re-appears with count starting at 1) or the page is refreshed (the
+  // map is in-memory only — Sitting 8's /api/providers/health endpoint will
+  // hydrate cross-refresh).
+  const dismissProviderAlert = useCallback((key: string) => {
+    setState((prev) => {
+      if (!prev.providerAlerts.has(key)) return prev;
+      const next = new Map(prev.providerAlerts);
+      next.delete(key);
+      return { ...prev, providerAlerts: next };
+    });
+  }, []);
+
+  // Sitting-8 Workstream D close-out: external listener for cap-changed
+  // wake signals.  Registered by App.tsx; on receipt, App calls the polling
+  // hook's refresh().  This is the only way to share the WS state across
+  // hooks without context — keeps useWebSocket from depending on usePolling.
+  const capChangedCallbackRef = useRef<(() => void) | null>(null);
+  const registerCapChangedCallback = useCallback((cb: (() => void) | null) => {
+    capChangedCallbackRef.current = cb;
   }, []);
 
   const connect = useCallback(() => {
@@ -91,6 +142,62 @@ export function useWebSocket() {
         setState((prev) => ({ ...prev, pythonRunning: msg.running }));
       } else if (msg.type === "log") {
         logCallbackRef.current?.(msg.lines ?? []);
+      } else if (msg.type === "ai-call-failed") {
+        // Dedup at insert time: one banner per (interface, category) burst.
+        // ThrottleRateLimit is AIMD's job — silent here, surfaced via the AI
+        // Health LED in Sitting 8.
+        const category = msg.category as ProviderErrorCategory;
+        const interfaceName = msg.interface_name as string;
+        if (!BANNER_CATEGORIES.has(category) || !interfaceName) return;
+        const key = alertKey(interfaceName, category);
+        const now = Date.now();
+        setState((prev) => {
+          const next = new Map(prev.providerAlerts);
+          const existing = next.get(key);
+          next.set(key, {
+            interfaceName,
+            category,
+            count: (existing?.count ?? 0) + 1,
+            firstSeenAt: existing?.firstSeenAt ?? now,
+            lastSeenAt: now,
+            errorCode: (msg.provider_error_code as string) ?? "",
+            errorType: (msg.provider_error_type as string) ?? "",
+            message: (msg.error_message as string) ?? "",
+            retryAfterSeconds:
+              typeof msg.retry_after_seconds === "number"
+                ? msg.retry_after_seconds
+                : undefined,
+            httpStatus: (msg.http_status as number) ?? 0,
+          });
+          return { ...prev, providerAlerts: next };
+        });
+      } else if (msg.type === "cap-changed") {
+        // Sitting-8 Workstream D close-out: payload-free wake signal — refetch
+        // /api/providers/health for authoritative state.  The callback is set
+        // by App.tsx to call usePolling.refresh, which re-hits every polling
+        // endpoint (including /api/providers/health).  Cheap enough not to
+        // worry about debouncing — AIMD cap mutations are bounded.
+        capChangedCallbackRef.current?.();
+      } else if (msg.type === "ai-call-completed") {
+        // Auto-dismiss every alert for this interface — a successful call means
+        // the provider is healthy again from j9t's point of view.  User-dismissed
+        // banners are already gone from the map; this clears the ones still up.
+        // Wire field is `interface_name` (matches ai-call-failed) — `interface`
+        // on ai-call-started uses a different shape and isn't relevant here.
+        const interfaceLabel = (msg.interface_name as string) ?? "";
+        if (!interfaceLabel) return;
+        setState((prev) => {
+          let changed = false;
+          const next = new Map(prev.providerAlerts);
+          for (const key of Array.from(next.keys())) {
+            const [iface] = key.split("|");
+            if (iface === interfaceLabel) {
+              next.delete(key);
+              changed = true;
+            }
+          }
+          return changed ? { ...prev, providerAlerts: next } : prev;
+        });
       }
     };
 
@@ -116,5 +223,5 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { ...state, registerLogCallback };
+  return { ...state, registerLogCallback, dismissProviderAlert, registerCapChangedCallback };
 }

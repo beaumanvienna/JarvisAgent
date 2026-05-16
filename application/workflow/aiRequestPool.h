@@ -35,6 +35,7 @@
 
 #include "workflow/aiInvocation.h"
 #include "workflow/aiReply.h"
+#include "workflow/providerHealth.h"
 
 namespace AIAssistant
 {
@@ -159,7 +160,14 @@ namespace AIAssistant
         // exception). Marks the matching pending entry failed and queues a failed
         // completion so the workflow runtime transitions out of waiting_external.
         // Returns true if the path matched a registered expected output.
-        [[nodiscard]] bool OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage);
+        //
+        // `error` carries the rich `AiError` (provider code/type, semantic
+        // category, Retry-After hint, HTTP status) and is logged at ERROR with
+        // run/workflow/task IDs in scope — this is the line the dashboard run
+        // analyzer surfaces.  Callers without an `AiError` handy (e.g. exception
+        // paths) construct an `AiError{Kind::Transport, 0, e.what()}` so the
+        // log line still gets a kind + message.
+        [[nodiscard]] bool OnRequestFailed(std::string const& expectedOutputPath, AiError const& error);
 
         // Resets the file-activity watchdog for the given request.
         // Call after each queue-file write so the watchdog knows the executor is still making progress.
@@ -224,6 +232,14 @@ namespace AIAssistant
         uint64_t GetSchemaValidationFailures() const { return m_SchemaValidationFailures.load(); }
         uint64_t GetChunkedDispatches() const { return m_ChunkedDispatches.load(); }
         uint64_t GetFenceStrips() const { return m_FenceStrips.load(); }
+
+        // Per-interface health snapshot consumed by /api/providers/health
+        // (Sitting-8 Workstream D).  Joins the pool's per-interface
+        // last-error tracking with the dispatcher's per-`quotaKey` controller
+        // cap state to produce one entry per configured `api_interfaces[]`.
+        // Single critical section per `m_HealthMutex` for internal consistency
+        // — the LED can't render a torn read of cap-from-now + error-from-last-tick.
+        [[nodiscard]] std::vector<ProviderHealthSnapshot> SnapshotProviderHealth() const;
 
     private:
         struct RequestContext
@@ -324,6 +340,16 @@ namespace AIAssistant
         std::atomic<uint64_t> m_SchemaValidationFailures{0};
         std::atomic<uint64_t> m_ChunkedDispatches{0};
         std::atomic<uint64_t> m_FenceStrips{0};
+
+        // Per-interface health tracking (Sitting-8 Workstream D) — updated by
+        // the curl callback on every completion (success bumps the success
+        // streak; failure records last_error_* + bumps consecutive_errors).
+        // SnapshotProviderHealth() joins this with the dispatcher's controller
+        // state to produce the wire-format snapshot.  Mutex covers both the
+        // map AND the entries (writes happen on the I/O thread; reads on the
+        // web thread).
+        mutable std::mutex m_HealthMutex;
+        std::unordered_map<std::string, InterfaceHealthState> m_HealthPerInterface;
 
         std::mutex m_IdMutex;
         int64_t m_NextRequestId = 1;

@@ -26,7 +26,16 @@ export default function App() {
     return params.get("tab") === "mcp-keys" || params.get("settings") === "1";
   });
   const ws = useWebSocket();
-  const { status, workflows, hasProviders, refresh } = usePolling(5000);
+  const { status, workflows, hasProviders, providersHealth, refresh } = usePolling(5000);
+
+  // Sitting-8 Workstream D close-out: hook the WS cap-changed wake signal to
+  // the polling refresh so the AI Health LED updates within ms of a cap
+  // mutation instead of waiting for the next 5s poll cycle.  Register on
+  // mount; useWebSocket holds the callback ref across reconnects.
+  useEffect(() => {
+    ws.registerCapChangedCallback(refresh);
+    return () => ws.registerCapChangedCallback(null);
+  }, [ws, refresh]);
   const isStudio = status?.edition === "studio";
   const canRunWorkflows = status?.capabilities?.workflow_run_endpoint !== false;
 
@@ -246,6 +255,7 @@ export default function App() {
         pythonRunning={ws.pythonRunning}
         mcpConnected={status?.mcp_connected ?? false}
         connectionHealth={status?.connection_health}
+        providersHealth={providersHealth}
         totalCompleted={ws.totalCompleted}
         totalFailed={ws.totalFailed}
         onQuit={handleQuit}
@@ -273,6 +283,8 @@ export default function App() {
             lastRuns={ws.lastRuns}
             onRefresh={refresh}
             canRunWorkflows={canRunWorkflows}
+            providerAlerts={ws.providerAlerts}
+            onDismissProviderAlert={ws.dismissProviderAlert}
           />
         </main>
       )}

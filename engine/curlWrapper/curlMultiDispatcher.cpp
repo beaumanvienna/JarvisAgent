@@ -89,7 +89,7 @@ namespace AIAssistant
             // moved-from in the stopping branch above, so it's still valid.
             callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                        "request rejected (dispatcher stopping)"),
-                     {});
+                     {}, std::nullopt);
             return;
         }
         // Capture submission for hermetic size-aware-budget tests.
@@ -458,11 +458,12 @@ namespace AIAssistant
     // Rate limit helpers (I/O thread only)
     // ---------------------------------------------------------------------------
 
-    void CurlMultiDispatcher::ParseRateLimitHeaders(CurlWrapper::QueryData const& queryData,
-                                                    std::string const& headerBuffer,
-                                                    std::string const& body,
-                                                    std::string& host,
-                                                    long httpCode)
+    std::optional<int> CurlMultiDispatcher::ParseRateLimitHeaders(
+        CurlWrapper::QueryData const& queryData,
+        std::string const& headerBuffer,
+        std::string const& body,
+        std::string& host,
+        long httpCode)
     {
         // Per-provider strategy delegation (Phase 1) + controller Observe (Phase 2).
         // The strategy returns a normalized RateLimitObservation; we merge it into
@@ -488,11 +489,20 @@ namespace AIAssistant
         // it for that key.  hardCap = kMaxActivePerHost; Phase 4 will swap in
         // config.rate_limit.max_concurrency.
         std::string const quotaKey = queryData.m_QuotaKey.empty() ? host : queryData.m_QuotaKey;
+        bool capChanged = false;
         if (!quotaKey.empty())
         {
             auto controllerIt = EnsureController(quotaKey, queryData);
+            // Snapshot cap before Observe so we can detect AIMD mutation
+            // (halve on 429, additive grow on streak boundary).  Fires the
+            // cap-changed wake signal to the dashboard so the AI Health LED
+            // doesn't wait for the next 5s poll cycle to reflect the new
+            // state — sub-second instead.
+            int const capBefore = controllerIt->second.CurrentConcurrencyCap();
             bool const was429 = (httpCode == 429);
             controllerIt->second.Observe(observation, was429);
+            int const capAfter = controllerIt->second.CurrentConcurrencyCap();
+            capChanged = (capAfter != capBefore);
         }
         auto& state = m_HostRateLimits[host];
         state.m_LastUpdated = std::chrono::steady_clock::now();
@@ -533,6 +543,7 @@ namespace AIAssistant
             state.m_TokensResetAt = *observation.m_TokensResetAt;
         }
 
+        std::optional<int> retryAfterSeconds;
         if (observation.m_RetryAfter.has_value())
         {
             // retry-after is a floor on the next admission for both buckets —
@@ -542,7 +553,36 @@ namespace AIAssistant
                 state.m_RequestsResetAt = candidate;
             if (candidate > state.m_TokensResetAt)
                 state.m_TokensResetAt = candidate;
+
+            // Surface to the caller for AiError::m_RetryAfterSeconds + WS payload.
+            // Round up so a sub-second hint never collapses to 0 ("retry now").
+            auto const seconds =
+                std::chrono::duration_cast<std::chrono::seconds>(*observation.m_RetryAfter);
+            int const rounded = static_cast<int>(seconds.count()) +
+                                ((*observation.m_RetryAfter > seconds) ? 1 : 0);
+            if (rounded > 0)
+            {
+                retryAfterSeconds = rounded;
+            }
         }
+
+        // Cap-changed wake signal (Sitting-8 Workstream D close-out).  Fired
+        // last so all state mutations (controller observation + host rate
+        // limits + retry-after) have committed before the callback observes.
+        // Callback is user code — keep it lightweight (push an event, no I/O).
+        if (capChanged && m_OnCapChanged)
+        {
+            m_OnCapChanged();
+        }
+        return retryAfterSeconds;
+    }
+
+    void CurlMultiDispatcher::SetOnCapChangedCallback(OnCapChangedCallback cb)
+    {
+        // Set-once at construct time before the I/O thread starts dispatching.
+        // No mutex needed — single-writer (JarvisAgent ctor) ordered before
+        // single-reader (I/O thread reads via ParseRateLimitHeaders).
+        m_OnCapChanged = std::move(cb);
     }
 
     // ---------------------------------------------------------------------------
@@ -616,7 +656,7 @@ namespace AIAssistant
                         {
                             pending.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                                                   "request cancelled (run terminated)"),
-                                               {});
+                                               {}, std::nullopt);
                         }
                         ++m_TotalCancelled;
                     }
@@ -637,7 +677,7 @@ namespace AIAssistant
                     {
                         it->m_Request.m_Callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                                                     "request cancelled (run terminated)"),
-                                                 {});
+                                                 {}, std::nullopt);
                     }
                     it = m_RetryQueue.erase(it);
                     ++m_TotalCancelled;
@@ -674,7 +714,7 @@ namespace AIAssistant
                 {
                     callback(QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                                  "request cancelled (run terminated)"),
-                             {});
+                             {}, std::nullopt);
                 }
                 ++m_TotalCancelled;
             }
@@ -718,9 +758,11 @@ namespace AIAssistant
 
         // Always parse rate limit headers (even on success) to keep state fresh.
         std::string host = ExtractHostFromUrl(pd.m_Url);
+        std::optional<int> retryAfterSeconds;
         if (!host.empty())
         {
-            ParseRateLimitHeaders(pd.m_QueryData, response.m_RawHeaders, response.m_Body, host, httpCode);
+            retryAfterSeconds = ParseRateLimitHeaders(pd.m_QueryData, response.m_RawHeaders,
+                                                      response.m_Body, host, httpCode);
         }
 
         // --- Handle 429 with auto-retry ---
@@ -853,10 +895,17 @@ namespace AIAssistant
             std::string errMsg = QueryErrorCode::Describe(static_cast<int>(httpCode));
             if (httpCode == 429)
             {
-                LOG_CORE_ERROR("HTTP 429 rate limit for query {} — AI provider rejected the request; "
-                               "retries exhausted ({}x) cancelKey='{}' quotaKey='{}'",
-                               qnum, pd.m_RetryCount,
-                               pd.m_QueryData.m_CancelKey, pd.m_QueryData.m_QuotaKey);
+                // WARN, not ERROR.  AiRequestPool::OnRequestFailed emits the
+                // user-visible ERROR with the parsed body discriminator
+                // (insufficient_quota / rate_limit_error / etc.) + runId, which
+                // is the line the dashboard run analyzer surfaces.  Two ERRORs
+                // for the same failure were creating duplicate "issues" in the
+                // analyzer pre-Workstream-A; this line stays for the curl-side
+                // technical context (cancelKey + quotaKey + retry count).
+                LOG_CORE_WARN("HTTP 429 rate limit for query {} — AI provider rejected the request; "
+                              "retries exhausted ({}x) cancelKey='{}' quotaKey='{}'",
+                              qnum, pd.m_RetryCount,
+                              pd.m_QueryData.m_CancelKey, pd.m_QueryData.m_QuotaKey);
                 ++m_TotalRetriesExhausted;
             }
             else
@@ -881,7 +930,7 @@ namespace AIAssistant
 
         if (callback)
         {
-            callback(result, std::move(responseBody));
+            callback(result, std::move(responseBody), retryAfterSeconds);
         }
     }
 
@@ -919,7 +968,7 @@ namespace AIAssistant
                         local.front().m_Callback(
                             QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                               "curl request aborted (shutdown)"),
-                            {});
+                            {}, std::nullopt);
                         local.pop();
                     }
 
@@ -929,7 +978,7 @@ namespace AIAssistant
                         entry.m_Request.m_Callback(
                             QueryResult::Fail(static_cast<int>(CURLE_ABORTED_BY_CALLBACK),
                                               "curl request aborted (shutdown)"),
-                            {});
+                            {}, std::nullopt);
                     }
                     m_RetryQueue.clear();
                 }

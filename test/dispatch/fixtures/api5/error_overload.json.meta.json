@@ -1,0 +1,7 @@
+{
+  "http_status": 503,
+  "headers": {
+    "Content-Type": "application/x-amz-json-1.1",
+    "Retry-After": "5"
+  }
+}

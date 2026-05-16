@@ -175,6 +175,141 @@ body {
   font-size: 0.85rem;
 }
 
+/* Sitting-7 Workstream C: red variant of .hazard-icon, painted on rows whose
+   ai_call tasks reference an interface in BillingExhausted / AuthFailure /
+   ModelNotFound / ServiceOverload.  Higher visual weight than the amber
+   missing-keys glyph (active failure vs configuration gap). */
+.hazard-icon-red {
+  color: #ef4444;
+}
+
+/* Sitting-7 Workstream C: ProviderAlertBanner.  Mirrors .no-keys-banner's box
+   shape but uses the red severity tokens (matches MasterPasswordDialog.mpd-error,
+   .python-warning, ScriptsPanel inline error) per §5.2-(a) of
+   doc/misc/ai-provider-error-visibility-dev-plan.md. */
+.provider-alert-banner {
+  background: #2a1010;
+  border: 1px solid #4a1a1a;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+  color: #ef4444;
+  line-height: 1.5;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.provider-alert-banner code {
+  background: #1a1a1a;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  color: #c8d6c0;
+}
+
+.provider-alert-body {
+  flex: 1;
+}
+
+.provider-alert-dismiss {
+  background: transparent;
+  border: none;
+  color: #ef4444;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  flex: 0 0 auto;
+}
+
+.provider-alert-dismiss:hover {
+  color: #ffffff;
+}
+
+/* Sitting-8 Workstream D: AI Health LED popover.  Anchored below the LED via
+   position:absolute on the click-wrapper.  Style matches the existing
+   ai_interfaces table rows (mono ID, muted timestamps, small category badges). */
+.ai-health-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 200;
+  background: #1a1d24;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: #c8d6c0;
+  min-width: 480px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+}
+
+.ai-health-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ai-health-table th,
+.ai-health-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid #2a2e36;
+}
+
+.ai-health-table th {
+  font-weight: 500;
+  color: #8a8a8a;
+}
+
+.ai-health-mock {
+  margin-left: 6px;
+  color: #a855f7;
+  font-size: 0.72rem;
+}
+
+.ai-health-shared {
+  color: #eab308;
+  margin-left: 2px;
+}
+
+.ai-health-when {
+  margin-left: 6px;
+  color: #8a8a8a;
+}
+
+.ai-health-footnote {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: #8a8a8a;
+}
+
+.cat-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  margin-right: 6px;
+}
+
+.cat-badge-red {
+  background: #4a1a1a;
+  color: #ef4444;
+}
+
+.cat-badge-amber {
+  background: #6b4f00;
+  color: #eab308;
+}
+
+.cat-badge-muted {
+  background: #2a2e36;
+  color: #8a8a8a;
+}
+
 /* ---- Data Tables ---- */
 .data-table {
   width: 100%;

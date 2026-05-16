@@ -37,6 +37,7 @@
 #include <optional>
 #include <thread>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -73,11 +74,29 @@ namespace AIAssistant
         // AI dispatch lifecycle — forwarded to the dashboard so per-task live state
         // is visible beyond the aggregate "queries in flight" LED.
         void BroadcastAiCallStarted(std::string const& probName, std::string const& interfaceName);
-        void BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
-                                      int32_t outputTokens, int32_t totalTokens,
+        void BroadcastAiCallCompleted(std::string const& probName, std::string const& interfaceName,
+                                      int32_t inputTokens, int32_t outputTokens, int32_t totalTokens,
                                       std::string const& finishReason);
+        // Extended payload (Workstream B): provider-side discriminators + UI-facing
+        // semantic category + Retry-After hint + the user-configured interface label.
+        // The dashboard branches banner/LED state on `category` (string-serialized
+        // ProviderErrorCategory) rather than the raw provider strings, so the
+        // wire schema is stable across providers.  retryAfterSeconds omitted from
+        // the JSON when nullopt.
         void BroadcastAiCallFailed(std::string const& probName, int errorKind,
-                                   int httpStatus, std::string const& errorMessage);
+                                   int httpStatus, std::string const& errorMessage,
+                                   std::string const& providerErrorCode,
+                                   std::string const& providerErrorType,
+                                   std::string_view category,
+                                   std::optional<int> retryAfterSeconds,
+                                   std::string const& interfaceName);
+
+        // Sitting-8 Workstream D close-out: cap-changed wake signal.  Payload-free
+        // — receivers refetch /api/providers/health for authoritative state.
+        // Fired from JarvisAgent's AiCapChangedEvent dispatcher when the AIMD
+        // controller's m_CurrentConcurrencyCap mutates on any per-interface
+        // observation.
+        void BroadcastCapChanged();
 
         // Log streaming: buffer lines for WebSocket broadcast (called from TerminalLogStreamBuf).
         void EnqueueLogLine(std::string const& line);
@@ -346,6 +365,11 @@ namespace AIAssistant
         crow::response HandleAiInterfaceDeleteDelete(std::string const& name);
         crow::response HandleAiInterfacesSavePost();
         crow::response HandleAiInterfaceTestPost(crow::request const& req);
+
+        // Sitting-8 Workstream D: per-interface health snapshot for the dashboard's
+        // AI Health LED.  Joins config interfaces × pool last-error tracking ×
+        // dispatcher AIMD cap state into one response array.
+        crow::response HandleProvidersHealthGet();
 
         // Config settings API (admin)
         crow::response HandleConfigReloadPost();

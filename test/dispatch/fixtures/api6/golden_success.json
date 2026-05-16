@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-azure-golden-success",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This is a canned Azure OpenAI reply from the MockTransport.\nAzure shares the API1 body shape; this fixture proves the API6 dispatch path delegates to ReplyParserAPI1 cleanly.\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 24,
+    "total_tokens": 34
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-aiZipDemo",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Mock canned response for the aiZipDemo workflow.\n\nThis content stands in for all three of the demo's ai_call tasks (STL random fact / Python trivia / Vulkan method).  Each task receives this same body — workflow-shape correctness is what's verified by the demo, not content variation.  The downstream `zip_responses` shell task packages the three .output.txt files into a single archive, exercising the dataflow + shell-task path end-to-end without burning real provider credit.\n\nIf you need three distinct canned responses (one per ai_call task) for richer demo content, provision three separate mock interfaces in `config.json` — each with `is_mock: true` and its own `fixture_path` — and reference them by name from the per-task `params.provider` field in the JCWF.\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 140,
+    "total_tokens": 152
+  }
+}

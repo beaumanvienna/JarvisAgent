@@ -60,6 +60,52 @@ namespace AIAssistant
         error.m_Kind = AiError::Kind::Provider;
         error.m_Message = m_ErrorInfo.m_Message;
         error.m_HttpStatus = m_ErrorInfo.m_Code;
+        // Gemini's discriminators: the top-level `error.status` enum names the
+        // bucket (RESOURCE_EXHAUSTED, UNAUTHENTICATED, etc.) but
+        // RESOURCE_EXHAUSTED covers BOTH billing and throttle.  The actual
+        // reason lives in error.details[*].reason — surface that as
+        // m_ProviderErrorCode so the log line and WS payload distinguish
+        // billing-exhausted (USER_PROJECT_QUOTA_EXCEEDED / BILLING_DISABLED)
+        // from genuine throttling (RATE_LIMIT_EXCEEDED).
+        error.m_ProviderErrorCode = m_ErrorInfo.m_DetailReason;
+        error.m_ProviderErrorType = m_ErrorInfo.m_Status;
+
+        // Classify: prefer details reason (specific) over status (generic).
+        if (m_ErrorInfo.m_DetailReason == "RATE_LIMIT_EXCEEDED")
+        {
+            error.m_Category = ProviderErrorCategory::ThrottleRateLimit;
+        }
+        else if (m_ErrorInfo.m_DetailReason == "USER_PROJECT_QUOTA_EXCEEDED" ||
+                 m_ErrorInfo.m_DetailReason == "BILLING_DISABLED")
+        {
+            error.m_Category = ProviderErrorCategory::BillingExhausted;
+        }
+        else if (m_ErrorInfo.m_Status == "UNAUTHENTICATED" ||
+                 m_ErrorInfo.m_Status == "PERMISSION_DENIED")
+        {
+            error.m_Category = ProviderErrorCategory::AuthFailure;
+        }
+        else if (m_ErrorInfo.m_Status == "UNAVAILABLE" ||
+                 m_ErrorInfo.m_Status == "DEADLINE_EXCEEDED")
+        {
+            error.m_Category = ProviderErrorCategory::ServiceOverload;
+        }
+        else if (m_ErrorInfo.m_Status == "NOT_FOUND")
+        {
+            error.m_Category = ProviderErrorCategory::ModelNotFound;
+        }
+        else if (m_ErrorInfo.m_Status == "INVALID_ARGUMENT" ||
+                 m_ErrorInfo.m_Status == "FAILED_PRECONDITION")
+        {
+            error.m_Category = ProviderErrorCategory::InvalidRequest;
+        }
+        else if (m_ErrorInfo.m_Status == "RESOURCE_EXHAUSTED")
+        {
+            // No details reason but status says exhausted — assume throttle
+            // (the conservative default; misclassifying billing as throttle
+            // only delays the dashboard banner, won't damage real state).
+            error.m_Category = ProviderErrorCategory::ThrottleRateLimit;
+        }
         return error;
     }
 
@@ -292,6 +338,41 @@ namespace AIAssistant
                 LOG_APP_ERROR("error status: {}", status);
                 errorInfo.m_Status = status;
             }
+            else if (key == "details")
+            {
+                // Walk error.details[*] for the first entry carrying a `reason`
+                // string — that's the specific discriminator (RATE_LIMIT_EXCEEDED
+                // vs USER_PROJECT_QUOTA_EXCEEDED vs BILLING_DISABLED).  Other
+                // detail entries (QuotaFailure, RetryInfo, etc.) are richer but
+                // not needed for classification — skipped.  Capped iteration so
+                // a malicious provider can't blow the parsing budget.
+                constexpr size_t kMaxDetailEntries = 32;
+                size_t detailIndex = 0;
+                ondemand::array detailsArr;
+                if (auto err = field.value().get_array().get(detailsArr); !err)
+                {
+                    for (auto detailEl : detailsArr)
+                    {
+                        if (detailIndex++ >= kMaxDetailEntries)
+                        {
+                            break;
+                        }
+                        ondemand::object detailObj;
+                        if (detailEl.get_object().get(detailObj))
+                        {
+                            continue;
+                        }
+                        std::string_view reasonView;
+                        if (detailObj["reason"].get_string().get(reasonView))
+                        {
+                            continue;   // no `reason` on this entry — try next
+                        }
+                        errorInfo.m_DetailReason = std::string(reasonView);
+                        LOG_APP_ERROR("error details reason: {}", errorInfo.m_DetailReason);
+                        break;          // first match wins
+                    }
+                }
+            }
             else
             {
                 simdjson::ondemand::value val = field.value();
@@ -300,7 +381,9 @@ namespace AIAssistant
         }
 
         m_ErrorInfo = errorInfo;
-        LOG_APP_CRITICAL("Gemini API error: {} ({}): {}", m_ErrorInfo.m_Status, m_ErrorInfo.m_Code, m_ErrorInfo.m_Message);
+        LOG_APP_CRITICAL("Gemini API error: {} ({}): {} [reason={}]",
+                         m_ErrorInfo.m_Status, m_ErrorInfo.m_Code,
+                         m_ErrorInfo.m_Message, m_ErrorInfo.m_DetailReason);
     }
 
 } // namespace AIAssistant

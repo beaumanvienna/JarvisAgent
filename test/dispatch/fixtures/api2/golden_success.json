@@ -1,0 +1,26 @@
+{
+  "id": "resp_mocktransport-golden-success",
+  "object": "response",
+  "created_at": 1778800000,
+  "status": "completed",
+  "model": "mock-stub",
+  "output": [
+    {
+      "id": "msg_mocktransport-golden-success",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "This is a canned Responses-API reply from the MockTransport.\nNo network call was made.\n"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 18,
+    "total_tokens": 28
+  }
+}

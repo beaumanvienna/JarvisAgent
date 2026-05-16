@@ -20,15 +20,149 @@
    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.*/
 
 #include "engine.h"
+#include "json/jsonObjectParser.h"
 #include "json/replyParser.h"
 #include "json/replyParserAPI1.h"
 #include "json/replyParserAPI2.h"
 #include "json/replyParserAPI3.h"
 #include "json/replyParserAPI4.h"
 #include "json/replyParserAPI5.h"
+#include "workflow/workflowTypes.h"
 
 namespace AIAssistant
 {
+    OpenAiStyleErrorInfo ParseOpenAiStyleError(simdjson::ondemand::object errorObj)
+    {
+        using namespace simdjson;
+        OpenAiStyleErrorInfo info;
+
+        for (auto field : errorObj)
+        {
+            std::string_view key;
+            if (auto err = field.unescaped_key().get(key); err)
+            {
+                LOG_APP_ERROR("ParseOpenAiStyleError: unescaped_key failed: {}", error_message(err));
+                continue;
+            }
+
+            ondemand::value val;
+            if (auto err = field.value().get(val); err)
+            {
+                LOG_APP_ERROR("ParseOpenAiStyleError: value() for key '{}' failed: {}",
+                              key, error_message(err));
+                continue;
+            }
+
+            if (key == "message")
+            {
+                std::string_view message;
+                if (auto err = val.get_string().get(message); err)
+                {
+                    LOG_APP_ERROR("ParseOpenAiStyleError: 'message' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                // Provider message may echo request fragments / key suffixes;
+                // sanitize at the boundary, defer length-capped logging to the
+                // caller which has runId in scope.
+                info.m_Message = SanitizeUtf8(std::string(message));
+            }
+            else if (key == "type")
+            {
+                std::string_view type;
+                if (auto err = val.get_string().get(type); err)
+                {
+                    LOG_APP_ERROR("ParseOpenAiStyleError: 'type' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                info.m_Type = std::string(type);
+            }
+            else if (key == "code")
+            {
+                ondemand::json_type t;
+                if (auto err = val.type().get(t); err)
+                {
+                    LOG_APP_ERROR("ParseOpenAiStyleError: 'code' type() failed: {}",
+                                  error_message(err));
+                    continue;
+                }
+                if (t == ondemand::json_type::null)
+                {
+                    continue;
+                }
+                // OpenAI returns code as string ("insufficient_quota"); some
+                // edge cases (Azure, older error envelopes) emit it as a
+                // number — accept both rather than dropping the discriminator.
+                if (t == ondemand::json_type::string)
+                {
+                    std::string_view code;
+                    if (auto err = val.get_string().get(code); err)
+                    {
+                        LOG_APP_ERROR("ParseOpenAiStyleError: 'code' not a string: {}",
+                                      error_message(err));
+                        continue;
+                    }
+                    info.m_Code = std::string(code);
+                }
+                else if (t == ondemand::json_type::number)
+                {
+                    int64_t numericCode = 0;
+                    if (auto err = val.get_int64().get(numericCode); err)
+                    {
+                        LOG_APP_ERROR("ParseOpenAiStyleError: 'code' not an int: {}",
+                                      error_message(err));
+                        continue;
+                    }
+                    info.m_Code = std::to_string(numericCode);
+                }
+            }
+            else if (key == "param")
+            {
+                ondemand::json_type t;
+                if (auto err = val.type().get(t); err)
+                {
+                    LOG_APP_ERROR("ParseOpenAiStyleError: 'param' type() failed: {}",
+                                  error_message(err));
+                    continue;
+                }
+                if (t == ondemand::json_type::null)
+                {
+                    continue;
+                }
+                std::string_view param;
+                if (auto err = val.get_string().get(param); err)
+                {
+                    LOG_APP_ERROR("ParseOpenAiStyleError: 'param' not a string: {}",
+                                  error_message(err));
+                    continue;
+                }
+                info.m_Param = std::string(param);
+            }
+            else
+            {
+                JsonObjectParser jsonObjectParser(key, val,
+                                                  "uncaught json field in OpenAI-style error envelope");
+            }
+        }
+        return info;
+    }
+
+    ProviderErrorCategory ClassifyOpenAiStyleErrorType(std::string_view type)
+    {
+        // Discriminators per OpenAI + Azure OpenAI error reference.  Maps the
+        // raw provider string to the UI-facing semantic category.  Unknown
+        // returns Unknown — the raw type still propagates via
+        // AiError::m_ProviderErrorType for logs/debug.
+        if (type == "insufficient_quota")    return ProviderErrorCategory::BillingExhausted;
+        if (type == "rate_limit_error")      return ProviderErrorCategory::ThrottleRateLimit;
+        if (type == "authentication_error")  return ProviderErrorCategory::AuthFailure;
+        if (type == "permission_error")      return ProviderErrorCategory::AuthFailure;
+        if (type == "model_not_found")       return ProviderErrorCategory::ModelNotFound;
+        if (type == "server_error")          return ProviderErrorCategory::ServiceOverload;
+        if (type == "invalid_request_error") return ProviderErrorCategory::InvalidRequest;
+        return ProviderErrorCategory::Unknown;
+    }
 
     ReplyParser::ReplyParser(std::string const& jsonString) : m_JsonString(jsonString) {}
 

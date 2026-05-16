@@ -52,8 +52,12 @@ namespace AIAssistant
     class AiCallCompletedEvent final : public Event
     {
     public:
-        AiCallCompletedEvent(std::string probName, AiUsage usage, std::string finishReason)
-            : m_ProbName(std::move(probName)), m_Usage(usage), m_FinishReason(std::move(finishReason))
+        AiCallCompletedEvent(std::string probName, std::string interfaceName,
+                             AiUsage usage, std::string finishReason)
+            : m_ProbName(std::move(probName)),
+              m_InterfaceName(std::move(interfaceName)),
+              m_Usage(usage),
+              m_FinishReason(std::move(finishReason))
         {
         }
 
@@ -61,20 +65,41 @@ namespace AIAssistant
         EVENT_CLASS_CATEGORY(EventCategoryAi)
 
         std::string const& GetProbName() const { return m_ProbName; }
+        std::string const& GetInterfaceName() const { return m_InterfaceName; }
         AiUsage const& GetUsage() const { return m_Usage; }
         std::string const& GetFinishReason() const { return m_FinishReason; }
 
     private:
         std::string m_ProbName;
+        std::string m_InterfaceName;   // user-configured label; lets the dashboard auto-clear alerts on success
         AiUsage m_Usage;
         std::string m_FinishReason;
+    };
+
+    // Sitting-8 Workstream D close-out: fired by CurlMultiDispatcher when a
+    // RateLimitController's m_CurrentConcurrencyCap mutates (typically on a
+    // 429 / clean-streak boundary).  Carries no payload — the dashboard
+    // treats it as a wake signal and refetches /api/providers/health for the
+    // authoritative state.  Sub-second updates without a polling cadence;
+    // dispatcher fires N events on a 429 burst (one per cap halve), which
+    // collapse into one refetch on the dashboard side (the in-flight fetch
+    // dedup'd at the React layer).
+    class AiCapChangedEvent final : public Event
+    {
+    public:
+        AiCapChangedEvent() = default;
+
+        EVENT_CLASS_TYPE(AiCapChanged)
+        EVENT_CLASS_CATEGORY(EventCategoryAi)
     };
 
     class AiCallFailedEvent final : public Event
     {
     public:
-        AiCallFailedEvent(std::string probName, AiError error)
-            : m_ProbName(std::move(probName)), m_Error(std::move(error))
+        AiCallFailedEvent(std::string probName, std::string interfaceName, AiError error)
+            : m_ProbName(std::move(probName)),
+              m_InterfaceName(std::move(interfaceName)),
+              m_Error(std::move(error))
         {
         }
 
@@ -82,10 +107,12 @@ namespace AIAssistant
         EVENT_CLASS_CATEGORY(EventCategoryAi)
 
         std::string const& GetProbName() const { return m_ProbName; }
+        std::string const& GetInterfaceName() const { return m_InterfaceName; }
         AiError const& GetError() const { return m_Error; }
 
     private:
         std::string m_ProbName;
+        std::string m_InterfaceName;   // user-configured label from config.json — feeds WS payload
         AiError m_Error;
     };
 } // namespace AIAssistant

@@ -40,6 +40,99 @@ export interface WorkflowEntry {
   manual_start?: boolean;
   has_ai_call?: boolean;
   is_sub_workflow?: boolean;
+  // Resolved at workflow-load time from each ai_call task's provider field.
+  // Empty string in the array means "system default provider".  Used by the
+  // dashboard to mark rows red when any of these interfaces is degraded
+  // (BillingExhausted / AuthFailure / ServiceOverload / ModelNotFound).
+  interface_names?: string[];
+}
+
+// Wire shape for the ai-call-failed broadcast (webServer.cpp::BroadcastAiCallFailed,
+// extended in Sitting 4 / Workstream B + Sitting 6 / Workstream E for cross-provider
+// classification).  Branch on `category` (stable wire string), never on the raw
+// provider strings.
+export type ProviderErrorCategory =
+  | "Unknown"
+  | "BillingExhausted"
+  | "ThrottleRateLimit"
+  | "AuthFailure"
+  | "ServiceOverload"
+  | "ModelNotFound"
+  | "InvalidRequest";
+
+export interface AiCallFailedMessage {
+  type: "ai-call-failed";
+  prob: string;
+  error_kind: number;
+  http_status: number;
+  error_message: string;
+  provider_error_code: string;
+  provider_error_type: string;
+  category: ProviderErrorCategory;
+  retry_after_seconds?: number;
+  interface_name: string;
+}
+
+export interface AiCallCompletedMessage {
+  type: "ai-call-completed";
+  prob: string;
+  interface_name: string;       // added Sitting-7 follow-up — drives the dashboard's auto-dismiss
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  finish_reason: string;
+}
+
+export interface AiCallStartedMessage {
+  type: "ai-call-started";
+  prob: string;
+  interface: string;
+}
+
+// Per-interface health snapshot from /api/providers/health (Sitting 8 /
+// Workstream D).  Polled at the same cadence as /api/status; drives the
+// dashboard's 6th LED ("AI Health") + click/hover popover.  Field shapes
+// mirror webServer.cpp::HandleProvidersHealthGet — `*_ms` fields are Unix
+// milliseconds (zero = epoch = "never").
+export interface ProviderHealth {
+  interface_name: string;
+  interface_type_name: string;            // "API1".."API6" — for the shared-cap footnote
+  quota_key: string;                      // controller key; empty if the interface has never dispatched
+  is_mock: boolean;
+  current_cap: number;                    // -1 when no controller exists yet
+  max_cap: number;                        // -1 when no controller exists yet
+  floor_cap: number;
+  last_error_at_ms: number;               // 0 = never errored
+  last_error_code: string;
+  last_error_type: string;
+  last_error_message: string;
+  last_error_category: ProviderErrorCategory;
+  last_http_status: number;
+  retry_after_seconds?: number;
+  consecutive_errors: number;
+  success_streak_since_last_error: number;
+  cap_pinned_at_floor_since_ms: number;   // 0 = not pinned
+}
+
+export interface ProvidersHealthResponse {
+  ok: boolean;
+  interfaces: ProviderHealth[];
+}
+
+// One row in the dashboard's per-interface alert state.  Keyed externally by
+// `${interface_name}|${category}`; dedup happens at insert time so the count
+// reflects burst size without spawning duplicate banners.
+export interface ProviderAlertEntry {
+  interfaceName: string;
+  category: ProviderErrorCategory;
+  count: number;
+  firstSeenAt: number;     // ms epoch
+  lastSeenAt: number;      // ms epoch
+  errorCode: string;       // raw m_ProviderErrorCode (Anthropic/Bedrock can be empty)
+  errorType: string;       // raw m_ProviderErrorType (always present post-Sitting-6)
+  message: string;         // provider's free-form message — shown verbatim in the body
+  retryAfterSeconds?: number;
+  httpStatus: number;
 }
 
 export interface WorkflowsListResponse {

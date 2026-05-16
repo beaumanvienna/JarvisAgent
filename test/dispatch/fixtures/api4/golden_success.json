@@ -1,0 +1,18 @@
+{
+  "id": "msg_mocktransport-golden-success",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "This is a canned Anthropic Messages reply from the MockTransport.\nNo network call was made.\n"
+    }
+  ],
+  "model": "mock-stub",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 18
+  }
+}

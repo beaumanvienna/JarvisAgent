@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "BOM-leading﻿ after-BOM. RTL-override:‮reversed-text‬ end-override. ZWJ‍emoji-joiner LRI⁦isolated-LTR⁩ RLI⁧isolated-RTL⁩ FSI⁨first-strong⁩. Arabic-letter-mark؜ Hebrewאבג ZeroWidthNoBreak⁠ SoftHyphen­. Mongolian-vowel-separator᠎ variation-selector-16️. Heavy-combining-stacked: é̂̃̄̅̆̇̈̉̊̋̌̍̎̏ unbounded. Valid-emoji-surrogate-pair: 🚀 rocket 👩‍💻 woman-technologist. Tab\there\tcarriage\rreturn\nline\nfeed. Long-mixed: αβγ 中文 ‮العربية‬ end."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 80,
+    "totalTokenCount": 92
+  },
+  "modelVersion": "mock-stub"
+}

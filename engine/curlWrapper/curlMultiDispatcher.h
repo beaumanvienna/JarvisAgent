@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -50,8 +51,21 @@ namespace AIAssistant
     class CurlMultiDispatcher
     {
     public:
-        // callback(result, responseBody) fires on the I/O thread when the request completes.
-        using Callback = std::function<void(QueryResult, std::string /*responseBody*/)>;
+        // callback(result, responseBody, retryAfterSeconds) fires on the I/O thread when the
+        // request completes.  retryAfterSeconds is populated from the provider's Retry-After
+        // response header when present (any HTTP status — 429, 503, or even a 200 with a
+        // forward-looking hint); std::nullopt otherwise.  Cancellation / shutdown / pre-flight
+        // failure paths fire with nullopt — there's no provider response to parse.
+        using Callback = std::function<void(QueryResult, std::string /*responseBody*/,
+                                            std::optional<int> /*retryAfterSeconds*/)>;
+
+        // Sitting-8 Workstream D close-out: fired on the I/O thread after a
+        // RateLimitController observation that mutated m_CurrentConcurrencyCap.
+        // No payload — receivers refetch /api/providers/health for the
+        // authoritative state.  Wired by JarvisAgent to push an
+        // AiCapChangedEvent that the WS layer broadcasts as {"type":"cap-changed"}.
+        using OnCapChangedCallback = std::function<void()>;
+        void SetOnCapChangedCallback(OnCapChangedCallback cb);
 
         CurlMultiDispatcher();
         ~CurlMultiDispatcher();
@@ -219,11 +233,16 @@ namespace AIAssistant
         // the per-(host, modelFamily) controller's Observe().  httpCode drives
         // the controller's AIMD signal: 429 halves the cap, any other clean
         // completion advances the streak counter.
-        void ParseRateLimitHeaders(CurlWrapper::QueryData const& queryData,
-                                   std::string const& headerBuffer,
-                                   std::string const& body,
-                                   std::string& host,
-                                   long httpCode);
+        //
+        // Returns the Retry-After value (in seconds) when the provider sent
+        // one; std::nullopt otherwise.  OnTransportComplete threads this into
+        // the user callback so AiRequestPool can stamp AiError::m_RetryAfterSeconds
+        // for the WS payload + dashboard popover countdown.
+        std::optional<int> ParseRateLimitHeaders(CurlWrapper::QueryData const& queryData,
+                                                 std::string const& headerBuffer,
+                                                 std::string const& body,
+                                                 std::string& host,
+                                                 long httpCode);
 
         // Fallback constants used only when QueryData doesn't pre-resolve a
         // per-interface override (rare — only legacy callers like assistant /
@@ -271,6 +290,13 @@ namespace AIAssistant
         // independent AIMD signals despite sharing api.anthropic.com.
         // Same threading rules as m_Active.
         std::unordered_map<std::string, RateLimitController> m_Controllers;
+
+        // Sitting-8 Workstream D close-out: cap-changed wake signal.  Fired
+        // from the I/O thread under m_DebugMutex after a controller observation
+        // that changes m_CurrentConcurrencyCap.  Nullable; callback set once
+        // by JarvisAgent.  Atomic store via the SetOnCapChangedCallback setter
+        // (single-writer at construct time, single-reader on the I/O thread).
+        OnCapChangedCallback m_OnCapChanged;
 
         // Recursive so the same I/O-thread call chain can lock at multiple nested levels
         // (e.g. OnTransportComplete holds the lock and calls ParseRateLimitHeaders, which

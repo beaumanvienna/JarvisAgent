@@ -71,21 +71,47 @@ namespace AIAssistant
         }
         error.m_Kind = AiError::Kind::Provider;
         error.m_Message = m_ErrorInfo.m_Message;
+        // Anthropic has no `code` field (only nested `error.type`); the type
+        // string is the sole discriminator and drives both HTTP-status synthesis
+        // and category classification.  Real network HTTP status overlays this
+        // in AiRequestPool's curl-error branch (e.g. credit_balance_too_low
+        // arrives as HTTP 400, not the 503 we'd synthesize for overloaded_error).
+        error.m_ProviderErrorType = m_ErrorInfo.m_Type;
+
         if (m_ErrorInfo.m_Type == "rate_limit_error")
         {
             error.m_HttpStatus = 429;
+            error.m_Category = ProviderErrorCategory::ThrottleRateLimit;
         }
-        else if (m_ErrorInfo.m_Type == "authentication_error")
+        else if (m_ErrorInfo.m_Type == "authentication_error" ||
+                 m_ErrorInfo.m_Type == "permission_error")
         {
-            error.m_HttpStatus = 401;
+            error.m_HttpStatus = (m_ErrorInfo.m_Type == "permission_error") ? 403 : 401;
+            error.m_Category = ProviderErrorCategory::AuthFailure;
         }
-        else if (m_ErrorInfo.m_Type == "permission_error")
-        {
-            error.m_HttpStatus = 403;
-        }
-        else if (m_ErrorInfo.m_Type == "overloaded_error" || m_ErrorInfo.m_Type == "api_error")
+        else if (m_ErrorInfo.m_Type == "overloaded_error" ||
+                 m_ErrorInfo.m_Type == "api_error")
         {
             error.m_HttpStatus = 503;
+            error.m_Category = ProviderErrorCategory::ServiceOverload;
+        }
+        else if (m_ErrorInfo.m_Type == "credit_balance_too_low")
+        {
+            // Anthropic billing exhaustion arrives as HTTP 400; classification
+            // is what matters for the dashboard banner, not the synthesized
+            // status (AiRequestPool overlays the real network HTTP status).
+            error.m_HttpStatus = 400;
+            error.m_Category = ProviderErrorCategory::BillingExhausted;
+        }
+        else if (m_ErrorInfo.m_Type == "invalid_request_error")
+        {
+            error.m_HttpStatus = 400;
+            error.m_Category = ProviderErrorCategory::InvalidRequest;
+        }
+        else if (m_ErrorInfo.m_Type == "not_found_error")
+        {
+            error.m_HttpStatus = 404;
+            error.m_Category = ProviderErrorCategory::ModelNotFound;
         }
         return error;
     }

@@ -63,6 +63,13 @@ namespace AIAssistant
         }
         error.m_Kind = AiError::Kind::Provider;
         error.m_Message = m_ErrorInfo.m_Message;
+
+        // Same OpenAI-style envelope as API1; share the classifier so a new
+        // discriminator added in one place reaches both surfaces.
+        error.m_ProviderErrorCode = m_ErrorInfo.m_Code;
+        error.m_ProviderErrorType = m_ErrorInfo.m_Type;
+        error.m_Category          = ClassifyOpenAiStyleErrorType(m_ErrorInfo.m_Type);
+
         if (m_ErrorType == ErrorType::RateLimitError)
         {
             error.m_HttpStatus = 429;
@@ -78,6 +85,10 @@ namespace AIAssistant
         else if (m_ErrorType == ErrorType::ServerError)
         {
             error.m_HttpStatus = 500;
+        }
+        else if (m_ErrorType == ErrorType::InsufficientQuota)
+        {
+            error.m_HttpStatus = 429;
         }
         return error;
     }
@@ -301,45 +312,14 @@ namespace AIAssistant
 
     void ReplyParserAPI2::ParseError(simdjson::ondemand::object errorObj)
     {
-        using namespace simdjson;
-
-        ReplyParserAPI2::ErrorInfo errorInfo;
-
-        for (auto field : errorObj)
-        {
-            std::string_view key = field.unescaped_key();
-            if (key == "message")
-            {
-                std::string_view message = field.value().get_string();
-                errorInfo.m_Message = SanitizeUtf8(std::string(message));
-            }
-            else if (key == "type")
-            {
-                std::string_view type = field.value().get_string();
-                errorInfo.m_Type = std::string(type);
-            }
-            else if (key == "code")
-            {
-                std::string_view code = field.value().get_string();
-                errorInfo.m_Code = std::string(code);
-            }
-            else if (key == "param")
-            {
-                if (!field.value().is_null())
-                {
-                    std::string_view param = field.value().get_string();
-                    errorInfo.m_Param = std::string(param);
-                }
-            }
-            else
-            {
-                simdjson::ondemand::value val = field.value();
-                JsonObjectParser jsonObjectParser(key, val, "Uncaught JSON field in error parser");
-            }
-        }
-
-        m_ErrorInfo = errorInfo;
-        m_ErrorType = ParseErrorType(m_ErrorInfo.m_Type);
+        // Shared OpenAI-style envelope parser — see ReplyParserAPI1::ParseError
+        // for the rationale (extract-before-third-site per feedback_cpp_discipline).
+        OpenAiStyleErrorInfo const info = ParseOpenAiStyleError(errorObj);
+        m_ErrorInfo.m_Message = info.m_Message;
+        m_ErrorInfo.m_Type    = info.m_Type;
+        m_ErrorInfo.m_Code    = info.m_Code;
+        m_ErrorInfo.m_Param   = info.m_Param;
+        m_ErrorType           = ParseErrorType(m_ErrorInfo.m_Type);
     }
 
     ReplyParserAPI2::ErrorType ReplyParserAPI2::ParseErrorType(std::string_view type)

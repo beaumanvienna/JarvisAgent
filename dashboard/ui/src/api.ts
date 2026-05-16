@@ -1,5 +1,13 @@
-import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse, KeysUnlockResponse } from "./types";
+import type { StatusResponse, WorkflowsListResponse, LastRunsResponse, LogResponse, AnalyzeLastRunResponse, KeysStatusResponse, KeysUnlockResponse, ProvidersHealthResponse } from "./types";
 import { authFetch } from "./auth";
+
+// Sitting-8 Workstream D: per-interface health snapshot driving the AI Health
+// LED.  Polled from usePolling; gracefully returns empty interfaces on 401
+// (engine-mode auth gap before sign-in).
+export async function fetchProvidersHealth(): Promise<ProvidersHealthResponse> {
+  const res = await authFetch(`${BASE}/api/providers/health`);
+  return res.json();
+}
 
 const BASE = window.location.origin;
 

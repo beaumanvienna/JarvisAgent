@@ -15,6 +15,387 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-15 (Sitting 8 + dev-plan closeout — Workstream D: AI Health LED + `ProviderHealthSnapshot` + `cap-changed` WS event) → next session
+
+Sitting 8 landed.  `doc/misc/ai-provider-error-visibility-dev-plan.md` is **closed** — all 8 sittings done in a single calendar day (2026-05-15) after Foundation 1+2 landed 2026-05-14.  No outstanding dev-plan work; the entries in §8 "After this plan" are post-1.0 product candidates (provider health probe, workflow auto-pause), separate dev plans if they're ever picked up.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **`ProviderHealthSnapshot` value type** | `application/workflow/providerHealth.h` (new) | Per-interface snapshot per §3.5-C: AIMD cap state (current/max/floor) + last-error info (raw code/type/message/category/http_status/retry_after) + counters (consecutive_errors, success_streak) + `m_CapPinnedAtFloorSince` for the safety-net rule + `m_QuotaKey` for shared-cap detection.  Sibling `InterfaceHealthState` for the pool's mutable tracking. |
+| **`AiRequestPool` health tracking + accessor** | `aiRequestPool.{h,cpp}` | `m_HealthMutex`-guarded `m_HealthPerInterface: unordered_map<string, InterfaceHealthState>`; updated by the curl callback on every completion (success bumps streak; failure records last-error).  Pin-tracking second block reads dispatcher cap via `GetDebugSnapshot()` and flips `m_CapPinnedAtFloorSince` at floor-boundary crossings.  `SnapshotProviderHealth()` joins per-interface state with controller cap state into one consistent vector — single critical section. |
+| **`/api/providers/health` REST endpoint** | `webServer.{h,cpp}` | All 4 build targets.  Serves snapshot vector as JSON with Unix-ms timestamps for cross-refresh persistence.  Documented in `doc/api-endpoints.md`. |
+| **`cap-changed` WS event for sub-second LED updates** | `engine/event/event.h` (new `EventType::AiCapChanged`), `aiCallEvents.h` (new `AiCapChangedEvent`), `curlMultiDispatcher.{h,cpp}` (new `OnCapChangedCallback`), `jarvisAgent.cpp` (register callback to push event; dispatch event to broadcast), `webServer.{h,cpp}` (new `BroadcastCapChanged` emitting payload-free `{"type":"cap-changed"}`) | Dispatcher snapshots `CurrentConcurrencyCap()` before/after `controller.Observe()` in `ParseRateLimitHeaders`; fires the callback when the value mutates.  Bounded broadcast rate: only on actual mutation, not every observation.  Dashboard refetches health on receipt — no payload needed. |
+| **AI Health LED + popover + WS handler** | `dashboard/ui/src/types.ts` (`ProviderHealth` + response type), `dashboard/ui/src/api.ts` (`fetchProvidersHealth`), `dashboard/ui/src/hooks/usePolling.ts` (extended to fetch /api/providers/health on every tick), `dashboard/ui/src/hooks/useWebSocket.ts` (`cap-changed` handler calls a registered refetch callback), `dashboard/ui/src/components/StatusBar.tsx` (6th LED + popover + frontend pin-tracker via useRef as safety net), `dashboard/ui/src/App.tsx` (threads providersHealth through + registers cap-changed callback to `refresh`), `dashboard/ui/src/App.css` (`.ai-health-popover` + `.cat-badge-*` + `.ai-health-mock` + `.ai-health-shared` + `.ai-health-footnote`) | Click-anchored popover (Interface / Cap / Last-error / Retry-in columns); `(mocked)` badge; shared-cap `*` footnote when 2+ interfaces share a quota_key; severity computed per §4-D rules but with the sustained-pin threshold tuned from 60s → 30s to align with the recent-severe window (avoids amber dip mid-outage). |
+| **`m_CapPinnedAtFloorSince` backend population** | `aiRequestPool.cpp` (curl callback's pin-update block, runs after the m_HealthMutex critical section that updates last-error) | Reads dispatcher cap via `GetDebugSnapshot()`, matches by `quotaKeyForHealth`, flips the timestamp at floor-boundary crossings (epoch → now when cap hits floor; now → epoch when cap recovers above floor).  Survives cross-refresh — dashboard renders red immediately on mount when state is degraded.  Frontend `useRef` tracker remains as safety net for the rare first-observation race. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build | Studio Debug + Release + Engine Debug + Release green from clean after each rebuild cycle this sitting. |
+| Per-API mock errors suite (Debug) | 36/36 still passing — Sitting-8 backend changes don't regress the per-API drivers. |
+| WS payload test (Debug) | 8/8 still passing across api1/3/4/5. |
+| TUI byte-safety stress (Debug) | PASS — Sitting-8 doesn't touch the render path. |
+| Sitting-8 backend acceptance | `/api/providers/health` returns 11 interfaces; mock_demo_billing snapshot shows `cap=1/48`, `category=BillingExhausted`, `cap_pinned_at_floor_since_ms=1778912358925` (timestamp populated by curl callback's pin-update block). |
+| Sitting-8 frontend acceptance | LED + popover verified visually via JC's screenshots: shows `🔴 AI: 2 unavailable` while two mock interfaces are pinned + categorized as severe; popover lists all 11 interfaces with `(mocked)` badges, relative-time last-error column, shared-cap footnote.  Page-refresh shows red immediately on mount (backend timestamp wins over frontend pin-tracker). |
+| `cap-changed` WS event | Fires on dispatcher's `controller.Observe()` mutation; dashboard refetches `/api/providers/health` within ms instead of waiting for the 5s poll tick. |
+| **TUI renderer verification (the §19 SanitizeUtf8 gap)** | **Initially "closed" 2026-05-15 23:48** with `test_stress_tui_utf8_heavy.py` (432 ai_calls × heavy-but-VALID multi-byte content from `api1/utf8_heavy.json`) against a TTY-active j9t — JC visually confirmed clean rendering.  **Then re-opened 2026-05-15 23:54** by firing the adversarial `test_tui_stress_malformed_utf8.py` (98 dispatches × the 14-fixture pathological battery) against the same TTY-active j9t — **j9t SIGABRT'd mid-burst** with `vt/pdcdisp.c:162: _unpack_combined_character: Assertion 'rval < buffsize' failed`.  Three-layer fix landed; both stress tests re-verified against the patched build with TTY active (see addendum row below for the diagnostic + patch trail). |
+| **PDCursesMod combining-mark buffer crash (real bug found + fixed 2026-05-16)** | The heavy-but-valid test passed because its longest combining-mark chain stayed under PDCursesMod's 10-wchar grapheme buffer.  The malformed stress fixture `api1/ugly_real_world.json` chains BOM + RTL/LTR overrides + ZWJ + LRI + RLI + FSI + Arabic letter marks + Hebrew + Zero-Width Joiner + Soft Hyphen + Mongolian vowel separator + variation-selector-16 into single clusters that exceed 10 marks — tripped the buffer.  **Three-layer fix:** (1) `engine/log/terminalLogStreamBuf.h` gained `CapCombiningRuns(input, maxRun=8)` applied in `syncLocked` after `StripAnsi` — boundary defense, caps consecutive combining/format codepoints per base char before any LOG_* bytes reach the renderer.  Curated codepoint ranges (diacriticals, Cyrillic/Hebrew/Arabic combining, ZWSP/ZWNJ/ZWJ/LRM/RLM, BiDi controls, word joiner + isolates, combining marks for symbols, variation selectors BMP+supplement, Mongolian VS, BOM, half marks).  (2) `vendor/pdcursesmod/vt/pdcdisp.c::_unpack_combined_character` (Linux + macOS): broken `assert(rval < buffsize)` removed — `rval == buffsize` is a legit full-buffer state, not overflow; on cluster-too-big substitute `U+FFFD` for `obuff[0]` so downstream UTF-8 conversion produces a valid replacement glyph instead of feeding a cluster sentinel to `PDC_wc_to_utf8`.  (3) `vendor/pdcursesmod/wincon/pdcdisp.c` (Windows): added missing bounds check on `n_combined < J9T_MAX_COMBINED - 1` — pre-fix had NO bounds check, would write past `added[9]` into stack memory on Windows (silent UB in both Debug + Release, no assertion to catch it).  Same `U+FFFD` fallback on capacity overflow.  Both vendored patches labeled `/* j9t fix (vt): ... */` and `/* j9t fix (wincon): ... */` for diff identification; `vendor/pdcursesmod/readme_j9t.md` documents both patches + the trigger + the rebase-onto-upstream procedure.  **Verified post-patch against BOTH Debug AND Release** with TTY active: both `test_tui_stress_malformed_utf8.py` AND `test_stress_tui_utf8_heavy.py` pass; JC visually confirmed no garbage glyphs + terminal recovers cleanly.  Combining-mark chains visibly capped at 8 per base.  Release verification matters specifically for this fix — `assert()` compiles out in Release, so pre-patch the broken `vt/pdcdisp.c` assertion wouldn't have fired and the cluster-sentinel corruption would have manifested as silent visual garbage hard to attribute.  The explicit `if (root > MAX_UNICODE)` U+FFFD branch is real code (not an assertion), so it behaves identically in both builds — confirmed end-to-end. |
+
+### Architecture notes for next-session-Claude
+
+- **`ProviderHealthSnapshot` lives in `application/workflow/`, NOT `engine/curlWrapper/`.**  The dev plan §3.5-C originally placed it on `CurlMultiDispatcher`, but moving it to the application layer avoids the engine→application include boundary (the struct references `ProviderErrorCategory` from `aiReply.h`).  Dispatcher tracks raw AIMD cap state via the existing `m_Controllers` map; AiRequestPool owns the per-interface health + classification + pin tracking and assembles snapshots by joining the two.
+- **Pin-tracking has two layers.**  Backend (`aiRequestPool::m_HealthPerInterface[name].m_CapPinnedAtFloorSince`) is authoritative and survives cross-refresh.  Frontend (`useRef` in `StatusBar.tsx`) is a safety net for the rare race where the backend timestamp lags (first-observation against a controller that already had cap pinned from an earlier burst).  The dashboard's `effectivePinAt` helper prefers backend > frontend.
+- **Sustained-pin threshold is 30s, not 60s.**  Dev plan §4-D originally specified 60s; shipped value tuned to 30s during E2E verification with JC because the 30s→60s gap produced a 30-second amber dip mid-outage (provider still failing, LED briefly suggesting recovery).  Both windows aligned at 30s gives continuous red coverage.  If you ever need to widen, change `30_000` in two places in `StatusBar.tsx` (`aiHealthSeverity` + `aiHealthLabel`).
+- **`cap-changed` WS payload is intentionally empty.**  It's a wake signal — dashboard refetches `/api/providers/health` for the authoritative state.  This keeps the WS surface small (no per-controller cap deltas to serialize/parse), trades a tiny extra RTT for a simpler contract.
+- **`AiCapChangedEvent` is `EventCategoryAi`.**  Same category as the AiCall* events.  Dispatched alongside them in `jarvisAgent.cpp::OnEvent`.
+- **`m_RequiredAiProviders` field was dead before Sitting 7** — declared in `workflowTypes.h` but never populated.  Sitting 7 added the inline `ExtractProviderFromParams` simdjson helper in `workflowRegistry.cpp` and now populates it at both load sites (root + sub-workflow).  As a side effect this also enables the latent "required providers exist" check in `workflowRuntimeManager.cpp:2801` that was a no-op while the vector was always empty.  If you see new "required provider missing" warnings post-Sitting-7, it's the previously-silent check finally firing.
+- **First-observation pin race**: when an interface's controller already has cap pinned at floor from a previous burst, the FIRST call against the interface after that may not set the pin timestamp if the dispatcher snapshot shows cap > floor between billing-burst halves.  Verified harmless — frontend safety net fills in within 30s, and any subsequent call sets the pin.  Edge case; happens once per interface per dispatcher state transition.
+- **Frontend pin-tracker resets on page refresh** but the backend timestamp persists — so refresh during ongoing degradation correctly keeps the LED red, only the frontend tracker has to re-warm (which it does on the next observation).
+
+### Open items / next-session candidates
+
+The dev plan is closed.  Carry-over from prior hand-offs that didn't get done in this session:
+
+1. **`test_markitdown_cntx.py` pre-existing failure.**  Carried over since Sitting 1.  Absolute-path test fixture vs relative-path API validation.  Quick standalone cleanup — not dev-plan-related.
+2. **Live-AI smoke for Workstream E parser extensions.**  When API credits are next available, one live run against api3 Gemini + api4 Anthropic + api5 Bedrock to confirm hand-crafted fixtures match captured-from-live byte-for-byte.  Mentioned by JC as "in a couple of weeks when credits run out".
+3. **Orphaned-banner cleanup after interface delete** (Sitting-7 follow-up).  Server-side `DELETE /api/settings/ai-interfaces/<name>` should broadcast a "stop tracking this interface" signal so the dashboard clears banners keyed by that interface.  Could piggyback on the `cap-changed` mechanism — emit a `cap-changed` after delete + the dashboard refetch would naturally drop the dead interface from the popover (banners would still need explicit handling).
+4. **"Dismiss all" button on banner stack** (Sitting-7 follow-up).  5-line React + 1-line `dismissProviderAlert("*")` extension.
+5. **`m_RequiredAiProviders` extension for default-provider workflows** (Sitting-7 follow-up).  When `interface_names` contains `""` (system default), the per-row hazard glyph can't currently identify which actual provider is in use.  `/api/providers/health` could include the resolved default provider name so the dashboard maps `""` → `<default-name>`.
+6. **First-observation pin race** (Sitting-8 follow-up).  Dispatcher could push pin state to `AiRequestPool` directly on every controller mutation via a callback (similar to `OnCapChangedCallback`) instead of waiting for the next interface-specific completion.  Closes the race but adds cross-layer coupling — defer until it actually surfaces as a UX problem.
+7. **Two Foundation-3 documentation tweaks** carried since Sitting 5.  `expected_log_substring` for per-API drivers now asserts body discriminator (Sitting 5+6 fixed); driver preamble updated.
+
+### Gotchas next-session-Claude should know
+
+Load-bearing past today:
+
+- **`ProviderHealthSnapshot` is application-layer.**  Don't try to put it in `engine/curlWrapper/` — the dependency on `ProviderErrorCategory` (from `aiReply.h`) would cross the engine→application boundary.  The dispatcher exposes raw controller cap state; the pool joins it with classification + last-error to produce the snapshot.
+- **`SnapshotProviderHealth()` calls `dispatcher->GetDebugSnapshot()` per call.**  The debug snapshot allocates a vector and iterates all controllers under `m_DebugMutex`.  Cheap for the current scale (≤20 controllers) but if you ever want to push this into a high-frequency hot path, add a tighter accessor (e.g. `int GetCurrentCap(string const& quotaKey)`).
+- **`cap-changed` fires from the I/O thread under `m_DebugMutex`** (recursive).  JarvisAgent's callback pushes to the event bus (separate mutex) — no deadlock today.  If you ever add a callback that calls back INTO the dispatcher, watch for re-entrancy on the recursive mutex.
+- **The dashboard's `usePolling` interval is 5s** (not 3s as the default suggests — App.tsx passes `5000`).  `cap-changed` WS event collapses this latency to sub-second on actual cap mutations.  If you tune the polling interval, the cap-changed event becomes more or less important accordingly.
+- **`StatusBar.tsx` mutates `pinTimesRef.current` during render.**  This is intentional (the ref is per-component-instance state derived from inputs) but unusual.  Don't move it into `useEffect` — the severity calculation needs the up-to-date pin map.
+- **Pin tracking is asymmetric.**  Backend writes pin from curl callback (per-interface).  Frontend writes pin from poll cycle (per-interface, observed cap state).  Both use the same 30s threshold.  Frontend wins on first-load (empty backend) until the next completion populates the backend timestamp.
+- **WS broadcasts now include `cap-changed`** — six broadcast types total: `queued`, `workflow-runs-snapshot`, `python-status`, `log`, `ai-call-started`, `ai-call-completed`, `ai-call-failed`, `cap-changed`.  Documented in `doc/api-endpoints.md`.
+- **The 30s vs 60s threshold change is documented** in the dev plan §4-D as a deliberate tuning decision made during JC's verification.  Future code-review questions about why it doesn't match the original §4-D spec are answered there.
+- **`test_stress_tui_utf8_heavy.py` + `test_tui_stress_malformed_utf8.py` do NOT verify the TUI renderer when j9t is launched via `nohup ... &` with stdout redirected** (the standard background-launch pattern this session used).  `terminalManager.cpp:482` checks `isatty(STDOUT_FILENO)` at init — `nohup` + `>` redirect means false → ncurses path skipped → j9t runs headless for its lifetime → the Python harness only exercises the server side.  The harness's "j9t alive + log valid UTF-8" assertions pass either way; they're necessary but not sufficient for real TUI verification.  For genuine renderer testing, launch j9t in an interactive terminal (e.g. `./jarvisagent.sh --debug` directly, no `nohup`/`>` redirect), watch the screen while firing the test, and capture a screenshot artifact.  **The TTY-active malformed run on 2026-05-15 23:54 found a real crash** (PDCursesMod combining-buffer bug — see addendum row in "What's verified" + `vendor/pdcursesmod/readme_j9t.md`); both stress tests now pass against the patched build.
+- **PDCursesMod has been patched in two places** (`vt/pdcdisp.c` for Linux/macOS, `wincon/pdcdisp.c` for Windows) — both labeled `/* j9t fix (vt|wincon): ... */` for diff identification.  See `vendor/pdcursesmod/readme_j9t.md` for the full rationale, rebase-onto-upstream procedure, and a description of the trigger (>9 combining marks per cluster: pathological/hostile input, not real-world content).  If you ever pull a newer upstream PDCursesMod, `grep -n "j9t fix" vendor/pdcursesmod/{vt,wincon}/pdcdisp.c` should return four hits (two per file); zero hits means the patches got lost in the upgrade — re-apply per the readme.
+- **The combining-mark cap (8 per base) is enforced at three layers**: (1) primary at `engine/log/terminalLogStreamBuf.h::CapCombiningRuns` (boundary defense — every LOG_* line passes through this before ncurses); (2) defensive at `vendor/pdcursesmod/vt/pdcdisp.c` (substitutes U+FFFD instead of crashing if a cluster somehow reaches the renderer with 10+ marks); (3) defensive at `vendor/pdcursesmod/wincon/pdcdisp.c` (same as 2 but for Windows backend, which pre-fix had ZERO bounds checking).  If you ever need to widen the cap, change `8` in (1) — the `J9T_MAX_COMBINED 10` in (3) and the `buffsize=10` caller in (2) are PDCursesMod's intrinsic buffer size and shouldn't be touched.
+
+### Files in working tree (uncommitted)
+
+Sitting 2+3+4+5+6+7 working-tree sets still uncommitted (per their hand-offs).  Sitting 8 adds:
+
+```
+ M application/jarvisAgent.cpp                          # AiCapChangedEvent dispatch + OnCapChanged callback registration
+ M application/web/webServer.{h,cpp}                    # /api/providers/health endpoint + BroadcastCapChanged
+ M application/workflow/aiCallEvents.h                  # AiCapChangedEvent class
+ M application/workflow/aiRequestPool.{h,cpp}           # m_HealthPerInterface + SnapshotProviderHealth + pin tracking
+?? application/workflow/providerHealth.h                # new — ProviderHealthSnapshot + InterfaceHealthState types
+ M dashboard/ui/src/App.css                             # .ai-health-popover + .cat-badge-* + .ai-health-mock + footnote
+ M dashboard/ui/src/App.tsx                             # providersHealth thread-through + cap-changed callback registration
+ M dashboard/ui/src/api.ts                              # fetchProvidersHealth
+ M dashboard/ui/src/components/StatusBar.tsx            # 6th LED + popover + pin tracking + severity
+ M dashboard/ui/src/hooks/usePolling.ts                 # /api/providers/health fetch on every tick
+ M dashboard/ui/src/hooks/useWebSocket.ts               # cap-changed handler + registerCapChangedCallback
+ M dashboard/ui/src/types.ts                            # ProviderHealth + ProvidersHealthResponse
+ M doc/api-endpoints.md                                 # /api/providers/health endpoint + cap-changed WS msg + (Sitting 7) /api/workflows.interface_names + ai-call-completed.interface_name
+ M doc/misc/ai-provider-error-visibility-dev-plan.md    # status: CLOSED + §4-D + §6 row 8 marked ✅ + total-sittings note
+ M doc/misc/hand-off.md                                 # this entry
+ M engine/curlWrapper/curlMultiDispatcher.{h,cpp}       # OnCapChangedCallback + cap-mutation detection in ParseRateLimitHeaders
+ M engine/event/event.h                                 # EventType::AiCapChanged
+
+# Sitting-8 addendum — PDCursesMod combining-buffer fix (2026-05-16):
+ M engine/log/terminalLogStreamBuf.h                    # CapCombiningRuns + IsCombiningOrFormat helpers; applied in syncLocked
+ M vendor/pdcursesmod/vt/pdcdisp.c                      # j9t fix (vt): off-by-one assert removed + U+FFFD fallback on capacity overflow
+ M vendor/pdcursesmod/wincon/pdcdisp.c                  # j9t fix (wincon): bounds check on n_combined + U+FFFD fallback (previously had ZERO bounds check — stack-overflow vulnerable on Windows)
+?? vendor/pdcursesmod/readme_j9t.md                     # new — documents both vendored patches + trigger + rebase-onto-upstream procedure
+```
+
+Three test-helper scripts at `/tmp/banner_burst_demo.py` + `/tmp/banner_autodismiss_demo.py` + the (deletable) earlier helpers are session scratch — not part of the project tree.  Run `python3 /tmp/banner_burst_demo.py --cleanup` to drop the three persistent mock interfaces from config.json before committing if needed.
+
+---
+
+## 2026-05-15 (Sittings 5 + 6 + 7 — Workstreams A + E + C: log enrichment, cross-provider classification, dashboard banner) → next session
+
+Three sittings of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed in a single working day after Sitting 4: log-enrichment, cross-provider classification, and the first frontend sitting (banner + per-row hazard glyph).  Dev plan now 7-of-8 done — only Sitting 8 (Workstream D, AI Health LED + `ProviderHealthSnapshot`) remains.  Each sitting's per-task detail lives in the dev plan §4 (Workstream-by-Workstream) and §6 (sitting table); this entry surfaces the cross-cutting state, the architectural deltas, and the load-bearing gotchas the next session needs.
+
+### What landed
+
+| Sitting | Workstream | Themes |
+|---|---|---|
+| **5** | A — log enrichment | `OnRequestFailed(path, AiError const&)` (signature change — was `(path, std::string)`); one consolidated ERROR with `HTTP {status} (code='X', type='Y', category=Z) run='…' workflow='…' task='…' message='…' path='…'`; dispatcher's "HTTP 429 retries exhausted" line dropped from ERROR to WARN (kept for curl-side context); 20 Sitting-3 driver cases tightened to body discriminators (api5 stayed on HTTP-status pending Sitting 6) |
+| **6** | E — cross-provider classification | API3 `m_DetailReason` field + `details[*]` walk + reason-based classifier (`USER_PROJECT_QUOTA_EXCEEDED` vs `RATE_LIMIT_EXCEEDED` distinguishable within `RESOURCE_EXHAUSTED`); API4 full `error.type` → category map (7 variants); API5 new `BedrockFamily::AwsError` variant + `ExtractAwsError` helper (strips `com.amazonaws...#` prefix) + `ClassifyAwsBedrockException` mapper (11 AWS exception names); api3 + api5 drivers tightened; WS payload test expanded 2 → 8 cases across api1/3/4/5 |
+| **7** | C — banner + hazard glyph | `ProviderAlertBanner` red-severity block in `WorkflowsPanel.tsx` (mirror of `.no-keys-banner`); `useWebSocket.ts` gained first-in-dashboard handlers for `ai-call-failed` (dedup'd into a Map keyed by `${interface}\|${category}`) + `ai-call-completed` (auto-clear by interface); per-row `.hazard-icon-red` driven by new `interface_names` field on `/api/workflows`; `WorkflowDefinition::m_RequiredAiProviders` populated for the first time (declared but dead since introduction); `AiCallCompletedEvent` + `BroadcastAiCallCompleted` gained `m_InterfaceName` (parallel to Sitting-4's `AiCallFailedEvent` change) so the dashboard auto-dismiss has a key to match on |
+
+Aggregate diff (working tree, uncommitted on top of Sittings 2+3+4's working set):
+
+```
+ M application/jarvisAgent.cpp                          # AiCallCompleted dispatch forwards interface_name (Sitting 7)
+ M application/json/replyParserAPI3.{h,cpp}             # m_DetailReason + details[*] walk + classifier (Sitting 6)
+ M application/json/replyParserAPI4.cpp                 # full error.type → category map (Sitting 6)
+ M application/json/replyParserAPI5.{h,cpp}             # BedrockFamily::AwsError + ExtractAwsError + ClassifyAwsBedrockException (Sitting 6)
+ M application/web/webServer.{h,cpp}                    # /api/workflows interface_names + BroadcastAiCallCompleted+interface_name (Sittings 7)
+ M application/workflow/aiCallEvents.h                  # AiCallCompletedEvent carries m_InterfaceName (Sitting 7)
+ M application/workflow/aiRequestPool.{h,cpp}           # OnRequestFailed(AiError) + enriched log (Sitting 5) + AiCallCompletedEvent ctor update (Sitting 7)
+ M application/workflow/workflowRegistry.cpp            # populates m_RequiredAiProviders at workflow-load (Sitting 7 — fixed dead field)
+ M dashboard/ui/src/App.css                             # .provider-alert-banner + .hazard-icon-red (Sitting 7)
+ M dashboard/ui/src/App.tsx                             # threads providerAlerts + dismissProviderAlert into WorkflowsPanel (Sitting 7)
+ M dashboard/ui/src/components/WorkflowsPanel.tsx       # ProviderAlertBanner block + per-row red hazard glyph (Sitting 7)
+ M dashboard/ui/src/hooks/useWebSocket.ts               # ai-call-failed + ai-call-completed handlers + dedup state + dismissProviderAlert (Sitting 7)
+ M dashboard/ui/src/types.ts                            # WorkflowEntry.interface_names + AiCall*Message + ProviderAlertEntry types (Sitting 7)
+ M doc/api-endpoints.md                                 # /api/workflows.interface_names + ai-call-completed.interface_name documented
+ M doc/architecture.md                                  # OnRequestFailed bullet + API5 AwsError no-delegate path
+ M doc/misc/ai-provider-error-visibility-dev-plan.md    # rev 8: §3 parity matrix, §4 Workstream A+C+E sections rewritten, §6 sittings 5+6+7 marked complete
+ M doc/misc/hand-off.md                                 # this entry
+ M engine/curlWrapper/curlMultiDispatcher.cpp           # 429-retries-exhausted ERROR → WARN (Sitting 5)
+ M test/dispatch/_per_api_fault_helpers.py              # preamble updated for body discriminators (Sittings 5+6)
+ M test/dispatch/README.md                              # per-API discriminator list + WS payload table (Sittings 5+6)
+ M test/dispatch/test_api{1..6}_mock_errors.py          # assertions tightened from HTTP status → body discriminator (Sittings 5+6)
+ M test/dispatch/test_ws_ai_call_failed_payload.py      # expanded 2 → 8 cases across api1/3/4/5 (Sitting 6)
+```
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build | Studio Debug + Release + Engine Debug + Release — green from clean after Sitting 6.  Sitting 7 added incremental Debug + Release rebuilds (interface_names + AiCallCompleted signature changes). |
+| Per-API mock errors suite (Debug) | **6 × 6 = 36 cases pass** with body-discriminator assertions across all 6 APIs (api5 tightened to AWS exception names in Sitting 6). |
+| WS payload test (Debug) | **8/8 pass** covering api1 + api3 + api4 + api5 with full field assertions (category, code, type, retry_after, http_status, interface_name). |
+| TUI byte-safety stress (Debug) | PASS — 98 dispatches across 14 stress fixtures × burst 7; log slice 2.27 MB valid UTF-8; j9t alive throughout. |
+| Full dispatch suite (Debug) | **24/24 pass** — Sitting-3 baseline (24) + Sitting-6 new (`test_ws_ai_call_failed_payload` expanded to 8 cases) = 25 distinct files; minus `test_markitdown_cntx.py` (pre-existing failure, deferred since Sitting 1). |
+| Sitting-7 banner E2E | Verified via JC's screenshot (`log/Untitled.png` at the time): 3 distinct red banners stacked for BillingExhausted / AuthFailure / ServiceOverload demo interfaces; `Affected calls: 3` counter on burst dedup; X-dismiss removes individual banners; auto-dismiss on next success vanishes the matching banner within ~1s after fix. |
+
+### Architecture notes for next-session-Claude
+
+- **`OnRequestFailed` signature is now `(path, AiError const&)`** — three call sites in `aiRequestPool.cpp` (curl-error, exception, schema-retry submission failure).  The schema-retry path constructs an `AiError{Kind::SchemaValidation, …}` so the consolidated log line still gets a kind + message even when there's no parser involved.
+- **`AiCallCompletedEvent` ctor signature changed** — now takes `(probName, interfaceName, usage, finishReason)`.  Parallel to Sitting 4's `AiCallFailedEvent(probName, interfaceName, error)`.  One construction site, one dispatcher consumer — both updated.  `BroadcastAiCallCompleted` likewise gained `interface_name` as its 2nd arg.
+- **`BedrockFamily::AwsError` is no-delegate** — when `DetectFamily` sees `{"__type": "...", "message": "..."}`, the `ReplyParserAPI5` ctor populates `m_AwsErrorType` + `m_AwsErrorMessage` directly and `GetError` returns the classified AiError before the delegate fallback.  Success-path bodies (Anthropic / Llama / Titan shapes) still route through delegates as before.  DetectFamily re-iterates the body for the `__type` probe (simdjson ondemand is single-pass).
+- **`m_RequiredAiProviders` was a latent bug.** Field declared in Sitting-pre-history but never populated.  Sitting 7 wired up the inline `ExtractProviderFromParams` helper in `workflowRegistry.cpp` and populates the distinct-set at both load sites (root + sub-workflow).  As a side effect, this also fixes the latent "required providers exist" check in `workflowRuntimeManager.cpp:2801` that was a no-op while the vector was always empty.  If you ever see "required provider missing" warnings post-Sitting-7, it's the previously-silent check finally firing.
+- **The dashboard's `providerAlerts` Map is in-memory only.**  Page refresh clears it.  Sitting 8's `/api/providers/health` will hydrate cross-refresh state — until then, the banner stack is per-session.
+- **Banners outlive deleted mock interfaces.**  Test suites that create a mock interface, fire one failure, then delete the interface leave an "orphan" banner in the dashboard until X-dismissed or page refresh — no `ai-call-completed` ever fires to auto-clear it.  See open-items list for the post-1.0 fix.
+- **`ai-call-completed` payload now has `interface_name`.**  Wire format documented in `doc/api-endpoints.md`.  The WS handler in `useWebSocket.ts` reads it for auto-dismiss.  Don't confuse with `ai-call-started.interface` — those are two different fields on two different message types (kept the per-message names to avoid breaking the started-event consumer).
+- **§5.2-(d) per-row precision works** — but only when the workflow's task params actually pin a `provider` field.  Workflows that ride the system default (`"provider": ""` in `m_RequiredAiProviders`) won't light up red even if the default is degraded; they'd need either a `provider` field set explicitly or a `''`-aware extension to the dashboard's worst-category check.  Not a bug — design choice (avoids over-warning every `has_ai_call` row).
+- **AwsError prefix-strip is defensive.**  AWS sometimes includes `com.amazon.coral.service#` (or similar namespaced prefix) in `__type`.  My fixtures use the short name, but real BedrockRuntime responses may include the prefix — `ExtractAwsError` handles both transparently.
+
+### Open items / next-session candidates
+
+1. **Sitting 8 = Workstream D — AI Health LED + `ProviderHealthSnapshot`.**  Per dev plan §4-D + §5.2-(b)/(c): `SnapshotHealth()` method on the dispatcher returning per-interface state in a single critical section; new `GET /api/providers/health` REST endpoint serving the snapshot for dashboard mount + reconnect backfill; 6th LED in `StatusBar.tsx` ("AI Health") with click/hover popover listing per-interface cap / last error / category / retry countdown; `EventCategoryAi::CapChanged` WS event for live updates; the "cap pinned at floor for >60s" red-rule safety net (catches the `m_Category=Unknown` case where classification can't recognize the discriminator).  Final dev-plan sitting.
+2. **Orphaned-banner cleanup after interface delete (post-1.0).**  Server-side `DELETE /api/settings/ai-interfaces/<name>` should broadcast an `ai-interface-deleted` WS message so the dashboard clears banners keyed by that interface.  Otherwise the test-suite footprint stacks up (saw ~18 banners after the 36-case run).  ~30-line backend + 10-line WS handler.
+3. **"Dismiss all" button on the banner stack (post-1.0).**  5-line React + 1-line `dismissProviderAlert("*")` extension in `useWebSocket.ts`.  Handy when test bursts leave many banners behind.
+4. **`m_RequiredAiProviders` extension for default-provider workflows.**  When `interface_names` contains the empty string (system default), the per-row hazard glyph can't currently identify which actual provider is in use.  Sitting 8's `/api/providers/health` could include the system-default resolution so the dashboard can map `''` → `<default-name>` for per-row precision.
+5. **`test_markitdown_cntx.py` pre-existing failure.**  Carried over since Sitting 1.  Absolute-path test fixture vs relative-path API validation.  Quick standalone cleanup.
+6. **Live-AI smoke for the parser-level extensions in Workstream E** — when JC's API credits are next available, one live run against each real provider (api4 Anthropic, api5 Bedrock, api3 Gemini) confirms the hand-crafted fixtures match captured-from-live byte-for-byte.  Plan §3 audit acceptance phrased as "every cell ground-truthed against a real response body".
+
+### Gotchas next-session-Claude should know
+
+Load-bearing past today:
+
+- **Hard refresh after dashboard rebuilds.**  Vite content-hashes the bundle (`index-<hash>.js`).  Browser tabs left open before the rebuild keep running the old JS even after j9t restarts.  Ctrl-Shift-R picks up the new bundle.  Sitting-7 verification spent ~2 minutes on a refresh-timing artifact (banners showed 2 instead of 3 because the Ctrl-Shift-R landed mid-burst and the new bundle's WS handshake missed the first message).
+- **`AiCallCompletedEvent` and `AiCallFailedEvent` both now carry `m_InterfaceName`.**  When adding a 3rd lifecycle event (Started already has its own `interface` field — different name for historical reasons), keep the parallel.  The dashboard auto-dismiss logic in `useWebSocket.ts::ai-call-completed` reads `msg.interface_name` (matches the WS payload field name, NOT the event field — they happen to be the same string content but live in different namespaces).
+- **`interface_names` is computed at workflow-load time, NOT runtime.**  Editing a JCWF + running `POST /api/workflows/reload` re-populates the field.  Editing a JCWF on disk WITHOUT reloading leaves the field stale.  Standard `feedback_reload_workflows` rule.
+- **`m_RequiredAiProviders` is a distinct-set, not multiset.**  N ai_call tasks all using the same provider → one entry.  UI cares which interfaces are touched, not how many tasks each one feeds.  Linear-scan dedup (typical workflow has 1-3 providers) — beats a hash set at this size.
+- **Banner copy is keyed by `category`, never `provider_error_code` or `provider_error_type`.**  Per dev plan §1 "no hardcoded provider names in UI".  When adding new category branches (Sitting 8 may want to surface ModelNotFound differently), keep the same discipline — the raw provider strings stay in logs only.
+- **Stress / test bursts leave banner debris.**  `test_api{1..6}_mock_errors.py` creates ~18 mock interfaces per run (36 cases × 3 banner-worthy categories = 18 distinct `(interface, category)` pairs).  Test cleanup deletes the interfaces server-side but not the dashboard banners (see open item #2).  For local-dev: Ctrl-Shift-R to clear, or wait for Sitting 8's `/api/providers/health` to land the snapshot-driven hydration.
+- **simdjson ondemand is single-pass.**  `DetectFamily` in `replyParserAPI5.cpp` constructs a fresh `parser` + re-iterates `padded` when probing for `__type` after the success-shape probes.  If you add another probe, follow the same pattern (or extract a helper if it grows beyond 2 re-iterations).
+- **Sitting 7 hit a real bug late in verification.**  The auto-dismiss path was wired but `BroadcastAiCallCompleted` had no `interface_name` field — the dashboard's WS handler had nothing to match against, so banners never cleared on success.  Caught only because JC tried the path manually.  Lesson: end-to-end WS tests for both ai-call-failed AND ai-call-completed paths would have caught it; Sitting 8 should add an ai-call-completed payload test alongside the ai-call-failed one if it touches the events.
+
+### Files in working tree (uncommitted)
+
+Sitting 2 + 3 + 4's working-tree sets still uncommitted (per their hand-offs).  Sittings 5 + 6 + 7 add the files in the aggregate diff above.  Three new test-helper files at `/tmp/banner_burst_demo.py` + `/tmp/banner_autodismiss_demo.py` are session scratch — not part of the project tree, can be deleted with `rm /tmp/banner_*_demo.py` or kept as throwaway tools.
+
+---
+
+## 2026-05-15 (Sitting 4 — Workstream B: AiError plumbing + §3.5 abstractions + WS payload extension) → next session
+
+Sitting 4 of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed.  C++-heavy: end-to-end propagation of provider error discriminators from the per-interface ReplyParsers through the dispatcher's curl callback into the WebSocket payload, plus the §3.5-A `ProviderErrorCategory` semantic enum and the §3.5-B `ParseOpenAiStyleError` shared helper.  Unblocks Workstream A (Sitting 5 — log enrichment uses the fields landed here) and Workstream E (Sitting 6 — non-OpenAI parsers fill in their categories).
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **`ProviderErrorCategory` enum + `AiError` extension** | `application/workflow/aiReply.h` | Closed enum (`uint8_t`, 7 variants: `Unknown`, `BillingExhausted`, `ThrottleRateLimit`, `AuthFailure`, `ServiceOverload`, `ModelNotFound`, `InvalidRequest`) with `CategoryToString` helper.  `static_assert(InvalidRequest == 6)` locks the switch sites per `feedback_cpp_discipline`.  `AiError` gains `m_ProviderErrorCode`, `m_ProviderErrorType`, `m_Category`, `m_RetryAfterSeconds` (`std::optional<int>` per `feedback_rust_emulating_defaults`). |
+| **`ParseOpenAiStyleError` shared helper** | `application/json/replyParser.{h,cpp}` | Free function returning `OpenAiStyleErrorInfo` from a simdjson `ondemand::object`.  Consumed by API1 (Chat) + API2 (Responses); API6 (Azure) inherits via the API1 parser per `replyParser.cpp:88`.  Companion `ClassifyOpenAiStyleErrorType(string_view)` maps `insufficient_quota`→`BillingExhausted`, `rate_limit_error`→`ThrottleRateLimit`, `authentication_error`/`permission_error`→`AuthFailure`, `model_not_found`→`ModelNotFound`, `server_error`→`ServiceOverload`, `invalid_request_error`→`InvalidRequest`. |
+| **API1 + API2 GetError/ParseError refactor** | `replyParserAPI1.cpp`, `replyParserAPI2.cpp` | `ParseError` collapsed (~80 lines each → 7-line passthrough) to call the shared helper; `GetError` populates the new `AiError` fields via the shared classifier.  Per `feedback_cpp_discipline` "extract before the third site". |
+| **API3 + API4 raw-field stubs** | `replyParserAPI3.cpp`, `replyParserAPI4.cpp` | `GetError` populates `m_ProviderErrorCode`+`m_ProviderErrorType` from each provider's native error shape (Gemini int code + status enum; Anthropic nested type-only).  `m_Category` stays `Unknown`; full classification deferred to Sitting 6 (Workstream E) where Gemini's `details[*].reason` + Anthropic's `credit_balance_too_low`/`overloaded_error` get mapped.  API5 (Bedrock) inherits via delegation — no change. |
+| **Retry-After threading + Callback signature** | `engine/curlWrapper/curlMultiDispatcher.{h,cpp}`, `application/workflow/aiRequestPool.cpp` | Dispatcher's `Callback` alias gained a third arg `std::optional<int> retryAfterSeconds`.  `ParseRateLimitHeaders` now returns the value (converted from the strategy's `optional<chrono::ms>`, rounded up so sub-second hints don't collapse to 0); `OnTransportComplete` threads it into the user callback; 5 callback fire sites updated (4 cancellation/shutdown paths pass `nullopt`).  The AiRequestPool curl-callback signature was extended in matching shape and stamps `m_RetryAfterSeconds` on every error branch. |
+| **HTTP-error body parsing — load-bearing fix** | `aiRequestPool.cpp` (in the `!curlResult.m_Ok` branch) | The dispatcher short-circuits to `m_Ok=false` on any HTTP ≥ 400, so before today the parser **never ran** on real 429/4xx responses — the body's discriminator was discarded end-to-end.  New code re-parses `responseBody` via `ReplyParser::Create` whenever `responseBody` is non-empty, then folds the parsed `m_ProviderErrorCode`+`m_ProviderErrorType`+`m_Category` into the `Http`-kind `AiError`; provider message overrides the curl-generic "Bad Request" string when present.  Without this, neither Workstream A's log enrichment nor the WS payload would surface `insufficient_quota`/`rate_limit_error`/etc.  m_HttpStatus also overlaid from `curlResult.m_ErrorCode` when it's a real HTTP status (`[100..599]`) — guards against propagating a CURLE_* code on transport failure. |
+| **AiCallFailedEvent + WS payload** | `application/workflow/aiCallEvents.h`, `application/web/webServer.{h,cpp}`, `application/jarvisAgent.cpp` | `AiCallFailedEvent` constructor gained `interfaceName` (captured by-value into the async lambda per `feedback_capture_by_value_async` since `api` is a pointer into the config registry that a reload can replace).  `BroadcastAiCallFailed` signature extended with `providerErrorCode`, `providerErrorType`, `category` (`string_view`, serialized via `CategoryToString`), `retryAfterSeconds`, `interfaceName`; JSON adds `provider_error_code`, `provider_error_type`, `category`, `retry_after_seconds` (omitted when `nullopt`), `interface_name`. |
+| **WS payload verification test** | `test/dispatch/test_ws_ai_call_failed_payload.py` (new) | Two cases: api1 `error_billing` (insufficient_quota → `BillingExhausted`, no Retry-After) and api1 `error_throttle` (rate_limit_error → `ThrottleRateLimit`, Retry-After:12 → `retry_after_seconds=12`).  WS subscriber runs in a background thread, sends `{"type":"ping"}` at 300ms intervals so the server's `DrainPendingBroadcasts` (only called from inside `onmessage` per `webServer.cpp:3921`) actually flushes.  The driver peels apart j9t's `{"type":"batch","messages":[…]}` envelope and asserts every new field including `interface_name` matching.  Reuses `_per_api_fault_helpers.create_mock_interface` / `build_jcwf` / `poll_run_state` for provisioning. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build | Studio Debug + Release + Engine Debug + Release — green from clean.  Build times ~22-32s each. |
+| Per-API mock errors suite (Debug binary) | **6 × 6 = 36 cases pass** end-to-end; new fields propagate without breaking the Sitting-3 assertions (which still check HTTP-status substrings; tightening to body discriminators stays deferred to Sitting 5). |
+| WS payload test (Debug) | **2/2 pass** — `BillingExhausted` + `ThrottleRateLimit` cases confirm `category`, `provider_error_code`, `provider_error_type`, `retry_after_seconds`, `interface_name` all flow through the WS broadcast. |
+| TUI byte-safety stress (Debug) | PASS — 98 dispatches across 14 stress fixtures × burst 7; log slice 2.28 MB valid UTF-8 end-to-end; j9t alive throughout. |
+| Full dispatch suite (Debug binary) | **24/24 pass** — Sitting-3 baseline (24) + Sitting-4 new (`test_ws_ai_call_failed_payload`) = 25; minus `test_markitdown_cntx` (pre-existing failure, deferred since Sitting 1) = 24.  Live tests + heavy 5-min `test_stress_tui_utf8_heavy` skipped per Sitting-3 convention. |
+| Release-binary smoke | 36-case matrix + TUI stress + WS payload all pass; debug-only signal endpoints (`/api/debug/signals`, `/api/debug/recent-submissions`) correctly absent. |
+
+### Architecture notes for next-session-Claude
+
+- **`Callback` is now a 3-arg `std::function`.**  `engine/curlWrapper/curlMultiDispatcher.h:54` — `void(QueryResult, std::string body, std::optional<int> retryAfterSeconds)`.  Cancellation, shutdown, and pre-flight paths pass `std::nullopt`; only the I/O-thread completion path passes a real value.  If anyone in the future widens this further (e.g. headers map for cookie-based providers), update the same 5 fire sites in lockstep.
+- **`ParseRateLimitHeaders` now returns `std::optional<int>`.**  The function still has the legacy side-effect of merging into `HostRateLimitState` + per-(host,modelFamily) controller, AND now returns the Retry-After seconds for the caller to thread through.  Single caller (`OnTransportComplete` at line ~738).  If a second caller appears, decide whether they need the return — most state-merge callers won't.
+- **HTTP-error body re-parse adds a parse cost on every 4xx/5xx.**  Two ReplyParser invocations per failed call now (the curl-error branch creates one, the parser-HasError branch may create another via a different path).  For Sitting 4 this is acceptable — error rates are low.  If the rate goes up (mass throttling), profile and cache.
+- **`AiCallFailedEvent` ctor signature changed** — now takes `(probName, interfaceName, error)`.  One construction site, one dispatcher consumer — both already updated.
+- **`BroadcastAiCallFailed` signature changed** — 4 args → 9 args.  One caller (jarvisAgent.cpp event dispatcher).  Test consumers that mock this would need updating but none exist today.
+- **`CategoryToString` lives in `aiReply.h`** (constexpr).  Returns `string_view`; convert to `std::string` if the consumer needs ownership (jarvisAgent.cpp does this implicitly when passing to `BroadcastAiCallFailed`).
+- **Sitting 5 (Workstream A) will tighten the per-API drivers' `expected_log_substring`** from `(429)` etc. to body discriminators (`insufficient_quota`, `rate_limit_error`, etc.).  The fields are populated as of today — the log line that includes them is what Sitting 5 lands.
+- **`OpenAiStyleErrorInfo` accepts numeric `code` too** (some Azure / legacy envelopes emit it as int).  Stringified via `std::to_string` so downstream code sees a consistent `std::string m_Code`.  If you ever add a third OpenAI-shaped provider, the helper handles it transparently.
+
+### Open items / next-session candidates
+
+1. **Sitting 5 = Workstream A — log enrichment.**  Touch `aiRequestPool::OnRequestFailed` and the dispatcher's existing 429 ERROR lines (`curlMultiDispatcher.cpp:856`) to include `aiError.m_ProviderErrorCode` + `m_ProviderErrorType` + `CategoryToString(aiError.m_Category)` + runId.  Then tighten the 24 Sitting-3 driver cases' `expected_log_substring` from HTTP-status to body discriminator.  Saturday's plan.
+2. **Sitting 6 = Workstream E — non-OpenAI category classification.**  API3 (Gemini): map `error.details[*].reason` (`RATE_LIMIT_EXCEEDED`, `USER_PROJECT_QUOTA_EXCEEDED`, `BILLING_DISABLED`); API4 (Anthropic): map `error.type` (`credit_balance_too_low`→`BillingExhausted`, `overloaded_error`→`ServiceOverload`, etc.); API5 (Bedrock): add `__type`-aware pre-parse before delegating (`ServiceQuotaExceededException`→`BillingExhausted`, `ThrottlingException`→`ThrottleRateLimit`, `ValidationException`→`InvalidRequest`).  Reuses Sitting-3 fixtures.  Saturday's plan.
+3. **`test_markitdown_cntx.py` pre-existing failure.**  Carried over since Sitting 1.  Absolute-path test fixture vs relative-path API validation.  Quick standalone cleanup.
+4. **WS test heartbeat could become a helper** — `WsSubscriber` class is currently inlined in `test_ws_ai_call_failed_payload.py`.  When the next WS-based test arrives (probably Sitting 7's banner-dedup test), extract to `_ws_helpers.py`.  Not at the "extract before the third copy" threshold yet.
+5. **Live-AI smoke for the parser-level extensions in Workstream E** — when Sitting 6 lands, one live run against each real provider confirms the inferred-from-docs fixtures match captured-from-live byte-for-byte.  Plan §3 audit acceptance ("every cell ground-truthed against a real response body").
+
+### Gotchas next-session-Claude should know
+
+Load-bearing past today:
+
+- **`DrainPendingBroadcasts` fires only inside the WS `onmessage` handler** (`webServer.cpp:3921`).  Passive WS clients never receive anything.  My initial WS test got 0 messages because of this.  The dashboard pings; test clients need to ping too.  `{"type":"ping"}` triggers the drain (and logs "unknown type" as the server's response, which is harmless).
+- **The Crow WS broadcast envelope is `{"type":"batch","messages":[…]}`.**  Each individual `ai-call-failed` / `log` / `workflow-runs-snapshot` message is inside the `messages` array.  My initial WS predicate looked at the top-level which only saw `type:"batch"` — peel one layer before asserting.
+- **The dispatcher's HTTP-4xx short-circuit** means the response BODY only got parsed when `httpCode < 400`.  Before Sitting 4, real 429s never had their body's `insufficient_quota`/etc. reach `AiError`.  Sitting 4 added a body-parse pass inside the `!curlResult.m_Ok` branch in `aiRequestPool.cpp`.  If you add a new error-classification feature, make sure it's downstream of this re-parse, not upstream.
+- **OpenAI throttle fixtures: `type` ≠ `code`.**  `type: rate_limit_error` is the discriminator; `code: rate_limit_exceeded` is the sub-reason.  My WS test initially asserted `provider_error_code == "rate_limit_error"` and failed because the fixture's `code` is `rate_limit_exceeded`.  Read the fixture before writing assertions.
+- **`ParseOpenAiStyleError` is a pure function.**  No logging, no state.  The caller emits the consolidated ERROR/WARN line with runId in scope per `feedback_log_failures`.  If you wire it into a third parser, don't add logging inside the helper.
+- **`AiError::m_RetryAfterSeconds` is `std::optional<int>` and the WS payload omits the key when nullopt.**  JSON consumers (React + future MCP clients) must use `key in payload` checks, not `payload.retry_after_seconds === 0`.
+- **The `CategoryToString` static_assert is intentionally strict.**  Adding a `ProviderErrorCategory` variant breaks compilation at the assert site AND forces the switch in `CategoryToString` to grow.  Don't relax it — it's the lockstep mechanism between enum + serializer + downstream UI consumers.
+
+### Files in working tree (uncommitted)
+
+Sitting 2 + 3's working-tree sets still uncommitted (per their hand-offs).  Sitting 4 adds:
+
+```
+ M application/jarvisAgent.cpp                          # 5 new args to BroadcastAiCallFailed dispatch
+ M application/json/replyParser.{h,cpp}                 # ParseOpenAiStyleError + ClassifyOpenAiStyleErrorType + OpenAiStyleErrorInfo
+ M application/json/replyParserAPI1.cpp                 # GetError populates new fields; ParseError uses shared helper
+ M application/json/replyParserAPI2.cpp                 # same
+ M application/json/replyParserAPI3.cpp                 # GetError populates raw fields; Unknown category
+ M application/json/replyParserAPI4.cpp                 # same
+ M application/web/webServer.{h,cpp}                    # BroadcastAiCallFailed extended signature + JSON keys
+ M application/workflow/aiCallEvents.h                  # AiCallFailedEvent carries m_InterfaceName
+ M application/workflow/aiReply.h                       # ProviderErrorCategory + CategoryToString + 4 new AiError fields
+ M application/workflow/aiRequestPool.cpp               # curl callback 3-arg, HTTP-error body re-parse, interfaceNameForEvent capture
+ M doc/misc/ai-provider-error-visibility-dev-plan.md    # §6 sitting table — row 4 marked complete
+ M doc/misc/hand-off.md                                 # this entry
+ M engine/curlWrapper/curlMultiDispatcher.{h,cpp}       # Callback alias gains optional<int> 3rd arg; ParseRateLimitHeaders returns it
+?? test/dispatch/test_ws_ai_call_failed_payload.py      # new — 2 WS payload cases
+```
+
+---
+
+## 2026-05-15 (Foundation Sitting 3 — Per-API fixture batteries + parser fault tests + TUI safety + curated demo fixtures) → next session
+
+Foundation Sitting 3 of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed.  Fully test-data + Python-test work — zero C++ changes.  Closes the §19 SanitizeUtf8 verification gap on the parser + log + WS path; gives the upcoming Workstream A/B/E sittings a hermetic 36-case fault matrix to assert against without touching real providers.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **Per-API fixture batteries** | `test/dispatch/fixtures/api{1..6}/` — 6 dirs × 7 fixtures + meta sidecars on the 4 error fixtures = 50 files | Each API has `golden_success`, `error_billing`, `error_throttle`, `error_auth`, `error_overload`, `malformed_utf8`, `truncated_response`.  Body shapes match the actual code per InterfaceType: api1+api2+api6 = OpenAI envelope; api3 = Gemini (`error.code` int + `error.status` enum + `error.details[*]`); api4 = Anthropic nested (`{"type":"error","error":{"type":..,"message":..}}`); api5 = AWS `__type` envelope on errors, Anthropic-on-Bedrock shape on success.  `.meta.json` sidecars set `http_status` (incl. non-standard 529 for Anthropic overload; 400 for Anthropic credit_balance_too_low and Bedrock ServiceQuotaExceededException) plus `Retry-After` headers on throttle/overload. |
+| **Per-API test drivers** | `test/dispatch/_per_api_fault_helpers.py` (new) + `test_api{1..6}_mock_errors.py` (6 new) | Each driver provisions a fresh `is_mock` interface per case, submits an adhoc ai_call, asserts (a) terminal run state matches expectation, (b) PROV sidecar has `mocked: true` + interface ref, (c) for failed runs: `[error]`/`[critical]` log line carrying the runId exists (`feedback_log_failures`), (d) `expected_log_substring` (HTTP status today, body discriminator post-Workstream-A) appears, (e) for succeeded runs (malformed_utf8): `.output.txt` byte-exact + valid UTF-8.  Shared helper holds the REST/poll/log-scan/cleanup so per-API drivers are thin metadata. |
+| **TUI byte-safety stress** | `test/dispatch/test_tui_stress_malformed_utf8.py` (new) + 2 extra fixtures (`api1/ugly_csi_escapes.json`, `api1/ugly_real_world.json`) | 98 concurrent ai_call dispatches across 14 stress fixtures × 7 burst.  Drives the malformed_utf8 + truncated_response fixtures across all 6 APIs plus CSI escape sequences (real ESC/BEL/BS/CAN/SUB/OSC control bytes via JSON `\u00XX` escapes) and "real-world ugly" sample (n8n-style verbose JSON, Polarion XML with BOM + mixed line endings, RTL/LTR override + format-string + homoglyph baits).  Asserts: j9t alive throughout, log/log.txt valid UTF-8 end-to-end, no unexpected `[critical]` lines.  Closes the §19 SanitizeUtf8 verification gap that Sitting 2 explicitly deferred. |
+| **Curated demo JCWF fixtures + README** | `test/dispatch/fixtures/demos/aiZipDemo/golden_success.json`, `demos/bookSummaryPipeline/golden_success.json`, `demos/README.md` | One canned response per mockable demo.  README documents the mockable-vs-not-mockable list: mockable = aiZipDemo + bookSummaryPipeline (shape correctness, content variation decorative); not-mockable = JCWFs whose AI reply feeds into `g++` or `python -c` (canned reply can't satisfy compile/eval). |
+| **Dev plan patches** | `doc/misc/ai-provider-error-visibility-dev-plan.md` | §3 parity matrix: swapped `API3 Anthropic` ↔ `API4 Gemini` to match actual code (`replyParserAPI3.h:33` says Gemini; `replyParserAPI4.h:34` says Anthropic).  Added API6 (Azure OpenAI) column noting it reuses ReplyParserAPI1 (per `replyParser.cpp:88`).  Corrected Gemini throttle/auth discriminators (`RESOURCE_EXHAUSTED + details[*].reason: RATE_LIMIT_EXCEEDED` / `UNAUTHENTICATED`, not `rate_limit_error` / `authentication_error`).  §3 per-provider notes, §3 known-unknowns, §4 Workstream E touchpoints, §Foundation Sitting 3 scope (api1-5 → api1-6), §6 sitting table row 6 — all swept for the swap + API6 addition. |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build | Studio Debug + Studio Release already built fresh in Sitting 2; Engine Debug + Engine Release intact (no C++ changes this sitting) |
+| Per-API mock errors suite | **6 × 6 = 36 cases pass** — `test_api{1..6}_mock_errors` × {error_billing, error_throttle, error_auth, error_overload, malformed_utf8, truncated_response} |
+| TUI byte-safety stress | PASS — 98 dispatches, ~2.3 MB log slice valid UTF-8, j9t alive, no unexpected criticals |
+| Demo end-to-end via `is_mock` (Release binary) | `aiZipDemo` (workflow id `ai-zip-demo`, 3 ai_call + 1 shell tasks): terminal=succeeded.  `bookSummaryPipeline` (1 per_item ai_call × 15 chapters + downstream python): terminal=succeeded.  Both via `PUT /api/settings/config {api_index: <mock>}` → trigger → restore.  Verified under **both** Debug binary (during full-suite run) AND Release binary (matches the plan's "against a Release binary" acceptance bullet). |
+| Full dispatch suite (Debug binary) | **24/24 pass**.  Pre-existing + Sitting 2 (18) + Sitting 3 new (7) = 25; minus `test_markitdown_cntx` (pre-existing failure, deferred since Sitting 1) = 24.  Skipped: `test_stress_tui_utf8_heavy` (5-min jarvisCpp 3-way; not regression-affected) + 3 `_live` tests (real providers). |
+| spdlog level format quirk | Confirmed: spdlog writes `[error]` / `[critical]` / `[warning]` etc. in **lowercase** square brackets — drivers grep `b"[error]"` not `b"ERROR"`. |
+| Plan §3 swap + §6 patches | Plan re-read end-to-end after edits — internally consistent; api1+api2+api6 documented as OpenAI-envelope, api3 as Gemini, api4 as Anthropic, api5 as Bedrock. |
+
+### Architecture notes for next-session-Claude
+
+- **Dispatcher short-circuits on HTTP 4xx/5xx — the body parser never runs.**  `AiRequestPool::Submit`'s curl callback (around `aiRequestPool.cpp:1460`) branches on `curlResult.m_Ok`: false → `aiReply.m_Error = curl_error_message`; the parser only runs when `m_Ok` is true (i.e. HTTP 2xx).  This is why pre-Workstream-A the dispatcher's `[error]` log carries only the HTTP status, not the body discriminator (`insufficient_quota` / `rate_limit_error` / etc.).  Sitting 3's drivers assert `(429)` / `(401)` / etc. on the log line — when Workstream A fires the ERROR from `OnRequestFailed` with the parsed `m_ProviderErrorCode`, tighten the assertions.
+- **Workstream A → B ordering question.**  Dev plan §6 has Sitting 4 = Workstream A (log enrichment) and Sitting 5 = Workstream B (`AiError` plumbing: `m_ProviderErrorCode`, `m_ProviderErrorType`, `m_Category`, `m_RetryAfterSeconds`).  But Workstream A's log line shape includes `aiError.m_ProviderErrorCode` + `aiError.m_Category` + `CategoryToString(...)` — fields that don't exist until Workstream B lands them.  Either swap the sittings (B before A) or bundle the minimal field-add into Sitting 4.  JC's call.
+- **Per-API driver pattern is the canonical shape for API7+.**  `_per_api_fault_helpers.py` owns provisioning + dispatch + assertions; per-API driver is metadata only.  Adding API7 = create `test/dispatch/fixtures/api7/`, write a 30-line driver pointing at the new dir.  No copy-paste of REST/poll logic.
+- **Fixture .meta.json is single source of truth for HTTP status.**  Default is 200 (no meta.json present).  Allowed range [200, 599]; allowlisted headers `{Content-Type, Retry-After}`; other keys dropped with WARN.  Mock-side validation per `mockTransport.cpp:LoadFixtureMeta`.
+- **`is_mock` interface needs `rate_limit.max_retries_429: 0` + `max_retries_transient: 0` for fault tests.**  Otherwise each 4xx/5xx fixture burns AIMD-backoff retry budget — default `max_retries_429 = 10` means 10+ seconds per 429 test case.  Recent Sitting-1 fix made `0` actually mean 0 (was "use default 10" before).  All Sitting-3 drivers set both to 0.
+- **Anthropic + Bedrock HTTP status quirks.**  Anthropic billing-exhausted (`credit_balance_too_low`) returns HTTP **400**, not 429 — that's why api4's `error_billing.json.meta.json` has `http_status: 400`.  Anthropic overload (`overloaded_error`) returns HTTP **529** (non-standard) — api4's overload fixture uses 529; the mock allowlist accepts it because [200, 599] covers 529.  Bedrock's `ServiceQuotaExceededException` also returns **400** (AWS uses 400 for client-side quota), `AccessDeniedException` returns **403** (not 401).  Real-world fixtures should match these or live tests on real providers will surface the mismatch.
+- **Stress codepoints in JSON: use real escapes, not Python source literals.**  The Write tool's content parameter auto-expands `\uXXXX` to the literal byte sequence before writing, which produces invalid JSON when the codepoint is a control char (NUL gets written as 0x00, which JSON forbids unescaped in strings).  For CSI/ESC content (`ugly_csi_escapes.json`), generate via `python3 -c "import json; json.dump(..., ensure_ascii=False)"` so JSON's strict mode emits proper `` escape sequences and the parsed string contains real control bytes.
+- **MockTransport delivers via Pump, not synchronously from Submit.**  Setup failures land in `m_PendingCompletions` and fire on the next `Pump()` tick.  This matters for tests that submit + immediately poll — give the dispatcher's I/O thread a tick to drain.  All Sitting-3 drivers use `poll_run_state` with 300ms polling and 30-60s timeouts; works reliably.
+- **Demo verification pattern.**  `PUT /api/settings/config {api_index: <mock_idx>}` + `POST /api/workflows/reload` + `POST /api/workflows/<id>/run` + restore in `finally`.  Workflow ID is what's REGISTERED, not the folder name — `aiZipDemo` folder registers as workflow id `ai-zip-demo`.  Check via `GET /api/workflows` if the id is uncertain.
+- **Plan §3 had API3 ↔ API4 swapped from code.**  Plan said API3=Anthropic / API4=Gemini; code says API3=Gemini / API4=Anthropic (header comments at `replyParserAPI3.h:33` and `replyParserAPI4.h:34` are unambiguous; `configParser.h:41-48` enum lists API5=Bedrock, API6=Azure).  Fixed in §3 + §4 + §6.  Also added API6 (Azure OpenAI) which the original plan didn't mention at all — Azure reuses `ReplyParserAPI1` per `replyParser.cpp:88`.
+
+### Schedule (revised after the A↔B swap)
+
+| Day | Sittings | Workstreams |
+|---|---|---|
+| **Friday 2026-05-15** | 3 ✅, 4 (next) | Foundation 3 ✅, then B (`AiError` plumbing — struct extension, `ProviderErrorCategory` enum, `ParseOpenAiStyleError` helper, `m_RetryAfterSeconds`, WS payload extension) |
+| **Saturday 2026-05-16** | 5, 6 | A (log enrichment — first user-visible surface, uses fields added by Sitting 4) + E (cross-provider parsing for api3 Gemini, api4 Anthropic, api5 Bedrock) |
+| **Sunday 2026-05-17** | 7, 8 | C (banner + hazard glyph) + D (`ProviderHealthSnapshot` + AI Health LED) |
+
+A↔B swap rationale: A's log-line shape references fields that B adds (`m_ProviderErrorCode`, `m_ProviderErrorType`, `m_Category`, `CategoryToString`).  Cleaner to land the struct + helper in Sitting 4, the log line that uses them in Sitting 5.  Dev plan §6 sitting table updated.
+
+### Open items / next-session candidates
+
+1. **A↔B swap landed in this hand-off** — Sitting 4 = Workstream B (plumbing), Sitting 5 = Workstream A (log enrichment).  Dev plan §6 sitting table updated; rationale captured in the table footer.  User-visible win moves from Sitting 4 to Sitting 5; Saturday's schedule absorbs it without slipping the Sunday UI sittings.
+2. **Test runner auth + base URL.**  Carried over from Sitting 1 + 2 hand-offs; still relevant.  `test/run_tests.py` defaults to `http://localhost:8080` no-auth.  Add `--token` / `J9T_TOKEN` + default `--base-url https://localhost:8443`.  Independent of the dev plan.
+3. **`test_markitdown_cntx.py` pre-existing failure.**  Carried over since Sitting 1.  Absolute-path test fixture vs relative-path API validation.  Quick standalone cleanup.
+4. **Live-AI smoke for the parser-level extensions in Workstream E.**  When parser extensions land for api3/api4/api5, a single live run against each real provider (api4 Anthropic, api5 Bedrock, api3 Gemini) confirms the body shapes hand-crafted in Sitting 3 fixtures match real-world responses byte-for-byte.  Plan §3 audit acceptance phrased as "every cell ground-truthed against a real response body" — fixtures here are inferred-from-docs, not captured-from-live.  Workstream E pair-review against these fixtures + a one-shot real-provider capture would tighten the verification.
+5. **Tighten `expected_log_substring` after Workstream A.**  Drivers currently assert `(429)` / `(401)` / `(503)` etc. — HTTP status only.  Once OnRequestFailed emits `error.code` + `error.type` + `category` on the error line, change each driver's `expected_log_substring` to the body discriminator (`insufficient_quota`, `rate_limit_error`, etc.).  Trivial follow-up; no helper change.
+6. **`test_stress_tui_utf8_heavy.py` re-run.**  Skipped from this sitting's full-suite count.  Worth one re-run before shipping 1.0 to confirm the heavy 3-way jarvisCpp pattern still passes alongside the new MockTransport stress.  Independent of any Sitting 3 work.
+
+### Gotchas next-session-Claude should know
+
+Load-bearing past today:
+
+- **Unlock keystore BEFORE the first authenticated request.**  Per `feedback_unlock_keystore_first`: pre-unlock auth attempts trigger a 15-minute IP lockout on 127.0.0.1.  I burned ~5 minutes today rediscovering this — j9t was started, `J9T_TOKEN` was set, and the first request to `/api/settings/ai-interfaces` failed with `mcp_auth_failure reason=invalid_key` because the keystore hadn't loaded the keys yet.  Repeated failures triggered the lockout.  Correct sequence: start j9t → `curl POST /api/settings/keys/unlock` with the master password → only then make authenticated REST calls.
+- **spdlog level tags are lowercase in square brackets.**  Test assertions that grep for `b"ERROR"` (uppercase, no brackets) miss every actual error log line.  Use `b"[error]"` / `b"[critical]"` / `b"[warning]"`.
+- **Auto-Write tool expands `\uXXXX` escapes.**  When writing fixture JSON via the Write tool, escape sequences like `﻿` get written as the literal byte sequence (not the JSON escape).  For ASCII control chars (NUL, ESC, etc.) this produces invalid JSON.  Workaround: generate the fixture via Python's `json.dump(..., ensure_ascii=False)` (writes the escape sequence as `` etc., which JSON parsers accept and then produce the literal byte at parse time).
+- **`feedback_no_audit_traces_in_code` applies to test files too.**  My drafts initially cited "Foundation Sitting N of dev plan" in docstrings; swept them out before final commit.  Existing test files (`test_mock_dispatch_hermetic.py`) have similar precedent text — those are out of scope for this sweep but worth a follow-up sometime.
+- **`fixture_path` config-side validation requires `is_mock: true` AND the path to resolve under project root.**  My early test driver tried passing `rate_limit` as a top-level object; that's accepted because there's a dedicated `ApplyAiInterfaceRateLimitFromJson` parser called on every POST/PUT.  Confirmed both `max_retries_429: 0` and `max_retries_transient: 0` work (Sitting-1 fix that made `0` actually mean 0).
+- **`run-adhoc` workflow_id ≠ folder name necessarily.**  `workflows/aiZipDemo/` registers as workflow id `ai-zip-demo` (kebab-case rewrite).  When triggering by id, hit `GET /api/workflows` first if uncertain.
+- **Lowercase fixture text vs ESC bytes.**  In `ugly_csi_escapes.json`, the *parsed* content has real ESC (0x1B) + BEL (0x07) + BS (0x08) + CAN (0x18) + SUB (0x1A) bytes that the renderer + spdlog + WebSocket will see.  Confirmed end-to-end: TUI didn't crash, log/log.txt stayed valid UTF-8 across 98 dispatches.  This is the §19 SanitizeUtf8 verification artifact JC was looking for.
+
+### Files in working tree (uncommitted)
+
+Sitting 2's working-tree set still uncommitted (per Sitting 2's hand-off Files-in-working-tree list).  This sitting adds:
+
+```
+ M doc/misc/ai-provider-error-visibility-dev-plan.md   # §3 API3↔API4 swap + API6 column + §4 Workstream E touchpoints + §6 sitting table + §Foundation 3 acceptance bullets
+ M doc/misc/hand-off.md                                # this entry (Sitting 3 ✅)
+?? test/dispatch/_per_api_fault_helpers.py             # shared helper for per-API fault drivers
+?? test/dispatch/test_api1_mock_errors.py              # 6 cases
+?? test/dispatch/test_api2_mock_errors.py              # 6 cases
+?? test/dispatch/test_api3_mock_errors.py              # 6 cases
+?? test/dispatch/test_api4_mock_errors.py              # 6 cases
+?? test/dispatch/test_api5_mock_errors.py              # 6 cases
+?? test/dispatch/test_api6_mock_errors.py              # 6 cases
+?? test/dispatch/test_tui_stress_malformed_utf8.py     # 98 concurrent stress dispatches
+?? test/dispatch/fixtures/api1/error_billing.json + .meta.json
+?? test/dispatch/fixtures/api1/error_throttle.json + .meta.json
+?? test/dispatch/fixtures/api1/error_auth.json + .meta.json
+?? test/dispatch/fixtures/api1/error_overload.json + .meta.json
+?? test/dispatch/fixtures/api1/malformed_utf8.json     # BMP stress codepoints (BOM, RTL, ZWJ, RLI/LRI, combining stacks)
+?? test/dispatch/fixtures/api1/truncated_response.json # JSON cut mid-stream
+?? test/dispatch/fixtures/api1/ugly_csi_escapes.json   # real ESC/BEL/BS/CAN/SUB control bytes via JSON \u escapes
+?? test/dispatch/fixtures/api1/ugly_real_world.json   # n8n verbose JSON + Polarion XML + format-string/homoglyph baits
+?? test/dispatch/fixtures/api2/...                    # 7 fixtures (golden + 4 errors + malformed + truncated)
+?? test/dispatch/fixtures/api3/...                    # 7 fixtures (Gemini envelope, error.details[*])
+?? test/dispatch/fixtures/api4/...                    # 7 fixtures (Anthropic nested error.type, 400/429/401/529)
+?? test/dispatch/fixtures/api5/...                    # 7 fixtures (Bedrock __type envelope on errors)
+?? test/dispatch/fixtures/api6/...                    # 7 fixtures (OpenAI body shape; parity-validation copy)
+?? test/dispatch/fixtures/demos/aiZipDemo/golden_success.json
+?? test/dispatch/fixtures/demos/bookSummaryPipeline/golden_success.json
+?? test/dispatch/fixtures/demos/README.md             # mockable vs not-mockable demos
+```
+
+Net per-Sitting-3: 1 doc edit + 1 hand-off prepend + 1 shared helper + 7 test drivers + 1 fixture README + 50 fixture files (35 main + 2 extra ugly + 2 demo + 11 meta sidecars).  Zero C++ changes.
+
+---
+
 ## 2026-05-14 (Foundation Sitting 2 — MockTransport + cyber-sec hardening + TestInterface removal) → next session
 
 Foundation Sitting 2 of `doc/misc/ai-provider-error-visibility-dev-plan.md` landed in the same calendar day as Sitting 1.  MockTransport (fixture-driven `IInterfaceTransport`) implemented with all §1 hardening in the first commit; per-request dispatch routing on `is_mock: true` wired through the dispatcher; TestInterface code path removed entirely (`InterfaceType::Test` enum variant deleted, short-circuit in `AiRequestPool::Submit` deleted, REST/configParser legacy `"Test"` rejected with migration guidance); 7 Python tests + 2 fixtures migrated to JSON-shaped golden_success.json fixtures; PROV sidecar carries `mocked: true` + `fixture_path` for mock dispatches; doc sweep across cyber security.md, jarvisagent.md, JC_Workflow_Specification.md, engine/json/json.md.

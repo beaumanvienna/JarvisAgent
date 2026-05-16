@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "You exceeded your current quota, please check your plan and billing details. Azure subscriptions enforce token-per-minute (TPM) and request-per-minute (RPM) caps per deployment.",
+    "type": "insufficient_quota",
+    "code": "insufficient_quota",
+    "param": null
+  }
+}

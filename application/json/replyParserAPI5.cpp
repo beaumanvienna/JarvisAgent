@@ -167,12 +167,15 @@ namespace AIAssistant
             Anthropic,
             Llama,
             Titan,
+            AwsError,        // {"__type": "ServiceQuotaExceededException", "message": "..."}
             Unknown
         };
 
         // Sniff the JSON shape to identify the model family. Bedrock returns the
         // underlying family's native body without wrapping, so structural keys
-        // disambiguate cleanly.
+        // disambiguate cleanly.  Success bodies are checked first (`content` /
+        // `generation` / `results`); the AWS `__type` error envelope is the
+        // fallback before declaring Unknown shape.
         BedrockFamily DetectFamily(std::string const& jsonString)
         {
             simdjson::ondemand::parser parser;
@@ -185,7 +188,70 @@ namespace AIAssistant
             if (doc["content"].get(v) == simdjson::SUCCESS) return BedrockFamily::Anthropic;
             if (doc["generation"].get(v) == simdjson::SUCCESS) return BedrockFamily::Llama;
             if (doc["results"].get(v) == simdjson::SUCCESS) return BedrockFamily::Titan;
+            // simdjson ondemand is single-pass — re-iterate before probing `__type`.
+            simdjson::ondemand::parser parser2;
+            auto docResult2 = parser2.iterate(padded);
+            if (docResult2.error()) return BedrockFamily::Unknown;
+            simdjson::ondemand::document doc2 = std::move(docResult2.value());
+            simdjson::ondemand::value awsTypeVal;
+            if (doc2["__type"].get(awsTypeVal) == simdjson::SUCCESS) return BedrockFamily::AwsError;
             return BedrockFamily::Unknown;
+        }
+
+        // Parse the AWS error envelope into __type + message.  Caller's
+        // ReplyParserAPI5 stores the strings as members for GetError to
+        // classify without re-parsing.  Returns false on parse failure
+        // (caller falls back to the "unrecognized shape" path).
+        bool ExtractAwsError(std::string const& jsonString,
+                             std::string& outType,
+                             std::string& outMessage)
+        {
+            simdjson::ondemand::parser parser;
+            simdjson::padded_string padded(jsonString);
+            auto docResult = parser.iterate(padded);
+            if (docResult.error()) return false;
+            simdjson::ondemand::document doc = std::move(docResult.value());
+
+            std::string_view sv;
+            if (doc["__type"].get_string().get(sv) != simdjson::SUCCESS) return false;
+            outType.assign(sv.data(), sv.size());
+
+            // __type sometimes includes a leading "com.amazonaws.bedrockruntime#"
+            // prefix; strip it so classification matches the short name we see
+            // in fixtures + AWS reference docs.
+            auto const hashPos = outType.find('#');
+            if (hashPos != std::string::npos && hashPos + 1 < outType.size())
+            {
+                outType.erase(0, hashPos + 1);
+            }
+
+            // message is optional but expected; absent → keep empty (the log
+            // line still has __type which is the primary discriminator).
+            if (doc["message"].get_string().get(sv) == simdjson::SUCCESS)
+            {
+                outMessage = SanitizeUtf8(std::string(sv));
+            }
+            return true;
+        }
+
+        // Map AWS Bedrock exception names to the UI-facing semantic category.
+        // Names match the BedrockRuntime API exceptions documented at
+        // docs.aws.amazon.com/bedrock/.  Unknown exception names fall through
+        // to Unknown — caller still propagates m_ProviderErrorType for logs.
+        ProviderErrorCategory ClassifyAwsBedrockException(std::string_view awsType)
+        {
+            if (awsType == "ServiceQuotaExceededException")   return ProviderErrorCategory::BillingExhausted;
+            if (awsType == "ThrottlingException")             return ProviderErrorCategory::ThrottleRateLimit;
+            if (awsType == "AccessDeniedException")           return ProviderErrorCategory::AuthFailure;
+            if (awsType == "UnauthorizedOperation")           return ProviderErrorCategory::AuthFailure;
+            if (awsType == "ValidationException")             return ProviderErrorCategory::InvalidRequest;
+            if (awsType == "ResourceNotFoundException")       return ProviderErrorCategory::ModelNotFound;
+            if (awsType == "ModelNotReadyException")          return ProviderErrorCategory::ServiceOverload;
+            if (awsType == "ModelStreamErrorException")       return ProviderErrorCategory::ServiceOverload;
+            if (awsType == "ModelTimeoutException")           return ProviderErrorCategory::ServiceOverload;
+            if (awsType == "InternalServerException")         return ProviderErrorCategory::ServiceOverload;
+            if (awsType == "ServiceUnavailableException")     return ProviderErrorCategory::ServiceOverload;
+            return ProviderErrorCategory::Unknown;
         }
     } // namespace
 
@@ -201,6 +267,22 @@ namespace AIAssistant
                 break;
             case BedrockFamily::Titan:
                 m_Delegate = std::make_unique<TitanBedrockReply>(jsonString);
+                break;
+            case BedrockFamily::AwsError:
+                // Pre-family error envelope — every Bedrock model surfaces the same
+                // {"__type": "...", "message": "..."} shape on quota/throttle/auth
+                // failures.  No delegate; GetError returns the classified AiError
+                // directly using m_AwsErrorType / m_AwsErrorMessage.
+                if (ExtractAwsError(jsonString, m_AwsErrorType, m_AwsErrorMessage))
+                {
+                    m_HasError = true;
+                    m_State = State::ReplyError;
+                }
+                else
+                {
+                    m_HasError = true;
+                    m_State = State::ParseFailure;
+                }
                 break;
             case BedrockFamily::Unknown:
                 // No standalone log here: the parser has no run context. The error message
@@ -222,6 +304,22 @@ namespace AIAssistant
 
     AiError ReplyParserAPI5::GetError() const
     {
+        // AWS error envelope path (ctor's BedrockFamily::AwsError branch).
+        // m_AwsErrorType being non-empty means the body matched {"__type": "...", ...}
+        // and ExtractAwsError populated the strings — return a Provider-kind AiError
+        // with the AWS exception name as m_ProviderErrorType and the classified
+        // category.  m_ProviderErrorCode stays empty (AWS doesn't have a separate
+        // code field; __type IS the discriminator).
+        if (!m_AwsErrorType.empty())
+        {
+            AiError e;
+            e.m_Kind = AiError::Kind::Provider;
+            e.m_Message = m_AwsErrorMessage;
+            e.m_ProviderErrorType = m_AwsErrorType;
+            e.m_Category = ClassifyAwsBedrockException(m_AwsErrorType);
+            return e;
+        }
+
         if (!m_Delegate)
         {
             AiError e;

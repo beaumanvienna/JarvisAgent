@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-bookSummary",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "## Chapter Summary (mocked)\n\nThis canned summary stands in for the `summarizeChapter` per-item AI call.  Every chapter the pipeline encounters receives this same body — MockTransport replays the same fixture regardless of the PROB input.  Workflow-shape correctness is what the demo verifies: the per_item fan-out fires once per chapter, each per-prob `.output.txt` lands on disk, and the downstream `combineSummaries` Python task concatenates them into the final summary.\n\n### Key points\n- Chapter touches on a central theme.\n- Two or three supporting threads.\n- Resolution / cliffhanger.\n\n### Notable passages\n- Paragraph-level highlights from the chapter.\n- Direct quotes when they're crisp.\n\nIf you need fan-out variety (different summaries for different chapters), provision multiple mock interfaces with distinct `fixture_path` values and reference them from the JCWF — but for the demo's end-to-end correctness this single canned response suffices.\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 220,
+    "total_tokens": 270
+  }
+}

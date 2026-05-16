@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-ugly-real-world",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Real-world ugly content stress sample.\n\n--- n8n-style webhook callback payload sample ---\n{\"executionId\":\"abc-123\",\"workflowId\":\"wf-7\",\"data\":{\"main\":[[{\"json\":{\"title\":\"<h1>Hello & welcome 🚀</h1>\",\"body\":\"Multi-paragraph <strong>HTML</strong> with embedded <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> attempts plus CJK 你好 こんにちは 안녕\",\"tags\":[\"工程\",\"тест\",\"اختبار\",\"ทดสอบ\"]}}]]},\"meta\":{\"timestamp\":\"2026-05-15T12:34:56.789Z\"}}\n\n--- Polarion-style XML output sample (declared encoding mismatches + BOM marker on internal node + mixed line endings) ---\n﻿<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<requirements>\r\n  <req id=\"REQ-001\" priority=\"HIGH\">\r\n    <title>Поддержка UTF-8 в pipeline</title>\r\n    <description>The system shall handle 中文 + עברית + ‮reversed RTL‬ content correctly.</description>\r\n  </req>\r\n  <req id=\"REQ-002\"><![CDATA[ inline CDATA with \"quotes\" & special <chars> ]]></req>\r\n</requirements>\r\n\n--- Deliberately ugly logger content (RTL/LTR overrides + format-string attempts + Unicode look-alikes) ---\nUser-supplied filename: ⁦invoice.pdf⁩ vs spoofed: ⁦invoice‮fdp.exe⁩ (RTL trick).\nFormat-string-injection-attempt-in-prompt: %s%s%s%n%n %d%d %p%p ${ENV}\nUnicode look-alikes (homoglyph): аdmin (Cyrillic a) vs admin (Latin a) ; раура1.com (Cyrillic) vs paypal.com.\nNUL-control replacement: ␀ (visible symbol, not literal). BOM zero-width:﻿(here-was-BOM).\n--- end of ugly sample ---\n"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 320,
+    "total_tokens": 334
+  }
+}

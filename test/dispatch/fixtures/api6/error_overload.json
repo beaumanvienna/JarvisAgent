@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "The Azure OpenAI service is temporarily unavailable. Please retry your request after a short delay.",
+    "type": "server_error",
+    "code": "server_overloaded",
+    "param": null
+  }
+}

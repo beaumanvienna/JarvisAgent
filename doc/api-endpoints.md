@@ -211,12 +211,16 @@ Healthy values during an active workflow: drains keep up with pings (one drain p
       "label": "JarvisAgent C++ Docu Generator",
       "path": "/abs/path/jarvisCppDocu.json",
       "manual_start": true,
+      "has_ai_call": true,
       "is_sub_workflow": false,
-      "container_path": "/abs/path/jarvisCppDocu.jcwf"
+      "container_path": "/abs/path/jarvisCppDocu.jcwf",
+      "interface_names": ["openai-default", ""]
     }
   ]
 }
 ```
+`interface_names` (added Sitting 7 / Workstream C, 2026-05-15) lists each distinct interface name referenced by the workflow's `ai_call` tasks.  Empty string in the array means "system default provider" (the task didn't pin a `provider` field).  Computed once at workflow-load time from `WorkflowDefinition::m_RequiredAiProviders`.  The dashboard's `WorkflowsPanel` cross-references this against the active `ai-call-failed` alert map to paint a red `⚠` glyph on rows whose interfaces are degraded.  Omitted entirely when the workflow has no `ai_call` tasks.
+
 Sub-workflows loaded from a container also appear in the list with `is_sub_workflow: true`, `parent_workflow_id`, and `container_folder`.
 
 ### POST /api/workflows
@@ -805,6 +809,51 @@ Reloads `config.json` from disk, updating in-memory AI interfaces and API index.
 
 ---
 
+## Providers — Health snapshot — Both editions (admin only)
+
+### GET /api/providers/health
+Per-interface health snapshot driving the dashboard's "AI Health" LED + click-through popover (Sitting 8 / Workstream D, 2026-05-15).  Joins the configured `api_interfaces[]` list with `AiRequestPool::m_HealthPerInterface` (last-error + counters + cap-pin timestamp) and `CurlMultiDispatcher`'s per-`quota_key` AIMD controller cap state.  One entry per configured interface; entries for interfaces that haven't dispatched yet render with `current_cap: -1`.
+
+Fetched by the dashboard on mount + every 5s poll tick + immediately on receipt of a `cap-changed` WebSocket message.
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "interfaces": [
+    {
+      "interface_name": "api.openai.com/gpt-4.1/API1",
+      "interface_type_name": "API1",
+      "quota_key": "api.openai.com|gpt-4",
+      "is_mock": false,
+      "current_cap": 12,
+      "max_cap": 48,
+      "floor_cap": 1,
+      "last_error_at_ms": 1778912358925,
+      "last_error_code": "insufficient_quota",
+      "last_error_type": "insufficient_quota",
+      "last_error_message": "You exceeded your current quota, please check your plan and billing details.",
+      "last_error_category": "BillingExhausted",
+      "last_http_status": 429,
+      "retry_after_seconds": 12,
+      "consecutive_errors": 3,
+      "success_streak_since_last_error": 0,
+      "cap_pinned_at_floor_since_ms": 0
+    }
+  ]
+}
+```
+
+Notes:
+- All timestamps are Unix milliseconds (`*_ms` suffix).  Zero means "never" / "epoch" / "not pinned".
+- `current_cap == -1` means the interface has never dispatched (no controller yet) — UI renders `—` instead of `0/0`.
+- `last_error_category` is the stable string form of `ProviderErrorCategory` — same wire shape as the `ai-call-failed` WS message's `category` field.
+- `retry_after_seconds` is omitted from the JSON entirely when no Retry-After header was present (not zero).
+- `cap_pinned_at_floor_since_ms > 0` when the dispatcher last observed `current_cap == floor_cap` for this interface's controller; reset to zero when the cap recovers above floor.  Drives the dashboard's sustained-pin safety-net rule (LED stays red after a sustained outage even when classification can't recognize the discriminator).
+- `quota_key` shape is `"<host>|<modelFamily>"`.  Multiple interfaces routing to the same `quota_key` share a controller and will report the same `current_cap`/`max_cap` values; the dashboard popover footnotes shared rows with `*` and a tooltip.
+
+---
+
 ## Settings — Config — Both editions (admin only)
 
 Read and update the scalar runtime configuration fields stored in `config.json`.
@@ -1195,8 +1244,11 @@ A persistent WebSocket connection for real-time communication.
 |------|--------|-------------|
 | `chat` | `subsystem`, `message` | Submit a chat message (same as POST /api/chat but via WS). Creates a `PROB_<id>_<ts>.txt` file. |
 | `workflow-runs-request` | — | Request the current workflow runs snapshot. Sent once on connect; server pushes updates automatically thereafter. |
+| `ping` | — | Heartbeat. The server's `DrainPendingBroadcasts` fires only inside the `onmessage` handler, so passive clients receive nothing.  A periodic `{"type":"ping"}` (the dashboard sends one every ~300 ms) flushes the broadcast queue.  Server returns no payload for `ping` itself. |
 
 ### Server → Client Messages
+
+Broadcasts are wrapped in a batch envelope before reaching the client: `{"type":"batch", "messages":[ <inner1>, <inner2>, ... ]}`.  The table below lists the inner message types.
 
 | Type | Description |
 |------|-------------|
@@ -1204,7 +1256,11 @@ A persistent WebSocket connection for real-time communication.
 | `workflow-runs-snapshot` | Full snapshot of active runs with per-task states (including `capturedStdout`/`capturedStderr`). **Server-pushed** on every state change (task start/complete/fail, run start/complete). Also sent on initial `workflow-runs-request`. Replaces the previous 500ms client polling. |
 | `python-status` | Broadcast when Python engine status changes (`{ "running": true/false }`). |
 | `log` | Live log lines streamed from the server. `{ "type": "log", "lines": ["...", ...] }`. Replaces 500ms REST polling for the Log Viewer page. |
-| *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on next `onmessage`. |
+| `ai-call-started` | An ai_call task has begun dispatch. Fields: `prob` (PROB file name), `interface` (user-configured interface label from `config.json`). |
+| `ai-call-completed` | An ai_call task succeeded. Fields: `prob`, `interface_name` (user-configured label — lets the dashboard auto-clear `ai-call-failed` alerts keyed by the same interface), `input_tokens`, `output_tokens`, `total_tokens`, `finish_reason`. |
+| `ai-call-failed` | An ai_call task failed (transport error, HTTP error, or provider-side error body).  Fields: `prob`, `error_kind` (`AiError::Kind` ordinal), `http_status`, `error_message`, `provider_error_code` (raw — e.g. `"insufficient_quota"`), `provider_error_type` (raw — e.g. `"insufficient_quota"`), `category` (string-serialized `ProviderErrorCategory` — `"Unknown"` / `"BillingExhausted"` / `"ThrottleRateLimit"` / `"AuthFailure"` / `"ServiceOverload"` / `"ModelNotFound"` / `"InvalidRequest"`), `retry_after_seconds` (int, **only present when the provider sent a `Retry-After` header**), `interface_name` (user-configured label).  UI consumers should branch on `category` rather than the raw provider strings so the wire schema stays stable across providers. |
+| `cap-changed` | Payload-free wake signal (added Sitting 8 / Workstream D, 2026-05-15).  Dispatcher fires this whenever a `RateLimitController::m_CurrentConcurrencyCap` mutates on an observation — receiver refetches `GET /api/providers/health` for authoritative state.  Bounded broadcast rate: only on actual cap mutation, not every observation.  Sub-second LED updates without polling. |
+| *(broadcast)* | Any JSON string queued via `Broadcast()` / `BroadcastJSON()` is drained to all clients on the next `ping` / `workflow-runs-request` / `chat` message. |
 
 ---
 

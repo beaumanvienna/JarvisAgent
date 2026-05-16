@@ -1,0 +1,4 @@
+{
+  "__type": "ServiceQuotaExceededException",
+  "message": "Your account does not have the required service quota for this operation. Please request a quota increase via the AWS Service Quotas console."
+}

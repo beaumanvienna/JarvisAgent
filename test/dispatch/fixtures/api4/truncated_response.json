@@ -1,0 +1,8 @@
+{
+  "id": "msg_mocktransport-truncated",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "This Anthropic Messages reply was cut mid-stream by a simulated network glitch.  Followed by multi-byte content: αβγ 中文 한국어 العربية 🚀💥

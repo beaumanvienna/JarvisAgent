@@ -1447,6 +1447,21 @@ namespace AIAssistant
                     return HandleAiInterfacesListGet();
                 });
 
+        // Sitting-8 Workstream D: per-interface health snapshot for the AI
+        // Health LED.  Read-only join of config interfaces × AiRequestPool's
+        // last-error tracking × dispatcher AIMD cap state.  Available in all
+        // 4 build targets (no debug-only gating).  Dashboard fetches on mount
+        // + on WS reconnect to hydrate the LED + popover before the first
+        // `cap-changed` broadcast arrives.
+        CROW_ROUTE(m_Server, "/api/providers/health")
+            .methods("GET"_method)(
+                [this](crow::request const& req)
+                {
+                    auto err = CheckAdminAuth(req);
+                    if (!err.empty()) return MakeAuthErrorResponse(err);
+                    return HandleProvidersHealthGet();
+                });
+
         CROW_ROUTE(m_Server, "/api/settings/ai-interfaces")
             .methods("POST"_method)(
                 [this](crow::request const& req)
@@ -1921,6 +1936,21 @@ namespace AIAssistant
                 workflowEntry["manual_start"] = workflowDefinition->m_ManualStart;
                 workflowEntry["has_ai_call"] = workflowDefinition->m_HasAiCallTasks;
                 workflowEntry["is_sub_workflow"] = workflowDefinition->m_IsSubWorkflow;
+
+                // Sitting-7 Workstream C: the dashboard's hazard glyph paints workflow
+                // rows red when ANY of their ai_call tasks use a degraded provider.
+                // Pre-resolved at workflow-load time (`m_RequiredAiProviders`).  Empty
+                // string in the vector means "system default provider".
+                if (!workflowDefinition->m_RequiredAiProviders.empty())
+                {
+                    crow::json::wvalue::list interfaceNamesJson;
+                    interfaceNamesJson.reserve(workflowDefinition->m_RequiredAiProviders.size());
+                    for (std::string const& providerName : workflowDefinition->m_RequiredAiProviders)
+                    {
+                        interfaceNamesJson.push_back(providerName);
+                    }
+                    workflowEntry["interface_names"] = std::move(interfaceNamesJson);
+                }
 
                 if (!workflowDefinition->m_ContainerPath.empty())
                 {
@@ -4385,13 +4415,14 @@ namespace AIAssistant
         BroadcastJSON(payload);
     }
 
-    void WebServer::BroadcastAiCallCompleted(std::string const& probName, int32_t inputTokens,
-                                             int32_t outputTokens, int32_t totalTokens,
+    void WebServer::BroadcastAiCallCompleted(std::string const& probName, std::string const& interfaceName,
+                                             int32_t inputTokens, int32_t outputTokens, int32_t totalTokens,
                                              std::string const& finishReason)
     {
         crow::json::wvalue msg;
         msg["type"] = "ai-call-completed";
         msg["prob"] = probName;
+        msg["interface_name"] = interfaceName;
         msg["input_tokens"] = static_cast<int64_t>(inputTokens);
         msg["output_tokens"] = static_cast<int64_t>(outputTokens);
         msg["total_tokens"] = static_cast<int64_t>(totalTokens);
@@ -4404,8 +4435,30 @@ namespace AIAssistant
         BroadcastJSON(payload);
     }
 
+    void WebServer::BroadcastCapChanged()
+    {
+        // Sitting-8 Workstream D close-out: payload-free wake signal.  Dashboard
+        // hears this, refetches /api/providers/health for the new cap state.
+        // Bounded broadcast frequency: dispatcher only fires on actual cap
+        // mutation, not on every observation — natural rate-limiting from AIMD's
+        // halve-on-429 / streak-grow dynamics.
+        crow::json::wvalue msg;
+        msg["type"] = "cap-changed";
+        std::string const payload = msg.dump();
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            ++m_WsTotalAiCallEventsEnqueued;
+        }
+        BroadcastJSON(payload);
+    }
+
     void WebServer::BroadcastAiCallFailed(std::string const& probName, int errorKind,
-                                          int httpStatus, std::string const& errorMessage)
+                                          int httpStatus, std::string const& errorMessage,
+                                          std::string const& providerErrorCode,
+                                          std::string const& providerErrorType,
+                                          std::string_view category,
+                                          std::optional<int> retryAfterSeconds,
+                                          std::string const& interfaceName)
     {
         crow::json::wvalue msg;
         msg["type"] = "ai-call-failed";
@@ -4413,6 +4466,14 @@ namespace AIAssistant
         msg["error_kind"] = static_cast<int64_t>(errorKind);
         msg["http_status"] = static_cast<int64_t>(httpStatus);
         msg["error_message"] = errorMessage;
+        msg["provider_error_code"] = providerErrorCode;
+        msg["provider_error_type"] = providerErrorType;
+        msg["category"] = std::string(category);
+        msg["interface_name"] = interfaceName;
+        if (retryAfterSeconds.has_value())
+        {
+            msg["retry_after_seconds"] = static_cast<int64_t>(*retryAfterSeconds);
+        }
         std::string const payload = msg.dump();
         {
             std::lock_guard<std::mutex> lock(m_Mutex);
@@ -4573,6 +4634,64 @@ namespace AIAssistant
         catch (...)
         {
         }
+    }
+
+    crow::response WebServer::HandleProvidersHealthGet()
+    {
+        // Sitting-8 Workstream D: per-interface health snapshot.  Joins config
+        // identity + pool last-error + dispatcher AIMD cap into one array.
+        // Returns empty array (200) when no AiRequestPool is wired — keeps the
+        // dashboard's mount fetch happy in test/dev configurations without a
+        // full j9t process behind it.
+        crow::json::wvalue responseJson;
+        responseJson["ok"] = true;
+
+        JarvisAgent* app = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
+        AiRequestPool const* pool = (app != nullptr) ? app->GetAiRequestPool() : nullptr;
+        if (pool == nullptr)
+        {
+            responseJson["interfaces"] = crow::json::wvalue::list{};
+            return crow::response(200, responseJson);
+        }
+
+        auto const snapshots = pool->SnapshotProviderHealth();
+        std::vector<crow::json::wvalue> items;
+        items.reserve(snapshots.size());
+        for (auto const& snap : snapshots)
+        {
+            crow::json::wvalue item;
+            item["interface_name"]      = snap.m_InterfaceName;
+            item["interface_type_name"] = snap.m_InterfaceTypeName;
+            item["quota_key"]           = snap.m_QuotaKey;
+            item["is_mock"]             = snap.m_IsMock;
+            item["current_cap"]         = static_cast<int64_t>(snap.m_CurrentCap);
+            item["max_cap"]             = static_cast<int64_t>(snap.m_MaxCap);
+            item["floor_cap"]           = static_cast<int64_t>(snap.m_FloorCap);
+            // Timestamps as Unix milliseconds (matches the rest of the WS
+            // schema — easier for the dashboard's JS Date constructor than
+            // ISO 8601 strings).  Zero = epoch = "never errored".
+            auto const lastErrorMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                snap.m_LastErrorAt.time_since_epoch()).count();
+            item["last_error_at_ms"]    = static_cast<int64_t>(lastErrorMs);
+            item["last_error_code"]     = snap.m_LastErrorCode;
+            item["last_error_type"]     = snap.m_LastErrorType;
+            item["last_error_message"]  = snap.m_LastErrorMessage;
+            item["last_error_category"] = std::string(CategoryToString(snap.m_LastErrorCategory));
+            item["last_http_status"]    = static_cast<int64_t>(snap.m_LastHttpStatus);
+            if (snap.m_RetryAfterSeconds.has_value())
+            {
+                item["retry_after_seconds"] = static_cast<int64_t>(*snap.m_RetryAfterSeconds);
+            }
+            item["consecutive_errors"]            = static_cast<int64_t>(snap.m_ConsecutiveErrors);
+            item["success_streak_since_last_error"] =
+                static_cast<int64_t>(snap.m_SuccessStreakSinceLastError);
+            auto const pinnedSinceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                snap.m_CapPinnedAtFloorSince.time_since_epoch()).count();
+            item["cap_pinned_at_floor_since_ms"] = static_cast<int64_t>(pinnedSinceMs);
+            items.push_back(std::move(item));
+        }
+        responseJson["interfaces"] = std::move(items);
+        return crow::response(200, responseJson);
     }
 
     crow::response WebServer::HandleAiInterfacesListGet()

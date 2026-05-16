@@ -1,0 +1,26 @@
+{
+  "id": "resp_mocktransport-malformed-utf8",
+  "object": "response",
+  "created_at": 1778800000,
+  "status": "completed",
+  "model": "mock-stub",
+  "output": [
+    {
+      "id": "msg_mocktransport-malformed-utf8",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "BOM-leading﻿ after-BOM. RTL-override:‮reversed-text‬ end-override. ZWJ‍emoji-joiner LRI⁦isolated-LTR⁩ RLI⁧isolated-RTL⁩ FSI⁨first-strong⁩. Arabic-letter-mark؜ Hebrewאבג ZeroWidthNoBreak⁠ SoftHyphen­. Mongolian-vowel-separator᠎ variation-selector-16️. Heavy-combining-stacked: é̂̃̄̅̆̇̈̉̊̋̌̍̎̏ unbounded. Valid-emoji-surrogate-pair: 🚀 rocket 👩‍💻 woman-technologist. Tab\there\tcarriage\rreturn\nline\nfeed. Long-mixed: αβγ 中文 ‮العربية‬ end."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 80,
+    "total_tokens": 92
+  }
+}

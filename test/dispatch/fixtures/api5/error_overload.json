@@ -1,0 +1,4 @@
+{
+  "__type": "ModelStreamErrorException",
+  "message": "An error occurred while streaming the response. The model is currently overloaded; retry the request."
+}

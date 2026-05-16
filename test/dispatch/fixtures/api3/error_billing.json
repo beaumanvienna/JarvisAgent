@@ -1,0 +1,27 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded for project mock-project on metric 'aiplatform.googleapis.com/generate_content_requests' and limit 'GenerateContentRequestsPerMinutePerProjectPerRegion'. Please review your quota usage and request a quota increase.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "USER_PROJECT_QUOTA_EXCEEDED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "service": "aiplatform.googleapis.com",
+          "consumer": "projects/mock-project"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+        "violations": [
+          {
+            "quotaMetric": "aiplatform.googleapis.com/generate_content_requests",
+            "quotaId": "GenerateContentRequestsPerMinutePerProjectPerRegion"
+          }
+        ]
+      }
+    ]
+  }
+}

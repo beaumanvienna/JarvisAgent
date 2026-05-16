@@ -1,0 +1,16 @@
+{
+  "id": "resp_mocktransport-truncated",
+  "object": "response",
+  "created_at": 1778800000,
+  "status": "in_progress",
+  "model": "mock-stub",
+  "output": [
+    {
+      "id": "msg_mocktransport-truncated",
+      "type": "message",
+      "status": "in_progress",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "This Responses-API reply was cut mid-stream by a simulated network glitch.  Followed by some multi-byte content so the bytes-up-to-cut path includes multi-byte sequences: αβγ 中文 한국어 العربية русский 🚀💥

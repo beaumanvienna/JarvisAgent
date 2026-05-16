@@ -1,0 +1,22 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Resource has been exhausted (e.g. check quota): rate limit exceeded for model 'gemini-2.5-flash'. Please retry after 12s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "service": "generativelanguage.googleapis.com",
+          "model": "gemini-2.5-flash"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "12s"
+      }
+    ]
+  }
+}

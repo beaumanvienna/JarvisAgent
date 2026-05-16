@@ -220,6 +220,20 @@ namespace AIAssistant
         m_AiRequestPool = std::make_unique<AiRequestPool>();
         m_CurlMultiDispatcher = std::make_unique<CurlMultiDispatcher>();
 
+        // Sitting-8 Workstream D close-out: wire the cap-changed wake signal.
+        // Dispatcher fires the callback from the I/O thread when an AIMD
+        // observation mutates m_CurrentConcurrencyCap; we translate to an
+        // event so the dashboard's AI Health LED refetches /api/providers/health
+        // within milliseconds instead of waiting for the next 5s poll cycle.
+        m_CurlMultiDispatcher->SetOnCapChangedCallback(
+            []()
+            {
+                if (Core::g_Core != nullptr)
+                {
+                    Core::g_Core->PushEvent(std::make_shared<AiCapChangedEvent>());
+                }
+            });
+
         // ---------------------------------------------------------
         // Initialize workflow system (registry + runtime manager + triggers)
         // ---------------------------------------------------------
@@ -716,9 +730,9 @@ namespace AIAssistant
                 [&](AiCallCompletedEvent& evt)
                 {
                     auto const& usage = evt.GetUsage();
-                    m_WebServer->BroadcastAiCallCompleted(evt.GetProbName(), usage.m_InputTokens,
-                                                          usage.m_OutputTokens, usage.m_TotalTokens,
-                                                          evt.GetFinishReason());
+                    m_WebServer->BroadcastAiCallCompleted(evt.GetProbName(), evt.GetInterfaceName(),
+                                                          usage.m_InputTokens, usage.m_OutputTokens,
+                                                          usage.m_TotalTokens, evt.GetFinishReason());
                     return false;
                 });
             dispatcher.Dispatch<AiCallFailedEvent>(
@@ -726,7 +740,20 @@ namespace AIAssistant
                 {
                     auto const& err = evt.GetError();
                     m_WebServer->BroadcastAiCallFailed(evt.GetProbName(), static_cast<int>(err.m_Kind),
-                                                       err.m_HttpStatus, err.m_Message);
+                                                       err.m_HttpStatus, err.m_Message,
+                                                       err.m_ProviderErrorCode, err.m_ProviderErrorType,
+                                                       CategoryToString(err.m_Category),
+                                                       err.m_RetryAfterSeconds,
+                                                       evt.GetInterfaceName());
+                    return false;
+                });
+            dispatcher.Dispatch<AiCapChangedEvent>(
+                [&](AiCapChangedEvent&)
+                {
+                    // Sitting-8 Workstream D close-out: payload-free wake signal
+                    // for the dashboard's AI Health LED — receiver refetches
+                    // /api/providers/health for authoritative state.
+                    m_WebServer->BroadcastCapChanged();
                     return false;
                 });
         }

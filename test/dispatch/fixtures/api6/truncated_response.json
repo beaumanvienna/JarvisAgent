@@ -1,0 +1,11 @@
+{
+  "id": "chatcmpl-mocktransport-azure-truncated",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This Azure OpenAI reply was cut mid-stream by a simulated network glitch.  Followed by multi-byte content: αβγ 中文 한국어 العربية 🚀💥

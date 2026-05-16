@@ -1,0 +1,4 @@
+{
+  "__type": "ThrottlingException",
+  "message": "Too many requests, please wait before trying again. You have sent too many requests in a given amount of time."
+}

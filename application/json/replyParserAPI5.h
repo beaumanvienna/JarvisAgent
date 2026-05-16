@@ -35,6 +35,13 @@ namespace AIAssistant
     //   - Anthropic-on-Bedrock: {"type":"message","content":[...],"stop_reason":...} -> ReplyParserAPI4
     //   - Llama-on-Bedrock:     {"generation":"...","stop_reason":"..."}             -> internal LlamaReply
     //   - Titan/Nova-on-Bedrock:{"results":[{"outputText":"..."}]}                   -> internal TitanReply
+    //   - AWS error envelope:   {"__type":"<Exception>","message":"..."}             -> classified directly
+    //
+    // The AWS error path is handled inline (no delegate) because AWS exceptions are
+    // pre-family — every Bedrock family surfaces the same `__type` shape on
+    // ServiceQuotaExceededException / ThrottlingException / etc.  Family detection runs
+    // FIRST for success bodies; the `__type` check runs as a fallback before declaring
+    // Unknown shape.
     class ReplyParserAPI5 final : public ReplyParser
     {
     public:
@@ -49,5 +56,11 @@ namespace AIAssistant
 
     private:
         std::unique_ptr<ReplyParser> m_Delegate;
+
+        // Set when the body is an AWS error envelope ({"__type": "...", "message": "..."}).
+        // Populated directly by the ctor — no delegate — so GetError can return the
+        // classified AiError without re-parsing.  Empty when the body matched a model family.
+        std::string m_AwsErrorType;
+        std::string m_AwsErrorMessage;
     };
 } // namespace AIAssistant

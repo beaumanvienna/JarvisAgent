@@ -246,19 +246,41 @@ static void _show_run_of_nonansi_characters( attr_t attr,
 #ifdef USING_COMBINING_CHARACTER_SCHEME
         if( ch > DUMMY_CHAR_NEXT_TO_FULLWIDTH)
         {
-            cchar_t added[10], root = ch;
+            /* j9t fix (wincon): bound n_combined against the `added` buffer
+               size.  Pre-fix the while loop had NO bounds check — feeding it
+               a cluster with >10 combining marks wrote past added[9] into
+               stack memory (silent UB in both Debug and Release on Windows;
+               no assertion to catch it, unlike the vt backend).  The j9t §19
+               TUI stress fixtures stack BOM + RTL/LTR overrides + ZWJ + LRI
+               + RLI + FSI + Arabic marks + variation selectors + Mongolian
+               vowel separators into single clusters that can chain 10+ marks. */
+            #define J9T_MAX_COMBINED 10
+            cchar_t added[J9T_MAX_COMBINED], root = ch;
             int n_combined = 0;
 
-            while( (root = PDC_expand_combined_characters( root,
+            while( n_combined < J9T_MAX_COMBINED - 1 &&
+                   (root = PDC_expand_combined_characters( root,
                                    &added[n_combined])) > MAX_UNICODE)
                 n_combined++;
-            buffer[n_out++].Char.UnicodeChar = (WCHAR)root;
-            ch = (chtype)added[n_combined];
+            if( root > MAX_UNICODE)
+            {
+                /* Cluster has more combining marks than the buffer can hold.
+                   Substitute U+FFFD for both base + final mark; the marks
+                   already collected in added[0..n_combined-1] render after. */
+                buffer[n_out++].Char.UnicodeChar = 0xFFFD;
+                ch = 0xFFFD;
+            }
+            else
+            {
+                buffer[n_out++].Char.UnicodeChar = (WCHAR)root;
+                ch = (chtype)added[n_combined];
+            }
             while( n_combined)
             {
                 n_combined--;
                 buffer[n_out++].Char.UnicodeChar = (WCHAR)added[n_combined];
             }
+            #undef J9T_MAX_COMBINED
         }
 #endif
         if( ch <= MAX_UNICODE)

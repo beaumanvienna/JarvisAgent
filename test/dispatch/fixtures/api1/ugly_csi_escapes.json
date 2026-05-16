@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-mocktransport-ugly-csi",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "\u001b[31mRED-via-CSI\u001b[0m \u001b[1;33;44mbold-yellow-on-blue\u001b[0m \u001b[2J\u001b[H cursor-home-and-clear-screen end. Bell:\u0007 Backspace:\b FormFeed:\f VerticalTab:\u000b SI:\u000f SO:\u000e CAN:\u0018 SUB:\u001a ESC:\u001b reverse-video:\u001b[7m inverted-text\u001b[0m. OSC-title-injection-attempt:\u001b]0;HOSTILE-TITLE\u0007 end. Mixed safe text with CJK between escapes: 中文测试\u001b[35m日本語\u001b[0m format-string-attempt:%s%d%n%n \u001b[2K erase-line."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 8,
+    "completion_tokens": 60,
+    "total_tokens": 68
+  }
+}

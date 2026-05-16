@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "Rate limit reached for o1 in organization org-mock on requests per min (RPM): Limit 100, Used 100, Requested 1. Please try again in 12s. Visit https://platform.openai.com/account/rate-limits to learn more.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded",
+    "param": null
+  }
+}

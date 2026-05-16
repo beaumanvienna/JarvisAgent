@@ -1,0 +1,11 @@
+{
+  "id": "chatcmpl-mocktransport-truncated",
+  "object": "chat.completion",
+  "created": 1778800000,
+  "model": "mock-stub",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "This response was cut off mid-stream by a simulated network glitch.  The closing braces are intentionally missing so simdjson surfaces a parse error and the dispatch path's response-malformation handling is exercised end-to-end.  Provider-side equivalent: idle-timeout disconnect during a Server-Sent-Events stream, or upstream proxy closing the socket mid-body.  Followed by some heavy multi-byte content so the bytes-up-to-cut path includes multi-byte sequences: αβγ 中文 한국어 العربية русский 🚀💥

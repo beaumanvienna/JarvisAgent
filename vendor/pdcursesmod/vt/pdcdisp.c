@@ -156,10 +156,27 @@ static size_t _unpack_combined_character(wchar_t* obuff, const size_t buffsize, 
     root = ch;
     while (rval < buffsize && (root = PDC_expand_combined_characters(root, &newchar)) > MAX_UNICODE)
         obuff[rval++] = (wchar_t)newchar;
-    obuff[0] = (wchar_t)root;
-    if (rval < buffsize)
-        obuff[rval++] = (wchar_t)newchar;
-    assert(rval < buffsize);
+    /* j9t fix (vt): when the cluster has more combining marks than buffsize
+       can hold, the loop exits with `rval == buffsize` but `root` is still
+       a cluster sentinel (>MAX_UNICODE), NOT the base codepoint.  Writing
+       that sentinel into obuff[0] and feeding it to PDC_wc_to_utf8 produces
+       undefined output.  Substitute U+FFFD for the base instead so the
+       terminal shows a replacement glyph at the overflow site; the marks
+       already stored in obuff[1..buffsize-1] remain.  The next newchar
+       (the mark we couldn't hold) is intentionally dropped.
+
+       Pre-fix: assert(rval < buffsize) would SIGABRT in Debug — was a
+       legitimate full-buffer state misclassified as overflow. */
+    if (root > MAX_UNICODE)
+    {
+        obuff[0] = 0xFFFD;
+    }
+    else
+    {
+        obuff[0] = (wchar_t)root;
+        if (rval < buffsize)
+            obuff[rval++] = (wchar_t)newchar;
+    }
     assert(rval > 1);
     return (rval);
 }

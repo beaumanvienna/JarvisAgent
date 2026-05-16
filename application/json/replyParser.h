@@ -23,11 +23,38 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include "json/configParser.h"
+#include "simdjson/simdjson.h"
 #include "workflow/aiReply.h"
 
 namespace AIAssistant
 {
+    // Shared OpenAI-style error envelope.  Both ReplyParserAPI1 (Chat
+    // Completions) and ReplyParserAPI2 (Responses API) deserialize this
+    // exact shape; Azure OpenAI inherits it via the API1 parser (see
+    // ReplyParser::Create -> API6).  Extracted into one place so a new
+    // OpenAI-compatible provider can reuse the helper without copying
+    // the parse loop a third time (feedback_cpp_discipline).
+    struct OpenAiStyleErrorInfo
+    {
+        std::string m_Message;
+        std::string m_Type;
+        std::string m_Code;
+        std::string m_Param;
+    };
+
+    // Parse an OpenAI-style {message, type, code, param} object.  Pure
+    // function — no logging, no state.  Caller emits the consolidated
+    // ERROR/WARN log line with runId in scope.  Unknown keys are
+    // silently ignored (provider may add fields over time).
+    OpenAiStyleErrorInfo ParseOpenAiStyleError(simdjson::ondemand::object errorObj);
+
+    // Classify the OpenAI-style error `type` string into the UI-facing
+    // semantic category.  Unknown strings → ProviderErrorCategory::Unknown
+    // (caller may still propagate the raw m_ProviderErrorType for logs).
+    ProviderErrorCategory ClassifyOpenAiStyleErrorType(std::string_view type);
+
     class ReplyParser
     {
     public:

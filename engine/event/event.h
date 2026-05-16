@@ -47,7 +47,8 @@ namespace AIAssistant
         AiCallStarted,       // AI dispatch lifecycle
         AiCallRetrying,      //
         AiCallCompleted,     //
-        AiCallFailed         //
+        AiCallFailed,        //
+        AiCapChanged         // Sitting-8 Workstream D — AIMD cap mutated
     };
 
     enum EventCategory

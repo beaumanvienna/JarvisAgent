@@ -90,9 +90,12 @@ namespace AIAssistant
         // error handling
         struct ErrorInfo
         {
-            int m_Code{0};
+            int m_Code{0};                  // HTTP status code (Gemini doesn't have a string code field)
             std::string m_Message;
-            std::string m_Status;
+            std::string m_Status;           // top-level enum: RESOURCE_EXHAUSTED, UNAUTHENTICATED, UNAVAILABLE, …
+            std::string m_DetailReason;     // first error.details[*].reason value (e.g. RATE_LIMIT_EXCEEDED,
+                                            // USER_PROJECT_QUOTA_EXCEEDED, BILLING_DISABLED).  Disambiguates
+                                            // billing vs throttle within RESOURCE_EXHAUSTED.  Empty if absent.
         };
 
     public:

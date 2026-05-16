@@ -586,7 +586,7 @@ namespace AIAssistant
         return true;
     }
 
-    bool AiRequestPool::OnRequestFailed(std::string const& expectedOutputPath, std::string const& errorMessage)
+    bool AiRequestPool::OnRequestFailed(std::string const& expectedOutputPath, AiError const& error)
     {
         if (expectedOutputPath.empty())
         {
@@ -624,13 +624,25 @@ namespace AIAssistant
             }
             pendingEntry->m_IsCompleted = true;
             pendingEntry->m_IsFailed = true;
-            pendingEntry->m_ErrorMessage = errorMessage;
+            pendingEntry->m_ErrorMessage = error.m_Message;
             pendingEntry->conditionVariable.notify_all();
         }
 
-        LOG_APP_ERROR("[AiRequestPool] OnRequestFailed run='{}' workflow='{}' task='{}' message='{}' path='{}'",
+        // Single consolidated ERROR with the body discriminator + semantic category
+        // + runId/workflowId/taskId.  This is the line the dashboard run analyzer
+        // filters on (per CLAUDE.md "Failure-path logs are ERROR-level AND mention
+        // the runId or workflowId as a literal substring").  Sitting-5 enrichment
+        // turns "HTTP 429" into "HTTP 429 (code='insufficient_quota',
+        // type='insufficient_quota', category=BillingExhausted)" so operators can
+        // tell billing exhaustion from genuine throttling without inspecting the
+        // transcript.  Dispatcher's intermediate 429-retries-exhausted line drops
+        // to WARN to avoid a duplicate ERROR for the same failure.
+        LOG_APP_ERROR("[AiRequestPool] OnRequestFailed HTTP {} (code='{}', type='{}', category={}) "
+                      "run='{}' workflow='{}' task='{}' message='{}' path='{}'",
+                      error.m_HttpStatus, error.m_ProviderErrorCode, error.m_ProviderErrorType,
+                      CategoryToString(error.m_Category),
                       pendingEntry->m_Context.m_RunId, pendingEntry->m_Context.m_WorkflowId,
-                      pendingEntry->m_Context.m_TaskId, errorMessage, canonicalPath);
+                      pendingEntry->m_Context.m_TaskId, error.m_Message, canonicalPath);
 
         QueueCompletionIfNeeded(pendingEntry);
         return true;
@@ -1447,11 +1459,22 @@ namespace AIAssistant
         }
 
         AiInvocation envelopeForRetry = envelope;
+        // Capture by value — `api` is a pointer into the config registry; the
+        // callback fires asynchronously on the I/O thread, possibly after the
+        // registry has been replaced by a config reload.  Per
+        // feedback_capture_by_value_async.
+        std::string const interfaceNameForEvent = api->m_Name;
+        // Quota key feeds the Sitting-8 per-interface health snapshot's
+        // `m_QuotaKey` field — lets the dashboard popover detect rows that
+        // share a controller (two interfaces routing to the same host|model).
+        std::string const quotaKeyForHealth = quotaKey;
 
         auto curlCallback = [this, interfaceType, queueFolder, probName, modelCapture, expectedOutputPath,
                              transcriptPath, callbackCopy, envelopeForRetry, decrementOnce,
                              runIdForLog, workflowIdForLog,
-                             taskIdForLog](QueryResult curlResult, std::string responseBody) mutable
+                             taskIdForLog, interfaceNameForEvent, quotaKeyForHealth](
+                                QueryResult curlResult, std::string responseBody,
+                                std::optional<int> retryAfterSeconds) mutable
         {
             AiReply aiReply;
 
@@ -1462,6 +1485,40 @@ namespace AIAssistant
                     aiReply.m_Kind = AiReply::Kind::Error;
                     aiReply.m_Error.m_Kind = AiError::Kind::Http;
                     aiReply.m_Error.m_Message = curlResult.m_ErrorMessage;
+                    // QueryResult::m_ErrorCode carries the HTTP status when the dispatcher
+                    // landed in the "HTTP >= 400" branch, OR a CURLE_* code on transport
+                    // failure (timeout, DNS, TLS handshake).  Only the former is a real
+                    // HTTP status; the latter would mislead the WS payload if propagated
+                    // as m_HttpStatus.
+                    if (curlResult.m_ErrorCode >= 100 && curlResult.m_ErrorCode <= 599)
+                    {
+                        aiReply.m_Error.m_HttpStatus = curlResult.m_ErrorCode;
+                    }
+                    // Even when curl reports failure (HTTP 4xx/5xx), providers usually
+                    // include a structured error body — parse it so the body's
+                    // discriminator (insufficient_quota / rate_limit_error / etc.) and
+                    // semantic category reach the WS payload + Workstream-A log line.
+                    // Without this, the dispatcher short-circuit on HTTP errors hides
+                    // billing-vs-throttle classification end-to-end.
+                    if (!responseBody.empty())
+                    {
+                        auto errorParser = ReplyParser::Create(interfaceType, responseBody);
+                        if (errorParser && errorParser->HasError())
+                        {
+                            AiError const parsedError = errorParser->GetError();
+                            aiReply.m_Error.m_ProviderErrorCode = parsedError.m_ProviderErrorCode;
+                            aiReply.m_Error.m_ProviderErrorType = parsedError.m_ProviderErrorType;
+                            aiReply.m_Error.m_Category          = parsedError.m_Category;
+                            // Prefer the parser's message when present — it's the
+                            // provider's free-form body text rather than curl's
+                            // generic "Bad Request" / "Too Many Requests" describe.
+                            if (!parsedError.m_Message.empty())
+                            {
+                                aiReply.m_Error.m_Message = parsedError.m_Message;
+                            }
+                        }
+                    }
+                    aiReply.m_Error.m_RetryAfterSeconds = retryAfterSeconds;
                     LOG_APP_ERROR("AiRequestPool::Submit callback: curl error ({}) run='{}' workflow='{}' task='{}' prob='{}': {}",
                                   curlResult.m_ErrorCode, runIdForLog, workflowIdForLog, taskIdForLog, probName,
                                   curlResult.m_ErrorMessage);
@@ -1481,6 +1538,7 @@ namespace AIAssistant
                         aiReply.m_Kind = AiReply::Kind::Error;
                         aiReply.m_Error = replyParser->GetError();
                         aiReply.m_Usage = replyParser->GetUsage();
+                        aiReply.m_Error.m_RetryAfterSeconds = retryAfterSeconds;
                     }
                     else if (replyParser->HasContent() == 0)
                     {
@@ -1582,7 +1640,10 @@ namespace AIAssistant
                                                   runIdForLog, workflowIdForLog, taskIdForLog, probName);
                                     if (!expectedOutputPath.empty())
                                     {
-                                        (void)OnRequestFailed(expectedOutputPath, "schema-retry submission failed");
+                                        AiError schemaRetryError;
+                                        schemaRetryError.m_Kind = AiError::Kind::SchemaValidation;
+                                        schemaRetryError.m_Message = "schema-retry submission failed";
+                                        (void)OnRequestFailed(expectedOutputPath, schemaRetryError);
                                     }
                                 }
                                 return;
@@ -1647,7 +1708,7 @@ namespace AIAssistant
                     // No .output.* file is written for error replies; without this signal the
                     // workflow runtime would stay parked in waiting_external until the ai_call
                     // deadline fires. Symmetric to the success path above.
-                    (void)OnRequestFailed(expectedOutputPath, aiReply.m_Error.m_Message);
+                    (void)OnRequestFailed(expectedOutputPath, aiReply.m_Error);
                 }
 
                 if (!transcriptPath.empty())
@@ -1658,17 +1719,96 @@ namespace AIAssistant
                     }
                 }
 
+                // Sitting-8 Workstream D: per-interface health tracking that
+                // feeds /api/providers/health + the dashboard's AI Health LED.
+                // Updates happen here (not inside event handlers) because the
+                // event bus is fire-and-forget and the health snapshot needs
+                // to be authoritative the moment any pending /api/providers/health
+                // request lands.  Single short critical section per call.
+                {
+                    std::scoped_lock<std::mutex> const lock(m_HealthMutex);
+                    InterfaceHealthState& health = m_HealthPerInterface[interfaceNameForEvent];
+                    health.m_QuotaKey = quotaKeyForHealth;
+                    if (aiReply.m_Kind == AiReply::Kind::Error)
+                    {
+                        health.m_LastErrorAt          = std::chrono::system_clock::now();
+                        health.m_LastErrorCode        = aiReply.m_Error.m_ProviderErrorCode;
+                        health.m_LastErrorType        = aiReply.m_Error.m_ProviderErrorType;
+                        health.m_LastErrorMessage     = aiReply.m_Error.m_Message;
+                        health.m_LastErrorCategory    = aiReply.m_Error.m_Category;
+                        health.m_LastHttpStatus       = aiReply.m_Error.m_HttpStatus;
+                        health.m_RetryAfterSeconds    = aiReply.m_Error.m_RetryAfterSeconds;
+                        health.m_ConsecutiveErrors    += 1;
+                        health.m_SuccessStreakSinceLastError = 0;
+                    }
+                    else
+                    {
+                        health.m_ConsecutiveErrors           = 0;
+                        health.m_SuccessStreakSinceLastError += 1;
+                    }
+                }
+
+                // Cap-pinned-at-floor timestamp (Sitting-8 close-out): consult
+                // the dispatcher's current cap for this interface's quotaKey
+                // and flip the pin timestamp at floor-boundary crossings.
+                // Survives cross-refresh — the dashboard's frontend pin
+                // tracker is now just a safety net for the dispatcher-down
+                // case.  Done outside the m_HealthMutex critical section
+                // above so we don't hold our mutex while calling into the
+                // dispatcher (avoids a future lock-order hazard if the
+                // dispatcher ever calls back into AiRequestPool).
+                if (!quotaKeyForHealth.empty())
+                {
+                    JarvisAgent* japp = dynamic_cast<JarvisAgent*>(
+                        App::g_App.load(std::memory_order_acquire));
+                    CurlMultiDispatcher* disp = (japp != nullptr) ? japp->GetCurlMultiDispatcher() : nullptr;
+                    if (disp != nullptr)
+                    {
+                        auto const dispSnap = disp->GetDebugSnapshot();
+                        int currentCap = -1;
+                        for (auto const& ctrl : dispSnap.m_Controllers)
+                        {
+                            if (ctrl.m_QuotaKey == quotaKeyForHealth)
+                            {
+                                currentCap = ctrl.m_CurrentConcurrencyCap;
+                                break;
+                            }
+                        }
+                        // Floor is hard-coded to 1 in RateLimitController
+                        // (the AIMD halve-on-429 / floor-at-1 contract).
+                        constexpr int kFloor = 1;
+                        if (currentCap > 0)
+                        {
+                            std::scoped_lock<std::mutex> const lock(m_HealthMutex);
+                            InterfaceHealthState& health = m_HealthPerInterface[interfaceNameForEvent];
+                            auto const epoch = std::chrono::system_clock::time_point{};
+                            bool const wasPinned = (health.m_CapPinnedAtFloorSince != epoch);
+                            bool const isPinned  = (currentCap <= kFloor);
+                            if (isPinned && !wasPinned)
+                            {
+                                health.m_CapPinnedAtFloorSince = std::chrono::system_clock::now();
+                            }
+                            else if (!isPinned && wasPinned)
+                            {
+                                health.m_CapPinnedAtFloorSince = epoch;
+                            }
+                        }
+                    }
+                }
+
                 if (Core::g_Core != nullptr)
                 {
                     if (aiReply.m_Kind == AiReply::Kind::Error)
                     {
-                        auto failedEvent = std::make_shared<AiCallFailedEvent>(probName, aiReply.m_Error);
+                        auto failedEvent = std::make_shared<AiCallFailedEvent>(probName, interfaceNameForEvent,
+                                                                               aiReply.m_Error);
                         Core::g_Core->PushEvent(failedEvent);
                     }
                     else
                     {
                         auto completedEvent =
-                            std::make_shared<AiCallCompletedEvent>(probName, aiReply.m_Usage, aiReply.m_FinishReason);
+                            std::make_shared<AiCallCompletedEvent>(probName, interfaceNameForEvent,
+                                                                   aiReply.m_Usage, aiReply.m_FinishReason);
                         Core::g_Core->PushEvent(completedEvent);
                     }
                 }
@@ -1690,7 +1830,7 @@ namespace AIAssistant
                 {
                     // Best-effort failure signal — exception path; pending entry may
                     // already have been resolved by the prior success branch.
-                    (void)OnRequestFailed(expectedOutputPath, errorReply.m_Error.m_Message);
+                    (void)OnRequestFailed(expectedOutputPath, errorReply.m_Error);
                 }
                 if (callbackCopy)
                 {
@@ -1720,5 +1860,103 @@ namespace AIAssistant
         dispatcher->Submit(queryData, std::move(curlCallback));
 
         return true;
+    }
+
+    // ------------------------------------------------------------------------
+    // Sitting-8 Workstream D: per-interface health snapshot
+    // ------------------------------------------------------------------------
+    //
+    // Joins three sources:
+    //   - config.m_ApiInterfaces       (identity: name, type, mock flag)
+    //   - m_HealthPerInterface         (last-error + streak counters)
+    //   - dispatcher GetDebugSnapshot  (per-quotaKey AIMD cap state)
+    //
+    // The join key from interface → controller is `quotaKey`.  Remembered
+    // per-interface from the most recent Submit() call (stored in
+    // InterfaceHealthState::m_QuotaKey).  Interfaces that have never
+    // dispatched have no quotaKey yet — they appear in the snapshot with
+    // cap fields = -1 (UI renders "—").
+    std::vector<ProviderHealthSnapshot> AiRequestPool::SnapshotProviderHealth() const
+    {
+        std::vector<ProviderHealthSnapshot> result;
+
+        if (Core::g_Core == nullptr)
+        {
+            return result;
+        }
+        auto const& config = Core::g_Core->GetConfig();
+        result.reserve(config.m_ApiInterfaces.size());
+
+        // Pull dispatcher controller state once (avoids re-locking per interface).
+        std::unordered_map<std::string, CurlMultiDispatcher::DebugSnapshot::ControllerEntry> controllerByKey;
+        JarvisAgent* jarvisAgent = dynamic_cast<JarvisAgent*>(App::g_App.load(std::memory_order_acquire));
+        CurlMultiDispatcher* dispatcher = (jarvisAgent != nullptr) ? jarvisAgent->GetCurlMultiDispatcher() : nullptr;
+        if (dispatcher != nullptr)
+        {
+            CurlMultiDispatcher::DebugSnapshot const snap = dispatcher->GetDebugSnapshot();
+            for (auto const& entry : snap.m_Controllers)
+            {
+                controllerByKey.emplace(entry.m_QuotaKey, entry);
+            }
+        }
+
+        // Snapshot the health map under lock — short critical section, no I/O
+        // inside.  Joining with config + dispatcher happens after release.
+        std::unordered_map<std::string, InterfaceHealthState> healthCopy;
+        {
+            std::scoped_lock<std::mutex> const lock(m_HealthMutex);
+            healthCopy = m_HealthPerInterface;
+        }
+
+        auto const interfaceTypeName = [](ConfigParser::EngineConfig::InterfaceType type) -> char const* {
+            switch (type)
+            {
+                case ConfigParser::EngineConfig::InterfaceType::API1: return "API1";
+                case ConfigParser::EngineConfig::InterfaceType::API2: return "API2";
+                case ConfigParser::EngineConfig::InterfaceType::API3: return "API3";
+                case ConfigParser::EngineConfig::InterfaceType::API4: return "API4";
+                case ConfigParser::EngineConfig::InterfaceType::API5: return "API5";
+                case ConfigParser::EngineConfig::InterfaceType::API6: return "API6";
+                case ConfigParser::EngineConfig::InterfaceType::NumAPIs:
+                case ConfigParser::EngineConfig::InterfaceType::InvalidAPI:
+                    return "InvalidAPI";
+            }
+            return "InvalidAPI";
+        };
+
+        for (auto const& api : config.m_ApiInterfaces)
+        {
+            ProviderHealthSnapshot snap;
+            snap.m_InterfaceName     = api.m_Name;
+            snap.m_InterfaceTypeName = interfaceTypeName(api.m_InterfaceType);
+            snap.m_IsMock            = api.m_IsMock;
+            snap.m_MaxCap            = api.m_RateLimit.m_MaxConcurrency;
+            snap.m_FloorCap          = 1;   // RateLimitController hard-codes floor=1
+
+            auto const healthIt = healthCopy.find(api.m_Name);
+            if (healthIt != healthCopy.end())
+            {
+                snap.m_QuotaKey                    = healthIt->second.m_QuotaKey;
+                snap.m_LastErrorAt                 = healthIt->second.m_LastErrorAt;
+                snap.m_LastErrorCode               = healthIt->second.m_LastErrorCode;
+                snap.m_LastErrorType               = healthIt->second.m_LastErrorType;
+                snap.m_LastErrorMessage            = healthIt->second.m_LastErrorMessage;
+                snap.m_LastErrorCategory           = healthIt->second.m_LastErrorCategory;
+                snap.m_LastHttpStatus              = healthIt->second.m_LastHttpStatus;
+                snap.m_RetryAfterSeconds           = healthIt->second.m_RetryAfterSeconds;
+                snap.m_ConsecutiveErrors           = healthIt->second.m_ConsecutiveErrors;
+                snap.m_SuccessStreakSinceLastError = healthIt->second.m_SuccessStreakSinceLastError;
+                snap.m_CapPinnedAtFloorSince       = healthIt->second.m_CapPinnedAtFloorSince;
+            }
+
+            auto const ctrlIt = controllerByKey.find(snap.m_QuotaKey);
+            if (ctrlIt != controllerByKey.end())
+            {
+                snap.m_CurrentCap = ctrlIt->second.m_CurrentConcurrencyCap;
+            }
+
+            result.push_back(std::move(snap));
+        }
+        return result;
     }
 } // namespace AIAssistant

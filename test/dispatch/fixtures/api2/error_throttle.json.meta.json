@@ -1,0 +1,7 @@
+{
+  "http_status": 429,
+  "headers": {
+    "Content-Type": "application/json",
+    "Retry-After": "12"
+  }
+}

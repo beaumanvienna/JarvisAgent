@@ -26,6 +26,7 @@
 #include "engine.h"
 #include "core.h"
 #include "file/pathConfinement.h"
+#include "simdjson/simdjson.h"
 #include "workflow/jcwfContainer.h"
 #include "workflow/workflowJsonParser.h"
 
@@ -59,6 +60,29 @@ static bool ReadFileToStringStatic(std::filesystem::path const& filePath, std::s
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace
+{
+    // Pull the resolved provider name from an ai_call task's `m_ParamsJson`.
+    // Mirrors what AiCallTaskExecutor::TryExtractStringParam does for the same
+    // field at dispatch time — kept inline (not extracted to a shared helper
+    // yet — `feedback_cpp_discipline` "extract before the third site"; today
+    // there are two read sites, executor + registry).  Returns the empty
+    // string for tasks that don't specify a provider; that's the wire
+    // contract — empty in `m_RequiredAiProviders` means "system default".
+    std::string ExtractProviderFromParams(std::string const& paramsJson)
+    {
+        if (paramsJson.empty()) return {};
+        simdjson::ondemand::parser parser;
+        simdjson::padded_string padded(paramsJson);
+        auto docResult = parser.iterate(padded);
+        if (docResult.error()) return {};
+        simdjson::ondemand::document doc = std::move(docResult.value());
+        std::string_view sv;
+        if (doc["provider"].get_string().get(sv) != simdjson::SUCCESS) return {};
+        return std::string(sv);
+    }
+}
 
 namespace AIAssistant
 {
@@ -677,14 +701,24 @@ bool WorkflowRegistry::LoadContainer(std::filesystem::path const& jcwfContainerP
         rootDef.m_Triggers.push_back(autoTrigger);
     }
 
-    // Check for AI call tasks.
-    for (auto const& [taskId, task] : rootDef.m_Tasks)
+    // Check for AI call tasks + collect every distinct provider name.  The
+    // dashboard's per-row hazard glyph (Sitting-7 Workstream C) reads this list
+    // via /api/workflows::interface_names to mark rows red when their providers
+    // are degraded.  Distinct-set (not multiset) — UI cares which interfaces
+    // are touched, not how many tasks each one feeds.
     {
-        if (task.m_Type == TaskType::AiCall)
+        std::vector<std::string> seen;     // small-N (typical workflow has 1-3 providers); linear-scan beats a hash set.
+        for (auto const& [taskId, task] : rootDef.m_Tasks)
         {
+            if (task.m_Type != TaskType::AiCall) continue;
             rootDef.m_HasAiCallTasks = true;
-            break;
+            std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson);
+            if (std::find(seen.begin(), seen.end(), providerName) == seen.end())
+            {
+                seen.push_back(providerName);
+            }
         }
+        rootDef.m_RequiredAiProviders = std::move(seen);
     }
 
     std::string const rootId = rootDef.m_Id;
@@ -810,14 +844,21 @@ bool WorkflowRegistry::LoadContainerSubWorkflows(std::filesystem::path const& fo
         subDef.m_ManualStart = true;
         subDef.m_Triggers.clear();
 
-        // Check for AI call tasks.
-        for (auto const& [taskId, task] : subDef.m_Tasks)
+        // Check for AI call tasks + collect distinct provider names — see the
+        // matching root-load comment above for the rationale.
         {
-            if (task.m_Type == TaskType::AiCall)
+            std::vector<std::string> seen;
+            for (auto const& [taskId, task] : subDef.m_Tasks)
             {
+                if (task.m_Type != TaskType::AiCall) continue;
                 subDef.m_HasAiCallTasks = true;
-                break;
+                std::string const providerName = ExtractProviderFromParams(task.m_ParamsJson);
+                if (std::find(seen.begin(), seen.end(), providerName) == seen.end())
+                {
+                    seen.push_back(providerName);
+                }
             }
+            subDef.m_RequiredAiProviders = std::move(seen);
         }
 
         std::string const subId = subDef.m_Id;

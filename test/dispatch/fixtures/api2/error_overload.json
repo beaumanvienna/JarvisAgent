@@ -1,0 +1,8 @@
+{
+  "error": {
+    "message": "The server is currently overloaded with other requests. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if the error persists.",
+    "type": "server_error",
+    "code": "server_overloaded",
+    "param": null
+  }
+}

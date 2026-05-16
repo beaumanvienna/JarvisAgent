@@ -1,5 +1,11 @@
 import { useState } from "react";
-import type { WorkflowEntry, RunSnapshot, LastRunInfo } from "../types";
+import type {
+  WorkflowEntry,
+  RunSnapshot,
+  LastRunInfo,
+  ProviderAlertEntry,
+  ProviderErrorCategory,
+} from "../types";
 import { reloadWorkflows, runWorkflow } from "../api";
 
 interface Props {
@@ -11,6 +17,52 @@ interface Props {
   lastRuns: LastRunInfo[];
   onRefresh: () => void;
   canRunWorkflows: boolean;
+  // Sitting-7 Workstream C: active per-interface provider alerts.  Map keyed by
+  // `${interfaceName}|${category}`.  Banner UI + hazard glyph branch off this.
+  providerAlerts: Map<string, ProviderAlertEntry>;
+  onDismissProviderAlert: (key: string) => void;
+}
+
+// Copy templates per §5.3 of doc/misc/ai-provider-error-visibility-dev-plan.md.
+// Title is provider-agnostic — phrasing uses the user-configured interface label,
+// never a provider brand name (per the dev plan §1 "no hardcoded provider names").
+const CATEGORY_COPY: Record<ProviderErrorCategory, { title: string; verb: string } | null> = {
+  Unknown: null,                              // not banner-worthy on its own
+  ThrottleRateLimit: null,                    // AIMD's job — surfaced via AI Health LED
+  InvalidRequest: null,                       // caller bug, not provider state
+  BillingExhausted:
+    { title: "Account billing limit reached",  verb: "is rejecting requests for billing reasons" },
+  AuthFailure:
+    { title: "Interface credentials rejected", verb: "is rejecting requests — credentials failed validation" },
+  ServiceOverload:
+    { title: "Interface overloaded — retrying", verb: "is reporting transient overload" },
+  ModelNotFound:
+    { title: "Requested model not available", verb: "rejected the request — model is unavailable or deprecated" },
+};
+
+function alertKey(interfaceName: string, category: ProviderErrorCategory): string {
+  return `${interfaceName}|${category}`;
+}
+
+// Returns the most-severe ongoing category for an interface, or null if none.
+// Severity order matches §5.3: BillingExhausted is the loudest (red banner +
+// stalls workflows), then AuthFailure (also a hard stop), then ModelNotFound,
+// then ServiceOverload (informational; auto-clears).
+const SEVERITY_ORDER: ProviderErrorCategory[] = [
+  "BillingExhausted",
+  "AuthFailure",
+  "ModelNotFound",
+  "ServiceOverload",
+];
+
+function worstCategoryFor(
+  interfaceName: string,
+  alerts: Map<string, ProviderAlertEntry>,
+): ProviderErrorCategory | null {
+  for (const cat of SEVERITY_ORDER) {
+    if (alerts.has(alertKey(interfaceName, cat))) return cat;
+  }
+  return null;
 }
 
 function progressText(run: RunSnapshot): string {
@@ -52,6 +104,8 @@ export default function WorkflowsPanel({
   lastRuns,
   onRefresh,
   canRunWorkflows,
+  providerAlerts,
+  onDismissProviderAlert,
 }: Props) {
   const [reloading, setReloading] = useState(false);
   const topLevelWorkflows = workflows.filter((wf) => !wf.is_sub_workflow);
@@ -128,6 +182,46 @@ export default function WorkflowsPanel({
           )}
         </div>
       )}
+      {/* Sitting-7 Workstream C: one banner per (interface, actionable-category)
+          pair.  Dedup happens at insert time in useWebSocket; this is a pure render. */}
+      {Array.from(providerAlerts.entries())
+        .map(([key, alert]) => {
+          const copy = CATEGORY_COPY[alert.category];
+          if (copy === null) return null;
+          return (
+            <div className="provider-alert-banner" key={key}>
+              <div className="provider-alert-body">
+                <strong>{copy.title}</strong>
+                <span>
+                  {" "}— Interface <code>{alert.interfaceName}</code> {copy.verb}
+                  {alert.errorType ? (
+                    <>
+                      {" "}(<code>{alert.errorType}</code>
+                      {alert.errorCode && alert.errorCode !== alert.errorType
+                        ? ` / ${alert.errorCode}`
+                        : ""}
+                      )
+                    </>
+                  ) : null}
+                  . Affected calls: {alert.count}.
+                  {alert.retryAfterSeconds !== undefined
+                    ? ` Provider asks for ${alert.retryAfterSeconds}s before retry.`
+                    : ""}
+                </span>
+              </div>
+              <button
+                className="provider-alert-dismiss"
+                type="button"
+                aria-label="Dismiss"
+                title="Dismiss for this session"
+                onClick={() => onDismissProviderAlert(key)}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })
+        .filter(Boolean)}
       {topLevelWorkflows.length === 0 ? (
         <p className="muted">No workflows loaded.</p>
       ) : (
@@ -148,12 +242,36 @@ export default function WorkflowsPanel({
               const displayState = activeRun?.state ?? lastRun?.state ?? null;
               const isRunning = displayState === "running" || displayState === "pending" || displayState === "queued";
               const missingKeys = !hasProviders && !!wf.has_ai_call;
+              // Sitting-7 Workstream C: scan this workflow's ai_call interfaces against the
+              // active alert map.  worst-category wins (Billing > Auth > ModelNotFound >
+              // ServiceOverload per SEVERITY_ORDER) — one glyph, one tooltip per row.
+              let degradedInterface: string | null = null;
+              let degradedCategory: ProviderErrorCategory | null = null;
+              if (!missingKeys && wf.interface_names && wf.interface_names.length > 0) {
+                for (const iface of wf.interface_names) {
+                  if (!iface) continue;          // empty string = "system default" — skip
+                  const cat = worstCategoryFor(iface, providerAlerts);
+                  if (cat !== null) {
+                    degradedInterface = iface;
+                    degradedCategory = cat;
+                    break;
+                  }
+                }
+              }
               return (
                 <tr key={wf.id} className={missingKeys ? "row-no-keys" : ""}>
                   <td className="mono">
                     {wf.id}
                     {missingKeys && (
                       <span className="hazard-icon" title="AI provider keys not configured — cannot run this workflow">
+                        &#9888;
+                      </span>
+                    )}
+                    {degradedInterface && degradedCategory && (
+                      <span
+                        className="hazard-icon hazard-icon-red"
+                        title={`AI interface '${degradedInterface}': ${degradedCategory}`}
+                      >
                         &#9888;
                       </span>
                     )}
