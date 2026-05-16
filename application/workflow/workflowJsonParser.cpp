@@ -1570,6 +1570,34 @@ namespace AIAssistant
                     return false;
                 }
             }
+            else if (key == "concurrency")
+            {
+                std::string concurrencyStr;
+                if (!ElementToString(value, concurrencyStr))
+                {
+                    errorMessage = "global.json field 'concurrency' must be a string "
+                                   "('serialize', 'parallel', or 'reject')";
+                    return false;
+                }
+                if (concurrencyStr == "serialize")
+                {
+                    workflowOut.m_ConcurrencyPolicy = WorkflowConcurrencyPolicy::Serialize;
+                }
+                else if (concurrencyStr == "parallel")
+                {
+                    workflowOut.m_ConcurrencyPolicy = WorkflowConcurrencyPolicy::Parallel;
+                }
+                else if (concurrencyStr == "reject")
+                {
+                    workflowOut.m_ConcurrencyPolicy = WorkflowConcurrencyPolicy::Reject;
+                }
+                else
+                {
+                    errorMessage = "global.json field 'concurrency' has unknown value '" + concurrencyStr +
+                                   "' (expected 'serialize', 'parallel', or 'reject')";
+                    return false;
+                }
+            }
             else if (key == "triggers")
             {
                 if (!ParseTriggers(value, workflowOut.m_Triggers, errorMessage))

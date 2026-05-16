@@ -265,6 +265,46 @@ namespace AIAssistant
     };
 
     // ---------------------------------------------------------------------
+    // Enqueue result — returned by WorkflowRuntimeManager enqueue paths so
+    // every caller can distinguish success from each refusal reason and map
+    // it to the right HTTP status / log / tool-error.  Replaces the old
+    // silent-empty-string failure sentinel.  See `feedback_log_failures`:
+    // each non-Ok status here pairs with an ERROR-level log at the throw
+    // site, and the m_Message is what the REST/MCP surface returns.
+    // ---------------------------------------------------------------------
+
+    enum class EnqueueStatus
+    {
+        Ok = 0,
+        InvalidWorkflowId,   // 400 — id failed the allowlist regex
+        AiPrereqMissing,     // 412 — required AI provider keys not configured
+        RejectedConcurrency, // 409 — JCWF's concurrency policy is `reject` and a run is already active
+        QueueFull,           // 503 — pending queue for this workflowId has hit its cap (kPendingQueueCap)
+    };
+
+    // ---------------------------------------------------------------------
+    // Concurrency policy — controls what happens when a run is requested for
+    // a workflowId that already has an active run.  `Serialize` is the
+    // safer default (preserves runId observability, prevents the shared
+    // queue-folder races); `Parallel` is opt-in for fan-out-by-design
+    // workflows; `Reject` is for IO-exclusive jobs that must never overlap.
+    // ---------------------------------------------------------------------
+
+    enum class WorkflowConcurrencyPolicy
+    {
+        Serialize = 0, // queue the second run as pending, FIFO drain
+        Parallel,      // both runs proceed concurrently (the current behavior)
+        Reject,        // return 409 Conflict for the second run
+    };
+
+    struct EnqueueRunResult
+    {
+        std::string m_RunId;
+        EnqueueStatus m_Status{EnqueueStatus::Ok};
+        std::string m_Message;
+    };
+
+    // ---------------------------------------------------------------------
     // Context map for workflow runs
     // ---------------------------------------------------------------------
 
@@ -591,6 +631,11 @@ namespace AIAssistant
 
         // JCWF: "manual_start" (default: true)
         bool m_ManualStart{true};
+
+        // JCWF: "concurrency" (default: Serialize) — see WorkflowConcurrencyPolicy.
+        // Controls what happens when a run is requested for this workflow while
+        // another run of the same workflow is already active.
+        WorkflowConcurrencyPolicy m_ConcurrencyPolicy{WorkflowConcurrencyPolicy::Serialize};
 
         // JCWF: "triggers"
         std::vector<WorkflowTrigger> m_Triggers;

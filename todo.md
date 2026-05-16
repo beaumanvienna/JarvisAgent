@@ -17,29 +17,6 @@ The two scope-specific live files (`application/workflow/doc/todo.md`, `workflow
 
 ## Pre-1.0
 
-### Concurrent-run policy for JCWFs (serialize by default)
-Surfaced 2026-04-29 during sitting-4 verification.  When the `--with-ai --auto-approve` test suite exercised `run_workflow`, the AI picked `jarvisCppDocu` (141 tasks) and started it multiple times — the runs raced on the shared queue folder, each run's `OnOutputFileCreated` callback consumed events the other was waiting for, and 82 tasks ended up stranded in `waiting_external` with output files already on disk that no one would transition.  Today the engine has no concurrency guard: there's no single-instance lock, no serialization, nothing.  The dashboard greys out the Run button while a run is active, which **looks** like a guard but only blocks the UI path — REST/MCP/test callers bypass it entirely.  That UX-vs-engine gap is itself a finding to fix.
-
-Three policies, picked in `global.json`:
-- `parallel` — current behaviour; both runs proceed concurrently.  Right for genuinely fan-out-by-design workflows but they need per-run queue folders to be safe (separate work).
-- `serialize` — second run accepted, sits in `pending` until the first completes; FIFO drain.  Right for "I clicked Run twice / cron stacked / test fired Run twice" — preserves runId observability without overlap.
-- `reject` — second run returns 409 Conflict; caller decides retry/fail/log.  Right for IO-exclusive jobs.
-
-**Default policy:** `serialize` — safer surprise.  Workflows that legitimately want parallel execution opt in via `"concurrency": "parallel"` in `global.json` and pair it with the per-run queue folder work below.
-
-Implementation lives in `WorkflowRuntimeManager`:
-- New `m_PendingByWorkflow: unordered_map<workflowId, deque<RunRequest>>`, mutex-guarded.
-- `EnqueueWorkflowRunAndGetRunId` checks the JCWF's policy.  If `serialize` and there's already an active run for `workflowId`, push to the deque and return the new runId in `pending` state.
-- On run completion (succeeded / failed / cancelled / stopped), pop the front of the deque and start the next run.
-- Cap the deque (e.g., 32).  Overflow either rejects or drops oldest with `LOG_APP_ERROR`.
-
-Dashboard work pairs with this:
-- Render `pending` runs distinctly from `running` runs (different badge / state column).
-- Stop button on a pending run dequeues cleanly — no AI calls dispatched yet, just remove from queue.
-- Match the dashboard's existing "grey out Run button" UX to the actual engine behaviour: with serialize-default, the Run button can stay enabled and queue the request rather than reject it.
-
-Per-run queue folder (separate, deeper work, not blocking this entry): `queue/<workflowId>/<runId>/<NN>_<task>/` instead of `queue/<workflowId>/<NN>_<task>/`.  Required for `parallel`-opted workflows to be hermetic.  Tracked here as a follow-up rather than its own entry because it only matters once `parallel` is opt-in.
-
 ### Dogfood the workflow editor (JC)
 Write a few non-trivial JCWFs **directly in the editor** rather than as raw JSON: sub-workflow nesting, per-item fan-out, mixed task types (ai_call + python + shell + cloud), file_watch trigger, error-branching edges.  The editor exists and has a 70-test suite, but it's never been driven by JC in anger.  Goal: surface UX gaps, validation-surprise messaging, broken-state visibility, inspector quirks.  Findings inform 1.0 polish or post-1.0 backlog depending on severity.
 

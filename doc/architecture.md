@@ -104,6 +104,7 @@ Tasks without mutual dependencies run in parallel via the shared thread pool.
 - **Template variables** — `{{binding.field}}` substitution per filter item.
 - **Error branching** — branch nodes and controlflow edges route execution on success or failure for retry/recovery patterns.
 - **Run control** — pause, resume, stop running workflows via REST API or editor UI.
+- **Concurrency policy** — per-JCWF `"concurrency"` field (`serialize` default / `parallel` / `reject`) controls what happens when a run is requested while another run of the same workflow is already active.  Serialize queues the second run as `pending` in a per-workflow FIFO and drains it when the active run completes; reject returns HTTP 409.  See [JC_Workflow_Specification.md](JC_Workflow_Specification.md) §3.1.1.
 - **Workflow versioning** — auto-backup on every save with full restore history (Studio only).
 - **Cancellation tokens** — cooperative cancellation through the executor stack.
 - **Watchdog** — inactivity-based timeout with heartbeat support for long-running shell and Python tasks.

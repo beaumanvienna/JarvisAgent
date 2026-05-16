@@ -44,8 +44,8 @@ A sub-workflow JCWF file is valid JSON with extension `.jcwf`.
 | `control_nodes` | no | array | Branch nodes for conditional execution (v1.1). |
 | `controlflow` | no | array | Edges between tasks and control nodes (v1.1). |
 
-**Not applicable to sub-workflows:** `manual_start`, `triggers`. Sub-workflows are
-always invoked by a parent — they never start on their own.
+**Not applicable to sub-workflows:** `manual_start`, `triggers`, `concurrency`. Sub-workflows are
+always invoked by a parent — they never start on their own, and concurrency is owned by the parent workflow.
 
 ---
 

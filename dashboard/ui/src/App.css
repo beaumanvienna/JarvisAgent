@@ -352,10 +352,6 @@ body {
   font-weight: bold;
 }
 
-.state-completed {
-  color: #22c55e;
-}
-
 .state-failed {
   color: #ef4444;
   font-weight: bold;
@@ -368,6 +364,24 @@ body {
 
 .state-queued {
   color: #8a8a8a;
+  font-style: italic;
+}
+
+/* Serialize-policy pending badge — appears next to the State label when a
+ * workflow has a running run + one or more queued runs waiting their turn.
+ * Compact pill, muted palette so it doesn't compete with the primary state. */
+.queued-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  background: #2a2a2a;
+  color: #aaa;
+  border: 1px solid #555;
+  border-radius: 10px;
+  font-size: 0.75em;
+  font-weight: 500;
+  font-style: normal;
+  vertical-align: middle;
 }
 
 .state-succeeded {

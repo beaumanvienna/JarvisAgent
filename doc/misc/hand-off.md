@@ -15,6 +15,101 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-16 (Concurrent-run policy + EnqueueRunResult refactor) → next session
+
+Single-sitting close-out of the `Concurrent-run policy for JCWFs` Pre-1.0 entry from `todo.md`.  Engine + dashboard + docs all landed in one pass.  Entry removed from `todo.md` (net one TODO down).
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **`EnqueueRunResult` struct + `EnqueueStatus` enum** | `application/workflow/workflowTypes.h` | Replaces silent-`""` failure sentinel on `EnqueueWorkflowRunAndGetRunId{,WithContext}` (3 pre-existing failure paths went unnoticed by callers because the REST handler returned `{"ok":true,"runId":""}` with 202).  Status values: `Ok` / `InvalidWorkflowId` / `AiPrereqMissing` / `RejectedConcurrency` / `QueueFull`.  Chose struct over typed exceptions because the codebase has zero custom exception classes — return-value-with-LOG_*_ERROR is the established convention, and `TaskExecutionResult` / `FilterEvalResult` / `AiRequestCompletion` are sibling result types. |
+| **`WorkflowConcurrencyPolicy` enum + parsing** | `workflowTypes.h`, `workflowJsonParser.cpp::ParseGlobalJson` | New JCWF field `"concurrency"` in `global.json`: `serialize` (default — safer surprise, FIFO queue under `m_PendingByWorkflow`), `parallel` (concurrent runs OK), `reject` (HTTP 409 on duplicate).  Strict parsing — unknown string → parse error (forward-compat handled via schema version, not lenient fallback). |
+| **`m_PendingByWorkflow` deque + policy guard** | `workflowRuntimeManager.{h,cpp}` | `unordered_map<workflowId, deque<PendingRun>>` guarded by `m_Mutex`.  `kPendingQueueCap=32` per workflowId; over-cap → `EnqueueStatus::QueueFull` → HTTP 503.  Single source of truth: `ApplyConcurrencyPolicyLocked()` is the one helper both enqueue overloads route through (so policy decisions can't skew between sites — discipline rule: "extract a helper before a third copy appears").  `HasInflightRunForWorkflowLocked()` checks `m_ActiveRuns` + a temp copy of `m_PendingRuns` + `m_PendingByWorkflow` (covers all 3 storage tiers). |
+| **FIFO drain on completion** | `workflowRuntimeManager.cpp::Update()` ~line 1816 | Promotion fires inside the completion loop right before `m_ActiveRuns.erase`: pops front of `m_PendingByWorkflow[wid]`, pushes to `m_PendingRuns` (single-tick staging) so the next `Update()` tick starts it.  Erases the map entry when the deque empties (prevents monotonic map growth across workflow IDs). |
+| **Unified the two enqueue functions** | `workflowRuntimeManager.cpp` | `EnqueueWorkflowRunAndGetRunId` now forwards to `EnqueueWorkflowRunWithContextAndGetRunId(workflowId, "", {})`.  Removes the duplicated 5-step (validate → registry lookup → prereq check → runId gen → push) sequence that would have skewed when a 6th step landed. |
+| **`GenerateRunId` seconds → milliseconds** | `workflowRuntimeManager.cpp` | Pre-existing latent bug surfaced by Serialize: two POSTs in the same second got identical runIds.  Hidden before because they raced silently on shared queue folder; now Serialize would queue both under one id and the dashboard couldn't distinguish them.  The fallback path already used millis — this aligns the canonical generator with it. |
+| **REST surface — exception-free typed errors** | `application/web/webServer{.cpp,_helpers.h}` | New helper `MaybeEnqueueErrorResponse(EnqueueRunResult, endpoint, workflowId)` in `webServer_helpers.h` — exhaustive switch on `EnqueueStatus` (no `default:`, per discipline rule).  All 5 enqueue call sites (REST `/run`, n8n integration, webhook, adhoc MCP submit, plus the 2-branch in `HandleWorkflowRunPost`) now use it.  Maps: Ok→202 / InvalidWorkflowId→400 / AiPrereqMissing→412 / RejectedConcurrency→409 / QueueFull→503. |
+| **Pending visibility in `/api/workflow-runs/active`** | `webServer.cpp::HandleWorkflowRunsActiveGet` + new `WorkflowRuntimeManager::GetPendingRunsSnapshot()` | Pending runs appear with `state: "pending"`, empty timestamps, `taskCount: 0`.  Without this, a user clicking Run while another run is active would see no response in `/active` and think the click was lost — the safer-default Serialize policy would have been a UX regression. |
+| **Non-REST callers** | `subWorkflowTaskExecutor.cpp`, `assistantTools.cpp`, `jarvisAgent.cpp` (trigger void wrapper) | Sub-workflow executor surfaces non-Ok status into task failure message; MCP `run_workflow` tool returns the failure message; trigger void wrapper relies on the `(void)` cast + existing LOG_APP_ERROR at the throw sites. |
+| **Dashboard `+N queued` badge** | `dashboard/ui/src/components/WorkflowsPanel.tsx`, `App.css` | Split `runsByWorkflow` into `activeByWorkflow` (last-write-wins on the active state) + `pendingCountByWorkflow` (count of pending runs per workflowId).  New `.queued-badge` class: compact muted pill displayed next to the State cell.  Without the split, last-write-wins was hiding the active state behind the last pending entry in the response array. |
+| **Flicker fix** | `WorkflowsPanel.tsx` | When `pendingCount > 0`, force `displayState = "running"` rather than showing `activeRun.state`.  Without this, the cell briefly flashed `succeeded` during the 2-second min-visibility hold between FIFO drains — read as glitchy when 3+ runs were queued.  JC observed this and rejected the initial implementation; fixed mid-session. |
+| **`state-completed` → `state-succeeded` rename + dead CSS removal** | `App.css`, `WorkflowsPanel.tsx` | Pre-existing duplication: both `state-completed` and `state-succeeded` rules existed, both green, used inconsistently (Workflows row used `state-completed`, LogViewer used `state-succeeded`).  Unified on `state-succeeded` (matches the API state string), removed the `state-completed` rule.  Triggered by JC's "why say completed when we already had successful?" question. |
+| **Schema + spec + generation guides** | `doc/jcwf.schema.json`, `doc/JC_Workflow_Specification.md`, `doc/api-endpoints.md`, `doc/architecture.md`, `doc/jcwf_generation_guide.md`, `doc/sub-jcwf_generation_guide.md` | `concurrency` enum + default in JSON schema (without this, validation would reject JCWFs using the new field).  Spec §3.1.1 is the canonical home for the field semantics; api-endpoints documents the 400/403/404/409/412/503 error catalog + pending visibility; architecture cross-refs the spec; generation guides know about the option so AI-generated JCWFs can use it.  Sub-workflow guide notes `concurrency` is owned by the parent (not applicable to sub-workflows). |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build clean | Studio Debug + Release green from clean, `-Wall -Wextra -Wpedantic` zero warnings.  Engine Debug + Release not built this sitting — Studio is the active edition (`.build-edition` = studio). |
+| **Smoke test: pre-existing success path** | `POST /api/workflows/inputResolutionTest/run` → 202 + valid runId; run completed (state=succeeded, ~2s).  Unchanged shape from before. |
+| **Smoke test: Serialize (default)** | Three rapid POSTs at `inputResolutionTest`: GET `/active` shows `1 running + 2 pending`.  Logs show clean FIFO drain: Run 1 completed → Run 2 promoted → Run 2 completed → Run 3 promoted → Run 3 completed.  Each run got a distinct millis-precision runId. |
+| **Smoke test: Parallel** | Created `concurrencyParallelTest.jcwf` with `"concurrency": "parallel"` in runtime workflows folder; two POSTs ran concurrently (both `state=running` in `/active`).  Cleaned up post-test. |
+| **Smoke test: Reject** | Created `concurrencyRejectTest.jcwf` with `"concurrency": "reject"`; first POST → 202, second POST → HTTP 409 with `error: "concurrency_rejected"` and human-readable message body.  Cleaned up post-test. |
+| **Dashboard visual** | JC verified the `+N queued` badge end-to-end with 3 POSTs at `aiCarMaintenancePipeline` (~30s/run).  Initial implementation had a flicker bug + the `state-completed`/`state-succeeded` duplication — both fixed mid-session.  JC then approved. |
+| **API doc** | curl-confirmed: 400 invalid id, 404 workflow not found, 409 concurrency_rejected — all match the documented error catalog. |
+
+### Architecture notes for next-session-Claude
+
+- **`EnqueueRunResult` is a real struct**, not exceptions.  Codebase has zero custom exception classes — return-value + LOG_*_ERROR is the convention.  If you find a future enqueue surface ignoring `result.m_Status`, the function is `[[nodiscard]]` so the compiler should catch it (caught one inline; expect future ones too).
+- **`m_PendingByWorkflow` is per-workflow, NOT global.**  The 32-entry cap is per-workflowId.  A global cap on `m_ActiveRuns.size()` does NOT exist (verified explicitly during the design — `grep MaxActiveRuns / MaxConcurrent / RunLimit` → zero matches).  If you ever want a global limit, that's an orthogonal feature.
+- **The completion-loop promotion fires under `m_Mutex`** (same lock that guards the `m_ActiveRuns.erase` call right after).  This is intentional — promotion + erase must be one atomic transition.  Don't try to factor the promotion into a post-tick action.
+- **`m_PendingRuns` is std::queue (no iteration)** — `HasInflightRunForWorkflowLocked` peeks via a temp copy.  Drained on every `Update()` tick so usually 0-1 entries; the copy is cheap.  If you ever convert to std::deque for direct iteration, that's fine but unrelated.
+- **Sub-workflow runs use the same enqueue path** — `subWorkflowTaskExecutor.cpp:115` calls `EnqueueWorkflowRunAndGetRunId(childWorkflowId)`.  This means a sub-workflow's parent JCWF's `concurrency` policy does NOT cascade to children — each child workflow has its own policy (default Serialize).  The sub-workflow doc explicitly calls this out.
+- **Trigger Engine's void wrapper** (`EnqueueWorkflowRun`) discards the `EnqueueRunResult` via `(void)` cast.  Acceptable because the throw-site logs (LOG_APP_ERROR for InvalidWorkflowId, LOG_APP_WARN for AiPrereqMissing inside `CheckAiProviderPrerequisites`, LOG_APP_INFO for Serialize-queue, LOG_APP_ERROR for QueueFull/Reject).  Triggers fire-and-forget — no failure path other than the log.
+- **Pending runs are NOT in `m_ActiveRuns`** so `RequestStopRun(runId)` against a pending runId currently returns false (no-op).  JC explicitly rejected adding stop-on-pending as a feature this session — don't propose it again.  Same applies to per-run queue folders and "Run button stays enabled while running" — both rejected.
+- **`GenerateRunId` now uses ms timestamps.**  If you see runIds like `workflow_1778952689697`, those are seconds × 1000 + 0-999 millis.  Don't try to parse the timestamp shape — it's stable but not a contract.
+- **Dashboard `state-completed` CSS rule is gone**, replaced by `state-succeeded` (already used by LogViewer's "No issues found" label).  If you grep for `state-completed` and find a re-introduction, that's a regression — the user-visible state string is `"succeeded"`, the CSS class should match.
+- **The dashboard's polling is 5s**; the `cap-changed` WS event (Sitting 8) doesn't apply to workflow-run state transitions.  Pending → running flips can take up to 5s to reflect in the UI.  Acceptable per JC's verification, but if you ever want sub-second pending-state updates, add a `workflow-runs-snapshot` WS broadcast on the promotion site (already broadcast on `BroadcastWorkflowRunsSnapshot()` — just call it from the promotion code if needed).
+
+### Open items / next-session candidates
+
+Carry-over from prior hand-offs that didn't get done in this session:
+
+1. **`test_markitdown_cntx.py` pre-existing failure** — carried since Sitting 1 of the prior dev plan.  Absolute-path test fixture vs relative-path API validation.  Quick standalone cleanup — not concurrent-run related.
+2. **Live-AI smoke for Workstream E parser extensions** — when API credits are next available, one live run against api3 Gemini + api4 Anthropic + api5 Bedrock.  Mentioned by JC as "in a couple of weeks when credits run out".
+3. **Orphaned-banner cleanup after interface delete** (Sitting-7 follow-up from prior plan).
+4. **"Dismiss all" button on banner stack** (Sitting-7 follow-up from prior plan).
+5. **`m_RequiredAiProviders` extension for default-provider workflows** (Sitting-7 follow-up from prior plan).
+6. **Freshness semantics for non-deterministic ai_call tasks** — surfaced during JC's visual smoke (he clicked Run on `ai-zip-demo`, which has 3 "random trivia" AI tasks, and saw it complete in 3ms due to freshness-skip).  The engine's mtime-based freshness has no way to know random-output prompts should always re-run.  Possible fix shapes: task-level `"freshness": "never"` opt-out, or a `force_run: true` flag.  Not committed to as work — flagged as a design question.  See the freshness-explanation thread in this session for the full rationale.
+
+### Gotchas next-session-Claude should know
+
+- **`workflows/` is the runtime folder; `example/workflows/` is the source-of-truth.**  Lesson learned mid-session: copying a test JCWF to `example/workflows/` and reloading via REST did NOT pick it up — the registry scans `workflows/` (per `config.json` `workflows folder = workflows`).  Test JCWFs go to `workflows/` for the live server; canonical sources go to `example/workflows/` for git tracking.
+- **Vite/npm build invocation:** dashboard package.json is at REPO ROOT (`/home/beaumanvienna/dev/jarvisAgent/package.json`), not `dashboard/ui/package.json`.  The Vite config has `base: "/dash-assets/"`, but assets land at `dashboard/ui/dist/assets/index-<hash>.{js,css}`.  Server serves them via `ServeDashboardStatic` at `/dash-assets/assets/<name>` (note the `assets/` subpath).  When verifying server-side fingerprinting, hit `/dash-assets/assets/index-<hash>.css`, NOT `/dash-assets/index-<hash>.css`.
+- **Browser cache after rebuild** — Vite hashes bundle filenames, so cache-busting is automatic.  But if you tested with `Ctrl+R` and saw old behavior, JC may need `Ctrl+Shift+R` (hard refresh) on the first visit after a rebuild.  Cleared during JC's visual smoke.
+- **The "concurrent-run policy" entry has been REMOVED from `todo.md`** as of this session — engine + dashboard both shipped.  If you re-add it because you saw the prior hand-off entry, that's a regression.  Net result of this session: one Pre-1.0 TODO down.
+- **JC explicitly rejected three follow-up items** during this session: stop-on-pending dequeue, per-run queue folders, "Run button stays enabled while running" UX change.  Don't propose them again.  The Run button stays disabled while any run (active OR pending) is in flight — that's intentional.
+
+### Files in working tree (uncommitted)
+
+```
+ M application/assistant/assistantTools.cpp                  # MCP run_workflow returns enqueue-result message on failure
+ M application/web/webServer.cpp                              # 5 enqueue sites use MaybeEnqueueErrorResponse; /active surfaces pending
+ M application/web/webServer_helpers.h                        # MaybeEnqueueErrorResponse helper (exhaustive switch, no default:)
+ M application/workflow/subWorkflowTaskExecutor.cpp           # Sub-workflow surfaces non-Ok status into task failure
+ M application/workflow/workflowJsonParser.cpp                # Parses "concurrency" string → enum, strict reject on unknown
+ M application/workflow/workflowRuntimeManager.cpp            # m_PendingByWorkflow + ApplyConcurrencyPolicyLocked + GenerateRunId ms + FIFO drain
+ M application/workflow/workflowRuntimeManager.h              # New helpers, PendingRunSnapshot, m_PendingByWorkflow, kPendingQueueCap=32
+ M application/workflow/workflowTypes.h                       # EnqueueStatus enum, EnqueueRunResult struct, WorkflowConcurrencyPolicy enum, m_ConcurrencyPolicy field on WorkflowDefinition
+ M dashboard/ui/src/App.css                                   # .queued-badge rule; state-completed removed; state-queued italicized
+ M dashboard/ui/src/components/WorkflowsPanel.tsx             # split runsByWorkflow→active+pendingCount; flicker fix; state-completed→state-succeeded
+ M doc/JC_Workflow_Specification.md                           # §3.1.1 concurrency field spec + global.json table
+ M doc/api-endpoints.md                                       # Error catalog (400/403/404/409/412/503) + pending visibility in /active
+ M doc/architecture.md                                        # Concurrency policy bullet in Workflow Runtime features list
+ M doc/jcwf.schema.json                                       # "concurrency" enum + default in root schema
+ M doc/jcwf_generation_guide.md                               # Root-fields table + JSON example mention "concurrency"
+ M doc/sub-jcwf_generation_guide.md                           # "Not applicable" note: concurrency owned by parent
+ M doc/misc/hand-off.md                                       # this entry
+ M todo.md                                                    # Concurrent-run policy entry removed (engine + dashboard both shipped)
+```
+
+Dashboard `dist/` bundle is regenerated and confirmed served by the running j9t (verified via `curl /dash-assets/assets/index-<hash>.css | grep queued-badge`).  Server was restarted twice mid-session (POST `/api/shutdown` → relaunch) so the running process is on the freshly-built binary.
+
+Two test JCWFs (`workflows/concurrencyParallelTest.jcwf`, `workflows/concurrencyRejectTest.jcwf`) were created, used for smoke tests, and **cleaned up post-test** — they should NOT appear in your working tree.  Their extracted folders under `workflows/` were also removed.  Workflow count post-cleanup: 31 (matches pre-session count).
+
+---
+
 ## 2026-05-15 (Sitting 8 + dev-plan closeout — Workstream D: AI Health LED + `ProviderHealthSnapshot` + `cap-changed` WS event) → next session
 
 Sitting 8 landed.  `doc/misc/ai-provider-error-visibility-dev-plan.md` is **closed** — all 8 sittings done in a single calendar day (2026-05-15) after Foundation 1+2 landed 2026-05-14.  No outstanding dev-plan work; the entries in §8 "After this plan" are post-1.0 product candidates (provider health probe, workflow auto-pause), separate dev plans if they're ever picked up.

@@ -1250,8 +1250,14 @@ namespace AIAssistant
         if (!wf.has_value())
             return {"run_workflow", false, "Workflow not found: " + workflowId};
 
-        std::string runId = m_RuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
-        return {"run_workflow", true, "Workflow run started: " + workflowId + " (run ID: " + runId + ")"};
+        EnqueueRunResult const enqueueResult = m_RuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
+        if (enqueueResult.m_Status != EnqueueStatus::Ok)
+        {
+            return {"run_workflow", false,
+                    "Failed to start workflow '" + workflowId + "': " + enqueueResult.m_Message};
+        }
+        return {"run_workflow", true,
+                "Workflow run started: " + workflowId + " (run ID: " + enqueueResult.m_RunId + ")"};
     }
 
     // -----------------------------------------------------------------

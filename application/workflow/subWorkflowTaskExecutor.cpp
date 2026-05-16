@@ -112,29 +112,30 @@ namespace AIAssistant
         }
 
         // Enqueue the child workflow run.
-        std::string const childRunId = m_RuntimeManager->EnqueueWorkflowRunAndGetRunId(childWorkflowId.value());
+        EnqueueRunResult const enqueueResult = m_RuntimeManager->EnqueueWorkflowRunAndGetRunId(childWorkflowId.value());
 
-        if (childRunId.empty())
+        if (enqueueResult.m_Status != EnqueueStatus::Ok)
         {
             taskState.m_State = TaskInstanceStateKind::Failed;
-            taskState.m_LastErrorMessage =
-                "SubWorkflowTaskExecutor: failed to enqueue child workflow '" + childWorkflowId.value() + "'";
-            LOG_APP_ERROR("SubWorkflowTaskExecutor: failed to enqueue child workflow '{}' (task '{}')",
-                          childWorkflowId.value(), taskDefinition.m_Id);
+            taskState.m_LastErrorMessage = "SubWorkflowTaskExecutor: failed to enqueue child workflow '" +
+                                           childWorkflowId.value() + "': " + enqueueResult.m_Message;
+            LOG_APP_ERROR("SubWorkflowTaskExecutor: failed to enqueue child workflow '{}' (task '{}'): {}",
+                          childWorkflowId.value(), taskDefinition.m_Id, enqueueResult.m_Message);
             return false;
         }
 
         // Register the parent-child link so the runtime manager can propagate completion.
-        m_RuntimeManager->RegisterSubWorkflowLink(childRunId, workflowRun.m_RunId, taskState.m_TaskInstanceId);
+        m_RuntimeManager->RegisterSubWorkflowLink(enqueueResult.m_RunId, workflowRun.m_RunId,
+                                                  taskState.m_TaskInstanceId);
 
         LOG_APP_INFO("SubWorkflowTaskExecutor: enqueued child workflow '{}' as run '{}' for parent task '{}'",
-                     childWorkflowId.value(), childRunId, taskDefinition.m_Id);
+                     childWorkflowId.value(), enqueueResult.m_RunId, taskDefinition.m_Id);
 
         // Transition to WaitingExternal — the runtime manager will complete this task
         // when the child run finishes.
         taskState.m_State = TaskInstanceStateKind::WaitingExternal;
         taskState.m_LastErrorMessage.clear();
-        taskState.m_CapturedStdout = "child_run_id=" + childRunId;
+        taskState.m_CapturedStdout = "child_run_id=" + enqueueResult.m_RunId;
 
         return true;
     }

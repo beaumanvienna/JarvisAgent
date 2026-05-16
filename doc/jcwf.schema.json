@@ -18,6 +18,12 @@
     },
     "base_directory": { "type": "string" },
     "manual_start": { "type": "boolean", "default": true },
+    "concurrency": {
+      "type": "string",
+      "enum": ["serialize", "parallel", "reject"],
+      "default": "serialize",
+      "description": "What happens when a run is requested while another run of this workflow is already active. See JC_Workflow_Specification.md §3.1.1."
+    },
     "triggers": {
       "type": "array",
       "items": { "$ref": "#/$defs/trigger" }

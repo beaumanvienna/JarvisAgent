@@ -22,6 +22,7 @@
 #pragma once
 
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -80,15 +81,17 @@ namespace AIAssistant
 
         void EnqueueWorkflowRun(std::string const& workflowId);
 
-        // Enqueue a workflow run and return the assigned run id.
-        // The run id is stable for the queued run and will match the run id
-        // observed by the UI once the run becomes active.
-        std::string EnqueueWorkflowRunAndGetRunId(std::string const& workflowId);
+        // Enqueue a workflow run.  Returns the assigned run id on success
+        // (m_Status == EnqueueStatus::Ok); otherwise m_Status names the
+        // refusal reason and m_Message carries the human-readable detail.
+        // Every caller must switch on m_Status — there is no longer an
+        // empty-string sentinel.  See workflowTypes.h::EnqueueStatus.
+        [[nodiscard]] EnqueueRunResult EnqueueWorkflowRunAndGetRunId(std::string const& workflowId);
 
         // Integration-friendly enqueue: allow specifying a run id and initial run context.
         // If runId is empty, a run id is generated.
-        std::string EnqueueWorkflowRunWithContextAndGetRunId(std::string const& workflowId, std::string const& runId,
-                                                             ContextMap const& context);
+        [[nodiscard]] EnqueueRunResult EnqueueWorkflowRunWithContextAndGetRunId(
+            std::string const& workflowId, std::string const& runId, ContextMap const& context);
 
         // Must be called periodically (from main thread).
         // Returns true if any workflow run changed state (completed, failed, new run started).
@@ -113,6 +116,18 @@ namespace AIAssistant
 
         // Returns a copy of all active runs (thread-safe snapshot).
         std::vector<WorkflowRun> GetActiveRunsSnapshot() const;
+
+        // Light snapshot for the Serialize policy's deferred-pending queue.
+        // Each entry: { runId, workflowId }; state implied as "pending" by caller.
+        // The runs in m_PendingByWorkflow haven't started yet (no task DAG, no
+        // start timestamp), so returning a thinner shape than WorkflowRun avoids
+        // pretending fields are populated.
+        struct PendingRunSnapshot
+        {
+            std::string m_RunId;
+            std::string m_WorkflowId;
+        };
+        std::vector<PendingRunSnapshot> GetPendingRunsSnapshot() const;
 
         // Returns a copy of the last completed run per workflow id (thread-safe snapshot).
         std::unordered_map<std::string, WorkflowRun> GetLastRunsSnapshot() const;
@@ -245,6 +260,17 @@ namespace AIAssistant
         // Safety-net timeout for WaitingExternal tasks (in case AiRequestPool timeout didn't fire).
         void TimeoutWaitingExternalTasks(ActiveRun& activeRun);
 
+        // Concurrency-policy helpers (PRECONDITION: caller holds m_Mutex).
+        // HasInflightRunForWorkflowLocked: true if any run for `workflowId` is active,
+        // staged in m_PendingRuns, or deferred in m_PendingByWorkflow.
+        // ApplyConcurrencyPolicyLocked: dispatches a new run according to the workflow's
+        // policy.  Pushes to m_PendingRuns or m_PendingByWorkflow on Ok; returns the
+        // refusal status on Reject/QueueFull paths.  Single source of truth for both
+        // enqueue overloads.
+        bool HasInflightRunForWorkflowLocked(std::string const& workflowId) const;
+        EnqueueStatus ApplyConcurrencyPolicyLocked(WorkflowConcurrencyPolicy policy, PendingRun&& pendingRun,
+                                                   std::string& outMessage);
+
         // Per-item fan-out helpers
         FilterDef const* FindFilterDef(WorkflowDefinition const& workflowDef, std::string const& filterId) const;
         void DispatchFilterEvaluation(ActiveRun& activeRun, std::string const& taskId, TaskDef const& taskDef);
@@ -262,6 +288,17 @@ namespace AIAssistant
 
         bool m_IsRunning = false;
         std::queue<PendingRun> m_PendingRuns;
+
+        // Per-workflow FIFO of pending runs deferred by the Serialize concurrency policy.
+        // A run lands here when EnqueueWorkflowRun* sees an active run already in flight for
+        // the same workflowId and the workflow's policy is Serialize.  When the active run
+        // completes (in Update()), the front of this deque is promoted to m_PendingRuns so
+        // the next tick can start it.  Both deque mutations are under m_Mutex.
+        //
+        // Cap: kPendingQueueCap entries per workflowId.  Over-cap returns EnqueueStatus::QueueFull
+        // (HTTP 503) so a runaway trigger source can't grow this map unbounded.
+        static constexpr size_t kPendingQueueCap{32};
+        std::unordered_map<std::string, std::deque<PendingRun>> m_PendingByWorkflow;
 
         // Held by std::unique_ptr so element addresses stay stable across push_back
         // reallocations.  Within a single Update() tick, TickActiveRun() takes

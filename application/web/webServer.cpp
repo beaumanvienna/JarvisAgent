@@ -2375,21 +2375,27 @@ namespace AIAssistant
             }
         }
 
-        std::string runId;
+        EnqueueRunResult enqueueResult;
         if (context.empty())
         {
-            runId = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
+            enqueueResult = workflowRuntimeManager->EnqueueWorkflowRunAndGetRunId(workflowId);
         }
         else
         {
-            runId = workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, std::string(), context);
+            enqueueResult =
+                workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, std::string(), context);
+        }
+
+        if (auto errorResponse = MaybeEnqueueErrorResponse(enqueueResult, "POST /api/workflows/{id}/run", workflowId))
+        {
+            return std::move(*errorResponse);
         }
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["enqueued"] = true;
         responseJson["id"] = workflowId;
-        responseJson["runId"] = runId;
+        responseJson["runId"] = enqueueResult.m_RunId;
 
         BroadcastWorkflowRunsSnapshot();
         BroadcastWorkflowRunsLastSnapshot();
@@ -2447,6 +2453,7 @@ namespace AIAssistant
         }
 
         auto activeRuns = workflowRuntimeManager->GetActiveRunsSnapshot();
+        auto pendingRuns = workflowRuntimeManager->GetPendingRunsSnapshot();
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
@@ -2460,6 +2467,22 @@ namespace AIAssistant
             runJson["startedAt"] = run.m_StartedAtIso8601;
             runJson["completedAt"] = run.m_CompletedAtIso8601;
             runJson["taskCount"] = static_cast<int64_t>(run.m_TaskStates.size());
+            runsJson.push_back(std::move(runJson));
+        }
+        // Serialize-policy deferred runs: rendered with state="pending", empty timestamps,
+        // taskCount=0.  The dashboard's existing run-row renderer handles these uniformly
+        // — pending state was already in the WorkflowRunState enum and the stringifier
+        // emits "pending" for it.  Without this, a user clicking Run while another run is
+        // already active would see no response in /active and think the click was lost.
+        for (auto const& pending : pendingRuns)
+        {
+            crow::json::wvalue runJson;
+            runJson["runId"] = pending.m_RunId;
+            runJson["workflowId"] = pending.m_WorkflowId;
+            runJson["state"] = ToStringWorkflowRunState(WorkflowRunState::Pending);
+            runJson["startedAt"] = std::string();
+            runJson["completedAt"] = std::string();
+            runJson["taskCount"] = static_cast<int64_t>(0);
             runsJson.push_back(std::move(runJson));
         }
         responseJson["runs"] = std::move(runsJson);
@@ -2885,13 +2908,19 @@ namespace AIAssistant
                                              "POST /api/integrations/n8n/start", workflowId);
             }
 
-            std::string const enqueuedRunId =
+            EnqueueRunResult const enqueueResult =
                 workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, runId, context);
+
+            if (auto errorResponse =
+                    MaybeEnqueueErrorResponse(enqueueResult, "POST /api/integrations/n8n/start", workflowId))
+            {
+                return std::move(*errorResponse);
+            }
 
             crow::json::wvalue responseJson;
             responseJson["ok"] = true;
             responseJson["workflowId"] = workflowId;
-            responseJson["runId"] = enqueuedRunId;
+            responseJson["runId"] = enqueueResult.m_RunId;
             responseJson["requestPath"] = requestJsonPath.string();
 
             BroadcastWorkflowRunsSnapshot();
@@ -3124,18 +3153,23 @@ namespace AIAssistant
                                          workflowId);
         }
 
-        std::string const enqueuedRunId =
+        EnqueueRunResult const enqueueResult =
             workflowRuntimeManager->EnqueueWorkflowRunWithContextAndGetRunId(workflowId, runId, context);
 
+        if (auto errorResponse = MaybeEnqueueErrorResponse(enqueueResult, kEndpoint, workflowId))
+        {
+            return std::move(*errorResponse);
+        }
+
         LOG_SECURITY_INFO("[security] webhook_accepted ip={} workflowId={} runId={}", req.remote_ip_address, workflowId,
-                          enqueuedRunId);
-        LOG_APP_INFO("WebServer::HandleWebhookPost: enqueued run '{}' for workflow '{}' (trigger '{}')", enqueuedRunId,
-                     workflowId, webhookTrigger->m_TriggerId);
+                          enqueueResult.m_RunId);
+        LOG_APP_INFO("WebServer::HandleWebhookPost: enqueued run '{}' for workflow '{}' (trigger '{}')",
+                     enqueueResult.m_RunId, workflowId, webhookTrigger->m_TriggerId);
 
         crow::json::wvalue responseJson;
         responseJson["ok"] = true;
         responseJson["workflowId"] = workflowId;
-        responseJson["runId"] = enqueuedRunId;
+        responseJson["runId"] = enqueueResult.m_RunId;
         responseJson["triggerId"] = webhookTrigger->m_TriggerId;
 
         BroadcastWorkflowRunsSnapshot();
@@ -7952,7 +7986,13 @@ namespace AIAssistant
             cv.m_Value = v;
             runtimeContext[k] = cv;
         }
-        runtime->EnqueueWorkflowRunWithContextAndGetRunId(result.m_WorkflowId, result.m_RunId, runtimeContext);
+        EnqueueRunResult const adhocEnqueueResult =
+            runtime->EnqueueWorkflowRunWithContextAndGetRunId(result.m_WorkflowId, result.m_RunId, runtimeContext);
+        if (auto errorResponse = MaybeEnqueueErrorResponse(adhocEnqueueResult, "POST /api/adhoc/submit",
+                                                           result.m_WorkflowId))
+        {
+            return std::move(*errorResponse);
+        }
 
         LOG_SECURITY_INFO("[security] adhoc_submitted user={} key_id={} runId={} workflowId={} policy={}",
                           mcpRecord->m_User, mcpRecord->m_KeyId, result.m_RunId, result.m_WorkflowId, cleanupPolicy);

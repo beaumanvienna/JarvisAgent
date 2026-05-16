@@ -82,7 +82,7 @@ function stateClass(state: string): string {
     case "running":
       return "state-running";
     case "succeeded":
-      return "state-completed";
+      return "state-succeeded";
     case "failed":
       return "state-failed";
     case "queued":
@@ -122,9 +122,18 @@ export default function WorkflowsPanel({
     }
   };
 
-  const runsByWorkflow = new Map<string, RunSnapshot>();
+  // Separate active (running/cancelled/etc.) from pending runs.  Serialize policy
+  // can produce N pending runs alongside one active run for the same workflowId;
+  // last-write-wins on a single map would hide the active state behind the last
+  // pending entry.  Show the active state primary, with a "+N queued" badge.
+  const activeByWorkflow = new Map<string, RunSnapshot>();
+  const pendingCountByWorkflow = new Map<string, number>();
   for (const run of runs) {
-    runsByWorkflow.set(run.workflowId, run);
+    if (run.state === "pending") {
+      pendingCountByWorkflow.set(run.workflowId, (pendingCountByWorkflow.get(run.workflowId) ?? 0) + 1);
+    } else {
+      activeByWorkflow.set(run.workflowId, run);
+    }
   }
 
   const lastRunByWorkflow = new Map<string, LastRunInfo>();
@@ -237,10 +246,23 @@ export default function WorkflowsPanel({
           </thead>
           <tbody>
             {topLevelWorkflows.map((wf) => {
-              const activeRun = runsByWorkflow.get(wf.id);
+              const activeRun = activeByWorkflow.get(wf.id);
+              const pendingCount = pendingCountByWorkflow.get(wf.id) ?? 0;
               const lastRun = lastRunByWorkflow.get(wf.id);
-              const displayState = activeRun?.state ?? lastRun?.state ?? null;
-              const isRunning = displayState === "running" || displayState === "pending" || displayState === "queued";
+              // If any pending runs are queued, force "running" — the workflow as
+              // a whole is still in flight, even when the current activeRun is
+              // briefly in the "succeeded" min-visibility hold between FIFO drains.
+              // Without this, the cell flickers running → succeeded → running every
+              // run boundary, which reads as glitchy when 3+ runs are queued.
+              const displayState =
+                pendingCount > 0
+                  ? "running"
+                  : activeRun?.state ?? lastRun?.state ?? null;
+              const isRunning =
+                displayState === "running" ||
+                displayState === "pending" ||
+                displayState === "queued" ||
+                pendingCount > 0;
               const missingKeys = !hasProviders && !!wf.has_ai_call;
               // Sitting-7 Workstream C: scan this workflow's ai_call interfaces against the
               // active alert map.  worst-category wins (Billing > Auth > ModelNotFound >
@@ -284,6 +306,14 @@ export default function WorkflowsPanel({
                       </span>
                     ) : (
                       <span className="muted">idle</span>
+                    )}
+                    {pendingCount > 0 && (
+                      <span
+                        className="queued-badge"
+                        title={`${pendingCount} run${pendingCount === 1 ? "" : "s"} queued (serialize policy)`}
+                      >
+                        +{pendingCount} queued
+                      </span>
                     )}
                   </td>
                   <td className="mono">

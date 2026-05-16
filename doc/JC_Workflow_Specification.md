@@ -192,6 +192,7 @@ The root object has the following top-level fields:
   "doc": "Generates a daily report from XLS and sends it to an AI assistant for summarization.",
   "base_directory": ".",
   "manual_start": true,
+  "concurrency": "serialize",
   "triggers": [ /* see 3.2 */ ],
   "filters": [ /* see 3.7 */ ],
   "tasks": { /* see 3.3 */ },
@@ -226,6 +227,14 @@ The root object has the following top-level fields:
 - `manual_start` (OPTIONAL, boolean, default: `true`)  
   - Controls whether the workflow can be started manually (via UI or CLI).  
   - If `false`, the workflow can only be started by its defined triggers (cron, file_watch, etc.). See 3.2.
+
+- `concurrency` (OPTIONAL, string, default: `"serialize"`)
+  - Controls what happens when a run is requested for this workflow while another run of the same workflow is already active. One of:
+    - `"serialize"` — The second run is accepted and queued in a per-workflow FIFO; it starts when the active run completes. Preserves run-id observability and prevents shared-queue-folder races. This is the safer default.
+    - `"parallel"` — Both runs proceed concurrently. Right for genuinely fan-out-by-design workflows; pair with per-run queue folders before relying on this for IO-touching tasks.
+    - `"reject"` — The second run is refused with HTTP 409 Conflict (`error: "concurrency_rejected"`). Right for jobs that must never overlap (singleton lock, exclusive DB mutation, etc.).
+  - The pending queue for `"serialize"` has a cap of 32 entries per workflowId; over-cap requests return HTTP 503 (`error: "queue_full"`).
+  - Pending runs appear in `GET /api/workflow-runs/active` with `state: "pending"` so the dashboard renders them alongside running runs.
 
 - `triggers` (OPTIONAL, array of trigger objects)  
   - Defines when and how the workflow starts. See 3.2.
@@ -2522,6 +2531,7 @@ Contains workflow-wide metadata. Never contains tasks.
 | `label` | string | Human-friendly name. |
 | `doc` | string | Documentation. |
 | `manual_start` | boolean | Default `true`. |
+| `concurrency` | string | `"serialize"` (default), `"parallel"`, or `"reject"`. See 3.1.1. |
 | `triggers` | array | Trigger definitions (auto, cron, file_watch, webhook, manual). |
 | `defaults` | object | Default timeout, retries, AI provider settings. |
 

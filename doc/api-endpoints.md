@@ -473,7 +473,18 @@ When provided, the `context` key-value pairs are seeded into the workflow run's 
 ```json
 { "ok": true, "enqueued": true, "id": "jarvisCppDocu", "runId": "jarvisCppDocu_1771127438" }
 ```
-Returns 403 if `manual_start` is false. Also broadcasts a `workflow-runs-snapshot` to WebSocket clients.
+
+**Error responses:**
+- `400 invalid_workflow_id` — `<id>` failed the allowlist regex.
+- `403 manual_start_disabled` — workflow has `"manual_start": false` and can only be started by its triggers.
+- `404 workflow_not_found` — no workflow with that id is registered.
+- `409 concurrency_rejected` — workflow has `"concurrency": "reject"` and a run is already active. See `JC_Workflow_Specification.md` §3.1.1.
+- `412 ai_prereq_missing` — workflow has `ai_call` tasks but required AI provider keys are not configured. Unlock the key store via `POST /api/settings/keys/unlock` first.
+- `503 queue_full` — workflow's pending FIFO has hit the 32-entry cap (only possible under `"concurrency": "serialize"`).
+
+**Concurrency behavior:** with the default `"concurrency": "serialize"` policy, a second run request for an already-running workflow is accepted with HTTP 202 and queued as pending; it surfaces in `GET /api/workflow-runs/active` with `state: "pending"` and starts when the active run completes (FIFO).
+
+Also broadcasts a `workflow-runs-snapshot` to WebSocket clients.
 
 ### POST /api/workflows/run-adhoc
 
@@ -598,12 +609,15 @@ Stream a single file's bytes. `path` is URL-encoded and resolved lexically relat
 Returns 409 if the workflow is currently running.
 
 ### GET /api/workflow-runs/active
+Returns both currently-running runs and runs queued by the `"serialize"` concurrency policy. Pending runs have `state: "pending"` and empty `startedAt`/`completedAt` (they haven't started yet). The dashboard renders them alongside running runs in the active list.
+
 **Response (200):**
 ```json
 {
   "ok": true,
   "runs": [
-    { "runId": "...", "workflowId": "...", "state": "running", "startedAt": "...", "completedAt": "", "taskCount": 68 }
+    { "runId": "abc", "workflowId": "foo", "state": "running", "startedAt": "2026-05-16T17:14:18Z", "completedAt": "", "taskCount": 68 },
+    { "runId": "def", "workflowId": "foo", "state": "pending", "startedAt": "", "completedAt": "", "taskCount": 0 }
   ]
 }
 ```

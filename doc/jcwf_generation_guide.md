@@ -23,6 +23,7 @@ For the root canvas, global metadata (version, id, triggers, defaults) comes fro
   "label": "Human-readable name",
   "doc": "Description of what this workflow does.",
   "manual_start": true,
+  "concurrency": "serialize",          /* optional — see Root Fields below */
   "triggers": [ /* optional */ ],
   "tasks": { /* REQUIRED — map of taskId → task object */ },
   "defaults": { /* optional */ },
@@ -42,6 +43,7 @@ For the root canvas, global metadata (version, id, triggers, defaults) comes fro
 | `label` | no | string | Human-friendly display name. |
 | `doc` | no | string | Documentation/comments. |
 | `manual_start` | no | boolean | Default `true`. Set `false` to prevent manual start (trigger-only). |
+| `concurrency` | no | string | `"serialize"` (default — queue duplicates as pending), `"parallel"` (concurrent runs OK), `"reject"` (HTTP 409 on duplicate). See `JC_Workflow_Specification.md` §3.1.1. |
 | `triggers` | no | array | When/how the workflow starts. If omitted, implicit auto-trigger. |
 | `tasks` | YES | object | Map from taskId to task definition. |
 | `defaults` | no | object | Default timeout, retry, AI provider settings. |

@@ -252,6 +252,31 @@ namespace AIAssistant
             return MakeJsonResponse(httpStatus, responseJson);
         }
 
+        // Maps a non-Ok EnqueueRunResult to the right HTTP error response.
+        // Returns std::nullopt when the result is Ok — the caller then builds
+        // its own success body.  All five workflow-enqueue REST surfaces share
+        // this mapping, so one helper avoids the parallel-construction skew
+        // the cpp discipline rule warns about.  Exhaustive switch, no default:
+        // adding a new EnqueueStatus variant fails the -Wswitch build.
+        inline std::optional<crow::response> MaybeEnqueueErrorResponse(
+            EnqueueRunResult const& result, std::string const& endpoint, std::string const& workflowId)
+        {
+            switch (result.m_Status)
+            {
+                case EnqueueStatus::Ok:
+                    return std::nullopt;
+                case EnqueueStatus::InvalidWorkflowId:
+                    return MakeWorkflowJsonError(400, "invalid_workflow_id", result.m_Message, endpoint, workflowId);
+                case EnqueueStatus::AiPrereqMissing:
+                    return MakeWorkflowJsonError(412, "ai_prereq_missing", result.m_Message, endpoint, workflowId);
+                case EnqueueStatus::RejectedConcurrency:
+                    return MakeWorkflowJsonError(409, "concurrency_rejected", result.m_Message, endpoint, workflowId);
+                case EnqueueStatus::QueueFull:
+                    return MakeWorkflowJsonError(503, "queue_full", result.m_Message, endpoint, workflowId);
+            }
+            return std::nullopt; // unreachable on a well-formed enum value; -Wreturn-type belt
+        }
+
         struct WorkflowValidationFinding
         {
             std::string m_Code;

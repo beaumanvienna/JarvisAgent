@@ -1296,60 +1296,109 @@ namespace AIAssistant
         (void)EnqueueWorkflowRunAndGetRunId(workflowId);
     }
 
-    std::string WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId(std::string const& workflowId)
+    // PRECONDITION: caller holds m_Mutex.
+    bool WorkflowRuntimeManager::HasInflightRunForWorkflowLocked(std::string const& workflowId) const
     {
-        if (!IsValidRunOrWorkflowId(workflowId))
+        for (auto const& activePtr : m_ActiveRuns)
         {
-            LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId: rejected invalid workflowId "
-                          "(len={}, allowlist [A-Za-z0-9._-], no leading dot)",
-                          workflowId.size());
-            return std::string();
-        }
-
-        WorkflowRegistry const* workflowRegistry = nullptr;
-        {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            workflowRegistry = m_WorkflowRegistry;
-        }
-
-        std::string runId;
-        if (workflowRegistry != nullptr)
-        {
-            std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
-            if (workflowDefinition.has_value())
+            if (activePtr != nullptr && activePtr->m_Run.m_WorkflowId == workflowId)
             {
-                if (!CheckAiProviderPrerequisites(workflowDefinition.value()))
-                {
-                    return std::string();
-                }
-                runId = GenerateRunId(workflowDefinition.value());
+                return true;
             }
         }
-
-        if (runId.empty())
+        // m_PendingRuns is std::queue (no iteration); peek via a temporary copy.
+        // Drained on every Update() tick, so usually 0-1 entries — copy is cheap.
+        std::queue<PendingRun> queueCopy = m_PendingRuns;
+        while (!queueCopy.empty())
         {
-            auto const now = std::chrono::system_clock::now().time_since_epoch();
-            auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-            runId = workflowId + "_" + std::to_string(millis);
+            if (queueCopy.front().m_WorkflowId == workflowId)
+            {
+                return true;
+            }
+            queueCopy.pop();
         }
-
+        auto const pendingIt = m_PendingByWorkflow.find(workflowId);
+        if (pendingIt != m_PendingByWorkflow.end() && !pendingIt->second.empty())
         {
-            std::scoped_lock<std::mutex> const lock(m_Mutex);
-            m_PendingRuns.push(PendingRun{workflowId, runId, ContextMap{}});
+            return true;
         }
-
-        return runId;
+        return false;
     }
 
-    std::string WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId(std::string const& workflowId,
-                                                                                 std::string const& runId,
-                                                                                 ContextMap const& context)
+    // PRECONDITION: caller holds m_Mutex.
+    // On Ok, takes ownership of pendingRun (moved into the appropriate queue) and
+    // returns Ok.  On refusal, leaves pendingRun untouched and returns the refusal
+    // status plus a human-readable outMessage.  Both enqueue overloads route through
+    // this one helper so policy decisions can't skew between the two call paths.
+    EnqueueStatus WorkflowRuntimeManager::ApplyConcurrencyPolicyLocked(WorkflowConcurrencyPolicy policy,
+                                                                       PendingRun&& pendingRun,
+                                                                       std::string& outMessage)
+    {
+        outMessage.clear();
+        switch (policy)
+        {
+            case WorkflowConcurrencyPolicy::Parallel:
+                m_PendingRuns.push(std::move(pendingRun));
+                return EnqueueStatus::Ok;
+
+            case WorkflowConcurrencyPolicy::Serialize:
+            {
+                if (!HasInflightRunForWorkflowLocked(pendingRun.m_WorkflowId))
+                {
+                    m_PendingRuns.push(std::move(pendingRun));
+                    return EnqueueStatus::Ok;
+                }
+                auto& deferred = m_PendingByWorkflow[pendingRun.m_WorkflowId];
+                if (deferred.size() >= kPendingQueueCap)
+                {
+                    LOG_APP_ERROR("WorkflowRuntimeManager: pending queue full for workflow '{}' (cap={}); "
+                                  "rejecting run '{}'",
+                                  pendingRun.m_WorkflowId, kPendingQueueCap, pendingRun.m_RunId);
+                    outMessage = "Pending run queue is full for this workflow (cap " +
+                                 std::to_string(kPendingQueueCap) + "). Try again after some runs complete.";
+                    return EnqueueStatus::QueueFull;
+                }
+                LOG_APP_INFO("WorkflowRuntimeManager: queued run '{}' for workflow '{}' as pending "
+                             "(serialize policy; {} already pending)",
+                             pendingRun.m_RunId, pendingRun.m_WorkflowId, deferred.size());
+                deferred.push_back(std::move(pendingRun));
+                return EnqueueStatus::Ok;
+            }
+
+            case WorkflowConcurrencyPolicy::Reject:
+            {
+                if (!HasInflightRunForWorkflowLocked(pendingRun.m_WorkflowId))
+                {
+                    m_PendingRuns.push(std::move(pendingRun));
+                    return EnqueueStatus::Ok;
+                }
+                LOG_APP_ERROR("WorkflowRuntimeManager: rejected run '{}' for workflow '{}': "
+                              "concurrency policy is 'reject' and a run is already active",
+                              pendingRun.m_RunId, pendingRun.m_WorkflowId);
+                outMessage = "A run for this workflow is already active and its concurrency policy is 'reject'.";
+                return EnqueueStatus::RejectedConcurrency;
+            }
+        }
+        // Unreachable on a well-formed enum value; -Wreturn-type belt.
+        outMessage = "Unknown concurrency policy";
+        return EnqueueStatus::RejectedConcurrency;
+    }
+
+    EnqueueRunResult WorkflowRuntimeManager::EnqueueWorkflowRunAndGetRunId(std::string const& workflowId)
+    {
+        return EnqueueWorkflowRunWithContextAndGetRunId(workflowId, std::string(), ContextMap{});
+    }
+
+    EnqueueRunResult WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId(std::string const& workflowId,
+                                                                                      std::string const& runId,
+                                                                                      ContextMap const& context)
     {
         if (!IsValidRunOrWorkflowId(workflowId))
         {
             LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId: rejected invalid "
                           "workflowId (len={})", workflowId.size());
-            return std::string();
+            return EnqueueRunResult{std::string(), EnqueueStatus::InvalidWorkflowId,
+                                    "Workflow id contains invalid characters"};
         }
         // runId is optional — empty triggers GenerateRunId below — but if
         // supplied it must satisfy the same allowlist.
@@ -1357,7 +1406,8 @@ namespace AIAssistant
         {
             LOG_APP_ERROR("WorkflowRuntimeManager::EnqueueWorkflowRunWithContextAndGetRunId: rejected invalid runId "
                           "(len={}) for workflow '{}'", runId.size(), workflowId);
-            return std::string();
+            return EnqueueRunResult{std::string(), EnqueueStatus::InvalidWorkflowId,
+                                    "Run id contains invalid characters"};
         }
 
         WorkflowRegistry const* workflowRegistry = nullptr;
@@ -1366,23 +1416,25 @@ namespace AIAssistant
             workflowRegistry = m_WorkflowRegistry;
         }
 
-        // Provider prerequisite check (must happen before enqueue).
+        // Resolve the workflow definition once — used for prereq check, runId
+        // generation, AND concurrency policy lookup.  Defaults to Serialize if
+        // the workflow can't be resolved (registry not set yet, or unknown id);
+        // the run still gets enqueued via the default-policy path.
+        WorkflowConcurrencyPolicy concurrencyPolicy = WorkflowConcurrencyPolicy::Serialize;
+        std::string resolvedRunId = runId;
+
         if (workflowRegistry != nullptr)
         {
             std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
-            if (workflowDefinition.has_value() && !CheckAiProviderPrerequisites(workflowDefinition.value()))
+            if (workflowDefinition.has_value())
             {
-                return std::string();
-            }
-        }
-
-        std::string resolvedRunId = runId;
-        if (resolvedRunId.empty())
-        {
-            if (workflowRegistry != nullptr)
-            {
-                std::optional<WorkflowDefinition> const workflowDefinition = workflowRegistry->GetWorkflow(workflowId);
-                if (workflowDefinition.has_value())
+                if (!CheckAiProviderPrerequisites(workflowDefinition.value()))
+                {
+                    return EnqueueRunResult{std::string(), EnqueueStatus::AiPrereqMissing,
+                                            "Required AI provider keys are not configured for this workflow"};
+                }
+                concurrencyPolicy = workflowDefinition->m_ConcurrencyPolicy;
+                if (resolvedRunId.empty())
                 {
                     resolvedRunId = GenerateRunId(workflowDefinition.value());
                 }
@@ -1396,12 +1448,19 @@ namespace AIAssistant
             resolvedRunId = workflowId + "_" + std::to_string(millis);
         }
 
+        std::string policyMessage;
+        EnqueueStatus policyStatus;
         {
             std::scoped_lock<std::mutex> const lock(m_Mutex);
-            m_PendingRuns.push(PendingRun{workflowId, resolvedRunId, context});
+            policyStatus = ApplyConcurrencyPolicyLocked(concurrencyPolicy,
+                                                        PendingRun{workflowId, resolvedRunId, context}, policyMessage);
+        }
+        if (policyStatus != EnqueueStatus::Ok)
+        {
+            return EnqueueRunResult{std::string(), policyStatus, std::move(policyMessage)};
         }
 
-        return resolvedRunId;
+        return EnqueueRunResult{resolvedRunId, EnqueueStatus::Ok, std::string()};
     }
 
     bool WorkflowRuntimeManager::TryGetLastRun(std::string const& workflowId, WorkflowRun& outRun) const
@@ -1755,6 +1814,24 @@ namespace AIAssistant
 
                     // Snapshot the WorkflowRun for callback + observer firing AFTER lock release.
                     postTickActions.push_back(PostTickAction{std::string{}, active.m_Run});
+
+                    // Promote one pending run for this workflowId — Serialize policy's
+                    // FIFO drain.  No-op for Parallel/Reject workflows (their deques
+                    // are always empty by construction).
+                    auto pendingIt = m_PendingByWorkflow.find(active.m_Run.m_WorkflowId);
+                    if (pendingIt != m_PendingByWorkflow.end() && !pendingIt->second.empty())
+                    {
+                        LOG_APP_INFO("WorkflowRuntimeManager: promoting next pending run '{}' for workflow '{}' "
+                                     "({} more queued)",
+                                     pendingIt->second.front().m_RunId, active.m_Run.m_WorkflowId,
+                                     pendingIt->second.size() - 1);
+                        m_PendingRuns.push(std::move(pendingIt->second.front()));
+                        pendingIt->second.pop_front();
+                        if (pendingIt->second.empty())
+                        {
+                            m_PendingByWorkflow.erase(pendingIt);
+                        }
+                    }
 
                     m_ActiveRuns.erase(m_ActiveRuns.begin() + static_cast<std::ptrdiff_t>(index));
                     stateChanged = true;
@@ -2761,12 +2838,17 @@ namespace AIAssistant
 
     std::string WorkflowRuntimeManager::GenerateRunId(WorkflowDefinition const& workflowDefinition) const
     {
-        auto now = std::chrono::system_clock::now();
-        auto nowTimeT = std::chrono::system_clock::to_time_t(now);
+        // Milliseconds (matches the fallback path in EnqueueWorkflowRun*).  Seconds
+        // resolution collided when two POSTs hit the same workflow within one second
+        // — pre-Serialize this raced silently on the shared queue folder; now the
+        // Serialize policy would queue both runs under the same id and the dashboard
+        // couldn't distinguish them.
+        auto const now = std::chrono::system_clock::now().time_since_epoch();
+        auto const millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 
         std::string runId = workflowDefinition.m_Id;
         runId += "_";
-        runId += std::to_string(static_cast<long long>(nowTimeT));
+        runId += std::to_string(static_cast<long long>(millis));
 
         return runId;
     }
@@ -3011,6 +3093,22 @@ namespace AIAssistant
     {
         std::scoped_lock<std::mutex> const lock(m_Mutex);
         return m_LastRuns; // copy
+    }
+
+    std::vector<WorkflowRuntimeManager::PendingRunSnapshot> WorkflowRuntimeManager::GetPendingRunsSnapshot() const
+    {
+        std::scoped_lock<std::mutex> const lock(m_Mutex);
+
+        std::vector<PendingRunSnapshot> snapshots;
+        for (auto const& [workflowId, deque] : m_PendingByWorkflow)
+        {
+            for (auto const& pendingRun : deque)
+            {
+                snapshots.push_back(PendingRunSnapshot{pendingRun.m_RunId, pendingRun.m_WorkflowId});
+            }
+        }
+
+        return snapshots;
     }
 
     void WorkflowRuntimeManager::GetRunCounters(uint64_t& outCompleted, uint64_t& outFailed) const
