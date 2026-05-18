@@ -65,29 +65,31 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
+                if (!api)
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be ApiKeyCredential — Slack requires a Bot token (xoxb-...)";
+                    return;
+                }
+                if (api->m_ApiKey.IsEmpty())
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' has no API key — Slack requires a Bot token (xoxb-...)";
+                    return;
+                }
+                credentials.m_AuthType = CloudAuthType::BearerToken;
+                credentials.m_Token = std::string(api->m_ApiKey.Get());
+            });
+        if (!found)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
-        if (!api)
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be ApiKeyCredential — Slack requires a Bot token (xoxb-...)";
-            return false;
-        }
-        if (api->m_ApiKey.IsEmpty())
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' has no API key — Slack requires a Bot token (xoxb-...)";
-            return false;
-        }
-
-        credentials.m_AuthType = CloudAuthType::BearerToken;
-        credentials.m_Token = std::string(api->m_ApiKey.Get());
-        return true;
+        return errorMessage.empty();
     }
 
     bool SlackConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)

@@ -4071,13 +4071,13 @@ namespace AIAssistant
             m_Server.ssl_file(config.m_TlsCert, config.m_TlsKey);
         }
 
-        // Try to initialise the MCP key store if the master password is already cached
-        // (from engine-level keys.json.enc load at startup). If the password isn't
-        // cached yet, the store is lazily initialised on HandleKeysUnlockPost().
+        // Try to initialise the MCP key store if the master password is already
+        // held in mlock memory (from engine-level keys.json.enc load at startup).
+        // If not yet held, the store is lazily initialised on HandleKeysUnlockPost().
         {
             auto& keyManager = Core::g_Core->GetKeyManager();
-            bool const initialised = keyManager.WithCachedMasterPassword(
-                [this](std::string_view cachedPwd) { InitMcpKeyStore(cachedPwd); });
+            bool const initialised = keyManager.WithMasterPassword(
+                [this](std::string_view masterPassword) { InitMcpKeyStore(masterPassword); });
             if (!initialised)
             {
                 LOG_CORE_INFO("MCP key store deferred — awaiting master password via /api/settings/keys/unlock");
@@ -6049,80 +6049,83 @@ namespace AIAssistant
 
         for (std::string const& name : names)
         {
-            auto const* cred = keyManager.GetCredential(name);
-            if (!cred)
+            crow::json::wvalue entry;
+            bool const found = keyManager.WithCredential(name,
+                [&](ICredential const& cred)
+                {
+                    entry["name"] = name;
+                    entry["display_name"]    = cred.m_DisplayName;
+                    entry["endpoint"]        = cred.m_Endpoint;
+                    entry["default_model"]   = cred.m_DefaultModel;
+                    entry["api_type"]        = cred.m_ApiType;
+                    entry["credential_type"] = std::string(cred.GetType());
+
+                    // Per-type secret-presence indicators (the secret values themselves NEVER cross
+                    // the network — only "set / not set" booleans).  Each branch handles one subtype
+                    // exhaustively; an unhandled subtype emits no `has_key` indicator (UI will show
+                    // "no key").  Adding a new subtype requires a new branch — visible omission.
+                    if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
+                    {
+                        entry["has_key"] = !api->m_ApiKey.IsEmpty();
+                    }
+                    else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
+                    {
+                        entry["has_key"]            = !oauth->m_AccessToken.IsEmpty();
+                        entry["has_refresh_token"]  = !oauth->m_RefreshToken.IsEmpty();
+                        entry["expires_at"]         = oauth->m_ExpiresAt;
+                        entry["scopes"]             = oauth->m_Scopes;
+                    }
+                    else if (auto const* kp = dynamic_cast<KeyPairCredential const*>(&cred))
+                    {
+                        entry["has_key"] = !kp->m_PrivateKeyPem.IsEmpty();
+                    }
+                    else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
+                    {
+                        entry["has_key"]  = !basic->m_Password.IsEmpty();
+                        entry["username"] = basic->m_Username;
+                    }
+                    else if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
+                    {
+                        entry["has_key"]               = !aws->m_AccessKeyId.empty();
+                        entry["has_secret_access_key"] = !aws->m_SecretAccessKey.IsEmpty();
+                        entry["has_session_token"]    = !aws->m_SessionToken.IsEmpty();
+                        if (!aws->m_Region.empty())
+                        {
+                            entry["region"] = aws->m_Region;
+                        }
+                    }
+
+                    // Non-secret params — defense-in-depth strip for any future subtype that puts
+                    // secrets in m_Params (the SecureString-typed subtypes don't, but the strip
+                    // keeps the contract stable).  AWS secret_access_key / session_token must never
+                    // leave the server.
+                    if (!cred.m_Params.empty())
+                    {
+                        static std::array<char const*, 2> const kSensitiveParamKeys = {
+                            "secret_access_key", "session_token"};
+                        crow::json::wvalue paramsJson;
+                        for (auto const& [k, v] : cred.m_Params)
+                        {
+                            bool sensitive = false;
+                            for (auto const* skey : kSensitiveParamKeys)
+                            {
+                                if (k == skey) { sensitive = true; break; }
+                            }
+                            if (sensitive)
+                            {
+                                entry[std::string("has_") + k] = !v.empty();
+                            }
+                            else
+                            {
+                                paramsJson[k] = v;
+                            }
+                        }
+                        entry["params"] = std::move(paramsJson);
+                    }
+                });
+            if (!found)
             {
                 continue;
-            }
-
-            crow::json::wvalue entry;
-            entry["name"] = name;
-            entry["display_name"]    = cred->m_DisplayName;
-            entry["endpoint"]        = cred->m_Endpoint;
-            entry["default_model"]   = cred->m_DefaultModel;
-            entry["api_type"]        = cred->m_ApiType;
-            entry["credential_type"] = std::string(cred->GetType());
-
-            // Per-type secret-presence indicators (the secret values themselves NEVER cross
-            // the network — only "set / not set" booleans).  Each branch handles one subtype
-            // exhaustively; an unhandled subtype emits no `has_key` indicator (UI will show
-            // "no key").  Adding a new subtype requires a new branch — visible omission.
-            if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
-            {
-                entry["has_key"] = !api->m_ApiKey.IsEmpty();
-            }
-            else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
-            {
-                entry["has_key"]            = !oauth->m_AccessToken.IsEmpty();
-                entry["has_refresh_token"]  = !oauth->m_RefreshToken.IsEmpty();
-                entry["expires_at"]         = oauth->m_ExpiresAt;
-                entry["scopes"]             = oauth->m_Scopes;
-            }
-            else if (auto const* kp = dynamic_cast<KeyPairCredential const*>(cred))
-            {
-                entry["has_key"] = !kp->m_PrivateKeyPem.IsEmpty();
-            }
-            else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
-            {
-                entry["has_key"]  = !basic->m_Password.IsEmpty();
-                entry["username"] = basic->m_Username;
-            }
-            else if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
-            {
-                entry["has_key"]               = !aws->m_AccessKeyId.empty();
-                entry["has_secret_access_key"] = !aws->m_SecretAccessKey.IsEmpty();
-                entry["has_session_token"]    = !aws->m_SessionToken.IsEmpty();
-                if (!aws->m_Region.empty())
-                {
-                    entry["region"] = aws->m_Region;
-                }
-            }
-
-            // Non-secret params — defense-in-depth strip for any future subtype that puts
-            // secrets in m_Params (the SecureString-typed subtypes don't, but the strip
-            // keeps the contract stable).  AWS secret_access_key / session_token must never
-            // leave the server.
-            if (!cred->m_Params.empty())
-            {
-                static std::array<char const*, 2> const kSensitiveParamKeys = {"secret_access_key", "session_token"};
-                crow::json::wvalue paramsJson;
-                for (auto const& [k, v] : cred->m_Params)
-                {
-                    bool sensitive = false;
-                    for (auto const* skey : kSensitiveParamKeys)
-                    {
-                        if (k == skey) { sensitive = true; break; }
-                    }
-                    if (sensitive)
-                    {
-                        entry[std::string("has_") + k] = !v.empty();
-                    }
-                    else
-                    {
-                        paramsJson[k] = v;
-                    }
-                }
-                entry["params"] = std::move(paramsJson);
             }
 
             // Secret values (api_key, refresh_token, client_secret, private_key_pem,
@@ -6208,16 +6211,6 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        auto const* existing = keyManager.GetCredential(providerName);
-        if (!existing)
-        {
-            crow::json::wvalue err;
-            err["ok"] = false;
-            err["error"] = "not_found";
-            err["message"] = "Provider '" + providerName + "' not found";
-            return MakeJsonResponse(404, err);
-        }
-
         simdjson::ondemand::parser parser;
         try
         {
@@ -6234,21 +6227,43 @@ namespace AIAssistant
                 return MakeJsonResponse(400, err);
             }
 
-            // CloneAndPatch builds a new same-subtype credential, copying all of
-            // `existing`'s fields, then overlays the optional patch keys.  Note:
-            // `credential_type` in the patch is intentionally ignored — to change
-            // a credential's type, DELETE + CREATE.
-            std::unique_ptr<ICredential> updated = CredentialFactory::CloneAndPatch(*existing, patchObj);
-            if (!updated)
+            // Atomic read-modify-write under unique_lock — no window between read
+            // and write where a concurrent RemoveProvider could leave `existing`
+            // dangling.  Mutator builds the patched credential; ModifyCredential
+            // returns false if the provider doesn't exist or the mutator returns
+            // nullptr (clone failed).
+            bool cloneFailed = false;
+            bool const ok = keyManager.ModifyCredential(providerName,
+                [&](ICredential const& existing) -> std::unique_ptr<ICredential>
+                {
+                    // CloneAndPatch builds a new same-subtype credential, copying all of
+                    // `existing`'s fields, then overlays the optional patch keys.  Note:
+                    // `credential_type` in the patch is intentionally ignored — to change
+                    // a credential's type, DELETE + CREATE.
+                    auto updated = CredentialFactory::CloneAndPatch(existing, patchObj);
+                    if (!updated)
+                    {
+                        cloneFailed = true;
+                    }
+                    return updated;
+                });
+
+            if (!ok)
             {
+                if (cloneFailed)
+                {
+                    crow::json::wvalue err;
+                    err["ok"] = false;
+                    err["error"] = "internal_error";
+                    err["message"] = "Failed to clone existing credential for update";
+                    return MakeJsonResponse(500, err);
+                }
                 crow::json::wvalue err;
                 err["ok"] = false;
-                err["error"] = "internal_error";
-                err["message"] = "Failed to clone existing credential for update";
-                return MakeJsonResponse(500, err);
+                err["error"] = "not_found";
+                err["message"] = "Provider '" + providerName + "' not found";
+                return MakeJsonResponse(404, err);
             }
-
-            keyManager.UpdateCredential(providerName, std::move(updated));
 
             crow::json::wvalue responseJson;
             responseJson["ok"] = true;
@@ -6292,7 +6307,7 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        if (!keyManager.GetCredential(providerName))
+        if (!keyManager.HasCredential(providerName))
         {
             crow::json::wvalue err;
             err["ok"] = false;
@@ -6313,8 +6328,9 @@ namespace AIAssistant
     {
         auto& keyManager = Core::g_Core->GetKeyManager();
 
-        // Master password: request body or already-cached password from a prior unlock.
-        // There is no env-var fallback — see doc/cyber security.md §"Master password after restart".
+        // Master password: request body or the password already held in mlock
+        // memory from a prior unlock.  There is no env-var fallback — see
+        // doc/cyber security.md §"Master password after restart".
         std::string bodyPassword;
         {
             simdjson::ondemand::parser parser;
@@ -6331,7 +6347,7 @@ namespace AIAssistant
             }
             catch (...)
             {
-                // Body might be empty or not JSON — fall through to cached password.
+                // Body might be empty or not JSON — fall through to the held master password.
             }
         }
 
@@ -6386,12 +6402,12 @@ namespace AIAssistant
             return doSave(bodyPassword);
         }
 
-        crow::response cachedResp;
-        bool const hadCached = keyManager.WithCachedMasterPassword(
-            [&](std::string_view cached) { cachedResp = doSave(cached); });
-        if (hadCached)
+        crow::response heldResp;
+        bool const hadHeld = keyManager.WithMasterPassword(
+            [&](std::string_view masterPassword) { heldResp = doSave(masterPassword); });
+        if (hadHeld)
         {
-            return cachedResp;
+            return heldResp;
         }
 
         crow::json::wvalue err;
@@ -7145,65 +7161,67 @@ namespace AIAssistant
         // fresh access_token.
         {
             auto& keyManager = Core::g_Core->GetKeyManager();
-            auto const* existing = keyManager.GetCredential(connection->m_KeyName);
 
-            // Build a fresh OAuthCredential.  When an existing credential is present we
-            // preserve its non-OAuth metadata (display_name, endpoint, default_model,
-            // api_type, params) — useful when the user edited those before authorising.
-            // The OAuth-specific fields are always rewritten to the freshly-issued values.
+            // Atomic add-or-update under one unique_lock — no window between the read
+            // (preserve existing metadata) and the write (store new OAuth fields)
+            // where a concurrent RemoveProvider could leave `existing` dangling, and
+            // no window where AddCredential could fail because another thread inserted
+            // the same name first.
             //
-            // Auto-create a placeholder if no existing entry: without this, the OAuth
-            // callback would bail and tokens would remain in OAuthTokenManager memory
-            // only — lost on the next j9t restart.  Matches the UX where a user creates
-            // an OAuth connection in the editor and immediately clicks "Authorize"
-            // without having to pre-create a same-named entry in the providers view.
-            auto cred = std::make_unique<OAuthCredential>();
-            if (existing)
-            {
-                cred->m_DisplayName  = existing->m_DisplayName;
-                cred->m_Endpoint     = existing->m_Endpoint;
-                cred->m_DefaultModel = existing->m_DefaultModel;
-                cred->m_ApiType      = existing->m_ApiType;
-                cred->m_Params       = existing->m_Params;
-            }
-            else
-            {
-                cred->m_DisplayName = connection->m_KeyName;
-                LOG_CORE_INFO("OAuth callback: auto-creating KeyManager provider '{}' for connection '{}'",
-                              connection->m_KeyName, connectionName);
-            }
-
-            // Access token is short-lived — OAuthTokenManager hydrates a fresh one on the
-            // next request from the persisted refresh token, so we don't write it here.
-            cred->m_RefreshToken.Set(refreshToken);
-            if (!clientSecretForRefresh.empty())
-            {
-                cred->m_ClientSecret.Set(clientSecretForRefresh);
-            }
-            cred->m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
-            cred->m_Scopes = connection->m_Params.count("scopes")
-                                 ? connection->m_Params.at("scopes")
-                                 : providerInfo.m_DefaultScopes;
-            cred->m_TokenEndpoint = tokenUrl;
-            cred->m_ClientId      = clientId;
-
-            if (existing)
-            {
-                keyManager.UpdateCredential(connection->m_KeyName, std::move(cred));
-            }
-            else
-            {
-                keyManager.AddCredential(connection->m_KeyName, std::move(cred));
-            }
+            // Builder receives `existing` (possibly null).  When non-null we preserve
+            // non-OAuth metadata (display_name, endpoint, default_model, api_type,
+            // params) — useful when the user edited those before authorising.  The
+            // OAuth-specific fields are always rewritten to the freshly-issued values.
+            //
+            // Auto-create on null `existing`: without this, the OAuth callback would
+            // bail and tokens would remain in OAuthTokenManager memory only — lost on
+            // the next j9t restart.  Matches the UX where a user creates an OAuth
+            // connection in the editor and immediately clicks "Authorize" without
+            // having to pre-create a same-named entry in the providers view.
+            keyManager.UpsertCredential(connection->m_KeyName,
+                [&](ICredential const* existing) -> std::unique_ptr<ICredential>
+                {
+                    auto cred = std::make_unique<OAuthCredential>();
+                    if (existing)
+                    {
+                        cred->m_DisplayName  = existing->m_DisplayName;
+                        cred->m_Endpoint     = existing->m_Endpoint;
+                        cred->m_DefaultModel = existing->m_DefaultModel;
+                        cred->m_ApiType      = existing->m_ApiType;
+                        cred->m_Params       = existing->m_Params;
+                    }
+                    else
+                    {
+                        cred->m_DisplayName = connection->m_KeyName;
+                        LOG_CORE_INFO("OAuth callback: auto-creating KeyManager provider '{}' "
+                                      "for connection '{}'",
+                                      connection->m_KeyName, connectionName);
+                    }
+                    // Access token is short-lived — OAuthTokenManager hydrates a fresh
+                    // one on the next request from the persisted refresh token, so we
+                    // don't write it here.
+                    cred->m_RefreshToken.Set(refreshToken);
+                    if (!clientSecretForRefresh.empty())
+                    {
+                        cred->m_ClientSecret.Set(clientSecretForRefresh);
+                    }
+                    cred->m_ExpiresAt = static_cast<int64_t>(std::time(nullptr)) + expiresIn;
+                    cred->m_Scopes = connection->m_Params.count("scopes")
+                                         ? connection->m_Params.at("scopes")
+                                         : providerInfo.m_DefaultScopes;
+                    cred->m_TokenEndpoint = tokenUrl;
+                    cred->m_ClientId      = clientId;
+                    return cred;
+                });
 
             // Persist OAuth tokens if the key store has been unlocked this session.
             // If the admin never unlocked (/api/settings/keys/unlock), the tokens stay
             // in memory only and the user gets a warning below. No env-var fallback.
             auto const& keysPath = keyManager.GetKeysFilePath();
-            bool const persisted = !keysPath.empty() && keyManager.WithCachedMasterPassword(
-                [&](std::string_view cachedPassword)
+            bool const persisted = !keysPath.empty() && keyManager.WithMasterPassword(
+                [&](std::string_view masterPassword)
                 {
-                    if (keyManager.Save(keysPath, cachedPassword))
+                    if (keyManager.Save(keysPath, masterPassword))
                     {
                         LOG_SECURITY_INFO("[security] OAuth tokens persisted to encrypted keys file for '{}'",
                                           connection->m_KeyName);
@@ -7217,8 +7235,9 @@ namespace AIAssistant
                 });
             if (!persisted)
             {
-                LOG_CORE_WARN("OAuth callback: no cached master password or keys file path — refresh_token "
-                              "for '{}' held in memory only and will be lost on restart",
+                LOG_CORE_WARN("OAuth callback: master password not held in mlock memory or keys file path "
+                              "not set — refresh_token for '{}' held in process memory only and will be "
+                              "lost on restart",
                               connection->m_KeyName);
             }
         }
@@ -7293,11 +7312,11 @@ namespace AIAssistant
         }
         auto& keyManager = Core::g_Core->GetKeyManager();
         bool saved = false;
-        bool const hadPassword = keyManager.WithCachedMasterPassword(
+        bool const hadPassword = keyManager.WithMasterPassword(
             [this, &saved](std::string_view pwd) { saved = m_McpKeyManager.Save(m_McpKeysFilePath, pwd); });
         if (!hadPassword)
         {
-            LOG_CORE_WARN("SaveMcpKeyStore: master password not cached — cannot persist");
+            LOG_CORE_WARN("SaveMcpKeyStore: master password not held in mlock memory — cannot persist");
             return false;
         }
         return saved;

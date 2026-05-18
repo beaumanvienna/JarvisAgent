@@ -21,8 +21,10 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -76,41 +78,96 @@ namespace AIAssistant
         void SetKeysFilePath(std::filesystem::path const& path) { m_KeysFilePath = path; }
         std::filesystem::path const& GetKeysFilePath() const { return m_KeysFilePath; }
 
-        // Run a callback with the cached master password as a std::string_view.
-        // Returns true if a cached password exists (callback was invoked) and
-        // false otherwise (callback was not invoked).  The view is only valid
-        // for the duration of the call; do not store it.
+        // Run a callback with the held master password as a std::string_view.
+        // Returns true if a master password is held (callback was invoked) and
+        // false otherwise (callback was not invoked).
         //
-        // Prefer this over a getter that returns std::string: the cached password
-        // lives in mlock()-locked SecureString memory, and copying it into a
-        // heap-allocated std::string defeats the swap-protection guarantee.
+        // The master password is held in mlock-locked SecureString memory from
+        // the moment Unlock (or first-run Save) succeeds until shutdown.  This
+        // is the single in-process copy: callers MUST NOT make plaintext
+        // std::string copies of the view (which would defeat the swap-protection
+        // guarantee).  Use the view only inside the callback; do not store it.
+        //
+        // Implementation note: the held password is copied into a local
+        // SecureString under a brief lock and the lock is released before the
+        // callback runs.  This makes callback re-entry into KeyManager (e.g.
+        // calling Save) safe without lock ordering hazards.  The local copy is
+        // zeroed on destruction at scope exit.
         template <typename F>
-        bool WithCachedMasterPassword(F&& fn) const
+        bool WithMasterPassword(F&& fn) const
         {
-            std::string_view view = m_CachedMasterPassword.Get();
-            if (view.empty())
+            SecureString localCopy;
             {
-                return false;
+                std::shared_lock lock(m_MasterPasswordMutex);
+                std::string_view view = m_MasterPassword.Get();
+                if (view.empty())
+                {
+                    return false;
+                }
+                localCopy.Set(view);
             }
-            std::forward<F>(fn)(view);
+            std::forward<F>(fn)(localCopy.Get());
             return true;
         }
 
-        // True if a master password is currently cached (after a successful
-        // Load/Unlock).  Use WithCachedMasterPassword() to actually use it.
-        bool HasCachedMasterPassword() const { return !m_CachedMasterPassword.IsEmpty(); }
-
         // Dirty flag: true when in-memory state differs from on-disk state
-        bool IsDirty() const { return m_Dirty; }
+        bool IsDirty() const { return m_Dirty.load(); }
 
-        // ---- Provider registry access (thread-safe, read-locked) ----
+        // ---- Provider registry access (thread-safe) ----
         // The typed `ICredential` hierarchy is the single source of truth; secret-bearing
         // fields are stored in `SecureString` (mlock'd, zero-on-destruct).  Callers
         // resolve a credential by name and `dynamic_cast` to the expected concrete subtype
         // (`ApiKeyCredential`, `OAuthCredential`, `KeyPairCredential`, `BasicAuthCredential`,
         // `AwsCredential`).  See `engine/keys/credential.h` for the hierarchy.
-        ICredential const* GetCredential(std::string const& name) const;
-        ICredential const* GetDefaultCredential() const;
+        //
+        // Read access is via callback (WithCredential / WithDefaultCredential): the
+        // callback runs while the shared_lock is held, so the `ICredential const&`
+        // reference is guaranteed live for the call's duration.  Callers MUST NOT store
+        // the reference (or pointers to its fields) beyond the callback — a subsequent
+        // RemoveProvider would invalidate it.  Callbacks also MUST NOT call back into
+        // write-side KeyManager methods (AddCredential / RemoveProvider /
+        // ModifyCredential / UpsertCredential / SetDefaultProvider) from inside the
+        // callback — that would deadlock against the held shared_lock.  Read-side calls
+        // (other With* / Has*) are safe (shared+shared).
+
+        // Run fn(ICredential const&) while holding shared_lock(m_Mutex).
+        // Returns true if `name` exists (fn was invoked), false otherwise.
+        template <typename F>
+        bool WithCredential(std::string const& name, F&& fn) const
+        {
+            std::shared_lock lock(m_Mutex);
+            auto const it = m_Credentials.find(name);
+            if (it == m_Credentials.end())
+            {
+                return false;
+            }
+            std::forward<F>(fn)(*it->second);
+            return true;
+        }
+
+        // Like WithCredential but uses the configured default provider.
+        // Returns false if no default is set, the default name has no credential, or
+        // the default credential entry is null.
+        template <typename F>
+        bool WithDefaultCredential(F&& fn) const
+        {
+            std::shared_lock lock(m_Mutex);
+            if (m_DefaultProviderName.empty())
+            {
+                return false;
+            }
+            auto const it = m_Credentials.find(m_DefaultProviderName);
+            if (it == m_Credentials.end() || !it->second)
+            {
+                return false;
+            }
+            std::forward<F>(fn)(*it->second);
+            return true;
+        }
+
+        // Existence checks (cheap shared_lock + map lookup).
+        bool HasCredential(std::string const& name) const;
+        bool HasDefaultCredential() const;
 
         std::string GetDefaultProviderName() const;
         std::vector<std::string> GetProviderNames() const;
@@ -120,9 +177,68 @@ namespace AIAssistant
         // (typically built by `CredentialFactory::CreateFromJson` from a REST request body
         // or by `CredentialFactory::CloneAndPatch` for partial-update flows).
         bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
-        bool UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred);
         bool RemoveProvider(std::string const& name);
         void SetDefaultProvider(std::string const& name);
+
+        // Atomic read-modify-write — looks up `name`, invokes `mutator(existing)` under
+        // unique_lock, stores the returned credential in place.  Mutator receives
+        // `ICredential const&` and returns a new `std::unique_ptr<ICredential>` (or
+        // nullptr to abort the update).  Returns true if the credential existed and was
+        // replaced; false if not found or mutator returned nullptr.
+        //
+        // Use for partial-update flows that read existing fields, derive a patched
+        // credential, and must not race against a concurrent RemoveProvider between
+        // the read and the write.
+        template <typename F>
+        bool ModifyCredential(std::string const& name, F&& mutator)
+        {
+            std::unique_lock lock(m_Mutex);
+            auto it = m_Credentials.find(name);
+            if (it == m_Credentials.end())
+            {
+                return false;
+            }
+            std::unique_ptr<ICredential> updated = std::forward<F>(mutator)(*it->second);
+            if (!updated)
+            {
+                return false;
+            }
+            updated->m_Name = name;
+            updated->RegisterSecrets();
+            it->second = std::move(updated);
+            m_Dirty.store(true);
+            return true;
+        }
+
+        // Atomic add-or-update — invokes `builder(existing)` under unique_lock, where
+        // `existing` is a pointer to the current credential or `nullptr` if `name` is
+        // new.  Builder returns the credential to store; returning nullptr is a no-op
+        // (the registry is left untouched).
+        //
+        // Use when a flow may legitimately create the credential OR update an existing
+        // one in a single atomic operation (e.g. OAuth callback persisting freshly-
+        // issued tokens whether or not the user pre-created a same-named provider).
+        template <typename F>
+        void UpsertCredential(std::string const& name, F&& builder)
+        {
+            std::unique_lock lock(m_Mutex);
+            auto it = m_Credentials.find(name);
+            ICredential const* existing = (it != m_Credentials.end()) ? it->second.get() : nullptr;
+            std::unique_ptr<ICredential> updated = std::forward<F>(builder)(existing);
+            if (!updated)
+            {
+                return;
+            }
+            updated->m_Name = name;
+            updated->RegisterSecrets();
+            bool const isInsert = (existing == nullptr);
+            m_Credentials[name] = std::move(updated);
+            m_Dirty.store(true);
+            if (isInsert && m_Credentials.size() == 1)
+            {
+                m_DefaultProviderName = name;
+            }
+        }
 
     private:
         // Parse a JSON string into the credential registry.  Dispatches each provider
@@ -141,7 +257,14 @@ namespace AIAssistant
 
         KeyLoadStatus m_KeyLoadStatus{KeyLoadStatus::NoKeysFile};
         std::filesystem::path m_KeysFilePath;
-        SecureString m_CachedMasterPassword;
-        bool m_Dirty{false};
+
+        // Master password held in mlock-locked memory after Unlock succeeds.
+        // Read via WithMasterPassword(); written by Load/Save under
+        // m_MasterPasswordMutex.  Separate from m_Mutex so callbacks invoked
+        // via WithMasterPassword can re-enter the KeyManager safely.
+        mutable std::shared_mutex m_MasterPasswordMutex;
+        SecureString m_MasterPassword;
+
+        std::atomic<bool> m_Dirty{false};
     };
 } // namespace AIAssistant

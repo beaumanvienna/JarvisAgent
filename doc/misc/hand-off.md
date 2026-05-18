@@ -15,6 +15,109 @@ Keep entries self-contained — a fresh-context Claude should be able to read ju
 
 ---
 
+## 2026-05-17 (Markitdown test fix + KeyManager hardening: master-password seal rename + GetCredential→With/Modify/Upsert refactor) → next session
+
+Two hardening items + carry-over test fix landed in one sitting, plus the routine new-AI-provider plumbing (qwen 7b + Anthropic).  All in working tree, not yet committed.
+
+### What landed
+
+| Theme | Files | Why |
+|---|---|---|
+| **`test_markitdown_cntx.py` fix** | `test/dispatch/test_markitdown_cntx.py` | Test had been failing since the parser was hardened to reject absolute paths in `queue_binding.cntx_files` (`IsAcceptedRelativePath` in `workflowJsonParserDetails.h`).  Test now transmits a project-root-relative path (`workflows/in.pdf`) prefixed with `6× "../"` to climb from the resolved adhoc working_directory (`<projectRoot>/_adhoc/<user>/<folder>/queue/<wfid>/<task>` — 6 segments deep) back to project root.  Off-by-one caught on first run because the workflow base directory is the **extracted** JCWF folder, not the parent `workflows/` folder.  CLI flag renamed `--pdf-path` → `--pdf-relative-path`; client-side existence check joins with `REPO_ROOT`. |
+| **Master-password seal rename + thread-safety fix** | `engine/keys/keyManager.{h,cpp}`, `application/web/webServer.cpp`, `doc/cloud-integration.md` | The "cached master password" wording (`m_CachedMasterPassword`, `WithCachedMasterPassword`, `HasCachedMasterPassword`) was misleading — it suggested a duplicate cache when in fact the field IS the single mlock-protected copy of the master password held after a successful unlock.  Renamed to `m_MasterPassword` / `WithMasterPassword` and dropped the unused `HasCachedMasterPassword` predicate.  Audit's HIGH finding from `combinedCyberSecAudit.md` item 136 closed in the same change: `m_Dirty` is now `std::atomic<bool>`; the SecureString gets a dedicated `m_MasterPasswordMutex` (separate from `m_Mutex` so callbacks invoked via `WithMasterPassword` can re-enter `Save` without lock-ordering deadlock); `WithMasterPassword` now copies the password under the brief lock into a local SecureString, releases the lock, then invokes the callback against the local copy.  All metadata writes (`m_Dirty.store()`, `m_MasterPassword.Set()`, `m_Credentials.size()` reads in log lines) are now race-free across `Load` / `Save` / `LoadPlaintext` / `SavePlaintext`.  Live-reproduced the bug end-to-end pre-fix (two consecutive empty-body `POST /api/settings/providers/save` calls returned `wrong_password` on the second one with the cache populated correctly from a prior unlock) and verified the fix end-to-end post-rebuild (four consecutive empty-body saves all returned `ok`, no `KeyEncryption::Decrypt: authentication failed` log lines). |
+| **`GetCredential` TOCTOU close — full callback API conversion** | `engine/keys/keyManager.{h,cpp}`, 28 caller sites across `application/cloud/` (14 connectors), `application/workflow/` (aiRequestPool x2, polarionClient filter, workflowRuntimeManager existence checks x2), `application/web/` (webServer 4 sites, aiJcwfService), `engine/keys/oauthTokenManager.cpp`, `engine/keys/credential.h` doc, `engine/keys.md`, `doc/cloud-integration.md` | Old API returned `ICredential const*` after releasing the internal `shared_lock`, leaving callers free to dereference the pointer past a concurrent `RemoveProvider`.  Pre-existing latent vulnerability flagged in `todo.md` "S2 sitting 17-20 review" deferral list.  Replaced with: `WithCredential(name, fn)` / `WithDefaultCredential(fn)` for read-only access (callback holds shared_lock for its duration); `HasCredential(name)` / `HasDefaultCredential()` for cheap existence checks; `ModifyCredential(name, mutator)` for atomic read-modify-write under one `unique_lock` (used by `HandleProviderUpdatePut` — was previously `Get → CloneAndPatch → Update`, now atomic); `UpsertCredential(name, builder)` for atomic add-or-update under one `unique_lock` (used by the OAuth callback — was previously `Get → (Update or Add)` based on existing, now one operation).  `GetCredential` / `GetDefaultCredential` / `UpdateCredential` removed from the public surface per `feedback_no_legacy`.  Migration is mechanical (most call sites: pointer-deref → lambda receives reference, `dynamic_cast<X*>(cred)` → `dynamic_cast<X*>(&cred)`).  Closes the race that motivated the deferral. |
+| **Routine ops touched up in passing** | `keys.json.enc` (encrypted) | New `localhost/ollama/qwen2.5-coder:7b/API1` AI interface (sibling to the existing 32b entry) + new `ollama` provider entry (placeholder API key — Ollama ignores it but j9t requires a registered provider for `key_name` resolution to succeed).  Also registered the `Anthropic` provider (was missing — three Anthropic interfaces had been showing offline despite $15 funded credits; root cause was no provider registered, not credits).  All three Anthropic interfaces now live-verified (haiku 1.7s, opus 1.9s, sonnet 1.7s).  Test containers (redmine, azurite, fake-gcs, greenmail, mailpit, minio) brought back up via `docker start` after a Zorin host crash (Nvidia 585 driver SOFTLOCKUP; JC moved to 595). |
+
+### What's verified
+
+| Check | Result |
+|---|---|
+| All 4 binaries build clean | Studio Debug + Release + Engine Debug + Release all green, `-Wall -Wextra -Wpedantic` zero warnings.  Built twice this session (after each of the two KeyManager changes). |
+| Markitdown contract test | `python3 test/dispatch/test_markitdown_cntx.py` — green.  Markitdown converted 8.4 MB PDF → 587 KB markdown in 17.4s; dispatch reached succeeded; `CNTX_*.md` artefact in the run folder; no ERROR lines in the log. |
+| Save round-trip after master-password seal rename | Four consecutive empty-body `POST /api/settings/providers/save` calls all returned `ok` with the seal populated from a prior unlock.  This was the failing case pre-fix (second call returned `wrong_password`). |
+| KeyManager API smoke test after `GetCredential` refactor | Restarted j9t Studio Debug, unlocked, exercised: provider list (`WithCredential` x18), AI interface test on qwen 7b (`WithCredential` in `aiJcwfService` dispatch — 1.5s response), `ModifyCredential` PUT on `ollama` provider (display_name patched + read-back verified + restored), encrypt-and-save.  Zero ERROR lines. |
+| Anthropic + qwen interfaces live | Tested all three Anthropic models through the j9t test endpoint after registering the Anthropic provider; tested qwen 7b through the same path.  Latencies: qwen 7b 5.7s cold / 1.5s warm, anthropic 1.7-1.9s. |
+
+### Architecture notes for next-session-Claude
+
+- **The "cached master password" wording is gone.**  `m_MasterPassword` is the **single** mlock-protected copy of the master password, populated by a successful `KeyManager::Load` (Unlock path) or `KeyManager::Save` (which re-confirms or re-seals on first-run bootstrap).  `WithMasterPassword(F&& fn)` is the only legitimate way to use it; callbacks get a `std::string_view` into a brief local SecureString copy (released before the callback runs) so re-entry into `KeyManager::Save` from inside the callback is safe.  There is no other cache.  No env-var auto-unlock exists (and the save handler comment at `webServer.cpp:6317` explicitly documents this — "There is no env-var fallback").
+- **Master-password-seal mutex is separate from the credential-registry mutex.**  `m_MasterPasswordMutex` protects the SecureString; `m_Mutex` protects `m_Credentials` + `m_DefaultProviderName`.  Don't merge them — the OAuth callback's `WithMasterPassword(lambda)` where the lambda calls `Save` (which takes `m_Mutex` internally) would deadlock if both used the same mutex.
+- **`m_Dirty` is now `std::atomic<bool>`.**  Read via `IsDirty()` (uses `.load()`); write via `.store(true/false)`.  The 9 mutation sites that touched `m_Dirty` are all converted.  Any future site that reads/writes the field must use atomic semantics — direct assignment will not compile.
+- **`GetCredential` / `GetDefaultCredential` / `UpdateCredential` are gone.**  Replaced by callback-based APIs.  The audit-flagged TOCTOU race (read-then-write window where a concurrent `RemoveProvider` would dangle the read pointer) is structurally impossible with the new shapes: `WithCredential` holds the lock for the callback's lifetime; `ModifyCredential` does the whole read-modify-write under one `unique_lock`; `UpsertCredential` does add-or-update atomically.  The callback contract documented in `keyManager.h`: callbacks under `With*` (shared_lock) MUST NOT call back into write-side `KeyManager` methods (would deadlock against the held shared_lock).  Read-side re-entry is safe.
+- **Adhoc workflow base directory is the extracted JCWF folder.**  `<projectRoot>/_adhoc/<userSlug>/<folderName>/workflows/<workflowId>/` — one level deeper than the unwrapped `workflows/` folder.  This matters for any test or generated JCWF that uses a relative path in `queue_binding.cntx_files` / similar (working_directory text `../../queue/<wfid>/<task>` resolves to a path 6 segments below project root, not 5).  Bit me on the first markitdown test run.
+- **No env-var fallback for master password persisted in the codebase.**  Per memory `feedback_jc_dev_env_vars` clarification: `$JARVIS_MASTER_PASSWORD` lives only in JC's dev shell and is shell-expanded into REST request bodies; j9t never reads any env var for the master password.  The save handler comment at `webServer.cpp:6317` is authoritative.
+
+### Open items / next-session candidates
+
+Carry-over from the §18/§19 hardening leftovers in `todo.md` (12 items as of session start, 1 closed this session — `KeyManager::GetCredential` TOCTOU):
+
+1. **`HandleWorkflowVersionRestorePost` broken since zip migration** — only outright functional bug remaining; mechanical fix (swap `SaveOrUpdateWorkflowFromJson` for the container-aware write path).  ~1 sitting.
+2. **`SanitizeUserSlug` collision risk** — only remaining security item with practical impact; needs stable-hash slug suffix + migration for existing `meta.json`.  ~1 sitting + careful migration.
+3. **Negative-path verification fixtures for D1** — umbrella test sitting that validates all S3 rejection branches + caps with hostile-JCWF Python tests.  High leverage, ~1 dedicated test sitting.
+4. **Editor master-password unlock + MCP login parity with dashboard** — frontend-only work; backend endpoints already edition-agnostic.
+5. **`SecureString`-only path through HTTP layer** — defense-in-depth; threads `SecureString const&` through bearer-token builders to eliminate heap residue after request returns.
+6. **Atomic-write (write-to-temp + rename) for hand-built JSON writers** — ~10-15 writer sites; SIGKILL-mid-write robustness.
+7. **`std::ofstream` exception-safety enable across writer sites** — ~20+ writer sites; disk-full silent-truncation robustness.
+8. **`std::expected<T,E>` API-shape sweep** — public methods using `bool + std::string& errorMessage` out-params; mechanical, big aggregate diff.
+9. **`EventQueue` bounded-cap policy** — soft cap + drop-policy choice (needs JC's decision before implementation).
+10. **`ConfigParser` ~30-field boilerplate refactor** — behaviour-neutral polish.
+11. **Hardening test for malformed `config.json`** — synthetic-input test sweep.
+12. **`RedactingFormatter::format` per-line allocation** — pure perf; defer until profiling shows it as hot.
+13. **SigV4 signer typed-credential refactor** — wait until first real Bedrock customer or bundle with a fixture.
+14. **`KeyManager::SetDefaultProvider` empty-name handling** — audit MEDIUM finding (line 2446 of `combinedCyberSecAudit.md`), `name.empty()` branch silently clears the default; consider explicit `ClearDefaultProvider()` separator.
+
+Plus the dual `engine/keys/keyManager.h` audit findings flagged in `combinedCyberSecAudit.md` item 136 that ARE NOT yet addressed:
+
+- **HIGH TOCTOU race in `Unlock` between `filesystem::exists` and `Load`** (line 2398) — `SetKeysFilePath` is racy with `Unlock`'s exists-check.  Mitigated in practice (path is set at startup and rarely changes), but still worth closing.
+- **HIGH `LoadPlaintext` / `SavePlaintext` available without build-guard** (line 2414) — needs `#ifdef J9T_DEVELOPMENT_BUILD` or equivalent.  Pre-existing.
+- **HIGH `ParseProvidersJson` unbounded allocation** (line 2421) — needs caps on provider count + field lengths.
+
+### Gotchas next-session-Claude should know
+
+- **Don't restart j9t lightly.**  Dispatcher state + AIMD caps + observation history live in-memory.  For repeated tests in one j9t, use `POST /api/debug/reset-dispatcher-state` between tests.  When restart IS needed: shut down via `POST /api/shutdown` (never `pkill` — bypasses keystore re-seal + audit-log flush; see `feedback_shutdown_via_rest`).
+- **Working tree contents (uncommitted)** — both KeyManager hardening changes + the test fix + the doc-sweep updates + the encrypted `keys.json.enc` mtime bump (Ollama + Anthropic provider entries persisted).  `keys.json.enc` is gitignored AFAICT but verify before commit.
+- **All 4 build configs verified post-final-change.**  If a future change touches `keyManager.h` (which is included by ~30 .cpp files via transitive headers), incremental builds may surprise — touch the source to force recompile.
+- **The qwen 7b + Anthropic interface additions are in `config.json`** — non-secret config that does get committed.  `keys.json.enc` is the encrypted secrets.
+- **Test containers** — redmine / azurite / fake-gcs / greenmail / mailpit / minio were brought up via `docker start` (preserved data from prior sessions: Redmine seed config, MinIO buckets).  If JC has another host crash, `docker start <names>` is the resume path — much faster than `docker run` from scratch.
+
+### Files in working tree (uncommitted)
+
+```
+ M test/dispatch/test_markitdown_cntx.py             # relative-path fix + 6× ../ depth correction
+ M engine/keys/keyManager.h                          # m_MasterPassword rename + m_MasterPasswordMutex + atomic m_Dirty + WithCredential/ModifyCredential/UpsertCredential/HasCredential/HasDefaultCredential
+ M engine/keys/keyManager.cpp                        # locking fixes for Load/Save/LoadPlaintext/SavePlaintext + HasCredential/HasDefaultCredential impls + removed GetCredential/GetDefaultCredential/UpdateCredential
+ M engine/keys/oauthTokenManager.cpp                 # WithCredential migration in HydrateFromKeyManager
+ M engine/keys/credential.h                          # doc comment updated for callback API
+ M engine/keys.md                                    # KeyManager surface section updated
+ M application/web/webServer.cpp                     # WithMasterPassword rename in 4 sites + 4 GetCredential migrations + ModifyCredential in HandleProviderUpdatePut + UpsertCredential in OAuth callback + HasCredential in HandleProviderSetDefaultPost
+ M application/web/aiJcwfService.cpp                 # WithCredential migration in TestAiInterface
+ M application/workflow/aiRequestPool.cpp            # WithCredential/WithDefaultCredential migration in ResolveApiKey + ResolveProviderParams
+ M application/workflow/workflowRuntimeManager.cpp   # HasCredential / HasDefaultCredential migration in CheckAiProviderPrerequisites
+ M application/workflow/filter/polarionClient.cpp    # WithCredential migration in FetchAll
+ M application/workflow/doc/perItem_structureTriggers.md  # KeyManager API ref updated
+ M application/cloud/azureBlobConnector.cpp          # WithCredential migration in ResolveCredentials
+ M application/cloud/emailConnector.cpp              # ...
+ M application/cloud/gcsConnector.cpp                # ...
+ M application/cloud/gitHubConnector.cpp             # ...
+ M application/cloud/googleSheetsConnector.cpp       # ...
+ M application/cloud/jiraConnector.cpp               # ...
+ M application/cloud/polarionConnector.cpp           # ...
+ M application/cloud/postgresConnector.cpp           # ...
+ M application/cloud/redmineConnector.cpp            # ...
+ M application/cloud/s3Connector.cpp                 # ...
+ M application/cloud/slackConnector.cpp              # ...
+ M application/cloud/snowflakeConnector.cpp          # ...
+ M doc/cyber security.md                             # RegisterSecrets mutation-path list updated for the new API
+ M doc/cloud-integration.md                          # KeyManager API description rewritten + OAuth-callback persistence wording updated for UpsertCredential
+ M doc/misc/hand-off.md                              # this entry
+   keys.json.enc                                    # encrypted secrets (Ollama + Anthropic provider entries added — gitignored)
+   config.json                                      # qwen 7b interface entry added (saved via REST after the provider POST)
+```
+
+Studio Debug binary is the running one (PID via `pgrep jarvisAgent`).  Keystore is unlocked.  18 providers loaded.  Test containers all up.  Ready for the next session to pick up at any point.
+
+---
+
 ## 2026-05-16 (Concurrent-run policy + EnqueueRunResult refactor) → next session
 
 Single-sitting close-out of the `Concurrent-run policy for JCWFs` Pre-1.0 entry from `todo.md`.  Engine + dashboard + docs all landed in one pass.  Entry removed from `todo.md` (net one TODO down).

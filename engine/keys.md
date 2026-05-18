@@ -187,10 +187,19 @@ public:
     // Runtime unlock: decrypt the stored keys file path with a freshly-supplied password.
     bool Unlock(std::string_view masterPassword);
 
-    // Read access (thread-safe, shared lock).  Callers `dynamic_cast` to the expected
-    // concrete subtype with fail-closed null-check on type mismatch.
-    ICredential const* GetCredential(std::string const& name) const;
-    ICredential const* GetDefaultCredential() const;
+    // Read access via callback.  The callback runs while a shared_lock is held, so
+    // the `ICredential const&` reference is guaranteed live for the call's duration.
+    // Callers MUST NOT store the reference (or pointers to its fields) beyond the
+    // callback — a subsequent RemoveProvider would invalidate it.  Callbacks MUST NOT
+    // re-enter write-side methods on the same KeyManager (would deadlock against the
+    // held shared_lock); read-side re-entry (other With/Has) is fine.
+    template <typename F> bool WithCredential(std::string const& name, F&& fn) const;
+    template <typename F> bool WithDefaultCredential(F&& fn) const;
+
+    // Existence checks (cheap shared_lock + map lookup).
+    bool HasCredential(std::string const& name) const;
+    bool HasDefaultCredential() const;
+
     std::vector<std::string> GetProviderNames() const;
     bool HasProviders() const;
 
@@ -198,9 +207,20 @@ public:
     // REST handlers build via `CredentialFactory::CreateFromJson` (CREATE) or
     // `CredentialFactory::CloneAndPatch` (UPDATE).
     bool AddCredential(std::string const& name, std::unique_ptr<ICredential> cred);
-    bool UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred);
     bool RemoveProvider(std::string const& name);
     void SetDefaultProvider(std::string const& name);
+
+    // Atomic read-modify-write under unique_lock — mutator(existing) → new credential.
+    // Returns false if `name` doesn't exist or mutator returned nullptr.  Closes the
+    // race window between an old-style read-then-write pair where a concurrent
+    // RemoveProvider would dangle.
+    template <typename F> bool ModifyCredential(std::string const& name, F&& mutator);
+
+    // Atomic add-or-update under unique_lock — builder(existing_or_null) → new credential.
+    // Use when the flow may legitimately create or update in one operation (e.g. OAuth
+    // callback persisting freshly-issued tokens whether or not the user pre-created a
+    // same-named provider).
+    template <typename F> void UpsertCredential(std::string const& name, F&& builder);
 
 private:
     std::string m_DefaultProviderName;
@@ -212,11 +232,15 @@ private:
 Consumer pattern (every cloud connector + every credential consumer):
 
 ```cpp
-auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-if (!cred) { /* not found */ }
-auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
-if (!api) { /* wrong type — fail closed, don't fall through to other types */ }
-auto const bearerToken = std::string(api->m_ApiKey.Get());  // request-scoped plaintext
+std::string bearerToken;
+bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+    [&](ICredential const& cred)
+    {
+        auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
+        if (!api) { /* wrong type — fail closed, don't fall through to other types */ return; }
+        bearerToken.assign(api->m_ApiKey.Get());  // request-scoped plaintext copy
+    });
+if (!found) { /* not found */ }
 // use bearerToken in Authorization header for the duration of this HTTP request
 ```
 

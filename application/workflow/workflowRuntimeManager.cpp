@@ -2884,7 +2884,7 @@ namespace AIAssistant
         {
             if (providerName.empty())
             {
-                if (keyManager.GetDefaultCredential() == nullptr)
+                if (!keyManager.HasDefaultCredential())
                 {
                     LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires system default "
                                  "provider, but no default provider is configured",
@@ -2911,7 +2911,7 @@ namespace AIAssistant
                     keyName = providerName;
                 }
 
-                if (keyManager.GetCredential(keyName) == nullptr)
+                if (!keyManager.HasCredential(keyName))
                 {
                     LOG_APP_WARN("Blocked workflow run '{}': ai_call task requires provider '{}' "
                                  "(key '{}') which is not configured",

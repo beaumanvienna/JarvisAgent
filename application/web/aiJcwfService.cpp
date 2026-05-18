@@ -1172,24 +1172,31 @@ namespace AIAssistant
         std::string apiKey;
         std::unordered_map<std::string, std::string> providerParams;
         {
-            auto const* cred = iface.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
-                                                       : Core::g_Core->GetKeyManager().GetCredential(iface.m_KeyName);
-            if (cred != nullptr)
+            auto extract = [&](ICredential const& cred)
             {
                 // ApiKeyCredential is the bearer-secret case (OpenAI, Anthropic, Gemini, Azure).
                 // OAuthCredential carries the cached access token in m_AccessToken (rotated by
                 // OAuthTokenManager's hydrate / refresh paths; the cache is what gets persisted
                 // into KeyManager and read here).  Other subtypes don't fit AI dispatch and
                 // leave apiKey empty — the empty-check below produces a clear error.
-                if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
+                if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
                 {
                     apiKey = std::string(api->m_ApiKey.Get());
                 }
-                else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
+                else if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
                 {
                     apiKey = std::string(oauth->m_AccessToken.Get());
                 }
-                providerParams = cred->m_Params;
+                providerParams = cred.m_Params;
+            };
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (iface.m_KeyName.empty())
+            {
+                keyManager.WithDefaultCredential(extract);
+            }
+            else
+            {
+                keyManager.WithCredential(iface.m_KeyName, extract);
             }
         }
 

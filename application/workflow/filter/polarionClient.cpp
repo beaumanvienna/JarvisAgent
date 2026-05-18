@@ -136,28 +136,37 @@ namespace AIAssistant
             return {};
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(source.m_KeyName);
-        if (!cred)
-        {
-            errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName + "' not found in KeyManager";
-            return {};
-        }
-        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
-        if (!api)
-        {
-            errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName +
-                           "' must be ApiKeyCredential — Polarion requires a PAT";
-            return {};
-        }
-        if (api->m_ApiKey.IsEmpty())
-        {
-            errorMessage =
-                "filter '" + filter.m_Id + "': credential '" + source.m_KeyName + "' is missing api_key (Bearer token)";
-            return {};
-        }
         // Polarion PAT: api_key stores the Bearer token (Personal Access Token).  Materialise
         // SecureString into request-scoped std::string for the HTTPS calls below.
-        std::string const bearerToken(api->m_ApiKey.Get());
+        std::string bearerToken;
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(source.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
+                if (!api)
+                {
+                    errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName +
+                                   "' must be ApiKeyCredential — Polarion requires a PAT";
+                    return;
+                }
+                if (api->m_ApiKey.IsEmpty())
+                {
+                    errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName +
+                                   "' is missing api_key (Bearer token)";
+                    return;
+                }
+                bearerToken.assign(api->m_ApiKey.Get());
+            });
+        if (!found)
+        {
+            errorMessage = "filter '" + filter.m_Id + "': credential '" + source.m_KeyName +
+                           "' not found in KeyManager";
+            return {};
+        }
+        if (!errorMessage.empty())
+        {
+            return {};
+        }
 
         uint32_t const pageSize = (source.m_PageSize > 0) ? source.m_PageSize : DEFAULT_PAGE_SIZE;
         size_t const maxItems = filter.m_MaxItems;

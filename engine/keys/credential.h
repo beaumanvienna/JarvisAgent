@@ -38,9 +38,11 @@ namespace AIAssistant
     // copy-prone std::string.
     //
     // Ownership: KeyManager stores `std::unique_ptr<ICredential>` in its registry.
-    // Callers receive `ICredential const*` from `KeyManager::GetCredential(name)` and
-    // dynamic_cast to the concrete subtype that matches `GetType()`.  Subtypes are
-    // movable but not copyable (SecureString is non-copyable by design).
+    // Callers access credentials through callback-based APIs
+    // (`KeyManager::WithCredential(name, fn)` / `WithDefaultCredential(fn)`); the
+    // callback receives an `ICredential const&` that's valid only for the call's
+    // duration, then dynamic_casts to the concrete subtype that matches `GetType()`.
+    // Subtypes are movable but not copyable (SecureString is non-copyable by design).
     //
     // Subtype map (matches the historical `credential_type` JSON field):
     //   - "api_key"     — `ApiKeyCredential`     (OpenAI, Anthropic, Gemini, Azure, GitHub PAT, Slack bot, etc.)

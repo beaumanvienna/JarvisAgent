@@ -59,35 +59,36 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
+        // Jira Cloud uses email + API token (BasicAuthCredential); Jira Data Center uses
+        // a Personal Access Token (ApiKeyCredential).  Both shapes are valid here — try
+        // the type-specific casts in order, fail closed if neither matches.
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
+                {
+                    credentials.m_AuthType = CloudAuthType::BasicAuth;
+                    credentials.m_Username = basic->m_Username;
+                    credentials.m_Password = std::string(basic->m_Password.Get());
+                }
+                else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
+                {
+                    credentials.m_AuthType = CloudAuthType::BearerToken;
+                    credentials.m_Token = std::string(api->m_ApiKey.Get());
+                }
+                else
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be BasicAuthCredential (Jira Cloud) or "
+                                   "ApiKeyCredential (Jira Data Center)";
+                }
+            });
+        if (!found)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-
-        // Jira Cloud uses email + API token (BasicAuthCredential); Jira Data Center uses
-        // a Personal Access Token (ApiKeyCredential).  Both shapes are valid here — try
-        // the type-specific casts in order, fail closed if neither matches.
-        if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
-        {
-            credentials.m_AuthType = CloudAuthType::BasicAuth;
-            credentials.m_Username = basic->m_Username;
-            credentials.m_Password = std::string(basic->m_Password.Get());
-        }
-        else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
-        {
-            credentials.m_AuthType = CloudAuthType::BearerToken;
-            credentials.m_Token = std::string(api->m_ApiKey.Get());
-        }
-        else
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be BasicAuthCredential (Jira Cloud) or ApiKeyCredential (Jira Data Center)";
-            return false;
-        }
-
-        return true;
+        return errorMessage.empty();
     }
 
     bool JiraConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)

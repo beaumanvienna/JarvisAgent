@@ -59,30 +59,33 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
+        // Redmine API key is sent via the X-Redmine-API-Key header (not Bearer). We store the
+        // key in m_Token; the executor reads it directly and builds the X-Redmine-API-Key header.
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
+                if (!api)
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be ApiKeyCredential — Redmine requires an API access key";
+                    return;
+                }
+                if (api->m_ApiKey.IsEmpty())
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' has no api_key — Redmine requires an API access key";
+                    return;
+                }
+                credentials.m_AuthType = CloudAuthType::BearerToken;
+                credentials.m_Token = std::string(api->m_ApiKey.Get());
+            });
+        if (!found)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
-        if (!api)
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be ApiKeyCredential — Redmine requires an API access key";
-            return false;
-        }
-        if (api->m_ApiKey.IsEmpty())
-        {
-            errorMessage = "Credential '" + connection.m_KeyName + "' has no api_key — Redmine requires an API access key";
-            return false;
-        }
-
-        // Redmine API key is sent via the X-Redmine-API-Key header (not Bearer). We store the
-        // key in m_Token; the executor reads it directly and builds the X-Redmine-API-Key header.
-        credentials.m_AuthType = CloudAuthType::BearerToken;
-        credentials.m_Token = std::string(api->m_ApiKey.Get());
-        return true;
+        return errorMessage.empty();
     }
 
     bool RedmineConnector::TestConnection(CloudConnection const& connection, std::string& errorMessage)

@@ -493,7 +493,7 @@ Other credential registration sites (outside the typed hierarchy):
 | Webhook HMAC shared secrets | `TriggerEngine::AddWebhookTrigger` |
 | Azure Storage Shared Keys (transient `CloudCredentials::m_SecretKey`) | `AzureBlobConnector::ResolveCredentials` (defense-in-depth — KeyManager already registered the underlying SecureString) |
 
-`KeyManager` calls `cred->RegisterSecrets()` from every mutation path: keystore load (`ParseProvidersJson`), REST `POST /api/settings/providers` (`AddCredential`), REST `PUT /api/settings/providers/<name>` (`UpdateCredential`), and the `OPENAI_API_KEY` environment fallback (`LoadFromEnvironment`).  Adding a new credential subtype requires extending the hierarchy AND providing a `RegisterSecrets()` override — the virtual call site is the single point that drives redactor wiring.
+`KeyManager` calls `cred->RegisterSecrets()` from every mutation path: keystore load (`ParseProvidersJson`), REST `POST /api/settings/providers` (`AddCredential`), REST `PUT /api/settings/providers/<name>` (`ModifyCredential`), the OAuth callback (`UpsertCredential`), and the `OPENAI_API_KEY` environment fallback (`LoadFromEnvironment`).  Adding a new credential subtype requires extending the hierarchy AND providing a `RegisterSecrets()` override — the virtual call site is the single point that drives redactor wiring.
 
 For MCP raw keys, registration happens at the four creation sites and at successful `Authenticate` only — failed authentication attempts (wrong hash / unknown keyId) take the early-return paths without registering, so an attacker spamming guesses cannot pollute the redactor's value pool with attacker-chosen strings.
 

@@ -49,13 +49,6 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
-        {
-            errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
-            return false;
-        }
-
         credentials.m_AuthType = CloudAuthType::SigV4;
 
         // Support three storage conventions, in order of preference:
@@ -63,36 +56,48 @@ namespace AIAssistant
         // 2. BasicAuthCredential — username = access key ID, password = secret key (legacy).
         // 3. ApiKeyCredential — api_key = "ACCESS_KEY_ID:SECRET_KEY" colon-split (legacy).
         // Fail closed if none match.
-        if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
-        {
-            credentials.m_AccessKeyId = aws->m_AccessKeyId;
-            credentials.m_SecretKey   = std::string(aws->m_SecretAccessKey.Get());
-        }
-        else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
-        {
-            credentials.m_AccessKeyId = basic->m_Username;
-            credentials.m_SecretKey   = std::string(basic->m_Password.Get());
-        }
-        else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
-        {
-            std::string_view apiKeyView = api->m_ApiKey.Get();
-            size_t const colonPos = apiKeyView.find(':');
-            if (colonPos != std::string_view::npos && colonPos > 0 && colonPos < apiKeyView.size() - 1)
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
             {
-                credentials.m_AccessKeyId = std::string(apiKeyView.substr(0, colonPos));
-                credentials.m_SecretKey   = std::string(apiKeyView.substr(colonPos + 1));
-            }
-            else
-            {
-                errorMessage = "Credential '" + connection.m_KeyName +
-                               "' api_key must be in 'ACCESS_KEY_ID:SECRET_KEY' format for S3";
-                return false;
-            }
-        }
-        else
+                if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
+                {
+                    credentials.m_AccessKeyId = aws->m_AccessKeyId;
+                    credentials.m_SecretKey   = std::string(aws->m_SecretAccessKey.Get());
+                }
+                else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
+                {
+                    credentials.m_AccessKeyId = basic->m_Username;
+                    credentials.m_SecretKey   = std::string(basic->m_Password.Get());
+                }
+                else if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
+                {
+                    std::string_view apiKeyView = api->m_ApiKey.Get();
+                    size_t const colonPos = apiKeyView.find(':');
+                    if (colonPos != std::string_view::npos && colonPos > 0 && colonPos < apiKeyView.size() - 1)
+                    {
+                        credentials.m_AccessKeyId = std::string(apiKeyView.substr(0, colonPos));
+                        credentials.m_SecretKey   = std::string(apiKeyView.substr(colonPos + 1));
+                    }
+                    else
+                    {
+                        errorMessage = "Credential '" + connection.m_KeyName +
+                                       "' api_key must be in 'ACCESS_KEY_ID:SECRET_KEY' format for S3";
+                    }
+                }
+                else
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be AwsCredential, BasicAuthCredential, or "
+                                   "ApiKeyCredential ('ID:SECRET' format)";
+                }
+            });
+        if (!found)
         {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be AwsCredential, BasicAuthCredential, or ApiKeyCredential ('ID:SECRET' format)";
+            errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
+            return false;
+        }
+        if (!errorMessage.empty())
+        {
             return false;
         }
 

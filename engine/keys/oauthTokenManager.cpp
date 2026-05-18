@@ -127,10 +127,31 @@ namespace AIAssistant
         for (auto const& name : names)
         {
             // Pull the typed credential — only OAuthCredential entries are hydrated.
-            // Non-OAuth subtypes return null on the dynamic_cast and are skipped silently.
-            auto const* cred = m_KeyManager.GetCredential(name);
-            auto const* oauth = dynamic_cast<OAuthCredential const*>(cred);
-            if (!oauth || oauth->m_RefreshToken.IsEmpty())
+            // Non-OAuth subtypes are skipped silently.  Build a TokenEntry while we hold
+            // the KeyManager's read-lock (inside the callback), then insert into m_Tokens
+            // after release.  Two-step: first decide whether to hydrate + copy fields out,
+            // then take m_Mutex and insert.
+            TokenEntry entry;
+            bool shouldHydrate = false;
+            m_KeyManager.WithCredential(name,
+                [&](ICredential const& cred)
+                {
+                    auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred);
+                    if (!oauth || oauth->m_RefreshToken.IsEmpty())
+                    {
+                        return;
+                    }
+                    // m_AccessToken intentionally left empty — forces refresh on first use.
+                    entry.m_RefreshToken.Set(oauth->m_RefreshToken.Get());
+                    entry.m_TokenEndpoint = oauth->m_TokenEndpoint;
+                    entry.m_ClientId      = oauth->m_ClientId;
+                    if (!oauth->m_ClientSecret.IsEmpty())
+                    {
+                        entry.m_ClientSecret.Set(oauth->m_ClientSecret.Get());
+                    }
+                    shouldHydrate = true;
+                });
+            if (!shouldHydrate)
             {
                 continue;
             }
@@ -139,16 +160,6 @@ namespace AIAssistant
             if (m_Tokens.find(name) != m_Tokens.end())
             {
                 continue; // already hydrated (e.g. from an in-session OAuth callback)
-            }
-
-            TokenEntry entry;
-            // m_AccessToken intentionally left empty — forces refresh on first use.
-            entry.m_RefreshToken.Set(oauth->m_RefreshToken.Get());
-            entry.m_TokenEndpoint = oauth->m_TokenEndpoint;
-            entry.m_ClientId      = oauth->m_ClientId;
-            if (!oauth->m_ClientSecret.IsEmpty())
-            {
-                entry.m_ClientSecret.Set(oauth->m_ClientSecret.Get());
             }
             entry.m_ExpiresAt = 0;                 // expired → next GetAccessToken triggers refresh
 

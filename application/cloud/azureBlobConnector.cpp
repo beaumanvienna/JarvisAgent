@@ -72,13 +72,6 @@ namespace AIAssistant
         }
 
         // Default: Azure Shared Key auth
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
-        {
-            errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
-            return false;
-        }
-
         credentials.m_AuthType = CloudAuthType::AzureSharedKey;
 
         // Two storage conventions supported, in order of preference:
@@ -86,18 +79,31 @@ namespace AIAssistant
         // 2. BasicAuthCredential — password holds the account key (account name in username,
         //    or in connection.m_Params["account_name"] below).
         // Fail closed if neither matches.
-        if (auto const* api = dynamic_cast<ApiKeyCredential const*>(cred))
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                if (auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred))
+                {
+                    credentials.m_SecretKey = std::string(api->m_ApiKey.Get());
+                }
+                else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(&cred))
+                {
+                    credentials.m_SecretKey = std::string(basic->m_Password.Get());
+                }
+                else
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be ApiKeyCredential (Base64 account key) or "
+                                   "BasicAuthCredential";
+                }
+            });
+        if (!found)
         {
-            credentials.m_SecretKey = std::string(api->m_ApiKey.Get());
+            errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
+            return false;
         }
-        else if (auto const* basic = dynamic_cast<BasicAuthCredential const*>(cred))
+        if (!errorMessage.empty())
         {
-            credentials.m_SecretKey = std::string(basic->m_Password.Get());
-        }
-        else
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be ApiKeyCredential (Base64 account key) or BasicAuthCredential";
             return false;
         }
 

@@ -102,23 +102,35 @@ namespace AIAssistant
             return false;
         }
 
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
+        // Generate a Snowflake JWT (1-hour expiry).  PEM is materialised into a request-
+        // scoped std::string for the JwtGenerator call; the SecureString remains intact in
+        // KeyManager storage.
+        std::string privateKeyPem;
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                auto const* keyPair = dynamic_cast<KeyPairCredential const*>(&cred);
+                if (!keyPair)
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' must be KeyPairCredential — Snowflake requires a key_pair credential";
+                    return;
+                }
+                if (keyPair->m_PrivateKeyPem.IsEmpty())
+                {
+                    errorMessage = "Credential '" + connection.m_KeyName +
+                                   "' has no RSA private key — Snowflake requires a key_pair credential";
+                    return;
+                }
+                privateKeyPem.assign(keyPair->m_PrivateKeyPem.Get());
+            });
+        if (!found)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-        auto const* keyPair = dynamic_cast<KeyPairCredential const*>(cred);
-        if (!keyPair)
+        if (!errorMessage.empty())
         {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' must be KeyPairCredential — Snowflake requires a key_pair credential";
-            return false;
-        }
-        if (keyPair->m_PrivateKeyPem.IsEmpty())
-        {
-            errorMessage = "Credential '" + connection.m_KeyName +
-                           "' has no RSA private key — Snowflake requires a key_pair credential";
             return false;
         }
 
@@ -136,10 +148,6 @@ namespace AIAssistant
             return false;
         }
 
-        // Generate a Snowflake JWT (1-hour expiry).  PEM is materialised into a request-
-        // scoped std::string for the JwtGenerator call; the SecureString remains intact in
-        // KeyManager storage.
-        std::string const privateKeyPem(keyPair->m_PrivateKeyPem.Get());
         std::string jwt =
             JwtGenerator::GenerateSnowflakeJwt(accountIt->second, userIt->second, privateKeyPem, errorMessage);
         if (jwt.empty())

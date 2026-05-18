@@ -997,30 +997,40 @@ namespace AIAssistant
             {
                 return {};
             }
-            auto const* cred = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
-                                                     : Core::g_Core->GetKeyManager().GetCredential(api.m_KeyName);
-            if (cred == nullptr)
+            std::string result;
+            auto extract = [&](ICredential const& cred)
             {
-                return {};
-            }
-            // ApiKeyCredential — bearer secret (OpenAI, Anthropic, Gemini, Azure, Test).
-            if (auto const* apiKey = dynamic_cast<ApiKeyCredential const*>(cred))
+                // ApiKeyCredential — bearer secret (OpenAI, Anthropic, Gemini, Azure, Test).
+                if (auto const* apiKey = dynamic_cast<ApiKeyCredential const*>(&cred))
+                {
+                    result.assign(apiKey->m_ApiKey.Get());
+                    return;
+                }
+                // OAuthCredential — cached access token (rotated by OAuthTokenManager).
+                if (auto const* oauth = dynamic_cast<OAuthCredential const*>(&cred))
+                {
+                    result.assign(oauth->m_AccessToken.Get());
+                    return;
+                }
+                // AwsCredential — access_key_id is public per AWS conventions and is what the
+                // SigV4 signer logs as the credential identifier.  The actual secret material
+                // (secret_access_key + session_token) flows via ResolveProviderParams below.
+                if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
+                {
+                    result = aws->m_AccessKeyId;
+                    return;
+                }
+            };
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (api.m_KeyName.empty())
             {
-                return std::string(apiKey->m_ApiKey.Get());
+                keyManager.WithDefaultCredential(extract);
             }
-            // OAuthCredential — cached access token (rotated by OAuthTokenManager).
-            if (auto const* oauth = dynamic_cast<OAuthCredential const*>(cred))
+            else
             {
-                return std::string(oauth->m_AccessToken.Get());
+                keyManager.WithCredential(api.m_KeyName, extract);
             }
-            // AwsCredential — access_key_id is public per AWS conventions and is what the
-            // SigV4 signer logs as the credential identifier.  The actual secret material
-            // (secret_access_key + session_token) flows via ResolveProviderParams below.
-            if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
-            {
-                return aws->m_AccessKeyId;
-            }
-            return {};
+            return result;
         }
 
         // SigV4 (AWS) needs region + secret_access_key beyond the api_key.  Today's signer
@@ -1032,27 +1042,34 @@ namespace AIAssistant
             ConfigParser::EngineConfig::ApiInterface const& api)
         {
             if (Core::g_Core == nullptr) { return {}; }
-            auto const* cred = api.m_KeyName.empty() ? Core::g_Core->GetKeyManager().GetDefaultCredential()
-                                                     : Core::g_Core->GetKeyManager().GetCredential(api.m_KeyName);
-            if (cred == nullptr)
+            std::unordered_map<std::string, std::string> params;
+            auto extract = [&](ICredential const& cred)
             {
-                return {};
+                params = cred.m_Params;
+                if (auto const* aws = dynamic_cast<AwsCredential const*>(&cred))
+                {
+                    if (!aws->m_SecretAccessKey.IsEmpty())
+                    {
+                        params["secret_access_key"] = std::string(aws->m_SecretAccessKey.Get());
+                    }
+                    if (!aws->m_SessionToken.IsEmpty())
+                    {
+                        params["session_token"] = std::string(aws->m_SessionToken.Get());
+                    }
+                    if (!aws->m_Region.empty())
+                    {
+                        params["region"] = aws->m_Region;
+                    }
+                }
+            };
+            auto& keyManager = Core::g_Core->GetKeyManager();
+            if (api.m_KeyName.empty())
+            {
+                keyManager.WithDefaultCredential(extract);
             }
-            std::unordered_map<std::string, std::string> params = cred->m_Params;
-            if (auto const* aws = dynamic_cast<AwsCredential const*>(cred))
+            else
             {
-                if (!aws->m_SecretAccessKey.IsEmpty())
-                {
-                    params["secret_access_key"] = std::string(aws->m_SecretAccessKey.Get());
-                }
-                if (!aws->m_SessionToken.IsEmpty())
-                {
-                    params["session_token"] = std::string(aws->m_SessionToken.Get());
-                }
-                if (!aws->m_Region.empty())
-                {
-                    params["region"] = aws->m_Region;
-                }
+                keyManager.WithCredential(api.m_KeyName, extract);
             }
             return params;
         }

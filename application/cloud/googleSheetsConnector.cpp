@@ -96,17 +96,25 @@ namespace AIAssistant
         }
 
         // API key auth (for public sheets, read-only)
-        auto const* cred = Core::g_Core->GetKeyManager().GetCredential(connection.m_KeyName);
-        if (!cred)
+        bool resolved = false;
+        bool const found = Core::g_Core->GetKeyManager().WithCredential(connection.m_KeyName,
+            [&](ICredential const& cred)
+            {
+                auto const* api = dynamic_cast<ApiKeyCredential const*>(&cred);
+                if (api && !api->m_ApiKey.IsEmpty())
+                {
+                    credentials.m_AuthType = CloudAuthType::BearerToken;
+                    credentials.m_Token = std::string(api->m_ApiKey.Get());
+                    resolved = true;
+                }
+            });
+        if (!found)
         {
             errorMessage = "Credential '" + connection.m_KeyName + "' not found in KeyManager";
             return false;
         }
-        auto const* api = dynamic_cast<ApiKeyCredential const*>(cred);
-        if (api && !api->m_ApiKey.IsEmpty())
+        if (resolved)
         {
-            credentials.m_AuthType = CloudAuthType::BearerToken;
-            credentials.m_Token = std::string(api->m_ApiKey.Get());
             return true;
         }
 

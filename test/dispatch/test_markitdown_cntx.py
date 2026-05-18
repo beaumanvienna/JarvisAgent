@@ -38,10 +38,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TEST_INTERFACE_NAME = "markitdown_test_dispatch"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_FIXTURE = os.path.join(REPO_ROOT, "test", "dispatch", "fixtures", "api1", "golden_success.json")
-PDF_FIXTURE = os.path.join(REPO_ROOT, "workflows", "in.pdf")
+PDF_PROJECT_RELATIVE_DEFAULT = "workflows/in.pdf"
+
+# Working_directory text — joined against the adhoc workflow base
+# (<projectRoot>/_adhoc/<userSlug>/<folderName>/workflows/<workflowId>/, i.e.
+# the extracted JCWF folder) and normalised, so it resolves to
+# <projectRoot>/_adhoc/<userSlug>/<folderName>/queue/adhoc_markitdown_dispatch/01_ingest.
+TASK_WORKING_DIRECTORY = "../../queue/adhoc_markitdown_dispatch/01_ingest"
+
+# Hops from the resolved working_directory back to project root.  Six
+# segments deep (_adhoc, <userSlug>, <folderName>, queue, <workflowId>, <task>)
+# ⇒ six "../".  Used to build the cntx_files path reference; the parser
+# rejects absolute paths (IsAcceptedRelativePath in workflowJsonParserDetails.h),
+# so we transmit a relative path that the executor resolves back to the
+# on-disk PDF.
+WORKING_DIR_DEPTH = 6
 
 
-def build_jcwf(interface_name: str, pdf_path: str) -> dict:
+def build_jcwf(interface_name: str, pdf_project_relative: str) -> dict:
+    cntx_path = ("../" * WORKING_DIR_DEPTH) + pdf_project_relative
     return {
         "version": "1.0",
         "id": "adhoc_markitdown_dispatch",
@@ -53,19 +68,20 @@ def build_jcwf(interface_name: str, pdf_path: str) -> dict:
                 "type": "ai_call",
                 "label": "Ingest a PDF via markitdown",
                 "mode": "single",
-                "working_directory": "../../queue/adhoc_markitdown_dispatch/01_ingest",
+                "working_directory": TASK_WORKING_DIRECTORY,
                 "params": {"provider": interface_name},
                 "queue_binding": {
                     "stng_files": [{"path": "STNG_x.txt",
                                     "content": "Summarise in one line."}],
                     "task_files": [{"path": "TASK_x.txt",
                                     "content": "Ingest the PDF reference."}],
-                    # Path reference only — parser accepts bare strings as
-                    # path-only entries (no inline content).  The executor sees
-                    # the .pdf extension and auto-runs markitdown.  Absolute
-                    # path avoids relative-path resolution against the adhoc
-                    # working dir.
-                    "cntx_files": [pdf_path],
+                    # Path reference (bare string) so the executor sees the
+                    # .pdf extension and auto-runs markitdown.  Relative form
+                    # required: the parser rejects absolute paths, and
+                    # ConfineUnderProjectRoot in the executor then accepts the
+                    # canonical resolution because it lands inside the project
+                    # tree.
+                    "cntx_files": [cntx_path],
                     "prob_files": [{"path": "PROB_x.txt",
                                     "content": "Describe the document in one sentence."}],
                 },
@@ -123,16 +139,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://localhost:8443")
     parser.add_argument("--token", default=os.environ.get("J9T_TOKEN"))
-    parser.add_argument("--pdf-path", default=PDF_FIXTURE,
-                        help="Absolute path to the PDF used as CNTX input.")
+    parser.add_argument("--pdf-relative-path", default=PDF_PROJECT_RELATIVE_DEFAULT,
+                        help="PDF location relative to the project root "
+                             "(server-side resolution).")
     parser.add_argument("--timeout-seconds", type=int, default=300)
     args = parser.parse_args()
 
     if not args.token:
         print("FAIL: no MCP token provided (use --token or J9T_TOKEN env var)")
         return 1
-    if not os.path.isfile(args.pdf_path):
-        print(f"FAIL: PDF fixture not found at {args.pdf_path}")
+    abs_pdf_path = os.path.join(REPO_ROOT, args.pdf_relative_path)
+    if not os.path.isfile(abs_pdf_path):
+        print(f"FAIL: PDF fixture not found at {abs_pdf_path}")
         return 1
     if not os.path.isfile(FIXTURE_FIXTURE):
         print(f"FAIL: hermetic reply fixture not found at {FIXTURE_FIXTURE}")
@@ -145,10 +163,11 @@ def main() -> int:
         return 1
 
     try:
-        print(f"Submitting with CNTX → {args.pdf_path} ({os.path.getsize(args.pdf_path):,} bytes)")
+        print(f"Submitting with CNTX → {args.pdf_relative_path} "
+              f"({os.path.getsize(abs_pdf_path):,} bytes)")
         r = requests.post(
             f"{args.base_url}/api/workflows/run-adhoc",
-            json={"jcwf": build_jcwf(TEST_INTERFACE_NAME, args.pdf_path),
+            json={"jcwf": build_jcwf(TEST_INTERFACE_NAME, args.pdf_relative_path),
                   "cleanup_policy": "ttl_1h"},
             headers=headers, verify=False, timeout=60,
         )
@@ -212,7 +231,7 @@ def main() -> int:
             print("FAIL: no .output.txt — dispatch did not complete end-to-end")
             return 1
 
-        print(f"OK: markitdown converted {os.path.basename(args.pdf_path)} → "
+        print(f"OK: markitdown converted {os.path.basename(args.pdf_relative_path)} → "
               f"{md_entry['path']} ({size:,} bytes), dispatch reached succeeded.")
         return 0
 

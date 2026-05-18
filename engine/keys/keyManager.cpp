@@ -65,9 +65,18 @@ namespace AIAssistant
             return false;
         }
 
-        m_Dirty = false;
-        m_CachedMasterPassword.Set(masterPassword);
-        LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", m_Credentials.size(), keysFilePath.string());
+        {
+            std::unique_lock pwdLock(m_MasterPasswordMutex);
+            m_MasterPassword.Set(masterPassword);
+        }
+        m_Dirty.store(false);
+
+        size_t credentialCount;
+        {
+            std::shared_lock lock(m_Mutex);
+            credentialCount = m_Credentials.size();
+        }
+        LOG_CORE_INFO("KeyManager::Load: loaded {} provider(s) from '{}'", credentialCount, keysFilePath.string());
         return true;
     }
 
@@ -96,9 +105,18 @@ namespace AIAssistant
         file.write(reinterpret_cast<char const*>(blob.data()), static_cast<std::streamsize>(blob.size()));
         file.close();
 
-        m_Dirty = false;
-        m_CachedMasterPassword.Set(masterPassword);
-        LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", m_Credentials.size(), keysFilePath.string());
+        {
+            std::unique_lock pwdLock(m_MasterPasswordMutex);
+            m_MasterPassword.Set(masterPassword);
+        }
+        m_Dirty.store(false);
+
+        size_t credentialCount;
+        {
+            std::shared_lock lock(m_Mutex);
+            credentialCount = m_Credentials.size();
+        }
+        LOG_CORE_INFO("KeyManager::Save: saved {} provider(s) to '{}'", credentialCount, keysFilePath.string());
         return true;
     }
 
@@ -128,8 +146,14 @@ namespace AIAssistant
             return false;
         }
 
-        m_Dirty = false;
-        LOG_CORE_INFO("KeyManager::LoadPlaintext: loaded {} provider(s) from '{}'", m_Credentials.size(),
+        m_Dirty.store(false);
+
+        size_t credentialCount;
+        {
+            std::shared_lock lock(m_Mutex);
+            credentialCount = m_Credentials.size();
+        }
+        LOG_CORE_INFO("KeyManager::LoadPlaintext: loaded {} provider(s) from '{}'", credentialCount,
                       keysFilePath.string());
         return true;
     }
@@ -152,8 +176,14 @@ namespace AIAssistant
         file << json;
         file.close();
 
-        m_Dirty = false;
-        LOG_CORE_INFO("KeyManager::SavePlaintext: saved {} provider(s) to '{}'", m_Credentials.size(),
+        m_Dirty.store(false);
+
+        size_t credentialCount;
+        {
+            std::shared_lock lock(m_Mutex);
+            credentialCount = m_Credentials.size();
+        }
+        LOG_CORE_INFO("KeyManager::SavePlaintext: saved {} provider(s) to '{}'", credentialCount,
                       keysFilePath.string());
         return true;
     }
@@ -182,7 +212,7 @@ namespace AIAssistant
         m_Credentials["openai"] = std::move(cred);
         m_DefaultProviderName   = "openai";
 
-        m_Dirty = false;
+        m_Dirty.store(false);
         LOG_CORE_INFO("KeyManager::LoadFromEnvironment: created 'openai' provider from OPENAI_API_KEY env var");
         return true;
     }
@@ -213,30 +243,20 @@ namespace AIAssistant
         return false;
     }
 
-    ICredential const* KeyManager::GetCredential(std::string const& name) const
+    bool KeyManager::HasCredential(std::string const& name) const
     {
         std::shared_lock lock(m_Mutex);
-        auto const it = m_Credentials.find(name);
-        if (it == m_Credentials.end())
-        {
-            return nullptr;
-        }
-        return it->second.get();
+        return m_Credentials.find(name) != m_Credentials.end();
     }
 
-    ICredential const* KeyManager::GetDefaultCredential() const
+    bool KeyManager::HasDefaultCredential() const
     {
         std::shared_lock lock(m_Mutex);
         if (m_DefaultProviderName.empty())
         {
-            return nullptr;
+            return false;
         }
-        auto const it = m_Credentials.find(m_DefaultProviderName);
-        if (it == m_Credentials.end())
-        {
-            return nullptr;
-        }
-        return it->second.get();
+        return m_Credentials.find(m_DefaultProviderName) != m_Credentials.end();
     }
 
     std::string KeyManager::GetDefaultProviderName() const
@@ -281,34 +301,12 @@ namespace AIAssistant
         cred->RegisterSecrets();
 
         m_Credentials[name] = std::move(cred);
-        m_Dirty = true;
+        m_Dirty.store(true);
 
         if (m_Credentials.size() == 1)
         {
             m_DefaultProviderName = name;
         }
-        return true;
-    }
-
-    bool KeyManager::UpdateCredential(std::string const& name, std::unique_ptr<ICredential> cred)
-    {
-        if (!cred)
-        {
-            LOG_CORE_ERROR("KeyManager::UpdateCredential: '{}' rejected — null credential", name);
-            return false;
-        }
-        std::unique_lock lock(m_Mutex);
-        if (!m_Credentials.count(name))
-        {
-            LOG_CORE_WARN("KeyManager::UpdateCredential: provider '{}' not found", name);
-            return false;
-        }
-
-        cred->m_Name = name;
-        cred->RegisterSecrets();
-
-        m_Credentials[name] = std::move(cred);
-        m_Dirty = true;
         return true;
     }
 
@@ -322,7 +320,7 @@ namespace AIAssistant
             return false;
         }
         m_Credentials.erase(it);
-        m_Dirty = true;
+        m_Dirty.store(true);
 
         // If we removed the default, pick a new one (or clear it)
         if (m_DefaultProviderName == name)

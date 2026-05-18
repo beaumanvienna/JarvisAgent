@@ -100,6 +100,14 @@
             "model": "qwen2.5-coder:32b",
             "API": "API1",
             "key_name": "ollama"
+        },
+        {
+            "name": "localhost/ollama/qwen2.5-coder:7b/API1",
+            "description": "Local Ollama qwen2.5-coder:7b via OpenAI-compatible Chat Completions endpoint. Lighter/faster than the 32b variant. Air-gapped, no cloud cost. Use API index 11.",
+            "url": "http://localhost:11434/v1/chat/completions",
+            "model": "qwen2.5-coder:7b",
+            "API": "API1",
+            "key_name": "ollama"
         }
     ],
 
