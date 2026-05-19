@@ -21,6 +21,7 @@
 
 #include "assistant/workspaceIndexer.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
@@ -576,32 +577,19 @@ namespace AIAssistant
 
     void WorkspaceIndexer::SaveIndex() const
     {
-        std::error_code ec;
-        fs::create_directories(m_IndexDir, ec);
-        if (ec)
-        {
-            LOG_APP_ERROR("[indexer] Index dir create failed: {} (path='{}')", ec.message(), m_IndexDir.string());
-            return;
-        }
-
-        std::ofstream ofs(m_IndexPath, std::ios::out | std::ios::trunc);
-        if (!ofs)
-        {
-            LOG_APP_ERROR("[indexer] Index file open-for-write failed: {}", m_IndexPath.string());
-            return;
-        }
-
+        std::ostringstream body;
         for (auto const& e : m_Entries)
         {
-            ofs << "{\"path\":\"" << JsonHelper::EscapeJsonString(e.relativePath) << "\",\"ext\":\""
-                << JsonHelper::EscapeJsonString(e.extension) << "\",\"size\":" << e.sizeBytes
-                << ",\"mtime\":" << e.mtimeNs << ",\"summary\":\""
-                << JsonHelper::EscapeJsonString(e.summary) << "\",\"summary_mtime\":" << e.summaryMtimeNs << "}\n";
+            body << "{\"path\":\"" << JsonHelper::EscapeJsonString(e.relativePath) << "\",\"ext\":\""
+                 << JsonHelper::EscapeJsonString(e.extension) << "\",\"size\":" << e.sizeBytes
+                 << ",\"mtime\":" << e.mtimeNs << ",\"summary\":\""
+                 << JsonHelper::EscapeJsonString(e.summary) << "\",\"summary_mtime\":" << e.summaryMtimeNs << "}\n";
         }
-        ofs.flush();
-        if (!ofs.good())
+
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(m_IndexPath, body.str(), writeError))
         {
-            LOG_APP_ERROR("[indexer] Index file write/flush failed: {}", m_IndexPath.string());
+            LOG_APP_ERROR("[indexer] Index file write failed: {} path='{}'", writeError, m_IndexPath.string());
         }
     }
 

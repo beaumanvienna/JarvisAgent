@@ -11,10 +11,15 @@ same folder cannot interleave file writes.
 
 ## Write(path, content)
 - Acquire the per-instance lock.
-- Create any missing parent directories (absolute + lexically-normalised).
-- Open the file with `std::ios::trunc` and write `content` verbatim — no
-  transformation, no trailing newline added.
-- Log success or open/write failure with the resolved path.
+- Route `content` through `EngineCore::AtomicWriteFile` (`engine/auxiliary/file.h`),
+  which creates missing parent directories, opens `<path>.tmp.<atomic-counter>`
+  with `failbit | badbit` exceptions, writes, closes, then `fs::rename`s to
+  the final path.  A SIGKILL or disk-full mid-write leaves the previous
+  version intact rather than a truncated partial — these queue files
+  (STNG / CNTX / TASK / PROB) are what AI dispatch consumes as completion
+  signals, so a torn write would surface as a malformed dispatch input.
+- Log `LOG_APP_INFO` on success with the resolved path; `LOG_APP_ERROR` on
+  failure with the helper's populated `errorMessage`.
 
 ## WriteWithHeader(path, content, model)
 Despite the name, this method currently writes `content` exactly like
@@ -22,9 +27,8 @@ Despite the name, this method currently writes `content` exactly like
 lines are prepended.
 
 - Acquire the per-instance lock.
-- Create any missing parent directories.
-- Truncate + write `content` verbatim.
-- Log success or open/write failure.
+- Same `EngineCore::AtomicWriteFile` path as `Write`.
+- Log `LOG_APP_INFO` on success; `LOG_APP_ERROR` on failure.
 
 Call sites live in `aiRequestPool.cpp` (`.output.txt` / `.output.json`
 writers). Keeping the two methods separate today preserves a future

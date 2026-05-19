@@ -396,101 +396,122 @@ namespace AIAssistant
             return true;
         };
 
-        // Write results to file
-        if (format == "csv")
+        // Write results to file.  This is a streaming writer (running byte
+        // cap is checked after each row via tellp), so atomic-rename through
+        // the shared helper is not applicable — buffering the entire result
+        // in memory would defeat the cap.  We do enable ofstream exceptions
+        // so disk-full or short-write conditions surface as a typed failure
+        // instead of silently truncating mid-row.
+        try
         {
-            std::ofstream out(outputPath, std::ios::trunc);
-            if (!out.is_open())
+            if (format == "csv")
             {
-                taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                LOG_APP_ERROR("[db_query] output file open failed task='{}' workflow='{}' run='{}' path='{}'",
-                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, outputPath.string());
-                return false;
-            }
-
-            // Header row
-            for (int col = 0; col < nCols; ++col)
-            {
-                if (col > 0)
+                std::ofstream out(outputPath, std::ios::trunc);
+                if (!out.is_open())
                 {
-                    out << ',';
+                    taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[db_query] output file open failed task='{}' workflow='{}' run='{}' path='{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                                  outputPath.string());
+                    return false;
                 }
-                out << CsvEscape(PQfname(res.get(), col));
-            }
-            out << '\n';
+                out.exceptions(std::ios::failbit | std::ios::badbit);
 
-            // Data rows
-            for (int row = 0; row < nRows; ++row)
-            {
+                // Header row
                 for (int col = 0; col < nCols; ++col)
                 {
                     if (col > 0)
                     {
                         out << ',';
                     }
-                    if (PQgetisnull(res.get(), row, col))
-                    {
-                        // Empty field for NULL
-                    }
-                    else
-                    {
-                        out << CsvEscape(PQgetvalue(res.get(), row, col));
-                    }
+                    out << CsvEscape(PQfname(res.get(), col));
                 }
                 out << '\n';
-                if (!checkByteCap(out)) return false;
-            }
-        }
-        else // json
-        {
-            std::ofstream out(outputPath, std::ios::trunc);
-            if (!out.is_open())
-            {
-                taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                LOG_APP_ERROR("[db_query] output file open failed task='{}' workflow='{}' run='{}' path='{}'",
-                              taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, outputPath.string());
-                return false;
-            }
 
-            // Collect column names
-            std::vector<std::string> colNames;
-            colNames.reserve(static_cast<size_t>(nCols));
-            for (int col = 0; col < nCols; ++col)
-            {
-                colNames.emplace_back(PQfname(res.get(), col));
-            }
-
-            out << "[\n";
-            for (int row = 0; row < nRows; ++row)
-            {
-                if (row > 0)
+                // Data rows
+                for (int row = 0; row < nRows; ++row)
                 {
-                    out << ",\n";
+                    for (int col = 0; col < nCols; ++col)
+                    {
+                        if (col > 0)
+                        {
+                            out << ',';
+                        }
+                        if (PQgetisnull(res.get(), row, col))
+                        {
+                            // Empty field for NULL
+                        }
+                        else
+                        {
+                            out << CsvEscape(PQgetvalue(res.get(), row, col));
+                        }
+                    }
+                    out << '\n';
+                    if (!checkByteCap(out)) return false;
                 }
-                out << "  {";
+            }
+            else // json
+            {
+                std::ofstream out(outputPath, std::ios::trunc);
+                if (!out.is_open())
+                {
+                    taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
+                    taskState.m_State = TaskInstanceStateKind::Failed;
+                    LOG_APP_ERROR("[db_query] output file open failed task='{}' workflow='{}' run='{}' path='{}'",
+                                  taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                                  outputPath.string());
+                    return false;
+                }
+                out.exceptions(std::ios::failbit | std::ios::badbit);
+
+                // Collect column names
+                std::vector<std::string> colNames;
+                colNames.reserve(static_cast<size_t>(nCols));
                 for (int col = 0; col < nCols; ++col)
                 {
-                    if (col > 0)
-                    {
-                        out << ", ";
-                    }
-                    out << "\"" << JsonHelper::EscapeJsonString(colNames[static_cast<size_t>(col)]) << "\": ";
-
-                    if (PQgetisnull(res.get(), row, col))
-                    {
-                        out << "null";
-                    }
-                    else
-                    {
-                        out << "\"" << JsonHelper::EscapeJsonString(PQgetvalue(res.get(), row, col)) << "\"";
-                    }
+                    colNames.emplace_back(PQfname(res.get(), col));
                 }
-                out << "}";
-                if (!checkByteCap(out)) return false;
+
+                out << "[\n";
+                for (int row = 0; row < nRows; ++row)
+                {
+                    if (row > 0)
+                    {
+                        out << ",\n";
+                    }
+                    out << "  {";
+                    for (int col = 0; col < nCols; ++col)
+                    {
+                        if (col > 0)
+                        {
+                            out << ", ";
+                        }
+                        out << "\"" << JsonHelper::EscapeJsonString(colNames[static_cast<size_t>(col)]) << "\": ";
+
+                        if (PQgetisnull(res.get(), row, col))
+                        {
+                            out << "null";
+                        }
+                        else
+                        {
+                            out << "\"" << JsonHelper::EscapeJsonString(PQgetvalue(res.get(), row, col)) << "\"";
+                        }
+                    }
+                    out << "}";
+                    if (!checkByteCap(out)) return false;
+                }
+                out << "\n]\n";
             }
-            out << "\n]\n";
+        }
+        catch (std::exception const& e)
+        {
+            taskState.m_LastErrorMessage = std::string("db_query output write failed: ") + e.what();
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[db_query] write failed task='{}' workflow='{}' run='{}' path='{}': {}",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, outputPath.string(),
+                          e.what());
+            return false;
         }
 
         // Build summary for captured stdout

@@ -297,13 +297,26 @@ namespace AIAssistant
         // Write stdout.txt and stderr.txt to the task working directory (full size).
         {
             std::error_code ec;
+            auto writeCapture = [&](fs::path const& path, std::string const& data, char const* label) {
+                try
+                {
+                    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+                    if (file.is_open())
+                    {
+                        file.exceptions(std::ios::failbit | std::ios::badbit);
+                        file.write(data.data(), static_cast<std::streamsize>(data.size()));
+                    }
+                }
+                catch (std::exception const& e)
+                {
+                    LOG_APP_ERROR("[python] write {} failed task='{}': {} path='{}'", label, taskDefinition.m_Id,
+                                  e.what(), path.string());
+                }
+            };
+
             if (!capturedStdout.empty())
             {
-                std::ofstream stdoutFile(taskWorkingDirectoryPath / "stdout.txt", std::ios::binary | std::ios::trunc);
-                if (stdoutFile.is_open())
-                {
-                    stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
-                }
+                writeCapture(taskWorkingDirectoryPath / "stdout.txt", capturedStdout, "stdout.txt");
             }
             else
             {
@@ -312,11 +325,7 @@ namespace AIAssistant
 
             if (!capturedStderr.empty())
             {
-                std::ofstream stderrFile(taskWorkingDirectoryPath / "stderr.txt", std::ios::binary | std::ios::trunc);
-                if (stderrFile.is_open())
-                {
-                    stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
-                }
+                writeCapture(taskWorkingDirectoryPath / "stderr.txt", capturedStderr, "stderr.txt");
             }
             else
             {

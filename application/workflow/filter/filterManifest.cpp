@@ -35,6 +35,7 @@
 
 #include <openssl/sha.h>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "file/pathConfinement.h"
 #include "json/jsonHelper.h"
@@ -131,17 +132,6 @@ namespace AIAssistant
             return false;
         }
 
-        // Ensure the directory exists
-        std::filesystem::path const dirPath = std::filesystem::path(path).parent_path();
-        std::error_code ec;
-        std::filesystem::create_directories(dirPath, ec);
-        if (ec)
-        {
-            errorMessage = "failed to create manifest directory '" + dirPath.string() + "': " + ec.message();
-            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
-            return false;
-        }
-
         // Build JSON manually (the structure is small and fixed).  item_count
         // is derived from m_Items.size() — never trust a separate counter
         // field that can drift from the array contents.
@@ -173,34 +163,11 @@ namespace AIAssistant
         json << "  ]\n";
         json << "}\n";
 
-        // Atomic write: <path>.tmp -> rename(path).  Promotes stream errors
-        // to exceptions so we can fail visibly on disk-full or short writes.
-        std::string const tempPath = path + ".tmp";
-        try
+        // Atomic write through the shared helper.  Helper creates parent
+        // directories, opens <path>.tmp.<counter> with stream exceptions
+        // enabled (failbit | badbit), writes, closes, then renames.
+        if (!EngineCore::AtomicWriteFile(path, json.str(), errorMessage))
         {
-            std::ofstream file(tempPath, std::ios::trunc);
-            if (!file.is_open())
-            {
-                errorMessage = "cannot open temp manifest file '" + tempPath + "'";
-                LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
-                return false;
-            }
-            file.exceptions(std::ios::failbit | std::ios::badbit);
-            file << json.str();
-            file.close();
-        }
-        catch (std::exception const& e)
-        {
-            errorMessage = std::string("manifest write to '") + tempPath + "' failed: " + e.what();
-            LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
-            return false;
-        }
-
-        std::error_code renameError;
-        std::filesystem::rename(tempPath, path, renameError);
-        if (renameError)
-        {
-            errorMessage = "rename '" + tempPath + "' -> '" + path + "' failed: " + renameError.message();
             LOG_APP_ERROR("[filter] WriteManifest: {}", errorMessage);
             return false;
         }

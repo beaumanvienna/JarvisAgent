@@ -32,6 +32,7 @@
 #include <string_view>
 #include <system_error>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
@@ -112,49 +113,6 @@ namespace AIAssistant
             std::ostringstream buffer;
             buffer << input.rdbuf();
             outContent = buffer.str();
-            return true;
-        }
-
-        // Atomic write: writes to <path>.tmp, fsyncs (where supported), then
-        // renames over the destination.  std::filesystem::rename is atomic on
-        // POSIX and same-volume on Windows.  A crash before rename leaves the
-        // original file intact (or absent on a fresh write); the .tmp sibling
-        // is left for forensic inspection rather than auto-cleaned, which has
-        // historically helped diagnose disk-full / permission failures.
-        [[nodiscard]] bool WriteFile(std::filesystem::path const& path, std::string const& content)
-        {
-            std::error_code dirError;
-            std::filesystem::create_directories(path.parent_path(), dirError);
-            if (dirError)
-            {
-                LOG_APP_ERROR("AiTranscript::WriteFile: create_directories('{}') failed: {}",
-                              path.parent_path().string(), dirError.message());
-                return false;
-            }
-            std::filesystem::path const tempPath = path.string() + ".tmp";
-            {
-                std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
-                if (!output)
-                {
-                    LOG_APP_ERROR("AiTranscript::WriteFile: cannot open temp file '{}'", tempPath.string());
-                    return false;
-                }
-                output << content;
-                if (!output.good())
-                {
-                    LOG_APP_ERROR("AiTranscript::WriteFile: stream write to '{}' failed (partial)",
-                                  tempPath.string());
-                    return false;
-                }
-            }
-            std::error_code renameError;
-            std::filesystem::rename(tempPath, path, renameError);
-            if (renameError)
-            {
-                LOG_APP_ERROR("AiTranscript::WriteFile: rename('{}' -> '{}') failed: {}",
-                              tempPath.string(), path.string(), renameError.message());
-                return false;
-            }
             return true;
         }
 
@@ -245,9 +203,10 @@ namespace AIAssistant
                     rebuilt = trimmedHead + ",\n  " + entryJson + "\n]\n";
                 }
             }
-            if (!WriteFile(transcriptPath, rebuilt))
+            std::string writeError;
+            if (!EngineCore::AtomicWriteFile(transcriptPath, rebuilt, writeError))
             {
-                LOG_APP_ERROR("AiTranscript::AppendEntry: write failed for '{}'", transcriptPath.string());
+                LOG_APP_ERROR("AiTranscript::AppendEntry: {} (path='{}')", writeError, transcriptPath.string());
                 return false;
             }
             return true;

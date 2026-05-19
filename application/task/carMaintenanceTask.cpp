@@ -24,6 +24,7 @@
 #include <fstream>
 #include <system_error>
 
+#include "auxiliary/file.h"
 #include <simdjson/simdjson.h>
 
 namespace fs = std::filesystem;
@@ -125,32 +126,11 @@ namespace AIAssistant
     bool CarMaintenanceTask::TryWriteAllText(fs::path const& filePath, std::string const& fileContents,
                                              std::string& errorMessageOut)
     {
-        fs::path const parentDirectoryPath = filePath.parent_path();
-        if (!parentDirectoryPath.empty())
+        if (!EngineCore::AtomicWriteFile(filePath, fileContents, errorMessageOut))
         {
-            std::error_code createDirectoriesErrorCode;
-            fs::create_directories(parentDirectoryPath, createDirectoriesErrorCode);
-            if (createDirectoriesErrorCode)
-            {
-                errorMessageOut = "CarMaintenanceTask: failed to create parent directory: " + parentDirectoryPath.string();
-                return false;
-            }
-        }
-
-        std::ofstream outputStream(filePath, std::ios::binary | std::ios::trunc);
-        if (!outputStream.is_open())
-        {
-            errorMessageOut = "CarMaintenanceTask: failed to open output file: " + filePath.string();
+            errorMessageOut = "CarMaintenanceTask: " + errorMessageOut;
             return false;
         }
-
-        outputStream.write(fileContents.data(), static_cast<std::streamsize>(fileContents.size()));
-        if (!outputStream.good())
-        {
-            errorMessageOut = "CarMaintenanceTask: failed while writing output file: " + filePath.string();
-            return false;
-        }
-
         return true;
     }
 

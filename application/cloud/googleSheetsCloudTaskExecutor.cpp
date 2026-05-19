@@ -29,6 +29,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "cloud/googleSheetsCloudTaskExecutor.h"
 #include "cloud/googleSheetsConnector.h"
@@ -461,16 +462,9 @@ namespace AIAssistant
             // Write output
             std::filesystem::path outputPath = workDir / outputFile;
 
+            std::ostringstream body;
             if (outputFormat == "json")
             {
-                std::ofstream out(outputPath, std::ios::trunc);
-                if (!out.is_open())
-                {
-                    taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                    taskState.m_State = TaskInstanceStateKind::Failed;
-                    return false;
-                }
-
                 // Use first row as headers if available
                 std::vector<std::string> headers;
                 size_t dataStart = 0;
@@ -480,38 +474,40 @@ namespace AIAssistant
                     dataStart = 1;
                 }
 
-                out << "[\n";
+                body << "[\n";
                 for (size_t r = dataStart; r < rows.size(); ++r)
                 {
-                    out << "  {";
+                    body << "  {";
                     for (size_t c = 0; c < headers.size() && c < rows[r].size(); ++c)
                     {
-                        if (c > 0) out << ", ";
-                        out << "\"" << JsonHelper::EscapeJsonString(headers[c]) << "\": \"" << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
+                        if (c > 0) body << ", ";
+                        body << "\"" << JsonHelper::EscapeJsonString(headers[c]) << "\": \""
+                             << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
                     }
-                    out << "}" << (r + 1 < rows.size() ? "," : "") << "\n";
+                    body << "}" << (r + 1 < rows.size() ? "," : "") << "\n";
                 }
-                out << "]\n";
+                body << "]\n";
             }
             else
             {
-                std::ofstream out(outputPath, std::ios::trunc);
-                if (!out.is_open())
-                {
-                    taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                    taskState.m_State = TaskInstanceStateKind::Failed;
-                    return false;
-                }
-
                 for (auto const& row : rows)
                 {
                     for (size_t c = 0; c < row.size(); ++c)
                     {
-                        if (c > 0) out << ",";
-                        out << CsvEscape(row[c]);
+                        if (c > 0) body << ",";
+                        body << CsvEscape(row[c]);
                     }
-                    out << "\n";
+                    body << "\n";
                 }
+            }
+
+            std::string writeError;
+            if (!EngineCore::AtomicWriteFile(outputPath, body.str(), writeError))
+            {
+                taskState.m_LastErrorMessage = "Cannot write output file: " + writeError;
+                taskState.m_State = TaskInstanceStateKind::Failed;
+                LOG_APP_ERROR("[sheets] write output failed: {} path='{}'", writeError, outputPath.string());
+                return false;
             }
 
             std::string summary = "{\"ok\":true,\"operation\":\"read\",\"rows\":" + std::to_string(rows.size()) +

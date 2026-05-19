@@ -33,6 +33,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "cloud/snowflakeCloudTaskExecutor.h"
 #include "cloud/snowflakeConnector.h"
@@ -600,78 +601,72 @@ namespace AIAssistant
         }
         std::filesystem::path outputPath = workDir / outputFile;
 
-        // Write output
+        // Build output body
+        std::ostringstream body;
         if (outputFormat == "json")
         {
-            std::ofstream out(outputPath, std::ios::trunc);
-            if (!out.is_open())
-            {
-                taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                return false;
-            }
-
-            out << "[\n";
+            body << "[\n";
             for (size_t r = 0; r < rows.size(); ++r)
             {
-                out << "  {";
+                body << "  {";
                 for (size_t c = 0; c < columnNames.size() && c < rows[r].size(); ++c)
                 {
                     if (c > 0)
                     {
-                        out << ", ";
+                        body << ", ";
                     }
-                    out << "\"" << JsonHelper::EscapeJsonString(columnNames[c]) << "\": ";
+                    body << "\"" << JsonHelper::EscapeJsonString(columnNames[c]) << "\": ";
                     if (rows[r][c].empty())
                     {
-                        out << "null";
+                        body << "null";
                     }
                     else
                     {
                         // RFC 8259 escape via canonical helper — superset of the prior
                         // inline 5-case switch (also handles control bytes 0x00..0x1F).
-                        out << "\"" << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
+                        body << "\"" << JsonHelper::EscapeJsonString(rows[r][c]) << "\"";
                     }
                 }
-                out << "}" << (r + 1 < rows.size() ? "," : "") << "\n";
+                body << "}" << (r + 1 < rows.size() ? "," : "") << "\n";
             }
-            out << "]\n";
+            body << "]\n";
         }
         else
         {
             // CSV output (RFC 4180)
-            std::ofstream out(outputPath, std::ios::trunc);
-            if (!out.is_open())
-            {
-                taskState.m_LastErrorMessage = "Cannot open output file: " + outputPath.string();
-                taskState.m_State = TaskInstanceStateKind::Failed;
-                return false;
-            }
-
-            // Header row
             for (size_t c = 0; c < columnNames.size(); ++c)
             {
                 if (c > 0)
                 {
-                    out << ",";
+                    body << ",";
                 }
-                out << CsvEscape(columnNames[c]);
+                body << CsvEscape(columnNames[c]);
             }
-            out << "\n";
+            body << "\n";
 
-            // Data rows
             for (auto const& row : rows)
             {
                 for (size_t c = 0; c < row.size(); ++c)
                 {
                     if (c > 0)
                     {
-                        out << ",";
+                        body << ",";
                     }
-                    out << CsvEscape(row[c]);
+                    body << CsvEscape(row[c]);
                 }
-                out << "\n";
+                body << "\n";
             }
+        }
+
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(outputPath, body.str(), writeError))
+        {
+            taskState.m_LastErrorMessage = "Cannot write output file: " + writeError;
+            taskState.m_State = TaskInstanceStateKind::Failed;
+            LOG_APP_ERROR("[snowflake] task='{}' workflow='{}' run='{}': write output failed: {} path='{}'",
+                          taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId, writeError,
+                          outputPath.string());
+            return false;
         }
 
         // Build summary for captured stdout

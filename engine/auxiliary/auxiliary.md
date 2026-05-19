@@ -112,6 +112,29 @@ fs::file_time_type GetNewestTimestamp(std::vector<fs::path> const& files);
 - Returns the maximum timestamp encountered, or `fs::file_time_type::min()` if none exist.
 - Exceptions (e.g., inaccessible paths) are silently ignored.
 
+### Atomic write
+
+```cpp
+[[nodiscard]] bool AtomicWriteFile(std::filesystem::path const& path,
+                                   std::string_view content,
+                                   std::string& errorMessage);
+```
+
+The single legitimate atomic-write path used by every hand-built file writer in `application/`.  Behaviour:
+
+1. `std::filesystem::create_directories(path.parent_path())` — idempotent; fail-closed with populated `errorMessage` on permission / file-collision error.
+2. Open `<path>.tmp.<atomic-counter>` with `std::ios::out | std::ios::binary | std::ios::trunc`.  The counter is a `static std::atomic<uint64_t>` inside the helper; concurrent writers targeting the same final path get distinct temp names.
+3. Enable `out.exceptions(std::ios::failbit | std::ios::badbit)` so disk-full / short-write conditions surface as exceptions, not silent truncation.
+4. `out.write(content.data(), content.size())` inside a `try { ... } catch (std::exception const&)` block; on failure the temp file is `fs::remove`d best-effort and `errorMessage` is populated.
+5. `std::filesystem::rename(tempPath, path)` — atomic on POSIX, `MOVEFILE_REPLACE_EXISTING` on Windows (same-volume); on failure the temp is removed and `errorMessage` is populated.
+
+Contract:
+- **No internal logging.**  The helper returns rich `errorMessage` on failure; callers with run / workflow context emit a single `LOG_APP_ERROR` so dashboard run analysis (which keys on runId substrings) surfaces the failure.  Aligns with the project's "subsystems without run context return errors via their data types and let the upstream caller emit the ERROR log" discipline.
+- **`[[nodiscard]]` return.**  Compiler enforces that callers handle the result.
+- **Forensic temp file on failure.**  Best-effort cleanup runs on every failure path; if it fails, a stale `<path>.tmp.<N>` sibling is left for inspection.
+
+See `application/file/README.md` for the use-site list (categorised by subsystem) and the documented opt-out cases (streaming writers with running caps, append-mode logs, operator-diagnostic dumps).
+
 ---
 
 ## 2. Thread Pool Wrapper (`auxiliary/threadPool.*`)
@@ -233,7 +256,7 @@ There is **no JarvisAgent‑specific logic** in this file; it simply makes the T
 
 The auxiliary module provides:
 
-- Cross‑platform filesystem helpers used throughout the engine (`file.*`).
+- Cross‑platform filesystem helpers used throughout the engine (`file.*`), including the project's single atomic-write path `AtomicWriteFile`.
 - A thin, synchronized wrapper around `BS::thread_pool` for engine task execution (`threadPool.*`).
 - A one‑stop integration point for the Tracy profiler (`TracyClient.cpp`).
 

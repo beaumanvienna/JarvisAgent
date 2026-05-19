@@ -21,6 +21,9 @@
 
 #include "auxiliary/file.h"
 
+#include <atomic>
+#include <system_error>
+
 namespace AIAssistant
 {
     namespace EngineCore
@@ -190,6 +193,62 @@ namespace AIAssistant
                 }
             }
             return newest;
+        }
+
+        bool AtomicWriteFile(std::filesystem::path const& path, std::string_view content, std::string& errorMessage)
+        {
+            std::filesystem::path const parent = path.parent_path();
+            if (!parent.empty())
+            {
+                std::error_code mkEc;
+                std::filesystem::create_directories(parent, mkEc);
+                if (mkEc)
+                {
+                    errorMessage = "AtomicWriteFile: create_directories('" + parent.string() +
+                                   "') failed: " + mkEc.message();
+                    return false;
+                }
+            }
+
+            // Counter makes the temp name unique under concurrent writers
+            // targeting the same final path.
+            static std::atomic<uint64_t> s_TempCounter{0};
+            uint64_t const counter = s_TempCounter.fetch_add(1, std::memory_order_relaxed);
+            std::filesystem::path const tempPath =
+                path.parent_path() / (path.filename().string() + ".tmp." + std::to_string(counter));
+
+            std::error_code rmEc;
+
+            try
+            {
+                std::ofstream out(tempPath, std::ios::out | std::ios::binary | std::ios::trunc);
+                if (!out.is_open())
+                {
+                    errorMessage = "AtomicWriteFile: cannot open temp file '" + tempPath.string() + "'";
+                    return false;
+                }
+                out.exceptions(std::ios::failbit | std::ios::badbit);
+                out.write(content.data(), static_cast<std::streamsize>(content.size()));
+                out.close();
+            }
+            catch (std::exception const& e)
+            {
+                errorMessage = "AtomicWriteFile: write to '" + tempPath.string() + "' failed: " + e.what();
+                std::filesystem::remove(tempPath, rmEc);
+                return false;
+            }
+
+            std::error_code renameEc;
+            std::filesystem::rename(tempPath, path, renameEc);
+            if (renameEc)
+            {
+                errorMessage = "AtomicWriteFile: rename '" + tempPath.string() + "' -> '" + path.string() +
+                               "' failed: " + renameEc.message();
+                std::filesystem::remove(tempPath, rmEc);
+                return false;
+            }
+
+            return true;
         }
 
     } // namespace EngineCore

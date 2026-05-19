@@ -28,6 +28,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "cloud/gitHubCloudTaskExecutor.h"
 #include "cloud/gitHubConnector.h"
@@ -558,10 +559,16 @@ namespace AIAssistant
                                       writePathRaw.string());
                         return false;
                     }
-                    std::ofstream outFile(writePath, std::ios::binary | std::ios::trunc);
-                    if (outFile.is_open())
+                    std::string ghWriteError;
+                    if (!EngineCore::AtomicWriteFile(writePath, decoded, ghWriteError))
                     {
-                        outFile.write(decoded.data(), static_cast<std::streamsize>(decoded.size()));
+                        taskState.m_LastErrorMessage =
+                            "github_issue 'get_file': write failed: " + ghWriteError;
+                        taskState.m_State = TaskInstanceStateKind::Failed;
+                        LOG_APP_ERROR("[github] write file failed task='{}' workflow='{}' run='{}': {} path='{}'",
+                                      taskDefinition.m_Id, workflowDefinition.m_Id, workflowRun.m_RunId,
+                                      ghWriteError, writePath.string());
+                        return false;
                     }
                 }
             }

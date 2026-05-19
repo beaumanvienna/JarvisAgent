@@ -22,6 +22,7 @@
 #include "assistant/assistantController.h"
 #include "assistant/assistantHelpers.h"
 #include "assistant/contextAssembler.h"
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "json/jsonHelper.h"
@@ -1917,19 +1918,9 @@ namespace AIAssistant
 
     bool AssistantController::WriteFile(fs::path const& path, std::string const& content, std::string& outError)
     {
-        std::ofstream ofs(path, std::ios::out | std::ios::binary);
-        if (!ofs)
+        if (!EngineCore::AtomicWriteFile(path, content, outError))
         {
-            LOG_APP_ERROR("[assistant] WriteFile open failed: path='{}'", path.string());
-            outError = "File write error";
-            return false;
-        }
-        ofs << content;
-        ofs.flush();
-        if (!ofs.good())
-        {
-            LOG_APP_ERROR("[assistant] WriteFile flush failed: path='{}' bytes={}", path.string(), content.size());
-            outError = "File write error";
+            LOG_APP_ERROR("[assistant] WriteFile: {} path='{}'", outError, path.string());
             return false;
         }
         return true;

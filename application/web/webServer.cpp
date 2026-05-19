@@ -47,6 +47,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "core.h"
 #include "json/jsonHelper.h"
 #include "engine.h"
@@ -1680,7 +1681,7 @@ namespace AIAssistant
                     LOG_SECURITY_INFO("[security] shutdown_requested ip={} user={}", req.remote_ip_address, auth.m_User);
                     Core::g_Core->RequestQuit();
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                    Core::g_Core->PushEvent(event);
+                    Core::g_Core->PushEvent(event, ProducerId::WebServer);
 
                     crow::json::wvalue response;
                     response["message"] = "Shutdown initiated.";
@@ -3878,28 +3879,20 @@ namespace AIAssistant
                                         continue;
                                     }
 
-                                    // Create parent directories if needed
-                                    std::error_code ec;
-                                    fs::path parentDir = normalized.parent_path();
-                                    if (!parentDir.empty())
-                                    {
-                                        fs::create_directories(parentDir, ec);
-                                    }
-
-                                    // Write file
-                                    std::ofstream ofs(normalized, std::ios::out | std::ios::binary);
-                                    if (!ofs)
+                                    // Atomic write through the shared helper (creates parent
+                                    // directories internally).
+                                    std::string scriptWriteError;
+                                    if (!EngineCore::AtomicWriteFile(normalized, content, scriptWriteError))
                                     {
                                         crow::json::wvalue err;
                                         err["path"] = scriptPath;
-                                        err["error"] = "Failed to open file for writing";
+                                        err["error"] = scriptWriteError;
                                         errorsList.push_back(std::move(err));
                                         continue;
                                     }
-                                    ofs << content;
-                                    ofs.close();
 
                                     // Set executable permission for shell scripts
+                                    std::error_code ec;
                                     if (executable || scriptPath.ends_with(".sh"))
                                     {
                                         fs::permissions(normalized,

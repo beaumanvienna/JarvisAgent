@@ -172,27 +172,33 @@ namespace AIAssistant
         }
 
         // Write to disk first; only commit to in-memory history on success.
-        std::ofstream ofs(m_FilePath, std::ios::app | std::ios::binary);
-        if (!ofs)
+        // Append-mode + per-line JSONL — atomic-rename isn't applicable;
+        // ofstream exceptions surface disk-full / partial-write mid-line.
+        try
         {
-            m_FileBroken = true;
-            LOG_APP_ERROR("[assistant] AppendTurn open failed: sid={} path='{}'", LogSafeSessionId(m_SessionId),
-                          m_FilePath.string());
-            return false;
+            std::ofstream ofs(m_FilePath, std::ios::app | std::ios::binary);
+            if (!ofs)
+            {
+                m_FileBroken = true;
+                LOG_APP_ERROR("[assistant] AppendTurn open failed: sid={} path='{}'", LogSafeSessionId(m_SessionId),
+                              m_FilePath.string());
+                return false;
+            }
+            ofs.exceptions(std::ios::failbit | std::ios::badbit);
+
+            // Restrict permissions on first write (best-effort, no error path).
+            RestrictFilePermissions(m_FilePath);
+
+            ofs << "{\"role\":\"" << JsonHelper::EscapeJsonString(turn.role) << "\",\"text\":\""
+                << JsonHelper::EscapeJsonString(turn.text) << "\",\"ts\":\""
+                << JsonHelper::EscapeJsonString(turn.timestamp) << "\"}\n";
+            ofs.flush();
         }
-
-        // Restrict permissions on first write (best-effort, no error path).
-        RestrictFilePermissions(m_FilePath);
-
-        ofs << "{\"role\":\"" << JsonHelper::EscapeJsonString(turn.role) << "\",\"text\":\""
-            << JsonHelper::EscapeJsonString(turn.text) << "\",\"ts\":\""
-            << JsonHelper::EscapeJsonString(turn.timestamp) << "\"}\n";
-        ofs.flush();
-        if (!ofs.good())
+        catch (std::exception const& e)
         {
             m_FileBroken = true;
-            LOG_APP_ERROR("[assistant] AppendTurn write/flush failed: sid={} path='{}'",
-                          LogSafeSessionId(m_SessionId), m_FilePath.string());
+            LOG_APP_ERROR("[assistant] AppendTurn write failed: sid={} path='{}': {}",
+                          LogSafeSessionId(m_SessionId), m_FilePath.string(), e.what());
             return false;
         }
 

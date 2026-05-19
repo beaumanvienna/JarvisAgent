@@ -75,8 +75,8 @@ Single canonical helper used everywhere j9t handles an external string that reso
 - `application/python/pythonEnginePool.cpp::Initialize` — gates the resolved script directory at the pool boundary (defense in depth).
 - `application/workflow/workflowRuntimeManager.cpp::CleanWorkflow` — gates every `fs::remove` / `fs::remove_all` target (5 sites: queue dir, glob-matched file_outputs, literal file_outputs, working directories, empty workflow dir).
 - `application/workflow/triggerEngine.cpp::NormalizePath` — gates both the file-watch trigger registration path AND the FileWatcher event path (canonical form keys both sides of the comparison so an embedded `..` cannot escape the watched tree).
-- `application/workflow/aiRequestPool.cpp::WriteTextFile` — gates AI-task output file writes; the canonical `confinedPath` is also the rename target of the atomic `<final>.tmp.<counter>` write so symlink targets resolve to their real on-tree location *and* a SIGKILL/disk-full mid-write leaves the previous version intact.
-- `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile` (public static) — same atomic-rename + canonical-path pattern, used by inline queue-file writes, the ConvertWithMarkitdown destination write, and the provider-sidecar JSON write.
+- `application/workflow/aiRequestPool.cpp::WriteTextFile` — gates AI-task output file writes; the canonical `confinedPath` is then handed to `EngineCore::AtomicWriteFile` so symlink targets resolve to their real on-tree location *and* a SIGKILL/disk-full mid-write leaves the previous version intact.
+- `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile` (public static) — same canonical-path pattern, used by inline queue-file writes, the ConvertWithMarkitdown destination write, and the provider-sidecar JSON write; routes through `EngineCore::AtomicWriteFile`.
 - `application/workflow/aiRequestPool.cpp::OnOutputFileCreated` — gates the read side of the AI-task output pipeline (map-key lookup + file read happen on the same canonical form).
 - `application/workflow/aiRequestPool.cpp::RegisterPendingWorkflowTask` — gates the `expectedOutputPath` insert into `m_PendingByOutputPath` so a hostile JCWF can't register a binding under a path outside the project tree.
 - `application/workflow/aiRequestPool.cpp::Submit` — log-attribution lookup (`m_PendingByOutputPath` find) AND cancel-key build use the same canonical form for matching across insert/lookup/cancel.
@@ -109,15 +109,27 @@ When a third + a fourth + ... call site appears, **add to the list above instead
 
 ## Atomic-rename writes
 
-Several writers materialise their output via the **temp-write-then-rename** pattern: open `<final>.tmp.<counter>` → write → close → `fs::rename`.  A SIGKILL or disk-full mid-write leaves the previous version of the final file intact instead of a truncated partial that downstream readers parse as malformed.  Use sites:
+Hand-built file writes route through the shared helper `EngineCore::AtomicWriteFile(path, content, errorMessage)` in `engine/auxiliary/file.h`.  It creates parent directories, opens `<final>.tmp.<counter>` with `ofstream` exceptions enabled (`failbit | badbit`), writes, closes, then `fs::rename`s over the destination.  A SIGKILL or disk-full mid-write leaves the previous version of the final file intact instead of a truncated partial that downstream readers parse as malformed.  Helper does NOT log on failure — callers with run/workflow context emit `LOG_APP_ERROR(...)` with the populated `errorMessage` so dashboard run analysis (which keys on runId substrings) can surface the failure.
 
-- `application/workflow/filter/filterManifest.cpp::WriteManifest` — uses `<path>.tmp` (single-writer guarantee from per-filter manifest mutex).
-- `application/workflow/aiTranscript.cpp::WriteFile` — single in-process mutex serialises writers; temp-then-rename ensures crash-safety.
-- `application/workflow/aiRequestPool.cpp::WriteTextFile` — atomic write of AI-task output files (`<prob>.output.{txt,json}`); a `static std::atomic<uint64_t>` counter makes the temp name unique under concurrent writers targeting the same final path.  Load-bearing because the rename event is what `OnOutputFileCreated` keys completion off — a torn write would surface to workflow runtime as a malformed completion signal.
-- `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile` (public static) — same atomic + counter pattern, applied to inline queue-file writes + ConvertWithMarkitdown destination + provider-sidecar JSON.
-- `application/web/webServerHelpers::WriteTextFileAtomic` — used by `HandleAiInterfacesSavePost`/`HandleConfigSettingsPut`/`HandleConnectionsSavePost` to persist `config.json` / `connections.json` from the REST handlers (full pipeline: parse-edit-revalidate-rename per the architecture decision row).
+Use-site categories (non-exhaustive — every hand-built JSON writer in `application/` should route through the helper):
 
-When adding a new file-output writer, prefer the atomic pattern over open→write→close.  The cost is a single rename syscall per write; the benefit is crash-safety for the entire downstream pipeline that depends on the file's contents being either fully-old or fully-new.
+- **AI-dispatch queue + output** — `application/session/fileWriter.cpp::FileWriter::Write` / `WriteWithHeader` (STNG/CNTX/TASK/PROB queue files), `application/workflow/aiRequestPool.cpp::WriteTextFile` lambda (AI-task `.output.{txt,json}`), `application/workflow/aiCallTaskExecutor.cpp::WriteTextFile`, `application/workflow/aiTranscript.cpp` (transcript appender).  Load-bearing because the rename event is what `OnOutputFileCreated` keys dispatch completion off — a torn write would surface as a malformed completion signal.
+- **Filter manifests** — `application/workflow/filter/filterManifest.cpp::WriteManifest`, `application/workflow/filter/polarionClient.cpp::WriteItemFile`.
+- **Workflow registry persistence** — `application/workflow/workflowRegistry.cpp` (global.json + canvas JSON inside `SaveOrUpdateWorkflowFromJson`).
+- **Adhoc workflow meta/manifest** — `application/workflow/adhocWorkflowManager.cpp::WriteMeta` (artifact-attribution gate) and `::WriteManifest` (artifact-listing input).
+- **Cloud-task outputs consumed by downstream tasks** — `application/cloud/cloudTaskExecutor.cpp::WriteResponseJson` (shared `response.json`), per-connector summary writers in `emailCloudTaskExecutor`, `slackCloudTaskExecutor`, `googleSheetsCloudTaskExecutor`, `snowflakeCloudTaskExecutor`, and the GitHub `get_file` write in `gitHubCloudTaskExecutor`.
+- **Assistant data** — `application/assistant/assistantTools.cpp` (`write_file` / `edit_file` / `jcwf_write_plan` / `jcwf_write_script` / canvas re-pack / `jcwf_generate`), `application/assistant/assistantController.cpp::WriteFile`, `application/assistant/assistantMemory.cpp::Save`, `application/assistant/workspaceIndexer.cpp::SaveIndex`.
+- **REST-handler config persistence** — `application/web/webServerHelpers::WriteTextFileAtomic` retains its own implementation because it owns the full parse-edit-revalidate-rename pipeline used by `HandleAiInterfacesSavePost` / `HandleConfigSettingsPut` / `HandleConnectionsSavePost` (`config.json` / `connections.json`).  Behaviour is equivalent; consolidation tracked as a separate cleanup.
+- **MCP keystore + REST script writes** — `application/web/mcpKeyManager.cpp::Save` (encrypted blob), `application/web/webServer.cpp` `/ai-write-scripts` handler.
+- **Misc** — `application/task/carMaintenanceTask.cpp::TryWriteAllText`.
+
+Writers that intentionally do NOT use `AtomicWriteFile`:
+
+- **Streaming writers with running caps** — `application/cloud/dbQueryCloudTaskExecutor.cpp` streams large result sets to disk with a per-row `tellp()` byte-cap check; buffering the entire result in memory to atomic-rename would defeat the cap.  Gets the exception-safety pattern (`ofstream::exceptions(failbit | badbit)` + try/catch) instead.
+- **Append-mode logs** — `application/assistant/assistantSession.cpp::AppendTurn` writes one JSON line per call in append mode; atomic-rename doesn't apply to logical appends.  Gets the exception-safety pattern.
+- **Captured stdout/stderr** — `application/workflow/shellTaskExecutor.cpp` and `application/workflow/pythonTaskExecutor.cpp` write `stdout.txt` / `stderr.txt` to the task working directory.  These are operator-diagnostic dumps, not consumed by downstream tasks; exception-safety pattern only.
+
+When adding a new file-output writer, default to `EngineCore::AtomicWriteFile`.  Only opt out for streaming-with-cap, append-mode logs, or operator dumps as above.
 
 ---
 

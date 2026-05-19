@@ -32,6 +32,7 @@
 #include <system_error>
 #include <vector>
 
+#include "auxiliary/file.h"
 #include "core.h"
 #include "curlWrapper/curlMultiDispatcher.h"
 #include "curlWrapper/curlWrapper.h"
@@ -117,49 +118,17 @@ namespace AIAssistant
                              parentAbsolute.generic_string(), created);
             }
 
-            // Atomic write via the confined path: open <final>.tmp.<counter> →
-            // write → close → rename.  Lands at the canonical location (not
-            // any symlinked alias the input string pointed at).  A SIGKILL or
+            // Atomic write via the confined path: helper opens
+            // <final>.tmp.<counter>, enables ofstream exceptions, writes,
+            // closes, then renames.  Lands at the canonical location (not any
+            // symlinked alias the input string pointed at).  A SIGKILL or
             // disk-full mid-write leaves the previous version intact instead
             // of a truncated partial that downstream consumers parse as
             // malformed (notably AiRequestPool::OnOutputFileCreated reading
             // the .output.{txt,json} file as the completion signal).
-            static std::atomic<uint64_t> s_TempCounter{0};
-            uint64_t const counter = s_TempCounter.fetch_add(1, std::memory_order_relaxed);
-            fs::path const tempPath = filesystemPathAbsolute.parent_path() /
-                                      (filesystemPathAbsolute.filename().string() + ".tmp." +
-                                       std::to_string(counter));
-
+            if (!EngineCore::AtomicWriteFile(filesystemPathAbsolute, fileContent, outErrorMessage))
             {
-                std::ofstream outputStream(tempPath, std::ios::binary | std::ios::trunc);
-                if (!outputStream.is_open())
-                {
-                    outErrorMessage = "failed to open for writing: " + filesystemPathAbsolute.filename().string();
-                    LOG_APP_ERROR("AiRequestPool::WriteTextFile open failed path='{}'", filePath);
-                    return false;
-                }
-
-                outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
-                if (!outputStream.good())
-                {
-                    outErrorMessage = "failed while writing: " + filesystemPathAbsolute.filename().string();
-                    LOG_APP_ERROR("AiRequestPool::WriteTextFile write failed path='{}'", filePath);
-                    std::error_code rmEc;
-                    fs::remove(tempPath, rmEc); // best-effort cleanup
-                    return false;
-                }
-            } // ofstream destructor closes the stream BEFORE rename
-
-            std::error_code renameEc;
-            fs::rename(tempPath, filesystemPathAbsolute, renameEc);
-            if (renameEc)
-            {
-                outErrorMessage = "failed to finalize write: " + filesystemPathAbsolute.filename().string() +
-                                  " (" + renameEc.message() + ")";
-                LOG_APP_ERROR("AiRequestPool::WriteTextFile rename failed temp='{}' final='{}' ec={}",
-                              tempPath.string(), filesystemPathAbsolute.string(), renameEc.message());
-                std::error_code rmEc;
-                fs::remove(tempPath, rmEc); // best-effort cleanup
+                LOG_APP_ERROR("AiRequestPool::WriteTextFile: {} (path='{}')", outErrorMessage, filePath);
                 return false;
             }
 
@@ -1472,7 +1441,7 @@ namespace AIAssistant
         if (Core::g_Core != nullptr)
         {
             auto startedEvent = std::make_shared<AiCallStartedEvent>(probName, api->m_Name);
-            Core::g_Core->PushEvent(startedEvent);
+            Core::g_Core->PushEvent(startedEvent, ProducerId::AiRequestPool);
         }
 
         AiInvocation envelopeForRetry = envelope;
@@ -1819,14 +1788,14 @@ namespace AIAssistant
                     {
                         auto failedEvent = std::make_shared<AiCallFailedEvent>(probName, interfaceNameForEvent,
                                                                                aiReply.m_Error);
-                        Core::g_Core->PushEvent(failedEvent);
+                        Core::g_Core->PushEvent(failedEvent, ProducerId::AiRequestPool);
                     }
                     else
                     {
                         auto completedEvent =
                             std::make_shared<AiCallCompletedEvent>(probName, interfaceNameForEvent,
                                                                    aiReply.m_Usage, aiReply.m_FinishReason);
-                        Core::g_Core->PushEvent(completedEvent);
+                        Core::g_Core->PushEvent(completedEvent, ProducerId::AiRequestPool);
                     }
                 }
 

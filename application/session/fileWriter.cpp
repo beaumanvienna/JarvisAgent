@@ -23,6 +23,7 @@
 #include <chrono>
 #include <iomanip>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "session/fileWriter.h"
 
@@ -40,67 +41,29 @@ namespace AIAssistant
     {
         std::lock_guard<std::mutex> guard(m_Mutex);
 
-        try
+        // Atomic write through the shared helper.  These files are the STNG /
+        // CNTX / TASK / PROB inputs that AI dispatch reads as a completion
+        // signal — a truncated partial would be parsed as malformed.  Helper
+        // creates parent directories and renames the temp file in one step.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(filePath, content, writeError))
         {
-            fs::path const parentPath = fs::absolute(filePath.parent_path()).lexically_normal();
-            bool const existedBefore = fs::exists(parentPath);
-            LOG_APP_INFO(
-                "[folder creation debug] debug create_directories attempt path='{}' reason='fileWriter output parent'",
-                parentPath.string());
-            fs::create_directories(parentPath);
-            bool const existsAfter = fs::exists(parentPath);
-            bool const created = (!existedBefore && existsAfter);
-            LOG_APP_INFO(
-                "[folder creation debug] debug create_directories ok path='{}' created={} reason='fileWriter output parent'",
-                parentPath.string(), created);
-            std::ofstream out(filePath, std::ios::out | std::ios::trunc);
-
-            if (!out)
-            {
-                LOG_APP_ERROR("FileWriter: Could not open file for writing: {}", filePath.string());
-                return;
-            }
-
-            out << content;
-            LOG_APP_INFO("FileWriter: Wrote file '{}'", filePath.string());
+            LOG_APP_ERROR("FileWriter::Write: {} (path='{}')", writeError, filePath.string());
+            return;
         }
-        catch (const std::exception& e)
-        {
-            LOG_APP_ERROR("FileWriter: Exception writing file '{}': {}", filePath.string(), e.what());
-        }
+        LOG_APP_INFO("FileWriter: Wrote file '{}'", filePath.string());
     }
 
     void FileWriter::WriteWithHeader(fs::path const& filePath, std::string const& content, std::string const& model)
     {
         std::lock_guard<std::mutex> guard(m_Mutex);
 
-        try
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(filePath, content, writeError))
         {
-            fs::path const parentPath = fs::absolute(filePath.parent_path()).lexically_normal();
-            bool const existedBefore = fs::exists(parentPath);
-            LOG_APP_INFO(
-                "[folder creation debug] debug create_directories attempt path='{}' reason='fileWriter output parent'",
-                parentPath.string());
-            fs::create_directories(parentPath);
-            bool const existsAfter = fs::exists(parentPath);
-            bool const created = (!existedBefore && existsAfter);
-            LOG_APP_INFO(
-                "[folder creation debug] debug create_directories ok path='{}' created={} reason='fileWriter output parent'",
-                parentPath.string(), created);
-            std::ofstream out(filePath, std::ios::out | std::ios::trunc);
-
-            if (!out)
-            {
-                LOG_APP_ERROR("FileWriter: Could not open file for writing: {}", filePath.string());
-                return;
-            }
-
-            out << content;
-            LOG_APP_INFO("FileWriter: Wrote output file with header: {}", filePath.string());
+            LOG_APP_ERROR("FileWriter::WriteWithHeader: {} (path='{}')", writeError, filePath.string());
+            return;
         }
-        catch (const std::exception& e)
-        {
-            LOG_APP_ERROR("FileWriter: Exception writing file '{}': {}", filePath.string(), e.what());
-        }
+        LOG_APP_INFO("FileWriter: Wrote output file with header: {}", filePath.string());
     }
 } // namespace AIAssistant

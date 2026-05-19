@@ -22,6 +22,7 @@
 #include "assistant/assistantMemory.h"
 
 #include "assistant/assistantHelpers.h"
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
 #include "simdjson/simdjson.h"
@@ -179,20 +180,10 @@ namespace AIAssistant
         }
         oss << "]\n";
 
-        std::ofstream ofs(m_StorePath, std::ios::out | std::ios::trunc | std::ios::binary);
-        if (!ofs)
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(m_StorePath, oss.str(), writeError))
         {
-            LOG_APP_ERROR("[memory] Memory file open-for-write failed: {}", m_StorePath.string());
-            m_FileBroken = true;
-            return false;
-        }
-
-        std::string const buf = oss.str();
-        ofs.write(buf.data(), static_cast<std::streamsize>(buf.size()));
-        ofs.flush();
-        if (!ofs.good())
-        {
-            LOG_APP_ERROR("[memory] Memory file write/flush failed: {}", m_StorePath.string());
+            LOG_APP_ERROR("[memory] Memory file write failed: {} path='{}'", writeError, m_StorePath.string());
             m_FileBroken = true;
             return false;
         }

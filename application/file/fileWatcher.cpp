@@ -193,7 +193,7 @@ namespace AIAssistant
                     {
                         if (fireAdd && Core::g_Core != nullptr)
                         {
-                            Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr));
+                            Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(pathStr), ProducerId::FileWatcher);
                         }
                         files[pathStr] = currentTime;
                     }
@@ -201,7 +201,8 @@ namespace AIAssistant
                     {
                         if (Core::g_Core != nullptr)
                         {
-                            Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr));
+                            Core::g_Core->PushEvent(std::make_shared<FileModifiedEvent>(pathStr),
+                                                    ProducerId::FileWatcher);
                         }
                         files[pathStr] = currentTime;
                     }
@@ -261,7 +262,7 @@ namespace AIAssistant
                 if (Core::g_Core != nullptr)
                 {
                     auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                    Core::g_Core->PushEvent(event);
+                    Core::g_Core->PushEvent(event, ProducerId::FileWatcher);
                 }
             }
 
@@ -280,7 +281,7 @@ namespace AIAssistant
                     LOG_APP_INFO("FileWatcher: file deleted from disk: {}", it->first);
                     if (Core::g_Core != nullptr)
                     {
-                        Core::g_Core->PushEvent(std::make_shared<FileRemovedEvent>(it->first));
+                        Core::g_Core->PushEvent(std::make_shared<FileRemovedEvent>(it->first), ProducerId::FileWatcher);
                     }
                     it = files.erase(it);
                 }

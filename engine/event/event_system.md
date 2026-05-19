@@ -117,10 +117,10 @@ If the type matches, the lambda is executed and the event is marked handled.
 
 The queue carries `std::shared_ptr<Event>` so the type-erased base lives in `std::queue` and per-event payload destruction is reference-counted (the main loop may forward a copy to `app->OnEvent` while the original sits in the local drained vector).
 
-Engine threads push events:
+Engine threads push events through `Core::PushEvent`:
 
 ```cpp
-m_EventQueue.Push(std::shared_ptr<Event>(...));
+Core::g_Core->PushEvent(std::make_shared<FileAddedEvent>(path), ProducerId::FileWatcher);
 ```
 
 Main loop drains:
@@ -130,6 +130,40 @@ auto events = m_EventQueue.PopAll();
 ```
 
 `Push` is safe to call from any thread.  `PopAll` assumes a single consumer (the main loop) and minimises its critical section by `std::swap`'ing the underlying `std::queue` into a local under the mutex (O(1)) — vector construction and event destruction then happen outside the lock so producers (file watcher, AI dispatch workers, web server, etc.) aren't blocked by main-thread housekeeping.
+
+### Producer-id tag
+
+Every `Push` carries a `ProducerId` identifying the calling subsystem.  The tag has no runtime effect on normal operation — it exists purely for the cap-hit diagnostic (see below).  Variants:
+
+```cpp
+enum class ProducerId : uint8_t
+{
+    SignalHandler,   // Core::CheckSignalFlags posts EngineEventShutdown
+    KeyboardInput,   // keyboardInput thread posts KeyPressedEvent + shutdown on 'q'
+    JarvisAgent,     // CurlMultiDispatcher cap-changed → AiCapChangedEvent
+    AiRequestPool,   // AiCallStarted/Completed/Failed lifecycle events
+    FileWatcher,     // FileAdded/Modified/Removed + shutdown-on-root-loss
+    PythonEngine,    // PythonCrashedEvent on uncaught Python exception
+    WebServer,       // POST /api/shutdown handler
+    NumVariants      // sentinel for strict-switch
+};
+```
+
+`ProducerIdToString` is a constexpr switch with no `default:` arm per the project's discipline rule on closed enums.  Add a new variant only when a new subsystem starts pushing events; sites in the same subsystem share an id.
+
+### Hard cap + fail-fast emergency exit
+
+`EventQueue::kMaxUnprocessedEvents = 1000`.  A wedged main loop (long-running embedded Python, synchronous curl slip, deadlocked subsystem) would otherwise let producers push indefinitely → OOM.  On reaching the cap, `Push`:
+
+1. Snapshots the per-producer push counters (`m_PushesSinceDrain`, reset to zero in every `PopAll`) under the queue mutex.
+2. Releases the lock — `std::exit` does not unwind the stack, so holding a `lock_guard` through it would leak the mutex.
+3. Emits `LOG_CORE_ERROR` with: queue depth, triggering producer, per-producer breakdown of pushes since the last drain, and the deliberate-trade message ("bypasses keystore re-seal and audit-log flush that POST /api/shutdown provides").
+4. Synchronously flushes both `Core` and `App` spdlog sinks so the ERROR line reaches `log/log.txt` before the process disappears.
+5. `std::exit(EXIT_FAILURE)` from the producer thread.
+
+This is intentionally non-recoverable.  Reaching 1000 unprocessed events means the main loop is wedged; lossy buffering would mask the underlying bug.  The breakdown reveals which subsystems were busy while the consumer was stuck, narrowing the diagnosis.
+
+The cap is well above any realistic per-tick burst (file-watcher storm, dispatch completion wave on shutdown), so hitting it signals a genuine wedge, not a brief spike.
 
 ---
 

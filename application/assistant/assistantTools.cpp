@@ -23,6 +23,7 @@
 #include "assistant/assistantHelpers.h"
 #include "assistant/assistantMemory.h"
 #include "assistant/workspaceIndexer.h"
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "json/jsonHelper.h"
@@ -2174,25 +2175,10 @@ namespace AIAssistant
             // Backup failure is not fatal — proceed with write.
         }
 
-        // Atomic write: write to .tmp, then rename.
-        fs::path tmpPath = filePath;
-        tmpPath += ".tmp";
-
-        {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"write_file", false, "Cannot open for writing: " + tmpPath.string()};
-            ofs << content;
-            if (!ofs.good())
-                return {"write_file", false, "Write failed: " + tmpPath.string()};
-        }
-
-        fs::rename(tmpPath, filePath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"write_file", false, "Rename failed: " + ec.message()};
-        }
+        // Atomic write through the shared helper.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(filePath, content, writeError))
+            return {"write_file", false, writeError};
 
         std::string action = existed ? "Overwritten" : "Created";
         return {"write_file", true, action + ": " + normalized + " (" + std::to_string(content.size()) + " bytes)"};
@@ -2270,25 +2256,10 @@ namespace AIAssistant
             fs::copy_file(filePath, bakPath, fs::copy_options::overwrite_existing, ec);
         }
 
-        // Atomic write.
-        fs::path tmpPath = filePath;
-        tmpPath += ".tmp";
-
-        {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"edit_file", false, "Cannot open for writing: " + tmpPath.string()};
-            ofs << newContent;
-            if (!ofs.good())
-                return {"edit_file", false, "Write failed: " + tmpPath.string()};
-        }
-
-        fs::rename(tmpPath, filePath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"edit_file", false, "Rename failed: " + ec.message()};
-        }
+        // Atomic write through the shared helper.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(filePath, newContent, writeError))
+            return {"edit_file", false, writeError};
 
         // Calculate line info for the summary.
         int lineNumber = 1;
@@ -2616,15 +2587,13 @@ namespace AIAssistant
             rootCanvasPath = extractedDir / (jcwfPath.stem().string() + ".json");
         }
 
-        // Write the canvas JSON.
+        // Write the canvas JSON atomically.  This file is immediately zipped
+        // into the .jcwf container, so a silent partial write would yield a
+        // corrupt zip; the helper's exception-safety + atomic-rename makes
+        // failures visible as a typed error before Pack() runs.
+        if (!EngineCore::AtomicWriteFile(rootCanvasPath, jsonContent, outError))
         {
-            std::ofstream ofs(rootCanvasPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-            {
-                outError = "Cannot write: " + rootCanvasPath.string();
-                return false;
-            }
-            ofs << jsonContent;
+            return false;
         }
 
         // Repack the container.
@@ -2865,29 +2834,11 @@ namespace AIAssistant
 
         fs::path planPath = fs::path("workflows") / (idIt->second + ".plan.md");
 
-        // Ensure workflows/ directory exists.
-        std::error_code ec;
-        fs::create_directories(planPath.parent_path(), ec);
-
-        // Atomic write.
-        fs::path tmpPath = planPath;
-        tmpPath += ".tmp";
-
-        {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"jcwf_write_plan", false, "Cannot open for writing: " + tmpPath.string()};
-            ofs << contentIt->second;
-            if (!ofs.good())
-                return {"jcwf_write_plan", false, "Write failed: " + tmpPath.string()};
-        }
-
-        fs::rename(tmpPath, planPath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"jcwf_write_plan", false, "Rename failed: " + ec.message()};
-        }
+        // Atomic write through the shared helper (creates the workflows/
+        // parent directory if missing).
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(planPath, contentIt->second, writeError))
+            return {"jcwf_write_plan", false, writeError};
 
         return {"jcwf_write_plan", true,
                 "Plan written: " + planPath.string() + " (" + std::to_string(contentIt->second.size()) + " bytes)"};
@@ -2992,22 +2943,16 @@ namespace AIAssistant
         // before embedding; otherwise a value containing a quote, backslash,
         // or control char would produce malformed JSON or flip surrounding
         // metadata (e.g. manual_start) by injection.
-        {
-            std::ofstream ofs(extractedDir / "global.json", std::ios::out | std::ios::binary);
-            if (ofs)
-            {
-                ofs << "{\n  \"version\": \"1.1\",\n  \"id\": \"" << JsonHelper::EscapeJsonString(workflowId)
-                    << "\",\n  \"manual_start\": true\n}";
-            }
-        }
+        std::string const globalContent =
+            "{\n  \"version\": \"1.1\",\n  \"id\": \"" + JsonHelper::EscapeJsonString(workflowId) +
+            "\",\n  \"manual_start\": true\n}";
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(extractedDir / "global.json", globalContent, writeError))
+            return {"jcwf_generate", false, "Failed to write global.json: " + writeError};
 
         // Write the root canvas JSON.
-        {
-            std::ofstream ofs(extractedDir / (workflowId + ".json"), std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"jcwf_generate", false, "Cannot write canvas JSON to: " + extractedDir.string()};
-            ofs << response;
-        }
+        if (!EngineCore::AtomicWriteFile(extractedDir / (workflowId + ".json"), response, writeError))
+            return {"jcwf_generate", false, "Failed to write canvas JSON: " + writeError};
 
         // Pack into zip container.
         std::string packError;
@@ -3271,21 +3216,10 @@ namespace AIAssistant
             fs::copy_file(scriptPath, bakPath, fs::copy_options::overwrite_existing, ec);
         }
 
-        // Atomic write.
-        fs::path tmpPath = scriptPath;
-        tmpPath += ".tmp";
-        {
-            std::ofstream ofs(tmpPath, std::ios::out | std::ios::binary);
-            if (!ofs)
-                return {"jcwf_write_script", false, "Cannot write: " + tmpPath.string()};
-            ofs << content;
-        }
-        fs::rename(tmpPath, scriptPath, ec);
-        if (ec)
-        {
-            fs::remove(tmpPath, ec);
-            return {"jcwf_write_script", false, "Rename failed: " + ec.message()};
-        }
+        // Atomic write through the shared helper.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(scriptPath, content, writeError))
+            return {"jcwf_write_script", false, writeError};
 
         // Make shell scripts executable.
         if (type == "shell")

@@ -21,13 +21,41 @@
 
 #include "event/eventQueue.h"
 
+#include <cstdlib>
+#include <sstream>
+
+#include "core.h"
+#include "engine.h"
+
 namespace AIAssistant
 {
 
-    void EventQueue::Push(EventPtr event)
+    void EventQueue::Push(EventPtr event, ProducerId producer)
     {
-        std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
-        m_Queue.push(std::move(event));
+        bool capHit = false;
+        std::array<uint64_t, static_cast<size_t>(ProducerId::NumVariants)> snapshot{};
+        size_t queueDepthAtCap = 0;
+
+        {
+            std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
+            if (m_Queue.size() >= kMaxUnprocessedEvents)
+            {
+                capHit = true;
+                snapshot = m_PushesSinceDrain;
+                queueDepthAtCap = m_Queue.size();
+            }
+            else
+            {
+                m_Queue.push(std::move(event));
+                ++m_PushesSinceDrain[static_cast<size_t>(producer)];
+            }
+        }
+
+        if (capHit)
+        {
+            // Lock released; safe to log + flush + exit without holding the mutex.
+            EmergencyExitOnCapExceeded(producer, snapshot, queueDepthAtCap);
+        }
     }
 
     std::vector<EventQueue::EventPtr> EventQueue::PopAll()
@@ -36,6 +64,7 @@ namespace AIAssistant
         {
             std::lock_guard<std::mutex> guard(m_QueueAccessMutex);
             std::swap(drained, m_Queue);
+            m_PushesSinceDrain.fill(0);
         }
 
         std::vector<EventPtr> eventVector;
@@ -46,6 +75,44 @@ namespace AIAssistant
             drained.pop();
         }
         return eventVector;
+    }
+
+    void EventQueue::EmergencyExitOnCapExceeded(
+        ProducerId triggeringProducer,
+        std::array<uint64_t, static_cast<size_t>(ProducerId::NumVariants)> const& breakdown,
+        size_t queueDepth)
+    {
+        std::ostringstream breakdownStream;
+        constexpr size_t numProducers = static_cast<size_t>(ProducerId::NumVariants);
+        bool first = true;
+        for (size_t i = 0; i < numProducers; ++i)
+        {
+            if (!first)
+            {
+                breakdownStream << ", ";
+            }
+            breakdownStream << ProducerIdToString(static_cast<ProducerId>(i)) << "=" << breakdown[i];
+            first = false;
+        }
+
+        LOG_CORE_ERROR(
+            "EventQueue::Push: hard cap of {} unprocessed events hit — main loop appears wedged. "
+            "Triggering producer: {}. Queue depth: {}. Breakdown since last drain: {{ {} }}. "
+            "Emergency exit follows: this bypasses keystore re-seal and audit-log flush that "
+            "POST /api/shutdown provides — deliberate trade vs. leaking forever in a wedged process.",
+            kMaxUnprocessedEvents, ProducerIdToString(triggeringProducer), queueDepth, breakdownStream.str());
+
+        // Synchronous flush so the ERROR line reaches log/log.txt before the
+        // process disappears.  Both loggers flush — the CORE logger carries
+        // the ERROR above, the APP logger may carry trailing context from
+        // other threads still in flight.
+        if (Core::g_Logger)
+        {
+            Core::g_Logger->GetLogger().flush();
+            Core::g_Logger->GetAppLogger().flush();
+        }
+
+        std::exit(EXIT_FAILURE);
     }
 
 } // namespace AIAssistant

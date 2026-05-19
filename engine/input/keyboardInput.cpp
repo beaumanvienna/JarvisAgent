@@ -92,13 +92,13 @@ void KeyboardInput::Listen()
                 LOG_CORE_INFO("Keyboard input: Quit requested");
                 Core::g_Core->RequestQuit();
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                Core::g_Core->PushEvent(event);
+                Core::g_Core->PushEvent(event, ProducerId::KeyboardInput);
                 break;
             }
             else if (ch != '\n' && ch != EOF)
             {
                 auto event = std::make_shared<KeyPressedEvent>(static_cast<char>(ch));
-                Core::g_Core->PushEvent(event);
+                Core::g_Core->PushEvent(event, ProducerId::KeyboardInput);
             }
         }
 #else
@@ -110,13 +110,13 @@ void KeyboardInput::Listen()
                 LOG_CORE_INFO("Keyboard: Quit requested");
                 Core::g_Core->RequestQuit();
                 auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-                Core::g_Core->PushEvent(event);
+                Core::g_Core->PushEvent(event, ProducerId::KeyboardInput);
                 break;
             }
             else
             {
                 auto event = std::make_shared<KeyPressedEvent>(static_cast<char>(ch));
-                Core::g_Core->PushEvent(event);
+                Core::g_Core->PushEvent(event, ProducerId::KeyboardInput);
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

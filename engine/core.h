@@ -76,8 +76,10 @@ namespace AIAssistant
         OAuthTokenManager const& GetOAuthTokenManager() const { return m_OAuthTokenManager; }
         std::filesystem::path const& GetLaunchCWDAbsolute() const { return m_LaunchCWDAbsolute; };
 
-        // event API
-        void PushEvent(EventQueue::EventPtr eventPtr);
+        // event API.  `producer` tags the calling subsystem so the
+        // per-producer breakdown emitted on EventQueue cap-hit names the
+        // wedged caller.  See EventQueue::kMaxUnprocessedEvents.
+        void PushEvent(EventQueue::EventPtr eventPtr, ProducerId producer);
 
     public:
         static std::unique_ptr<AIAssistant::Log> g_Logger;

@@ -1374,15 +1374,19 @@ namespace AIAssistant
             std::error_code ec;
             if (!capturedStdout.empty())
             {
-                std::ofstream stdoutFile(stdoutPath, std::ios::binary | std::ios::trunc);
-                if (stdoutFile.is_open())
+                try
                 {
-                    stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
-                    if (!stdoutFile.good())
+                    std::ofstream stdoutFile(stdoutPath, std::ios::binary | std::ios::trunc);
+                    if (stdoutFile.is_open())
                     {
-                        LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed mid-stream task='{}'",
-                                      stdoutPath.string(), taskDefinition.m_Id);
+                        stdoutFile.exceptions(std::ios::failbit | std::ios::badbit);
+                        stdoutFile.write(capturedStdout.data(), static_cast<std::streamsize>(capturedStdout.size()));
                     }
+                }
+                catch (std::exception const& e)
+                {
+                    LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed task='{}': {}", stdoutPath.string(),
+                                  taskDefinition.m_Id, e.what());
                 }
             }
             else
@@ -1398,15 +1402,19 @@ namespace AIAssistant
 
             if (!capturedStderr.empty())
             {
-                std::ofstream stderrFile(stderrPath, std::ios::binary | std::ios::trunc);
-                if (stderrFile.is_open())
+                try
                 {
-                    stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
-                    if (!stderrFile.good())
+                    std::ofstream stderrFile(stderrPath, std::ios::binary | std::ios::trunc);
+                    if (stderrFile.is_open())
                     {
-                        LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed mid-stream task='{}'",
-                                      stderrPath.string(), taskDefinition.m_Id);
+                        stderrFile.exceptions(std::ios::failbit | std::ios::badbit);
+                        stderrFile.write(capturedStderr.data(), static_cast<std::streamsize>(capturedStderr.size()));
                     }
+                }
+                catch (std::exception const& e)
+                {
+                    LOG_APP_ERROR("ShellTaskExecutor: write to '{}' failed task='{}': {}", stderrPath.string(),
+                                  taskDefinition.m_Id, e.what());
                 }
             }
             else

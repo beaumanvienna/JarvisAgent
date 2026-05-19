@@ -25,6 +25,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "core.h"
 #include "engine.h"
 #include "cloud/cloudTaskExecutor.h"
@@ -258,13 +259,16 @@ namespace AIAssistant
             return;
         }
 
-        std::error_code ec;
-        std::filesystem::create_directories(workDir, ec);
-
-        std::ofstream responseFile(workDir / ResponseJsonFilename(taskState), std::ios::trunc);
-        if (responseFile.is_open())
+        // response.json is the downstream-task input for cloud tasks — a
+        // truncated partial would be parsed as malformed.  Atomic write
+        // through the shared helper guarantees readers see either the
+        // previous version or the new one.
+        std::filesystem::path const path = workDir / ResponseJsonFilename(taskState);
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(path, responseBody, writeError))
         {
-            responseFile << responseBody;
+            LOG_APP_ERROR("CloudTaskExecutor::WriteResponseJson: {} taskInstance='{}' path='{}'", writeError,
+                          taskState.m_TaskInstanceId, path.string());
         }
     }
 

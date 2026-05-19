@@ -29,6 +29,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "file/fileWatcher.h"
 #include "json/jsonHelper.h"
@@ -311,27 +312,25 @@ namespace AIAssistant
     bool AdhocWorkflowManager::WriteMeta(std::filesystem::path const& folder, RunMeta const& meta) const
     {
         std::filesystem::path const metaPath = folder / kMetaFileName;
-        std::ofstream os(metaPath, std::ios::binary | std::ios::trunc);
-        if (!os)
-        {
-            // Operator-visible: meta.json is the artifact-attribution gate, so a
-            // silent failure here breaks the artifact-retrieval security contract.
-            LOG_APP_ERROR("[adhoc] WriteMeta: failed to open '{}' for writing user='{}' folder='{}'",
-                          metaPath.string(), meta.m_User, folder.string());
-            return false;
-        }
+
         // Minimal hand-built JSON; fields are validated server-side so no escaping
         // pass is needed. owner_slug is the filesystem-safe derivative of user.
-        os << "{\n"
-           << "  \"user\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
-           << "  \"role\": \"" << JsonHelper::EscapeJsonString(meta.m_Role) << "\",\n"
-           << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
-           << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\"\n"
-           << "}\n";
-        if (!os.good())
+        std::ostringstream body;
+        body << "{\n"
+             << "  \"user\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
+             << "  \"role\": \"" << JsonHelper::EscapeJsonString(meta.m_Role) << "\",\n"
+             << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
+             << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\"\n"
+             << "}\n";
+
+        // Atomic write through the shared helper.  meta.json is the
+        // artifact-attribution gate, so a silent partial-write here would
+        // break the artifact-retrieval security contract — atomic-rename
+        // guarantees readers see either the previous version or the new one.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(metaPath, body.str(), writeError))
         {
-            LOG_APP_ERROR("[adhoc] WriteMeta: failed while writing '{}' user='{}' folder='{}'",
-                          metaPath.string(), meta.m_User, folder.string());
+            LOG_APP_ERROR("[adhoc] WriteMeta: {} user='{}' folder='{}'", writeError, meta.m_User, folder.string());
             return false;
         }
         return true;
@@ -604,16 +603,6 @@ namespace AIAssistant
                   [](auto const& a, auto const& b) { return a.m_RelPath < b.m_RelPath; });
 
         std::filesystem::path const manifestPath = folder / kManifestFileName;
-        std::ofstream os(manifestPath, std::ios::binary | std::ios::trunc);
-        if (!os)
-        {
-            // Manifest is consumed by artifact-listing endpoints; silent failure
-            // results in 500s + no diagnostic.  Operator-visible per fail-path
-            // discipline.
-            LOG_APP_ERROR("[adhoc] WriteManifest: failed to open '{}' for writing runId='{}' user='{}'",
-                          manifestPath.string(), runId, meta.m_User);
-            return;
-        }
 
         // delete_at is encoded in the folder name — re-derive for the manifest.
         std::string deleteAtStr;
@@ -641,24 +630,36 @@ namespace AIAssistant
             }
         }
 
-        os << "{\n"
-           << "  \"runId\": \"" << JsonHelper::EscapeJsonString(runId) << "\",\n"
-           << "  \"owner\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
-           << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\",\n"
-           << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
-           << "  \"delete_at\": \"" << JsonHelper::EscapeJsonString(deleteAtStr) << "\",\n"
-           << "  \"files\": [";
+        std::ostringstream body;
+        body << "{\n"
+             << "  \"runId\": \"" << JsonHelper::EscapeJsonString(runId) << "\",\n"
+             << "  \"owner\": \"" << JsonHelper::EscapeJsonString(meta.m_User) << "\",\n"
+             << "  \"owner_slug\": \"" << JsonHelper::EscapeJsonString(meta.m_OwnerSlug) << "\",\n"
+             << "  \"cleanup_policy\": \"" << JsonHelper::EscapeJsonString(meta.m_CleanupPolicy) << "\",\n"
+             << "  \"delete_at\": \"" << JsonHelper::EscapeJsonString(deleteAtStr) << "\",\n"
+             << "  \"files\": [";
         for (size_t i = 0; i < entries.size(); ++i)
         {
-            if (i > 0) os << ",";
-            os << "\n    {"
-               << "\"path\": \"" << JsonHelper::EscapeJsonString(entries[i].m_RelPath) << "\", "
-               << "\"size_bytes\": " << entries[i].m_SizeBytes << ", "
-               << "\"modified_at\": \"" << JsonHelper::EscapeJsonString(entries[i].m_ModifiedIso) << "\""
-               << "}";
+            if (i > 0) body << ",";
+            body << "\n    {"
+                 << "\"path\": \"" << JsonHelper::EscapeJsonString(entries[i].m_RelPath) << "\", "
+                 << "\"size_bytes\": " << entries[i].m_SizeBytes << ", "
+                 << "\"modified_at\": \"" << JsonHelper::EscapeJsonString(entries[i].m_ModifiedIso) << "\""
+                 << "}";
         }
-        if (!entries.empty()) os << "\n  ";
-        os << "]\n}\n";
+        if (!entries.empty()) body << "\n  ";
+        body << "]\n}\n";
+
+        // Atomic write — manifest is consumed by artifact-listing endpoints,
+        // so a silent partial-write would yield 500s with no diagnostic; the
+        // helper's atomic-rename guarantees consumers see either the previous
+        // version or the new one.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(manifestPath, body.str(), writeError))
+        {
+            LOG_APP_ERROR("[adhoc] WriteManifest: {} runId='{}' user='{}'", writeError, runId, meta.m_User);
+            return;
+        }
     }
 
     void AdhocWorkflowManager::Reap()

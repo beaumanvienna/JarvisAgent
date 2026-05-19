@@ -213,7 +213,7 @@ namespace AIAssistant
             LOG_CORE_INFO("Received signal SIGINT/SIGTERM, exiting");
             g_Core->RequestQuit();
             auto event = std::make_shared<EngineEvent>(EngineEvent::EngineEventShutdown);
-            g_Core->PushEvent(event);
+            g_Core->PushEvent(event, ProducerId::SignalHandler);
         }
     }
 
@@ -235,7 +235,10 @@ namespace AIAssistant
 #endif
     }
 
-    void Core::PushEvent(EventQueue::EventPtr eventPtr) { m_EventQueue.Push(std::move(eventPtr)); }
+    void Core::PushEvent(EventQueue::EventPtr eventPtr, ProducerId producer)
+    {
+        m_EventQueue.Push(std::move(eventPtr), producer);
+    }
 
     void Core::Start(ConfigParser::EngineConfig const& engineConfig)
     {

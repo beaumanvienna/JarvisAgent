@@ -52,5 +52,20 @@ namespace AIAssistant
         std::ifstream::pos_type FileSize(const std::string& filename);
         std::string& AddSlash(std::string& filename);
         fs::file_time_type GetNewestTimestamp(std::vector<fs::path> const& files);
+
+        // Atomic file write: create parent directories, open <path>.tmp.<counter>
+        // with exceptions enabled on failbit | badbit, write the content,
+        // close, then rename over the destination.  std::filesystem::rename
+        // is atomic on POSIX and uses MOVEFILE_REPLACE_EXISTING on Windows
+        // (same-volume).  A SIGKILL or disk-full mid-write leaves the previous
+        // version intact rather than a truncated partial that downstream
+        // consumers parse as malformed.
+        //
+        // The helper does NOT log on failure — callers with run/workflow
+        // context emit a single ERROR line with the populated errorMessage so
+        // dashboard run analysis (which keys on runId substrings) can surface
+        // it.  Best-effort tmp cleanup happens on every failure path.
+        [[nodiscard]] bool AtomicWriteFile(std::filesystem::path const& path, std::string_view content,
+                                           std::string& errorMessage);
     } // namespace EngineCore
 } // namespace AIAssistant

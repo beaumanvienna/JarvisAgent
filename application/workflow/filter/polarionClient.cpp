@@ -31,6 +31,7 @@
 
 #include <curl/curl.h>
 
+#include "auxiliary/file.h"
 #include "core.h"
 #include "engine.h"
 #include "curlWrapper/curlWrapper.h"
@@ -895,40 +896,34 @@ namespace AIAssistant
             return false;
         }
 
-        std::ofstream file(filePath, std::ios::trunc);
-        if (!file.is_open())
-        {
-            errorMessage = "cannot open polarion item file for writing (filter='" + filter.m_Id + "')";
-            LOG_APP_ERROR("[polarion] WriteItemFile open failed filter='{}' path='{}'",
-                          filter.m_Id, filePath.string());
-            return false;
-        }
-
-        // Write a simple JSON object with all values.  Use the canonical
+        // Build a simple JSON object with all values.  Use the canonical
         // JsonHelper::EscapeJsonString for full RFC 8259 escape coverage —
         // pre-fix the local switch handled only 5 characters, leaving raw
         // control bytes (< 0x20) to land verbatim in the JSON output.
-        file << "{\n";
+        std::ostringstream body;
+        body << "{\n";
         size_t count = 0;
         for (auto const& [key, value] : item.m_Values)
         {
-            file << "  \"" << JsonHelper::EscapeJsonString(key) << "\": \""
+            body << "  \"" << JsonHelper::EscapeJsonString(key) << "\": \""
                  << JsonHelper::EscapeJsonString(value) << "\"";
             if (++count < item.m_Values.size())
             {
-                file << ",";
+                body << ",";
             }
-            file << "\n";
+            body << "\n";
         }
-        file << "}\n";
+        body << "}\n";
 
-        // Verify the stream succeeded — `is_open()` only catches open failure;
-        // disk-full or permission-loss-mid-write only show up via fail()/bad().
-        if (!file.good())
+        // Atomic write through the shared helper: opens <path>.tmp.<counter>,
+        // enables ofstream exceptions, writes, closes, then renames.  A
+        // SIGKILL or disk-full mid-write leaves the previous version intact.
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(filePath, body.str(), writeError))
         {
-            errorMessage = "polarion item file write failed (filter='" + filter.m_Id + "')";
-            LOG_APP_ERROR("[polarion] WriteItemFile stream failed mid-write filter='{}' path='{}'",
-                          filter.m_Id, filePath.string());
+            errorMessage = "polarion item file write failed (filter='" + filter.m_Id + "'): " + writeError;
+            LOG_APP_ERROR("[polarion] WriteItemFile: {} filter='{}' path='{}'", writeError, filter.m_Id,
+                          filePath.string());
             return false;
         }
 

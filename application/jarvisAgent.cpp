@@ -230,7 +230,7 @@ namespace AIAssistant
             {
                 if (Core::g_Core != nullptr)
                 {
-                    Core::g_Core->PushEvent(std::make_shared<AiCapChangedEvent>());
+                    Core::g_Core->PushEvent(std::make_shared<AiCapChangedEvent>(), ProducerId::JarvisAgent);
                 }
             });
 

@@ -29,6 +29,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "cloud/slackCloudTaskExecutor.h"
 #include "cloud/slackConnector.h"
@@ -480,26 +481,16 @@ namespace AIAssistant
             std::filesystem::path workDir =
                 TaskPathResolver::ResolveTaskWorkingDirectoryPath(workflowBaseDir, taskDefinition.m_WorkingDirectory);
 
-            std::error_code ec;
-            std::filesystem::create_directories(workDir, ec);
-
-            std::ofstream summaryFile(workDir / "messages_summary.json", std::ios::trunc);
-            if (summaryFile.is_open())
-            {
-                summaryFile << summaryStr;
-            }
-
-            std::ofstream latestMsg(workDir / "latest_message.txt", std::ios::trunc);
-            if (latestMsg.is_open())
-            {
-                latestMsg << latestText;
-            }
-
-            std::ofstream latestTsFile(workDir / "latest_ts.txt", std::ios::trunc);
-            if (latestTsFile.is_open())
-            {
-                latestTsFile << latestTs;
-            }
+            auto writeOutput = [](std::filesystem::path const& path, std::string const& body, char const* label) {
+                std::string err;
+                if (!EngineCore::AtomicWriteFile(path, body, err))
+                {
+                    LOG_APP_ERROR("[slack_read] write {} failed: {} path='{}'", label, err, path.string());
+                }
+            };
+            writeOutput(workDir / "messages_summary.json", summaryStr, "messages_summary.json");
+            writeOutput(workDir / "latest_message.txt", latestText, "latest_message.txt");
+            writeOutput(workDir / "latest_ts.txt", latestTs, "latest_ts.txt");
 
             std::string responseJson = "{\"ok\":true,\"count\":" + std::to_string(messages.size()) +
                                        ",\"channel\":\"" + JsonHelper::EscapeJsonString(channel) + "\"" +

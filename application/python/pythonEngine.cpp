@@ -79,7 +79,7 @@ JARVIS_PY_EXPORT void JarvisPyStatus(char const* message)
     {
         auto event = std::make_shared<AIAssistant::PythonCrashedEvent>(message);
 
-        AIAssistant::Core::g_Core->PushEvent(event);
+        AIAssistant::Core::g_Core->PushEvent(event, AIAssistant::ProducerId::PythonEngine);
     }
 }
 

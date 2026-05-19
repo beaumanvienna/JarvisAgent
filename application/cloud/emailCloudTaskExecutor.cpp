@@ -33,6 +33,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "cloud/emailCloudTaskExecutor.h"
 #include "cloud/emailConnector.h"
@@ -428,10 +429,12 @@ namespace AIAssistant
         // Write output files
         if (!workDir.empty())
         {
-            std::ofstream summaryFile(workDir / "emails_summary.json", std::ios::trunc);
-            if (summaryFile.is_open())
+            std::filesystem::path const summaryPath = workDir / "emails_summary.json";
+            std::string summaryError;
+            if (!EngineCore::AtomicWriteFile(summaryPath, summaryStr, summaryError))
             {
-                summaryFile << summaryStr;
+                LOG_APP_ERROR("[email_read] write emails_summary.json failed: {} path='{}'", summaryError,
+                              summaryPath.string());
             }
 
             std::string responseStr = "{\"ok\":true,\"count\":" + std::to_string(fetchCount) +

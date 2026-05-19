@@ -38,6 +38,7 @@
 
 #include "simdjson/simdjson.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "json/jsonHelper.h"
 #include "keys/keyEncryption.h"
@@ -229,14 +230,16 @@ namespace AIAssistant
             return false;
         }
 
-        std::ofstream file(path, std::ios::binary | std::ios::trunc);
-        if (!file)
+        // Atomic write of the encrypted blob — a truncated keystore breaks
+        // all subsequent unlocks.  Helper renames the temp file in one step
+        // so readers see either the previous version or the new one.
+        std::string_view const blobView(reinterpret_cast<char const*>(blob.data()), blob.size());
+        std::string writeError;
+        if (!EngineCore::AtomicWriteFile(path, blobView, writeError))
         {
-            LOG_CORE_ERROR("McpKeyManager::Save: cannot open '{}' for writing", path.string());
+            LOG_CORE_ERROR("McpKeyManager::Save: {} (path='{}')", writeError, path.string());
             return false;
         }
-        file.write(reinterpret_cast<char const*>(blob.data()), static_cast<std::streamsize>(blob.size()));
-        file.close();
 
         {
             std::lock_guard lock(m_Mutex);

@@ -23,7 +23,6 @@
 #include "workflow/templateEngine.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +31,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "jarvisAgent.h"
 #include "content/chunkPlanner.h"
@@ -842,48 +842,14 @@ namespace AIAssistant
             }
         }
 
-        // Atomic write: open <final>.tmp.<counter> → write → close → rename.
-        // A SIGKILL or disk-full mid-write leaves the previous version of the
+        // Atomic write via the shared helper: opens <final>.tmp.<counter> with
+        // ofstream exceptions enabled, writes, closes, then renames.  A
+        // SIGKILL or disk-full mid-write leaves the previous version of the
         // final file intact, instead of a truncated partial that downstream
-        // consumers parse as malformed.  The counter (atomic) makes the temp
-        // name unique under concurrent writers targeting the same final path.
-        static std::atomic<uint64_t> s_TempCounter{0};
-        uint64_t const counter = s_TempCounter.fetch_add(1, std::memory_order_relaxed);
-        std::filesystem::path const tempPath =
-            filesystemPath.parent_path() /
-            (filesystemPath.filename().string() + ".tmp." + std::to_string(counter));
-        std::string const tempPathString = tempPath.string();
-
+        // consumers parse as malformed.
+        if (!EngineCore::AtomicWriteFile(filesystemPathAbsolute, fileContent, outErrorMessage))
         {
-            std::ofstream outputStream(tempPathString, std::ios::binary | std::ios::trunc);
-            if (!outputStream.is_open())
-            {
-                outErrorMessage = "failed to open for writing: " + filesystemPath.filename().string();
-                LOG_APP_ERROR("[ai_call] WriteTextFile open failed path='{}'", filePath);
-                return false;
-            }
-
-            outputStream.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
-            if (!outputStream.good())
-            {
-                outErrorMessage = "failed while writing: " + filesystemPath.filename().string();
-                LOG_APP_ERROR("[ai_call] WriteTextFile write failed path='{}'", filePath);
-                std::error_code rmEc;
-                std::filesystem::remove(tempPathString, rmEc); // best-effort cleanup
-                return false;
-            }
-        } // ofstream destructor closes the stream BEFORE rename
-
-        std::error_code renameEc;
-        std::filesystem::rename(tempPathString, filePath, renameEc);
-        if (renameEc)
-        {
-            outErrorMessage = "failed to finalize write: " + filesystemPath.filename().string() +
-                              " (" + renameEc.message() + ")";
-            LOG_APP_ERROR("[ai_call] WriteTextFile rename failed temp='{}' final='{}' ec={}",
-                          tempPathString, filePath, renameEc.message());
-            std::error_code rmEc;
-            std::filesystem::remove(tempPathString, rmEc); // best-effort cleanup
+            LOG_APP_ERROR("[ai_call] WriteTextFile: {} (path='{}')", outErrorMessage, filePath);
             return false;
         }
 

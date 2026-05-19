@@ -23,6 +23,7 @@
 
 #include "workflow/workflowRegistry.h"
 
+#include "auxiliary/file.h"
 #include "engine.h"
 #include "core.h"
 #include "file/pathConfinement.h"
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <sstream>
 
 static bool ReadFileToStringStatic(std::filesystem::path const& filePath, std::string& outText)
 {
@@ -432,22 +434,20 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
         }
         else
         {
-            std::ofstream globalStream(globalJsonPath, std::ios::binary | std::ios::trunc);
-            if (globalStream.is_open())
+            // Build a minimal global.json from the parsed metadata, then write
+            // atomically through the shared helper.
+            std::ostringstream globalBody;
+            globalBody << "{\n"
+                       << "  \"version\": \"" << workflowDefinition.m_Version << "\",\n"
+                       << "  \"id\": \"" << workflowId << "\",\n"
+                       << "  \"manual_start\": " << (workflowDefinition.m_ManualStart ? "true" : "false") << "\n"
+                       << "}\n";
+            std::string globalWriteError;
+            if (!EngineCore::AtomicWriteFile(globalJsonPath, globalBody.str(), globalWriteError))
             {
-                // Build a minimal global.json from the parsed metadata.
-                globalStream << "{\n"
-                             << "  \"version\": \"" << workflowDefinition.m_Version << "\",\n"
-                             << "  \"id\": \"" << workflowId << "\",\n"
-                             << "  \"manual_start\": " << (workflowDefinition.m_ManualStart ? "true" : "false") << "\n"
-                             << "}\n";
-            }
-            else
-            {
-                errorMessage = "Failed to open global.json for writing";
-                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: failed to open global.json "
-                              "workflow='{}' path='{}'",
-                              workflowId, globalJsonPath.string());
+                errorMessage = "Failed to write global.json: " + globalWriteError;
+                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: {} workflow='{}' path='{}'",
+                              globalWriteError, workflowId, globalJsonPath.string());
                 return false;
             }
         }
@@ -456,16 +456,14 @@ bool WorkflowRegistry::SaveOrUpdateWorkflowFromJson(std::string const& workflowJ
         // and ParseCanvasJson tolerates extra metadata fields).
         std::filesystem::path const canvasJsonPath = extractedDir / (workflowId + ".json");
         {
-            std::ofstream canvasStream(canvasJsonPath, std::ios::binary | std::ios::trunc);
-            if (!canvasStream.is_open())
+            std::string canvasWriteError;
+            if (!EngineCore::AtomicWriteFile(canvasJsonPath, workflowJson, canvasWriteError))
             {
-                errorMessage = "Failed to open canvas JSON for writing";
-                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: failed to open canvas "
-                              "workflow='{}' path='{}'",
-                              workflowId, canvasJsonPath.string());
+                errorMessage = "Failed to write canvas JSON: " + canvasWriteError;
+                LOG_APP_ERROR("WorkflowRegistry::SaveOrUpdateWorkflowFromJson: {} workflow='{}' path='{}'",
+                              canvasWriteError, workflowId, canvasJsonPath.string());
                 return false;
             }
-            canvasStream.write(workflowJson.data(), static_cast<std::streamsize>(workflowJson.size()));
         }
 
         // Pack the extracted directory into a .jcwf zip container.
